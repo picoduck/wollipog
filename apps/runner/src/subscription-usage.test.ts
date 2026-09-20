@@ -1227,6 +1227,26 @@ test("configured accounts have independent sources, homes, and targeted refreshe
     ?.buckets[0]?.usedPercent, 75);
 });
 
+test("a failed account refresh preserves the configured label over provider identity", async () => {
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+    ],
+    resolveEnv: () => ({ CODEX_HOME: "/accounts/work" }),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: () => {},
+    probeCodex: async () => ({
+      state: "unavailable",
+      detail: "No allowance returned.",
+      accountLabel: "provider@example.com",
+    }),
+  });
+  await manager.refreshAccount("work");
+  assert.equal(manager.inventory()[0]?.accountLabel, "Work");
+});
+
 test("configured account login state does not inherit a sibling or agent-wide status", () => {
   const manager = new SubscriptionUsageManager({
     runnerId: "runner-1",

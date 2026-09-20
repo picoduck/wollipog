@@ -115,6 +115,10 @@ export interface ReconcileSkillsOptions {
    * account fan-out uses one directory kind per pass so it cannot sweep or report another
    * provider's links. */
   harnessScope?: readonly string[];
+  /** Harness directories this pass may sweep. The base pass includes inactive legacy real-home
+   * directories so enabling accounts reclaims old managed links; account passes default to their
+   * one overridden harness and never touch the real home. */
+  sweepHarnessScope?: readonly string[];
   /** Only the base pass reports targets absent from the runner. Account fan-out passes leave
    * those targets for the base pass so their partial reports can be merged without false
    * "agent not present" states. */
@@ -1228,6 +1232,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const manageCanonical = options.manageCanonical !== false;
   const reportUnknownTargets = options.reportUnknownTargets !== false;
   const harnessScope = new Set(options.harnessScope ?? Object.values(SKILL_DIRS));
+  const sweepHarnessScope = new Set(options.sweepHarnessScope ?? harnessScope);
   const managedAgents = agents.filter((agent) => {
     const relDir = SKILL_DIRS[agent.driver ?? "acp"];
     return relDir !== undefined && harnessScope.has(relDir);
@@ -1442,7 +1447,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const deployed: DeployedSkillState[] = [];
   const canonicalKeep = new Set<string>();
   const harnessKeep = new Map<string, Set<string>>();
-  for (const relDir of new Set(bindings.map((binding) => binding.relDir))) harnessKeep.set(relDir, new Set());
+  for (const relDir of sweepHarnessScope) harnessKeep.set(relDir, new Set());
   for (const { entry, invalid, manualNeeded, materializationError } of prepared) {
     const scopedTargets = targetsForPass(entry);
     if (typeof entry.name === "string" && entry.name && invalid) {
@@ -1477,7 +1482,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
 
     // WSL targets reconcile inside their distro after this native materialization phase. Their
     // versions remain protected by storeKeep above, but they must not create unused native links.
-    if (scopedTargets.length > 0 && scopedTargets.every((target) => wslAgentIds.has(target.agentId))) {
+    if (entry.targets.length > 0 && entry.targets.every((target) => wslAgentIds.has(target.agentId))) {
       state.links = scopedTargets.map((target) => ({
         agentId: target.agentId,
         status: "unsupported" as const,

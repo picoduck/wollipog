@@ -1139,7 +1139,7 @@ export function NewSessionDialog({
       const session = await api.createSession({
         ...placement,
         agentId,
-        ...(providerAccountId ? { providerAccountId } : {}),
+        ...(hostExecutionTarget && providerAccountId ? { providerAccountId } : {}),
         ...(orchestratorRoleSupported && roleOverride !== undefined ? { role: roleOverride } : {}),
         useWorktree,
         executionTargetId: executionTarget?.id,
@@ -1491,7 +1491,7 @@ export function NewSessionDialog({
             )}
           </div>
 
-          {providerAccounts.length > 1 && (
+          {hostExecutionTarget && providerAccounts.length > 1 && (
             <div className="field">
               <label className="new-session-field-label">Account</label>
               <Select<string>

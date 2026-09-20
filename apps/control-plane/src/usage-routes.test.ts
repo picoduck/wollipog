@@ -197,6 +197,38 @@ test("subscription usage routes are human-scoped and refresh only visible curren
   db.close();
 });
 
+test("a partial Claude account config retains the legacy Codex refresh deadline", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const codexAgent = (id: string) => ({
+    id, name: id, command: "codex", args: [], env: {},
+    driver: "codex-app-server" as const, context: { kind: "native" as const },
+    codexAppServer: { status: "supported" as const, appServerAvailable: true, transport: "stdio" as const,
+      contractFingerprint: "test" },
+  });
+  db.registerRunner({
+    runnerId: "partial", hostname: "partial", os: "linux", version: "1",
+    agents: [codexAgent("codex-a"), codexAgent("codex-b")], workspaces: [],
+    providerAccounts: [
+      { id: "claude-work", label: "Claude Work", provider: "claude", authStatus: "authenticated" },
+    ],
+  }, Date.now(), PROTOCOL_VERSION, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "operator-user" },
+  });
+  let timeoutMs = 0;
+  const app = Fastify();
+  registerUsageRoutes(app, db, () => human("operator"), {
+    requestFromRunner: async (_runnerId, requestId, _message, timeout) => {
+      timeoutMs = timeout;
+      return { type: "subscription_usage_refresh_result", requestId, ok: true, snapshots: [] };
+    },
+  });
+  const response = await app.inject({ method: "POST", url: "/api/usage/subscriptions/refresh" });
+  assert.equal(response.statusCode, 200);
+  assert.equal(timeoutMs, 18_000, "two legacy Codex sources retain two sequential probe budgets");
+  await app.close();
+  db.close();
+});
+
 test("usage responses carry rate-table status and members can force a bounded pricing refresh", async () => {
   const db = ControlPlaneDb.open(":memory:");
   const principals = new Map<string, AuthPrincipal>([["viewer", human("viewer")]]);

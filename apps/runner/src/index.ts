@@ -1280,6 +1280,7 @@ function queueSkillsReconcile(requestId?: string): void {
         home: homedir(),
         agents: metadata.agents,
         harnessScope: baseHarnessScope,
+        sweepHarnessScope: Object.values(SKILL_DIRS),
         desired: desired ?? [],
         // Content frames are published immediately to bound memory. While their completion fence
         // is pending, suppress removal/GC so an interleaved discovery pass cannot reclaim that

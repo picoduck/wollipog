@@ -802,7 +802,15 @@ function providerAccountDirectoryKey(directory: string): string {
   const targetIsPosix = process.platform !== "win32" || directory.startsWith("/");
   let normalized = targetIsPosix ? posix.normalize(directory) : win32.normalize(directory);
   const hostInspectable = process.platform !== "win32" || !targetIsPosix;
-  if (hostInspectable && existsSync(directory)) normalized = realpathSync.native(directory);
+  if (hostInspectable && existsSync(directory)) {
+    try {
+      normalized = realpathSync.native(directory);
+    } catch {
+      // Permission changes and TOCTOU removal must not leak a raw filesystem error from config
+      // parsing. The stable lexical key still detects ordinary aliases; launch reports an
+      // unavailable credential home through the provider-account path.
+    }
+  }
   normalized = normalized.replace(/[\\/]+$/u, "") || normalized;
   return process.platform === "win32" && !targetIsPosix ? normalized.toLowerCase() : normalized;
 }

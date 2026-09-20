@@ -241,6 +241,70 @@ test("provider account harness overrides reconcile the same skill into each cred
   }
 });
 
+test("the base pass prepares canonical links for native account targets beside WSL legacy targets", async () => {
+  const roots = makeRoots();
+  try {
+    const codexWsl: AgentDefinition = {
+      ...codexAgent,
+      id: "codex-wsl",
+      context: { kind: "wsl", distro: "Ubuntu" },
+    };
+    const alpha = entry("alpha", [
+      { agentId: codexWsl.id, invocation: "agent" },
+      { agentId: claudeAgent.id, invocation: "agent" },
+    ]);
+    await reconcileSkills({
+      dataDir: roots.dataDir,
+      home: roots.home,
+      agents: [codexWsl, claudeAgent],
+      harnessScope: [".codex/skills"],
+      sweepHarnessScope: [".claude/skills", ".codex/skills", ".pi/agent/skills"],
+      desired: [alpha],
+      allowRemovals: true,
+    });
+    const accountSkills = join(roots.root, "claude-work", "skills");
+    const accountResult = await reconcileSkills({
+      dataDir: roots.dataDir,
+      home: roots.home,
+      agents: [codexWsl, claudeAgent],
+      harnessDirectories: { ".claude/skills": accountSkills },
+      harnessScope: [".claude/skills"],
+      reportUnknownTargets: false,
+      manageCanonical: false,
+      desired: [alpha],
+      allowRemovals: true,
+    });
+    assert.equal(accountResult.deployed[0]?.links[0]?.status, "linked");
+    assert.equal(realpathSync(join(accountSkills, "alpha")),
+      join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", alpha.versionDigest));
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("enabling accounts sweeps managed links left in the provider's legacy real home", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: codexAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [alpha]);
+    const legacyLink = join(roots.home, ".codex", "skills", "alpha");
+    assert.ok(existsSync(legacyLink));
+    const baseResult = await reconcileSkills({
+      dataDir: roots.dataDir,
+      home: roots.home,
+      agents,
+      harnessScope: [".claude/skills"],
+      sweepHarnessScope: [".claude/skills", ".codex/skills", ".pi/agent/skills"],
+      desired: [alpha],
+      allowRemovals: true,
+    });
+    assert.equal(existsSync(legacyLink), false);
+    assert.ok(baseResult.removedLinks.some((removal) => removal.path === "~/.codex/skills/alpha"));
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
 test("chunked content is validated and cached immediately with the shared manual-variant policy", () => {
   const roots = makeRoots();
   try {

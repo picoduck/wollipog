@@ -952,7 +952,8 @@ export class SubscriptionUsageManager {
         detail: result.detail ?? initial.detail,
         fetchedAt: this.now(),
         ...(result.plan ? { plan: result.plan } : {}),
-        ...(result.accountLabel ? { accountLabel: result.accountLabel } : {}),
+        ...(source.accountLabel ? { accountLabel: source.accountLabel } :
+          result.accountLabel ? { accountLabel: result.accountLabel } : {}),
       };
       this.snapshots.set(source.sourceId, unavailable);
       this.options.publish(unavailable);
