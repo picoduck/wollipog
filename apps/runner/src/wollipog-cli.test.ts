@@ -52,6 +52,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["admin", ["admin pairing-url", "admin status", "admin doctor", "admin device create", "admin runner-credential"]],
     ["session", ["session list", "session capabilities", "session create", "session wait", "session guardrails", "--effort"]],
     ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard"]],
+    ["decision", ["decision request", "decision get", "decision consume", "request_workflow_decision", "--snapshot"]],
     ["init", ["wollipog init", ".wollipog.json", "does not run", "never overwritten"]],
   ];
   for (const [topic, expected] of topics) {
@@ -710,4 +711,122 @@ test("CLI artifact help is discoverable and malformed artifact commands issue no
   const missing = await captureCli(["artifact", "attach", "--json"]);
   assert.equal(missing.code, 2);
   assert.deepEqual(JSON.parse(missing.stdout), { error: "artifact attach requires --file" });
+});
+
+test("CLI typed decisions preserve exact snapshots while confining a child to itself", async () => {
+  const calls: Array<{ url: string; method?: string; body?: string; headers?: Record<string, string> }> = [];
+  const decisions = [
+    { occurrenceId: "workflow_question", status: "pending" },
+    { occurrenceId: "workflow_evidence", status: "pending" },
+    { occurrenceId: "workflow_question", status: "approved" },
+    { occurrenceId: "workflow_question", status: "consumed" },
+  ];
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, method: init?.method, body: init?.body, headers: init?.headers });
+    const body = url.endsWith("/api/compatibility")
+      ? { protocolVersion: PROTOCOL_VERSION }
+      : decisions.shift();
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+  const env = {
+    WOLLIPOG_CONTROL_PLANE_URL: "http://cp",
+    WOLLIPOG_TOKEN: "child-token",
+    WOLLIPOG_SESSION_ID: "codex-child",
+  };
+  const implementationQuestion = {
+    category: "implementation_question",
+    question: "Which bounded implementation should be used?",
+    options: [
+      { optionId: "cli", label: "CLI", description: "Reuse the session credential." },
+      { optionId: "mcp", label: "MCP", description: "Add a launch-time server." },
+    ],
+  };
+  const uiEvidence = {
+    category: "ui_evidence_approval",
+    evidence: [{ evidenceId: "desktop", uri: "https://evidence.invalid/desktop.png", sha256: "a".repeat(64) }],
+  };
+  const run = async (argv: string[]): Promise<unknown> => {
+    let stdout = "";
+    let stderr = "";
+    assert.equal(await runWollipogCli(
+      ["node", "cli.js", "--wollipog-cli", ...argv, "--json"],
+      env,
+      { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } },
+      fetch,
+    ), 0, stderr);
+    return JSON.parse(stdout);
+  };
+
+  await run(["decision", "request", "--request-id", "question-1", "--resource-key", "implementation-1",
+    "--snapshot", JSON.stringify(implementationQuestion)]);
+  await run(["decision", "request", "--request-id", "evidence-1", "--resource-key", "evidence-1",
+    "--snapshot", JSON.stringify(uiEvidence)]);
+  await run(["decision", "get", "workflow_question"]);
+  await run(["decision", "consume", "workflow_question", "--snapshot", JSON.stringify(implementationQuestion)]);
+
+  const requests = calls.filter((call) => !call.url.endsWith("/api/compatibility"));
+  assert.deepEqual(requests.map((call) => [call.method, call.url]), [
+    ["POST", "http://cp/api/sessions/codex-child/workflow-decisions"],
+    ["POST", "http://cp/api/sessions/codex-child/workflow-decisions"],
+    ["GET", "http://cp/api/sessions/codex-child/workflow-decisions/workflow_question"],
+    ["POST", "http://cp/api/sessions/codex-child/workflow-decisions/workflow_question/consume"],
+  ]);
+  assert.deepEqual(JSON.parse(requests[0]!.body!), {
+    requestId: "question-1", resourceKey: "implementation-1", resourceSnapshot: implementationQuestion,
+  });
+  assert.deepEqual(JSON.parse(requests[1]!.body!), {
+    requestId: "evidence-1", resourceKey: "evidence-1", resourceSnapshot: uiEvidence,
+  });
+  assert.deepEqual(JSON.parse(requests[3]!.body!), { resourceSnapshot: implementationQuestion });
+  assert.ok(requests.every((call) => call.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER] === "codex-child"));
+});
+
+test("CLI typed-decision help is discoverable and malformed or cross-session commands make no request", async () => {
+  const rootHelpText = await captureCli(["help"]);
+  assert.match(rootHelpText.stdout, /^\s+decision\s+Request, read, and consume typed workflow decisions/mu);
+  const topic = await captureCli(["help", "workflow-decisions"]);
+  assert.equal(topic.code, 0);
+  for (const text of [
+    "decision request", "decision get", "decision consume", "request_workflow_decision",
+    "get_workflow_decision", "consume_workflow_decision", "cannot resolve its own decision",
+  ]) assert.ok(topic.stdout.includes(text), `decision help omits ${text}`);
+
+  for (const malformed of [
+    ["decision", "request", "--resource-key", "key", "--snapshot", "{}"],
+    ["decision", "request", "--request-id", "id", "--resource-key", "key", "--snapshot", "not-json"],
+    ["decision", "get"],
+    ["decision", "consume", "--snapshot", "{}"],
+    ["decision", "consume", "workflow_1", "--snapshot", "[]"],
+    ["decision", "get", "workflow_1", "--session", "other"],
+  ]) {
+    const result = await captureCli([...malformed, "--json"]);
+    assert.equal(result.code, 2, malformed.join(" "));
+    assert.equal(result.stderr, "", malformed.join(" "));
+    assert.match(JSON.parse(result.stdout).error, /requires|valid JSON|JSON object|do not accept --session/u);
+  }
+});
+
+test("CLI typed decisions fail closed before their protocol capability", async () => {
+  let stdout = "";
+  let calls = 0;
+  const fetch: McpFetch = async () => {
+    calls++;
+    return {
+      ok: true,
+      status: 200,
+      text: async () => JSON.stringify({
+        protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.typedWorkflowDecisionDelegation - 1,
+      }),
+    };
+  };
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "decision", "get", "workflow_old", "--json"],
+    { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "child-token", WOLLIPOG_SESSION_ID: "child" },
+    { stdout: (text) => { stdout += text; }, stderr: () => {} },
+    fetch,
+  ), 1);
+  assert.match(JSON.parse(stdout).error, new RegExp(
+    `requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.typedWorkflowDecisionDelegation}`, "u",
+  ));
+  assert.equal(calls, 1, "an old control plane receives only the compatibility probe");
 });

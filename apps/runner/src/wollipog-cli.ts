@@ -18,7 +18,7 @@ import {
 import { VERSION } from "./version.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
-import { artifactHelp, expandCommandAlias, initHelp, pairHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp } from "./wollipog-help.js";
+import { artifactHelp, decisionHelp, expandCommandAlias, initHelp, pairHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp } from "./wollipog-help.js";
 import { resolveWorktreeSetupRepositoryRoot, writeStarterWorktreeSetupConfig } from "./worktree-setup-generator.js";
 
 type Write = (text: string) => void;
@@ -89,6 +89,24 @@ function usage(): string {
   return rootHelp();
 }
 
+function jsonObjectOption(
+  args: string[],
+  name: string,
+): { value: Record<string, unknown> } | { error: string } {
+  const raw = option(args, name);
+  if (!optionPresent(args, name) || raw === undefined || !raw.trim() || raw.startsWith("--")) {
+    return { error: `${name} requires a JSON object` };
+  }
+  try {
+    const value = JSON.parse(raw) as unknown;
+    return value !== null && typeof value === "object" && !Array.isArray(value)
+      ? { value: value as Record<string, unknown> }
+      : { error: `${name} must be a JSON object` };
+  } catch {
+    return { error: `${name} must be valid JSON` };
+  }
+}
+
 export async function runWollipogInit(
   directory: string,
   json: boolean,
@@ -129,6 +147,53 @@ function invocationArgs(argv: string[]): string[] {
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
   const words = positional(args);
+  // Like artifact, this group reads only its fixed leading words. Keeping its JSON value options
+  // out of the shared positional-option set ensures an unrelated command cannot become valid just
+  // because it happens to include --snapshot or --action.
+  if (["decision", "decisions", "workflow-decision", "workflow-decisions"].includes(words[0] ?? "")) {
+    const groupIndex = args.findIndex((arg) =>
+      ["decision", "decisions", "workflow-decision", "workflow-decisions"].includes(arg));
+    const verb = args[groupIndex + 1];
+    const occurrenceId = args[groupIndex + 2];
+    if (optionPresent(args, "--session")) {
+      return { error: "decision commands act only on the injected session and do not accept --session" };
+    }
+    if (verb === "request") {
+      const requestId = option(args, "--request-id");
+      const resourceKey = option(args, "--resource-key");
+      if (!requestId || requestId.startsWith("--")) return { error: "decision request requires --request-id" };
+      if (!resourceKey || resourceKey.startsWith("--")) return { error: "decision request requires --resource-key" };
+      const snapshot = jsonObjectOption(args, "--snapshot");
+      if ("error" in snapshot) return snapshot;
+      return {
+        tool: "request_workflow_decision",
+        input: { requestId, resourceKey, resourceSnapshot: snapshot.value },
+      };
+    }
+    if (verb === "get") {
+      return occurrenceId && !occurrenceId.startsWith("--")
+        ? { tool: "get_workflow_decision", input: { occurrenceId } }
+        : { error: "decision get requires an occurrence id" };
+    }
+    if (verb === "consume") {
+      if (!occurrenceId || occurrenceId.startsWith("--")) {
+        return { error: "decision consume requires an occurrence id" };
+      }
+      const snapshot = jsonObjectOption(args, "--snapshot");
+      if ("error" in snapshot) return snapshot;
+      let action: Record<string, unknown> | undefined;
+      if (optionPresent(args, "--action")) {
+        const parsedAction = jsonObjectOption(args, "--action");
+        if ("error" in parsedAction) return parsedAction;
+        action = parsedAction.value;
+      }
+      return {
+        tool: "consume_workflow_decision",
+        input: { occurrenceId, resourceSnapshot: snapshot.value, ...(action ? { action } : {}) },
+      };
+    }
+    return { error: decisionHelp() };
+  }
   // Only the group and verb are read positionally, so --file and --name are deliberately not added
   // to the shared value-option set: doing so would change how every other command counts its words.
   if (words[0] === "artifact" || words[0] === "artifacts") {
@@ -409,12 +474,17 @@ export async function runWollipogCli(
     return 1;
   }
   const worktreeTools = new Set(["create_worktree", "attach_worktree", "select_worktree"]);
+  const workflowDecisionTools = new Set([
+    "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
+  ]);
   const requiredProtocol = parsed.tool === "create_session" && typeof parsed.input.effort === "string"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControlReasoningEffort
     : parsed.tool === "discard_worktree"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement
     : parsed.tool === "attach_session_artifact"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach
+    : workflowDecisionTools.has(parsed.tool)
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.typedWorkflowDecisionDelegation
     : worktreeTools.has(parsed.tool)
       ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees
       : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl;
