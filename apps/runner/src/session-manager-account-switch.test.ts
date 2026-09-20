@@ -18,6 +18,7 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
 const accounts = {
   work: { id: "work", label: "Work", provider: "codex" as const, credentialHome: "/accounts/work" },
   personal: { id: "personal", label: "Personal", provider: "codex" as const, credentialHome: "/accounts/personal" },
+  backup: { id: "backup", label: "Backup", provider: "codex" as const, credentialHome: "/accounts/backup" },
   claudeWork: { id: "claude-work", label: "Claude Work", provider: "claude" as const, credentialHome: "/claude/work" },
   claudePersonal: { id: "claude-personal", label: "Claude Personal", provider: "claude" as const, credentialHome: "/claude/personal" },
 };
@@ -45,7 +46,7 @@ function makeManager(
   const internals = manager as unknown as {
     resolveProviderAccount: ProviderAccountResolver;
     prepareLaunch: (meta: { providerAccountProvider?: string; providerCredentialHome?: string;
-      env: Record<string, string> }) => void;
+      env: Record<string, string> }) => void | Promise<void>;
   };
   internals.resolveProviderAccount = accountResolver;
   internals.prepareLaunch = (meta) => {
@@ -229,6 +230,206 @@ test("a failed account resume parks the session with the selected account and a 
     assert.equal(meta?.providerAccountSwitchFailure?.providerAccountLabel, "Personal");
     assert.match(meta?.providerAccountSwitchFailure?.reason ?? "", /could not resume/);
     assert.equal(meta?.providerCredentialIdentityId, undefined);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Stop remains terminal while an account-switch replacement is preparing", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-stop-"));
+  const messages: RunnerToControlPlane[] = [];
+  const launches: string[] = [];
+  let releasePreparation = () => {};
+  let manager: SessionManager | undefined;
+  try {
+    const made = makeManager(root, (_driver: unknown, launch: { env: Record<string, string> }) => {
+      launches.push(launch.env.CODEX_HOME!);
+      return {
+        pid: launches.length,
+        initialize: async () => {},
+        newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: async () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => "codex-thread",
+      };
+    }, messages);
+    manager = made.manager;
+    let preparationStartedResolve!: () => void;
+    const preparationStarted = new Promise<void>((resolve) => { preparationStartedResolve = resolve; });
+    const preparationGate = new Promise<void>((resolve) => { releasePreparation = resolve; });
+    const internals = manager as unknown as {
+      prepareLaunch: (meta: { providerAccountProvider?: string; providerCredentialHome?: string;
+        env: Record<string, string> }) => Promise<void>;
+      providerAccountSwitches: Map<string, unknown>;
+    };
+    internals.prepareLaunch = async (meta) => {
+      meta.env = { CODEX_HOME: meta.providerCredentialHome! };
+      if (meta.providerCredentialHome === accounts.personal.credentialHome) {
+        preparationStartedResolve();
+        await preparationGate;
+      }
+    };
+    const spec = launchSpec(root, "codex-app-server", "work");
+    assert.equal(await manager.start(spec), true);
+    made.store.patchMeta(spec.sessionId, { agentSessionId: "codex-thread" });
+
+    const switching = manager.switchProviderAccount(spec.sessionId, "personal");
+    await preparationStarted;
+    manager.stop(spec.sessionId);
+    releasePreparation();
+    await switching;
+    await waitFor(() => !internals.providerAccountSwitches.has(spec.sessionId), "stopped handoff did not settle");
+
+    assert.deepEqual(launches, [accounts.work.credentialHome]);
+    assert.equal(made.store.readMeta(spec.sessionId)?.status, "stopped");
+    assert.equal(made.store.readMeta(spec.sessionId)?.providerAccountSwitchFailure, undefined);
+  } finally {
+    releasePreparation();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("orphan recovery crosses a pending account-switch barrier before the handoff", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-orphan-"));
+  const messages: RunnerToControlPlane[] = [];
+  const launches: string[] = [];
+  const prompts: Array<{ home: string; text: string }> = [];
+  let manager: SessionManager | undefined;
+  try {
+    const made = makeManager(root, (_driver: unknown, launch: { env: Record<string, string> }) => {
+      const home = launch.env.CODEX_HOME!;
+      launches.push(home);
+      return {
+        pid: launches.length,
+        initialize: async () => {},
+        newSession: async () => {},
+        prompt: async (text: string) => { prompts.push({ home, text }); return "end_turn" as const; },
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: async () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => "codex-thread",
+      };
+    }, messages);
+    manager = made.manager;
+    const spec = launchSpec(root, "codex-app-server", "work");
+    assert.equal(await manager.start(spec), true);
+    made.store.patchMeta(spec.sessionId, {
+      agentSessionId: "codex-thread",
+      backgroundWorkState: "orphaned",
+      pendingBackgroundTaskIds: ["task-1"],
+      orphanedWork: { pendingTaskIds: ["task-1"], markedAt: 1, reason: "process_exit" },
+    });
+
+    assert.deepEqual(await manager.switchProviderAccount(spec.sessionId, "personal"), {
+      ok: true,
+      scheduled: true,
+    });
+    assert.equal(manager.prompt(spec.sessionId, "recover orphaned work", [], undefined, undefined, undefined, true), true);
+    await waitFor(() => launches.length === 2, "account switch did not resume after orphan recovery");
+
+    assert.deepEqual(prompts, [{ home: accounts.work.credentialHome, text: "recover orphaned work" }]);
+    assert.deepEqual(launches, [accounts.work.credentialHome, accounts.personal.credentialHome]);
+    assert.equal(made.store.readMeta(spec.sessionId)?.providerAccountId, "personal");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a newer account selection made mid-handoff is preserved as a follow-up switch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-overlap-"));
+  const messages: RunnerToControlPlane[] = [];
+  const launches: string[] = [];
+  let releaseFirstClose = () => {};
+  let manager: SessionManager | undefined;
+  try {
+    let launchCount = 0;
+    let firstCloseStartedResolve!: () => void;
+    const firstCloseStarted = new Promise<void>((resolve) => { firstCloseStartedResolve = resolve; });
+    const firstCloseGate = new Promise<void>((resolve) => { releaseFirstClose = resolve; });
+    const made = makeManager(root, (_driver: unknown, launch: { env: Record<string, string> }) => {
+      const launchNumber = ++launchCount;
+      launches.push(launch.env.CODEX_HOME!);
+      return {
+        pid: launchNumber,
+        initialize: async () => {},
+        newSession: async () => {},
+        close: async () => {
+          if (launchNumber === 1) {
+            firstCloseStartedResolve();
+            await firstCloseGate;
+          }
+        },
+        prompt: async () => "end_turn" as const,
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: async () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => "codex-thread",
+      };
+    }, messages);
+    manager = made.manager;
+    const spec = launchSpec(root, "codex-app-server", "work");
+    assert.equal(await manager.start(spec), true);
+    made.store.patchMeta(spec.sessionId, { agentSessionId: "codex-thread" });
+
+    const first = manager.switchProviderAccount(spec.sessionId, "personal");
+    await firstCloseStarted;
+    assert.deepEqual(await manager.switchProviderAccount(spec.sessionId, "backup"), {
+      ok: true,
+      scheduled: true,
+    });
+    releaseFirstClose();
+    await first;
+    await waitFor(() => launches.length === 3, "newer account selection was not applied");
+
+    assert.deepEqual(launches, [
+      accounts.work.credentialHome,
+      accounts.personal.credentialHome,
+      accounts.backup.credentialHome,
+    ]);
+    assert.equal(made.store.readMeta(spec.sessionId)?.providerAccountId, "backup");
+    assert.equal(made.store.readEvents(spec.sessionId).filter((event) =>
+      event.payload.kind === "provider_account_switched").length, 2);
+  } finally {
+    releaseFirstClose();
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("account-switch failure reasons are bounded and control-free", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-reason-"));
+  const messages: RunnerToControlPlane[] = [];
+  let manager: SessionManager | undefined;
+  try {
+    const made = makeManager(root, () => ({
+      pid: 1,
+      initialize: async () => {},
+      newSession: async () => {},
+      prompt: async () => "end_turn" as const,
+      cancel: () => {},
+      dispose: () => {},
+      setConfig: async () => {},
+      resolvePermission: () => false,
+      agentSessionId: () => "codex-thread",
+    }), messages);
+    manager = made.manager;
+    const spec = launchSpec(root, "codex-app-server", "work");
+    assert.equal(await manager.start(spec), true);
+    (manager as unknown as {
+      parkProviderAccountSwitchFailure: (sessionId: string, target: typeof accounts.personal,
+        reason: string) => void;
+    }).parkProviderAccountSwitchFailure(spec.sessionId, accounts.personal, `\u0000${"x".repeat(1_000)}\nsecret`);
+    const reason = made.store.readMeta(spec.sessionId)?.providerAccountSwitchFailure?.reason ?? "";
+    assert.equal(reason.length, 500);
+    assert.doesNotMatch(reason, /[\p{Cc}\p{Cf}]/u);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

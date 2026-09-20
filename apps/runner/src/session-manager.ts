@@ -2505,6 +2505,7 @@ export class SessionManager {
     const active = this.active.get(sessionId);
     const rebind = this.worktreeRebindings.get(sessionId);
     const rebinding = rebind?.entry;
+    const accountSwitching = this.providerAccountSwitches.get(sessionId)?.entry;
     const rebindingSelection = rebinding ? this.store.readMeta(sessionId)?.worktreePath : undefined;
     return (!!active && (sameWorktreePath(active.context, active.cwd, path) ||
       (!!active.worktree && sameWorktreePath(active.context, active.worktree.path, path)) ||
@@ -2515,6 +2516,9 @@ export class SessionManager {
       (!!rebinding && !!rebindingSelection && sameWorktreePath(rebinding.context, rebindingSelection, path)) ||
       (!!rebinding && !!rebind?.launchingWorktreePath &&
         sameWorktreePath(rebinding.context, rebind.launchingWorktreePath, path)) ||
+      (!!accountSwitching && (sameWorktreePath(accountSwitching.context, accountSwitching.cwd, path) ||
+        (!!accountSwitching.worktree &&
+          sameWorktreePath(accountSwitching.context, accountSwitching.worktree.path, path)))) ||
       this.closing.has(sessionId);
   }
 
@@ -2527,12 +2531,15 @@ export class SessionManager {
         sameWorktreePath(active.context, active.pendingWorktreeRebind, path) &&
         !sameWorktreePath(active.context, active.cwd, path)) return true;
     const rebinding = this.worktreeRebindings.get(sessionId);
-    if (!rebinding) return false;
-    return (!!rebinding.launchingWorktreePath &&
+    const accountSwitching = this.providerAccountSwitches.get(sessionId)?.entry;
+    return (!!rebinding?.launchingWorktreePath &&
       sameWorktreePath(context, rebinding.launchingWorktreePath, path)) ||
-      sameWorktreePath(rebinding.entry.context, rebinding.entry.cwd, path) ||
-      (!!rebinding.entry.worktree &&
-        sameWorktreePath(rebinding.entry.context, rebinding.entry.worktree.path, path));
+      (!!rebinding && sameWorktreePath(rebinding.entry.context, rebinding.entry.cwd, path)) ||
+      (!!rebinding?.entry.worktree &&
+        sameWorktreePath(rebinding.entry.context, rebinding.entry.worktree.path, path)) ||
+      (!!accountSwitching && sameWorktreePath(accountSwitching.context, accountSwitching.cwd, path)) ||
+      (!!accountSwitching?.worktree &&
+        sameWorktreePath(accountSwitching.context, accountSwitching.worktree.path, path));
   }
 
   /** The durable signal that this session's selected worktree is the one a launch is bringing up.
@@ -2829,6 +2836,13 @@ export class SessionManager {
       this.stop(sessionId);
       await rebinding.promise;
     }
+    const accountSwitching = this.providerAccountSwitches.get(sessionId);
+    if (accountSwitching && (sameWorktreePath(accountSwitching.entry.context, accountSwitching.entry.cwd, path) ||
+        !!accountSwitching.entry.worktree &&
+          sameWorktreePath(accountSwitching.entry.context, accountSwitching.entry.worktree.path, path))) {
+      this.stop(sessionId);
+      await accountSwitching.promise;
+    }
     await this.retireWorktreeShells?.(sessionId, context, path);
     if (processMarker && !await terminatePosixProcessesByMarker(processMarker)) {
       throw new Error("worktree descendant process retirement is unconfirmed");
@@ -3119,7 +3133,8 @@ export class SessionManager {
     // is being captured. Their scans cannot see this journal row, so arrange the missed reap once
     // neither an active provider nor a launch/rebind generation still owns the worktree.
     const providerBoundaryGone = !this.active.has(meta.sessionId) &&
-      !this.worktreeRebindings.has(meta.sessionId);
+      !this.worktreeRebindings.has(meta.sessionId) &&
+      !this.providerAccountSwitches.has(meta.sessionId);
     const missedBoundary = reason === "provider_active" ||
       (reason === "provider_launching" && !this.launchGenerations.has(meta.sessionId));
     if (deferredRecord && providerBoundaryGone && missedBoundary) {
@@ -4735,10 +4750,12 @@ export class SessionManager {
       }
     }
     const rebinding = this.worktreeRebindings.get(spec.sessionId);
+    const accountSwitching = this.providerAccountSwitches.get(spec.sessionId);
     // Once launch() publishes the replacement entry, an explicit Restart owns cancellation and
     // retirement directly. Waiting for the encompassing rebind promise could deadlock forever on
     // a driver initialization promise that ignores disposal.
     if (rebinding && !this.active.has(spec.sessionId)) await rebinding.promise;
+    if (accountSwitching && !this.active.has(spec.sessionId)) await accountSwitching.promise;
     if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) {
       this.emitEvent(spec.sessionId, { kind: "error", message: "session deletion is in progress" });
       this.emitStatus(spec.sessionId, "stopped");
@@ -5595,7 +5612,8 @@ export class SessionManager {
     this.forgetLaunchingWorktreePath(sessionId, generation);
     // A deferred retirement recorded before provider admission has no ActiveSession exit to drive
     // replay when launch fails. Once the generation is finished, it is safe to resume the journal.
-    if (this.active.has(sessionId) || this.worktreeRebindings.has(sessionId)) return;
+    if (this.active.has(sessionId) || this.worktreeRebindings.has(sessionId) ||
+        this.providerAccountSwitches.has(sessionId)) return;
     this.scheduleDeferredSafeWorktreeReaps(sessionId, "provider launch finished");
   }
 
@@ -7422,6 +7440,9 @@ export class SessionManager {
     const stoppedRebindInProgress = this.worktreeRebindings.has(sessionId) &&
       (rebindGeneration === undefined ||
         this.preLaunchAdmissionGenerations.get(sessionId) !== rebindGeneration);
+    const stoppedAccountSwitchInProgress = this.providerAccountSwitches.has(sessionId) &&
+      (rebindGeneration === undefined ||
+        this.preLaunchAdmissionGenerations.get(sessionId) !== rebindGeneration);
     const closing = this.closing.get(sessionId);
     const providerCloseBlocksPrompt = !!closing && !closing.acceptPromptsDuringHandoff;
     // A prompt during a file rewind would snapshot (and run the agent over) a half-restored
@@ -7432,7 +7453,8 @@ export class SessionManager {
       this.loggingOut.has(sessionId) ||
       providerCloseBlocksPrompt ||
       this.deleting.has(sessionId) ||
-      stoppedRebindInProgress
+      stoppedRebindInProgress ||
+      stoppedAccountSwitchInProgress
     ) {
       const operation = this.rewinding.has(sessionId)
         ? "rewind"
@@ -7444,9 +7466,12 @@ export class SessionManager {
               ? "provider session close"
               : this.deleting.has(sessionId)
                 ? "session deletion"
-                : "worktree rebind shutdown";
+                : stoppedAccountSwitchInProgress
+                  ? "provider account switch shutdown"
+                  : "worktree rebind shutdown";
       this.emitEvent(sessionId, { kind: "error", message: `a ${operation} is in progress — retry in a moment` });
-      if (providerCloseBlocksPrompt || this.deleting.has(sessionId) || stoppedRebindInProgress) {
+      if (providerCloseBlocksPrompt || this.deleting.has(sessionId) || stoppedRebindInProgress ||
+          stoppedAccountSwitchInProgress) {
         this.emitStatus(sessionId, this.store.readMeta(sessionId)?.status ?? "stopped");
       }
       durable?.failed(`a ${operation} is in progress`, "COMMAND_CANCELLED");
@@ -9410,15 +9435,16 @@ export class SessionManager {
     if (entry.pendingProviderAccountSwitch) {
       if (this.providerAccountSwitchCanProceed(sessionId, entry)) {
         await this.rebindSelectedProviderAccount(sessionId, entry);
+        return;
       }
-      return;
+      if (!this.promoteQueuedHandoffPrerequisite(sessionId, entry.queue)) return;
     }
     if (entry.pendingWorktreeRebind) {
       if (this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
         return;
       }
-      if (!this.promoteQueuedWorktreePrerequisite(sessionId, entry.queue)) return;
+      if (!this.promoteQueuedHandoffPrerequisite(sessionId, entry.queue)) return;
     }
     // Schedulers may race with cancellation or interruption and leave an empty generation. Do not
     // claim—or queue for—an active-work permit when there is no provider work to dispatch.
@@ -9648,15 +9674,19 @@ export class SessionManager {
     meta: SessionMeta,
     target: BoundProviderAccount,
   ): Partial<SessionMeta> {
+    const selectedWhileSwitching = this.pendingProviderAccount(meta);
+    const followUp = selectedWhileSwitching?.id !== target.id
+      ? selectedWhileSwitching
+      : undefined;
     return {
       providerAccountId: target.id,
       providerAccountLabel: target.label,
       providerAccountProvider: target.provider,
       providerCredentialHome: target.credentialHome,
-      pendingProviderAccountId: undefined,
-      pendingProviderAccountLabel: undefined,
-      pendingProviderAccountProvider: undefined,
-      pendingProviderCredentialHome: undefined,
+      pendingProviderAccountId: followUp?.id,
+      pendingProviderAccountLabel: followUp?.label,
+      pendingProviderAccountProvider: followUp?.provider,
+      pendingProviderCredentialHome: followUp?.credentialHome,
       providerAccountSwitchFailure: undefined,
       // Provider identity is scoped to the credential home. An intentional account change starts
       // a new pin instead of presenting the previous account as a suspicious identity mismatch.
@@ -9675,15 +9705,28 @@ export class SessionManager {
     target: Pick<BoundProviderAccount, "id" | "label">,
     reason: string,
   ): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current) return;
+    const boundedReason = boundedProviderAccountSwitchFailureReason(reason);
+    if (current.status === "stopped") {
+      const stopped = this.store.patchMeta(sessionId, {
+        pendingProviderAccountId: undefined,
+        pendingProviderAccountLabel: undefined,
+        pendingProviderAccountProvider: undefined,
+        pendingProviderCredentialHome: undefined,
+      });
+      if (stopped) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(stopped) });
+      return;
+    }
     const failure: ProviderAccountSwitchFailureView = {
       providerAccountId: target.id,
       providerAccountLabel: target.label,
-      reason,
+      reason: boundedReason,
       detectedAt: Date.now(),
     };
     this.emitEvent(sessionId, {
       kind: "error",
-      message: `Account switch to ${target.label} failed: ${reason}`,
+      message: `Account switch to ${target.label} failed: ${boundedReason}`,
     });
     const updated = this.store.patchMeta(sessionId, {
       pendingProviderAccountId: undefined,
@@ -9851,10 +9894,11 @@ export class SessionManager {
           retirement.preserveLock = false;
           retirement.acceptPromptsDuringHandoff = false;
         }
+        this.log(`session ${sessionId} provider disposal failed during account switch: ${errText(error)}`);
         this.parkProviderAccountSwitchFailure(
           sessionId,
           target,
-          `the previous provider could not be stopped: ${errText(error)}`,
+          "the previous provider could not be stopped",
         );
         return;
       }
@@ -9881,15 +9925,32 @@ export class SessionManager {
             this.log(`session ${sessionId} failed account-switch replacement disposal: ${errText(error)}`);
           }
         }
-        this.parkProviderAccountSwitchFailure(
-          sessionId,
-          target,
-          "the provider could not resume this conversation with the selected account",
-        );
+        if (this.launchIsCurrent(sessionId, launchGeneration) &&
+            this.store.readMeta(sessionId)?.status !== "stopped") {
+          this.parkProviderAccountSwitchFailure(
+            sessionId,
+            target,
+            "the provider could not resume this conversation with the selected account",
+          );
+        }
         return;
       }
       const reboundEntry = this.active.get(sessionId);
-      if (reboundEntry) reboundEntry.pendingProviderAccountSwitch = undefined;
+      if (this.store.readMeta(sessionId)?.status === "stopped") {
+        if (reboundEntry) {
+          this.deleteActiveSession(sessionId, reboundEntry, false);
+          try {
+            await this.beginProviderRetirement(sessionId, reboundEntry).promise;
+          } catch (disposeError) {
+            this.log(`session ${sessionId} stopped account-switch replacement disposal failed: ${errText(disposeError)}`);
+          }
+        }
+        launched = false;
+        return;
+      }
+      const latestMeta = this.store.readMeta(sessionId);
+      const followUp = latestMeta ? this.pendingProviderAccount(latestMeta) : undefined;
+      if (reboundEntry) reboundEntry.pendingProviderAccountSwitch = followUp;
       this.emitEvent(sessionId, {
         kind: "provider_account_switched",
         providerAccountId: target.id,
@@ -9901,18 +9962,29 @@ export class SessionManager {
       this.activatePreLaunchQueue(sessionId);
       preserveLockForQueue = hasQueuedWork;
       if (!hasQueuedWork) this.emitStatus(sessionId, "idle");
+      if (reboundEntry?.pendingProviderAccountSwitch) {
+        setImmediate(() => this.scheduleDrain(sessionId));
+      }
     } finally {
       const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
       const ownsGeneration = this.launchGenerations.get(sessionId) === launchGeneration;
       const retirementPending = this.closing.has(sessionId);
       if (!launched && ownsGeneration && !superseded) {
-        this.rejectPreLaunchQueue(sessionId, "provider could not resume with the selected account");
+        this.rejectPreLaunchQueue(
+          sessionId,
+          this.store.readMeta(sessionId)?.status === "stopped"
+            ? "session stopped before the selected-account provider resumed"
+            : "provider could not resume with the selected account",
+        );
       }
       if (this.preLaunchAdmissionGenerations.get(sessionId) === launchGeneration) {
         this.preLaunchAdmissionGenerations.delete(sessionId);
       }
       this.finishLaunchGeneration(sessionId, launchGeneration);
       if (!launched && !superseded && !retirementPending) this.releaseAdmissionIfInactive(sessionId);
+      else if (!launched && !retirementPending && this.store.readMeta(sessionId)?.status === "stopped") {
+        this.releaseAdmissionIfInactive(sessionId);
+      }
       if (switchLockHeld && !preserveLockForQueue && !retirementPending) this.clearLock(sessionId);
     }
   }
@@ -9927,7 +9999,7 @@ export class SessionManager {
   /** A deferred rebind holds user work, but its runner-owned prerequisite must cross that barrier.
    * Preserve ordinary FIFO order while moving only the continuation that can settle background
    * ownership. A recovered answer already promoted above retains priority when an approval is open. */
-  private promoteQueuedWorktreePrerequisite(sessionId: string, queue: QueuedPrompt[]): boolean {
+  private promoteQueuedHandoffPrerequisite(sessionId: string, queue: QueuedPrompt[]): boolean {
     if (this.hasPendingApproval(sessionId)) {
       return this.queuedPromptResolvesPendingQuestion(sessionId, queue[0]);
     }
@@ -11784,7 +11856,8 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     if (!entry) {
       const rebinding = this.worktreeRebindings.get(sessionId);
-      if (rebinding) {
+      const accountSwitching = this.providerAccountSwitches.get(sessionId);
+      if (rebinding || accountSwitching) {
         const stopGeneration = this.beginLaunchGeneration(sessionId);
         this.finishLaunchGeneration(sessionId, stopGeneration);
       }
@@ -11808,7 +11881,7 @@ export class SessionManager {
         });
         this.emitStatus(sessionId, "stopped");
       }
-      if (!this.closing.has(sessionId) && !rebinding) {
+      if (!this.closing.has(sessionId) && !rebinding && !accountSwitching) {
         this.releaseAdmissionIfInactive(sessionId);
       }
       if (authenticationBlock) this.surfaceProviderAuthentication(authenticationBlock.credentialScopeId);
@@ -12049,11 +12122,12 @@ export class SessionManager {
       this.provingWorktreeRoots.delete(sessionId);
       this.cancelAdmissionWait(sessionId);
       const rebinding = this.worktreeRebindings.get(sessionId);
+      const accountSwitching = this.providerAccountSwitches.get(sessionId);
       this.discardRecovery(sessionId);
       this.cancelApprovalTelemetry(sessionId);
       let closing = this.closing.get(sessionId);
       const entry = this.active.get(sessionId);
-      if (!closing && !rebinding) this.releaseAdmissionIfInactive(sessionId);
+      if (!closing && !rebinding && !accountSwitching) this.releaseAdmissionIfInactive(sessionId);
       this.clearSteeringState(sessionId, "session was deleted before steering settled");
       if (entry) {
         this.deleteActiveSession(sessionId, entry, false);
@@ -12091,6 +12165,10 @@ export class SessionManager {
         await rebinding.promise;
         this.releaseAdmission(sessionId);
       }
+      if (accountSwitching && !entry) {
+        await accountSwitching.promise;
+        this.releaseAdmission(sessionId);
+      }
       this.clearLock(sessionId);
       const managedPiCleanupContext = meta?.adoptedProviderState?.cleanupContext ?? meta?.context;
       if (meta?.adoptedProviderState?.driver === "pi" && managedPiCleanupContext?.kind === "wsl") {
@@ -12110,6 +12188,7 @@ export class SessionManager {
       // captured and retired that exact entry above, so the encompassing rebind promise must no
       // longer retain the session indefinitely when initialize()/newSession() never resolves.
       if (rebinding && entry) this.worktreeRebindings.delete(sessionId);
+      if (accountSwitching && entry) this.providerAccountSwitches.delete(sessionId);
       this.pendingDeletions.delete(sessionId);
       this.cancelAdmissionWait(sessionId);
       // Checkpoint refs live in the SHARED repo odb (not the worktree dir) — drop them or the
@@ -12495,7 +12574,8 @@ export class SessionManager {
       this.loggingOut.has(sessionId) ||
       this.deleting.has(sessionId) ||
       this.closing.has(sessionId) ||
-      this.worktreeRebindings.has(sessionId)
+      this.worktreeRebindings.has(sessionId) ||
+      this.providerAccountSwitches.has(sessionId)
     ) return false;
     this.rewinding.add(sessionId);
     return true;
@@ -13133,6 +13213,16 @@ export class SessionManager {
       }
     }
     this.worktreeRebindings.clear();
+    for (const { entry } of this.providerAccountSwitches.values()) {
+      if (shutdownRetirementClients.has(entry.client)) continue;
+      try {
+        entry.client.dispose();
+      } catch (error) {
+        clean = false;
+        this.log(`shutdown dispose failed for an account-switching session: ${errText(error)}`);
+      }
+    }
+    this.providerAccountSwitches.clear();
     this.pendingDeletions.clear();
     this.deleting.clear();
     this.recoveryQueues.clear();
@@ -15743,6 +15833,11 @@ function errText(err: unknown): string {
     return String((err as { message: unknown }).message);
   }
   return String(err);
+}
+
+function boundedProviderAccountSwitchFailureReason(reason: string): string {
+  const clean = reason.replace(/[\p{Cc}\p{Cf}]+/gu, " ").trim();
+  return (clean || "the provider account switch failed").slice(0, 500);
 }
 
 function isProviderAuthenticationBlock(pending: SessionMeta["pendingApproval"] | undefined): boolean {
