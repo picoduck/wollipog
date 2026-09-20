@@ -1280,6 +1280,103 @@ test("an explicit No Project preset is selected and launchable on mount", async 
   }
 });
 
+test("multiple provider accounts expose a picker and submit the selected account", async () => {
+  const accountRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, defaultProviderAccountId: "work" })),
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "claude", authStatus: "unauthenticated" },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+  try {
+    assert.match(
+      fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Account:"]')?.getAttribute("aria-label") ?? "",
+      /Account: Work/,
+    );
+    await chooseSelectOption(fixture.container, "Account", "Personal");
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]?.providerAccountId, "personal");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a WSL agent does not submit an implicit runner-host provider account", async () => {
+  const accountRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({
+      ...agent,
+      context: { kind: "wsl" as const, distro: "Ubuntu" },
+      defaultProviderAccountId: undefined,
+    })),
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+  try {
+    assert.equal(fixture.container.querySelector('[aria-label^="Account:"]'), null);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests.length, 1);
+    assert.equal(fixture.requests[0]?.providerAccountId, undefined);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("container targets hide and omit runner-local provider accounts", async () => {
+  const boundaries = {
+    filesystem: "container" as const,
+    network: "deny" as const,
+    secrets: "none" as const,
+    billing: "none" as const,
+  };
+  const accountRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, defaultProviderAccountId: "work" })),
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+    ],
+    executionTargets: [
+      {
+        id: "host-in-place", runnerId: runner.runnerId, name: "Runner Host · in place",
+        kind: "local", workspaceStrategy: "in_place", adapter: "host",
+        boundaries: { filesystem: "host", network: "inherit", secrets: "runner_local", billing: "agent_account" },
+        available: true,
+      },
+      {
+        id: "host-worktree", runnerId: runner.runnerId, name: "Runner Host · worktree",
+        kind: "local", workspaceStrategy: "worktree", adapter: "host",
+        boundaries: { filesystem: "worktree", network: "inherit", secrets: "runner_local", billing: "agent_account" },
+        available: true,
+      },
+      {
+        id: "container", runnerId: runner.runnerId, name: "Offline Container",
+        kind: "container", workspaceStrategy: "worktree", adapter: "container", boundaries,
+        compatibleAgentIds: ["claude"], available: true,
+      },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+  try {
+    await chooseSelectOption(fixture.container, "Account", "Personal");
+    await chooseSelectOption(fixture.container, "Execution Target", "Offline Container");
+    assert.equal(fixture.container.querySelector('[aria-label^="Account:"]'), null);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.executionTargetId, "container");
+    assert.equal(fixture.requests[0]?.providerAccountId, undefined);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("a delayed Project preset hydrates once its exact Project and Location arrive", async () => {
   const fixture = await mountFixture(
     { projects: [] },

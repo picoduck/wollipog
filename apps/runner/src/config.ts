@@ -1,7 +1,7 @@
 /** Runner configuration loading + CLI argument parsing. */
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { posix, resolve, win32 } from "node:path";
 import { homedir } from "node:os";
 import type { AcpEnvironmentReference, AcpMcpServerConfig, AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
@@ -21,6 +21,16 @@ export interface RunnerConfigAgent {
   mcpServers?: AcpMcpServerConfig[];
   /** ACP is runner-local stdio. Any other JSON value is rejected at startup. */
   transport?: "stdio";
+  /** Opaque account id used when this agent is selected without an explicit account. */
+  defaultProviderAccountId?: string;
+}
+
+export interface RunnerProviderAccount {
+  id: string;
+  label: string;
+  provider: "claude" | "codex";
+  /** Runner-local credential/config home; never advertised to the control plane. */
+  directory: string;
 }
 
 export interface RunnerConfigWorkspace {
@@ -121,6 +131,8 @@ export interface RunnerConfig {
   token: string;
   workspaces: RunnerConfigWorkspace[];
   agents: RunnerConfigAgent[];
+  /** Optional provider accounts. Omission preserves the legacy default-home behavior exactly. */
+  providerAccounts: RunnerProviderAccount[];
   /** Exclusively owned host-native runner state root (sessions, credentials, worktrees, journals). */
   dataDir: string;
   /** Maximum simultaneously live agent processes on this box. */
@@ -436,6 +448,38 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
     }
   }
   const agents = (overrides.agents ?? file.agents ?? []);
+  const rawProviderAccounts = overrides.providerAccounts ?? file.providerAccounts ?? [];
+  if (!Array.isArray(rawProviderAccounts) || rawProviderAccounts.length > 32) {
+    throw new Error("runner config: 'providerAccounts' must be an array with at most 32 entries");
+  }
+  const providerAccountIds = new Set<string>();
+  const providerAccountDirectories = new Set<string>();
+  const providerAccounts = rawProviderAccounts.map((account, index) => {
+    if (!account || typeof account !== "object" || Array.isArray(account)) {
+      throw new Error(`runner config: providerAccounts[${index}] must be an object`);
+    }
+    if (typeof account.id !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(account.id) || providerAccountIds.has(account.id)) {
+      throw new Error(`runner config: provider account id '${String(account.id)}' must be unique and contain only letters, digits, '.', '_' or '-'`);
+    }
+    providerAccountIds.add(account.id);
+    const label = typeof account.label === "string" ? account.label.trim() : "";
+    if (!label || label.length > 100 || /[\u0000-\u001f\u007f]/.test(label)) {
+      throw new Error(`runner config: provider account '${account.id}' label must contain 1 to 100 characters`);
+    }
+    if (account.provider !== "claude" && account.provider !== "codex") {
+      throw new Error(`runner config: provider account '${account.id}' provider must be 'claude' or 'codex'`);
+    }
+    if (typeof account.directory !== "string" || !configuredAbsolute(account.directory)) {
+      throw new Error(`runner config: provider account '${account.id}' directory must be absolute`);
+    }
+    const comparableDirectoryKey = providerAccountDirectoryKey(account.directory);
+    if (providerAccountDirectories.has(comparableDirectoryKey)) {
+      throw new Error("runner config: provider account directories must be distinct");
+    }
+    providerAccountDirectories.add(comparableDirectoryKey);
+    return { id: account.id, label, provider: account.provider, directory: account.directory };
+  });
   const containerTargets = validateContainerTargets(overrides.containerTargets ?? file.containerTargets ?? []);
   const cloudTargets = validateCloudTargets(overrides.cloudTargets ?? file.cloudTargets ?? []);
   const remoteEnabled = overrides.features?.acpRemoteTransports ?? file.features?.acpRemoteTransports ?? false;
@@ -452,6 +496,15 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
   resolveAcpSessionContext({ runner: mcpServers });
   for (const workspace of workspaces) resolveAcpSessionContext({ workspace: workspace.mcpServers });
   for (const agent of agents) {
+    if (agent.defaultProviderAccountId !== undefined) {
+      const account = providerAccounts.find((candidate) => candidate.id === agent.defaultProviderAccountId);
+      if (!account) throw new Error(`runner config: agent '${agent.id}' names unknown default provider account '${agent.defaultProviderAccountId}'`);
+      const provider = agent.driver === "claude-code" ? "claude"
+        : agent.driver === "codex" || agent.driver === "codex-app-server" ? "codex" : null;
+      if (provider !== account.provider) {
+        throw new Error(`runner config: agent '${agent.id}' default provider account is incompatible with its driver`);
+      }
+    }
     for (const [name, value] of Object.entries(agent.env ?? {})) {
       if (!/^[A-Za-z_][A-Za-z0-9_]*$/u.test(name)) {
         throw new Error(`runner config: agent '${agent.id}' has invalid environment key '${name}'`);
@@ -479,6 +532,7 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
     // against cwd, leaving Windows (C:\…) and POSIX/WSL (/home/…) absolutes intact.
     workspaces,
     agents,
+    providerAccounts,
     dataDir: resolveWorkspacePath(overrides.dataDir ?? file.dataDir ?? resolve(homedir(), ".agent-manager")),
     maxConcurrentSessions,
     admission: {
@@ -739,6 +793,26 @@ function validateAdmissionMap(name: string, value: Record<string, number> | unde
 
 function configuredAbsolute(path: string): boolean {
   return typeof path === "string" && (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\"));
+}
+
+/** Compare credential roots by their target-platform spelling, then by native filesystem identity
+ * when the runner can inspect it. POSIX paths on Windows belong to WSL and must not be rewritten
+ * through the host drive. */
+function providerAccountDirectoryKey(directory: string): string {
+  const targetIsPosix = process.platform !== "win32" || directory.startsWith("/");
+  let normalized = targetIsPosix ? posix.normalize(directory) : win32.normalize(directory);
+  const hostInspectable = process.platform !== "win32" || !targetIsPosix;
+  if (hostInspectable && existsSync(directory)) {
+    try {
+      normalized = realpathSync.native(directory);
+    } catch {
+      // Permission changes and TOCTOU removal must not leak a raw filesystem error from config
+      // parsing. The stable lexical key still detects ordinary aliases; launch reports an
+      // unavailable credential home through the provider-account path.
+    }
+  }
+  normalized = normalized.replace(/[\\/]+$/u, "") || normalized;
+  return process.platform === "win32" && !targetIsPosix ? normalized.toLowerCase() : normalized;
 }
 
 export function loadConfig(

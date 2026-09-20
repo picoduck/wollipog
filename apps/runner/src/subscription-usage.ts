@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type {
   AgentContext,
   AgentDefinition,
+  ProviderAccountDefinition,
   SubscriptionUsageBucket,
   SubscriptionUsageProvider,
   SubscriptionUsageSnapshot,
@@ -11,6 +12,7 @@ import { runnerSupportsProtocol } from "@wollipog/protocol";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import { killTree, spawnAgent, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 import type { DriverSubscriptionUsageUpdate } from "./drivers/driver.js";
+import { agentForProviderAccount, providerForDriver } from "./provider-accounts.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -95,9 +97,12 @@ export function subscriptionUsageSourceId(
   agentId: string,
   provider: SubscriptionUsageProvider,
   context: AgentContext | undefined,
+  providerAccountId?: string,
 ): string {
   return createHash("sha256")
-    .update(JSON.stringify({ runnerId, agentId, provider, context: contextKey(context) }))
+    .update(JSON.stringify(providerAccountId
+      ? { runnerId, provider, providerAccountId }
+      : { runnerId, agentId, provider, context: contextKey(context) }))
     .digest("hex")
     .slice(0, 32);
 }
@@ -261,7 +266,7 @@ function normalizeCodexSnapshot(
 
 export function normalizeCodexRateLimits(
   payload: unknown,
-  base: Pick<SubscriptionUsageSnapshot, "sourceId" | "runnerId" | "agentId">,
+  base: Pick<SubscriptionUsageSnapshot, "sourceId" | "runnerId" | "agentId" | "providerAccountId">,
   fetchedAt: number,
 ): SubscriptionUsageSnapshot | null {
   const root = record(payload);
@@ -326,7 +331,7 @@ function claudeWindow(id: string, input: unknown, observedAt: number): Subscript
 
 export function normalizeClaudeRateLimits(
   payload: unknown,
-  base: Pick<SubscriptionUsageSnapshot, "sourceId" | "runnerId" | "agentId">,
+  base: Pick<SubscriptionUsageSnapshot, "sourceId" | "runnerId" | "agentId" | "providerAccountId">,
   fetchedAt: number,
 ): SubscriptionUsageSnapshot | null {
   const root = record(payload);
@@ -574,12 +579,15 @@ interface SubscriptionSource {
   provider: SubscriptionUsageProvider;
   sourceId: string;
   accountLabel?: string;
+  providerAccountId?: string;
+  authStatus?: ProviderAccountDefinition["authStatus"];
 }
 
 export interface SubscriptionUsageManagerOptions {
   runnerId: string;
   agents: () => AgentDefinition[];
-  resolveEnv: (agentId: string, driver: AgentDefinition["driver"], context: AgentContext) => Record<string, string>;
+  providerAccounts?: () => ProviderAccountDefinition[];
+  resolveEnv: (agentId: string, driver: AgentDefinition["driver"], context: AgentContext, providerAccountId?: string) => Record<string, string>;
   /** Discovery probes the context-default Claude credential scope. Configured sources that select
    * another credential scope must not inherit that probe's account label. */
   usesDiscoveredClaudeAccount?: (agent: AgentDefinition) => boolean;
@@ -615,13 +623,36 @@ export class SubscriptionUsageManager {
   private sources(): SubscriptionSource[] {
     const result: SubscriptionSource[] = [];
     const seen = new Set<string>();
+    const accounts = this.options.providerAccounts?.() ?? [];
+    for (const account of accounts) {
+        const agent = agentForProviderAccount(
+          this.options.agents(),
+          account,
+          account.provider === "codex" ? ["codex-app-server"] : ["claude-code"],
+        );
+        if (!agent) continue;
+        const sourceId = subscriptionUsageSourceId(
+          this.options.runnerId,
+          agent.id,
+          account.provider,
+          agent.context,
+          account.id,
+        );
+        result.push({
+          agent,
+          provider: account.provider,
+          sourceId,
+          providerAccountId: account.id,
+          accountLabel: account.label,
+          authStatus: account.authStatus,
+        });
+    }
     for (const agent of this.options.agents()) {
-      const provider = agent.driver === "codex-app-server"
-        ? "codex"
-        : agent.driver === "claude-code"
-          ? "claude"
-          : null;
-      if (!provider) continue;
+      const provider = providerForDriver(agent.driver ?? "acp");
+      if (!provider || agent.driver === "codex") continue;
+      const mappedToAccount = accounts.some((account) => account.provider === provider &&
+        ((agent.context?.kind ?? "native") === "native" || agent.defaultProviderAccountId === account.id));
+      if (mappedToAccount) continue;
       const sourceId = subscriptionUsageSourceId(
         this.options.runnerId,
         agent.id,
@@ -647,6 +678,9 @@ export class SubscriptionUsageManager {
 
   private initialSnapshot(source: SubscriptionSource): SubscriptionUsageSnapshot {
     const { agent, provider, sourceId } = source;
+    const discoveryClaude = provider === "claude" && source.providerAccountId === undefined
+      ? agent.claudeCode
+      : undefined;
     const base = {
       sourceId,
       runnerId: this.options.runnerId,
@@ -655,12 +689,14 @@ export class SubscriptionUsageManager {
       fetchedAt: this.now(),
       buckets: [],
       ...(source.accountLabel ? { accountLabel: source.accountLabel } : {}),
+      ...(source.providerAccountId ? { providerAccountId: source.providerAccountId } : {}),
     };
     if (agent.available !== true) {
       return { ...base, state: "unavailable", detail: `${agent.name} is not available on this runner.` };
     }
-    if (agent.authStatus === "unauthenticated" ||
-        (provider === "claude" && agent.claudeCode?.status === "unauthenticated")) {
+    if (source.authStatus === "unauthenticated" ||
+        (source.providerAccountId === undefined && agent.authStatus === "unauthenticated") ||
+        discoveryClaude?.status === "unauthenticated") {
       return { ...base, state: "unauthenticated", detail: `${agent.name} is not signed in.` };
     }
     if (provider === "codex" && agent.codexAppServer?.status !== "supported") {
@@ -671,7 +707,7 @@ export class SubscriptionUsageManager {
       };
     }
     if (provider === "claude") {
-      const auth = agent.claudeCode?.auth;
+      const auth = discoveryClaude?.auth;
       if (agent.claudeCode?.status === "unsupported") {
         return {
           ...base,
@@ -738,13 +774,23 @@ export class SubscriptionUsageManager {
     driver: AgentDefinition["driver"],
     context: AgentContext,
     update: DriverSubscriptionUsageUpdate,
+    providerAccountId?: string,
   ): SubscriptionUsageSnapshot | null {
     this.syncSources();
     const provider = driver === "codex-app-server" ? "codex" : driver === "claude-code" ? "claude" : null;
     if (!provider || provider !== update.provider) return null;
-    const sourceId = subscriptionUsageSourceId(this.options.runnerId, agentId, provider, context);
+    const sourceId = subscriptionUsageSourceId(this.options.runnerId, agentId, provider, context, providerAccountId);
     if (update.kind === "response_observed") return this.observeProviderResponse(sourceId);
-    const base = { sourceId, runnerId: this.options.runnerId, agentId };
+    const source = this.sources().find((candidate) => candidate.sourceId === sourceId);
+    // Remote targets intentionally have no runner-local account source. Ignore their provider
+    // events instead of publishing snapshots the control plane must reject.
+    if (!source) return null;
+    const base = {
+      sourceId,
+      runnerId: this.options.runnerId,
+      agentId,
+      ...(source.providerAccountId ? { providerAccountId: source.providerAccountId } : {}),
+    };
     const normalized = provider === "codex"
       ? normalizeCodexRateLimits(update.payload, base, this.now())
       : normalizeClaudeRateLimits(update.payload, base, this.now());
@@ -804,6 +850,17 @@ export class SubscriptionUsageManager {
     return this.refreshPromise;
   }
 
+  async refreshAccount(providerAccountId: string): Promise<SubscriptionUsageSnapshot[]> {
+    if (this.shuttingDown) throw new Error("subscription usage manager is shutting down");
+    this.syncSources();
+    const sources = this.sources().filter((source) => source.providerAccountId === providerAccountId);
+    if (sources.length === 0) throw new Error("provider account is not configured");
+    for (const source of sources) {
+      if (source.provider === "codex") await this.refreshCodex(source);
+    }
+    return this.inventory();
+  }
+
   private async refreshAllNow(): Promise<SubscriptionUsageSnapshot[]> {
     this.syncSources();
     const codexSources = this.sources().filter((source) => source.provider === "codex");
@@ -834,6 +891,7 @@ export class SubscriptionUsageManager {
         source.agent.id,
         source.agent.driver,
         source.agent.context ?? { kind: "native" },
+        source.providerAccountId,
       );
       if (env.OPENAI_API_KEY) {
         const notApplicable: SubscriptionUsageSnapshot = {
@@ -871,6 +929,7 @@ export class SubscriptionUsageManager {
             sourceId: source.sourceId,
             runnerId: this.options.runnerId,
             agentId: source.agent.id,
+            ...(source.providerAccountId ? { providerAccountId: source.providerAccountId } : {}),
           },
           this.now(),
         );
@@ -879,7 +938,8 @@ export class SubscriptionUsageManager {
         const update = {
           ...normalized,
           ...(result.plan && !normalized.plan ? { plan: result.plan } : {}),
-          ...(result.accountLabel ? { accountLabel: result.accountLabel } : {}),
+          ...(source.accountLabel ? { accountLabel: source.accountLabel } :
+            result.accountLabel ? { accountLabel: result.accountLabel } : {}),
         };
         // A provider-account switch changes the authority behind every allowance. Replace the
         // source atomically so absent buckets from the new account cannot survive from the old one.
@@ -897,7 +957,8 @@ export class SubscriptionUsageManager {
         detail: result.detail ?? initial.detail,
         fetchedAt: this.now(),
         ...(result.plan ? { plan: result.plan } : {}),
-        ...(result.accountLabel ? { accountLabel: result.accountLabel } : {}),
+        ...(source.accountLabel ? { accountLabel: source.accountLabel } :
+          result.accountLabel ? { accountLabel: result.accountLabel } : {}),
       };
       this.snapshots.set(source.sourceId, unavailable);
       this.options.publish(unavailable);

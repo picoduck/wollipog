@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
@@ -174,11 +174,19 @@ test("session naming resolves runner isolation, leases provider HOME, and cleans
   manager.shutdownAll();
 });
 
-test("Seatbelt session naming shares the provider-exclusive admission group", async (t) => {
+test("Seatbelt naming and legacy sessions share an env-configured credential-home group", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-naming-seatbelt-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = new SessionStore(join(root, "sessions"));
+  store.create({
+    sessionId: "legacy", agentId: "claude-code", workspaceId: "repo", repoPath: "/repo",
+    worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+    context: { kind: "native" }, agentSessionId: null, status: "idle", title: "Legacy",
+    config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null,
+    pendingApproval: null, seq: 0, createdAt: 1, updatedAt: 1,
+  });
   const manager = new SessionManager(
-    () => {}, () => {}, new SessionStore(join(root, "sessions")), "runner", undefined, undefined, root,
+    () => {}, () => {}, store, "runner", undefined, undefined, root,
   );
   const policy = { mode: "seatbelt" as const, network: "inherit" as const };
   const isolation = { backend: "seatbelt" as const, command: "sandbox-exec", args: [],
@@ -192,14 +200,31 @@ test("Seatbelt session naming shares the provider-exclusive admission group", as
     release: (id) => { released = id; },
     releaseAll: () => {},
   };
+  let resolvedCredentialHome = "/accounts/claude-alt/../claude-alt/";
+  (manager as unknown as { resolveProviderCredentialHome: () => string }).resolveProviderCredentialHome =
+    () => resolvedCredentialHome;
+  const sessionGroup = (manager as unknown as {
+    admissionRequest(id: string): { exclusiveGroup?: string };
+  }).admissionRequest("legacy").exclusiveGroup;
   const authorization = await manager.prepareSessionNamingExecution({
     id: "claude-code", name: "Claude Code", command: "claude", args: [], env: {},
     driver: "claude-code", context: { kind: "native" },
-  }, {}, "/neutral");
-  assert.equal(admission?.exclusiveGroup, "seatbelt:claude");
+  }, { CLAUDE_CONFIG_DIR: "/accounts/claude-alt" }, "/neutral");
+  assert.equal(admission?.exclusiveGroup, sessionGroup);
   assert.match(admission?.sessionId ?? "", /^session-naming:/);
   await authorization.cleanup();
   assert.equal(released, admission?.sessionId);
+
+  resolvedCredentialHome = homedir();
+  const defaultSessionGroup = (manager as unknown as {
+    admissionRequest(id: string): { exclusiveGroup?: string };
+  }).admissionRequest("legacy").exclusiveGroup;
+  const defaultAuthorization = await manager.prepareSessionNamingExecution({
+    id: "claude-code", name: "Claude Code", command: "claude", args: [], env: {},
+    driver: "claude-code", context: { kind: "native" },
+  }, {}, "/neutral");
+  assert.equal(admission?.exclusiveGroup, defaultSessionGroup);
+  await defaultAuthorization.cleanup();
   manager.shutdownAll();
 });
 

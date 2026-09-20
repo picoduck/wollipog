@@ -6371,6 +6371,69 @@ test("ACP context fails closed against a pre-v38 runner instead of being silentl
   assert.equal(hub.sentToRunner.length, 0);
 });
 
+test("provider account selection is capability-gated, persisted, and sent on restart", async () => {
+  const { db, hub, svc } = makeHarness();
+  const accountMeta = runnerMeta();
+  accountMeta.providerAccounts = [
+    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+  ];
+  accountMeta.agents = accountMeta.agents.map((agent) => agent.id === AGENT_ID
+    ? { ...agent, defaultProviderAccountId: "work" }
+    : agent);
+
+  db.registerRunner(accountMeta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts - 1);
+  const unsupported = svc.createSession({
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    agentId: AGENT_ID,
+    providerAccountId: "personal",
+  });
+  assert.equal(unsupported.status, 409);
+  assert.match(unsupported.error ?? "", /protocol-v170/);
+
+  db.registerRunner(accountMeta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts);
+  const created = svc.createSession({
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    agentId: AGENT_ID,
+    providerAccountId: "personal",
+  });
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(created.data.providerAccountLabel, "Personal");
+  const start = hub.sentOfType("start_session").at(-1)!;
+  assert.equal(start.spec.providerAccountId, "personal");
+  assert.equal(start.spec.providerAccountLabel, "Personal");
+
+  svc.onSessionStatus(created.data.id, "stopped");
+  const restarted = await svc.restart(created.data.id);
+  assert.ok(restarted.ok, restarted.error);
+  const restart = hub.sentOfType("start_session").at(-1)!;
+  assert.equal(restart.spec.providerAccountId, "personal");
+  assert.equal(restart.spec.providerAccountLabel, "Personal");
+});
+
+test("a WSL agent does not implicitly inherit a runner-host provider account", () => {
+  const { db, hub, svc } = makeHarness();
+  const accountMeta = runnerMeta();
+  accountMeta.providerAccounts = [
+    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+  ];
+  accountMeta.agents = accountMeta.agents.map((agent) => agent.id === AGENT_ID
+    ? { ...agent, context: { kind: "wsl" as const, distro: "Ubuntu" } }
+    : agent);
+  db.registerRunner(accountMeta, Date.now(), PROTOCOL_VERSION);
+
+  const created = svc.createSession({
+    runnerId: RUNNER_ID,
+    workspaceId: WORKSPACE_ID,
+    agentId: AGENT_ID,
+  });
+  assert.ok(created.ok && created.data, created.error);
+  assert.equal(created.data.providerAccountId, undefined);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, undefined);
+});
+
 test("createSession rejects unsupported image input before creating or sending", () => {
   const { hub, svc, db } = makeHarness();
   const before = db.listSessions().length;
@@ -7026,19 +7089,30 @@ test("createSession selects and persists an exact compatible container environme
     environment: { id: "offline-tools", revision: 1, image, setupCheckDigest: "4".repeat(64) },
     compatibleAgentIds: [AGENT_ID, ACP_AGENT_ID], available: true,
   };
-  db.registerRunner({ ...runnerMeta(), executionTargets: [container] }, Date.now(), PROTOCOL_VERSION);
+  const containerRunner = runnerMeta();
+  containerRunner.providerAccounts = [
+    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+  ];
+  containerRunner.agents = containerRunner.agents.map((agent) => agent.id === AGENT_ID
+    ? { ...agent, defaultProviderAccountId: "work" }
+    : agent);
+  db.registerRunner({ ...containerRunner, executionTargets: [container] }, Date.now(), PROTOCOL_VERSION);
   assert.deepEqual(db.getRunner(RUNNER_ID)!.executionTargets?.at(-1)?.environment, container.environment);
 
   const result = svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
-    executionTargetId: container.id, useWorktree: true,
+    executionTargetId: container.id, useWorktree: true, providerAccountId: "work",
   });
   assert.ok(result.ok && result.data, result.error);
-  assert.deepEqual(hub.sentOfType("start_session").at(-1)!.spec.executionTarget, {
+  const containerStart = hub.sentOfType("start_session").at(-1)!;
+  assert.deepEqual(containerStart.spec.executionTarget, {
     id: container.id, runnerId: RUNNER_ID, kind: "container", workspaceStrategy: "worktree",
     adapter: "container", boundaries: container.boundaries, environment: container.environment,
   });
-  assert.deepEqual(db.getSession(result.data!.id)!.executionTarget, hub.sentOfType("start_session").at(-1)!.spec.executionTarget);
+  assert.equal(containerStart.spec.providerAccountId, undefined,
+    "runner-local credentials do not cross the container boundary");
+  assert.equal(result.data.providerAccountId, undefined);
+  assert.deepEqual(db.getSession(result.data.id)!.executionTarget, containerStart.spec.executionTarget);
 
   const incompatible = svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_AGENT_ID,

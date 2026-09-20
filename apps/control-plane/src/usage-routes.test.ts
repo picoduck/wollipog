@@ -117,6 +117,9 @@ test("subscription usage routes are human-scoped and refresh only visible curren
   };
   const register = (runnerId: string, protocolVersion: number, userId: string) => db.registerRunner({
     runnerId, hostname: runnerId, os: "linux", version: "1", agents: [agent], workspaces: [],
+    ...(runnerId === "current" ? {
+      providerAccounts: [{ id: "work", label: "Work", provider: "codex" as const, authStatus: "authenticated" as const }],
+    } : {}),
   }, Date.now(), protocolVersion, {
     organizationId: "org_personal", owner: { kind: "user", userId },
   });
@@ -125,7 +128,7 @@ test("subscription usage routes are human-scoped and refresh only visible curren
   register("foreign-private", PROTOCOL_VERSION, "someone-else");
   const sent: Array<{ runnerId: string; message: ControlPlaneToRunner; timeoutMs: number }> = [];
   const sourceId = createHash("sha256").update(JSON.stringify({
-    runnerId: "current", agentId: "codex", provider: "codex", context: "native",
+    runnerId: "current", provider: "codex", providerAccountId: "work",
   })).digest("hex").slice(0, 32);
   const app = Fastify();
   registerUsageRoutes(app, db, (request) => {
@@ -141,6 +144,7 @@ test("subscription usage routes are human-scoped and refresh only visible curren
       sent.push({ runnerId, message, timeoutMs });
       const snapshot = {
         sourceId, runnerId, agentId: "codex", provider: "codex" as const, state: "available" as const,
+        providerAccountId: "work", accountLabel: "Work",
         fetchedAt: Date.now(), buckets: [{ id: "codex:primary", label: "Five-Hour Window", usedPercent: 20 }],
       };
       db.upsertSubscriptionUsageSnapshot(snapshot);
@@ -164,6 +168,99 @@ test("subscription usage routes are human-scoped and refresh only visible curren
   assert.equal(sent[0]?.timeoutMs, 10_000);
   assert.equal(response.json().sources[0].state, "available");
   assert.deepEqual(response.json().refresh, { attempted: 1, failed: 0 });
+
+  const targeted = await app.inject({
+    method: "POST",
+    url: "/api/usage/subscriptions/refresh",
+    headers: { authorization: "Bearer operator" },
+    payload: { runnerId: "current", providerAccountId: "work" },
+  });
+  assert.equal(targeted.statusCode, 200);
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1]?.runnerId, "current");
+  assert.equal(sent[1]?.message.type, "refresh_subscription_usage");
+  assert.equal(sent[1]?.message.type === "refresh_subscription_usage"
+    ? sent[1].message.providerAccountId : undefined, "work");
+  assert.equal((await app.inject({
+    method: "POST",
+    url: "/api/usage/subscriptions/refresh",
+    headers: { authorization: "Bearer operator" },
+    payload: { runnerId: "current", providerAccountId: "missing" },
+  })).statusCode, 404);
+  assert.equal((await app.inject({
+    method: "POST",
+    url: "/api/usage/subscriptions/refresh",
+    headers: { authorization: "Bearer operator" },
+    payload: { runnerId: "current" },
+  })).statusCode, 400);
+  await app.close();
+  db.close();
+});
+
+test("a partial Claude account config retains the legacy Codex refresh deadline", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const codexAgent = (id: string) => ({
+    id, name: id, command: "codex", args: [], env: {},
+    driver: "codex-app-server" as const, context: { kind: "native" as const },
+    codexAppServer: { status: "supported" as const, appServerAvailable: true, transport: "stdio" as const,
+      contractFingerprint: "test" },
+  });
+  db.registerRunner({
+    runnerId: "partial", hostname: "partial", os: "linux", version: "1",
+    agents: [codexAgent("codex-a"), codexAgent("codex-b")], workspaces: [],
+    providerAccounts: [
+      { id: "claude-work", label: "Claude Work", provider: "claude", authStatus: "authenticated" },
+    ],
+  }, Date.now(), PROTOCOL_VERSION, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "operator-user" },
+  });
+  let timeoutMs = 0;
+  const app = Fastify();
+  registerUsageRoutes(app, db, () => human("operator"), {
+    requestFromRunner: async (_runnerId, requestId, _message, timeout) => {
+      timeoutMs = timeout;
+      return { type: "subscription_usage_refresh_result", requestId, ok: true, snapshots: [] };
+    },
+  });
+  const response = await app.inject({ method: "POST", url: "/api/usage/subscriptions/refresh" });
+  assert.equal(response.statusCode, 200);
+  assert.equal(timeoutMs, 18_000, "two legacy Codex sources retain two sequential probe budgets");
+  await app.close();
+  db.close();
+});
+
+test("refresh deadlines include configured and unmapped legacy Codex sources", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const codexAgent = (id: string, context: { kind: "native" } | { kind: "wsl"; distro: string }) => ({
+    id, name: id, command: "codex", args: [], env: {},
+    driver: "codex-app-server" as const, context,
+    codexAppServer: { status: "supported" as const, appServerAvailable: true, transport: "stdio" as const,
+      contractFingerprint: "test" },
+  });
+  db.registerRunner({
+    runnerId: "mixed", hostname: "mixed", os: "windows", version: "1",
+    agents: [
+      codexAgent("codex-native", { kind: "native" }),
+      codexAgent("codex-wsl", { kind: "wsl", distro: "Ubuntu" }),
+    ],
+    workspaces: [],
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+    ],
+  }, Date.now(), PROTOCOL_VERSION, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "operator-user" },
+  });
+  let timeoutMs = 0;
+  const app = Fastify();
+  registerUsageRoutes(app, db, () => human("operator"), {
+    requestFromRunner: async (_runnerId, requestId, _message, timeout) => {
+      timeoutMs = timeout;
+      return { type: "subscription_usage_refresh_result", requestId, ok: true, snapshots: [] };
+    },
+  });
+  const response = await app.inject({ method: "POST", url: "/api/usage/subscriptions/refresh" });
+  assert.equal(response.statusCode, 200);
+  assert.equal(timeoutMs, 18_000, "one account plus one unmapped WSL source receive two probe budgets");
   await app.close();
   db.close();
 });

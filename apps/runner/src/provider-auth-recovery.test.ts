@@ -75,6 +75,28 @@ test("credential scope unifies Codex transports but separates install, distro, a
   assert.equal(configured.id.includes("runner-secret"), false);
 });
 
+test("provider account homes produce independent authentication scopes without exposing their paths", () => {
+  const key = "runner-local-hmac-key";
+  const work = describeProviderCredentialScope(meta({
+    providerAccountId: "work",
+    providerAccountLabel: "Work",
+    providerAccountProvider: "codex",
+    providerCredentialHome: "/credentials/work",
+    env: { CODEX_HOME: "/credentials/work" },
+  }), key)!;
+  const personal = describeProviderCredentialScope(meta({
+    providerAccountId: "personal",
+    providerAccountLabel: "Personal",
+    providerAccountProvider: "codex",
+    providerCredentialHome: "/credentials/personal",
+    env: { CODEX_HOME: "/credentials/personal" },
+  }), key)!;
+  assert.notEqual(work.id, personal.id);
+  assert.equal(work.provider, "codex");
+  assert.equal(personal.provider, "codex");
+  assert.doesNotMatch(`${work.id}${personal.id}`, /credentials|work|personal/);
+});
+
 test("Claude status derives only an opaque account identity and never returns provider output", async () => {
   const controller = createTestProviderAuthRecovery(async (_context, command, args, options) => {
     assert.equal(command, "claude");

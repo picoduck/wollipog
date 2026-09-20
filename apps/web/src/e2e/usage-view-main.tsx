@@ -129,6 +129,7 @@ const subscription: SubscriptionUsageResponse = {
       runnerId: "r-build-box", runnerName: "build-box", runnerStatus: "online",
       provider: "codex", freshness: "fresh", plan: "pro",
       fetchedAt: SUBSCRIPTION_NOW, sourceId: "8b66ac9939adad73bfadb15095f19d9c",
+      providerAccountId: "codex-work",
       agentId: "codex", agentName: "Codex App Server", state: "available",
       accountLabel: "codex@example.com",
       buckets: [
@@ -145,6 +146,7 @@ const subscription: SubscriptionUsageResponse = {
     },
     {
       ...claudeSource, sourceId: "4e9ca361dace7ad20c621d0eadac54f0",
+      providerAccountId: "claude-work",
       agentId: "claude", agentName: "Claude Code", state: "available",
       accountLabel: "primary@example.com",
       buckets: [
@@ -158,6 +160,7 @@ const subscription: SubscriptionUsageResponse = {
     },
     {
       ...claudeSource, sourceId: "8a66ac9939adad73bfadb15095f19d9c",
+      providerAccountId: "claude-personal",
       agentId: "claude-wsl", agentName: "Claude Code (Ubuntu)", state: "available",
       accountLabel: "alternate@example.com",
       detail: "Claude Code reported allowance windows for this source without utilization " +

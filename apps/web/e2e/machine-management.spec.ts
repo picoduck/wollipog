@@ -44,6 +44,14 @@ test("Connections distinguish verified, unavailable, and unverified agents", asy
   await expect(page.getByText(/configured command was not found/u)).toBeVisible();
 });
 
+test("Machine cards show account-scoped login status", async ({ page }) => {
+  await page.getByText("Accounts", { exact: true }).click();
+  const accounts = page.locator("details.runner-agents").filter({ hasText: "Accounts" });
+  await expect(accounts).toContainText("WorkClaudeLogged In");
+  await expect(accounts).toContainText("PersonalClaudeLogin Required");
+  await page.screenshot({ path: "test-results/provider-accounts/machine-accounts.png", fullPage: true });
+});
+
 test("Connections ask protocol v153 runners to update before trusting unverified agents", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("legacy-unverified"));
   await expect(page.locator(".runner-agents-summary")).toHaveText("0 Available");

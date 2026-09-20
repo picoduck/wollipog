@@ -80,6 +80,58 @@ test("resolveConfig rejects relative additional-directory grants instead of rewr
   }), /additional-directory grants must be absolute/);
 });
 
+test("resolveConfig validates provider accounts and agent defaults", () => {
+  const config = resolveConfig({
+    runnerId: "r",
+    controlPlaneUrl: "ws://localhost",
+    providerAccounts: [
+      { id: "work", label: "Work Account", provider: "codex", directory: "/credentials/work" },
+      { id: "personal", label: "Personal Account", provider: "claude", directory: "/credentials/personal" },
+    ],
+    agents: [{
+      id: "codex",
+      name: "Codex",
+      command: "codex",
+      driver: "codex-app-server",
+      defaultProviderAccountId: "work",
+    }],
+  });
+  assert.equal(config.providerAccounts[0]?.directory, "/credentials/work");
+  assert.equal(config.agents[0]?.defaultProviderAccountId, "work");
+  assert.throws(() => resolveConfig({
+    runnerId: "r",
+    controlPlaneUrl: "ws://localhost",
+    providerAccounts: [{ id: "work", label: "Work", provider: "codex", directory: "relative" }],
+  }), /directory must be absolute/);
+  assert.throws(() => resolveConfig({
+    runnerId: "r",
+    controlPlaneUrl: "ws://localhost",
+    providerAccounts: [{ id: "work", label: "Work", provider: "codex", directory: "/credentials/work" }],
+    agents: [{ id: "claude", name: "Claude", command: "claude", driver: "claude-code", defaultProviderAccountId: "work" }],
+  }), /incompatible/);
+  assert.throws(() => resolveConfig({
+    runnerId: "r",
+    controlPlaneUrl: "ws://localhost",
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "codex", directory: "/credentials/shared" },
+      { id: "personal", label: "Personal", provider: "codex", directory: "/credentials/shared/" },
+    ],
+  }), /directories must be distinct/);
+  assert.throws(() => resolveConfig({
+    runnerId: "r",
+    controlPlaneUrl: "ws://localhost",
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "codex", directory: "/credentials/shared" },
+      { id: "personal", label: "Personal", provider: "codex", directory: "/credentials/team/../shared" },
+    ],
+  }), /directories must be distinct/);
+  assert.throws(() => resolveConfig({
+    runnerId: "r",
+    controlPlaneUrl: "ws://localhost",
+    providerAccounts: [{ id: 123 as never, label: "Work", provider: "codex", directory: "/credentials/work" }],
+  }), /provider account id/);
+});
+
 /* ---- config-less startup: flags / env / merge ---- */
 
 test("parseArgs reads config-less connection flags into overrides", () => {

@@ -55,10 +55,17 @@ function boolean(value: unknown, field: string): boolean | undefined {
   return value;
 }
 
-function expectedSourceId(runnerId: string, agent: AgentDefinition, provider: "codex" | "claude"): string {
+function expectedSourceId(
+  runnerId: string,
+  agent: AgentDefinition,
+  provider: "codex" | "claude",
+  providerAccountId?: string,
+): string {
   const context = agent.context?.kind === "wsl" ? `wsl:${agent.context.distro}` : "native";
   return createHash("sha256")
-    .update(JSON.stringify({ runnerId, agentId: agent.id, provider, context }))
+    .update(JSON.stringify(providerAccountId
+      ? { runnerId, provider, providerAccountId }
+      : { runnerId, agentId: agent.id, provider, context }))
     .digest("hex")
     .slice(0, 32);
 }
@@ -116,9 +123,24 @@ export function validateSubscriptionUsageSnapshot(
   const agentId = text(input.agentId, "agentId", 128)!;
   const provider = input.provider;
   if (provider !== "codex" && provider !== "claude") throw new Error("subscription usage provider is invalid");
-  const agent = db.getRunner(runnerId)?.agents.find((candidate) => candidate.id === agentId);
+  const runner = db.getRunner(runnerId);
+  const agent = runner?.agents.find((candidate) => candidate.id === agentId);
   const expectedDriver = provider === "codex" ? "codex-app-server" : "claude-code";
-  if (!agent || agent.driver !== expectedDriver || sourceId !== expectedSourceId(runnerId, agent, provider)) {
+  const providerAccountId = text(input.providerAccountId, "providerAccountId", 128, true);
+  if (providerAccountId !== undefined && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(providerAccountId)) {
+    throw new Error("subscription usage providerAccountId is invalid");
+  }
+  const providerAccount = providerAccountId
+    ? runner?.providerAccounts?.find((candidate) => candidate.id === providerAccountId)
+    : undefined;
+  const agentMapsToProviderAccount = providerAccountId === undefined && !!agent &&
+    (runner?.providerAccounts?.some((candidate) => candidate.provider === provider &&
+      ((agent.context?.kind ?? "native") === "native" ||
+        agent.defaultProviderAccountId === candidate.id)) ?? false);
+  if (!agent || agent.driver !== expectedDriver ||
+      (providerAccountId !== undefined && providerAccount?.provider !== provider) ||
+      agentMapsToProviderAccount ||
+      sourceId !== expectedSourceId(runnerId, agent, provider, providerAccountId)) {
     throw new Error("subscription usage source is not advertised by this runner");
   }
   const state = input.state;
@@ -159,6 +181,7 @@ export function validateSubscriptionUsageSnapshot(
     buckets: input.buckets.map((item) => bucket(item, now)),
     ...(plan === undefined ? {} : { plan }),
     ...(accountLabel === undefined ? {} : { accountLabel }),
+    ...(providerAccountId === undefined ? {} : { providerAccountId }),
     ...(credits === undefined ? {} : { credits }),
     ...(input.spendControls === undefined
       ? {}

@@ -186,8 +186,10 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 169", () => {
-  assert.equal(PROTOCOL_VERSION, 169);
+test("PROTOCOL_VERSION is 170", () => {
+  assert.equal(PROTOCOL_VERSION, 170);
+  assert.equal(runnerSupportsProtocol(169, "providerAccounts"), false);
+  assert.equal(runnerSupportsProtocol(170, "providerAccounts"), true);
   assert.equal(runnerSupportsProtocol(167, "piAcknowledgedSteerUncertain"), false);
   assert.equal(runnerSupportsProtocol(168, "piAcknowledgedSteerUncertain"), true);
   assert.equal(runnerSupportsProtocol(168, "sessionArtifactFileAttach"), false);

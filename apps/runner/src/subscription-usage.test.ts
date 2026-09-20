@@ -1182,3 +1182,172 @@ test("Claude window ids that collide once bounded do not fuse into a hybrid wind
   );
   assert.equal(snapshot.buckets[0]?.resetsAt, FIVE_HOUR_RESET * 1_000);
 });
+
+test("configured accounts have independent sources, homes, and targeted refreshes", async () => {
+  let now = 20_000;
+  const probedHomes: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "codex", authStatus: "authenticated" },
+    ],
+    resolveEnv: (_agentId, _driver, _context, accountId) => ({ CODEX_HOME: `/accounts/${accountId}` }),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: () => {},
+    now: () => now,
+    probeCodex: async (_agent, env) => {
+      probedHomes.push(env.CODEX_HOME!);
+      return {
+        state: "available",
+        rateLimits: { rateLimits: { limitId: "codex", primary: {
+          usedPercent: env.CODEX_HOME?.endsWith("work") ? 25 : 75,
+        } } },
+      };
+    },
+  });
+  manager.syncSources();
+  assert.deepEqual(manager.inventory().map((snapshot) => [
+    snapshot.providerAccountId, snapshot.accountLabel, snapshot.sourceId,
+  ]), [
+    ["work", "Work", subscriptionUsageSourceId("runner-1", "codex", "codex", { kind: "native" }, "work")],
+    ["personal", "Personal", subscriptionUsageSourceId("runner-1", "codex", "codex", { kind: "native" }, "personal")],
+  ]);
+  await manager.refreshAccount("work");
+  assert.deepEqual(probedHomes, ["/accounts/work"]);
+  assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "work")
+    ?.buckets[0]?.usedPercent, 25);
+  assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "personal")
+    ?.buckets.length, 0, "refreshing Work leaves Personal unchanged");
+  now += 20_000;
+  await manager.refreshAccount("personal");
+  assert.deepEqual(probedHomes, ["/accounts/work", "/accounts/personal"]);
+  assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "personal")
+    ?.buckets[0]?.usedPercent, 75);
+});
+
+test("provider events without an advertised account source are ignored", () => {
+  const published: unknown[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    ],
+    resolveEnv: () => ({}),
+    publish: (snapshot) => published.push(snapshot),
+  });
+  const observed = manager.observe(
+    "claude", "claude-code", { kind: "native" },
+    { kind: "usage", provider: "claude", payload: { fiveHour: { utilization: 0.5 } } },
+  );
+  assert.equal(observed, null);
+  assert.deepEqual(published, []);
+});
+
+test("an unbound WSL agent keeps its legacy source beside same-provider accounts", () => {
+  const wsl = {
+    ...claudeAgent(),
+    id: "claude-wsl",
+    context: { kind: "wsl" as const, distro: "Ubuntu" },
+  };
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent(), wsl],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    ],
+    resolveEnv: () => ({}),
+    publish: () => {},
+  });
+  manager.syncSources();
+  assert.deepEqual(manager.inventory().map((source) => [source.agentId, source.providerAccountId]), [
+    ["claude", "work"],
+    ["claude-wsl", undefined],
+  ]);
+});
+
+test("a failed account refresh preserves the configured label over provider identity", async () => {
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+    ],
+    resolveEnv: () => ({ CODEX_HOME: "/accounts/work" }),
+    authorizeProbe: () => ({ cwd: "/safe/subscription-probe" }),
+    publish: () => {},
+    probeCodex: async () => ({
+      state: "unavailable",
+      detail: "No allowance returned.",
+      accountLabel: "provider@example.com",
+    }),
+  });
+  await manager.refreshAccount("work");
+  assert.equal(manager.inventory()[0]?.accountLabel, "Work");
+});
+
+test("configured account login state does not inherit a sibling or agent-wide status", () => {
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [{ ...agent(), authStatus: "authenticated" }],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "codex", authStatus: "unauthenticated" },
+    ],
+    resolveEnv: () => ({}),
+    publish: () => {},
+  });
+  manager.syncSources();
+  assert.deepEqual(manager.inventory().map((snapshot) => [snapshot.providerAccountId, snapshot.state]), [
+    ["work", "unavailable"],
+    ["personal", "unauthenticated"],
+  ]);
+});
+
+test("configured Claude accounts do not inherit default-home auth or billing", () => {
+  for (const claudeCode of [
+    { ...claudeAgent().claudeCode!, status: "unauthenticated" as const },
+    {
+      ...claudeAgent().claudeCode!,
+      auth: { status: "authenticated" as const, billingSource: "api" as const },
+    },
+  ]) {
+    const manager = new SubscriptionUsageManager({
+      runnerId: "runner-1",
+      agents: () => [claudeAgent({ claudeCode })],
+      providerAccounts: () => [
+        { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      ],
+      resolveEnv: () => ({ CLAUDE_CONFIG_DIR: "/accounts/work" }),
+      publish: () => {},
+    });
+    manager.syncSources();
+    assert.deepEqual(manager.inventory().map((snapshot) => [snapshot.providerAccountId, snapshot.state]), [
+      ["work", "unavailable"],
+    ]);
+  }
+});
+
+test("configuring one provider keeps the other provider's legacy usage source", () => {
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent(), {
+      id: "claude", name: "Claude", command: "claude", args: [], env: {},
+      driver: "claude-code", context: { kind: "native" }, available: true,
+    }],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+    ],
+    resolveEnv: () => ({}),
+    publish: () => {},
+  });
+  manager.syncSources();
+  assert.deepEqual(manager.inventory().map((source) => [
+    source.provider, source.providerAccountId, source.agentId,
+  ]), [
+    ["claude", undefined, "claude"],
+    ["codex", "work", "codex"],
+  ]);
+});

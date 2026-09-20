@@ -51,6 +51,7 @@ const runner: RunnerView = {
       args: [],
       env: {},
       driver: "claude-code",
+      defaultProviderAccountId: "claude-work",
       available: true,
       capabilities: {
         models: [],
@@ -98,6 +99,20 @@ const runner: RunnerView = {
         supportsSteering: true,
         permissionModes: [],
       },
+    },
+  ],
+  providerAccounts: [
+    {
+      id: "claude-work",
+      label: "Work",
+      provider: "claude",
+      authStatus: "authenticated",
+    },
+    {
+      id: "claude-personal",
+      label: "Personal",
+      provider: "claude",
+      authStatus: "unauthenticated",
     },
   ],
   workspaces: [{ id: "workspace-1", name: "Wollipog", path: "/repos/wollipog" }],

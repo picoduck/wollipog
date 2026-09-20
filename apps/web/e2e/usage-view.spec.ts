@@ -102,6 +102,7 @@ test("subscription cards show provider allowances in presentation order (#223, #
   // the shared desktop/mobile renderer preserves that order without matching display labels.
   const codex = cards.filter({ hasText: "Codex App Server on build-box" });
   await expect(codex.locator("h4")).toHaveText("Codex — Pro");
+  await expect(codex.getByRole("button", { name: "Refresh Account" })).toBeVisible();
   await expect(codex.locator(".subscription-bucket dt")).toHaveText([
     "Codex — Weekly",
     "GPT-5.3-Codex-Spark — 5-Hour Window",
@@ -113,6 +114,7 @@ test("subscription cards show provider allowances in presentation order (#223, #
   const current = cards.filter({ hasText: "Claude Code on build-box" }).first();
   await expect(current.locator("h4")).toHaveText("Claude — Max");
   await expect(current.locator(".subscription-account")).toHaveText("Account: primary@example.com");
+  await expect(current.getByRole("button", { name: "Refresh Account" })).toHaveCount(0);
   const buckets = current.locator(".subscription-bucket");
   await expect(buckets).toHaveCount(3);
   await expect(buckets.nth(0)).toContainText("Five-Hour Window");
@@ -129,6 +131,7 @@ test("subscription cards show provider allowances in presentation order (#223, #
   // has not answered yet.
   const resetOnly = cards.filter({ hasText: "Claude Code (Ubuntu)" }).first();
   await expect(resetOnly.locator(".subscription-account")).toHaveText("Account: alternate@example.com");
+  await expect(resetOnly.getByRole("button", { name: "Refresh Account" })).toHaveCount(0);
   await expect(resetOnly).toContainText("without utilization percentages");
   await expect(resetOnly).not.toContainText("after the first provider response");
 

@@ -107,7 +107,7 @@ export function UsageView() {
   const [subscriptionData, setSubscriptionData] = useState<SubscriptionUsageResponse | null>(null);
   const [subscriptionLoading, setSubscriptionLoading] = useState(true);
   const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
-  const [subscriptionRefreshing, setSubscriptionRefreshing] = useState(false);
+  const [subscriptionRefreshing, setSubscriptionRefreshing] = useState<string | null>(null);
   const [subscriptionRefreshStatus, setSubscriptionRefreshStatus] = useState<string | null>(null);
   const [subscriptionNow, setSubscriptionNow] = useState(Date.now());
   // Which operation is actually in flight. `saving` spans the PUT and the refresh that follows it,
@@ -206,12 +206,12 @@ export function UsageView() {
     return () => window.clearInterval(timer);
   }, []);
 
-  const refreshSubscriptions = async () => {
-    setSubscriptionRefreshing(true);
+  const refreshSubscriptions = async (target?: { runnerId: string; providerAccountId: string }) => {
+    setSubscriptionRefreshing(target ? `${target.runnerId}:${target.providerAccountId}` : "*");
     setSubscriptionError(null);
     setSubscriptionRefreshStatus(null);
     try {
-      const refreshed = await api.refreshSubscriptionUsage();
+      const refreshed = await api.refreshSubscriptionUsage(target);
       setSubscriptionData(refreshed);
       setSubscriptionNow(Date.now());
       setSubscriptionRefreshStatus(
@@ -224,7 +224,7 @@ export function UsageView() {
     } catch (cause) {
       setSubscriptionError(cause instanceof Error ? cause.message : "Unable to refresh subscription usage");
     } finally {
-      setSubscriptionRefreshing(false);
+      setSubscriptionRefreshing(null);
     }
   };
 
@@ -347,10 +347,10 @@ export function UsageView() {
           <button
             type="button"
             className="btn ghost"
-            disabled={subscriptionRefreshing}
+            disabled={subscriptionRefreshing !== null}
             onClick={() => void refreshSubscriptions()}
           >
-            {subscriptionRefreshing ? "Refreshing…" : "Refresh"}
+            {subscriptionRefreshing === "*" ? "Refreshing…" : "Refresh"}
           </button>
         </div>
         {subscriptionLoading && !subscriptionData && <div className="usage-state" role="status">Loading subscription usage…</div>}
@@ -376,6 +376,19 @@ export function UsageView() {
                   >
                     {source.freshness === "stale" ? "⚠ " : ""}{sourceStateLabel(source)}
                   </span>
+                  {source.provider === "codex" && source.providerAccountId && (
+                    <button
+                      type="button"
+                      className="btn ghost sm"
+                      disabled={subscriptionRefreshing !== null}
+                      onClick={() => void refreshSubscriptions({
+                        runnerId: source.runnerId,
+                        providerAccountId: source.providerAccountId!,
+                      })}
+                    >
+                      {subscriptionRefreshing === `${source.runnerId}:${source.providerAccountId}` ? "Refreshing…" : "Refresh Account"}
+                    </button>
+                  )}
                 </header>
                 {source.detail && <p className="subscription-detail">{source.detail}</p>}
                 {source.buckets.length > 0 && (

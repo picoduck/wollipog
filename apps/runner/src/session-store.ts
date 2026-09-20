@@ -79,6 +79,12 @@ export interface SessionMeta {
   /** Opaque control-plane identity of the start command that created or replaced this runtime. */
   controlPlaneLaunchId?: string;
   agentId: string | null;
+  /** Opaque account identity projected to the control plane. */
+  providerAccountId?: string;
+  providerAccountLabel?: string;
+  /** Runner-private binding captured once so config edits cannot redirect a durable session. */
+  providerAccountProvider?: "claude" | "codex";
+  providerCredentialHome?: string;
   /** Discovered adapter/CLI version; telemetry dimension only, never an auth source. */
   agentVersion?: string;
   /** Discovery-verified optional CLI flags/modes, retained for restart and runner-side defense. */
@@ -2892,6 +2898,8 @@ export function metaToSnapshot(
     controlPlaneLaunchId: m.controlPlaneLaunchId,
     workspaceId: m.workspaceId,
     agentId: m.agentId,
+    providerAccountId: m.providerAccountId,
+    providerAccountLabel: m.providerAccountLabel,
     title: m.title,
     titleSource: m.titleSource,
     providerUpdatedAt: m.providerUpdatedAt,

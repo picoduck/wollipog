@@ -495,6 +495,9 @@ export function SessionHeader({
         </>
       )}
       <div className="session-header-statuses" ref={statusesRef}>
+        {session.providerAccountLabel && (
+          <span className="tag" title="Provider account">{session.providerAccountLabel}</span>
+        )}
         {renderNoninteractiveStatuses()}
         {activeSubagents && (
           <ActiveSubagentsBadge count={activeSubagents.count} onOpen={activeSubagents.onOpen} workers={activeSubagents.workers} />

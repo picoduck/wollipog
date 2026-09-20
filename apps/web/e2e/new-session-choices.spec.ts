@@ -49,6 +49,22 @@ async function openDialog(page: Page, query = "") {
   await expect(page.getByRole("heading", { name: "New Session" })).toBeVisible();
 }
 
+test("selects a provider account and submits its opaque id", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openDialog(page);
+
+  const account = page.getByRole("button", { name: /Account:/ });
+  await expect(account).toHaveAccessibleName(/Account: Work/);
+  await account.click();
+  await page.getByRole("option", { name: /Personal/ }).click();
+  await expect(account).toHaveAccessibleName(/Account: Personal/);
+
+  await page.screenshot({ path: "test-results/provider-accounts/new-session-account.png", fullPage: true });
+  await page.getByRole("button", { name: "Create Session" }).click();
+  await expect.poll(() => page.evaluate(() => document.documentElement.dataset.createSessionRequest))
+    .toContain('"providerAccountId":"claude-personal"');
+});
+
 async function openDialogWithoutPointer(page: Page, query = "") {
   await page.goto(`/new-session-choices-e2e.html?keyboard=1${query}`);
   const opener = page.getByRole("button", { name: "New Session" });

@@ -268,7 +268,11 @@ export class ProviderHomeLeaseRegistry {
         `shared ${provider} provider home in WSL cannot be safely owner-leased; use a supported native, container, or cloud execution target`,
       );
     }
-    const requestedHome = request.env.HOME || homedir();
+    const requestedHome = provider === "claude"
+      ? request.env.CLAUDE_CONFIG_DIR || request.env.HOME || homedir()
+      : provider === "codex"
+        ? request.env.CODEX_HOME || request.env.HOME || homedir()
+        : request.env.HOME || homedir();
     this.acquireHome(requestedHome, provider);
   }
 
@@ -276,7 +280,16 @@ export class ProviderHomeLeaseRegistry {
   acquireHome(requestedHome: string, provider = "skills"): void {
     if (!PROVIDER_KEY.test(provider)) throw new Error("provider home lease key is invalid");
     if (!isAbsolute(requestedHome)) throw new Error("provider HOME must be absolute");
-    const home = realpathSync(requestedHome);
+    let home: string;
+    try {
+      // A newly configured account is expected to be Login Required before the provider creates
+      // its files. Establish the private root before canonicalizing it so the ownership boundary,
+      // rather than a raw ENOENT containing the runner-local path, is the first launch result.
+      mkdirSync(requestedHome, { recursive: true, mode: 0o700 });
+      home = realpathSync(requestedHome);
+    } catch {
+      throw new Error("provider credential home is unavailable");
+    }
     const root = join(home, ".agent-manager", "provider-home-leases-v1");
     // ACP adapters are not provider-specific and known CLIs co-locate auth/config/cache below
     // HOME. Lease the whole effective home rather than pretending those mutations are disjoint.
@@ -339,7 +352,7 @@ export class ProviderHomeLeaseRegistry {
       }
       if (existing.record.ownerHash !== this.ownerHash) {
         throw new Error(
-          `provider home has a stale lease from another attested owner; after proving no provider process uses this HOME, manually quarantine ${lockDir} and retry`,
+          "provider home has a stale lease from another attested owner; after proving no provider process uses this HOME, manually quarantine the stale lease directory and retry",
         );
       }
     }

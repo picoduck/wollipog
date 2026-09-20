@@ -79,6 +79,17 @@ test("container and cloud launches never lease the host provider HOME", () => {
   );
 });
 
+test("a configured credential home is created before its first lease", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-home-create-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "new-account");
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a" });
+  registry.acquire(request(home));
+  assert.equal(existsSync(home), true);
+  assert.equal(existsSync(leasePaths(home).lock), true);
+  registry.releaseAll();
+});
+
 test("provider-home leases are process-reentrant and reject a live competing owner", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));
@@ -98,6 +109,23 @@ test("provider-home leases are process-reentrant and reject a live competing own
     journalRecords(home).map((record) => record.state).sort(),
     ["active", "active", "released", "released"],
   );
+});
+
+test("provider-specific config homes, not the process HOME, own account leases", (t) => {
+  const processHome = mkdtempSync(join(tmpdir(), "wollipog-process-home-"));
+  const accountHome = mkdtempSync(join(tmpdir(), "wollipog-account-home-"));
+  t.after(() => rmSync(processHome, { recursive: true, force: true }));
+  t.after(() => rmSync(accountHome, { recursive: true, force: true }));
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a" });
+  registry.acquire({
+    driver: "codex-app-server",
+    command: "codex",
+    context: { kind: "native" },
+    env: { HOME: processHome, CODEX_HOME: accountHome },
+  });
+  assert.equal(existsSync(leasePaths(accountHome).lock), true);
+  assert.equal(existsSync(leasePaths(processHome).lock), false);
+  registry.releaseAll();
 });
 
 test("a validated stale same-owner legacy lease is migrated and reclaimed without emptying the lock", (t) => {
@@ -140,7 +168,11 @@ test("stale leases with a foreign owner or host and live leases all fail closed"
     });
     const expected = scenario === "owner" ? /another attested owner.*manually quarantine/ :
       scenario === "host" ? /leased by host host-b/ : /already in use by process 101/;
-    assert.throws(() => registry.acquire(request(home)), expected);
+    assert.throws(() => registry.acquire(request(home)), (error) => {
+      assert.match(String(error), expected);
+      assert.doesNotMatch(String(error), new RegExp(home.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+      return true;
+    });
     assert.deepEqual(readdirSync(leasePaths(home).lock), ["lease.json"]);
   }
 });

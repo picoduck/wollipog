@@ -21,9 +21,11 @@ import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import {
   cacheSkillSyncEntry,
+  mergeReconcileSkillsResults,
   MAX_RETAINED_STALE_SKILL_VERSIONS,
   SKILL_SCAN_LIMITS,
   linkManifestPath,
+  legacySessionHarnessScopes,
   parseSkillFrontmatter,
   reconcileSkills,
   skillRetentionStatePath,
@@ -51,6 +53,14 @@ const codexAgent: AgentDefinition = {
   context: { kind: "native" },
 };
 const agents = [claudeAgent, codexAgent];
+
+test("legacy host sessions retain their provider harness scope after accounts are configured", () => {
+  assert.deepEqual(legacySessionHarnessScopes([
+    { driver: "claude-code" },
+    { driver: "codex-app-server", providerAccountId: "work" },
+    { driver: "codex-app-server", executionTarget: { adapter: "container" } },
+  ]), [".claude/skills"]);
+});
 
 function makeRoots(): { root: string; home: string; dataDir: string } {
   const root = mkdtempSync(join(tmpdir(), "runner-skills-"));
@@ -184,6 +194,121 @@ test("reconcile materializes verified versions and links every harness through t
     assert.equal(linkTarget(join(roots.home, ".codex", "skills", "alpha")), canonicalPath);
     assert.equal(realpathSync(join(roots.home, ".claude", "skills", "alpha")), agentDir);
     assert.equal(realpathSync(join(roots.home, ".codex", "skills", "alpha")), agentDir);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("provider account harness overrides reconcile the same skill into each credential home", async () => {
+  const roots = makeRoots();
+  try {
+    const workSkills = join(roots.root, "codex-work", "skills");
+    const personalSkills = join(roots.root, "codex-personal", "skills");
+    const alpha = entry("alpha", [
+      { agentId: claudeAgent.id, invocation: "agent" },
+      { agentId: codexAgent.id, invocation: "agent" },
+    ]);
+    let result = await reconcileSkills({
+      dataDir: roots.dataDir,
+      home: roots.home,
+      agents,
+      harnessScope: [".claude/skills"],
+      desired: [alpha],
+      allowRemovals: true,
+    });
+    const claudeLink = join(roots.home, ".claude", "skills", "alpha");
+    assert.equal(realpathSync(claudeLink), join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", alpha.versionDigest));
+    for (const accountSkills of [workSkills, personalSkills]) {
+      const accountResult = await reconcileSkills({
+        dataDir: roots.dataDir,
+        home: roots.home,
+        agents,
+        harnessDirectories: { ".codex/skills": accountSkills },
+        harnessScope: [".codex/skills"],
+        reportUnknownTargets: false,
+        manageCanonical: false,
+        desired: [alpha],
+        allowRemovals: true,
+      });
+      assert.equal(accountResult.deployed[0]?.links[0]?.status, "linked");
+      assert.equal(accountResult.removedLinks.length, 0);
+      assert.ok(existsSync(claudeLink), "an account pass cannot sweep another provider's real-home link");
+      result = mergeReconcileSkillsResults(result, accountResult);
+    }
+    const expected = join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", alpha.versionDigest);
+    assert.equal(realpathSync(join(workSkills, "alpha")), expected);
+    assert.equal(realpathSync(join(personalSkills, "alpha")), expected);
+    assert.equal(existsSync(join(roots.home, ".codex", "skills", "alpha")), false,
+      "account reconciliation never falls back to the process HOME");
+    assert.equal(result.deployed.length, 1, "scoped passes merge into one skill state");
+    assert.deepEqual(result.deployed[0]?.links, [
+      { agentId: claudeAgent.id, status: "linked" },
+      { agentId: codexAgent.id, status: "linked" },
+    ]);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("the base pass prepares canonical links for native account targets beside WSL legacy targets", async () => {
+  const roots = makeRoots();
+  try {
+    const codexWsl: AgentDefinition = {
+      ...codexAgent,
+      id: "codex-wsl",
+      context: { kind: "wsl", distro: "Ubuntu" },
+    };
+    const alpha = entry("alpha", [
+      { agentId: codexWsl.id, invocation: "agent" },
+      { agentId: claudeAgent.id, invocation: "agent" },
+    ]);
+    await reconcileSkills({
+      dataDir: roots.dataDir,
+      home: roots.home,
+      agents: [codexWsl, claudeAgent],
+      harnessScope: [".codex/skills"],
+      sweepHarnessScope: [".claude/skills", ".codex/skills", ".pi/agent/skills"],
+      desired: [alpha],
+      allowRemovals: true,
+    });
+    const accountSkills = join(roots.root, "claude-work", "skills");
+    const accountResult = await reconcileSkills({
+      dataDir: roots.dataDir,
+      home: roots.home,
+      agents: [codexWsl, claudeAgent],
+      harnessDirectories: { ".claude/skills": accountSkills },
+      harnessScope: [".claude/skills"],
+      reportUnknownTargets: false,
+      manageCanonical: false,
+      desired: [alpha],
+      allowRemovals: true,
+    });
+    assert.equal(accountResult.deployed[0]?.links[0]?.status, "linked");
+    assert.equal(realpathSync(join(accountSkills, "alpha")),
+      join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", alpha.versionDigest));
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("enabling accounts sweeps managed links left in the provider's legacy real home", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [{ agentId: codexAgent.id, invocation: "agent" }]);
+    await reconcile(roots, [alpha]);
+    const legacyLink = join(roots.home, ".codex", "skills", "alpha");
+    assert.ok(existsSync(legacyLink));
+    const baseResult = await reconcileSkills({
+      dataDir: roots.dataDir,
+      home: roots.home,
+      agents,
+      harnessScope: [".claude/skills"],
+      sweepHarnessScope: [".claude/skills", ".codex/skills", ".pi/agent/skills"],
+      desired: [alpha],
+      allowRemovals: true,
+    });
+    assert.equal(existsSync(legacyLink), false);
+    assert.ok(baseResult.removedLinks.some((removal) => removal.path === "~/.codex/skills/alpha"));
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }

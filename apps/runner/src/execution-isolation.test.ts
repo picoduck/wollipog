@@ -323,6 +323,24 @@ test("strict sessions virtualize native harness transcript roots under runner da
     target: "/home/me/.codex/sessions",
   });
 
+  const accountCodex = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
+    platform: "linux", uid: () => 1000, nativeHome: () => "/home/me",
+    resolveNative: async () => ({
+      path: "/usr/bin/bwrap", via: "path", launch: { command: "/usr/bin/bwrap", args: [] },
+    }),
+    mkdirNative: async () => {},
+  }, {
+    driver: "codex-app-server",
+    dataDir: "/var/lib/wollipog",
+    env: { CODEX_HOME: "/credentials/work" },
+    sessionId: "s-account-codex",
+    cwd: "/work",
+  });
+  assert.deepEqual(accountCodex?.writableBinds?.[0], {
+    source: `/var/lib/wollipog/provider-state/codex/${providerStateKey("s-account-codex")}/sessions`,
+    target: "/credentials/work/sessions",
+  });
+
   const pi = await resolveExecutionIsolation(bwrap, { kind: "native" }, {
     platform: "linux", uid: () => 1000, nativeHome: () => "/home/me",
     resolveNative: async () => ({

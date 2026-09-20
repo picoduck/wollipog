@@ -158,6 +158,8 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
       runnerId: "runner-1",
       agentId: "codex",
       provider: "codex",
+      providerAccountId: "work",
+      accountLabel: "Work",
       state: "available",
       fetchedAt: now - 700_000,
       freshness: "stale",
@@ -174,17 +176,35 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
         status,
       }],
       spendControls: [{ id: "monthly", label: "Monthly Limit", limit: "$100" }],
+    }, {
+      sourceId: "b".repeat(32),
+      runnerId: "runner-1",
+      agentId: "claude",
+      provider: "claude",
+      providerAccountId: "personal",
+      accountLabel: "Personal",
+      state: "unavailable",
+      detail: "Usage appears after a provider response.",
+      fetchedAt: now,
+      freshness: "fresh",
+      runnerStatus: "online",
+      runnerName: "Build Machine",
+      agentName: "Claude",
+      buckets: [],
+      spendControls: [],
     }],
   });
   let refreshes = 0;
+  const refreshTargets: Array<{ runnerId: string; providerAccountId: string } | undefined> = [];
   const client = {
     ...api,
     usage: async () => response([]),
     usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
     usageUsers: async () => ({ users: [] }),
     subscriptionUsage: async () => subscription("warning", 15),
-    refreshSubscriptionUsage: async () => {
+    refreshSubscriptionUsage: async (target?: { runnerId: string; providerAccountId: string }) => {
       refreshes++;
+      refreshTargets.push(target);
       return subscription("exhausted", 0);
     },
   } as unknown as ApiClient;
@@ -216,9 +236,25 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
     await Promise.resolve();
   });
   assert.equal(refreshes, 1);
+  assert.equal(refreshTargets[0], undefined);
   assert.match(pageText(), /0% Remaining/);
   assert.match(pageText(), /⛔ Exhausted/);
   assert.match(pageText(), /Subscription usage refreshed/);
+  const refreshAccount = [...container.querySelectorAll("button")]
+    .find((button) => button.textContent?.trim() === "Refresh Account") as HTMLButtonElement;
+  assert.equal(
+    [...container.querySelectorAll("button")]
+      .filter((button) => button.textContent?.trim() === "Refresh Account").length,
+    1,
+    "only a Codex account exposes an active refresh probe",
+  );
+  await act(async () => {
+    refreshAccount.click();
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  assert.equal(refreshes, 2);
+  assert.deepEqual(refreshTargets[1], { runnerId: "runner-1", providerAccountId: "work" });
   await act(async () => root.unmount());
   container.remove();
 });
