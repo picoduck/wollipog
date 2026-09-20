@@ -124,7 +124,12 @@ function provisionClaudeTuiGuard(
   const prepared = prepareClaudeHookArgs(spec.args);
   // A relayed manager hook (#1472) authenticates with a key from the spawn environment, never argv.
   if (prepared.env) spec.env = { ...spec.env, ...prepared.env };
-  return { protections, args: prepared.args, guardActive: prepared.guardActive };
+  return {
+    protections,
+    args: prepared.args,
+    guardActive: prepared.guardActive,
+    ...(prepared.guardReason ? { reason: prepared.guardReason } : {}),
+  };
 }
 
 /**

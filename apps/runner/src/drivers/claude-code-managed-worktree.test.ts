@@ -11,7 +11,7 @@
 
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -317,6 +317,26 @@ test("the mediated fallback still emulates the fixed-rule modes", async (t) => {
     .map((line) => JSON.parse(line) as { type?: string; response?: { response?: { behavior?: string } } })
     .filter((frame) => frame.type === "control_response");
   assert.deepEqual(responses.map((frame) => frame.response?.response?.behavior), ["allow"]);
+});
+
+test("a rewritten file-form hook command falls back to mediation and reports the tamper (#1475)", (t) => {
+  const dir = tempDir(t);
+  const args = provision(dir, "tampered-1", "auto", { protections: PROTECTIONS });
+  const settings = claudeHookSettingsPath(dir, "tampered-1");
+  const document = JSON.parse(readFileSync(settings, "utf8")) as {
+    hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> };
+  };
+  document.hooks.PreToolUse[0]!.hooks[0]!.command = "/bin/true";
+  writeFileSync(settings, JSON.stringify(document, null, 2), "utf8");
+
+  const run = launch(args, "auto", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  assert.equal(run.argv.includes(settings), false, "the altered settings document is not launched");
+  assert.deepEqual(permissionArgv(run.argv), ["--permission-prompt-tool", "stdio"],
+    "the driver restores the mediated launch");
+  assert.ok(run.stderr.some((line) => line.includes(
+    "Claude managed-worktree guard inactive: the file-form guard settings documents were modified after provisioning",
+  )), run.stderr.join("\n"));
 });
 
 test("an open manager-hook circuit keeps the guard: the veto is not a policy-transport feature", (t) => {

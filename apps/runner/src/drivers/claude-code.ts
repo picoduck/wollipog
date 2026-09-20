@@ -581,6 +581,7 @@ export class ClaudeCodeDriver implements Driver {
   /** Established by the last `preparedBaseArgs()`: the managed-worktree guard hook is in the
    * settings file this spawn launches with, so the runner does NOT have to mediate the mode. */
   private managedWorktreeGuardActive = false;
+  private managedWorktreeGuardReason: string | null = null;
   /** Runner-owned hook state directory for this spawn; the provider must not touch it. */
   private managedWorktreeGuardStateDirectory = "";
   /** Also from the last `preparedBaseArgs()`: what the spawn's environment carries for the runner's
@@ -2110,6 +2111,10 @@ export class ClaudeCodeDriver implements Driver {
     this.preparedHookEnv = prepared.env ?? {};
     this.managedWorktreeGuardActive = prepared.guardActive;
     this.managedWorktreeGuardStateDirectory = prepared.guardStateDirectory ?? "";
+    if (prepared.guardReason && prepared.guardReason !== this.managedWorktreeGuardReason) {
+      this.cb.onStderr(`Claude managed-worktree guard inactive: ${prepared.guardReason}; using runner mediation.`);
+    }
+    this.managedWorktreeGuardReason = prepared.guardReason ?? null;
     if (prepared.circuitOpen && !this.hookCircuitReported) {
       this.hookCircuitReported = true;
       this.hookCircuitOpenedAt = prepared.circuitOpenedAt ?? null;
