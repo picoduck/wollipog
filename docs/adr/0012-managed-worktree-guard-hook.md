@@ -842,7 +842,8 @@ combined heal template, the guard-only fallback, and the two legitimate live-fil
 or guard-only). A missing live file remains healable, but changed bytes in any existing copy —
 including a rewritten hook `command` with untouched arguments — drop the settings argument,
 return `guardActive: false`, and report that the guard became inactive. A structured launch then
-uses the existing driver mediation; a TUI with a managed worktree is refused because it has no
+uses the existing driver mediation. A TUI ordinarily re-provisions a fresh set before preparing
+its spawn; if a mismatch is observed after that provisioning, it is refused because it has no
 driver fallback. A runner restart has no old baseline to trust: ordinary pre-spawn provisioning
 writes and records a fresh set before it can be active.
 

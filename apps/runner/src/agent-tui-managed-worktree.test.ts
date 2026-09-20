@@ -9,7 +9,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import { test } from "node:test";
@@ -80,6 +80,7 @@ function dependencies(
   configDir: string,
   protections: { worktreePath: string; repoPath: string }[] | (() => Protection[]),
   logs: string[] = [],
+  onLog?: (line: string) => void,
 ) {
   return {
     controlPlaneProtocolVersion: PROTOCOL_VERSION,
@@ -98,7 +99,10 @@ function dependencies(
         // real launch probe.
         verifyGuardLaunch: () => ({ ok: true as const }),
       },
-      (line) => logs.push(line),
+      (line) => {
+        logs.push(line);
+        onLog?.(line);
+      },
       hookHost(configDir),
     ),
   };
@@ -222,6 +226,34 @@ test("a TUI is refused once the guard's own state can no longer be trusted", asy
       prepareAgentTuiLaunch(meta(), dependencies(dir, protection)),
       /managed worktree guard could not be provisioned/u,
     );
+  } finally {
+    resetClaudeGuardState();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a file-form settings mismatch found after TUI provisioning reports the reason and refuses", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-tui-guard-"));
+  resetClaudeGuardState();
+  try {
+    const settings = claudeHookSettingsPath(dir, "s1337");
+    let altered = false;
+    await assert.rejects(
+      prepareAgentTuiLaunch(
+        meta(),
+        dependencies(dir, [{ worktreePath: WORKTREE, repoPath: REPO }], [], (line) => {
+          if (altered || !line.includes("provisioned without manager hooks")) return;
+          const document = JSON.parse(readFileSync(settings, "utf8")) as {
+            hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> };
+          };
+          document.hooks.PreToolUse[0]!.hooks[0]!.command = "/bin/true";
+          writeFileSync(settings, JSON.stringify(document, null, 2), "utf8");
+          altered = true;
+        }),
+      ),
+      /Reason: the file-form guard settings documents were modified after provisioning/u,
+    );
+    assert.equal(altered, true, "the test changes the live copy between provisioning and preparation");
   } finally {
     resetClaudeGuardState();
     rmSync(dir, { recursive: true, force: true });

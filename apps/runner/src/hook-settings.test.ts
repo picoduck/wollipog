@@ -888,6 +888,56 @@ test("a rewritten hook command in any file-form settings copy disables the guard
   }
 }));
 
+test("settings and protections tampering both poison the file-form guard", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, { enabled: false });
+  const { file } = settingsOf(dir);
+  const template = JSON.parse(readFileSync(claudeHookTemplatePath(file), "utf8")) as {
+    hooks: { PreToolUse: Array<{ hooks: Array<{ command: string }> }> };
+  };
+  template.hooks.PreToolUse[0]!.hooks[0]!.command = "/bin/true";
+  writeFileSync(claudeHookTemplatePath(file), JSON.stringify(template, null, 2), "utf8");
+  const protections = claudeHookProtectionsPath(file);
+  writeFileSync(protections, JSON.stringify({ version: 1, protections: [] }), "utf8");
+
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.guardActive, false);
+  assert.deepEqual(prepared.args, []);
+  assert.equal(existsSync(protections), false,
+    "the settings mismatch does not skip poisoning the separately altered protection list");
+  const relaunch = spec();
+  provisionClaudeHooks(relaunch, {
+    ...config, enabled: false, managedWorktreeProtections: PROTECTIONS, verifyGuardLaunch: guardVerifies,
+  }, () => {}, host(dir));
+  assert.deepEqual(relaunch.args, [], "the poisoned session cannot silently reprovision a guard");
+}));
+
+test("a file-form guard is not trusted after its runner-held identity is reset", () => temp((dir) => {
+  const launch = provisionGuarded(dir, {}, { enabled: false });
+  resetClaudeGuardState();
+  const prepared = prepareClaudeHookArgs(launch.args);
+  assert.equal(prepared.guardActive, false);
+  assert.deepEqual(prepared.args, []);
+  assert.match(prepared.guardReason ?? "", /no runner-held identity/u);
+}));
+
+test("a runner-authored guard-less rewrite clears the old settings baseline", () => temp((dir) => {
+  const launch = provisionGuarded(dir);
+  const { file } = settingsOf(dir);
+  writeFileSync(claudeHookProtectionsPath(file), JSON.stringify({ version: 1, protections: [] }), "utf8");
+  assert.equal(prepareClaudeHookArgs(launch.args).guardActive, false, "the original guard is poisoned");
+
+  // A pre-authorization restart does not yet know the live worktree set. If authorization rejects
+  // it, the old provider must keep its manager transport rather than mistake this runner-written
+  // guard-less document for an external rewrite.
+  const preauthorization = spec();
+  provisionClaudeHooks(preauthorization, config, () => {}, host(dir));
+  assert.equal(describeManagedSettings(file)?.guard, false);
+  assert.equal(describeManagedSettings(file)?.manager, true);
+  const prepared = prepareClaudeHookArgs(preauthorization.args);
+  assert.deepEqual(prepared.args, preauthorization.args);
+  assert.equal(prepared.guardReason, undefined);
+}));
+
 test("an open manager circuit keeps the guard and drops only the policy transport", () => temp((dir) => {
   const launch = provisionGuarded(dir);
   const file = claudeHookSettingsPath(dir, "sess_hook_1");

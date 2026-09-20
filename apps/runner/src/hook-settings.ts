@@ -427,7 +427,10 @@ export function writeClaudeSettingsSet(
   const contents = claudeSettingsDocument(file, diskManager ?? null, diskGuard);
   if (diskGuard) {
     fileSettingsDocuments.set(resolve(file), { combined: contents, guardOnly: guardOnlyContents! });
-  } else if (!preserveGuardState) {
+  } else {
+    // This call is about to replace the live/template documents with a guard-less set. Keeping an
+    // earlier baseline would mislabel the runner's own rewrite as tampering and drop the manager
+    // policy transport from a still-running provider after a rejected restart.
     fileSettingsDocuments.delete(resolve(file));
   }
   protectedWrite(claudeHookTemplatePath(file), contents);
@@ -1731,12 +1734,14 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
   const hasGuard = described?.guard === true;
   const expectedFileGuard = fileSettingsDocuments.has(resolve(file));
   const settingsSetTrusted = expectedFileGuard && hasGuard && fileSettingsSetTrusted(file);
+  // Do not let a settings mismatch short-circuit the protections tripwire. Another live process
+  // for this session may still be consulting that list, so simultaneous tampering must poison it.
+  const guardStateTrusted = !(expectedFileGuard || hasGuard) || claudeGuardStateTrusted(file);
   const hookAskCapable = managedSettingsAskCapable(file);
   const circuit = readHookCircuitState(claudeHookCircuitPath(file));
   const reprobePending = circuit.open && circuit.openedAt != null &&
     now - circuit.openedAt >= CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS;
-  if ((expectedFileGuard || hasGuard) &&
-      (!settingsSetTrusted || !claudeGuardStateTrusted(file))) {
+  if ((expectedFileGuard || hasGuard) && (!settingsSetTrusted || !guardStateTrusted)) {
     // The settings document carries a guard hook that can no longer be relied on. Launching with
     // it would either block every matched tool or trust a foreign list, so the whole document is
     // dropped for this spawn and the driver mediates, exactly as when no guard was provisionable.
