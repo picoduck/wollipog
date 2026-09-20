@@ -201,7 +201,12 @@ export function codexGuardActiveInArgs(args: readonly string[]): boolean {
       else if (!value.includes("enabled=false")) trust = false;
     }
   }
-  return guard && trust;
+  // The bypass flag is required here for the same reason `codexGuardArgsActive` requires it: the
+  // two derivations must agree, or a launch is guarded by one and unguarded by the other. It is
+  // inert on `app-server` and load-bearing on a TUI and `codex exec`, and anything that strips it
+  // after provisioning — `stripOrchestratorLaunchArgs` does — has changed the argv out from under
+  // the proof, so the safe reading is that this launch is no longer the one that was proven.
+  return guard && trust && options.includes(CODEX_HOOK_TRUST_BYPASS_FLAG);
 }
 
 /**

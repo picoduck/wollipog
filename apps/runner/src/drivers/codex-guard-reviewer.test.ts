@@ -27,7 +27,8 @@ const GUARD_OVERRIDE =
   'command="/usr/bin/node /runner/cli.js --managed-worktree-guard --protections /state/s1.json"}]}]';
 const TRUST_OVERRIDE =
   'hooks.state={"/<session-flags>/config.toml:pre_tool_use:0:0"={trusted_hash="sha256:abc"}}';
-const GUARDED = ["-c", GUARD_OVERRIDE, "-c", TRUST_OVERRIDE];
+const BYPASS = "--dangerously-bypass-hook-trust";
+const GUARDED = ["-c", GUARD_OVERRIDE, "-c", TRUST_OVERRIDE, BYPASS];
 
 function reviewerFor(protectManagedWorktrees: boolean, guardActive: boolean): unknown {
   return buildCodexTurnParams(
@@ -94,9 +95,17 @@ test("both halves are required, because the hook override alone is unfalsifiable
   assert.equal(codexGuardActiveInArgs(GUARDED), true);
   // The pre-#1499 shape: a hook override with no trust override. On an entry point where the
   // bypass flag does nothing, Codex reports this hook enabled and untrusted, and skips it.
-  assert.equal(codexGuardActiveInArgs(["-c", GUARD_OVERRIDE]), false);
-  assert.equal(codexGuardActiveInArgs(["-c", TRUST_OVERRIDE]), false);
+  assert.equal(codexGuardActiveInArgs(["-c", GUARD_OVERRIDE, BYPASS]), false);
+  assert.equal(codexGuardActiveInArgs(["-c", TRUST_OVERRIDE, BYPASS]), false);
   assert.equal(codexGuardActiveInArgs([]), false);
+});
+
+test("stripping the trust bypass after provisioning disarms the derived guard", () => {
+  // `stripOrchestratorLaunchArgs` drops the bypass flag for a non-Claude driver. The flag is inert
+  // on `app-server` and load-bearing on a TUI and `codex exec`, but either way its removal means
+  // the argv is no longer the one provisioning proved, so both derivations must agree it is not
+  // guarded rather than one of them vouching for it.
+  assert.equal(codexGuardActiveInArgs(["-c", GUARD_OVERRIDE, "-c", TRUST_OVERRIDE]), false);
 });
 
 test("a later foreign override of either dotted path disarms the guard", () => {
@@ -115,13 +124,13 @@ test("the isolation override is not mistaken for a trust override, and does not 
   // #1473's override writes the same `hooks.state` prefix with `enabled=false`; it disables
   // foreign hooks and says nothing about trust, so it must neither grant nor revoke it.
   const disable = 'hooks.state={"/home/u/.codex/config.toml:pre_tool_use:0:0"={enabled=false}}';
-  assert.equal(codexGuardActiveInArgs(["-c", GUARD_OVERRIDE, "-c", disable]), false);
+  assert.equal(codexGuardActiveInArgs(["-c", GUARD_OVERRIDE, "-c", disable, BYPASS]), false);
   assert.equal(codexGuardActiveInArgs([...GUARDED, "-c", disable]), true);
 });
 
 test("a value that is not a config override's value is never read as one", () => {
   // The overrides only count when they follow `-c`/`--config`; a prompt that happens to contain
   // the same text is an argument, not configuration.
-  assert.equal(codexGuardActiveInArgs([GUARD_OVERRIDE, TRUST_OVERRIDE]), false);
-  assert.equal(codexGuardActiveInArgs(["--", "-c", GUARD_OVERRIDE, "-c", TRUST_OVERRIDE]), false);
+  assert.equal(codexGuardActiveInArgs([GUARD_OVERRIDE, TRUST_OVERRIDE, BYPASS]), false);
+  assert.equal(codexGuardActiveInArgs(["--", "-c", GUARD_OVERRIDE, "-c", TRUST_OVERRIDE, BYPASS]), false);
 });

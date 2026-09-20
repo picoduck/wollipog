@@ -710,6 +710,21 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
       log,
       claudeHookHost,
     );
+    await provisionAgentControl(
+      meta,
+      {
+        controlPlaneUrl: config.controlPlaneUrl,
+        controlPlaneProtocolVersion,
+        allowInsecureTransport,
+        registerCredential: registerAgentControlCredential,
+        registerCredentialAndWait: registerAgentControlCredentialAndWait,
+        orchestratorAgent: localAgent,
+        executionIsolationMode: config.executionIsolation.mode,
+        orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
+      },
+      log,
+      agentControlHost,
+    );
     // #1499: a structured Codex launch carries the same `PreToolUse` guard a Codex TUI has had
     // since #1377. Without it the managed-worktree veto lives only in the driver's approval
     // handling, which is reachable only while every escalation is routed to the human — so
@@ -720,6 +735,11 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
     // Unlike a TUI, a failure here is NOT a refusal. A structured session still has the driver's
     // own approval-time veto, so an unguarded launch simply keeps routing escalations to the
     // human, which is exactly the behaviour it had before this. The runner says which it got.
+    //
+    // Provisioned LAST, after everything that rewrites `meta.args`: `provisionAgentControl` runs
+    // `stripOrchestratorLaunchArgs` on the Orchestrator preset path, which drops
+    // `--dangerously-bypass-hook-trust` and then appends the preset's own arguments, so a guard
+    // proved before it would be a proof about a different argv than the one that launches.
     if (CODEX_GUARD_DRIVERS.has(meta.driver)) {
       const codexGuardSocket = await memoryGuardSocket(
         meta, () => sessions.managedWorktreeGuardProtections(meta));
@@ -740,21 +760,6 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
           `(${codexGuard.reason ?? "unknown"}); escalations stay with the user`);
       }
     }
-    await provisionAgentControl(
-      meta,
-      {
-        controlPlaneUrl: config.controlPlaneUrl,
-        controlPlaneProtocolVersion,
-        allowInsecureTransport,
-        registerCredential: registerAgentControlCredential,
-        registerCredentialAndWait: registerAgentControlCredentialAndWait,
-        orchestratorAgent: localAgent,
-        executionIsolationMode: config.executionIsolation.mode,
-        orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
-      },
-      log,
-      agentControlHost,
-    );
     const commandPreparation = await prepareClaudeSlashCommandCatalog(meta);
     if (commandPreparation.outcome === "retained") {
       log(`${commandPreparation.error}; retaining matching prior session command catalog`);
