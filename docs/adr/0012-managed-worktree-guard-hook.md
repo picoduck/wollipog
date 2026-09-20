@@ -649,6 +649,78 @@ What remains, stated plainly:
   guard or a translated one: all keep the file form, whose settings documents are still
   untripwired.
 
+Amended by #1472: **in `provider` mode on native Linux, the manager policy hook keeps nothing in
+the hook state directory either.** The two bullets above that say otherwise (the circuit "still
+read from disk", and the credential and circuit that "still live there") describe slice 3 as it
+shipped and no longer hold for such a launch.
+
+What the four files were for decided the design. The **token** is written by the runner and read by
+the hook sidecar, which presents it to the control plane as a bearer credential scoped to exactly
+one route, `POST /api/sessions/:id/policy-hook`, for one session. The **ready** file is the
+runner's record that the control plane acknowledged that token's hash; the sidecar waits for it so
+its first request is never unauthenticated. The **circuit** is written mostly by the sidecar: three
+consecutive transport failures open it, after which the sidecar answers "no opinion" instead of
+denying every tool call, and the next spawn drops the manager hooks so the provider's native
+approval flow takes over. It is a liveness device: without it, an unreachable control plane bricks
+the session. The **lock** serializes that read-modify-write between concurrent sidecars, which are
+real (measured on claude 2.1.278: three parallel tool calls ran three overlapping `PreToolUse`
+hooks). The sidecar is a process the provider starts, as the provider's OS user. So no placement of
+the credential keeps it from the provider while the sidecar still has to read it, and a circuit the
+sidecar can write is a circuit the provider can write. The only sound move is for the sidecar to
+hold neither.
+
+So the runner relays. For a native Linux host launch the runner does not sandbox:
+
+- The credential, its acknowledgement, and the circuit are fields in the runner process. No token,
+  ready, circuit, or lock file is written, files left by an earlier file-form provisioning are
+  removed, and nothing planted at those paths is read, by the runner or by the sidecar.
+- The hook command carries `--policy-relay` and, in the memory-held document only,
+  `--policy-socket @wollipog-guard-<name>`: the session's existing abstract verdict socket. The
+  sidecar sends the event name and the payload, and prints the hook response the runner returns.
+  The runner runs the same evaluation the file-form sidecar runs (`evaluatePolicyHook`), against a
+  transport whose state is memory. One event loop serializes the circuit, so there is no lock.
+- A guard verdict changes nothing, which is why that socket answers anyone. A relayed event reaches
+  the control plane, so a relay request must carry the session's **relay key**: 256 random bits,
+  per session per runner process, handed to the provider in its spawn **environment** and never in
+  its argv. Measured on claude 2.1.278: a variable in the spawn environment reaches all three hook
+  events, as does the inline `env` block. `/proc/<pid>/cmdline` is world-readable and
+  `/proc/<pid>/environ` is owner-only, so the key keeps other local users out where the socket name
+  cannot. A request without the key gets the event's fail-closed response and reaches neither the
+  control plane nor the circuit, so an unauthenticated caller cannot open it.
+- The runner's circuit is the one that chooses between the combined document and the guard-only
+  one. A circuit file written by the provider selects nothing: it is ignored, not honoured.
+- Every failure to get an answer is the event's existing fail-closed response (`PreToolUse` denies,
+  the other two do not block), and the sidecar records nothing. There is deliberately no deadline
+  on the answer: a `PreToolUse` ask parks for as long as a human takes, and the runner holds the
+  connection open. A sidecar that goes away closes it, which stops the runner polling on its
+  behalf; closing a session's socket destroys parked connections rather than waiting for them.
+- The pre-authorization `start_session` provisioning knows neither the worktree set nor the socket.
+  On a relaying runner it keeps the state in memory too, so no credential touches disk on the way
+  to a relayed launch. A launch whose socket could not be created or proven keeps the file form,
+  exactly as its guard does.
+
+Measured end to end with the runner's own provisioning, the real socket and sidecar, a stand-in
+control plane, and claude 2.1.278 in `bypassPermissions`: `UserPromptSubmit`, `PreToolUse`, and
+`PostToolUse` all arrived with the runner-held bearer, a policy deny blocked the tool call, and the
+hook state directory held only the three settings documents before and after. With an open circuit
+and a token planted in the directory beforehand, the result was identical.
+
+What this does not deliver:
+
+- **The provider can still use the hook.** Whatever the sidecar may ask, the process that starts it
+  may ask: a process of the runner's user that reads the key from its environment can submit hook
+  events for that session, including ones the control plane rejects, and three consecutive failures
+  open the circuit. That is the capability the token gave, minus the token. It is now visible
+  rather than silent: a circuit the runner opens always carries its timestamp, so the next spawn
+  emits the existing `policy_transport` event.
+- The key is in the environment of every process the provider starts, its tools and MCP servers
+  included.
+- A runner restart forgets the credential and the circuit, and closes the socket. A provider that
+  outlived it would be denied on every `PreToolUse` until its next spawn, which provisions afresh;
+  the guard already behaves the same way there.
+- Runner `bwrap` and Seatbelt, macOS, Windows, WSL, container, and cloud launches are unchanged:
+  the file form, with the #1447 `managerTransport` grants where a sandbox hides the directory.
+
 The launch self-test (`verifyManagedWorktreeGuardLaunch`) is unchanged and still necessary: it
 proves the sidecar STARTS, from a foreign directory, with a probe-owned list. It owns a throwaway
 directory, so nothing in the hook state directory can influence it. The socket proof above is the
@@ -923,6 +995,9 @@ control-channel veto keeps reading the live inventory.
   slice 3): the list and Claude's settings documents live in runner memory, and the sidecar asks an
   abstract-namespace socket that a same-user process cannot take over. Any local user can query
   that socket for a verdict, and nothing else.
+- There, the manager policy hook's credential, acknowledgement, and circuit live in runner memory
+  too (#1472), and the sidecar relays each event over the same socket with a key from its spawn
+  environment. Reading the directory yields no credential, and a circuit written into it is ignored.
 - A Codex launch in `provider` mode sends a permission profile and NO legacy sandbox policy, because
   Codex silently ignores the profile when both are present. A launch migrates only when its own
   configured sandbox is exactly the plain built-in its profile extends, which each launch reads

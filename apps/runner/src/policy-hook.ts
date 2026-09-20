@@ -1,6 +1,10 @@
 /**
  * Claude hook sidecar. Reads one bounded event from stdin, performs one authenticated local
  * control-plane round trip, and emits only Claude's structured hook response on stdout.
+ *
+ * Where the runner relays (#1472: `provider` mode on a native Linux host) the sidecar holds no
+ * credential and no circuit. It hands the event to the runner's socket, and the runner runs the
+ * very same evaluation against state it keeps in memory.
  */
 
 import { createHash } from "node:crypto";
@@ -20,11 +24,18 @@ import {
   LEGACY_POLICY_HOOK_ENV,
   POLICY_HOOK_ENV,
   claimExpiredHookCircuitProbe,
-  readHookCircuitState,
-  updateHookCircuitState,
-  writeHookCircuitState,
+  fileHookCircuitStore,
+  managerHookRelayState,
   type HookCircuitState,
+  type HookCircuitStore,
 } from "./hook-settings.js";
+import {
+  POLICY_HOOK_RELAY_FLAG,
+  POLICY_HOOK_RELAY_KEY_ENV,
+  policyHookRelaySocketArgument,
+  requestPolicyHookRelay,
+  type PolicyHookRelayRequest,
+} from "./policy-hook-relay.js";
 
 const MAX_HOOK_INPUT_BYTES = 128 * 1024;
 const CP_TIMEOUT_MS = 1_500;
@@ -53,6 +64,20 @@ export interface PolicyHookDeps {
   readStdin: () => Promise<string>;
   now: () => number;
   sleep: (ms: number) => Promise<void>;
+  /** The caller is gone (a relayed sidecar that Claude killed): stop waiting on its behalf. */
+  signal: AbortSignal;
+}
+
+/**
+ * Where one evaluation finds its circuit, its coordinates, and its credential: the sidecar's files,
+ * or the runner's memory when the runner relays.
+ */
+export interface PolicyHookTransport {
+  circuit: HookCircuitStore;
+  /** Throws when the transport is not fully configured or holds no credential. */
+  coordinates(): { cpUrl: string; sessionId: string; token: string; askCapable: boolean };
+  /** The control plane has acknowledged the credential `coordinates()` returned. */
+  credentialReady(): boolean;
 }
 
 export interface PolicyHookRunResult {
@@ -154,31 +179,52 @@ function readRequiredPolicyHookEnv(env: NodeJS.ProcessEnv, key: PolicyHookEnviro
 }
 
 async function waitForCredentialReady(
-  file: string,
-  token: string,
-  circuitFile: string,
+  transport: PolicyHookTransport,
 ): Promise<"ready" | "rejected" | "timeout"> {
-  const expected = createHash("sha256").update(token).digest("hex");
   const deadline = Date.now() + CREDENTIAL_READY_TIMEOUT_MS;
   for (;;) {
-    try {
-      if (readFileSync(file, "utf8").trim() === expected) return "ready";
-    } catch {
-      // The runner writes the acknowledgement after the CP commits the session-bound hash.
-    }
-    if (readHookCircuitState(circuitFile).open) return "rejected";
+    // The runner records the acknowledgement after the CP commits the session-bound hash.
+    if (transport.credentialReady()) return "ready";
+    if (transport.circuit.read().open) return "rejected";
     if (Date.now() >= deadline) return "timeout";
     await delay(10);
   }
 }
 
+/** The file form: every coordinate comes from the settings `env` block, every state from a file. */
+function filePolicyHookTransport(env: NodeJS.ProcessEnv): PolicyHookTransport {
+  const circuitFile = readRequiredPolicyHookEnv(env, "circuitFile");
+  let readyFile = "";
+  let expected = "";
+  return {
+    circuit: fileHookCircuitStore(circuitFile),
+    coordinates: () => {
+      const cpUrl = readRequiredPolicyHookEnv(env, "cpUrl");
+      const sessionId = readRequiredPolicyHookEnv(env, "sessionId");
+      const tokenFile = readRequiredEnv(env, "MANAGER_TOKEN_FILE");
+      const token = readFileSync(tokenFile, "utf8").trim();
+      if (!token) throw new Error("policy-hook credential file is empty");
+      readyFile = readRequiredPolicyHookEnv(env, "readyFile");
+      expected = createHash("sha256").update(token).digest("hex");
+      return { cpUrl, sessionId, token, askCapable: readPolicyHookEnv(env, "askCapable") === "1" };
+    },
+    credentialReady: () => {
+      try {
+        return readFileSync(readyFile, "utf8").trim() === expected;
+      } catch {
+        return false;
+      }
+    },
+  };
+}
+
 function updateCircuit(
-  file: string,
+  circuit: HookCircuitStore,
   success: boolean,
   durationMs: number,
   now: number,
 ): HookCircuitState {
-  return updateHookCircuitState(file, (prior) => {
+  return circuit.update((prior) => {
     const consecutiveFailures = success ? 0 : prior.consecutiveFailures + 1;
     const open = prior.open || (!success &&
       (prior.probeStartedAt != null || consecutiveFailures >= POLICY_HOOK_FAILURE_LIMIT));
@@ -209,29 +255,82 @@ export async function runPolicyHook(
 ): Promise<PolicyHookRunResult> {
   const event = parseExpectedEvent(argv);
   if (!event) return { exitCode: 0, output: preToolOutput("deny", "Manager policy hook event is invalid.") };
+  if (argv.includes(POLICY_HOOK_RELAY_FLAG)) return relayPolicyHook(argv, env, event, deps);
+  return evaluatePolicyHook(event, () => filePolicyHookTransport(env), deps);
+}
 
-  let circuitFile = "";
+/**
+ * The relayed sidecar (#1472). The flag is a commitment, exactly as the guard's socket flag is: no
+ * credential, acknowledgement, or circuit file is read, whatever the environment names and whatever
+ * has been planted at those paths. Without an answer from the runner the event gets its fail-closed
+ * response, and nothing is recorded anywhere: the circuit is the runner's to move.
+ */
+async function relayPolicyHook(
+  argv: string[],
+  env: NodeJS.ProcessEnv,
+  event: ClaudeHookEventName,
+  deps: Partial<PolicyHookDeps>,
+): Promise<PolicyHookRunResult> {
+  try {
+    const socket = policyHookRelaySocketArgument(argv);
+    const key = env[POLICY_HOOK_RELAY_KEY_ENV];
+    if (!socket || !key) throw new Error("the policy relay is not configured for this launch");
+    const input = await (deps.readStdin ?? defaultReadStdin)();
+    return { exitCode: 0, output: await requestPolicyHookRelay(socket, { key, event, input }) };
+  } catch {
+    return { exitCode: 0, output: failureOutput(event) };
+  }
+}
+
+/**
+ * The runner's side of the relay: one hook event from a sidecar that presented this session's key,
+ * evaluated against the state the runner holds for that session. A caller without the key gets the
+ * fail-closed response and reaches neither the control plane nor the circuit.
+ */
+export async function servePolicyHookRelay(
+  sessionId: string,
+  request: PolicyHookRelayRequest,
+  signal: AbortSignal,
+  deps: Partial<PolicyHookDeps> = {},
+): Promise<string> {
+  const state = managerHookRelayState(sessionId, request.key);
+  if (!state) return failureOutput(request.event);
+  const result = await evaluatePolicyHook(request.event, () => ({
+    circuit: state.circuit,
+    coordinates: () => ({
+      cpUrl: state.cpHttpUrl,
+      sessionId: state.sessionId,
+      token: state.token,
+      askCapable: state.askCapable,
+    }),
+    credentialReady: state.credentialReady,
+  }), { ...deps, readStdin: async () => request.input, signal });
+  return result.output;
+}
+
+async function evaluatePolicyHook(
+  event: ClaudeHookEventName,
+  openTransport: () => PolicyHookTransport,
+  deps: Partial<PolicyHookDeps>,
+): Promise<PolicyHookRunResult> {
+  let transport: PolicyHookTransport | null = null;
   let circuit: HookCircuitState = { consecutiveFailures: 0, open: false };
   let recoveredFrom: number | undefined;
   try {
-    circuitFile = readRequiredPolicyHookEnv(env, "circuitFile");
-    const recovered = claimExpiredHookCircuitProbe(circuitFile, (deps.now ?? Date.now)());
+    transport = openTransport();
+    const circuitStore = transport.circuit;
+    const recovered = claimExpiredHookCircuitProbe(circuitStore, (deps.now ?? Date.now)());
     circuit = recovered.state;
     recoveredFrom = recovered.recoveredFrom;
     if (circuit.open || recovered.probeInProgress) {
       return { exitCode: 0, output: nonBlockingOutput() };
     }
 
-    const cpUrl = readRequiredPolicyHookEnv(env, "cpUrl").replace(/\/+$/, "");
-    const managerSessionId = readRequiredPolicyHookEnv(env, "sessionId");
-    const tokenFile = readRequiredEnv(env, "MANAGER_TOKEN_FILE");
-    const token = readFileSync(tokenFile, "utf8").trim();
-    if (!token) throw new Error("policy-hook credential file is empty");
-    const credentialState = await waitForCredentialReady(
-      readRequiredPolicyHookEnv(env, "readyFile"),
-      token,
-      circuitFile,
-    );
+    const coordinates = transport.coordinates();
+    const cpUrl = coordinates.cpUrl.replace(/\/+$/, "");
+    const managerSessionId = coordinates.sessionId;
+    const { token, askCapable } = coordinates;
+    const credentialState = await waitForCredentialReady(transport);
     if (credentialState === "rejected") {
       return { exitCode: 0, output: nonBlockingOutput() };
     }
@@ -256,7 +355,7 @@ export async function runPolicyHook(
           authorization: `Bearer ${token}`,
           "content-type": "application/json",
           [WOLLIPOG_POLICY_HOOK_SESSION_HEADER]: managerSessionId,
-          ...(readPolicyHookEnv(env, "askCapable") === "1"
+          ...(askCapable
             ? { [POLICY_HOOK_POLL_CAPABILITY_HEADER]: POLICY_HOOK_POLL_CAPABILITY }
             : {}),
         },
@@ -279,7 +378,7 @@ export async function runPolicyHook(
     // half-open probe before a durable human ask starts polling so concurrent hook invocations can
     // reach the control plane and join its per-session turn barrier instead of bypassing policy.
     try {
-      updateCircuit(circuitFile, true, now() - started, now());
+      updateCircuit(circuitStore, true, now() - started, now());
     } catch {
       /* The terminal response path retries optional telemetry persistence below. */
     }
@@ -290,7 +389,7 @@ export async function runPolicyHook(
       // A v65 control plane can return `ask` but cannot durably correlate a polling invocation.
       // The provisioned v66 marker is the negotiation proof: fail closed without treating this
       // expected rolling-upgrade skew as a transport failure or opening the circuit.
-      if (readPolicyHookEnv(env, "askCapable") !== "1" || !decision.approvalRequestId) {
+      if (!askCapable || !decision.approvalRequestId) {
         return {
           exitCode: 0,
           output: preToolOutput("deny", "Manager approval polling is unavailable; blocked fail-closed."),
@@ -298,6 +397,11 @@ export async function runPolicyHook(
       }
       if (event !== "PreToolUse") {
         throw new Error("control plane returned an incomplete policy ask");
+      }
+      if (deps.signal?.aborted) {
+        // Nobody is left to print the answer. The parked approval stays with the control plane,
+        // which expires or supersedes it as it does when a file-form sidecar is killed mid-poll.
+        return { exitCode: 0, output: preToolOutput("deny", "Manager approval was abandoned by its hook.") };
       }
       const askDeadline = Number.isFinite(decision.expiresAt)
         ? Math.trunc(decision.expiresAt!)
@@ -314,6 +418,9 @@ export async function runPolicyHook(
       await sleep(askDeadline == null
         ? retryAfterMs
         : Math.min(retryAfterMs, Math.max(0, askDeadline - now())));
+      if (deps.signal?.aborted) {
+        return { exitCode: 0, output: preToolOutput("deny", "Manager approval was abandoned by its hook.") };
+      }
       if (askDeadline != null && now() >= askDeadline) {
         return {
           exitCode: 0,
@@ -343,7 +450,7 @@ export async function runPolicyHook(
     // The authoritative policy response must not be replaced by a deny merely because optional
     // circuit telemetry cannot be persisted (for example, a stranded lock or Windows file scan).
     try {
-      updateCircuit(circuitFile, true, now() - started, now());
+      updateCircuit(circuitStore, true, now() - started, now());
     } catch {
       /* A later transport failure will still fail closed and repair/open the circuit. */
     }
@@ -363,14 +470,14 @@ export async function runPolicyHook(
       output: preToolOutput("deny", decision.reason ?? "Blocked by manager policy."),
     };
   } catch {
-    if (circuitFile) {
+    if (transport) {
       try {
-        updateCircuit(circuitFile, false, 0, (deps.now ?? Date.now)());
+        updateCircuit(transport.circuit, false, 0, (deps.now ?? Date.now)());
       } catch {
         // A stale lock or persistence race must not strand an endlessly failing hook transport.
         // Conservatively open the breaker; the current PreToolUse event still fails closed below.
         try {
-          writeHookCircuitState(circuitFile, {
+          transport.circuit.write({
             consecutiveFailures: POLICY_HOOK_FAILURE_LIMIT,
             open: true,
             openedAt: (deps.now ?? Date.now)(),

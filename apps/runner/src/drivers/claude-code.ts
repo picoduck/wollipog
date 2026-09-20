@@ -583,6 +583,9 @@ export class ClaudeCodeDriver implements Driver {
   private managedWorktreeGuardActive = false;
   /** Runner-owned hook state directory for this spawn; the provider must not touch it. */
   private managedWorktreeGuardStateDirectory = "";
+  /** Also from the last `preparedBaseArgs()`: what the spawn's environment carries for the runner's
+   * own hooks (the relayed manager hook's key, #1472). Never part of the persisted launch env. */
+  private preparedHookEnv: Record<string, string> = {};
   /** The permission mode the RUNNING child emulates on the worktree veto's behalf, or null when it
    * was launched unmediated. Bound at spawn for the same reason as
    * `launchedRoutineControlChannelMode`: the worktree inventory now changes mid-turn by design
@@ -2084,7 +2087,7 @@ export class ClaudeCodeDriver implements Driver {
   }
 
   private childEnv(): Record<string, string> {
-    const env = { ...this.opts.env };
+    const env = { ...this.opts.env, ...this.preparedHookEnv };
     delete env[CLAUDE_PERSISTENT_FLAG];
     delete env[CLAUDE_PERSISTENT_IDLE_MS];
     delete env[CLAUDE_PENDING_MAX_MS];
@@ -2104,6 +2107,7 @@ export class ClaudeCodeDriver implements Driver {
    * transport circuit opens. The persisted base args remain intact for restart diagnostics. */
   private preparedBaseArgs(): string[] {
     const prepared = prepareClaudeHookArgs(this.opts.args);
+    this.preparedHookEnv = prepared.env ?? {};
     this.managedWorktreeGuardActive = prepared.guardActive;
     this.managedWorktreeGuardStateDirectory = prepared.guardStateDirectory ?? "";
     if (prepared.circuitOpen && !this.hookCircuitReported) {

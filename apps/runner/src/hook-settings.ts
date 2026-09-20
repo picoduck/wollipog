@@ -17,7 +17,7 @@ import {
   rmSync,
   statSync,
 } from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import type { AgentDefinition, ElicitationTransport, SessionLaunchSpec } from "@wollipog/protocol";
@@ -60,6 +60,11 @@ import {
 import { winQuoteArg } from "./spawn.js";
 import { readCompatibleEnv, type LegacyEnvironmentWarning } from "./env-compat.js";
 import { assertSafeSessionFileId, isSafeSessionFileId } from "./session-file-id.js";
+import {
+  POLICY_HOOK_RELAY_FLAG,
+  POLICY_HOOK_RELAY_KEY_ENV,
+  POLICY_HOOK_RELAY_SOCKET_FLAG,
+} from "./policy-hook-relay.js";
 
 export const CLAUDE_HOOKS_FLAG = "WOLLIPOG_CLAUDE_HOOKS";
 export const LEGACY_CLAUDE_HOOKS_FLAG = "MAM_CLAUDE_HOOKS";
@@ -96,6 +101,13 @@ const CLAUDE_HOOK_CIRCUIT_LOCK_STALE_MS = 5_000;
 
 export interface ClaudeHookHost extends RunnerReentryHost {
   configDir: string;
+  /**
+   * This runner keeps the manager policy hook's credential, acknowledgement, and circuit in its own
+   * memory and relays each hook event itself (#1472): a runner that does not sandbox its providers,
+   * on Linux, where the session's abstract verdict socket carries the relay. Everywhere else the
+   * hook keeps its files, which a runner-owned sandbox grants back to it (#1447).
+   */
+  managerHookRelay?: boolean;
 }
 
 type ClaudeHookLaunchSpec = Omit<Pick<
@@ -112,6 +124,37 @@ export interface HookCircuitState {
   probeStartedAt?: number;
   /** Explicit CP rejection defers until re-registration succeeds; it is not a transport failure. */
   credentialRejected?: boolean;
+}
+
+/**
+ * Where one session's circuit lives. The file form is shared between the runner and every hook
+ * sidecar, hence the lock; the memory form belongs to the runner process alone (#1472), where the
+ * event loop already serializes a read-modify-write.
+ */
+export interface HookCircuitStore {
+  read(): HookCircuitState;
+  write(state: HookCircuitState): void;
+  update(update: (prior: HookCircuitState) => HookCircuitState): HookCircuitState;
+}
+
+export function fileHookCircuitStore(file: string): HookCircuitStore {
+  return {
+    read: () => readHookCircuitState(file),
+    write: (state) => writeHookCircuitState(file, state),
+    update: (update) => updateHookCircuitState(file, update),
+  };
+}
+
+function memoryHookCircuitStore(): HookCircuitStore {
+  let state: HookCircuitState = { consecutiveFailures: 0, open: false };
+  return {
+    read: () => ({ ...state }),
+    write: (next) => { state = { ...next }; },
+    update: (update) => {
+      state = { ...update({ ...state }) };
+      return { ...state };
+    },
+  };
 }
 
 export function claudeHooksEnabled(
@@ -199,8 +242,16 @@ function validateInjectedArg(arg: string): void {
   }
 }
 
-function hookHandler(launch: { command: string; args: string[] }, event: string) {
-  const args = [...launch.args, "--hook-event", event];
+function hookHandler(
+  launch: { command: string; args: string[] },
+  event: string,
+  relay?: ClaudeManagerHookOptions["relay"],
+) {
+  const args = [
+    ...launch.args,
+    "--hook-event", event,
+    ...(relay ? [POLICY_HOOK_RELAY_FLAG, ...(relay.socket ? [POLICY_HOOK_RELAY_SOCKET_FLAG, relay.socket] : [])] : []),
+  ];
   validateInjectedArg(launch.command);
   for (const arg of args) validateInjectedArg(arg);
   // PreToolUse may park indefinitely while the SAME hook process waits for a human. Claude's
@@ -262,6 +313,12 @@ export interface ClaudeManagerHookOptions {
   cpHttpUrl: string;
   tokenFile: string;
   askCapable?: boolean;
+  /**
+   * The runner relays this session's hook events (#1472). The sidecar then reads no file at all.
+   * `socket` is the session's abstract verdict socket; like the guard's, it goes only into the
+   * document the runner holds in memory, never into the one written to disk.
+   */
+  relay?: { socket?: string };
 }
 
 /**
@@ -303,12 +360,12 @@ function claudeSettingsDocument(
         // The guard runs first; its refusal is the security property and must not depend on the
         // manager hook being enabled, reachable, or healthy.
         ...(guard ? [guardHookEntry(guard.launch, guard.protectionsFile, guard.socketPath)] : []),
-        ...(manager ? [{ hooks: [hookHandler(manager.launch, "PreToolUse")] }] : []),
+        ...(manager ? [{ hooks: [hookHandler(manager.launch, "PreToolUse", manager.relay)] }] : []),
       ],
       ...(manager
         ? {
-          PostToolUse: [{ hooks: [hookHandler(manager.launch, "PostToolUse")] }],
-          UserPromptSubmit: [{ hooks: [hookHandler(manager.launch, "UserPromptSubmit")] }],
+          PostToolUse: [{ hooks: [hookHandler(manager.launch, "PostToolUse", manager.relay)] }],
+          UserPromptSubmit: [{ hooks: [hookHandler(manager.launch, "UserPromptSubmit", manager.relay)] }],
         }
         : {}),
     },
@@ -338,6 +395,10 @@ export function writeClaudeSettingsSet(
   // and refuse every matched call rather than pass one.
   const memoryGuard = guard !== null && guardAnswersFromMemory(guard.socketPath);
   const diskGuard = memoryGuard ? { ...guard, socketPath: undefined } : guard;
+  // A relayed manager hook (#1472) follows the same rule: the socket it asks is in the memory-held
+  // document only. Launched from disk it would reach no runner and deny every tool call.
+  const relayedManager = manager?.relay?.socket !== undefined;
+  const diskManager = manager?.relay ? { ...manager, relay: {} } : manager;
   if (guard && diskGuard) {
     if (!preserveGuardState && !memoryGuard) {
       writeManagedWorktreeGuardProtections(guard.protectionsFile, guard.protections);
@@ -347,15 +408,20 @@ export function writeClaudeSettingsSet(
     rmSync(claudeHookGuardPath(file), { force: true });
     rmSync(claudeHookProtectionsPath(file), { force: true });
   }
-  if (memoryGuard) {
+  // A guard that does not answer from memory is left out of a memory-held document rather than
+  // carried into it: its list is a file, and the file form's tripwire and heal belong to the file
+  // form. That combination does not arise from the runner's own provisioning, where one abstract
+  // socket serves both.
+  const documentGuard = memoryGuard ? guard : null;
+  if (memoryGuard || relayedManager) {
     memorySettingsDocuments.set(resolve(file), {
-      combined: claudeSettingsDocument(file, manager, guard),
-      guardOnly: claudeSettingsDocument(file, null, guard),
+      combined: claudeSettingsDocument(file, manager, documentGuard),
+      guardOnly: documentGuard ? claudeSettingsDocument(file, null, documentGuard) : null,
     });
   } else if (guard || !preserveGuardState) {
     memorySettingsDocuments.delete(resolve(file));
   }
-  const contents = claudeSettingsDocument(file, manager, diskGuard);
+  const contents = claudeSettingsDocument(file, diskManager ?? null, diskGuard);
   protectedWrite(claudeHookTemplatePath(file), contents);
   protectedWrite(file, contents);
 }
@@ -389,6 +455,7 @@ export function removeClaudeHookFiles(sessionId: string, configDir = defaultHook
   compromisedGuardSessions.delete(sessionId);
   guardSockets.delete(sessionId);
   guardMemoryLists.delete(sessionId);
+  managerHookMemory.delete(sessionId);
   try {
     const settings = claudeHookSettingsPath(configDir, sessionId);
     memorySettingsDocuments.delete(resolve(settings));
@@ -833,7 +900,7 @@ export function provisionClaudeHooks(
   const carriedGuard: ClaudeGuardHookOptions | null = preserveGuardState &&
       !compromisedGuardSessions.has(spec.sessionId) &&
       (guardAnswersFromMemory(socketPath)
-        ? memorySettingsDocuments.has(resolve(file)) && guardMemoryLists.has(spec.sessionId)
+        ? memorySettingsDocuments.get(resolve(file))?.guardOnly != null && guardMemoryLists.has(spec.sessionId)
         : describeManagedSettings(file)?.guard === true &&
           guardStatePresent(claudeHookProtectionsPath(file)))
     ? {
@@ -846,10 +913,33 @@ export function provisionClaudeHooks(
     : null;
   // `managerHooksBlocked` already rejected a null/too-old control plane.
   const protocolVersion = config.controlPlaneProtocolVersion ?? 0;
-  const circuit = readHookCircuitState(claudeHookCircuitPath(file));
+  // Relayed (#1472) whenever this runner relays at all and the session's abstract socket is known.
+  // A call that does not know the live worktree set does not know the socket either (the
+  // pre-authorization `start_session` provisioning, which precedes the first socket): it keeps the
+  // state in memory too, so that no credential is written to disk on the way to a relayed launch.
+  // A launch whose socket could not be created or proven keeps the file form, as its guard does.
+  const relaySocket = guardAnswersFromMemory(socketPath) ? socketPath : undefined;
+  const relayed = host.managerHookRelay === true && (relaySocket !== undefined || !guardRequested)
+    ? ensureManagerHookMemory(
+      spec.sessionId,
+      deriveCpHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport),
+      protocolVersion >= 66,
+    )
+    : undefined;
+  if (relayed) {
+    // Left by an earlier file-form provisioning: a superseded credential, and a circuit that is no
+    // longer consulted. Anything planted there later is simply never read.
+    discardManagerHookFiles(file);
+  } else {
+    managerHookMemory.delete(spec.sessionId);
+  }
+  const relayOption: Pick<ClaudeManagerHookOptions, "relay"> = relayed
+    ? { relay: relaySocket ? { socket: relaySocket } : {} }
+    : {};
+  const circuit = (relayed?.circuit ?? fileHookCircuitStore(claudeHookCircuitPath(file))).read();
   if (circuit.open && !circuit.credentialRejected) {
     stripHookFromLaunchCapability(spec);
-    const managedSettingsExist = describeManagedSettings(file)?.manager === true;
+    const managedSettingsExist = relayed ? relayed.provisioned : describeManagedSettings(file)?.manager === true;
     if (managedSettingsExist || guard) {
       // A rolling downgrade can happen while the circuit is open. Refresh the non-secret v66
       // marker before returning so a later Phase 3b recovery cannot resurrect Phase 4 elicitation.
@@ -863,6 +953,7 @@ export function provisionClaudeHooks(
             cpHttpUrl: deriveCpHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport),
             tokenFile: claudeHookTokenPath(file),
             askCapable: protocolVersion >= 66,
+            ...relayOption,
           }
           : null,
         guard ?? carriedGuard,
@@ -877,6 +968,29 @@ export function provisionClaudeHooks(
   }
 
   const tokenFile = claudeHookTokenPath(file);
+  if (relayed) {
+    // Registered at every provisioning, as the file form does; the acknowledgement arrives as
+    // `markClaudeHookCredentialReady` and the relay waits for it before its first request.
+    config.registerCredential?.(spec.sessionId, relayed.tokenHash);
+    writeClaudeSettingsSet(file, {
+      sessionId: spec.sessionId,
+      launch: runnerReentryCommand(host, "--policy-hook"),
+      cpHttpUrl: relayed.cpHttpUrl,
+      tokenFile,
+      askCapable: protocolVersion >= 66,
+      ...relayOption,
+    }, guard ?? carriedGuard, preserveGuardState);
+    relayed.provisioned = true;
+    if (!hasCurrentSettings) {
+      spec.args.push("--settings", file);
+      log(`Claude hooks ${spec.sessionId}: policy transport provisioned, relayed by the runner (${file})`);
+    } else {
+      log(`Claude hooks ${spec.sessionId}: settings refreshed ${file}`);
+    }
+    if (protocolVersion >= 66) advertiseHookForLaunchCapability(spec);
+    else stripHookFromLaunchCapability(spec);
+    return;
+  }
   let token = "";
   try {
     if (existsSync(tokenFile) && !lstatSync(tokenFile).isSymbolicLink()) {
@@ -992,9 +1106,69 @@ const guardMemoryLists = new Map<string, ManagedWorktreeProtection[]>();
  * persisted `--settings` argument names. `prepareClaudeHookArgs` hands Claude one of them INLINE, so
  * the hook command comes from runner memory as well, and the file at that path is never opened.
  */
-const memorySettingsDocuments = new Map<string, { combined: string; guardOnly: string }>();
+const memorySettingsDocuments = new Map<string, { combined: string; guardOnly: string | null }>();
 
 /** An abstract-namespace address: the list and the settings live in runner memory. */
+/**
+ * The manager policy hook's state for a session whose hook events the runner relays (#1472): what
+ * the file form keeps in the token, ready, circuit, and circuit-lock files. Nothing here is ever
+ * written to disk, and nothing on disk is read in its place. A runner restart forgets it; the next
+ * provisioning mints and registers a fresh credential, exactly as it does after the startup sweep
+ * removes the files.
+ */
+interface ManagerHookMemoryState {
+  token: string;
+  tokenHash: string;
+  /** The control plane acknowledged `tokenHash`; the file form's ready file. */
+  ready: boolean;
+  circuit: HookCircuitStore;
+  /** Authenticates a relay request as coming from this session's provider process tree. */
+  relayKey: string;
+  cpHttpUrl: string;
+  askCapable: boolean;
+  /** A settings document carrying the manager hooks was written for this state. */
+  provisioned: boolean;
+}
+const managerHookMemory = new Map<string, ManagerHookMemoryState>();
+
+function ensureManagerHookMemory(sessionId: string, cpHttpUrl: string, askCapable: boolean): ManagerHookMemoryState {
+  let state = managerHookMemory.get(sessionId);
+  if (!state) {
+    const token = `${POLICY_HOOK_CREDENTIAL_PREFIX}${randomBytes(32).toString("base64url")}`;
+    state = {
+      token,
+      tokenHash: createHash("sha256").update(token).digest("hex"),
+      ready: false,
+      circuit: memoryHookCircuitStore(),
+      relayKey: randomBytes(32).toString("base64url"),
+      cpHttpUrl,
+      askCapable,
+      provisioned: false,
+    };
+    managerHookMemory.set(sessionId, state);
+  }
+  state.cpHttpUrl = cpHttpUrl;
+  state.askCapable = askCapable;
+  return state;
+}
+
+/** The file form's manager hook state, which a relayed session neither writes nor reads. */
+function discardManagerHookFiles(settingsFile: string): void {
+  const circuit = claudeHookCircuitPath(settingsFile);
+  for (const file of [
+    claudeHookTokenPath(settingsFile),
+    claudeHookReadyPath(settingsFile),
+    circuit,
+    claudeHookCircuitLockPath(circuit),
+  ]) {
+    try {
+      rmSync(file, { force: true });
+    } catch {
+      /* Not an authority either way; a directory planted at the path is left where it is. */
+    }
+  }
+}
+
 function guardAnswersFromMemory(socket: string | undefined): boolean {
   return socket?.startsWith(MANAGED_WORKTREE_GUARD_ABSTRACT_PREFIX) === true;
 }
@@ -1018,7 +1192,45 @@ export function managedWorktreeGuardMemoryProtections(sessionId: string): Manage
 }
 
 /** Testing seam: forget every remembered guard-state digest and compromise marker. */
+/** What a relayed hook evaluation runs against, for the request that presents this session's key. */
+export interface ManagerHookRelayState {
+  sessionId: string;
+  cpHttpUrl: string;
+  token: string;
+  askCapable: boolean;
+  circuit: HookCircuitStore;
+  credentialReady: () => boolean;
+}
+
+/**
+ * `null` for a session the runner does not relay for and for a wrong key alike. A request that gets
+ * `null` must reach neither the control plane nor the circuit: the socket has no permission bits,
+ * and an unauthenticated caller must not be able to open it.
+ */
+export function managerHookRelayState(sessionId: string, key: string): ManagerHookRelayState | null {
+  const state = managerHookMemory.get(sessionId);
+  if (!state) return null;
+  const presented = createHash("sha256").update(key).digest();
+  const expected = createHash("sha256").update(state.relayKey).digest();
+  if (!timingSafeEqual(presented, expected)) return null;
+  const { token, tokenHash } = state;
+  return {
+    sessionId,
+    cpHttpUrl: state.cpHttpUrl,
+    token,
+    askCapable: state.askCapable,
+    circuit: state.circuit,
+    // Read live, and bound to the credential this evaluation presents: a rotation in between must
+    // not let the acknowledgement of the new hash vouch for the old token.
+    credentialReady: () => {
+      const current = managerHookMemory.get(sessionId);
+      return current !== undefined && current.ready && current.tokenHash === tokenHash;
+    },
+  };
+}
+
 export function resetClaudeGuardState(): void {
+  managerHookMemory.clear();
   guardStateDigests.clear();
   compromisedGuardSessions.clear();
   verifiedGuardLaunches.clear();
@@ -1281,6 +1493,15 @@ export function markClaudeHookCredentialReady(
   tokenHash: string,
 ): void {
   if (!/^[0-9a-f]{64}$/u.test(tokenHash)) throw new Error("invalid policy-hook credential hash");
+  const relayed = managerHookMemory.get(sessionId);
+  if (relayed) {
+    // An acknowledgement of a hash the runner no longer holds (a rotation overtook it) readies
+    // nothing; the file form gets the same effect from the sidecar comparing the ready file.
+    if (relayed.tokenHash !== tokenHash) return;
+    if (relayed.circuit.read().credentialRejected) relayed.circuit.write({ consecutiveFailures: 0, open: false });
+    relayed.ready = true;
+    return;
+  }
   const settings = claudeHookSettingsPath(configDir, sessionId);
   const circuitFile = claudeHookCircuitPath(settings);
   const circuit = readHookCircuitState(circuitFile);
@@ -1296,24 +1517,31 @@ export function markClaudeHookCredentialRejected(
   sessionId: string,
   now = Date.now(),
 ): HookCircuitState {
-  const settings = claudeHookSettingsPath(configDir, sessionId);
-  rmSync(claudeHookReadyPath(settings), { force: true });
   const state: HookCircuitState = {
     consecutiveFailures: 3,
     open: true,
     openedAt: now,
     credentialRejected: true,
   };
+  const relayed = managerHookMemory.get(sessionId);
+  if (relayed) {
+    relayed.ready = false;
+    relayed.circuit.write(state);
+    return state;
+  }
+  const settings = claudeHookSettingsPath(configDir, sessionId);
+  rmSync(claudeHookReadyPath(settings), { force: true });
   writeHookCircuitState(claudeHookCircuitPath(settings), state);
   return state;
 }
 
 /** Close an expired circuit for one bounded half-open re-probe. */
 export function claimExpiredHookCircuitProbe(
-  file: string,
+  circuit: string | HookCircuitStore,
   now = Date.now(),
 ): { state: HookCircuitState; recoveredFrom?: number; probeInProgress: boolean } {
-  const snapshot = readHookCircuitState(file);
+  const store = typeof circuit === "string" ? fileHookCircuitStore(circuit) : circuit;
+  const snapshot = store.read();
   if (snapshot.credentialRejected) {
     return { state: snapshot, probeInProgress: false };
   }
@@ -1326,7 +1554,7 @@ export function claimExpiredHookCircuitProbe(
   }
   let recoveredFrom: number | undefined;
   let probeInProgress = false;
-  const state = updateHookCircuitState(file, (prior) => {
+  const state = store.update((prior) => {
     if (prior.probeStartedAt != null) {
       if (now - prior.probeStartedAt < CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS) {
         probeInProgress = true;
@@ -1373,6 +1601,12 @@ export interface PreparedClaudeHookArgs {
    * driver mirrors the guard's own-state veto on the control channel with it.
    */
   guardStateDirectory?: string;
+  /**
+   * What this spawn's environment must carry besides the launch's own: the relay key of a session
+   * whose manager hook events the runner relays (#1472). It belongs in the environment and never
+   * in the argv, which every local user can read.
+   */
+  env?: Record<string, string>;
 }
 
 /**
@@ -1538,24 +1772,42 @@ export const MAX_INLINE_SETTINGS_BYTES = 96 * 1024;
  * For the spawn itself that path is replaced by the document the runner holds, passed inline
  * (`--settings <json>`, measured on claude 2.1.278), so Claude never opens a file in the hook state
  * directory and nothing written there can change the hook command it runs. Nothing is healed,
- * because nothing on disk is launched. The manager hook's circuit is the one thing still read from
- * disk: it only chooses between the combined document and the guard-only one, and both carry the
- * guard.
+ * because nothing on disk is launched. The manager hook's circuit chooses between the combined
+ * document and the guard-only one. Where the runner relays that hook (#1472) the circuit is in
+ * memory as well; the file form's is still read from disk, and both documents carry the guard.
  */
 function prepareMemorySettingsArgs(
   args: string[],
   index: number,
   file: string,
-  memory: { combined: string; guardOnly: string },
+  memory: { combined: string; guardOnly: string | null },
   now: number,
 ): PreparedClaudeHookArgs {
   const guardStateDirectory = dirname(resolve(file));
-  const circuit = readHookCircuitState(claudeHookCircuitPath(file));
+  // A relayed manager hook (#1472) keeps its circuit in runner memory, so for that session nothing
+  // at all is read from disk here, and a circuit file written there selects nothing.
+  const relayed = managerHookMemory.get(basename(file).slice(0, -SETTINGS_SUFFIX.length));
+  const circuit = (relayed?.circuit ?? fileHookCircuitStore(claudeHookCircuitPath(file))).read();
   const reprobePending = circuit.open && circuit.openedAt != null &&
     now - circuit.openedAt >= CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS;
   const circuitHolds = (circuit.open && !reprobePending) || circuit.probeStartedAt != null;
+  const hasGuard = memory.guardOnly !== null;
   const document = circuitHolds ? memory.guardOnly : memory.combined;
-  if (!claudeGuardStateTrusted(file) || Buffer.byteLength(document, "utf8") > MAX_INLINE_SETTINGS_BYTES) {
+  if (document === null) {
+    // The manager hooks are out for this spawn and the document carries nothing else.
+    return {
+      args: [...args.slice(0, index), ...args.slice(index + 2)],
+      circuitOpen: true,
+      circuitReprobePending: false,
+      ...(circuit.openedAt != null ? { circuitOpenedAt: circuit.openedAt } : {}),
+      hookAskCapable: false,
+      healed: false,
+      guardActive: false,
+      guardStateDirectory,
+    };
+  }
+  if ((hasGuard && !claudeGuardStateTrusted(file)) ||
+      Buffer.byteLength(document, "utf8") > MAX_INLINE_SETTINGS_BYTES) {
     return {
       args: [...args.slice(0, index), ...args.slice(index + 2)],
       circuitOpen: circuit.open,
@@ -1581,8 +1833,13 @@ function prepareMemorySettingsArgs(
     ...((circuitHolds || reprobePending) && circuit.openedAt != null ? { circuitOpenedAt: circuit.openedAt } : {}),
     hookAskCapable,
     healed: false,
-    guardActive: true,
+    guardActive: hasGuard,
     guardStateDirectory,
+    // Only a spawn that carries the relayed hooks is handed the key to use them. The state outlives
+    // a launch for which the manager hooks were blocked, so the document itself is what is asked.
+    ...(relayed && !circuitHolds && document.includes(`"${POLICY_HOOK_RELAY_FLAG}"`)
+      ? { env: { [POLICY_HOOK_RELAY_KEY_ENV]: relayed.relayKey } }
+      : {}),
   };
 }
 
