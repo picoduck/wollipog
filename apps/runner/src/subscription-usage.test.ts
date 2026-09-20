@@ -1268,6 +1268,62 @@ test("an unbound WSL agent keeps its legacy source beside same-provider accounts
   ]);
 });
 
+test("an incompatible account context stays unsupported without spawning a usage probe", async () => {
+  const wsl = {
+    ...agent(),
+    id: "codex-wsl",
+    context: { kind: "wsl" as const, distro: "Ubuntu" },
+    defaultProviderAccountId: "work",
+  };
+  let authorized = 0;
+  let probed = 0;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [wsl],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+    ],
+    resolveProviderAccountAgent: () => undefined,
+    resolveEnv: () => ({ CODEX_HOME: "C:\\credentials\\work" }),
+    authorizeProbe: () => { authorized++; return { cwd: "/safe/subscription-probe" }; },
+    probeCodex: async () => { probed++; return { state: "unavailable" }; },
+    publish: () => {},
+    now: () => 20_000,
+  });
+
+  await manager.refreshAccount("work");
+  const first = manager.inventory()[0];
+  assert.equal(first?.state, "unsupported");
+  assert.equal(first?.providerAccountId, "work");
+  assert.match(first?.detail ?? "", /compatible provider execution context/);
+  assert.doesNotMatch(first?.detail ?? "", /credentials|[A-Z]:\\\\/);
+  await manager.refreshAccount("work");
+  assert.deepEqual(manager.inventory()[0], first, "manual refresh retains the stable unsupported snapshot");
+  assert.equal(authorized, 0);
+  assert.equal(probed, 0);
+});
+
+test("a configured account uses the compatible context resolved by the runner", () => {
+  const native = agent();
+  const wsl = agent({ id: "codex-wsl", context: { kind: "wsl", distro: "Ubuntu" } });
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [native, wsl],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+    ],
+    resolveProviderAccountAgent: () => wsl,
+    resolveEnv: () => ({ CODEX_HOME: "/home/operator/.codex-work" }),
+    publish: () => {},
+  });
+
+  manager.syncSources();
+  assert.deepEqual(manager.inventory().map((snapshot) => [snapshot.agentId, snapshot.providerAccountId]), [
+    ["codex", undefined],
+    ["codex-wsl", "work"],
+  ], "the selected WSL account source remains distinct from the native legacy scope");
+});
+
 test("a failed account refresh preserves the configured label over provider identity", async () => {
   const manager = new SubscriptionUsageManager({
     runnerId: "runner-1",
