@@ -28,10 +28,14 @@ import {
   codexGuardConfigOverride,
   codexHookInventoryProbe,
   codexHookInventoryVerdict,
+  codexHookIsolationVerdict,
+  codexHookStateDisableOverride,
   readCodexHookInventory,
+  withoutCodexHooksFeatureDisable,
   type CodexHookEntry,
   type CodexHookInventoryProbe,
 } from "./codex-managed-worktree-guard.js";
+import { orchestratorLaunchArgs } from "./orchestrator-preset.js";
 import {
   claudeHookSessionProtectionsPath,
   refreshClaudeGuardProtections,
@@ -614,5 +618,217 @@ test("against the installed codex, the override installs an enabled session-flag
     ));
     const verdict = codexHookInventoryVerdict(attached, codexGuardCommandString(launch));
     assert.equal(verdict.ok, false);
+  });
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * Issue #1473: the Orchestrator preset's Codex TUI carries the guard without any user hook.
+ * ------------------------------------------------------------------------------------------ */
+
+const CODEX_PRESET_ARGS = orchestratorLaunchArgs("codex", { command: "/runner", args: ["--agent-control-mcp"], env: {} }, ["/repo"]);
+
+function orchestratorMeta(overrides: Partial<SessionMeta> = {}): SessionMeta {
+  return meta({
+    sessionId: "s1473",
+    worktreePath: undefined,
+    args: [...CODEX_PRESET_ARGS],
+    config: { permissionMode: "orchestrator" },
+    orchestrator: { strictProjectIsolation: true },
+    ...overrides,
+  });
+}
+
+/** The Orchestrator branch of `prepareAgentTuiLaunch` prepares scratch, provisions Agent Control,
+ * and probes MCP servers; none of that is under test here, so each is the smallest stand-in. */
+function orchestratorDependencies(
+  configDir: string,
+  options: Parameters<typeof dependencies>[1] = {},
+  harness: Harness = { probes: [], logs: [] },
+) {
+  return {
+    ...dependencies(configDir, options, harness),
+    executionIsolationMode: "bwrap" as const,
+    prepareScratch: async () => "/scratch",
+    provision: () => {},
+    probe: async () => [] as string[],
+  };
+}
+
+function stateOverrideOf(args: readonly string[]): string | null {
+  const index = args.findIndex((arg, i) => i > 0 && args[i - 1] === "-c" && arg.startsWith("hooks.state="));
+  return index >= 0 ? args[index]! : null;
+}
+
+function hasHooksDisable(args: readonly string[]): boolean {
+  return args.some((arg, i) => (arg === "--disable" && args[i + 1] === "hooks") || arg === "--disable=hooks");
+}
+
+test("a Codex Orchestrator TUI drops --disable hooks, disables every foreign hook by key, and carries the guard (#1473)", async () => {
+  await withDir(async (dir) => {
+    const harness: Harness = { probes: [], logs: [] };
+    const foreign = [
+      { key: "/home/u/.codex/config.toml:pre_tool_use:0:0", trustStatus: "trusted", command: "/home/u/t.sh" },
+      { key: "/repo/.codex/config.toml:post_tool_use:0:0", trustStatus: "untrusted", command: "/repo/u.sh" },
+    ];
+    const source = orchestratorMeta();
+    const launch = await prepareAgentTuiLaunch(source, orchestratorDependencies(dir, {
+      protections: [],
+      inventory: (probe) => {
+        // Codex honours the runner's per-key disable override; the probe reads that back.
+        const disabled = !!stateOverrideOf(probe.args);
+        return [
+          runnerHookEntry(probe),
+          ...foreign.map((entry) => ({ ...entry, enabled: !disabled, source: "user" })),
+          { key: "already-off", enabled: false, trustStatus: "trusted", command: "/x.sh" },
+        ];
+      },
+    }, harness));
+
+    assert.ok(launch);
+    assert.deepEqual(launch.managedWorktreeGuard, { active: true });
+    const override = overrideArgument(launch.args);
+    assert.ok(override && codexGuardArgsActive(launch.args, override));
+    // The preset's flag is gone from the guarded launch, and ONLY the hooks feature flag is.
+    assert.equal(hasHooksDisable(launch.args), false);
+    for (const feature of ["apps", "plugins", "multi_agent"]) {
+      assert.equal(launch.args[launch.args.indexOf(feature) - 1], "--disable", `${feature} stays disabled`);
+    }
+    assert.ok(launch.args.includes("--strict-config"));
+    // Every enabled foreign hook is named in the per-invocation disable override, trusted or not.
+    const state = stateOverrideOf(launch.args);
+    assert.equal(state,
+      'hooks.state={"/home/u/.codex/config.toml:pre_tool_use:0:0"={enabled=false},"/repo/.codex/config.toml:post_tool_use:0:0"={enabled=false}}');
+    assert.ok(launch.args.indexOf(state!) < launch.args.indexOf(override!), "the guard override stays last");
+    // Two enumerations: one to find the foreign hooks, one to prove they are off. Neither replays
+    // the dropped flag, and the second replays the disable override.
+    assert.equal(harness.probes.length, 2);
+    for (const probe of harness.probes) assert.equal(hasHooksDisable(probe.args), false);
+    assert.equal(stateOverrideOf(harness.probes[0]!.args), null);
+    assert.equal(stateOverrideOf(harness.probes[1]!.args), state);
+    // Durable metadata still says what the preset wrote.
+    assert.ok(hasHooksDisable(source.args));
+  });
+});
+
+test("a Codex Orchestrator TUI with no foreign hook is guarded after a single enumeration (#1473)", async () => {
+  await withDir(async (dir) => {
+    const harness: Harness = { probes: [], logs: [] };
+    const launch = await prepareAgentTuiLaunch(orchestratorMeta(), orchestratorDependencies(dir, { protections: [] }, harness));
+    assert.ok(launch);
+    assert.deepEqual(launch.managedWorktreeGuard, { active: true });
+    assert.equal(harness.probes.length, 1);
+    assert.equal(hasHooksDisable(launch.args), false);
+    assert.equal(stateOverrideOf(launch.args), null);
+  });
+});
+
+test("a Codex Orchestrator TUI whose foreign hook stays enabled keeps --disable hooks and no guard, and is refused with something to protect (#1473)", async () => {
+  await withDir(async (dir) => {
+    const stubborn = { key: "/home/u/.codex/config.toml:pre_tool_use:0:0", enabled: true, trustStatus: "trusted", command: "/home/u/t.sh" };
+    const harness: Harness = { probes: [], logs: [] };
+    const source = orchestratorMeta();
+    // Nothing to protect yet: opened exactly as the preset wrote it, hooks feature off, no bypass.
+    const launch = await prepareAgentTuiLaunch(source, orchestratorDependencies(dir, {
+      protections: [],
+      inventory: (probe) => [runnerHookEntry(probe), stubborn],
+    }, harness));
+    assert.ok(launch);
+    assert.equal(harness.probes.length, 2, "the disable override was tried and read back");
+    assert.equal(launch.managedWorktreeGuard?.active, false);
+    assert.match(launch.managedWorktreeGuard?.reason ?? "", /Orchestrator launch/u);
+    assert.ok(launch.managedWorktreeGuard?.reason?.includes(stubborn.key));
+    assert.deepEqual(launch.args, source.args, "the preset's own argv, --disable hooks included");
+    assert.ok(hasHooksDisable(launch.args));
+    assert.ok(!launch.args.includes(CODEX_HOOK_TRUST_BYPASS_FLAG));
+
+    // With a descendant's worktree to protect, an unguarded Orchestrator TUI is refused instead.
+    await assert.rejects(
+      prepareAgentTuiLaunch(orchestratorMeta(), orchestratorDependencies(dir, {
+        inventory: (probe) => [runnerHookEntry(probe), stubborn],
+      })),
+      /Native TUI is unavailable.*Orchestrator launch/su,
+    );
+  });
+});
+
+test("a foreign hook whose key the override cannot spell leaves the Codex Orchestrator TUI as the preset wrote it (#1473)", async () => {
+  await withDir(async (dir) => {
+    const harness: Harness = { probes: [], logs: [] };
+    const source = orchestratorMeta();
+    const launch = await prepareAgentTuiLaunch(source, orchestratorDependencies(dir, {
+      protections: [],
+      inventory: (probe) => [
+        runnerHookEntry(probe),
+        { key: "/home/u/odd\nname/config.toml:pre_tool_use:0:0", enabled: true, trustStatus: "trusted", command: "/x.sh" },
+      ],
+    }, harness));
+    assert.ok(launch);
+    assert.equal(launch.managedWorktreeGuard?.active, false);
+    assert.match(launch.managedWorktreeGuard?.reason ?? "", /could not be disabled.*control character/u);
+    assert.deepEqual(launch.args, source.args);
+    assert.equal(harness.probes.length, 1, "no second enumeration was attempted");
+  });
+});
+
+test("an ordinary Codex TUI still admits a trusted foreign hook and never rewrites --disable hooks (#1473)", async () => {
+  await withDir(async (dir) => {
+    const harness: Harness = { probes: [], logs: [] };
+    const launch = await prepareAgentTuiLaunch(meta({ args: ["--disable", "hooks"] }), dependencies(dir, {
+      inventory: (probe) => [
+        { ...runnerHookEntry(probe), enabled: false },
+        { key: "trusted", enabled: true, trustStatus: "trusted", command: "/t.sh" },
+      ],
+    }, harness)).catch((error: Error) => error);
+    // The person's own `--disable hooks` disables the runner's hook too, which the ordinary rule
+    // reports as such — it is not rewritten for them.
+    assert.ok(launch instanceof Error);
+    assert.match(launch.message, /reports the runner's PreToolUse hook as disabled/u);
+    assert.equal(harness.probes.length, 1);
+    assert.ok(hasHooksDisable(harness.probes[0]!.args));
+  });
+});
+
+test("the isolation verdict refuses any enabled hook beside the runner's, and the disable override is one inline table (#1473)", () => {
+  const ours = "/usr/bin/node /r/cli.ts --managed-worktree-guard --protections /p.json";
+  const runner: CodexHookEntry = { key: "/<session-flags>/config.toml:pre_tool_use:0:0", enabled: true, trustStatus: "untrusted", command: ours };
+  assert.deepEqual(codexHookIsolationVerdict([runner], ours), { ok: true });
+  assert.deepEqual(codexHookIsolationVerdict([runner, { key: "off", enabled: false, trustStatus: "trusted", command: "/x" }], ours), { ok: true });
+  const trusted = codexHookIsolationVerdict([runner, { key: "k1", enabled: true, trustStatus: "trusted", command: "/x" }], ours);
+  assert.equal(trusted.ok, false);
+  assert.match((trusted as { reason: string }).reason, /Orchestrator launch: k1/u);
+  // The ordinary verdicts still come first: an absent or disabled runner hook is reported as such.
+  assert.match((codexHookIsolationVerdict([], ours) as { reason: string }).reason, /did not install/u);
+  assert.equal(codexHookStateDisableOverride(["a:0:0", 'q"uote']), 'hooks.state={"a:0:0"={enabled=false},"q\\"uote"={enabled=false}}');
+  assert.throws(() => codexHookStateDisableOverride(["bad\nkey"]), /control character/u);
+  assert.deepEqual(withoutCodexHooksFeatureDisable(["--strict-config", "--disable", "hooks", "--disable=hooks", "--disable", "apps", "--", "--disable", "hooks"]),
+    ["--strict-config", "--disable", "apps", "--", "--disable", "hooks"]);
+});
+
+test("against the installed codex, a foreign hook is disabled for the invocation by the state override (#1473)", {
+  skip: installedCodex.status !== 0 ? "codex is not installed" : false,
+}, async () => {
+  await withDir(async (dir) => {
+    // A throwaway CODEX_HOME carrying a user hook of its own, so the inventory has a foreign entry.
+    const home = join(dir, "codex-home");
+    mkdirSync(home);
+    writeFileSync(join(home, "config.toml"),
+      '[[hooks.PreToolUse]]\nmatcher = "Bash"\n[[hooks.PreToolUse.hooks]]\ntype = "command"\ncommand = "/bin/true"\n');
+    const launch = { command: "/bin/true", args: [MANAGED_WORKTREE_GUARD_MODE, "--protections", join(dir, "p.json")] };
+    const override = codexGuardConfigOverride(launch);
+    const ours = codexGuardCommandString(launch);
+    const entries = await readCodexHookInventory(codexHookInventoryProbe(
+      { command: "codex", args: [], env: { CODEX_HOME: home } }, dir, override,
+    ));
+    const foreign = entries.filter((entry) => entry.enabled && entry.command !== ours);
+    assert.equal(foreign.length, 1);
+    assert.equal(foreign[0]!.source, "user");
+    assert.equal(codexHookIsolationVerdict(entries, ours).ok, false);
+    const disabled = await readCodexHookInventory(codexHookInventoryProbe(
+      { command: "codex", args: ["-c", codexHookStateDisableOverride(foreign.map((entry) => entry.key))], env: { CODEX_HOME: home } },
+      dir, override,
+    ));
+    assert.deepEqual(codexHookIsolationVerdict(disabled, ours), { ok: true });
+    assert.equal(disabled.find((entry) => entry.key === foreign[0]!.key)?.enabled, false);
+    assert.equal(disabled.find((entry) => entry.command === ours)?.enabled, true);
   });
 });

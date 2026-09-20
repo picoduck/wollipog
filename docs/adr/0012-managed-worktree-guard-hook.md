@@ -368,6 +368,67 @@ call, naming the denied path. Indirection through a script still ran and still h
   resumed `codex exec` turn pass no `-s`, so what they had is Codex's configured default, not the
   session's structured mode. They are compared with that default and migrate only as `:workspace`.
 
+## Measurements (claude 2.1.278 and codex-cli 0.155.1, this machine, 2026-09-19): the Orchestrator preset
+
+Can the Orchestrator preset carry the guard while keeping every user hook out (#1473)? The preset
+excluded user hooks with `--settings '{"disableAllHooks":true}'` (Claude) and `--disable hooks`
+(Codex), and both excluded the runner's guard with them.
+
+Claude, in a throwaway project holding a project `.claude/settings.json` `PreToolUse` hook and a
+`.claude/settings.local.json` one, with the real user config (twelve enabled plugins, whose
+`SessionStart` and `PreToolUse` hooks are the user-scope probe) and, for the user-scope
+`settings.json` case, a throwaway `CLAUDE_CONFIG_DIR` whose `SessionStart` hook fires before the
+login check. Each run asked for two Bash calls, the second naming `PROTECTED`, against an inline
+`--settings` document whose `PreToolUse` hook exits 2 on that word:
+
+| Flags | Hooks that ran | Protected call |
+| --- | --- | --- |
+| `--setting-sources "" --settings '{"disableAllHooks":true}'` (the old preset) | none | ran |
+| `--setting-sources "" --settings <inline guard>` | the inline guard only, twice | blocked |
+| `--settings <inline guard>` (sources left alone) | inline, project, local, and plugin hooks | blocked |
+| `--setting-sources "" --settings <inline guard + disableAllHooks>` | none | ran |
+| throwaway `CLAUDE_CONFIG_DIR`, `--settings <inline>` | user-scope and inline | — |
+| same, `--setting-sources ""` | inline only | — |
+
+So `--setting-sources ""` alone drops the user, project, and local sources and the hooks of
+plugins enabled there, and the inline document still runs. End to end with the preset's exact
+argv (from `orchestratorLaunchArgs`, plus the removal added to `--allowedTools` so that `dontAsk`
+could not refuse it first), the runner's real sidecar in a runner-shaped document, and a real
+worktree in the list: from a scratch directory, `git -C <repo> status --short` ran and
+`git -C <repo> worktree remove --force <worktree>` was refused with the managed-worktree refusal,
+the worktree stayed, and a project hook planted in the scratch directory never fired. The same
+argv with the old `disableAllHooks` document ran both commands, no hook fired, and the worktree
+was gone.
+
+Codex, in a throwaway `CODEX_HOME` with a user `config.toml` `PreToolUse` hook and a trusted
+project with a `.codex/config.toml` one, over `hooks/list`:
+
+- `--disable hooks` beside the runner's `-c hooks.PreToolUse=` override lists NO hook: the flag
+  takes the guard down with the user's, so the #1438 probe for a preset launch had a fixed answer.
+- Without the flag all three are listed, the user's two `enabled`/`untrusted`.
+- A per-hook disable exists and can be passed from argv, in ONE spelling. The INLINE TABLE
+  `-c 'hooks.state={"<key>"={enabled=false},…}'` lists the named hooks as `enabled: false` and
+  leaves the runner's untouched; the dotted `-c 'hooks.state."<key>".enabled=false'` is accepted
+  and changes nothing, because the key itself contains dots. A launch that used the wrong spelling
+  would have looked configured and been fail-open, so the inventory is read back after the
+  override rather than trusted.
+- Under `--strict-config`, which the preset passes, both overrides are accepted.
+- Not needed here but recorded: `-c 'hooks.state={"<session-flags key>"={trusted_hash="<currentHash>"}}'`
+  makes the runner's session-flags hook report `trustStatus: trusted` in the inventory. Whether
+  Codex then RUNS it without `--dangerously-bypass-hook-trust` was not measured. If it does, the
+  invocation-wide bypass #1377 had to accept could be retired for every Codex TUI, and #1377's
+  "no way to persist trust for a session-flags hook" was one spelling short.
+
+End to end against the real `CODEX_HOME` (read-only; credentials used the ordinary way), with
+`codex exec`, the preset's shape minus `--disable hooks`, the runner's real sidecar over a real
+worktree, a project hook planted in the scratch directory, and the trust bypass: with the project
+hook disabled by key the removal was refused (`blocked by PreToolUse hook: Wollipog protects this
+runner-owned worktree…`), `git status` ran, the worktree stayed, and the project hook never ran. In
+the control WITHOUT the disable override — the bypass alone, which is what the ordinary #1377
+rule would pass for a trusted hook — the project hook ran alongside the guard. That is the
+isolation the preset promises not to give up, and why an Orchestrator launch demands an inventory
+with no enabled hook but the runner's.
+
 ## Fail closed, and the fail-safe
 
 Two different failure domains, two different answers:
@@ -803,6 +864,50 @@ control-channel veto keeps reading the live inventory.
   - Everything above rests on Codex hook behaviour measured at codex-cli 0.155.1. The inventory
     check fails closed if a later build stops installing the hook, but not if one changes how a
     deny is honoured.
+
+  Amended by #1473: **the Orchestrator preset is guarded, for both providers, and its list is
+  every runner-created worktree on the runner.** The preset excluded user hooks in a way that
+  excluded the guard too — `--settings '{"disableAllHooks":true}'` for Claude, `--disable hooks`
+  for Codex — so an Orchestrator could `git worktree remove` a child's runner-created worktree
+  unrefused, and since #1438 every Codex Orchestrator TUI open paid the inventory probe for an
+  answer the flag had fixed. The alternative the report allowed, declaring the preset unguarded,
+  was rejected because an Orchestrator is exactly the session that runs shell commands beside
+  other sessions' worktrees, and the guard is the only thing between a mistaken removal and the
+  loss of a child's work. What changed, each measured (see "Measurements … the Orchestrator
+  preset" above):
+
+  - **Claude.** The preset no longer passes a settings document of its own; `--setting-sources ""`
+    alone keeps user, project, local, and plugin hooks out while the runner's document still
+    runs. The resume strip (`stripOrchestratorLaunchArgs`) now keeps the runner-owned settings
+    document, recognised by its self-description, because on a structured launch hook provisioning
+    runs BEFORE the preset's arguments are rebuilt and the strip used to remove the guard's
+    document along with the rest — so even the non-strict preset, which never carried
+    `disableAllHooks`, was unguarded on structured spawns. The ACP form
+    (`orchestratorAcpSessionMeta`) keeps `settings: { disableAllHooks: true }`: the guard has no ACP
+    transport at all, so there is nothing for that setting to exclude, and an ACP Orchestrator
+    stays unguarded like every other ACP launch.
+  - **Codex.** The structured launch keeps `--disable hooks` — it carries no guard hook, its
+    protection is driver-side, and nothing there needs hooks on. A Codex Orchestrator TUI drops
+    the flag for its own argv only, enumerates the inventory, disables every enabled hook that is
+    not the runner's by key for that invocation (`-c hooks.state={…}` in the inline-table spelling
+    that works), enumerates again, and requires that NO other hook is enabled — trusted ones
+    included, which the ordinary #1377 verdict admits and the preset's isolation does not. Only
+    then does it carry the bypass. A launch that cannot prove it is opened exactly as the preset
+    wrote it, `--disable hooks` and all, and is refused when there is a worktree to protect, by the
+    unchanged #1337 rule. The probe is no longer paid for a fixed answer: with hooks on, its
+    answer decides.
+  - **The list.** A guard over the Orchestrator's OWN worktrees protects almost nothing, because
+    an Orchestrator rarely owns one. Its descendants' worktrees are what it runs beside, and the
+    runner has no record of descent: `parentSessionId` is control-plane-attributed and never sent
+    to a runner. So an Orchestrator launch's list (`managedWorktreeGuardProtections`) is every
+    runner-created worktree of every session on this runner — a superset of its descendants on
+    this runner, never an attached operator worktree — and a change to ANY session's inventory
+    refreshes every Orchestrator's list as well as that session's. The over-protection refuses
+    nothing real: an Orchestrator retires worktrees through the control plane, never by hand. The
+    same set feeds the driver's control-channel veto for an Orchestrator; the sandbox read-only
+    derivation keeps the session's own set, because it is a list of mounts. Descendants on ANOTHER
+    runner are not on this runner's filesystem and are not covered, which is the same limit every
+    guard here has.
 - One extra short-lived process runs before each Bash, Edit, MultiEdit, Write, NotebookEdit, Read,
   Grep, Glob, and — for Codex since #1437 — `apply_patch` call in a guarded session; since #1303,
   every guardable session.

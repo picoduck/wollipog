@@ -685,7 +685,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         log(`Claude managed worktree guard ${meta.sessionId}: verdict socket unavailable (${errText(error)})`);
       }
     } else if (meta.driver === "claude-code") {
-      managedWorktreeGuardSocket = await memoryGuardSocket(meta, () => sessions.managedWorktreeProtections(meta));
+      managedWorktreeGuardSocket = await memoryGuardSocket(meta, () => sessions.managedWorktreeGuardProtections(meta));
     }
     provisionClaudeHooks(
       meta,
@@ -698,7 +698,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         // The live runner-owned worktree set for this session, written into the managed-worktree
         // guard's list. The guard is provisioned even while it is empty (#1303), which is what
         // protects a worktree created later in the same turn and lets the launch keep the user's mode.
-        managedWorktreeProtections: sessions.managedWorktreeProtections(meta),
+        managedWorktreeProtections: sessions.managedWorktreeGuardProtections(meta),
         ...(managedWorktreeGuardSocket !== undefined ? { managedWorktreeGuardSocket } : {}),
       },
       log,
@@ -2343,10 +2343,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               // leaving a worktree created in that window unprotected for the running provider
               // too. A session deleted inside the same window is refused here, before the guard
               // writes anything (#1337).
-              protections: () => sessions.managedWorktreeProtections(
+              protections: () => sessions.managedWorktreeGuardProtections(
                 agentTuiSessionMeta(prepared.sessionId),
               ),
-              guardSocket: () => memoryGuardSocket(prepared, () => sessions.managedWorktreeProtections(
+              guardSocket: () => memoryGuardSocket(prepared, () => sessions.managedWorktreeGuardProtections(
                 agentTuiSessionMeta(prepared.sessionId),
               )),
             },
@@ -2381,7 +2381,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               message.shellId,
               message.sessionId,
               launch.managedWorktreeGuard,
-              current ? sessions.managedWorktreeProtections(current).length : 0,
+              current ? sessions.managedWorktreeGuardProtections(current).length : 0,
             );
             if (notice) sessions.noticeManagedWorktreeGuard(message.sessionId, notice);
           } catch (error) {

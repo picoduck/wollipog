@@ -30,6 +30,7 @@ import {
   type AgentControlHost,
 } from "./agent-control.js";
 import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION } from "./orchestrator-preset.js";
+import { claudeHookSettingsPath, provisionClaudeHooks, resetClaudeGuardState } from "./hook-settings.js";
 import { PI_ORCHESTRATOR_PRESET_TOOLS_ENV, PI_SECURITY_REQUEST_NONCE_ENV } from "./pi-agent-control-extension.js";
 
 function spec(driver: SessionLaunchSpec["driver"] = "codex"): SessionLaunchSpec {
@@ -978,4 +979,39 @@ test("Integration Isolation removes only integrations from an additive launch, a
       /Integration Isolation|independent provider permissions/);
     assert.equal(existsSync(agentControlTokenPath(root, acp.sessionId)), false);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the Orchestrator preset keeps the runner-owned hook settings document that guard provisioning injected before it (#1473)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-guard-"));
+  try {
+    // The structured launch provisions Claude hooks FIRST (index.ts), which injects the runner-owned
+    // settings document carrying the managed-worktree guard, then Agent Control rebuilds the
+    // preset's arguments. The rebuild used to strip every --settings, guard included.
+    const hooksDir = join(root, "hooks");
+    const launch = spec("claude-code");
+    launch.config = { permissionMode: "orchestrator" };
+    launch.orchestrator = { strictProjectIsolation: true };
+    resetClaudeGuardState();
+    provisionClaudeHooks(launch, {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION, enabled: true,
+      managedWorktreeProtections: [], verifyGuardLaunch: () => ({ ok: true }),
+    }, () => {}, { isSea: false, execPath: "/usr/bin/node", execArgv: [], scriptPath: "/r/cli.ts", configDir: hooksDir });
+    const settings = claudeHookSettingsPath(hooksDir, launch.sessionId);
+    assert.deepEqual(launch.args, ["--settings", settings]);
+
+    const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux" };
+    const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "bwrap" as const, orchestratorProjectPaths: ["/repo"] };
+    provisionAgentControl(launch, control, () => {}, host);
+    assert.deepEqual(launch.args.flatMap((arg, index) => arg === "--settings" ? [launch.args[index + 1]] : []), [settings],
+      "exactly the guard's document, once");
+    assert.equal(launch.args[launch.args.indexOf("--setting-sources") + 1], "");
+    assert.equal(launch.args.join(" ").includes("disableAllHooks"), false);
+    const once = [...launch.args];
+    provisionAgentControl(launch, control, () => {}, host);
+    assert.deepEqual(launch.args, once, "resume is idempotent around the kept document");
+  } finally {
+    resetClaudeGuardState();
+    rmSync(root, { recursive: true, force: true });
+  }
 });

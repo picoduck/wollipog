@@ -54,6 +54,7 @@ import {
   supportsClaudeAgentAcpOrchestrator,
   supportsNativeOrchestratorBoundary,
 } from "./orchestrator-preset.js";
+import { describeManagedSettings } from "./hook-settings.js";
 import {
   PI_AGENT_CONTROL_ENV_KEYS,
   PI_AGENT_CONTROL_EXTENSION_SUFFIX,
@@ -248,6 +249,16 @@ function removePiAgentControlLaunchState(
   }
   for (const key of PI_AGENT_CONTROL_ENV_KEYS) delete spec.env[key];
   rmSync(extension, { force: true });
+}
+
+/**
+ * A `--settings` value the Orchestrator preset must leave in place on resume: the runner-owned hook
+ * settings document, recognised by its own self-description (it declares the managed-worktree
+ * guard, the manager policy hooks, or both). Hook provisioning injects it before the preset's
+ * arguments are rebuilt, and the guard inside it is what protects descendants' worktrees (#1473).
+ */
+function runnerOwnedClaudeSettings(value: string): boolean {
+  return describeManagedSettings(value) != null;
 }
 
 /** Mutates only ephemeral runner-side launch state. The credential bytes never cross the runner
@@ -458,7 +469,7 @@ export function provisionAgentControl(
         WOLLIPOG_CLI_ARGS: JSON.stringify([WSL_AGENT_CONTROL_HELPER_PATH, "cli"]),
       };
       spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
-      spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver);
+      spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver, runnerOwnedClaudeSettings);
       spec.args.push(...orchestratorLaunchArgs(spec.driver, helperLaunch, orchestratorProjectPaths, strictProjectIsolation));
       if (spec.driver === "claude-code") spec.args.push("--mcp-config", WSL_AGENT_CONTROL_PRIVATE_MCP);
       wslLaunches.set(spec.sessionId, {
@@ -554,7 +565,7 @@ export function provisionAgentControl(
         ...(orchestratorProjectPaths.length ? { additionalDirectories: orchestratorProjectPaths } : {}),
       };
     } else {
-      spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver);
+      spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver, runnerOwnedClaudeSettings);
       spec.args.push(...orchestratorLaunchArgs(spec.driver, mcp, orchestratorProjectPaths, strictProjectIsolation));
       if (spec.driver === "pi") {
         spec.args.push("--extension", piAgentControlExtensionPath(host.configDir, spec.sessionId));

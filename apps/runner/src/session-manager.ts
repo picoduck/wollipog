@@ -68,6 +68,7 @@ import type {
 } from "@wollipog/protocol";
 import {
   addPendingRequest, removePendingRequest, pendingRequests,
+  isOrchestratorLaunch,
   isPromptImageReference,
   isWorkspaceReference,
   PROTOCOL_VERSION,
@@ -1123,15 +1124,12 @@ export class SessionManager {
     store.observeMetaPatch((meta, patch, previous) => {
       if (!this.refreshManagedWorktreeGuard) return;
       if (!("worktrees" in patch) && !this.patchChangesAttributedWorktrees(meta, patch, previous)) return;
-      let outcome: ManagedWorktreeGuardRefreshOutcome;
-      try {
-        outcome = this.refreshManagedWorktreeGuard(meta, this.managedWorktreeProtections(meta));
-      } catch (error) {
-        // An exception here is itself a refresh failure, and a failed refresh must never leave a
-        // stale protection list trusted by a running provider.
-        outcome = { state: "unprotected", reason: (error as Error).message };
+      this.refreshGuardFor(meta);
+      // An Orchestrator's guard covers every runner-created worktree on this runner (#1473), so a
+      // change to ANY session's inventory is a change to each Orchestrator's list as well.
+      for (const other of this.store.listSessions()) {
+        if (other.sessionId !== meta.sessionId && isOrchestratorLaunch(other)) this.refreshGuardFor(other);
       }
-      this.applyManagedWorktreeGuardOutcome(meta.sessionId, outcome);
     });
     this.providerHomeLeases = runnerOwnerHash ? new ProviderHomeLeaseRegistry(runnerOwnerHash) : undefined;
     this.stateDir = dataDir ?? join(store.rootPath(), ".runner-data");
@@ -1533,6 +1531,18 @@ export class SessionManager {
     this.onDriverStderr(sessionId, notice);
   }
 
+  private refreshGuardFor(meta: SessionMeta): void {
+    let outcome: ManagedWorktreeGuardRefreshOutcome;
+    try {
+      outcome = this.refreshManagedWorktreeGuard!(meta, this.managedWorktreeGuardProtections(meta));
+    } catch (error) {
+      // An exception here is itself a refresh failure, and a failed refresh must never leave a
+      // stale protection list trusted by a running provider.
+      outcome = { state: "unprotected", reason: (error as Error).message };
+    }
+    this.applyManagedWorktreeGuardOutcome(meta.sessionId, outcome);
+  }
+
   /** Every runner-created identity remains protected even while a sibling is selected or its
    * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary.
    * Public because launch provisioning needs the same set the driver's veto uses. */
@@ -1540,6 +1550,35 @@ export class SessionManager {
     return this.attributedWorktrees(meta)
       .filter((worktree) => worktree.source !== "attached")
       .map((worktree) => ({ worktreePath: worktree.path, repoPath: meta.repoPath }));
+  }
+
+  /**
+   * What the managed-worktree guard and the driver's veto refuse operations against (#1473).
+   *
+   * For an ordinary session that is its own runner-created worktrees. An Orchestrator runs beside
+   * its descendants' worktrees, and the runner has no record of which sessions those are
+   * (lineage is control-plane-attributed and never sent to a runner), so its list is EVERY
+   * runner-created worktree of every session on this runner. That over-protects nothing real: an
+   * Orchestrator retires worktrees only through the control plane, never by hand. The sandbox
+   * read-only derivation keeps using the session's own set, because it is a list of mounts.
+   */
+  managedWorktreeGuardProtections(meta: SessionMeta): ManagedWorktreeProtection[] {
+    if (!isOrchestratorLaunch(meta)) return this.managedWorktreeProtections(meta);
+    const seen = new Set<string>();
+    const protections: ManagedWorktreeProtection[] = [];
+    const add = (entries: ManagedWorktreeProtection[]) => {
+      for (const entry of entries) {
+        const key = `${entry.repoPath}\0${entry.worktreePath}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        protections.push(entry);
+      }
+    };
+    add(this.managedWorktreeProtections(meta));
+    for (const other of this.store.listSessions()) {
+      if (other.sessionId !== meta.sessionId) add(this.managedWorktreeProtections(other));
+    }
+    return protections;
   }
 
   private runnerOwnedWorktreeBlocksWorkspaceRemap(
@@ -6459,7 +6498,7 @@ export class SessionManager {
           sessionStateDir: this.store.sessionPath(sessionId),
           initialBackgroundTaskIds: meta.orphanedWork?.pendingTaskIds ?? meta.pendingBackgroundTaskIds,
           descendantMarker: worktree ? this.worktreeProcessMarker(sessionId, cwd) : undefined,
-          managedWorktreeProtections: () => this.managedWorktreeProtections(
+          managedWorktreeProtections: () => this.managedWorktreeGuardProtections(
             this.store.readMeta(sessionId) ?? meta,
           ),
           hookStateDir: this.guardStateSandbox?.hookStateDir,
@@ -10724,7 +10763,7 @@ export class SessionManager {
             resumeId: source.agentSessionId,
             isolation,
             descendantMarker: this.worktreeProcessMarker(source.sessionId, source.worktreePath),
-            managedWorktreeProtections: () => this.managedWorktreeProtections(
+            managedWorktreeProtections: () => this.managedWorktreeGuardProtections(
               this.store.readMeta(source.sessionId) ?? source,
             ),
             hookStateDir: this.guardStateSandbox?.hookStateDir,
@@ -10835,7 +10874,7 @@ export class SessionManager {
             resumeId: source.agentSessionId,
             isolation: forkIsolation,
             descendantMarker: targetDescendantMarker,
-            managedWorktreeProtections: () => this.managedWorktreeProtections(
+            managedWorktreeProtections: () => this.managedWorktreeGuardProtections(
               this.store.readMeta(forkMeta.sessionId) ?? forkMeta,
             ),
           },

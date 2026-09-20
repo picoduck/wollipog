@@ -354,7 +354,22 @@ function toml(value: unknown): string {
 
 /** The native harness grants only the planning surface described above; the control plane
  * independently scopes the credential. Unknown feature flags fail launch rather than falling back
- * to an unrestricted mode. */
+ * to an unrestricted mode.
+ *
+ * The strict Claude preset keeps every user hook out with `--setting-sources ""` ALONE (#1473).
+ * Measured against claude 2.1.278: with the sources emptied, a user-scope `settings.json` hook, a
+ * project `.claude/settings.json` hook, a `.claude/settings.local.json` hook, and the hooks of
+ * plugins enabled in user settings all stayed silent, while a `PreToolUse` hook in the runner's own
+ * `--settings` document still ran and its exit 2 still blocked the call. The preset used to add
+ * `--settings '{"disableAllHooks":true}'` on top, which stopped the runner's managed-worktree
+ * guard as well (measured: same document with `disableAllHooks` — no hook ran, the protected
+ * command ran), so an Orchestrator could `git worktree remove` a child's runner-created worktree
+ * unrefused. The runner-owned settings document is injected by hook provisioning, not here.
+ *
+ * The Codex preset still disables the `hooks` feature outright: the structured Codex launch
+ * carries no guard hook (its protection is driver-side), so nothing there needs hooks on. A
+ * Codex TUI, which does carry the guard, removes that flag itself once every foreign hook is
+ * disabled by key and the inventory proves the runner's hook is the only enabled one. */
 export function orchestratorLaunchArgs(
   driver: SessionLaunchSpec["driver"],
   mcp: { command: string; args: string[]; env: Record<string, string> },
@@ -374,7 +389,7 @@ export function orchestratorLaunchArgs(
       "--disallowedTools", "Write,Edit,MultiEdit,NotebookEdit,Agent,Task",
       "--append-system-prompt", instructions,
       ...projectPaths.flatMap((path) => ["--add-dir", path]),
-      "--setting-sources", "", "--settings", '{"disableAllHooks":true}'];
+      "--setting-sources", ""];
   }
   if (driver === "pi") {
     return [
@@ -732,8 +747,18 @@ export function stripAdditiveOrchestratorLaunchArgs(
   return result;
 }
 
-/** Replace controlled launch flags on every resume, including stale persisted provisioning. */
-export function stripOrchestratorLaunchArgs(args: string[], driver: SessionLaunchSpec["driver"]): string[] {
+/** Replace controlled launch flags on every resume, including stale persisted provisioning.
+ *
+ * `keepClaudeSettings` names a `--settings` value that is NOT the preset's to strip: the
+ * runner-owned hook settings document, which hook provisioning injects BEFORE this runs on a
+ * structured launch and which carries the managed-worktree guard (#1473). Without it the guard was
+ * stripped from every Claude Orchestrator spawn, whatever the preset said about hooks. The preset's
+ * historical inline `{"disableAllHooks":true}` document is still stripped, like any other value. */
+export function stripOrchestratorLaunchArgs(
+  args: string[],
+  driver: SessionLaunchSpec["driver"],
+  keepClaudeSettings: (value: string) => boolean = () => false,
+): string[] {
   const result: string[] = [];
   if (driver === "pi") {
     const valueFlags = new Set(["--tools", "--exclude-tools", "--append-system-prompt", "--extension", "-e"]);
@@ -755,6 +780,12 @@ export function stripOrchestratorLaunchArgs(args: string[], driver: SessionLaunc
     const arg = args[i]!;
     const flag = arg.split("=")[0]!;
     if (driver === "claude-code" && (claudeFlags.has(flag) || flag === "--strict-mcp-config" || flag === "--disable-slash-commands")) {
+      const value = arg.includes("=") ? arg.slice(arg.indexOf("=") + 1) : args[i + 1];
+      if (flag === "--settings" && typeof value === "string" && keepClaudeSettings(value)) {
+        result.push(arg);
+        if (!arg.includes("=")) result.push(args[++i]!);
+        continue;
+      }
       if (claudeFlags.has(flag) && !arg.includes("=")) i++;
       continue;
     }

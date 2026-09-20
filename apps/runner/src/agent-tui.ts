@@ -218,8 +218,8 @@ function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {
  * sweep removed would break the launch outright. Since #1337 the runner-owned document is
  * re-provisioned (and healed) before every Claude TUI launch, so what remains for this to drop is
  * what provisioning does not write: an agent-supplied `--settings` whose file is gone, and any
- * launch with no guard to provision. An inline JSON object (the Claude Orchestrator preset's
- * `{"disableAllHooks":true}`) names no file at all and is kept (#1378).
+ * launch with no guard to provision. An inline JSON object names no file at all and is kept
+ * (#1378; the Claude Orchestrator preset carried one until #1473, and a catalog still may).
  */
 function withoutMissingSettingsFiles(args: readonly string[]): string[] {
   const result: string[] = [];
