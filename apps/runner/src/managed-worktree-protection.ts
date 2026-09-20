@@ -29,7 +29,11 @@ export interface ManagedWorktreeProtection {
  */
 export type ProviderEnvironment = Readonly<Record<string, string | undefined>>;
 
-type ShellToken = ParseEntry;
+interface ExpandedField {
+  expandedField: string;
+  expandsLeadingTilde: boolean;
+}
+type ShellToken = ParseEntry | ExpandedField;
 
 /**
  * What one command, segment, or operand amounts to: it reaches a protected root (`protected`), it
@@ -109,12 +113,28 @@ function protectionRepository(path: string, protections: readonly ManagedWorktre
     pathContains(repoPath, path) || pathContains(worktreePath, path));
 }
 
+/** The raw text of a plain word, including one produced by field expansion. */
+function plainWordText(token: ShellToken | undefined): string | null {
+  if (typeof token === "string") return token;
+  if (token != null && typeof token === "object" && "expandedField" in token) return token.expandedField;
+  return null;
+}
+
 /** The raw text of a word token (a plain word or a glob), placeholders included. */
 function wordText(token: ShellToken | undefined): string | null {
-  if (typeof token === "string") return token;
+  const plain = plainWordText(token);
+  if (plain !== null) return plain;
   if (token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
       "pattern" in token && typeof token.pattern === "string") return token.pattern;
   return null;
+}
+
+/** Whether a leading tilde came from shell syntax, rather than from parameter expansion. */
+function expandsLeadingTilde(token: ShellToken | undefined): boolean {
+  if (token != null && typeof token === "object" && "expandedField" in token) {
+    return token.expandsLeadingTilde;
+  }
+  return wordText(token)?.startsWith("~") === true;
 }
 
 function lookup(name: string, cwd: string, environment: ReadonlyMap<string, string>): string | undefined {
@@ -335,6 +355,7 @@ function operandVerdict(
 ): Verdict {
   const value = word(token, cwd, environment);
   if (value == null) return wordText(token) == null ? null : "unresolved";
+  const expandTilde = expandsLeadingTilde(token);
   // An unquoted expansion is field-split by the shell, and this parser no longer knows which
   // expansions were quoted. A value built from a reference is judged whole AND field by field; if
   // the separators themselves cannot be read, the operand cannot be placed at all.
@@ -342,9 +363,11 @@ function operandVerdict(
   if (fields === null) return "unresolved";
   if (fields.length !== 1 || fields[0] !== value) {
     return strongest([value, ...fields].map((field) =>
-      literalOperandVerdict(field, field, cwd, environment, protections, followFinalSymlink, optionsEnded)));
+      literalOperandVerdict(field, field, cwd, environment, protections, followFinalSymlink, optionsEnded,
+        expandTilde)));
   }
-  return literalOperandVerdict(value, token, cwd, environment, protections, followFinalSymlink, optionsEnded);
+  return literalOperandVerdict(value, token, cwd, environment, protections, followFinalSymlink, optionsEnded,
+    expandTilde);
 }
 
 function literalOperandVerdict(
@@ -355,17 +378,23 @@ function literalOperandVerdict(
   protections: readonly ManagedWorktreeProtection[],
   followFinalSymlink: boolean,
   optionsEnded: boolean,
+  expandsLeadingTilde: boolean,
 ): Verdict {
+  const expandedValue = expandsLeadingTilde && value.startsWith("~")
+    ? expandOperandHome(value, cwd, environment)
+    : value;
+  if (expandedValue == null) return "unresolved";
   // An option word names no path, so it must not read as a relative operand once the working
   // directory is unknown: `rm -rf /tmp/scratch` is placeable there and `rm -rf build` is not. After
   // `--` there are no options left, so a dashed word there IS a path (`rm -- -managed`).
-  if (cwd === UNKNOWN_CWD && !isAbsolute(value) && (optionsEnded || !value.startsWith("-"))) {
+  if (cwd === UNKNOWN_CWD && !isAbsolute(expandedValue) &&
+      (optionsEnded || !expandedValue.startsWith("-"))) {
     return "unresolved";
   }
-  const target = resolvedPath(value, cwd);
+  const target = resolvedPath(expandedValue, cwd);
   if (target == null) {
-    return globTargetsProtected(token, cwd, environment, protections) ||
-        globTargetsProtected(token, physicalCwd(cwd), environment, physicalProtections(protections))
+    return globTargetsProtected(expandedValue, cwd, environment, protections) ||
+        globTargetsProtected(expandedValue, physicalCwd(cwd), environment, physicalProtections(protections))
       ? "protected"
       : null;
   }
@@ -374,8 +403,8 @@ function literalOperandVerdict(
   // kernel resolves it from the PHYSICAL directory: `..` beneath a symlink lands where the link
   // points, not where the shell prints. Judge that reading too, against the physical protections.
   const follows = followFinalSymlink ||
-    (process.platform === "win32" ? /[\\/]\.?$/u : /\/\.?$/u).test(value);
-  return protectedTarget(physicalResolve(cwd, value, follows), physicalProtections(protections))
+    (process.platform === "win32" ? /[\\/]\.?$/u : /\/\.?$/u).test(expandedValue);
+  return protectedTarget(physicalResolve(cwd, expandedValue, follows), physicalProtections(protections))
     ? "protected"
     : null;
 }
@@ -392,7 +421,11 @@ function resolvedOperand(
   environment: ReadonlyMap<string, string>,
 ): string | null {
   const value = word(token, cwd, environment);
-  return value == null ? null : resolvedPath(value, cwd);
+  if (value == null) return null;
+  const expandedValue = expandsLeadingTilde(token) && value.startsWith("~")
+    ? expandOperandHome(value, cwd, environment)
+    : value;
+  return expandedValue == null ? null : resolvedPath(expandedValue, cwd);
 }
 
 /**
@@ -542,8 +575,9 @@ function commandWords(
   // so `A=$B B=$A` leaves both holding B's original value.
   const childEnvironment = new Map(environment);
   const assigned: string[] = [];
-  while (typeof tokens[index] === "string" && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[index] as string)) {
-    const assignment = tokens[index] as string;
+  for (;;) {
+    const assignment = plainWordText(tokens[index]);
+    if (assignment === null || !/^[A-Za-z_][A-Za-z0-9_]*=/u.test(assignment)) break;
     const equals = assignment.indexOf("=");
     const name = assignment.slice(0, equals);
     childEnvironment.set(name, expandReferences(assignment.slice(equals + 1), cwd, childEnvironment));
@@ -589,10 +623,10 @@ function commandWords(
     }
     if (name === "env") {
       index += 1;
-      while (typeof tokens[index] === "string") {
+      while (plainWordText(tokens[index]) !== null) {
         // `env` reads its ARGV, so an assignment that arrived through an expansion
         // (`env "$ASSIGNMENT" sh -c ...`) is an assignment to it like any other.
-        const value = word(tokens[index], cwd, environment) ?? (tokens[index] as string);
+        const value = word(tokens[index], cwd, environment) ?? plainWordText(tokens[index])!;
         // Like a prefix assignment, this builds the environment of the command `env` runs; it is
         // not in effect while the shell expands the words of this very command.
         if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)) {
@@ -779,8 +813,12 @@ function wordReadings(
       whole.push(token);
       continue;
     }
-    split.push(...fields);
-    whole.push(value);
+    const syntacticTilde = text?.startsWith("~") === true;
+    split.push(...fields.map((field): ExpandedField => ({
+      expandedField: field,
+      expandsLeadingTilde: syntacticTilde,
+    })));
+    whole.push(token);
     if (fields.length !== 1 || fields[0] !== value) divided = true;
   }
   return divided ? [split, whole] : [split];
@@ -1150,12 +1188,16 @@ export const GUARD_STATE_FILE_TOOLS: Readonly<Record<string, GuardStateToolPath>
  * named user resolves to the current home when it is the current user and to a sibling of it
  * otherwise, which is where every conventional layout puts it. `~-` (OLDPWD) is unknowable.
  */
-function homeSpelling(path: string, cwd: string): { base: string; rest: string } | null {
+function homeSpelling(
+  path: string,
+  cwd: string,
+  homeDirectory = homedir(),
+): { base: string; rest: string } | null {
   if (!path.startsWith("~")) return null;
   const end = path.search(/[\\/]/u);
   const head = end < 0 ? path : path.slice(0, end);
   const rest = end < 0 ? "" : path.slice(end + 1);
-  if (head === "~") return { base: homedir(), rest };
+  if (head === "~") return { base: homeDirectory, rest };
   if (head === "~+") return { base: cwd || ".", rest };
   if (head === "~-") return null;
   const name = head.slice(1);
@@ -1165,12 +1207,35 @@ function homeSpelling(path: string, cwd: string): { base: string; rest: string }
   } catch {
     /* no passwd entry for this uid: fall through to the sibling layout */
   }
-  return { base: name === current ? homedir() : resolve(dirname(homedir()), name), rest };
+  return { base: name === current ? homeDirectory : resolve(dirname(homeDirectory), name), rest };
 }
 
-function expandHome(path: string, cwd = ""): string {
-  const home = homeSpelling(path, cwd);
+function expandHome(path: string, cwd = "", homeDirectory = homedir()): string {
+  const home = homeSpelling(path, cwd, homeDirectory);
   return home === null ? path : resolve(home.base, home.rest);
+}
+
+/**
+ * Expand a syntactically leading tilde as the provider's shell will. The launch environment wins
+ * over the runner account's home; an absent or empty HOME falls back to the latter. shell-quote
+ * does not preserve whether literal text was quoted, so a quoted leading tilde is deliberately
+ * expanded too (and may over-refuse), while a tilde produced by `$VAR` is not expanded at all.
+ */
+function expandOperandHome(
+  path: string,
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+): string | null {
+  const configuredHome = lookup("HOME", cwd, environment);
+  if (configuredHome?.includes("\0")) return null;
+  const homeDirectory = configuredHome
+    ? (isAbsolute(configuredHome) ? configuredHome : cwd === UNKNOWN_CWD ? null : resolve(cwd, configuredHome))
+    : homedir();
+  if (homeDirectory === null) return null;
+  const spelling = homeSpelling(path, cwd, homeDirectory);
+  if (spelling === null) return path;
+  if (spelling.base === UNKNOWN_CWD || spelling.base.includes("\0")) return null;
+  return resolve(spelling.base, spelling.rest);
 }
 
 /**
