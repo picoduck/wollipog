@@ -20,6 +20,11 @@ import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo }
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
 import { artifactHelp, decisionHelp, expandCommandAlias, initHelp, pairHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp } from "./wollipog-help.js";
 import { resolveWorktreeSetupRepositoryRoot, writeStarterWorktreeSetupConfig } from "./worktree-setup-generator.js";
+import {
+  AGENT_CONTROL_RELAY_ENDPOINT_ENV,
+  AGENT_CONTROL_RELAY_KEY_ENV,
+  agentControlRelayFetch,
+} from "./agent-control-relay.js";
 
 type Write = (text: string) => void;
 
@@ -457,18 +462,28 @@ export async function runWollipogCli(
   }
   const cpUrl = (option(args, "--url") ?? env.WOLLIPOG_CONTROL_PLANE_URL ?? "").replace(/\/+$/, "");
   const sessionId = env.WOLLIPOG_SESSION_ID ?? "";
+  const relayEndpoint = env[AGENT_CONTROL_RELAY_ENDPOINT_ENV];
+  const relayKey = env[AGENT_CONTROL_RELAY_KEY_ENV];
+  let activeFetch = fetchImpl;
   let token = "";
-  try { token = readToken(env, option(args, "--token-file")); } catch (error) {
+  try {
+    if (relayEndpoint || relayKey) {
+      if (!relayEndpoint || !relayKey) throw new Error("incomplete runner relay configuration");
+      activeFetch = agentControlRelayFetch(relayEndpoint, relayKey);
+    } else {
+      token = readToken(env, option(args, "--token-file"));
+    }
+  } catch (error) {
     const message = `could not read Wollipog token: ${(error as Error).message}`;
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
     return 1;
   }
-  if (!cpUrl || !token) {
-    const message = "WOLLIPOG_CONTROL_PLANE_URL and a token (WOLLIPOG_SESSION_TOKEN_FILE, WOLLIPOG_TOKEN_FILE, or WOLLIPOG_TOKEN) are required";
+  if (!cpUrl || (!token && !relayEndpoint)) {
+    const message = "WOLLIPOG_CONTROL_PLANE_URL and an injected runner relay or token are required";
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
     return 2;
   }
-  const readinessError = await waitForCredentialReady(env, token);
+  const readinessError = token ? await waitForCredentialReady(env, token) : null;
   if (readinessError) {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: readinessError })}\n` : `${readinessError}\n`);
     return 1;
@@ -488,13 +503,13 @@ export async function runWollipogCli(
     : worktreeTools.has(parsed.tool)
       ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees
       : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionAgentControl;
-  const compatibility = await compatible(fetchImpl, cpUrl, requiredProtocol, token, sessionId);
+  const compatibility = await compatible(activeFetch, cpUrl, requiredProtocol, token, sessionId);
   if (compatibility.error) {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: compatibility.error })}\n` : `${compatibility.error}\n`);
     return 1;
   }
   const result = await executeManagerTool(parsed.tool, parsed.input, {
-    fetch: fetchImpl,
+    fetch: activeFetch,
     cpUrl,
     selfSessionId: sessionId,
     token,
@@ -511,22 +526,32 @@ export async function runWollipogCli(
 export async function runAgentControlMcp(env: NodeJS.ProcessEnv): Promise<void> {
   const cpUrl = (env.WOLLIPOG_CONTROL_PLANE_URL ?? "").replace(/\/+$/, "");
   const selfSessionId = env.WOLLIPOG_SESSION_ID ?? "";
+  const relayEndpoint = env[AGENT_CONTROL_RELAY_ENDPOINT_ENV];
+  const relayKey = env[AGENT_CONTROL_RELAY_KEY_ENV];
+  let fetchImpl: McpFetch = globalThis.fetch;
   let token = "";
-  try { token = readToken(env); } catch (error) {
+  try {
+    if (relayEndpoint || relayKey) {
+      if (!relayEndpoint || !relayKey) throw new Error("incomplete runner relay configuration");
+      fetchImpl = agentControlRelayFetch(relayEndpoint, relayKey);
+    } else {
+      token = readToken(env);
+    }
+  } catch (error) {
     console.error(`[wollipog-mcp] could not read session token: ${(error as Error).message}`);
     process.exit(1);
   }
-  if (!cpUrl || !selfSessionId || !token) {
-    console.error("[wollipog-mcp] session URL, id, and token file are required");
+  if (!cpUrl || !selfSessionId || (!token && !relayEndpoint)) {
+    console.error("[wollipog-mcp] session URL, id, and runner relay or token file are required");
     process.exit(1);
   }
-  const readinessError = await waitForCredentialReady(env, token);
+  const readinessError = token ? await waitForCredentialReady(env, token) : null;
   if (readinessError) {
     console.error(`[wollipog-mcp] ${readinessError}`);
     process.exit(1);
   }
   const deps: McpDeps = {
-    fetch: globalThis.fetch,
+    fetch: fetchImpl,
     cpUrl,
     selfSessionId,
     token,
