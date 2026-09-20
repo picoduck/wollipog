@@ -201,7 +201,9 @@ import {
 import { discoverRegistryAgents, updateRegistryApproval } from "./discovery/acp-registry.js";
 import {
   cacheSkillSyncEntry,
+  mergeReconcileSkillsResults,
   reconcileSkills,
+  SKILL_DIRS,
   skillNeedsManualVariant,
   skillsStateMessage,
   storedSkillVersionAvailable,
@@ -855,12 +857,14 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
       agent.args.every((arg, index) => arg === args[index]);
   },
   config.worktreePorts,
-  (spec) => selectProviderAccount(
-    config.providerAccounts,
-    config.agents.find((agent) => agent.id === spec.agentId),
-    spec.driver ?? "acp",
-    spec.providerAccountId,
-  ),
+  (spec) => spec.executionTarget && spec.executionTarget.adapter !== "host"
+    ? undefined
+    : selectProviderAccount(
+        config.providerAccounts,
+        config.agents.find((agent) => agent.id === spec.agentId),
+        spec.driver ?? "acp",
+        spec.providerAccountId,
+      ),
   (meta) => {
     const provider = providerForDriver(meta.driver);
     if (!provider) return undefined;
@@ -1267,10 +1271,15 @@ function queueSkillsReconcile(requestId?: string): void {
     try {
       const allowRemovals = desired !== null && !chunkedSkillsSync.inProgress;
       const baseAgents = agentsWithoutConfiguredProviderAccounts(metadata.agents, config.providerAccounts);
+      const baseHarnessScope = [...new Set(baseAgents.flatMap((agent) => {
+        const relDir = SKILL_DIRS[agent.driver ?? "acp"];
+        return relDir ? [relDir] : [];
+      }))];
       let result = await reconcileSkills({
         dataDir: config.dataDir,
         home: homedir(),
-        agents: baseAgents,
+        agents: metadata.agents,
+        harnessScope: baseHarnessScope,
         desired: desired ?? [],
         // Content frames are published immediately to bound memory. While their completion fence
         // is pending, suppress removal/GC so an interleaved discovery pass cannot reclaim that
@@ -1291,8 +1300,11 @@ function queueSkillsReconcile(requestId?: string): void {
         const accountResult = await reconcileSkills({
           dataDir: config.dataDir,
           home: homedir(),
-          agents: accountAgents,
+          agents: metadata.agents,
           harnessDirectories: { [relDir]: resolve(account.directory, "skills") },
+          harnessScope: [relDir],
+          reportUnknownTargets: false,
+          manageCanonical: false,
           desired: desired ?? [],
           allowRemovals,
           log,
@@ -1301,13 +1313,7 @@ function queueSkillsReconcile(requestId?: string): void {
           removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
           previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
         });
-        result = {
-          ...result,
-          deployed: [...result.deployed, ...accountResult.deployed],
-          unmanaged: [...result.unmanaged, ...accountResult.unmanaged],
-          removedLinks: [...result.removedLinks, ...accountResult.removedLinks],
-          error: [result.error, accountResult.error].filter(Boolean).join("; ") || undefined,
-        };
+        result = mergeReconcileSkillsResults(result, accountResult);
       }
       if (process.platform === "win32" && metadata.agents.some((agent) => agent.context?.kind === "wsl")) {
         const wsl = await reconcileWslSkills({

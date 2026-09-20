@@ -676,6 +676,9 @@ export class SubscriptionUsageManager {
 
   private initialSnapshot(source: SubscriptionSource): SubscriptionUsageSnapshot {
     const { agent, provider, sourceId } = source;
+    const discoveryClaude = provider === "claude" && source.providerAccountId === undefined
+      ? agent.claudeCode
+      : undefined;
     const base = {
       sourceId,
       runnerId: this.options.runnerId,
@@ -691,7 +694,7 @@ export class SubscriptionUsageManager {
     }
     if (source.authStatus === "unauthenticated" ||
         (source.providerAccountId === undefined && agent.authStatus === "unauthenticated") ||
-        (provider === "claude" && agent.claudeCode?.status === "unauthenticated")) {
+        discoveryClaude?.status === "unauthenticated") {
       return { ...base, state: "unauthenticated", detail: `${agent.name} is not signed in.` };
     }
     if (provider === "codex" && agent.codexAppServer?.status !== "supported") {
@@ -702,7 +705,7 @@ export class SubscriptionUsageManager {
       };
     }
     if (provider === "claude") {
-      const auth = agent.claudeCode?.auth;
+      const auth = discoveryClaude?.auth;
       if (agent.claudeCode?.status === "unsupported") {
         return {
           ...base,

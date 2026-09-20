@@ -1245,6 +1245,30 @@ test("configured account login state does not inherit a sibling or agent-wide st
   ]);
 });
 
+test("configured Claude accounts do not inherit default-home auth or billing", () => {
+  for (const claudeCode of [
+    { ...claudeAgent().claudeCode!, status: "unauthenticated" as const },
+    {
+      ...claudeAgent().claudeCode!,
+      auth: { status: "authenticated" as const, billingSource: "api" as const },
+    },
+  ]) {
+    const manager = new SubscriptionUsageManager({
+      runnerId: "runner-1",
+      agents: () => [claudeAgent({ claudeCode })],
+      providerAccounts: () => [
+        { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      ],
+      resolveEnv: () => ({ CLAUDE_CONFIG_DIR: "/accounts/work" }),
+      publish: () => {},
+    });
+    manager.syncSources();
+    assert.deepEqual(manager.inventory().map((snapshot) => [snapshot.providerAccountId, snapshot.state]), [
+      ["work", "unavailable"],
+    ]);
+  }
+});
+
 test("configuring one provider keeps the other provider's legacy usage source", () => {
   const manager = new SubscriptionUsageManager({
     runnerId: "runner-1",

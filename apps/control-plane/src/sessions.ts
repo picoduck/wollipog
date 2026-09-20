@@ -3335,32 +3335,6 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(req.runnerId)) return fail(`runner '${req.runnerId}' is offline`, 409);
     const runner = this.db.getRunner(req.runnerId);
     if (!runner) return fail("runner not found", 404);
-    if (req.providerAccountId !== undefined &&
-        (typeof req.providerAccountId !== "string" ||
-          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(req.providerAccountId))) {
-      return fail("providerAccountId is invalid", 400);
-    }
-    if (req.providerAccountId && !runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")) {
-      return fail(
-        `Provider account selection requires a protocol-v${RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts} runner; update the runner and retry.`,
-        409,
-      );
-    }
-    const launchProvider = launch.driver === "claude-code" ? "claude"
-      : launch.driver === "codex" || launch.driver === "codex-app-server" ? "codex" : null;
-    const compatibleProviderAccounts = launchProvider
-      ? (runner.providerAccounts ?? []).filter((account) => account.provider === launchProvider)
-      : [];
-    const defaultProviderAccountId = runner.agents.find((agent) => agent.id === req.agentId)
-      ?.defaultProviderAccountId;
-    const providerAccountId = snapshotSpec?.providerAccountId ?? req.providerAccountId ??
-      defaultProviderAccountId ?? compatibleProviderAccounts[0]?.id;
-    const providerAccount = providerAccountId
-      ? compatibleProviderAccounts.find((account) => account.id === providerAccountId)
-      : undefined;
-    if (providerAccountId && !providerAccount) {
-      return fail(`provider account '${providerAccountId}' is not available for the selected agent`, 409);
-    }
     if (launch.driver === "pi") {
       const unsupported = this.capabilityFailure(req.runnerId, "piHarness", "Pi RPC sessions");
       if (unsupported) return unsupported;
@@ -3382,6 +3356,36 @@ export class SessionsService {
     if ("error" in resolvedTarget) return fail(resolvedTarget.error, 400);
     const executionTarget = executionTargetRef(resolvedTarget.target);
     const useWorktree = resolvedTarget.useWorktree;
+    if (req.providerAccountId !== undefined &&
+        (typeof req.providerAccountId !== "string" ||
+          !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(req.providerAccountId))) {
+      return fail("providerAccountId is invalid", 400);
+    }
+    const usesRunnerProviderAccount = executionTarget.adapter === "host";
+    if (usesRunnerProviderAccount && req.providerAccountId &&
+        !runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")) {
+      return fail(
+        `Provider account selection requires a protocol-v${RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts} runner; update the runner and retry.`,
+        409,
+      );
+    }
+    const launchProvider = launch.driver === "claude-code" ? "claude"
+      : launch.driver === "codex" || launch.driver === "codex-app-server" ? "codex" : null;
+    const compatibleProviderAccounts = launchProvider
+      ? (runner.providerAccounts ?? []).filter((account) => account.provider === launchProvider)
+      : [];
+    const defaultProviderAccountId = runner.agents.find((agent) => agent.id === req.agentId)
+      ?.defaultProviderAccountId;
+    const providerAccountId = usesRunnerProviderAccount
+      ? snapshotSpec?.providerAccountId ?? req.providerAccountId ??
+        defaultProviderAccountId ?? compatibleProviderAccounts[0]?.id
+      : undefined;
+    const providerAccount = providerAccountId
+      ? compatibleProviderAccounts.find((account) => account.id === providerAccountId)
+      : undefined;
+    if (providerAccountId && !providerAccount) {
+      return fail(`provider account '${providerAccountId}' is not available for the selected agent`, 409);
+    }
     const acpSessionContext = snapshotSpec?.acpSessionContext ?? req.acpSessionContext;
     if ((executionTarget.adapter === "container" || executionTarget.adapter === "cloud") &&
         ((acpSessionContext?.additionalDirectories?.length ?? 0) > 0 || (acpSessionContext?.mcpServers?.length ?? 0) > 0)) {

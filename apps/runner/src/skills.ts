@@ -111,6 +111,17 @@ export interface ReconcileSkillsOptions {
   /** Exact runner-local harness directories, keyed by SKILL_DIRS value. Provider accounts use
    * this to reconcile each configured credential home without treating it as an OS home. */
   harnessDirectories?: Record<string, string>;
+  /** Exact harness directory kinds this pass owns. Omission owns every local harness. Provider
+   * account fan-out uses one directory kind per pass so it cannot sweep or report another
+   * provider's links. */
+  harnessScope?: readonly string[];
+  /** Only the base pass reports targets absent from the runner. Account fan-out passes leave
+   * those targets for the base pass so their partial reports can be merged without false
+   * "agent not present" states. */
+  reportUnknownTargets?: boolean;
+  /** The base pass alone owns ~/.agents/skills and runner-local store GC. Account passes only
+   * reconcile their exact provider harness directory through the already-created canonical link. */
+  manageCanonical?: boolean;
   desired: ReconcileSkillEntry[];
   /** Removal sweeps and store GC run only when an authoritative CP desired list is in hand. */
   allowRemovals?: boolean;
@@ -163,6 +174,45 @@ export interface ReconcileSkillsResult {
   /** Home-relative shown paths and reasons for every link this pass removed. Always logged as
    * well; a pass that removes nothing returns an empty array. */
   removedLinks: SkillLinkRemoval[];
+}
+
+/** Merge independently scoped harness passes into one authoritative runner report. A target is
+ * represented once; if account homes disagree, the most severe outcome wins instead of hiding a
+ * failed credential scope behind a successful sibling. */
+export function mergeReconcileSkillsResults(
+  left: ReconcileSkillsResult,
+  right: ReconcileSkillsResult,
+): ReconcileSkillsResult {
+  const deployed = left.deployed.map((state) => ({ ...state, links: [...state.links] }));
+  const severity = { linked: 0, unsupported: 1, conflict: 2, error: 3 } as const;
+  for (const incoming of right.deployed) {
+    const existing = deployed.find((state) =>
+      state.name === incoming.name && state.digest === incoming.digest);
+    if (!existing) {
+      deployed.push({ ...incoming, links: [...incoming.links] });
+      continue;
+    }
+    for (const link of incoming.links) {
+      const index = existing.links.findIndex((candidate) => candidate.agentId === link.agentId);
+      if (index < 0) existing.links.push(link);
+      else if (severity[link.status] > severity[existing.links[index]!.status]) existing.links[index] = link;
+    }
+    const errors = [existing.error, incoming.error].filter((value): value is string => !!value);
+    existing.error = [...new Set(errors)].join("; ") || undefined;
+  }
+  const unmanaged = [...left.unmanaged];
+  for (const candidate of right.unmanaged) {
+    if (!unmanaged.some((entry) => entry.agentId === candidate.agentId && entry.name === candidate.name)) {
+      unmanaged.push(candidate);
+    }
+  }
+  const errors = [left.error, right.error].filter((value): value is string => !!value);
+  return {
+    deployed,
+    unmanaged,
+    removedLinks: [...left.removedLinks, ...right.removedLinks],
+    error: [...new Set(errors)].join("; ") || undefined,
+  };
 }
 
 /** Compose the runner's authoritative wire report from one completed reconcile pass. */
@@ -1175,6 +1225,23 @@ function linkedStoreVersionKeys(
 export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<ReconcileSkillsResult> {
   const { dataDir, home, agents, desired } = options;
   const allowRemovals = options.allowRemovals === true;
+  const manageCanonical = options.manageCanonical !== false;
+  const reportUnknownTargets = options.reportUnknownTargets !== false;
+  const harnessScope = new Set(options.harnessScope ?? Object.values(SKILL_DIRS));
+  const managedAgents = agents.filter((agent) => {
+    const relDir = SKILL_DIRS[agent.driver ?? "acp"];
+    return relDir !== undefined && harnessScope.has(relDir);
+  });
+  const managedAgentIds = new Set(managedAgents.map((agent) => agent.id));
+  const targetsForPass = (entry: Pick<ReconcileSkillEntry, "targets">) =>
+    validReconcileTargets(entry.targets)
+      ? entry.targets.filter((target) => {
+          if (managedAgentIds.has(target.agentId)) return true;
+          if (!reportUnknownTargets) return false;
+          const agent = agents.find((candidate) => candidate.id === target.agentId);
+          return !agent || SKILL_DIRS[agent.driver ?? "acp"] === undefined;
+        })
+      : [];
   const platform = options.platform ?? process.platform;
   const replaceJunction = options.replaceWindowsJunction ?? ((path: string, expectedTarget: string, target: string) =>
     replaceWindowsSkillJunction(path, expectedTarget, target));
@@ -1197,11 +1264,11 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       })),
       // No store root means no managed-link classification, so symlinks are skipped here rather
       // than misreported; nothing is removed on this path either.
-      unmanaged: scanUnmanagedSkills(home, agents, undefined, options.harnessDirectories),
+      unmanaged: scanUnmanagedSkills(home, managedAgents, undefined, options.harnessDirectories),
       removedLinks: [],
     };
   }
-  const bindings = harnessBindings(agents);
+  const bindings = harnessBindings(managedAgents);
   const agentBinding = new Map(bindings.map((binding) => [binding.agentId, binding]));
   const wslAgentIds = new Set(agents.flatMap((agent) =>
     agent.context?.kind === "wsl" ? [agent.id] : []));
@@ -1263,9 +1330,14 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     }
   }
 
-  const leaseNeeded = allowRemovals ||
-    prepared.some(({ entry, invalid, materializationError }) => !invalid && !materializationError &&
-      !(entry.targets.length > 0 && entry.targets.every((target) => wslAgentIds.has(target.agentId))));
+  const leaseNeeded = manageCanonical
+    ? allowRemovals || prepared.some(({ entry, invalid, materializationError }) =>
+        !invalid && !materializationError &&
+        !(entry.targets.length > 0 && entry.targets.every((target) => wslAgentIds.has(target.agentId))))
+    : (allowRemovals && bindings.length > 0) ||
+      prepared.some(({ entry, invalid, materializationError }) => !invalid && !materializationError &&
+        targetsForPass(entry).length > 0 &&
+        !targetsForPass(entry).every((target) => wslAgentIds.has(target.agentId)));
   if (leaseNeeded && options.acquireProviderHomeLease) {
     try {
       options.acquireProviderHomeLease();
@@ -1275,7 +1347,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         "Unmanaged symlink inventory is limited to entry names because targets were not followed.";
       const contendedOwned = loadOwnedLinks(linkManifestPath(dataDir), options.log);
       options.log?.(`skill reconcile links blocked: ${detail}`);
-      if (allowRemovals) {
+      if (allowRemovals && manageCanonical) {
         gcStoreWithRetention(
           dataDir,
           realStoreRoot,
@@ -1290,7 +1362,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         );
       }
       let foundForeignSymlink = false;
-      const unmanaged = scanUnmanagedSkills(home, agents, (linkPath) => {
+      const unmanaged = scanUnmanagedSkills(home, managedAgents, (linkPath) => {
         const probe = probeLink(linkPath, realStoreRoot, canonicalSkillsDir(home), platform);
         const foreign = probe.kind !== "ours" ||
           (probe.via === "canonical" && !contendedOwned.has(linkPath));
@@ -1306,7 +1378,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             return {
               name: entry.name,
               digest: entry.versionDigest,
-              links: entry.targets.map((target) => ({
+              links: targetsForPass(entry).map((target) => ({
                 agentId: target.agentId,
                 status: "error" as const,
                 detail: "the skill version could not be materialized",
@@ -1317,7 +1389,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           return {
             name: entry.name,
             digest: entry.versionDigest,
-            links: entry.targets.map((target) => {
+            links: targetsForPass(entry).map((target) => {
               const binding = agentBinding.get(target.agentId);
               if (binding) return { agentId: target.agentId, status: "error" as const, detail };
               const agent = agents.find((candidate) => candidate.id === target.agentId);
@@ -1370,8 +1442,9 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const deployed: DeployedSkillState[] = [];
   const canonicalKeep = new Set<string>();
   const harnessKeep = new Map<string, Set<string>>();
-  for (const relDir of new Set(Object.values(SKILL_DIRS))) harnessKeep.set(relDir, new Set());
+  for (const relDir of new Set(bindings.map((binding) => binding.relDir))) harnessKeep.set(relDir, new Set());
   for (const { entry, invalid, manualNeeded, materializationError } of prepared) {
+    const scopedTargets = targetsForPass(entry);
     if (typeof entry.name === "string" && entry.name && invalid) {
       canonicalKeep.add(entry.name);
         // A payload this runner cannot verify must not tear anything down: keep the name's
@@ -1391,7 +1464,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     if (materializationError) {
       canonicalKeep.add(entry.name);
       state.error = `could not materialize the skill version: ${materializationError}`;
-      state.links = entry.targets.map((target) => ({
+      state.links = scopedTargets.map((target) => ({
         agentId: target.agentId,
         status: "error" as const,
         detail: "the skill version could not be materialized",
@@ -1404,8 +1477,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
 
     // WSL targets reconcile inside their distro after this native materialization phase. Their
     // versions remain protected by storeKeep above, but they must not create unused native links.
-    if (entry.targets.length > 0 && entry.targets.every((target) => wslAgentIds.has(target.agentId))) {
-      state.links = entry.targets.map((target) => ({
+    if (scopedTargets.length > 0 && scopedTargets.every((target) => wslAgentIds.has(target.agentId))) {
+      state.links = scopedTargets.map((target) => ({
         agentId: target.agentId,
         status: "unsupported" as const,
         detail: (() => {
@@ -1425,6 +1498,11 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       continue;
     }
 
+    if (!manageCanonical && scopedTargets.length === 0) {
+      deployed.push(state);
+      continue;
+    }
+
     canonicalKeep.add(entry.name);
 
     const agentVariantDir = join(realStoreRoot, entry.name, entry.versionDigest);
@@ -1432,23 +1510,33 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     const canonicalPath = join(canonicalDir, entry.name);
 
     // Canonical link always points at the untransformed agent-invocation variant.
-    const canonical = ensureManagedSymlink(
-      canonicalPath,
-      agentVariantDir,
-      realStoreRoot,
-      `~/.agents/skills/${entry.name}`,
-      undefined,
-      platform,
-      replaceJunction,
-    );
-    if (canonical.ok) ownLink(canonicalPath);
-    else state.error = `canonical link: ${canonical.detail}`;
+    const canonical: LinkOutcome = manageCanonical
+      ? ensureManagedSymlink(
+          canonicalPath,
+          agentVariantDir,
+          realStoreRoot,
+          `~/.agents/skills/${entry.name}`,
+          undefined,
+          platform,
+          replaceJunction,
+        )
+      : (() => {
+          const probe = probeLink(canonicalPath, realStoreRoot, undefined, platform);
+          return probe.kind === "ours" && samePath(probe.resolvedTarget, agentVariantDir, platform)
+            ? { ok: true }
+            : { ok: false, status: "error", detail: "the canonical skill link was not prepared by the base pass" };
+        })();
+    if (canonical.ok) {
+      if (manageCanonical) ownLink(canonicalPath);
+    } else {
+      state.error = `canonical link: ${canonical.detail}`;
+    }
 
     // Group targets by harness link path; a shared harness directory can only carry one variant,
     // and the agent-invocation variant wins when policies disagree.
     const plans = new Map<string, { agentTargets: string[]; manualTargets: string[] }>();
     const manualUnsupported: { agentId: string; relDir: string }[] = [];
-    for (const target of entry.targets) {
+    for (const target of scopedTargets) {
       const binding = agentBinding.get(target.agentId);
       if (!binding) {
         const agent = agents.find((candidate) => candidate.id === target.agentId);
@@ -1478,7 +1566,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       (target.invocation === "manual" ? plan.manualTargets : plan.agentTargets).push(target.agentId);
       harnessKeep.get(binding.relDir)?.add(entry.name);
     }
-    const targetedIds = new Set(entry.targets.map((target) => target.agentId));
+    const targetedIds = new Set(scopedTargets.map((target) => target.agentId));
     const linkedDirs = new Set<string>();
     for (const [relDir, plan] of plans) {
       const mixed = plan.agentTargets.length > 0 && plan.manualTargets.length > 0;
@@ -1620,24 +1708,26 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         canonicalDir,
       );
     }
-    sweepManagedLinks(canonicalDir, canonicalKeep, realStoreRoot, {
-      owned,
-      removedLinks,
-      shownDir: "~/.agents/skills",
-      log: options.log,
-      platform,
-    });
-    gcStoreWithRetention(
-      dataDir,
-      realStoreRoot,
-      storeKeep,
-      {
-        removedSkillMs: options.removedSkillRetentionMs ?? DEFAULT_REMOVED_SKILL_RETENTION_MS,
-        previousVersionMs: options.previousVersionGraceMs ?? DEFAULT_PREVIOUS_VERSION_GRACE_MS,
-        now: options.now ?? Date.now(),
-      },
-      options.log,
-    );
+    if (manageCanonical) {
+      sweepManagedLinks(canonicalDir, canonicalKeep, realStoreRoot, {
+        owned,
+        removedLinks,
+        shownDir: "~/.agents/skills",
+        log: options.log,
+        platform,
+      });
+      gcStoreWithRetention(
+        dataDir,
+        realStoreRoot,
+        storeKeep,
+        {
+          removedSkillMs: options.removedSkillRetentionMs ?? DEFAULT_REMOVED_SKILL_RETENTION_MS,
+          previousVersionMs: options.previousVersionGraceMs ?? DEFAULT_PREVIOUS_VERSION_GRACE_MS,
+          now: options.now ?? Date.now(),
+        },
+        options.log,
+      );
+    }
   }
 
   // Persist ownership only when it changed (links created, removed, or newly adopted); the save
@@ -1648,7 +1738,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
 
   return {
     deployed,
-    unmanaged: scanUnmanagedSkills(home, agents, (linkPath) => {
+    unmanaged: scanUnmanagedSkills(home, managedAgents, (linkPath) => {
       // Foreign is anything the sweep would refuse to touch: a link with a foreign target, or a
       // canonical-shaped link this runner has no record of creating.
       const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);

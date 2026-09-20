@@ -65,10 +65,16 @@ export function registerUsageRoutes(
         !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(body.providerAccountId))) {
       return reply.code(400).send({ error: "runnerId and providerAccountId are required for an account refresh" });
     }
-    const visibleSources = db.subscriptionUsageForPrincipal(principal, Date.now(), SUBSCRIPTION_USAGE_STALE_AFTER_MS).sources;
-    if (targeted && !visibleSources.some((source) => source.runnerId === body!.runnerId &&
-        source.providerAccountId === body!.providerAccountId)) {
-      return reply.code(404).send({ error: "subscription account source not found" });
+    if (targeted) {
+      const visibleSources = db.subscriptionUsageForPrincipal(
+        principal,
+        Date.now(),
+        SUBSCRIPTION_USAGE_STALE_AFTER_MS,
+      ).sources;
+      if (!visibleSources.some((source) => source.runnerId === body!.runnerId &&
+          source.providerAccountId === body!.providerAccountId)) {
+        return reply.code(404).send({ error: "subscription account source not found" });
+      }
     }
     const runners = db.listRunnersForPrincipal(principal).filter((runner) =>
       runner.status === "online" &&

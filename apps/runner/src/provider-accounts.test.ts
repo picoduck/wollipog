@@ -100,3 +100,33 @@ test("a persisted session keeps its exact credential home across runner config c
   }));
   assert.equal(binding?.credentialHome, "/old/codex-home");
 });
+
+test("container and cloud launches never bind runner-local provider accounts", () => {
+  const prior = {
+    providerAccountId: "work",
+    providerAccountLabel: "Work",
+    providerAccountProvider: "codex",
+    providerCredentialHome: "/old/codex-home",
+  } as never;
+  for (const adapter of ["container", "cloud"] as const) {
+    const spec = {
+      sessionId: `session-${adapter}`,
+      workspaceId: "workspace",
+      workspacePath: "/repo",
+      agentId: "codex",
+      command: "codex",
+      args: [],
+      env: {},
+      useWorktree: false,
+      driver: "codex-app-server",
+      providerAccountId: "work",
+      executionTarget: { adapter },
+    } as unknown as SessionLaunchSpec;
+    assert.equal(bindSessionProviderAccount(prior, spec, () => ({
+      id: "work",
+      label: "Work",
+      provider: "codex",
+      credentialHome: "/new/codex-home",
+    })), undefined);
+  }
+});

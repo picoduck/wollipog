@@ -7068,19 +7068,30 @@ test("createSession selects and persists an exact compatible container environme
     environment: { id: "offline-tools", revision: 1, image, setupCheckDigest: "4".repeat(64) },
     compatibleAgentIds: [AGENT_ID, ACP_AGENT_ID], available: true,
   };
-  db.registerRunner({ ...runnerMeta(), executionTargets: [container] }, Date.now(), PROTOCOL_VERSION);
+  const containerRunner = runnerMeta();
+  containerRunner.providerAccounts = [
+    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+  ];
+  containerRunner.agents = containerRunner.agents.map((agent) => agent.id === AGENT_ID
+    ? { ...agent, defaultProviderAccountId: "work" }
+    : agent);
+  db.registerRunner({ ...containerRunner, executionTargets: [container] }, Date.now(), PROTOCOL_VERSION);
   assert.deepEqual(db.getRunner(RUNNER_ID)!.executionTargets?.at(-1)?.environment, container.environment);
 
   const result = svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
-    executionTargetId: container.id, useWorktree: true,
+    executionTargetId: container.id, useWorktree: true, providerAccountId: "work",
   });
   assert.ok(result.ok && result.data, result.error);
-  assert.deepEqual(hub.sentOfType("start_session").at(-1)!.spec.executionTarget, {
+  const containerStart = hub.sentOfType("start_session").at(-1)!;
+  assert.deepEqual(containerStart.spec.executionTarget, {
     id: container.id, runnerId: RUNNER_ID, kind: "container", workspaceStrategy: "worktree",
     adapter: "container", boundaries: container.boundaries, environment: container.environment,
   });
-  assert.deepEqual(db.getSession(result.data!.id)!.executionTarget, hub.sentOfType("start_session").at(-1)!.spec.executionTarget);
+  assert.equal(containerStart.spec.providerAccountId, undefined,
+    "runner-local credentials do not cross the container boundary");
+  assert.equal(result.data.providerAccountId, undefined);
+  assert.deepEqual(db.getSession(result.data.id)!.executionTarget, containerStart.spec.executionTarget);
 
   const incompatible = svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_AGENT_ID,

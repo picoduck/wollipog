@@ -21,6 +21,10 @@ export function bindSessionProviderAccount(
   spec: SessionLaunchSpec,
   resolveAccount?: (spec: SessionLaunchSpec) => BoundProviderAccount | undefined,
 ): BoundProviderAccount | undefined {
+  // Runner-local credential directories are meaningful only for host execution. Container and
+  // cloud targets authenticate inside their own boundary, so carrying a prior or requested
+  // account would falsely label a credential scope that the provider process never uses.
+  if (spec.executionTarget && spec.executionTarget.adapter !== "host") return undefined;
   if (prior?.providerAccountId && prior.providerCredentialHome && prior.providerAccountProvider) {
     return {
       id: prior.providerAccountId,

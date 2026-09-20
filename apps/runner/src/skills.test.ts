@@ -21,6 +21,7 @@ import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import {
   cacheSkillSyncEntry,
+  mergeReconcileSkillsResults,
   MAX_RETAINED_STALE_SKILL_VERSIONS,
   SKILL_SCAN_LIMITS,
   linkManifestPath,
@@ -194,23 +195,47 @@ test("provider account harness overrides reconcile the same skill into each cred
   try {
     const workSkills = join(roots.root, "codex-work", "skills");
     const personalSkills = join(roots.root, "codex-personal", "skills");
-    const alpha = entry("alpha", [{ agentId: codexAgent.id, invocation: "agent" }]);
+    const alpha = entry("alpha", [
+      { agentId: claudeAgent.id, invocation: "agent" },
+      { agentId: codexAgent.id, invocation: "agent" },
+    ]);
+    let result = await reconcileSkills({
+      dataDir: roots.dataDir,
+      home: roots.home,
+      agents,
+      harnessScope: [".claude/skills"],
+      desired: [alpha],
+      allowRemovals: true,
+    });
+    const claudeLink = join(roots.home, ".claude", "skills", "alpha");
+    assert.equal(realpathSync(claudeLink), join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", alpha.versionDigest));
     for (const accountSkills of [workSkills, personalSkills]) {
-      const result = await reconcileSkills({
+      const accountResult = await reconcileSkills({
         dataDir: roots.dataDir,
         home: roots.home,
-        agents: [codexAgent],
+        agents,
         harnessDirectories: { ".codex/skills": accountSkills },
+        harnessScope: [".codex/skills"],
+        reportUnknownTargets: false,
+        manageCanonical: false,
         desired: [alpha],
         allowRemovals: true,
       });
-      assert.equal(result.deployed[0]?.links[0]?.status, "linked");
+      assert.equal(accountResult.deployed[0]?.links[0]?.status, "linked");
+      assert.equal(accountResult.removedLinks.length, 0);
+      assert.ok(existsSync(claudeLink), "an account pass cannot sweep another provider's real-home link");
+      result = mergeReconcileSkillsResults(result, accountResult);
     }
     const expected = join(realpathSync(skillsStoreRoot(roots.dataDir)), "alpha", alpha.versionDigest);
     assert.equal(realpathSync(join(workSkills, "alpha")), expected);
     assert.equal(realpathSync(join(personalSkills, "alpha")), expected);
     assert.equal(existsSync(join(roots.home, ".codex", "skills", "alpha")), false,
       "account reconciliation never falls back to the process HOME");
+    assert.equal(result.deployed.length, 1, "scoped passes merge into one skill state");
+    assert.deepEqual(result.deployed[0]?.links, [
+      { agentId: claudeAgent.id, status: "linked" },
+      { agentId: codexAgent.id, status: "linked" },
+    ]);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
