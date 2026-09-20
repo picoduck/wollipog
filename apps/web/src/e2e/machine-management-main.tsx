@@ -259,6 +259,52 @@ const client = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { workspace };
   },
+  startProviderLogin: async (
+    _runnerId: string,
+    body: { provider: "claude" | "codex"; label: string } | { accountId: string },
+  ) => {
+    if (!runner) throw new Error("runner not found");
+    const existing = "accountId" in body
+      ? runner.providerAccounts?.find((account) => account.id === body.accountId)
+      : undefined;
+    const provider = existing?.provider ?? ("provider" in body ? body.provider : "claude");
+    const label = existing?.label ?? ("label" in body ? body.label : "Account");
+    const accountId = existing?.id ?? `fixture-${provider}`;
+    const login = {
+      operationId: `login_fixture_${provider}`,
+      accountId,
+      label,
+      provider,
+      status: provider === "claude" ? "awaiting_code" as const : "waiting_for_provider" as const,
+      expectsCode: provider === "claude",
+      verificationUrl: provider === "claude"
+        ? "https://claude.ai/oauth/authorize?fixture=machine"
+        : "https://auth.openai.com/device",
+      ...(provider === "codex" ? { userCode: "WOLL-IPOG" } : {}),
+      startedAt: Date.now(),
+    };
+    runner.providerLogins = [login];
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { login };
+  },
+  submitProviderLoginCode: async (_runnerId: string, operationId: string) => {
+    if (!runner) throw new Error("runner not found");
+    const login = runner.providerLogins?.find((candidate) => candidate.operationId === operationId);
+    if (!login) throw new Error("login not found");
+    const completed = { ...login, status: "succeeded" as const, expectsCode: false };
+    runner.providerLogins = [completed];
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { login: completed };
+  },
+  cancelProviderLogin: async (_runnerId: string, operationId: string) => {
+    if (!runner) throw new Error("runner not found");
+    const login = runner.providerLogins?.find((candidate) => candidate.operationId === operationId);
+    if (!login) throw new Error("login not found");
+    const cancelled = { ...login, status: "cancelled" as const, expectsCode: false };
+    runner.providerLogins = [cancelled];
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { login: cancelled };
+  },
   removeRunner: async () => {
     if (!runner) throw new Error("runner not found");
     const runnerId = runner.runnerId;

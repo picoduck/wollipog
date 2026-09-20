@@ -2023,6 +2023,24 @@ export function useStoreSelector<T>(selector: (s: State) => T, isEqual: (a: T, b
   return useSyncExternalStore(store.subscribe, getSnapshot);
 }
 
+/** Store-backed enhancement for components that also have intentional standalone renderers. */
+export function useOptionalStoreSelector<T>(
+  selector: (s: State) => T,
+  isEqual: (a: T, b: T) => boolean = Object.is,
+): T | undefined {
+  const store = useContext(StoreContext);
+  const lastRef = useRef<{ v: T } | null>(null);
+  const getSnapshot = () => {
+    if (!store) return undefined;
+    const next = selector(store.getState());
+    const last = lastRef.current;
+    if (last && isEqual(last.v, next)) return last.v;
+    lastRef.current = { v: next };
+    return next;
+  };
+  return useSyncExternalStore(store?.subscribe ?? (() => () => {}), getSnapshot, getSnapshot);
+}
+
 /** Back-compat full-state subscription: re-renders on EVERY store change. Fine for transient
  * mounts (dialogs, the Runners view); always-mounted components use useStoreSelector. */
 export function useStore(): StoreValue {

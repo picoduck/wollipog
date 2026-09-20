@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import type { ControlPlaneToUi, RunnerMetadata } from "@wollipog/protocol";
+import { RUNNER_CAPABILITY_MIN_PROTOCOL, type ControlPlaneToUi, type RunnerMetadata } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -447,7 +447,18 @@ test("scoped websocket clients receive only authorized snapshots and deltas", ()
   });
   db.createDevice({ id: "d1", name: "one", tokenHash: hashToken("one"), userId: "usr_operator", organizationId: local.organizationId, now: 3 });
   db.createDevice({ id: "d2", name: "two", tokenHash: hashToken("two"), userId: "usr_viewer", organizationId: local.organizationId, now: 4 });
-  db.registerRunner(runner(), 5, 53);
+  db.registerRunner(runner(), 5, RUNNER_CAPABILITY_MIN_PROTOCOL.providerLogin);
+  db.updateRunnerProviderLogins("runner-1", [{
+    operationId: "login_sensitive",
+    accountId: "account",
+    label: "Sensitive",
+    provider: "codex",
+    status: "waiting_for_provider",
+    verificationUrl: "https://auth.openai.com/device",
+    userCode: "ABCD-EFGH",
+    expectsCode: false,
+    startedAt: 5,
+  }], 5);
   db.createSession({
     id: "s_private", runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent", title: "Private",
     useWorktree: false, driver: "acp", config: {},
@@ -466,6 +477,8 @@ test("scoped websocket clients receive only authorized snapshots and deltas", ()
   const viewer = seen(principal(db, "two"));
   const operatorMessages = operator.messages;
   const viewerMessages = viewer.messages;
+  assert.equal(operatorMessages[0]?.type === "snapshot" ? operatorMessages[0].runners[0]?.providerLogins : null, undefined);
+  assert.equal(viewerMessages[0]?.type === "snapshot" ? viewerMessages[0].runners[0]?.providerLogins : null, undefined);
   assert.deepEqual(operatorMessages[0]?.type === "snapshot" ? operatorMessages[0].sessions.map((s) => s.id) : [], ["s_private"]);
   assert.deepEqual(viewerMessages[0]?.type === "snapshot" ? viewerMessages[0].sessions.map((s) => s.id) : [], []);
   const sharedProjectId = operatorMessages[0]?.type === "snapshot" ? operatorMessages[0].projects?.[0]?.id : undefined;
@@ -504,6 +517,7 @@ test("scoped websocket clients receive only authorized snapshots and deltas", ()
   const operatorRunnerDelta = operatorMessages.findLast((message) => message.type === "runner_upsert");
   assert.deepEqual(operatorRunnerDelta?.type === "runner_upsert" ? operatorRunnerDelta.runner.agents[0]?.env : null, {});
   assert.equal(operatorRunnerDelta?.type === "runner_upsert" ? operatorRunnerDelta.runner.runtime : null, undefined);
+  assert.equal(operatorRunnerDelta?.type === "runner_upsert" ? operatorRunnerDelta.runner.providerLogins : null, undefined);
   hub.setUiSessionSubscriptions(operator.socket, 1, ["s_private"], []);
   hub.setUiSessionSubscriptions(viewer.socket, 1, ["s_private"], []);
   const operatorAck = operatorMessages.findLast((message) => message.type === "session_subscriptions_applied");

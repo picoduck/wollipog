@@ -618,6 +618,97 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "the runner capacity report in the authenticated Machine view",
   );
   assert.equal(capacityView?.blockers?.[0]?.kind, "agent_quota");
+
+  const ordinaryProviderLogin = await fetch(`${httpBase}/api/runners/runner-ui-route/provider-logins`, {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${operatorToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ provider: "claude", label: "Work" }),
+  });
+  assert.equal(ordinaryProviderLogin.status, 403, "an ordinary member cannot mutate Machine credentials");
+  const providerLoginResponse = fetchWithBearer(
+    `${httpBase}/api/runners/runner-ui-route/provider-logins`,
+    ownerToken,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "claude", label: "Work" }),
+    },
+  );
+  const providerLoginCommand = await runnerInbox.take((message) => message.type === "start_provider_login");
+  assert.equal(providerLoginCommand.provider, "claude");
+  assert.equal(providerLoginCommand.label, "Work");
+  const providerLogin = {
+    operationId: "login_12345678-1234-4123-8123-123456789abc",
+    accountId: "work",
+    label: "Work",
+    provider: "claude",
+    status: "awaiting_code",
+    verificationUrl: "https://claude.ai/oauth/authorize",
+    expectsCode: true,
+    startedAt: Date.now(),
+  };
+  runner.send(JSON.stringify({
+    type: "provider_login_result",
+    requestId: providerLoginCommand.requestId,
+    action: "start",
+    ok: true,
+    login: providerLogin,
+  }));
+  const startedProviderLogin = await providerLoginResponse;
+  assert.equal(startedProviderLogin.status, 201, await startedProviderLogin.clone().text());
+
+  const submitCodeResponse = fetchWithBearer(
+    `${httpBase}/api/runners/runner-ui-route/provider-logins/${providerLogin.operationId}/code`,
+    ownerToken,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: "transient-response" }),
+    },
+  );
+  const codeCommand = await runnerInbox.take((message) => message.type === "submit_provider_login_code");
+  assert.equal(codeCommand.code, "transient-response");
+  runner.send(JSON.stringify({
+    type: "provider_login_result",
+    requestId: codeCommand.requestId,
+    action: "submit_code",
+    ok: true,
+    login: { ...providerLogin, status: "waiting_for_provider", expectsCode: false },
+  }));
+  assert.equal((await submitCodeResponse).status, 200);
+
+  const cancelLoginResponse = fetchWithBearer(
+    `${httpBase}/api/runners/runner-ui-route/provider-logins/${providerLogin.operationId}`,
+    ownerToken,
+    { method: "DELETE" },
+  );
+  const cancelCommand = await runnerInbox.take((message) => message.type === "cancel_provider_login");
+  runner.send(JSON.stringify({
+    type: "provider_login_result",
+    requestId: cancelCommand.requestId,
+    action: "cancel",
+    ok: true,
+    login: { ...providerLogin, status: "cancelled", expectsCode: false, verificationUrl: undefined },
+  }));
+  assert.equal((await cancelLoginResponse).status, 200);
+
+  runner.send(JSON.stringify({ type: "provider_logins_updated", runnerId: "runner-ui-route", logins: [providerLogin] }));
+  const projectedProviderLogins = await waitForValue(
+    async () => (await (await fetchWithBearer(`${httpBase}/api/runners`, ownerToken)).json() as {
+      runners: Array<{ runnerId: string; providerLogins?: unknown[] }>;
+    }).runners.find((candidate) => candidate.runnerId === "runner-ui-route")?.providerLogins,
+    (logins) => logins?.length === 1,
+    "the provider sign-in projection in the authenticated Machine view",
+  );
+  assert.equal(projectedProviderLogins?.length, 1);
+  const ordinaryProviderLogins = (await (await fetchWithBearer(
+    `${httpBase}/api/runners`, operatorToken,
+  )).json() as { runners: Array<{ runnerId: string; providerLogins?: unknown[] }> })
+    .runners.find((candidate) => candidate.runnerId === "runner-ui-route")?.providerLogins;
+  assert.equal(ordinaryProviderLogins, undefined, "one-time provider sign-in material is visible only to Machine managers");
   runner.send(JSON.stringify({
     type: "agent_control_credential",
     sessionId: "session-agent-parent",

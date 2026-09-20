@@ -192,6 +192,8 @@ test("PROTOCOL_VERSION is 171", () => {
   assert.equal(runnerSupportsProtocol(171, "sessionProviderAccountSwitch"), true);
   assert.equal(runnerSupportsProtocol(169, "providerAccounts"), false);
   assert.equal(runnerSupportsProtocol(170, "providerAccounts"), true);
+  assert.equal(runnerSupportsProtocol(170, "providerLogin"), false);
+  assert.equal(runnerSupportsProtocol(171, "providerLogin"), true);
   assert.equal(runnerSupportsProtocol(167, "piAcknowledgedSteerUncertain"), false);
   assert.equal(runnerSupportsProtocol(168, "piAcknowledgedSteerUncertain"), true);
   assert.equal(runnerSupportsProtocol(168, "sessionArtifactFileAttach"), false);

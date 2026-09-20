@@ -68,6 +68,7 @@ import type {
   ArchiveProjectSessionsResponse,
   PromptImageInput,
   PromptImageReference,
+  ProviderLoginView,
   QueuedPromptDraft,
   InvokeSessionCommandRequest,
   RelayPodRequest,
@@ -1185,6 +1186,26 @@ export function createApiClient(transport: ApiTransport) {
 
   rediscover: (runnerId: string) =>
     req<{ ok: true }>(`/api/runners/${encodeURIComponent(runnerId)}/rediscover`, { method: "POST" }),
+
+  startProviderLogin: (
+    runnerId: string,
+    body: { provider: "claude" | "codex"; label: string } | { accountId: string },
+  ) => req<{ login: ProviderLoginView }>(
+    `/api/runners/${encodeURIComponent(runnerId)}/provider-logins`,
+    { method: "POST", body: JSON.stringify(body) },
+  ),
+
+  submitProviderLoginCode: (runnerId: string, operationId: string, code: string) =>
+    req<{ login: ProviderLoginView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/provider-logins/${encodeURIComponent(operationId)}/code`,
+      { method: "POST", body: JSON.stringify({ code }) },
+    ),
+
+  cancelProviderLogin: (runnerId: string, operationId: string) =>
+    req<{ login: ProviderLoginView }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/provider-logins/${encodeURIComponent(operationId)}`,
+      { method: "DELETE" },
+    ),
 
   setAcpRegistryApproval: (
     runnerId: string,

@@ -129,6 +129,7 @@ import {
   writeStarterWorktreeSetupConfig,
 } from "./worktree-setup-generator.js";
 import { createRunnerProviderAuthRecovery } from "./provider-auth-recovery.js";
+import { ProviderLoginSupervisor } from "./provider-login.js";
 import {
   agentForProviderAccount,
   agentWithDefaultProviderAccount,
@@ -485,6 +486,7 @@ const metadata: RunnerMetadata = {
     withOrchestratorPreset(configuredAgentDefinitions, { isolationMode: config.executionIsolation.mode }),
   ),
   providerAccounts: config.providerAccounts.map((account) => providerAccountDefinition(account)),
+  providerLogins: [],
   workspaces: config.workspaces.map((w) => ({
     id: w.id,
     name: w.name,
@@ -686,6 +688,37 @@ const registerAgentControlCredentialAndWait = (sessionId: string, tokenHash: str
     }
   });
 };
+const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSupervisor({
+  dataDir: config.dataDir,
+  configPath: parsed.configPath,
+  accounts: config.providerAccounts,
+  agents: () => metadata.agents,
+  resolveEnv: (agent) => runnerLocalAgentEnv(
+    agent.id,
+    agent.driver ?? "acp",
+    agent.context ?? { kind: "native" },
+  ),
+  acquireLease: (directory, provider): boolean => sessions.acquireProviderLoginHome(directory, provider),
+  releaseLease: (directory): boolean => sessions.releaseProviderHomeAfterLogin(directory),
+  onUpdate: (logins) => {
+    metadata.providerLogins = logins;
+    if (runnerSupportsProtocol(controlPlaneProtocolVersion, "providerLogin")) {
+      sendUp({ type: "provider_logins_updated", runnerId: config.runnerId, logins });
+    }
+  },
+  onAccountAdded: (account) => {
+    providerAccountAuthStatus.set(account.id, "authenticated");
+    sendUp({
+      type: "agents_updated",
+      runnerId: config.runnerId,
+      agents: agentsForControlPlane(),
+      providerAccounts: providerAccountsForControlPlane(),
+      editors: metadata.editors,
+    });
+    void subscriptionUsage.refreshAccount(account.id)
+      .catch(() => log("subscription usage refresh after Provider Sign-In failed"));
+  },
+});
 // The box's on-disk session store (source of truth, shared across runner instances on this box).
 const store = new SessionStore(resolve(config.dataDir, "sessions"));
 store.scrubLegacyAgentEnv();
@@ -703,7 +736,7 @@ const sessionNaming = new SessionNamingExecutor({
 // metadata.agents). It's the same shared resolver as the `resumable` flag and handleAdopt — resume,
 // listing, and adoption can never disagree — and it lets a read-only adopt heal once the box gains
 // a matching agent (discovery finished after the adopt, or the user installed the CLI later).
-const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driver, context, agentId) =>
+const sessions: SessionManager = new SessionManager(() => {}, log, store, config.runnerId, (driver, context, agentId) =>
   agentId
     ? resolveLaunchForAgent(metadata.agents, agentId, driver, context)
     : resolveLaunchForDriver(metadata.agents, driver, context),
@@ -847,7 +880,12 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
   cloudTargets,
   () => controlPlaneProtocolVersion,
   dataDirLease.ownerHash,
-  createRunnerProviderAuthRecovery(config),
+  createRunnerProviderAuthRecovery(
+    config,
+    undefined,
+    providerLoginSupervisor,
+    () => runnerSupportsProtocol(controlPlaneProtocolVersion, "providerLogin"),
+  ),
   (agentId, driver, context, update, providerAccountId) => {
     subscriptionUsage.observe(agentId, driver, context, update, providerAccountId);
   },
@@ -2267,6 +2305,76 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           error: `subscription usage refresh failed: ${errText(error)}`,
         }));
       break;
+    case "start_provider_login":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerLogin")) break;
+      if (msg.runnerId !== config.runnerId) {
+        sendUp({
+          type: "provider_login_result",
+          requestId: msg.requestId,
+          action: "start",
+          ok: false,
+          error: "Provider sign-in targeted a different Machine.",
+        });
+        break;
+      }
+      runCommandTask("start_provider_login", providerLoginSupervisor.startAccount(
+        msg.accountId ? { accountId: msg.accountId } : { provider: msg.provider!, label: msg.label! },
+      ).then((login) => sendUp({
+        type: "provider_login_result",
+        requestId: msg.requestId,
+        action: "start",
+        ok: true,
+        login,
+      })).catch((error) => sendUp({
+        type: "provider_login_result",
+        requestId: msg.requestId,
+        action: "start",
+        ok: false,
+        error: errText(error),
+      })));
+      break;
+    case "submit_provider_login_code":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerLogin")) break;
+      try {
+        const login = providerLoginSupervisor.submitCode(msg.operationId, msg.code);
+        sendUp({
+          type: "provider_login_result",
+          requestId: msg.requestId,
+          action: "submit_code",
+          ok: true,
+          login,
+        });
+      } catch (error) {
+        sendUp({
+          type: "provider_login_result",
+          requestId: msg.requestId,
+          action: "submit_code",
+          ok: false,
+          error: errText(error),
+        });
+      }
+      break;
+    case "cancel_provider_login":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerLogin")) break;
+      try {
+        const login = providerLoginSupervisor.cancel(msg.operationId);
+        sendUp({
+          type: "provider_login_result",
+          requestId: msg.requestId,
+          action: "cancel",
+          ok: true,
+          login,
+        });
+      } catch (error) {
+        sendUp({
+          type: "provider_login_result",
+          requestId: msg.requestId,
+          action: "cancel",
+          ok: false,
+          error: errText(error),
+        });
+      }
+      break;
     case "generate_session_title": {
       if (msg.mode === "custom_model_endpoint") {
         if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionCustomModelNaming")) {
@@ -3218,6 +3326,7 @@ function shutdown(exitCode = 0): void {
     if (reconnectTimer) clearTimeout(reconnectTimer);
   });
   bestEffort("stop subscription usage", () => subscriptionUsage.shutdown());
+  bestEffort("stop provider sign-ins", () => providerLoginSupervisor.shutdown());
   // Track whether every provider driver was disposed. If not (a dispose threw), a provider may still
   // be alive with no registered kill, so we must NOT release its provider-home lease below even if
   // waitForPendingKills reports "reaped" — releasing it could let a replacement runner share the HOME.

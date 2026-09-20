@@ -630,6 +630,9 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/skill-assignments" || routePath.startsWith("/api/skill-assignments/") ||
     routePath === "/api/runners/:id/skills" ||
     routePath === "/api/runners/:id/capacity" ||
+    routePath === "/api/runners/:id/provider-logins" ||
+    routePath === "/api/runners/:id/provider-logins/:operationId/code" ||
+    routePath === "/api/runners/:id/provider-logins/:operationId" ||
     routePath === "/api/runners/:id/skills/sync" ||
     routePath === "/api/runners/:id/skill-snapshots" ||
     routePath.startsWith("/api/skill-machine/") ||
@@ -1262,6 +1265,24 @@ app.register(async (instance) => {
           app.log.info(`runner ${msg.runnerId} agents: [${msg.agents.map((a) => a.id).join(", ")}]`);
         }
         break;
+      case "provider_logins_updated":
+        if (runnerId !== msg.runnerId) {
+          app.log.warn(`runner ${runnerId} sent a mismatched provider sign-in inventory`);
+          break;
+        }
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "providerLogin")) {
+          app.log.warn(`runner ${runnerId} sent provider sign-ins without negotiated support`);
+          break;
+        }
+        try {
+          db.updateRunnerProviderLogins(msg.runnerId, msg.logins, Date.now());
+          hub.runnerChanged(msg.runnerId);
+        } catch (error) {
+          app.log.warn(
+            `runner ${runnerId} sent invalid provider sign-ins — ${error instanceof Error ? error.message : "ignored"}`,
+          );
+        }
+        break;
       case "runner_capacity_status":
         if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "machineRunnerCapacity")) {
           app.log.warn(`runner ${runnerId} sent capacity status without negotiated support`);
@@ -1424,6 +1445,7 @@ app.register(async (instance) => {
       case "interrupt_turn_result":
       case "read_queued_prompt_result":
       case "edit_queued_prompt_result":
+      case "provider_login_result":
         hub.resolveRunnerRequest(msg, runnerId!);
         break;
       case "skills_state": {
@@ -2471,6 +2493,130 @@ app.post("/api/runners/:id/rediscover", async (req, reply) => {
   const sent = hub.sendToRunner(id, { type: "rediscover", runnerId: id });
   if (!sent) return reply.code(503).send({ error: "runner not reachable" });
   return { ok: true };
+});
+
+app.post("/api/runners/:id/provider-logins", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  const runner = db.getRunner(id);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
+  const unsupported = runnerCapabilityError(id, "providerLogin", "Provider Sign-In");
+  if (unsupported) return reply.code(409).send({ error: unsupported });
+  const body = (req.body ?? {}) as { provider?: unknown; label?: unknown; accountId?: unknown };
+  const hasAccountId = body.accountId !== undefined;
+  if (hasAccountId) {
+    if (typeof body.accountId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(body.accountId) ||
+        body.provider !== undefined || body.label !== undefined) {
+      return reply.code(400).send({ error: "accountId must be the only sign-in target" });
+    }
+  } else if ((body.provider !== "claude" && body.provider !== "codex") ||
+      typeof body.label !== "string" || !body.label.trim() || body.label.trim().length > 100 ||
+      /[\u0000-\u001f\u007f]/u.test(body.label)) {
+    return reply.code(400).send({ error: "provider and a 1 to 100 character label are required" });
+  }
+  const requestId = `provider_login_${randomUUID()}`;
+  try {
+    const result = await hub.requestFromRunner(id, requestId, {
+      type: "start_provider_login",
+      requestId,
+      runnerId: id,
+      ...(hasAccountId
+        ? { accountId: body.accountId as string }
+        : { provider: body.provider as "claude" | "codex", label: (body.label as string).trim() }),
+    });
+    if (result.type !== "provider_login_result" || result.action !== "start") {
+      return reply.code(502).send({ error: "unexpected runner reply" });
+    }
+    if (!result.ok || !result.login) {
+      return reply.code(409).send({ error: result.error ?? "Provider sign-in could not be started" });
+    }
+    return reply.code(201).send({ login: result.login });
+  } catch (error) {
+    return reply.code(504).send({ error: (error as Error).message });
+  }
+});
+
+app.post("/api/runners/:id/provider-logins/:operationId/code", async (req, reply) => {
+  const { id, operationId } = req.params as { id: string; operationId: string };
+  if (!/^login_[A-Za-z0-9-]{1,122}$/u.test(operationId)) {
+    return reply.code(400).send({ error: "operationId is invalid" });
+  }
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  const runner = db.getRunner(id);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
+  if (!runnerSupportsProtocol(runner.protocolVersion, "providerLogin")) {
+    return reply.code(409).send({
+      error: runnerCapabilityRequirement(runner.protocolVersion, "providerLogin", "Provider Sign-In"),
+    });
+  }
+  const code = (req.body as { code?: unknown })?.code;
+  if (typeof code !== "string" || !code.trim() || code.trim().length > 4_096 || /[\u0000\r\n]/u.test(code.trim())) {
+    return reply.code(400).send({ error: "code must be a single line of 1 to 4096 characters" });
+  }
+  const requestId = `provider_login_code_${randomUUID()}`;
+  try {
+    const result = await hub.requestFromRunner(id, requestId, {
+      type: "submit_provider_login_code",
+      requestId,
+      runnerId: id,
+      operationId,
+      code: code.trim(),
+    });
+    if (result.type !== "provider_login_result" || result.action !== "submit_code") {
+      return reply.code(502).send({ error: "unexpected runner reply" });
+    }
+    if (!result.ok || !result.login) {
+      return reply.code(409).send({ error: result.error ?? "Authorization code could not be submitted" });
+    }
+    return { login: result.login };
+  } catch (error) {
+    return reply.code(504).send({ error: (error as Error).message });
+  }
+});
+
+app.delete("/api/runners/:id/provider-logins/:operationId", async (req, reply) => {
+  const { id, operationId } = req.params as { id: string; operationId: string };
+  if (!/^login_[A-Za-z0-9-]{1,122}$/u.test(operationId)) {
+    return reply.code(400).send({ error: "operationId is invalid" });
+  }
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  const runner = db.getRunner(id);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
+  if (!runnerSupportsProtocol(runner.protocolVersion, "providerLogin")) {
+    return reply.code(409).send({
+      error: runnerCapabilityRequirement(runner.protocolVersion, "providerLogin", "Provider Sign-In"),
+    });
+  }
+  const requestId = `provider_login_cancel_${randomUUID()}`;
+  try {
+    const result = await hub.requestFromRunner(id, requestId, {
+      type: "cancel_provider_login",
+      requestId,
+      runnerId: id,
+      operationId,
+    });
+    if (result.type !== "provider_login_result" || result.action !== "cancel") {
+      return reply.code(502).send({ error: "unexpected runner reply" });
+    }
+    if (!result.ok || !result.login) {
+      return reply.code(409).send({ error: result.error ?? "Provider sign-in could not be cancelled" });
+    }
+    return { login: result.login };
+  } catch (error) {
+    return reply.code(504).send({ error: (error as Error).message });
+  }
 });
 
 app.post("/api/runners/:id/acp-registry/:agentId/approval", async (req, reply) => {
@@ -3936,6 +4082,13 @@ app.post("/api/sessions/:id/approve", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const body = req.body as ApproveRequest;
   const human = requestHuman(req);
+  if (body.optionId === "auth:login") {
+    const session = db.getSession(id);
+    if (!session) return reply.code(404).send({ error: "session not found" });
+    if (!human || !db.canManageRunner(human, session.runnerId)) {
+      return reply.code(403).send({ error: "Machine owner or organization admin permission is required to start Provider Sign-In" });
+    }
+  }
   return respond(reply, svc.approve(id, body.requestId, body.optionId ?? null, {
     kind: "human",
     id: humanActorId(req),

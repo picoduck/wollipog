@@ -1,7 +1,18 @@
 /** Runner configuration loading + CLI argument parsing. */
 
-import { existsSync, readFileSync, realpathSync } from "node:fs";
-import { posix, resolve, win32 } from "node:path";
+import {
+  closeSync,
+  existsSync,
+  fsyncSync,
+  openSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { randomUUID } from "node:crypto";
+import { dirname, posix, resolve, win32 } from "node:path";
 import { homedir } from "node:os";
 import type { AcpEnvironmentReference, AcpMcpServerConfig, AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
@@ -361,6 +372,41 @@ function readConfigFile(
  */
 export const DEFAULT_MAX_CONCURRENT_SESSIONS = 16;
 
+export function validateProviderAccounts(raw: unknown): RunnerProviderAccount[] {
+  if (!Array.isArray(raw) || raw.length > 32) {
+    throw new Error("runner config: 'providerAccounts' must be an array with at most 32 entries");
+  }
+  const providerAccountIds = new Set<string>();
+  const providerAccountDirectories = new Set<string>();
+  return raw.map((value, index) => {
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      throw new Error(`runner config: providerAccounts[${index}] must be an object`);
+    }
+    const account = value as Partial<RunnerProviderAccount>;
+    if (typeof account.id !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(account.id) || providerAccountIds.has(account.id)) {
+      throw new Error(`runner config: provider account id '${String(account.id)}' must be unique and contain only letters, digits, '.', '_' or '-'`);
+    }
+    providerAccountIds.add(account.id);
+    const label = typeof account.label === "string" ? account.label.trim() : "";
+    if (!label || label.length > 100 || /[\u0000-\u001f\u007f]/.test(label)) {
+      throw new Error(`runner config: provider account '${account.id}' label must contain 1 to 100 characters`);
+    }
+    if (account.provider !== "claude" && account.provider !== "codex") {
+      throw new Error(`runner config: provider account '${account.id}' provider must be 'claude' or 'codex'`);
+    }
+    if (typeof account.directory !== "string" || !configuredAbsolute(account.directory)) {
+      throw new Error(`runner config: provider account '${account.id}' directory must be absolute`);
+    }
+    const comparableDirectoryKey = providerAccountDirectoryKey(account.directory);
+    if (providerAccountDirectories.has(comparableDirectoryKey)) {
+      throw new Error("runner config: provider account directories must be distinct");
+    }
+    providerAccountDirectories.add(comparableDirectoryKey);
+    return { id: account.id, label, provider: account.provider, directory: account.directory };
+  });
+}
+
 /** Merge config sources (precedence: overrides > file > defaults), validate, resolve paths. */
 export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<RunnerConfig> = {}): RunnerConfig {
   const runnerId = overrides.runnerId ?? file.runnerId;
@@ -448,38 +494,7 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
     }
   }
   const agents = (overrides.agents ?? file.agents ?? []);
-  const rawProviderAccounts = overrides.providerAccounts ?? file.providerAccounts ?? [];
-  if (!Array.isArray(rawProviderAccounts) || rawProviderAccounts.length > 32) {
-    throw new Error("runner config: 'providerAccounts' must be an array with at most 32 entries");
-  }
-  const providerAccountIds = new Set<string>();
-  const providerAccountDirectories = new Set<string>();
-  const providerAccounts = rawProviderAccounts.map((account, index) => {
-    if (!account || typeof account !== "object" || Array.isArray(account)) {
-      throw new Error(`runner config: providerAccounts[${index}] must be an object`);
-    }
-    if (typeof account.id !== "string" ||
-        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(account.id) || providerAccountIds.has(account.id)) {
-      throw new Error(`runner config: provider account id '${String(account.id)}' must be unique and contain only letters, digits, '.', '_' or '-'`);
-    }
-    providerAccountIds.add(account.id);
-    const label = typeof account.label === "string" ? account.label.trim() : "";
-    if (!label || label.length > 100 || /[\u0000-\u001f\u007f]/.test(label)) {
-      throw new Error(`runner config: provider account '${account.id}' label must contain 1 to 100 characters`);
-    }
-    if (account.provider !== "claude" && account.provider !== "codex") {
-      throw new Error(`runner config: provider account '${account.id}' provider must be 'claude' or 'codex'`);
-    }
-    if (typeof account.directory !== "string" || !configuredAbsolute(account.directory)) {
-      throw new Error(`runner config: provider account '${account.id}' directory must be absolute`);
-    }
-    const comparableDirectoryKey = providerAccountDirectoryKey(account.directory);
-    if (providerAccountDirectories.has(comparableDirectoryKey)) {
-      throw new Error("runner config: provider account directories must be distinct");
-    }
-    providerAccountDirectories.add(comparableDirectoryKey);
-    return { id: account.id, label, provider: account.provider, directory: account.directory };
-  });
+  const providerAccounts = validateProviderAccounts(overrides.providerAccounts ?? file.providerAccounts ?? []);
   const containerTargets = validateContainerTargets(overrides.containerTargets ?? file.containerTargets ?? []);
   const cloudTargets = validateCloudTargets(overrides.cloudTargets ?? file.cloudTargets ?? []);
   const remoteEnabled = overrides.features?.acpRemoteTransports ?? file.features?.acpRemoteTransports ?? false;
@@ -821,4 +836,42 @@ export function loadConfig(
   explicitConfig = false,
 ): RunnerConfig {
   return resolveConfig(readConfigFile(configPath, overrides, explicitConfig), overrides);
+}
+
+/** Atomically replace only providerAccounts in the operator's existing JSON configuration. */
+export function writeProviderAccountsConfig(configPath: string, accounts: RunnerProviderAccount[]): void {
+  const validated = validateProviderAccounts(accounts);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(configPath, "utf8"));
+  } catch {
+    throw new Error("runner configuration could not be read for the account update");
+  }
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error("runner configuration must be a JSON object");
+  }
+  const next = { ...(parsed as Record<string, unknown>), providerAccounts: validated };
+  const temporary = `${configPath}.${process.pid}.${randomUUID()}.tmp`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(temporary, "wx", 0o600);
+    writeFileSync(fd, `${JSON.stringify(next, null, 2)}\n`);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temporary, configPath);
+    try {
+      const directory = openSync(dirname(configPath), "r");
+      try { fsyncSync(directory); } finally { closeSync(directory); }
+    } catch {
+      // The atomic replacement already committed. Directory fsync is a best-effort durability
+      // barrier; reporting failure now would make callers remove a credential home that the
+      // committed configuration already references.
+    }
+  } catch {
+    throw new Error("runner configuration account update failed");
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(temporary, { force: true });
+  }
 }

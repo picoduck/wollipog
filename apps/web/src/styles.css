@@ -6951,6 +6951,100 @@ button.file-head.source-path-link {
   padding: 0 10px 10px;
   border-top: 1px solid var(--border);
 }
+.provider-accounts-actions,
+.provider-login-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.provider-accounts-actions {
+  padding: 10px 2px 2px;
+}
+.provider-accounts-actions p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.provider-account-form,
+.provider-account-form label {
+  display: grid;
+  gap: 8px;
+}
+.provider-account-form label {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.provider-login-card {
+  margin-top: 10px;
+  padding: 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 38%, var(--border));
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--amber) 8%, var(--bg-elev));
+  color: var(--text);
+}
+.provider-login-card[data-provider-login-status="failed"],
+.provider-login-card[data-provider-login-status="timed_out"] {
+  border-color: color-mix(in srgb, var(--red) 42%, var(--border));
+  background: color-mix(in srgb, var(--red) 8%, var(--bg-elev));
+}
+.provider-login-head > div {
+  display: grid;
+  gap: 3px;
+}
+.provider-login-head span,
+.provider-login-device-code span {
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.provider-login-card p {
+  margin: 9px 0 0;
+}
+.provider-login-card a {
+  font-weight: 600;
+}
+.provider-login-device-code {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+.provider-login-device-code code {
+  padding: 5px 8px;
+  border-radius: var(--radius-xs);
+  background: var(--bg-elev-3);
+  font-size: var(--text-md);
+  letter-spacing: .08em;
+}
+.provider-login-card form {
+  display: flex;
+  align-items: end;
+  gap: 8px;
+  margin-top: 10px;
+}
+.provider-login-card form label {
+  display: grid;
+  flex: 1;
+  gap: 5px;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+}
+.provider-login-card form input {
+  width: 100%;
+}
+.approval-bar:has(> .provider-login-card) {
+  flex-wrap: wrap;
+}
+.approval-bar > .provider-login-card {
+  flex: 0 0 100%;
+  margin-top: 0;
+}
+.inbox-provider-logins {
+  display: grid;
+  gap: 8px;
+  padding: 0 12px 10px;
+  border-bottom: 1px solid var(--border);
+}
 .runner-details-body {
   padding-bottom: 2px;
 }
