@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane, SessionWorktreeView } from "@wollipog/protocol";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -740,6 +740,7 @@ test("changed-branch discard durably hands off every preserved ref before remova
 
 test("retained ref reclamation is exact, checkout-aware, default-safe, and idempotent", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-reclaim-"));
+  let manager: SessionManager | undefined;
   try {
     const { repo } = initRepoWithOrigin(root);
     execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
@@ -748,10 +749,19 @@ test("retained ref reclamation is exact, checkout-aware, default-safe, and idemp
       try {
         const reflog = execFileSync(
           "git",
-          ["-C", repo, "reflog", "show", "--max-count=1", "--format=%H%x00%P%x00%gD%x00%gs%x00%ct%x00%cn%x00%ce", `refs/heads/${branch}`],
+          ["-C", repo, "reflog", "show", "--max-count=1", "--date=raw", "--format=%H%x00%gD%x00%gs", `refs/heads/${branch}`],
           { encoding: "utf8" },
         );
-        return reflog ? createHash("sha256").update(reflog).digest("hex") : undefined;
+        const commonDir = execFileSync(
+          "git",
+          ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+          { encoding: "utf8" },
+        ).trim();
+        const stat = statSync(join(commonDir, "logs", "refs", "heads", ...branch.split("/")));
+        const fileIdentity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.ctimeMs}:${stat.size}`;
+        return reflog
+          ? createHash("sha256").update(reflog).update("\0").update(fileIdentity).digest("hex")
+          : undefined;
       } catch {
         return undefined;
       }
@@ -809,7 +819,7 @@ test("retained ref reclamation is exact, checkout-aware, default-safe, and idemp
     publish("fix/same-oid-recreated-retained");
     const sameOidRecreated = record("fix/same-oid-recreated-retained", main);
     execFileSync("git", ["-C", repo, "update-ref", "-d", "refs/heads/fix/same-oid-recreated-retained", main]);
-    execFileSync("git", ["-C", repo, "update-ref", "refs/heads/fix/same-oid-recreated-retained", main]);
+    execFileSync("git", ["-C", repo, "branch", "fix/same-oid-recreated-retained", main]);
     assert.deepEqual(await reclaimRetainedWorktreeRef(sameOidRecreated), {
       state: "retained", reason: "ref_changed_or_recreated",
     }, "same-name recreation is retained even when it points to the captured commit");
@@ -819,6 +829,52 @@ test("retained ref reclamation is exact, checkout-aware, default-safe, and idemp
       identityToken: undefined,
     })), { state: "retained", reason: "identity_unproved" },
     "records without generation proof are never retroactively granted deletion ownership");
+
+    publish("fix/default-at-handoff-retained");
+    execFileSync("git", ["-C", repo, "branch", "develop", main]);
+    execFileSync("git", ["-C", repo, "push", "origin", "develop"]);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "develop"]);
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("fix/default-at-handoff-retained", main, {
+      reasons: ["default_branch"],
+    })), { state: "retained", reason: "default_branch" },
+    "a ref retained as the default is never claimed after the remote default changes");
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("fix/default-at-handoff-retained", main, {
+      reasons: ["default_unknown"],
+    })), { state: "retained", reason: "default_unproved_at_handoff" });
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+
+    execFileSync("git", ["-C", repo, "branch", "fix/prefix-only/child", main]);
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("fix/prefix-only", main)), {
+      state: "completed", reason: "already_missing",
+    }, "a prefix-sharing child ref is not mistaken for the exact retained ref");
+
+    publish("fix/unarmed-retained");
+    const dataDir = join(root, "unarmed-data");
+    const unarmed = record("fix/unarmed-retained", main, {
+      sessionId: "s_unarmed",
+      worktreeId: "wt-unarmed",
+    });
+    new WorktreeCleanupJournal(dataDir).addRetainedRef(unarmed);
+    manager = new SessionManager(
+      () => {},
+      () => {},
+      new SessionStore(join(dataDir, "sessions")),
+      "runner",
+      undefined,
+      undefined,
+      dataDir,
+    );
+    const privateManager = manager as unknown as {
+      cleanupJournal: WorktreeCleanupJournal;
+      replayRetainedRefReclaims(): Promise<void>;
+    };
+    await privateManager.replayRetainedRefReclaims();
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/unarmed-retained"]);
+    privateManager.cleanupJournal.armRetainedRefs("s_unarmed", "wt-unarmed");
+    await privateManager.replayRetainedRefReclaims();
+    assert.throws(() => execFileSync(
+      "git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/unarmed-retained"],
+    ), "reclamation becomes eligible only after worktree cleanup arms the durable row");
 
     assert.deepEqual(await reclaimRetainedWorktreeRef(record("main", main)), {
       state: "retained", reason: "default_branch",
@@ -854,6 +910,7 @@ test("retained ref reclamation is exact, checkout-aware, default-safe, and idemp
       encoding: "utf8",
     }).trim(), racingHead);
   } finally {
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -1223,16 +1280,21 @@ test("retained ref journal survives restart and never re-arms a completed or rep
     const journal = new WorktreeCleanupJournal(dataDir);
     journal.addRetainedRef(record);
     assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [record]);
+    journal.armRetainedRefs("s1", "other-worktree");
+    assert.equal(new WorktreeCleanupJournal(dataDir).listRetainedRefs()[0]?.armedAt, undefined);
+    journal.armRetainedRefs("s1", "wt1");
+    const armedRecord = new WorktreeCleanupJournal(dataDir).listRetainedRefs()[0]!;
+    assert.equal(typeof armedRecord.armedAt, "number");
 
     const changed = { ...record, expectedOid: "b".repeat(40), updatedAt: 2 };
     assert.equal(journal.addRetainedRef(changed).expectedOid, record.expectedOid,
       "a retry cannot bless an advanced or recreated ref");
-    record.pendingReason = "checked_out";
-    record.updatedAt = 3;
-    journal.updateRetainedRef(record);
+    armedRecord.pendingReason = "checked_out";
+    armedRecord.updatedAt = 3;
+    journal.updateRetainedRef(armedRecord);
     assert.equal(new WorktreeCleanupJournal(dataDir).listRetainedRefs()[0]?.pendingReason, "checked_out");
 
-    journal.finishRetainedRef(record, "completed", "deleted");
+    journal.finishRetainedRef(armedRecord, "completed", "deleted");
     const restarted = new WorktreeCleanupJournal(dataDir);
     assert.deepEqual(restarted.listRetainedRefs(), []);
     assert.equal(restarted.retainedRefHistory()[0]?.state, "completed");

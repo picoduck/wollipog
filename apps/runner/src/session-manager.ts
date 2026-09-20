@@ -3080,6 +3080,7 @@ export class SessionManager {
       if (record.worktreeId) {
         this.worktreePortAllocator.release(this.worktreePortOwner(record.sessionId, record.worktreeId));
       }
+      this.cleanupJournal.armRetainedRefs(record.sessionId, record.worktreeId);
       record.completedAt = Date.now();
       this.cleanupJournal.complete(record);
       this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
@@ -3092,6 +3093,7 @@ export class SessionManager {
   }
 
   private async reapRetainedRef(record: RetainedWorktreeRefRecord): Promise<void> {
+    if (!record.armedAt) return;
     const result = await reclaimRetainedWorktreeRef(record, { context: record.context });
     if (result.state === "pending") {
       if (record.pendingReason === result.reason) return;
@@ -3108,6 +3110,7 @@ export class SessionManager {
       record.sessionId === sessionId && (record.worktreeId ?? "legacy") === (worktreeId ?? "legacy"));
     if (!records.length) return;
     setImmediate(() => {
+      if (this.shuttingDown) return;
       for (const record of records) {
         void this.reapRetainedRef(record).catch((error) => {
           this.log(`retained ref cleanup for ${boundedSessionIdForLog(sessionId)} needs retry: ${errText(error)}`);

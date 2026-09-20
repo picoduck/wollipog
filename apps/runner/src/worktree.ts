@@ -183,6 +183,7 @@ export type RetainedWorktreeRefTerminalReason =
   | "deleted"
   | "already_missing"
   | "default_branch"
+  | "default_unproved_at_handoff"
   | "ref_changed_or_recreated"
   | "identity_unproved"
   | "delivery_unproved";
@@ -195,7 +196,7 @@ export interface RetainedWorktreeRefRecord {
   context: AgentContext;
   branch: string;
   expectedOid: string;
-  /** Hash of the branch's latest reflog entry at handoff; distinguishes same-OID recreation. */
+  /** Hash of the latest reflog entry and its file identity; distinguishes same-OID recreation. */
   identityToken?: string;
   reasons: RetainedWorktreeRefReason[];
   /** Exact merged-head proof already accepted by worktree cleanup, when one exists. */
@@ -203,6 +204,8 @@ export interface RetainedWorktreeRefRecord {
   state: "pending" | "completed" | "retained";
   pendingReason?: RetainedWorktreeRefPendingReason;
   terminalReason?: RetainedWorktreeRefTerminalReason;
+  /** Set only after the associated worktree was successfully removed. */
+  armedAt?: number;
   createdAt: number;
   updatedAt: number;
   completedAt?: number;
@@ -337,6 +340,18 @@ export class WorktreeCleanupJournal {
     if (!this.retainedRefs.has(key)) return;
     this.retainedRefs.set(key, structuredClone(record));
     this.flushRetainedRefs();
+  }
+
+  armRetainedRefs(sessionId: string, worktreeId?: string): void {
+    const now = Date.now();
+    let changed = false;
+    for (const [key, record] of this.retainedRefs) {
+      if (record.sessionId !== sessionId ||
+          (record.worktreeId ?? "legacy") !== (worktreeId ?? "legacy") || record.armedAt) continue;
+      this.retainedRefs.set(key, { ...record, armedAt: now, updatedAt: now });
+      changed = true;
+    }
+    if (changed) this.flushRetainedRefs();
   }
 
   finishRetainedRef(
@@ -1233,7 +1248,8 @@ export type RetainedWorktreeRefReclaimResult =
   | { state: "completed"; reason: "deleted" | "already_missing" }
   | {
       state: "retained";
-      reason: "default_branch" | "ref_changed_or_recreated" | "identity_unproved" | "delivery_unproved";
+      reason: "default_branch" | "default_unproved_at_handoff" | "ref_changed_or_recreated" |
+        "identity_unproved" | "delivery_unproved";
     };
 
 async function localBranchOid(
@@ -1241,11 +1257,13 @@ async function localBranchOid(
   repoPath: string,
   ref: string,
 ): Promise<string | undefined> {
-  const oid = (await command(
+  const refs = await command(
     context,
     repoPath,
-    ["for-each-ref", "--count=1", "--format=%(objectname)", ref],
-  )).trim();
+    ["for-each-ref", "--format=%(refname)%09%(objectname)", ref],
+  );
+  const oid = refs.split(/\r?\n/u).map((line) => line.split("\t", 2))
+    .find(([candidate]) => candidate === ref)?.[1]?.trim();
   if (!oid) return undefined;
   if (!/^[a-f0-9]{40,64}$/u.test(oid)) throw new Error("local branch has an invalid object id");
   return oid;
@@ -1261,11 +1279,32 @@ async function localBranchIdentity(
   let identityToken: string | undefined;
   try {
     const reflog = await command(context, repoPath, [
-      "reflog", "show", "--max-count=1",
-      "--format=%H%x00%P%x00%gD%x00%gs%x00%ct%x00%cn%x00%ce",
+      "reflog", "show", "--max-count=1", "--date=raw",
+      "--format=%H%x00%gD%x00%gs",
       ref,
     ]);
-    if (reflog) identityToken = createHash("sha256").update(reflog).digest("hex");
+    const commonDir = (await command(
+      context,
+      repoPath,
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )).trim().replace(/[\\/]+$/u, "");
+    const reflogPath = context.kind === "wsl"
+      ? `${commonDir}/logs/${ref}`
+      : join(commonDir, "logs", ...ref.split("/"));
+    const fileIdentity = context.kind === "wsl"
+      ? (await runContextCommand(
+          context,
+          "stat",
+          ["-c", "%d:%i:%w:%z:%s", "--", reflogPath],
+          { cwd: "/", timeoutMs: 8_000 },
+        )).stdout.trim()
+      : (() => {
+          const stat = statSync(reflogPath);
+          return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.ctimeMs}:${stat.size}`;
+        })();
+    if (reflog && fileIdentity) {
+      identityToken = createHash("sha256").update(reflog).update("\0").update(fileIdentity).digest("hex");
+    }
   } catch {
     // A missing reflog is not permission to delete. Persist the OID-only ownership record and
     // let reclamation terminally retain it as identity_unproved.
@@ -1277,11 +1316,11 @@ async function localBranchIdentity(
 
 async function retainedRefDeliveryProven(
   record: RetainedWorktreeRefRecord,
+  context: AgentContext,
   ref: string,
   defaultBranch: string,
 ): Promise<boolean> {
   if (record.verifiedMergedHead === record.expectedOid) return true;
-  const context = record.context;
   try {
     await command(context, record.repoPath, ["rev-parse", "--verify", `${record.branch}@{upstream}`]);
     const ahead = (await command(
@@ -1308,14 +1347,16 @@ async function retainedRefDeliveryProven(
 }
 
 /** Reclaim one retained local branch only after re-proving every safety property. The final
- * update-ref is compare-and-delete against the captured object id, so a concurrent advance is
- * retained. A crash after deletion is idempotent: the next pass observes an already-missing ref. */
+ * update-ref is compare-and-delete against the captured object id after a generation check, so an
+ * advance or same-OID recreation is retained. A crash after deletion is idempotent: the next pass
+ * observes an already-missing ref. */
 export async function reclaimRetainedWorktreeRef(
   record: RetainedWorktreeRefRecord,
   options: WorktreeOptions & { beforeDelete?: () => Promise<void> } = {},
 ): Promise<RetainedWorktreeRefReclaimResult> {
   const context = options.context ?? record.context;
-  if (context.kind !== record.context.kind || !/^[a-f0-9]{40,64}$/u.test(record.expectedOid)) {
+  if (JSON.stringify(context) !== JSON.stringify(record.context) ||
+      !/^[a-f0-9]{40,64}$/u.test(record.expectedOid)) {
     return { state: "pending", reason: "git_unavailable" };
   }
   let branch: string;
@@ -1326,6 +1367,12 @@ export async function reclaimRetainedWorktreeRef(
   }
   const ref = `refs/heads/${branch}`;
   try {
+    if (record.reasons.includes("default_branch")) {
+      return { state: "retained", reason: "default_branch" };
+    }
+    if (record.reasons.includes("default_unknown")) {
+      return { state: "retained", reason: "default_unproved_at_handoff" };
+    }
     const defaultBranch = await readRepositoryDefaultBranch(record.repoPath, { ...options, context });
     if (!defaultBranch) return { state: "pending", reason: "default_unknown" };
     if (defaultBranch === branch) return { state: "retained", reason: "default_branch" };
@@ -1346,7 +1393,7 @@ export async function reclaimRetainedWorktreeRef(
     if (currentIdentity.identityToken !== record.identityToken) {
       return { state: "retained", reason: "ref_changed_or_recreated" };
     }
-    if (!await retainedRefDeliveryProven(record, ref, defaultBranch)) {
+    if (!await retainedRefDeliveryProven(record, context, ref, defaultBranch)) {
       return { state: "retained", reason: "delivery_unproved" };
     }
 
