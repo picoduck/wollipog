@@ -352,6 +352,21 @@ function toml(value: unknown): string {
   throw new Error("unsupported orchestrator MCP configuration value");
 }
 
+type OrchestratorMcpLaunch = {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  forwardEnv?: boolean;
+};
+
+function codexMcpLaunch(mcp: OrchestratorMcpLaunch): Record<string, unknown> {
+  return {
+    command: mcp.command,
+    args: mcp.args,
+    ...(mcp.forwardEnv ? { env_vars: Object.keys(mcp.env) } : { env: mcp.env }),
+  };
+}
+
 /** The native harness grants only the planning surface described above; the control plane
  * independently scopes the credential. Unknown feature flags fail launch rather than falling back
  * to an unrestricted mode.
@@ -372,7 +387,7 @@ function toml(value: unknown): string {
  * disabled by key and the inventory proves the runner's hook is the only enabled one. */
 export function orchestratorLaunchArgs(
   driver: SessionLaunchSpec["driver"],
-  mcp: { command: string; args: string[]; env: Record<string, string> },
+  mcp: OrchestratorMcpLaunch,
   projectPaths: readonly string[] = [],
   strictProjectIsolation = true,
 ): string[] {
@@ -420,7 +435,7 @@ export function orchestratorLaunchArgs(
     "-c", 'web_search="live"',
     "-c", `developer_instructions=${toml(instructions)}`,
     "-c", `mcp_servers=${toml({ wollipog: {
-      ...mcp,
+      ...codexMcpLaunch(mcp),
       enabled: true,
       default_tools_approval_mode: "approve",
     } })}`,
@@ -583,9 +598,13 @@ export function reservedCodexMcpNameCollision(args: readonly string[]): boolean 
 }
 
 export function additiveCodexMcpServerArg(
-  mcp: { command: string; args: string[]; env: Record<string, string> },
+  mcp: OrchestratorMcpLaunch,
 ): string {
-  return `mcp_servers.wollipog=${toml({ ...mcp, enabled: true, default_tools_approval_mode: "approve" })}`;
+  return `mcp_servers.wollipog=${toml({
+    ...codexMcpLaunch(mcp),
+    enabled: true,
+    default_tools_approval_mode: "approve",
+  })}`;
 }
 
 /**
@@ -617,7 +636,7 @@ export function additiveCodexMcpServerArg(
  */
 export function additiveOrchestratorLaunchArgs(
   driver: SessionLaunchSpec["driver"],
-  mcp: { command: string; args: string[]; env: Record<string, string> },
+  mcp: OrchestratorMcpLaunch,
   projectPaths: readonly string[] = [],
   integrationIsolation = false,
 ): string[] {

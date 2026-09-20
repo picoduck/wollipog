@@ -24,11 +24,16 @@ import {
   markAgentControlCredentialRejected,
   piAgentControlExtensionPath,
   provisionAgentControl,
+  relayAgentControlRequest,
   removeAgentControlFiles,
   sweepAgentControlFiles,
   wslAgentControlLaunch,
   type AgentControlHost,
 } from "./agent-control.js";
+import {
+  AGENT_CONTROL_RELAY_ENDPOINT_ENV,
+  AGENT_CONTROL_RELAY_KEY_ENV,
+} from "./agent-control-relay.js";
 import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION } from "./orchestrator-preset.js";
 import { claudeHookSettingsPath, provisionClaudeHooks, resetClaudeGuardState } from "./hook-settings.js";
 import { PI_ORCHESTRATOR_PRESET_TOOLS_ENV, PI_SECURITY_REQUEST_NONCE_ENV } from "./pi-agent-control-extension.js";
@@ -494,6 +499,76 @@ test("native sessions receive a purpose-bound token file and CLI environment wit
   }
 });
 
+test("provider-mode Agent Control keeps the registered credential in runner memory across launch and resume", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-provider-agent-control-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/wollipog-runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const launch = spec("claude-code");
+    const hashes: string[] = [];
+    const control = {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "provider" as const,
+      providerRelayEndpoint: "tcp://127.0.0.1:4318",
+      registerCredential: (_id: string, hash: string) => hashes.push(hash),
+    };
+    provisionAgentControl(launch, control, () => {}, host);
+
+    assert.equal(existsSync(agentControlTokenPath(root, launch.sessionId)), false);
+    assert.equal(existsSync(agentControlReadyPath(root, launch.sessionId)), false);
+    assert.equal(launch.env.WOLLIPOG_SESSION_TOKEN_FILE, undefined);
+    assert.equal(launch.env.WOLLIPOG_SESSION_CREDENTIAL_READY_FILE, undefined);
+    assert.equal(launch.env[AGENT_CONTROL_RELAY_ENDPOINT_ENV], control.providerRelayEndpoint);
+    const relayKey = launch.env[AGENT_CONTROL_RELAY_KEY_ENV];
+    assert.ok(relayKey);
+    assert.doesNotMatch(relayKey, /^wollipoga_/u, "the provider receives no control-plane bearer");
+    const mcpConfig = readFileSync(agentControlMcpConfigPath(root, launch.sessionId), "utf8");
+    assert.equal(mcpConfig.includes("WOLLIPOG_SESSION_TOKEN_FILE"), false);
+
+    markAgentControlCredentialReady(root, launch.sessionId, hashes[0]!);
+    const planted = "wollipoga_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    writeFileSync(agentControlTokenPath(root, launch.sessionId), planted, { mode: 0o600 });
+    writeFileSync(agentControlReadyPath(root, launch.sessionId), createHash("sha256").update(planted).digest("hex"));
+    let observedAuthorization = "";
+    const response = await relayAgentControlRequest(launch.sessionId, {
+      key: relayKey,
+      method: "GET",
+      path: "/api/sessions?limit=1",
+    }, new AbortController().signal, async (input, init) => {
+      observedAuthorization = new Headers(init?.headers).get("authorization") ?? "";
+      assert.equal(new Headers(init?.headers).get("x-wollipog-agent-session"), launch.sessionId);
+      assert.equal(String(input), "http://127.0.0.1:4317/api/sessions?limit=1");
+      return new Response('{"sessions":[]}', { status: 200 });
+    });
+    assert.equal(response.status, 200);
+    assert.match(observedAuthorization, /^Bearer wollipoga_[A-Za-z0-9_-]{43}$/u);
+    assert.notEqual(observedAuthorization, `Bearer ${planted}`, "a planted file never selects the accepted credential");
+    await assert.rejects(() => relayAgentControlRequest(launch.sessionId, {
+      key: relayKey,
+      method: "GET",
+      path: "/\\example.com/api/sessions",
+    }, new AbortController().signal), /destination changed origin/,
+    "the origin comparison rejects WHATWG backslash authority escapes");
+
+    provisionAgentControl(launch, control, () => {}, host);
+    assert.equal(hashes[1], hashes[0], "resume re-registers the same runner-memory credential");
+    assert.equal(existsSync(agentControlTokenPath(root, launch.sessionId)), false, "resume removes planted files");
+    assert.equal(existsSync(agentControlReadyPath(root, launch.sessionId)), false);
+    await assert.rejects(() => relayAgentControlRequest(launch.sessionId, {
+      key: `${relayKey}x`, method: "GET", path: "/api/sessions",
+    }, new AbortController().signal), /authentication failed/);
+
+    removeAgentControlFiles(launch.sessionId, root);
+    provisionAgentControl(launch, control, () => {}, host);
+    assert.notEqual(hashes[2], hashes[0], "runner-lifecycle loss mints a fresh credential");
+  } finally {
+    removeAgentControlFiles("s_agent", root);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("credential acknowledgement creates an exact-hash readiness fence and rejection revokes files", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-"));
   try {
@@ -695,7 +770,8 @@ test("a non-strict Codex Orchestrator launches as a normal session plus Wollipog
       isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
     };
     const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
-      executionIsolationMode: "provider" as const, orchestratorProjectPaths: ["/other-project"] };
+      executionIsolationMode: "provider" as const, providerRelayEndpoint: "tcp://127.0.0.1:4318",
+      orchestratorProjectPaths: ["/other-project"] };
     // Everything a user may have configured for an ordinary Codex session, including their own
     // MCP server, their own developer instructions, and an explicitly enabled feature.
     const userArgs = [
@@ -729,6 +805,10 @@ test("a non-strict Codex Orchestrator launches as a normal session plus Wollipog
         assert.match(added[3]!, /^developer_instructions="You are running with the Wollipog Orchestrator role/);
         assert.equal(orchestrator.env.WOLLIPOG_PERMISSION_PRESET, "orchestrator",
           "the campaign tools are exposed on Wollipog's own server");
+        const relayKey = orchestrator.env[AGENT_CONTROL_RELAY_KEY_ENV]!;
+        assert.equal(args.some((arg) => arg.includes(relayKey)), false,
+          "the relay key is forwarded from the Codex environment, never serialized in argv");
+        assert.match(added[1]!, /"env_vars" = \[[^\]]*"WOLLIPOG_AGENT_CONTROL_RELAY_KEY"/u);
         assert.equal(existsSync(agentControlMcpConfigPath(root, orchestrator.sessionId)), false,
           "Codex needs no runner-written MCP config file beside the user's own");
         provisionAgentControl(orchestrator, control, () => {}, host);
@@ -749,6 +829,9 @@ test("a non-strict Codex Orchestrator launches as a normal session plus Wollipog
     legacy.config = { permissionMode: "orchestrator" };
     legacy.orchestrator = { strictProjectIsolation: false };
     provisionAgentControl(legacy, control, () => {}, host);
+    assert.equal(legacy.args.some((arg) => arg.includes(legacy.env[AGENT_CONTROL_RELAY_KEY_ENV]!)), false,
+      "the coupled Codex preset never serializes the relay key in argv");
+    assert.ok(legacy.args.some((arg) => /"env_vars" = \[[^\]]*"WOLLIPOG_AGENT_CONTROL_RELAY_KEY"/u.test(arg)));
     assert.ok(legacy.args.includes("--strict-config"), "an existing Codex Orchestrator keeps the preset");
     assert.ok(legacy.args.includes("--disable"));
     assert.ok(legacy.args.some((arg) => arg.startsWith("sandbox_mode=")));
@@ -763,7 +846,8 @@ test("an Orchestrator with independent provider permissions keeps the ordinary C
       isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
     };
     const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
-      executionIsolationMode: "provider" as const, orchestratorProjectPaths: ["/other-project"] };
+      executionIsolationMode: "provider" as const, providerRelayEndpoint: "tcp://127.0.0.1:4318",
+      orchestratorProjectPaths: ["/other-project"] };
     const launch = spec("claude-code");
     launch.args = ["--mcp-config", "/home/user/mcp.json", "--add-dir", "/home/user/notes", "--allowedTools", "Bash(npm test:*)"];
     launch.config = { permissionMode: "acceptEdits" };
@@ -846,6 +930,7 @@ test("an additive Codex Orchestrator refuses a launch that already claims the re
     assert.throws(() => provisionAgentControl(launch, {
       controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
       executionIsolationMode: "provider" as const,
+      providerRelayEndpoint: "tcp://127.0.0.1:4318",
     }, () => {}, host), /reserved for Wollipog/);
     assert.deepEqual(launch.args, ["-c", 'mcp_servers.wollipog={ command = "my-server", args = [] }'],
       "the user's server is reported, never silently removed");

@@ -1,6 +1,6 @@
 /** Runner-local provisioning for the provider-neutral Wollipog CLI and MCP surface. */
 
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { spawn } from "node:child_process";
 import {
   chmodSync,
@@ -16,6 +16,7 @@ import {
 import { dirname, join, resolve } from "node:path";
 import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
+  WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   isOrchestratorLaunch,
   orchestratorAdditiveCapability,
   runnerSupportsProtocol,
@@ -63,6 +64,12 @@ import {
   PI_SECURITY_REQUEST_NONCE_ENV,
   piAgentControlExtensionSource,
 } from "./pi-agent-control-extension.js";
+import {
+  AGENT_CONTROL_RELAY_ENDPOINT_ENV,
+  AGENT_CONTROL_RELAY_KEY_ENV,
+  type AgentControlRelayRequest,
+  type AgentControlRelayResponse,
+} from "./agent-control-relay.js";
 
 const TOKEN_PREFIX = "wollipoga_";
 const TOKEN_PATTERN = /^wollipoga_[A-Za-z0-9_-]{43}$/u;
@@ -72,6 +79,8 @@ const AGENT_CONTROL_ENV_KEYS = [
   "WOLLIPOG_SESSION_ID",
   "WOLLIPOG_SESSION_TOKEN_FILE",
   "WOLLIPOG_SESSION_CREDENTIAL_READY_FILE",
+  AGENT_CONTROL_RELAY_ENDPOINT_ENV,
+  AGENT_CONTROL_RELAY_KEY_ENV,
   "WOLLIPOG_CLI",
   "WOLLIPOG_CLI_ARGS",
   ...PI_AGENT_CONTROL_ENV_KEYS,
@@ -97,6 +106,36 @@ function projectPathMatchesContext(path: string, context: AgentContext, platform
 }
 
 const wslLaunches = new Map<string, WslAgentControlLaunch>();
+
+interface AgentControlMemoryState {
+  token: string;
+  tokenHash: string;
+  ready: boolean;
+  relayKey: string;
+  cpUrl: string;
+}
+
+/** Provider-isolated sessions keep the bearer here. The provider receives only the relay key,
+ * which can exercise this session's already-allowlisted Agent Control surface while the runner is
+ * alive but is not a credential the control plane accepts. */
+const agentControlMemory = new Map<string, AgentControlMemoryState>();
+
+function ensureAgentControlMemory(sessionId: string, cpUrl: string): AgentControlMemoryState {
+  let state = agentControlMemory.get(sessionId);
+  if (!state) {
+    const token = `${TOKEN_PREFIX}${randomBytes(32).toString("base64url")}`;
+    state = {
+      token,
+      tokenHash: createHash("sha256").update(token).digest("hex"),
+      ready: false,
+      relayKey: randomBytes(32).toString("base64url"),
+      cpUrl,
+    };
+    agentControlMemory.set(sessionId, state);
+  }
+  state.cpUrl = cpUrl;
+  return state;
+}
 
 /** Ephemeral only: SessionStore never receives the credential or helper launch contract. */
 export function wslAgentControlLaunch(sessionId: string): WslAgentControlLaunch | undefined {
@@ -191,14 +230,74 @@ function rotateSessionToken(file: string): string {
   return token;
 }
 
+function removeAgentControlCredentialFiles(configDir: string, sessionId: string): void {
+  for (const file of [
+    agentControlTokenPath(configDir, sessionId),
+    agentControlReadyPath(configDir, sessionId),
+  ]) {
+    try { rmSync(file, { force: true }); } catch { /* A provider-mode file is never authoritative. */ }
+  }
+}
+
+function memoryStateForRelay(sessionId: string, key: string): AgentControlMemoryState | null {
+  const state = agentControlMemory.get(sessionId);
+  if (!state) return null;
+  const presented = createHash("sha256").update(key).digest();
+  const expected = createHash("sha256").update(state.relayKey).digest();
+  return timingSafeEqual(presented, expected) ? state : null;
+}
+
+async function waitForMemoryCredential(
+  sessionId: string,
+  state: AgentControlMemoryState,
+  signal: AbortSignal,
+): Promise<void> {
+  const deadline = Date.now() + 10_000;
+  while (Date.now() < deadline) {
+    const current = agentControlMemory.get(sessionId);
+    if (current !== state) throw new Error("Agent Control relay credential was replaced");
+    if (state.ready) return;
+    if (signal.aborted) throw new Error("Agent Control relay request was cancelled");
+    await new Promise<void>((resolvePromise) => setTimeout(resolvePromise, 50));
+  }
+  throw new Error("Agent Control credential was not acknowledged within 10 seconds");
+}
+
+/** Runner-side half of the provider-mode relay. The request controls only method, path, and JSON
+ * body; the destination, bearer, and exact-session actor header come from runner memory. */
+export async function relayAgentControlRequest(
+  sessionId: string,
+  request: AgentControlRelayRequest,
+  signal: AbortSignal,
+  fetchImpl: typeof globalThis.fetch = globalThis.fetch,
+): Promise<AgentControlRelayResponse> {
+  const state = memoryStateForRelay(sessionId, request.key);
+  if (!state) throw new Error("Agent Control relay authentication failed");
+  await waitForMemoryCredential(sessionId, state, signal);
+  const base = new URL(state.cpUrl);
+  if (!request.path.startsWith("/") || request.path.startsWith("//") || request.path.includes("#")) {
+    throw new Error("Agent Control relay path is invalid");
+  }
+  const destination = new URL(request.path, base);
+  if (destination.origin !== base.origin) throw new Error("Agent Control relay destination changed origin");
+  const headers: Record<string, string> = {
+    authorization: `Bearer ${state.token}`,
+    [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: sessionId,
+  };
+  if (request.contentType) headers["content-type"] = request.contentType;
+  const response = await fetchImpl(destination, {
+    method: request.method,
+    headers,
+    ...(request.body !== undefined ? { body: request.body } : {}),
+    signal,
+  });
+  return { status: response.status, body: await response.text() };
+}
+
 function writeMcpConfig(
   file: string,
   launch: { command: string; args: string[] },
-  tokenFile: string,
-  cpUrl: string,
-  sessionId: string,
-  readyFile: string,
-  orchestrator = false,
+  env: Record<string, string>,
 ): void {
   mkdirSync(dirname(file), { recursive: true });
   const body = {
@@ -207,13 +306,7 @@ function writeMcpConfig(
         type: "stdio",
         command: launch.command,
         args: [...launch.args],
-        env: {
-          WOLLIPOG_CONTROL_PLANE_URL: cpUrl,
-          WOLLIPOG_SESSION_ID: sessionId,
-          WOLLIPOG_SESSION_TOKEN_FILE: tokenFile,
-          WOLLIPOG_SESSION_CREDENTIAL_READY_FILE: readyFile,
-          ...(orchestrator ? { [ORCHESTRATOR_ENV_KEY]: "orchestrator" } : {}),
-        },
+        env,
       },
     },
   };
@@ -283,6 +376,8 @@ export function provisionAgentControl(
     orchestratorAgent?: AgentDefinition;
     /** Direct WSL is proven only by the target-local bwrap launcher. */
     executionIsolationMode?: "provider" | "bwrap" | "seatbelt" | "windows-job";
+    /** Session-bound runner listener used when `provider` isolation cannot protect a bearer file. */
+    providerRelayEndpoint?: string;
     /** Operator-configured Project Locations exposed read-only to an Orchestrator. */
     orchestratorProjectPaths?: string[];
   },
@@ -431,15 +526,29 @@ export function provisionAgentControl(
 
   const cpUrl = deriveControlPlaneHttpUrl(config.controlPlaneUrl, config.allowInsecureTransport);
   const tokenFile = agentControlTokenPath(host.configDir, spec.sessionId);
-  const token = wslOrchestrator ? rotateSessionToken(tokenFile) : sessionToken(tokenFile);
-  const tokenHash = createHash("sha256").update(token).digest("hex");
   const readyFile = agentControlReadyPath(host.configDir, spec.sessionId);
+  const providerRelay = config.executionIsolationMode === "provider" && nativeHostExecution;
+  if (providerRelay && !config.providerRelayEndpoint) {
+    throw new Error("provider-mode Agent Control requires a runner relay endpoint");
+  }
+  if (!providerRelay) agentControlMemory.delete(spec.sessionId);
+  const memory = providerRelay ? ensureAgentControlMemory(spec.sessionId, cpUrl) : null;
+  const token = memory?.token ?? (wslOrchestrator ? rotateSessionToken(tokenFile) : sessionToken(tokenFile));
+  const tokenHash = memory?.tokenHash ?? createHash("sha256").update(token).digest("hex");
   // Every registration gets a fresh positive-ack fence, including reconnect/resume with the same
   // token. A stale marker must never let the first request race a rejected re-binding.
-  rmSync(readyFile, { force: true });
+  if (memory) {
+    memory.ready = false;
+    removeAgentControlCredentialFiles(host.configDir, spec.sessionId);
+  } else {
+    rmSync(readyFile, { force: true });
+  }
   const credentialRegistration = wslOrchestrator && config.registerCredentialAndWait
     ? config.registerCredentialAndWait(spec.sessionId, tokenHash)
     : (config.registerCredential?.(spec.sessionId, tokenHash), undefined);
+  // Resume may change isolation mode. No transport coordinate from the previous launch survives
+  // into the new one, especially not a formerly valid credential-file path.
+  for (const key of AGENT_CONTROL_ENV_KEYS) delete spec.env[key];
 
   if (wslOrchestrator && context.kind === "wsl" && wslAgentControl) {
     const provisionWsl = async (): Promise<void> => {
@@ -495,12 +604,22 @@ export function provisionAgentControl(
   }
 
   const cli = runnerReentryCommand(host, "--wollipog-cli");
+  const transportEnv: Record<string, string> = memory
+    ? {
+        WOLLIPOG_CONTROL_PLANE_URL: cpUrl,
+        WOLLIPOG_SESSION_ID: spec.sessionId,
+        [AGENT_CONTROL_RELAY_ENDPOINT_ENV]: config.providerRelayEndpoint!,
+        [AGENT_CONTROL_RELAY_KEY_ENV]: memory.relayKey,
+      }
+    : {
+        WOLLIPOG_CONTROL_PLANE_URL: cpUrl,
+        WOLLIPOG_SESSION_ID: spec.sessionId,
+        WOLLIPOG_SESSION_TOKEN_FILE: tokenFile,
+        WOLLIPOG_SESSION_CREDENTIAL_READY_FILE: readyFile,
+      };
   spec.env = {
     ...spec.env,
-    WOLLIPOG_CONTROL_PLANE_URL: cpUrl,
-    WOLLIPOG_SESSION_ID: spec.sessionId,
-    WOLLIPOG_SESSION_TOKEN_FILE: tokenFile,
-    WOLLIPOG_SESSION_CREDENTIAL_READY_FILE: readyFile,
+    ...transportEnv,
     WOLLIPOG_CLI: cli.command,
     WOLLIPOG_CLI_ARGS: JSON.stringify(cli.args),
   };
@@ -535,20 +654,20 @@ export function provisionAgentControl(
     spec.args.push(...additiveOrchestratorLaunchArgs(spec.driver, {
       ...runnerReentryCommand(host, "--agent-control-mcp"),
       env: {
-        WOLLIPOG_CONTROL_PLANE_URL: cpUrl, WOLLIPOG_SESSION_ID: spec.sessionId,
-        WOLLIPOG_SESSION_TOKEN_FILE: tokenFile, WOLLIPOG_SESSION_CREDENTIAL_READY_FILE: readyFile,
+        ...transportEnv,
         [ORCHESTRATOR_ENV_KEY]: "orchestrator",
       },
+      ...(memory ? { forwardEnv: true } : {}),
     }, orchestratorProjectPaths, integrationIsolation));
   } else if (orchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
     const mcp = {
       ...runnerReentryCommand(host, "--agent-control-mcp"),
       env: {
-        WOLLIPOG_CONTROL_PLANE_URL: cpUrl, WOLLIPOG_SESSION_ID: spec.sessionId,
-        WOLLIPOG_SESSION_TOKEN_FILE: tokenFile, WOLLIPOG_SESSION_CREDENTIAL_READY_FILE: readyFile,
+        ...transportEnv,
         [ORCHESTRATOR_ENV_KEY]: "orchestrator",
       },
+      ...(memory ? { forwardEnv: true } : {}),
     };
     if ((spec.driver ?? "acp") === "acp") {
       const server: AcpMcpStdioServer = {
@@ -578,7 +697,10 @@ export function provisionAgentControl(
 
   if (spec.driver === "claude-code") {
     const file = agentControlMcpConfigPath(host.configDir, spec.sessionId);
-    writeMcpConfig(file, runnerReentryCommand(host, "--agent-control-mcp"), tokenFile, cpUrl, spec.sessionId, readyFile, orchestrator);
+    writeMcpConfig(file, runnerReentryCommand(host, "--agent-control-mcp"), {
+      ...transportEnv,
+      ...(orchestrator ? { [ORCHESTRATOR_ENV_KEY]: "orchestrator" } : {}),
+    });
     let already = false;
     for (let i = 0; i < spec.args.length - 1; i++) {
       if (spec.args[i] === "--mcp-config" && spec.args[i + 1] === file) already = true;
@@ -590,6 +712,7 @@ export function provisionAgentControl(
 
 export function removeAgentControlFiles(sessionId: string, configDir: string): void {
   wslLaunches.delete(sessionId);
+  agentControlMemory.delete(sessionId);
   for (const file of [
     agentControlTokenPath(configDir, sessionId),
     agentControlMcpConfigPath(configDir, sessionId),
@@ -619,6 +742,15 @@ export function sweepAgentControlFiles(configDir: string): number {
  * token before issuing the first HTTP request, closing the runner-socket/HTTP race. */
 export function markAgentControlCredentialReady(configDir: string, sessionId: string, tokenHash: string): void {
   if (!/^[0-9a-f]{64}$/u.test(tokenHash)) throw new Error("invalid agent-control credential hash");
+  const memory = agentControlMemory.get(sessionId);
+  if (memory) {
+    if (memory.tokenHash !== tokenHash) {
+      throw new Error("agent-control acknowledgement does not match the active token");
+    }
+    memory.ready = true;
+    removeAgentControlCredentialFiles(configDir, sessionId);
+    return;
+  }
   const token = readFileSync(agentControlTokenPath(configDir, sessionId), "utf8").trim();
   if (createHash("sha256").update(token).digest("hex") !== tokenHash) {
     throw new Error("agent-control acknowledgement does not match the active token");

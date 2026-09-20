@@ -100,9 +100,11 @@ import {
   markAgentControlCredentialReady,
   markAgentControlCredentialRejected,
   provisionAgentControl,
+  relayAgentControlRequest,
   removeAgentControlFiles,
   sweepAgentControlFiles,
 } from "./agent-control.js";
+import { AgentControlRelaySockets } from "./agent-control-relay.js";
 import {
   projectOrchestratorPresetForPeer,
   stripOrchestratorLaunchArgs,
@@ -370,11 +372,24 @@ const claudeHookHost = {
   managerHookRelay: !sandboxHidesGuardState && process.platform === "linux",
 };
 const agentControlHost = defaultAgentControlHost(config.dataDir);
+const agentControlRelays = new AgentControlRelaySockets(relayAgentControlRequest);
 sweepClaudeHookFiles(claudeHookHost.configDir);
 // Verdict sockets (#1336). A runner that sandboxes its providers serves a path socket inside the
 // hidden hook state directory. One that does not (`provider` mode) serves an abstract-namespace
 // socket on Linux and answers from its own memory; elsewhere the guard reads its file as before.
 const guardSockets = new ManagedWorktreeGuardSockets(claudeHookHost.configDir);
+
+async function providerAgentControlRelayEndpoint(
+  meta: Pick<SessionMeta, "sessionId" | "context" | "executionTarget">,
+): Promise<string | undefined> {
+  if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionAgentControl") ||
+      config.executionIsolation.mode !== "provider" || meta.context.kind !== "native" ||
+      (meta.executionTarget && meta.executionTarget.adapter !== "host")) {
+    await agentControlRelays.close(meta.sessionId);
+    return undefined;
+  }
+  return agentControlRelays.ensure(meta.sessionId);
+}
 
 /**
  * The abstract verdict socket for a launch the runner does not sandbox, proven once per address by
@@ -722,6 +737,7 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
         registerCredentialAndWait: registerAgentControlCredentialAndWait,
         orchestratorAgent: localAgent,
         executionIsolationMode: config.executionIsolation.mode,
+        providerRelayEndpoint: await providerAgentControlRelayEndpoint(meta),
         orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
       },
       log,
@@ -983,6 +999,7 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
 function sendUp(msg: RunnerToControlPlane): void {
   if (msg.type === "session_status" && ["completed", "failed", "stopped"].includes(msg.status)) {
     removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
+    void agentControlRelays.close(msg.sessionId);
     for (const [key, pending] of pendingAgentControlRegistrations) {
       if (!key.startsWith(`${msg.sessionId}\0`)) continue;
       clearTimeout(pending.timer);
@@ -1920,6 +1937,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       removeClaudeHookFiles(msg.sessionId, claudeHookHost.configDir);
       void guardSockets.close(msg.sessionId);
       removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);
+      void agentControlRelays.close(msg.sessionId);
       break;
     case "resolve_permission":
       sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId, msg.resolvedByParentSessionId);
@@ -2363,6 +2381,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,
               executionIsolationMode: config.executionIsolation.mode,
+              providerRelayEndpoint: await providerAgentControlRelayEndpoint(prepared),
               orchestratorProjectPaths: config.workspaces.map((workspace) => workspace.path),
             }, log, agentControlHost);
             // Even the no-turn MCP configuration probe may initialize provider HOME.
@@ -3042,6 +3061,7 @@ function shutdown(exitCode = 0): void {
   });
   bestEffort("dispose shells", () => shells.dispose());
   bestEffort("close guard sockets", () => { void guardSockets.closeAll(); });
+  bestEffort("close Agent Control relays", () => { void agentControlRelays.closeAll(); });
   // Providers that exited normally may have intentional background descendants retained under
   // their session boundary. Runner shutdown is the final owner and must drain every such scope.
   bestEffort("register retained descendant cleanup", () => terminateDescendantBoundariesAfterPendingKills());

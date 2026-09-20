@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -32,13 +32,14 @@ import {
 import { SessionsService } from "../../control-plane/src/sessions.js";
 import {
   agentControlMcpConfigPath,
-  agentControlReadyPath,
   agentControlTokenPath,
   markAgentControlCredentialReady,
   markAgentControlCredentialRejected,
   provisionAgentControl,
+  relayAgentControlRequest,
   type AgentControlHost,
 } from "./agent-control.js";
+import { AGENT_CONTROL_RELAY_KEY_ENV } from "./agent-control-relay.js";
 import { ClaudeCodeDriver } from "./drivers/claude-code.js";
 import type { DriverCallbacks, DriverOptions } from "./drivers/driver.js";
 import {
@@ -371,6 +372,7 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
           controlPlaneUrl: CONTROL_PLANE_URL,
           controlPlaneProtocolVersion: PROTOCOL_VERSION,
           executionIsolationMode: "provider",
+          providerRelayEndpoint: "tcp://127.0.0.1:4318",
           orchestratorProjectPaths: [repo],
           // apps/runner/src/index.ts:618 passes `registerAgentControlCredential`, which is the
           // `agent_control_credential` message of apps/runner/src/index.ts:523-524.
@@ -420,8 +422,21 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
         delegatedScope,
       };
     };
-    const scopedToken = (sessionId: string): string =>
-      readFileSync(agentControlTokenPath(configDir, sessionId), "utf8").trim();
+    /** Test-only observation at the runner-side fetch seam. The provider receives only the returned
+     * response; it cannot observe the Authorization header this stub records. */
+    const scopedToken = async (sessionId: string, launch: ProviderLaunch): Promise<string> => {
+      const key = launch.env[AGENT_CONTROL_RELAY_KEY_ENV];
+      assert.ok(key, "the provider receives its opaque relay key");
+      let authorization = "";
+      await relayAgentControlRequest(sessionId, {
+        key, method: "GET", path: "/api/compatibility",
+      }, new AbortController().signal, async (_input, init) => {
+        authorization = new Headers(init?.headers).get("authorization") ?? "";
+        return new Response(JSON.stringify({ protocolVersion: PROTOCOL_VERSION }), { status: 200 });
+      });
+      assert.match(authorization, /^Bearer wollipoga_/u);
+      return authorization.slice("Bearer ".length);
+    };
 
     /** Deliver a control-plane launch the way the runner's `start_session` case does. */
     const deliver = async (sessionId: string, prompt: string): Promise<ProviderLaunch> => {
@@ -513,14 +528,14 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     // --------------------------------- 2b. the scoped Agent Control credential, round-tripped
     assert.deepEqual(credentialAcks.filter((ack) => ack.sessionId === parent.id).map((ack) => ack.accepted),
       [true], "the runner registered the minted credential and the control plane accepted the binding");
-    const parentToken = scopedToken(parent.id);
+    const parentToken = await scopedToken(parent.id, first);
     const parentHash = hashToken(parentToken);
     assert.equal(credentialAcks.find((ack) => ack.sessionId === parent.id)?.tokenHash, parentHash,
       "the registered hash is the hash of this session's minted token");
-    assert.equal(first.env.WOLLIPOG_SESSION_TOKEN_FILE, agentControlTokenPath(configDir, parent.id),
-      "the provider is pointed at this session's own credential file");
-    assert.equal(readFileSync(agentControlReadyPath(configDir, parent.id), "utf8"), parentHash,
-      "the acknowledgement published the matching ready-file hash");
+    assert.equal(first.env.WOLLIPOG_SESSION_TOKEN_FILE, undefined,
+      "the provider is not pointed at a credential file");
+    assert.equal(existsSync(agentControlTokenPath(configDir, parent.id)), false,
+      "provider mode leaves no credential file to read");
     assert.equal(db.agentControlCredentialValid(parent.id, RUNNER_ID, parentHash), true,
       "the control plane accepts the exact minted token for this session");
     assert.equal(db.agentControlCredentialValid(parent.id, RUNNER_ID, hashToken(`${parentToken}x`)), false,
@@ -561,7 +576,7 @@ test("a non-strict Claude Orchestrator campaign runs end to end as an additive r
     const child = childResult.data;
     const childLaunch = await deliver(child.id, "investigate the failing test");
     // The ordinary child gets its own scoped credential and the ordinary route surface.
-    const childToken = scopedToken(child.id);
+    const childToken = await scopedToken(child.id, childLaunch);
     assert.notEqual(childToken, parentToken, "each session gets its own credential");
     assert.equal(db.agentControlCredentialValid(child.id, RUNNER_ID, hashToken(childToken)), true);
     assert.equal(db.agentControlCredentialValid(parent.id, RUNNER_ID, hashToken(childToken)), false,

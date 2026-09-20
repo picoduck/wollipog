@@ -1,17 +1,38 @@
 # Agent Control CLI and MCP
 
 Wollipog protocol v100 gives each native host session a purpose-specific control credential. The
-runner stores the plaintext in a mode-0600 session file, sends only its SHA-256 digest to the
-control plane, and waits for an exact positive acknowledgement marker before the CLI or MCP server
-makes its first request. Stopping the session makes the credential unusable; deleting it cascades
-the hash row and removes runner-local credential/config files.
+runner sends only its SHA-256 digest to the control plane and waits for an exact positive
+acknowledgement before the CLI or MCP server makes its first request. Stopping the session makes
+the credential unusable; deleting it cascades the hash row and removes runner-local state.
+
+The credential transport follows the runner's execution-isolation boundary:
+
+| Execution path | Credential location and transport |
+| --- | --- |
+| Native host, `provider` isolation | **Runner memory only.** Provider-spawned CLI/MCP re-entries carry a random relay key and session-bound loopback endpoint. The runner pins the control-plane origin, supplies its memory-held bearer and exact-session actor header, and returns the response. The key is not accepted by the control plane. |
+| Native host, `bwrap`, Seatbelt, or Windows Job isolation | Mode-0600 runner-state token and exact-hash acknowledgement files, passed by path to the re-entry. |
+| Verified Direct WSL Orchestrator | The Windows runner owns and rotates the registered credential; the provider sees only the mode-0600 copy inside its private bwrap `/tmp`, through the attested target-local bridge described below. |
+| Container, cloud, generic Direct WSL, and other non-host paths | Agent Control is not injected. |
+
+Provider-mode provisioning removes any token or acknowledgement file left at the session paths
+before launch. Reading, replacing, or deleting those paths therefore cannot reveal or select the
+credential the runner registered. The opaque relay key intentionally reaches the same Agent
+Control surface the CLI/MCP exposes; the control plane still enforces its closed method/route
+allowlist. The key cannot authenticate a direct control-plane request or outlive the runner
+listener. Launch and resume re-register the
+memory-held credential behind a fresh positive-acknowledgement fence. A runner restart forgets it,
+mints and registers a new credential during the next launch, and publishes a new relay endpoint.
 
 The runner injects these non-transcript environment values at launch:
 
 - `WOLLIPOG_CONTROL_PLANE_URL`: HTTP origin for the session's control plane.
 - `WOLLIPOG_SESSION_ID`: the principal and ownership scope of every request.
-- `WOLLIPOG_SESSION_TOKEN_FILE`: protected bearer source; never pass its contents in argv.
-- `WOLLIPOG_SESSION_CREDENTIAL_READY_FILE`: runner/control-plane registration fence.
+- `WOLLIPOG_SESSION_TOKEN_FILE`: protected bearer source outside native provider mode; never pass
+  its contents in argv.
+- `WOLLIPOG_SESSION_CREDENTIAL_READY_FILE`: file-mode runner/control-plane registration fence.
+- `WOLLIPOG_AGENT_CONTROL_RELAY_ENDPOINT`: native provider-mode, session-bound runner listener.
+- `WOLLIPOG_AGENT_CONTROL_RELAY_KEY`: native provider-mode opaque relay authorization; it is not a
+  control-plane credential.
 - `WOLLIPOG_CLI`: standalone executable location.
 - `WOLLIPOG_CLI_ARGS`: JSON-encoded re-entry arguments for development/non-SEA launches.
 
