@@ -852,12 +852,19 @@ export async function worktreeHead(worktreePath: string, options: WorktreeOption
 /** Return the branch Git currently has checked out, or no value for a detached/unavailable tree. */
 export async function worktreeBranch(
   worktreePath: string,
-  options: WorktreeOptions = {},
+  options: WorktreeOptions & { timeoutMs?: number } = {},
 ): Promise<string | undefined> {
   const context = options.context ?? nativeContext;
   try {
-    const branch = (await command(context, worktreePath, ["branch", "--show-current"])).trim();
-    return branch ? await validateBranch(context, worktreePath, branch) : undefined;
+    // Git can only point HEAD at a valid ref, so one bounded symbolic-ref probe supplies both the
+    // detached check and the already-validated short branch name.
+    const branch = (await command(
+      context,
+      worktreePath,
+      ["symbolic-ref", "--quiet", "--short", "HEAD"],
+      options.timeoutMs,
+    )).trim();
+    return branch ? safeGitArgument(branch, "worktree branch") : undefined;
   } catch {
     return undefined;
   }
@@ -1083,7 +1090,7 @@ export type SafeWorktreeDiscardResult =
     }
   | {
       removed: false;
-      reason: "not_runner_owned" | "dirty" | "no_upstream" | "unpushed" | "unavailable";
+      reason: "detached_head" | "not_runner_owned" | "dirty" | "no_upstream" | "unpushed" | "unavailable";
     };
 
 /** Remove one inactive runner-owned worktree only after proving it has no local-only state.
@@ -1122,7 +1129,7 @@ export async function discardWorktreeIfSafe(
     let branchChanged = false;
     if (registered && registered.branch !== recordedBranch) {
       if (!registered.branch) {
-        return { removed: false, reason: "branch_changed", checkedOutBranch: "(detached HEAD)" };
+        return { removed: false, reason: "detached_head" };
       }
       branch = await validateBranch(context, repoPath, registered.branch);
       branchChanged = true;
@@ -1158,14 +1165,18 @@ export async function discardWorktreeIfSafe(
     }
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
 
+    let preserveCheckedOutRef = false;
     if (branchChanged) {
       // A pushed-but-unmerged replacement is not enough: unlike the recorded branch, its upstream
       // was never part of the ownership record. Require delivery proof or no work beyond default.
       const mergedHead = options.verifiedMergedHead;
       let safeChangedHead = typeof mergedHead === "string" && /^[a-f0-9]{40,64}$/u.test(mergedHead) &&
         mergedHead === head;
+      const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
+      // Removing a runner-owned worktree must not remove the repository's conventional local base
+      // ref when an agent temporarily checked it out for inspection.
+      preserveCheckedOutRef = defaultBranch === branch;
       if (!safeChangedHead) {
-        const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
         if (defaultBranch) {
           try {
             const defaultRef = `refs/remotes/origin/${await validateBranch(context, repoPath, defaultBranch)}`;
@@ -1223,7 +1234,9 @@ export async function discardWorktreeIfSafe(
     }
     // For a changed checkout `ref` is the branch actually removed with the worktree; the recorded
     // branch is deliberately untouched, whether its ref still exists or has already disappeared.
-    await command(context, repoPath, ["update-ref", "-d", ref, head]);
+    if (!preserveCheckedOutRef) {
+      await command(context, repoPath, ["update-ref", "-d", ref, head]);
+    }
     await command(context, repoPath, ["worktree", "prune"]);
     return { removed: true };
   } catch {

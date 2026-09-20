@@ -504,6 +504,28 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
     }, "a changed branch is retained when the default branch cannot be proved");
 
     execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    execFileSync("git", ["-C", repo, "switch", "-c", "operator/primary"]);
+    const defaultCheckout = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/default-checkout",
+    }, { dataDir });
+    execFileSync("git", ["-C", defaultCheckout.path, "switch", "main"]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...defaultCheckout,
+      source: "created",
+    }, { dataDir }), { removed: true });
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/main"]);
+
+    const detached = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/detached",
+    }, { dataDir });
+    execFileSync("git", ["-C", detached.path, "checkout", "--detach"]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...detached,
+      source: "created",
+    }, { dataDir }), { removed: false, reason: "detached_head" });
+
     const unchangedBranch = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
       branch: "agent/safe-unchanged",
@@ -2380,7 +2402,7 @@ test("missing-upstream reconciliation is bounded, fair, identity-aware, and lane
     let ineligiblePath: string | undefined;
     let forgeUnavailablePath: string | undefined;
     const internals = manager as unknown as {
-      readWorktreeBranch: (path: string) => Promise<string | undefined>;
+      readWorktreeBranch: (path: string, options?: { timeoutMs?: number }) => Promise<string | undefined>;
       discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
       resolveWorktreePullRequestState: () => Promise<null>;
       discardSessionWorktreeIfSafe: () => Promise<{ removed: false; reason: "unavailable" }>;
@@ -2389,7 +2411,8 @@ test("missing-upstream reconciliation is bounded, fair, identity-aware, and lane
       worktreePullRequestDiscoveryRetryAt: Map<string, { identity: string; retryAt: number }>;
     };
     internals.worktreePullRequestDiscoveryNow = () => now;
-    internals.readWorktreeBranch = async (path) => {
+    internals.readWorktreeBranch = async (path, options) => {
+      assert.equal(options?.timeoutMs, 8_000, "periodic branch discovery uses the bounded Git preflight");
       const index = candidatePaths.indexOf(path);
       return index >= 0 ? `fix/candidate-${index}` : undefined;
     };

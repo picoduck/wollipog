@@ -2681,7 +2681,10 @@ export class SessionManager {
         const worktree = this.attributedWorktrees(initial)
           .find((item) => sameWorktreePath(initial.context, item.path, path));
         if (!worktree || worktree.source === "attached" || worktree.pullRequest) return;
-        const checkedOutBranch = await this.readWorktreeBranch(worktree.path, { context: initial.context });
+        const checkedOutBranch = await this.readWorktreeBranch(worktree.path, {
+          context: initial.context,
+          timeoutMs: 8_000,
+        });
         if (!checkedOutBranch) return;
         const pathKey = JSON.stringify([sessionId, worktree.path]);
         let attemptedIdentity: string | undefined;
@@ -3273,12 +3276,6 @@ export class SessionManager {
           this.removeWorktreeCleanupRecord(cleanup);
         }
         if (result.reason === "branch_changed") {
-          if (result.checkedOutBranch === "(detached HEAD)") {
-            return {
-              removed: false,
-              reason: `the worktree has a detached HEAD instead of its registered branch ${JSON.stringify(worktree.branch)}`,
-            };
-          }
           return {
             removed: false,
             reason: `the worktree is checked out on branch ${JSON.stringify(result.checkedOutBranch)}, ` +
@@ -3287,6 +3284,7 @@ export class SessionManager {
           };
         }
         const reasons = {
+          detached_head: `the worktree has a detached HEAD instead of its registered branch ${JSON.stringify(worktree.branch)}`,
           not_runner_owned: "runner ownership could not be proven",
           dirty: "the worktree has uncommitted changes",
           no_upstream: "the branch has no upstream",
