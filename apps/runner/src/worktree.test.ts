@@ -540,13 +540,28 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
       source: "created",
     }, { dataDir }), { removed: false, reason: "detached_head" });
 
-    const unchangedBranch = await createRequestedWorktree(repo, "s_safe", {
+    execFileSync("git", ["-C", repo, "switch", "-c", "operator/shared"]);
+    const sharedCheckout = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/shared-checkout",
+    }, { dataDir });
+    execFileSync("git", [
+      "-C", sharedCheckout.path, "switch", "--ignore-other-worktrees", "operator/shared",
+    ]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...sharedCheckout,
+      source: "created",
+    }, { dataDir }), { removed: true });
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/operator/shared"]);
+    execFileSync("git", ["-C", repo, "switch", "operator/primary"]);
+
+    const defaultContainedBranch = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
       branch: "agent/safe-unchanged",
     }, { dataDir });
-    execFileSync("git", ["-C", unchangedBranch.path, "switch", "-c", "fix/safe-unchanged"]);
+    execFileSync("git", ["-C", defaultContainedBranch.path, "switch", "-c", "fix/safe-unchanged"]);
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
-      ...unchangedBranch,
+      ...defaultContainedBranch,
       source: "created",
     }, { dataDir }), { removed: true });
     execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/agent/safe-unchanged"]);
@@ -2300,6 +2315,8 @@ test("merged PR worktrees remain discardable after their remote branches are del
       "safe-discard eligibility is checked before an active provider is retired");
     activeEntries.delete("s_merged_no_upstream");
     const launchGenerations = (manager as unknown as { launchGenerations: Map<string, number> }).launchGenerations;
+    // A real `starting` session always owns a launch generation. Model that fence so this test's
+    // explicit-discovery assertions do not race the missed-boundary `setImmediate` replay.
     launchGenerations.set("s_merged_no_upstream", 1);
     store.patchMeta("s_merged_no_upstream", {
       status: "starting",

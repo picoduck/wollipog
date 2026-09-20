@@ -1134,6 +1134,8 @@ export async function discardWorktreeIfSafe(
       branch = await validateBranch(context, repoPath, registered.branch);
       branchChanged = true;
     }
+    const branchCheckedOutElsewhere = listed.some((entry) =>
+      !sameWorktreePath(context, entry.path, handle.path) && entry.branch === branch);
     const ref = `refs/heads/${branch}`;
     if (!registered) {
       // A missing registration is not proof that the on-disk directory is disposable. Native can
@@ -1175,8 +1177,9 @@ export async function discardWorktreeIfSafe(
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       // Removing a runner-owned worktree must not remove the repository's conventional local base
       // ref when an agent temporarily checked it out for inspection. An unknown default cannot
-      // prove the checked-out ref is disposable, so retain the ref while still removing the tree.
-      preserveCheckedOutRef = !defaultBranch || defaultBranch === branch;
+      // prove the checked-out ref is disposable, and another worktree may deliberately share the
+      // ref via --ignore-other-worktrees, so retain the ref while still removing this tree.
+      preserveCheckedOutRef = !defaultBranch || defaultBranch === branch || branchCheckedOutElsewhere;
       if (!safeChangedHead) {
         if (defaultBranch) {
           try {
