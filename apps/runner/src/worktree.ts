@@ -1167,7 +1167,10 @@ export async function discardWorktreeIfSafe(
     }
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
 
-    let preserveCheckedOutRef = false;
+    // Git permits another worktree to deliberately share this branch via
+    // --ignore-other-worktrees. Removing this worktree must not detach that sibling from its ref,
+    // whether this checkout still uses the recorded branch or switched to a replacement.
+    let preserveCheckedOutRef = branchCheckedOutElsewhere;
     if (branchChanged) {
       // A pushed-but-unmerged replacement is not enough: unlike the recorded branch, its upstream
       // was never part of the ownership record. Require delivery proof or no work beyond default.
@@ -1179,7 +1182,7 @@ export async function discardWorktreeIfSafe(
       // ref when an agent temporarily checked it out for inspection. An unknown default cannot
       // prove the checked-out ref is disposable, and another worktree may deliberately share the
       // ref via --ignore-other-worktrees, so retain the ref while still removing this tree.
-      preserveCheckedOutRef = !defaultBranch || defaultBranch === branch || branchCheckedOutElsewhere;
+      preserveCheckedOutRef ||= !defaultBranch || defaultBranch === branch;
       if (!safeChangedHead) {
         if (defaultBranch) {
           try {

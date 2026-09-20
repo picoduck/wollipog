@@ -629,6 +629,56 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
   }
 });
 
+test("safe discard preserves a shared unchanged branch but deletes an exclusive one", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-safe-discard-shared-unchanged-"));
+  const dataDir = join(root, "data");
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const shared = await createRequestedWorktree(repo, "s_shared_unchanged", {
+      baseRef: "HEAD",
+      branch: "fix/shared-unchanged",
+    }, { dataDir });
+    execFileSync("git", ["-C", shared.path, "push", "-u", "origin", shared.branch]);
+    const sharedHead = execFileSync("git", ["-C", shared.path, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    const siblingPath = join(root, "sibling");
+    execFileSync("git", ["-C", repo, "worktree", "add", "--detach", siblingPath, "HEAD"]);
+    execFileSync("git", [
+      "-C", siblingPath, "switch", "--ignore-other-worktrees", shared.branch,
+    ]);
+
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_shared_unchanged", {
+      ...shared,
+      source: "created",
+    }, { dataDir }), { removed: true });
+    assert.equal(existsSync(shared.path), false);
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${shared.branch}`]);
+    assert.equal(execFileSync("git", ["-C", siblingPath, "branch", "--show-current"], {
+      encoding: "utf8",
+    }).trim(), shared.branch);
+    assert.equal(execFileSync("git", ["-C", siblingPath, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim(), sharedHead);
+
+    const exclusive = await createRequestedWorktree(repo, "s_shared_unchanged", {
+      baseRef: "HEAD",
+      branch: "fix/exclusive-unchanged",
+    }, { dataDir });
+    execFileSync("git", ["-C", exclusive.path, "push", "-u", "origin", exclusive.branch]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_shared_unchanged", {
+      ...exclusive,
+      source: "created",
+    }, { dataDir }), { removed: true });
+    assert.equal(existsSync(exclusive.path), false);
+    assert.throws(() => execFileSync(
+      "git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${exclusive.branch}`],
+    ));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("managed discard verifies a changed checkout and names an unproved branch", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-changed-branch-discard-"));
   const dataDir = join(root, "data");
