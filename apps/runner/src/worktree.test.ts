@@ -635,6 +635,7 @@ test("managed discard verifies a changed checkout and names an unproved branch",
   let manager: SessionManager | undefined;
   try {
     const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
     const store = new SessionStore(join(dataDir, "sessions"));
     store.create({
       sessionId: "s_changed_branch", agentId: "claude", workspaceId: "repo", repoPath: repo,
