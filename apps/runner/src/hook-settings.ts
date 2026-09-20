@@ -397,6 +397,7 @@ export function writeClaudeSettingsSet(
   // and refuse every matched call rather than pass one.
   const memoryGuard = guard !== null && guardAnswersFromMemory(guard.socketPath);
   const diskGuard = memoryGuard ? { ...guard, socketPath: undefined } : guard;
+  const guardOnlyContents = diskGuard ? claudeSettingsDocument(file, null, diskGuard) : null;
   // A relayed manager hook (#1472) follows the same rule: the socket it asks is in the memory-held
   // document only. Launched from disk it would reach no runner and deny every tool call.
   const relayedManager = manager?.relay?.socket !== undefined;
@@ -405,7 +406,7 @@ export function writeClaudeSettingsSet(
     if (!preserveGuardState && !memoryGuard) {
       writeManagedWorktreeGuardProtections(guard.protectionsFile, guard.protections);
     }
-    protectedWrite(claudeHookGuardPath(file), claudeSettingsDocument(file, null, diskGuard));
+    protectedWrite(claudeHookGuardPath(file), guardOnlyContents!);
   } else if (!preserveGuardState) {
     rmSync(claudeHookGuardPath(file), { force: true });
     rmSync(claudeHookProtectionsPath(file), { force: true });
@@ -424,6 +425,11 @@ export function writeClaudeSettingsSet(
     memorySettingsDocuments.delete(resolve(file));
   }
   const contents = claudeSettingsDocument(file, diskManager ?? null, diskGuard);
+  if (diskGuard) {
+    fileSettingsDocuments.set(resolve(file), { combined: contents, guardOnly: guardOnlyContents! });
+  } else if (!preserveGuardState) {
+    fileSettingsDocuments.delete(resolve(file));
+  }
   protectedWrite(claudeHookTemplatePath(file), contents);
   protectedWrite(file, contents);
 }
@@ -461,6 +467,7 @@ export function removeClaudeHookFiles(sessionId: string, configDir = defaultHook
   try {
     const settings = claudeHookSettingsPath(configDir, sessionId);
     memorySettingsDocuments.delete(resolve(settings));
+    fileSettingsDocuments.delete(resolve(settings));
     const circuit = claudeHookCircuitPath(settings);
     for (const file of [
       settings,
@@ -1075,6 +1082,7 @@ function discardGuardArtifacts(file: string): void {
   rmSync(claudeHookProtectionsPath(file), { force: true });
   memorySettingsDocuments.delete(resolve(file));
   const described = describeManagedSettings(file);
+  fileSettingsDocuments.delete(resolve(file));
   if (!described?.guard) return;
   rmSync(claudeHookGuardPath(file), { force: true });
   if (!described.manager) {
@@ -1109,6 +1117,12 @@ const guardMemoryLists = new Map<string, ManagedWorktreeProtection[]>();
  * the hook command comes from runner memory as well, and the file at that path is never opened.
  */
 const memorySettingsDocuments = new Map<string, { combined: string; guardOnly: string | null }>();
+/**
+ * The exact file-form settings set last provisioned by this runner process. The live document may
+ * legitimately be either member while the manager circuit is open, but no other bytes are trusted:
+ * in particular, a rewritten guard command in any copy must mediate the next spawn (#1475).
+ */
+const fileSettingsDocuments = new Map<string, { combined: string; guardOnly: string }>();
 
 /** An abstract-namespace address: the list and the settings live in runner memory. */
 /**
@@ -1239,6 +1253,7 @@ export function resetClaudeGuardState(): void {
   guardSockets.clear();
   guardMemoryLists.clear();
   memorySettingsDocuments.clear();
+  fileSettingsDocuments.clear();
 }
 
 export type ClaudeGuardRefreshOutcome =
@@ -1622,6 +1637,8 @@ export interface PreparedClaudeHookArgs {
    * permission mode — never an assumption about protections being present.
    */
   guardActive: boolean;
+  /** Why a settings document that was expected to carry the guard is not trusted for this spawn. */
+  guardReason?: string;
   /**
    * The runner-owned hook state directory for this spawn, when one is in the launch argv. The
    * driver mirrors the guard's own-state veto on the control channel with it.
@@ -1665,6 +1682,25 @@ function claudeGuardStateTrusted(settingsFile: string): boolean {
   }
 }
 
+/**
+ * A file-form guard is active only while every document that can become Claude's effective
+ * settings still matches the exact set provisioned by this runner process. The live file may be
+ * absent (the ordinary heal path) or hold the guard-only copy while a manager circuit is open.
+ */
+function fileSettingsSetTrusted(settingsFile: string): boolean {
+  const expected = fileSettingsDocuments.get(resolve(settingsFile));
+  if (!expected) return false;
+  try {
+    if (readFileSync(claudeHookTemplatePath(settingsFile), "utf8") !== expected.combined) return false;
+    if (readFileSync(claudeHookGuardPath(settingsFile), "utf8") !== expected.guardOnly) return false;
+    if (!existsSync(settingsFile)) return true;
+    const live = readFileSync(settingsFile, "utf8");
+    return live === expected.combined || live === expected.guardOnly;
+  } catch {
+    return false;
+  }
+}
+
 /** Driver-side exact-path heal and recoverable circuit check before every Claude process spawn. */
 export function prepareClaudeHookArgs(args: string[], now = Date.now()): PreparedClaudeHookArgs {
   let index = -1;
@@ -1673,7 +1709,9 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
     const value = args[candidate + 1]!;
     // A memory-held document is recognised by the runner's own record, not by what is on disk.
     if (args[candidate] !== "--settings" ||
-        !(memorySettingsDocuments.has(resolve(value)) || selfDescribingManagedSettings(value))) continue;
+        !(memorySettingsDocuments.has(resolve(value)) ||
+          fileSettingsDocuments.has(resolve(value)) ||
+          selfDescribingManagedSettings(value))) continue;
     index = candidate;
     file = value;
   }
@@ -1691,11 +1729,14 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
   if (memory) return prepareMemorySettingsArgs(args, index, file, memory, now);
   const described = describeManagedSettings(file);
   const hasGuard = described?.guard === true;
+  const expectedFileGuard = fileSettingsDocuments.has(resolve(file));
+  const settingsSetTrusted = expectedFileGuard && hasGuard && fileSettingsSetTrusted(file);
   const hookAskCapable = managedSettingsAskCapable(file);
   const circuit = readHookCircuitState(claudeHookCircuitPath(file));
   const reprobePending = circuit.open && circuit.openedAt != null &&
     now - circuit.openedAt >= CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS;
-  if (hasGuard && !claudeGuardStateTrusted(file)) {
+  if ((expectedFileGuard || hasGuard) &&
+      (!settingsSetTrusted || !claudeGuardStateTrusted(file))) {
     // The settings document carries a guard hook that can no longer be relied on. Launching with
     // it would either block every matched tool or trust a foreign list, so the whole document is
     // dropped for this spawn and the driver mediates, exactly as when no guard was provisionable.
@@ -1709,6 +1750,13 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
       hookAskCapable: false,
       healed: false,
       guardActive: false,
+      ...(!settingsSetTrusted
+        ? {
+          guardReason: expectedFileGuard
+            ? "the file-form guard settings documents were modified after provisioning"
+            : "the file-form guard settings have no runner-held identity in this process",
+        }
+        : {}),
       guardStateDirectory: dirname(resolve(file)),
     };
   }

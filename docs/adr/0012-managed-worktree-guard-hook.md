@@ -730,9 +730,11 @@ What is done instead:
 - **No free advertising.** The protections path is not exported in the settings `env` block (which
   reaches every tool process); it travels only in the hook command inside the 0600 settings file,
   and the guard accepts it only from there — never from the environment.
-- **Tripwire.** The runner remembers the SHA-256 of the exact protections document it last wrote
-  and compares the file before every rewrite, at spawn and at refresh. A mismatch invalidates the
-  guard for that session (mediation from then on) and emits a visible notice.
+- **Tripwires.** The runner remembers the SHA-256 of the exact protections document it last wrote
+  and compares the file before every rewrite, at spawn and at refresh. For a file-form guard it
+  also holds the exact live/template document and guard-only document it provisioned, and compares
+  every copy before each spawn. A mismatch invalidates the guard for that spawn (mediation from
+  then on) and emits a visible notice.
 - **Removal, not emptiness, means invalidated.** An empty list is a valid runner-written state
   (#1303) and is covered by the tripwire like any other document. A guard the runner no longer
   trusts has its list removed, and a missing list fails closed.
@@ -831,8 +833,27 @@ What remains, stated plainly:
 - A same-user process can still kill the runner (every verdict then refuses), rewrite the runner's
   own code, or remove the worktree directly. No file-level design closes that.
 - macOS and Windows have no abstract namespace, and WSL, container, and cloud launches carry no
-  guard or a translated one: all keep the file form, whose settings documents are still
-  untripwired.
+  guard or a translated one: all keep the file form. Before #1475, its settings documents were
+  still untripwired.
+
+Amended by #1475: **every file-form settings set is now held to the exact identity the runner
+provisioned before every spawn.** The baseline lives only in the runner process and covers the
+combined heal template, the guard-only fallback, and the two legitimate live-file states (combined
+or guard-only). A missing live file remains healable, but changed bytes in any existing copy —
+including a rewritten hook `command` with untouched arguments — drop the settings argument,
+return `guardActive: false`, and report that the guard became inactive. A structured launch then
+uses the existing driver mediation; a TUI with a managed worktree is refused because it has no
+driver fallback. A runner restart has no old baseline to trust: ordinary pre-spawn provisioning
+writes and records a fresh set before it can be active.
+
+The comparison is platform-independent and therefore covers macOS, Windows, path-socket launches,
+and any other launch that keeps the file form without a platform-specific macOS branch. Measured
+on Linux by forcing that same file form through the runner's real provisioning and claude 2.1.278:
+the untouched document's `PreToolUse` hook blocked the protected Bash call; after the command was
+rewritten in the live, template, and guard-only copies, `prepareClaudeHookArgs` removed
+`--settings`, returned `guardActive: false`, and named the tamper reason. Native Linux's ordinary
+abstract-socket launch remains memory-held and unchanged. The full per-platform matrix in
+`docs/agent-control.md` records which launches use each form.
 
 Amended by #1472: **in `provider` mode on native Linux, the manager policy hook keeps nothing in
 the hook state directory either.** The two bullets above that say otherwise (the circuit "still
