@@ -20,7 +20,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { buildCodexTurnParams } from "./codex-app-server.js";
-import { codexGuardActiveInArgs } from "../codex-managed-worktree-guard.js";
+import { codexGuardActiveInArgs, withoutCodexGuardArgs } from "../codex-managed-worktree-guard.js";
 
 const GUARD_OVERRIDE =
   'hooks.PreToolUse=[{matcher="Bash|apply_patch",hooks=[{type="command",' +
@@ -133,4 +133,29 @@ test("a value that is not a config override's value is never read as one", () =>
   // the same text is an argument, not configuration.
   assert.equal(codexGuardActiveInArgs([GUARD_OVERRIDE, TRUST_OVERRIDE, BYPASS]), false);
   assert.equal(codexGuardActiveInArgs(["--", "-c", GUARD_OVERRIDE, "-c", TRUST_OVERRIDE, BYPASS]), false);
+});
+
+test("--disable hooks disarms the guard, whatever the overrides still say", () => {
+  // Review finding CR-1.1. The flag switches the whole feature off, so Codex runs NO hook while the
+  // argv still carries every string this predicate looks for. Provisioning drops it for an isolated
+  // launch and proves that argv; anything re-adding it afterwards has taken the guard away.
+  for (const disable of [["--disable", "hooks"], ["--disable=hooks"]]) {
+    assert.equal(codexGuardActiveInArgs([...GUARDED, ...disable]), false, disable.join(" "));
+    assert.equal(codexGuardActiveInArgs([...disable, ...GUARDED]), false, disable.join(" "));
+  }
+  // Disabling some other feature says nothing about hooks.
+  assert.equal(codexGuardActiveInArgs([...GUARDED, "--disable", "web_search"]), true);
+});
+
+test("a person's own hook-trust configuration is never stripped from their launch", () => {
+  // Review finding CR-1.2. Only the runner's own trust override is runner-owned, and Codex keys
+  // the hook the runner installs through `-c` under `/<session-flags>/`. A hook from config.toml,
+  // a project, or a plugin is keyed by its own path, and its trust must survive.
+  const userTrust = 'hooks.state={"/home/u/.codex/config.toml:pre_tool_use:0:0"={trusted_hash="sha256:user"}}';
+  assert.deepEqual(withoutCodexGuardArgs(["-c", userTrust]), ["-c", userTrust]);
+  // The runner's own is still replaced rather than stacked across re-preparation.
+  assert.deepEqual(withoutCodexGuardArgs(["-c", TRUST_OVERRIDE]), []);
+  // And the isolation override (#1473), which shares the prefix, survives either way.
+  const disable = 'hooks.state={"/home/u/.codex/config.toml:pre_tool_use:0:0"={enabled=false}}';
+  assert.deepEqual(withoutCodexGuardArgs(["-c", disable]), ["-c", disable]);
 });

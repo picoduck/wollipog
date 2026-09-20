@@ -110,10 +110,24 @@ export function codexGuardConfigOverride(launch: { command: string; args: readon
     `hooks=[{type="command",command=${tomlString(codexGuardCommandString(launch))}}]}]`;
 }
 
-/** A runner-owned hook TRUST override, as distinct from the isolation override, which writes the
- * same `hooks.state=` prefix with `enabled=false` and must survive re-preparation. */
+/**
+ * A RUNNER-OWNED hook trust override.
+ *
+ * Three things write `hooks.state=`, and only one of them is this: the isolation override (#1473)
+ * carries `enabled=false`, a person or catalog may legitimately trust THEIR own hook by hash, and
+ * the runner trusts the hook it installed itself. Recognising the third by the prefix and
+ * `trusted_hash` alone deleted the second — a user's `-c 'hooks.state={"<their key>"=…}'` was
+ * stripped out of their own launch (review finding CR-1.2).
+ *
+ * The runner's hook is always the one it installed through `-c`, which Codex keys under
+ * `/<session-flags>/`; a hook from `config.toml`, a project, or a plugin is keyed by its own path.
+ * So the marker is what makes this the runner's, and a user's trust for their own hook survives.
+ */
+const CODEX_SESSION_FLAGS_KEY_MARKER = "/<session-flags>/";
+
 function declaresRunnerHookTrust(argument: string): boolean {
-  return argument.startsWith(CODEX_HOOK_STATE_OVERRIDE_PREFIX) && argument.includes("trusted_hash");
+  return argument.startsWith(CODEX_HOOK_STATE_OVERRIDE_PREFIX) &&
+    argument.includes("trusted_hash") && argument.includes(CODEX_SESSION_FLAGS_KEY_MARKER);
 }
 
 /** Does this argument carry a `hooks.PreToolUse` override, in any spelling Codex accepts? */
@@ -200,6 +214,13 @@ export function codexGuardActiveInArgs(args: readonly string[]): boolean {
       if (declaresRunnerHookTrust(value)) trust = true;
       else if (!value.includes("enabled=false")) trust = false;
     }
+  }
+  // `--disable hooks` switches the whole feature off, so Codex runs NO hook whatever the overrides
+  // say, and the argv still carries every string this function looks for (review finding CR-1.1).
+  // Provisioning drops the flag for an isolated launch and proves that argv; anything that re-adds
+  // it afterwards has taken the guard away again, silently.
+  for (let index = 0; index < options.length; index++) {
+    if (disablesCodexHooksFeature(options[index]!, options[index + 1]) > 0) return false;
   }
   // The bypass flag is required here for the same reason `codexGuardArgsActive` requires it: the
   // two derivations must agree, or a launch is guarded by one and unguarded by the other. It is
