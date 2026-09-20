@@ -1,7 +1,7 @@
 /** Runner configuration loading + CLI argument parsing. */
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { posix, resolve, win32 } from "node:path";
 import { homedir } from "node:os";
 import type { AcpEnvironmentReference, AcpMcpServerConfig, AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { resolveAcpSessionContext } from "./acp-session-context.js";
@@ -458,7 +458,8 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
     if (!account || typeof account !== "object" || Array.isArray(account)) {
       throw new Error(`runner config: providerAccounts[${index}] must be an object`);
     }
-    if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(account.id) || providerAccountIds.has(account.id)) {
+    if (typeof account.id !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(account.id) || providerAccountIds.has(account.id)) {
       throw new Error(`runner config: provider account id '${String(account.id)}' must be unique and contain only letters, digits, '.', '_' or '-'`);
     }
     providerAccountIds.add(account.id);
@@ -472,8 +473,7 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
     if (typeof account.directory !== "string" || !configuredAbsolute(account.directory)) {
       throw new Error(`runner config: provider account '${account.id}' directory must be absolute`);
     }
-    const directoryKey = account.directory.replace(/[\\/]+$/u, "") || account.directory;
-    const comparableDirectoryKey = process.platform === "win32" ? directoryKey.toLowerCase() : directoryKey;
+    const comparableDirectoryKey = providerAccountDirectoryKey(account.directory);
     if (providerAccountDirectories.has(comparableDirectoryKey)) {
       throw new Error("runner config: provider account directories must be distinct");
     }
@@ -793,6 +793,18 @@ function validateAdmissionMap(name: string, value: Record<string, number> | unde
 
 function configuredAbsolute(path: string): boolean {
   return typeof path === "string" && (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path) || path.startsWith("\\\\"));
+}
+
+/** Compare credential roots by their target-platform spelling, then by native filesystem identity
+ * when the runner can inspect it. POSIX paths on Windows belong to WSL and must not be rewritten
+ * through the host drive. */
+function providerAccountDirectoryKey(directory: string): string {
+  const targetIsPosix = process.platform !== "win32" || directory.startsWith("/");
+  let normalized = targetIsPosix ? posix.normalize(directory) : win32.normalize(directory);
+  const hostInspectable = process.platform !== "win32" || !targetIsPosix;
+  if (hostInspectable && existsSync(directory)) normalized = realpathSync.native(directory);
+  normalized = normalized.replace(/[\\/]+$/u, "") || normalized;
+  return process.platform === "win32" && !targetIsPosix ? normalized.toLowerCase() : normalized;
 }
 
 export function loadConfig(

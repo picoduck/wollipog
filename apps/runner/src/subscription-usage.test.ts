@@ -1244,3 +1244,25 @@ test("configured account login state does not inherit a sibling or agent-wide st
     ["personal", "unauthenticated"],
   ]);
 });
+
+test("configuring one provider keeps the other provider's legacy usage source", () => {
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent(), {
+      id: "claude", name: "Claude", command: "claude", args: [], env: {},
+      driver: "claude-code", context: { kind: "native" }, available: true,
+    }],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+    ],
+    resolveEnv: () => ({}),
+    publish: () => {},
+  });
+  manager.syncSources();
+  assert.deepEqual(manager.inventory().map((source) => [
+    source.provider, source.providerAccountId, source.agentId,
+  ]), [
+    ["claude", undefined, "claude"],
+    ["codex", "work", "codex"],
+  ]);
+});

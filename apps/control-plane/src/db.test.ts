@@ -1757,6 +1757,11 @@ test("provider account inventory is principal-safe, version-gated, and session-d
     { id: "personal", label: "Personal", provider: "claude", authStatus: "unauthenticated" },
   ]);
   assert.doesNotMatch(JSON.stringify(db.getRunner("runner-1")?.providerAccounts), /credential|directory|home|path/i);
+  assert.throws(() => db.registerRunner(meta({
+    providerAccounts: [{
+      id: 123, label: "Numeric", provider: "codex", authStatus: "authenticated",
+    }] as never,
+  }), 550, RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts), /provider account inventory/);
 
   const session = db.createSession(newSession({
     providerAccountId: "work",

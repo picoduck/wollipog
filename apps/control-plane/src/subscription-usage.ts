@@ -135,7 +135,8 @@ export function validateSubscriptionUsageSnapshot(
     : undefined;
   if (!agent || agent.driver !== expectedDriver ||
       (providerAccountId !== undefined && providerAccount?.provider !== provider) ||
-      (providerAccountId === undefined && (runner?.providerAccounts?.length ?? 0) > 0) ||
+      (providerAccountId === undefined &&
+        (runner?.providerAccounts?.some((candidate) => candidate.provider === provider) ?? false)) ||
       sourceId !== expectedSourceId(runnerId, agent, provider, providerAccountId)) {
     throw new Error("subscription usage source is not advertised by this runner");
   }

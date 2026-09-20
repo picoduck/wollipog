@@ -12,6 +12,7 @@ import { runnerSupportsProtocol } from "@wollipog/protocol";
 import { JsonRpcPeer } from "./jsonrpc.js";
 import { killTree, spawnAgent, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 import type { DriverSubscriptionUsageUpdate } from "./drivers/driver.js";
+import { agentForProviderAccount, providerForDriver } from "./provider-accounts.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -623,12 +624,13 @@ export class SubscriptionUsageManager {
     const result: SubscriptionSource[] = [];
     const seen = new Set<string>();
     const accounts = this.options.providerAccounts?.() ?? [];
-    if (accounts.length > 0) {
-      for (const account of accounts) {
-        const agent = this.options.agents().find((candidate) =>
-          account.provider === "codex"
-            ? candidate.driver === "codex-app-server"
-            : candidate.driver === "claude-code");
+    const accountProviders = new Set(accounts.map((account) => account.provider));
+    for (const account of accounts) {
+        const agent = agentForProviderAccount(
+          this.options.agents(),
+          account,
+          account.provider === "codex" ? ["codex-app-server"] : ["claude-code"],
+        );
         if (!agent) continue;
         const sourceId = subscriptionUsageSourceId(
           this.options.runnerId,
@@ -645,16 +647,10 @@ export class SubscriptionUsageManager {
           accountLabel: account.label,
           authStatus: account.authStatus,
         });
-      }
-      return result;
     }
     for (const agent of this.options.agents()) {
-      const provider = agent.driver === "codex-app-server"
-        ? "codex"
-        : agent.driver === "claude-code"
-          ? "claude"
-          : null;
-      if (!provider) continue;
+      const provider = providerForDriver(agent.driver ?? "acp");
+      if (!provider || agent.driver === "codex" || accountProviders.has(provider)) continue;
       const sourceId = subscriptionUsageSourceId(
         this.options.runnerId,
         agent.id,

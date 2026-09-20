@@ -1123,6 +1123,9 @@ export class SessionManager {
     private readonly authorizeSafeWslLaunch?: SafeWslLaunchAuthorizer,
     private readonly worktreePorts: RunnerWorktreePorts = DEFAULT_WORKTREE_PORTS,
     private readonly resolveProviderAccount?: ProviderAccountResolver,
+    /** Current legacy credential-home override used only for Seatbelt admission grouping. Account
+     * sessions use their durable bound home; omission therefore preserves legacy launch behavior. */
+    private readonly resolveProviderCredentialHome?: (meta: SessionMeta) => string | undefined,
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     // Every worktree creation, activation, attach, and discard lands as a `worktrees` patch. The
@@ -6146,8 +6149,9 @@ export class SessionManager {
         : meta?.driver === "pi"
           ? "pi"
           : null;
-    const seatbeltAccount = meta?.providerCredentialHome
-      ? createHash("sha256").update(meta.providerCredentialHome).digest("hex").slice(0, 16)
+    const credentialHome = meta?.providerCredentialHome ?? (meta ? this.resolveProviderCredentialHome?.(meta) : undefined);
+    const seatbeltAccount = credentialHome
+      ? createHash("sha256").update(credentialHome).digest("hex").slice(0, 16)
       : "default";
     return {
       sessionId,

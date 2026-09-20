@@ -117,6 +117,19 @@ test("resolveConfig validates provider accounts and agent defaults", () => {
       { id: "personal", label: "Personal", provider: "codex", directory: "/credentials/shared/" },
     ],
   }), /directories must be distinct/);
+  assert.throws(() => resolveConfig({
+    runnerId: "r",
+    controlPlaneUrl: "ws://localhost",
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "codex", directory: "/credentials/shared" },
+      { id: "personal", label: "Personal", provider: "codex", directory: "/credentials/team/../shared" },
+    ],
+  }), /directories must be distinct/);
+  assert.throws(() => resolveConfig({
+    runnerId: "r",
+    controlPlaneUrl: "ws://localhost",
+    providerAccounts: [{ id: 123 as never, label: "Work", provider: "codex", directory: "/credentials/work" }],
+  }), /provider account id/);
 });
 
 /* ---- config-less startup: flags / env / merge ---- */

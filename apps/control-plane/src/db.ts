@@ -284,7 +284,8 @@ function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullabl
   if (!Array.isArray(value) || value.length > 32) throw new Error("runner provider account inventory is invalid");
   const ids = new Set<string>();
   return value.map((account) => {
-    if (!account || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(account.id) || ids.has(account.id) ||
+    if (!account || typeof account.id !== "string" ||
+        !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(account.id) || ids.has(account.id) ||
         typeof account.label !== "string" || !account.label.trim() || account.label.trim().length > 100 ||
         /[\u0000-\u001f\u007f]/.test(account.label) ||
         (account.provider !== "claude" && account.provider !== "codex") ||
@@ -10705,21 +10706,27 @@ export class ControlPlaneDb {
     const sources: SubscriptionUsageResponse["sources"] = [];
     for (const runner of runners) {
       const providerAccounts = runner.providerAccounts ?? [];
-      const sourceCoordinates = providerAccounts.length > 0
-        ? providerAccounts.flatMap((account) => {
-            const agent = runner.agents.find((candidate) => account.provider === "codex"
-              ? candidate.driver === "codex-app-server"
-              : candidate.driver === "claude-code");
-            return agent ? [{ agent, provider: account.provider, account }] : [];
-          })
-        : runner.agents.flatMap((agent) => {
+      const accountProviders = new Set(providerAccounts.map((account) => account.provider));
+      const sourceCoordinates = [
+        ...providerAccounts.flatMap((account) => {
+          const compatible = runner.agents.filter((candidate) => account.provider === "codex"
+            ? candidate.driver === "codex-app-server"
+            : candidate.driver === "claude-code");
+          const agent = compatible.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
+            compatible.find((candidate) => (candidate.context?.kind ?? "native") === "native") ?? compatible[0];
+          return agent ? [{ agent, provider: account.provider, account }] : [];
+        }),
+        ...runner.agents.flatMap((agent) => {
             const provider = agent.driver === "codex-app-server"
               ? "codex" as const
               : agent.driver === "claude-code"
                 ? "claude" as const
                 : null;
-            return provider ? [{ agent, provider, account: undefined }] : [];
-          });
+            return provider && !accountProviders.has(provider)
+              ? [{ agent, provider, account: undefined }]
+              : [];
+          }),
+      ];
       for (const { agent, provider, account } of sourceCoordinates) {
         const context = agent.context?.kind === "wsl" ? `wsl:${agent.context.distro}` : "native";
         const sourceId = createHash("sha256")

@@ -130,9 +130,12 @@ import {
 } from "./worktree-setup-generator.js";
 import { createRunnerProviderAuthRecovery } from "./provider-auth-recovery.js";
 import {
+  agentForProviderAccount,
   agentWithDefaultProviderAccount,
+  agentsWithoutConfiguredProviderAccounts,
   providerAccountDefinition,
   providerAccountEnvironment,
+  providerForDriver,
   selectProviderAccount,
 } from "./provider-accounts.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
@@ -858,6 +861,12 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
     spec.driver ?? "acp",
     spec.providerAccountId,
   ),
+  (meta) => {
+    const provider = providerForDriver(meta.driver);
+    if (!provider) return undefined;
+    const env = runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
+    return provider === "claude" ? env.CLAUDE_CONFIG_DIR : env.CODEX_HOME;
+  },
 );
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
   sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
@@ -1257,9 +1266,7 @@ function queueSkillsReconcile(requestId?: string): void {
     const desired = lastDesiredSkills;
     try {
       const allowRemovals = desired !== null && !chunkedSkillsSync.inProgress;
-      const baseAgents = config.providerAccounts.length
-        ? metadata.agents.filter((agent) => !["claude-code", "codex", "codex-app-server"].includes(agent.driver ?? "acp"))
-        : metadata.agents;
+      const baseAgents = agentsWithoutConfiguredProviderAccounts(metadata.agents, config.providerAccounts);
       let result = await reconcileSkills({
         dataDir: config.dataDir,
         home: homedir(),
@@ -1485,9 +1492,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
     metadata.editors = editors;
     await Promise.all(config.providerAccounts.map(async (account) => {
-      const agent = metadata.agents.find((candidate) => account.provider === "claude"
-        ? candidate.driver === "claude-code"
-        : candidate.driver === "codex" || candidate.driver === "codex-app-server");
+      const agent = agentForProviderAccount(metadata.agents, account);
       if (!agent || agent.available !== true) {
         providerAccountAuthStatus.set(account.id, "unknown");
         return;

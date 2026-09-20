@@ -6,11 +6,22 @@ import { mkdtempSync } from "node:fs";
 import { test } from "node:test";
 import type { SessionLaunchSpec } from "@wollipog/protocol";
 import {
+  agentForProviderAccount,
+  agentsWithoutConfiguredProviderAccounts,
   bindSessionProviderAccount,
   providerAccountDefinition,
   providerAccountEnvironment,
   selectProviderAccount,
 } from "./provider-accounts.js";
+
+const claudeAgent = {
+  id: "claude", name: "Claude", command: "claude", args: [], env: {},
+  driver: "claude-code" as const, context: { kind: "native" as const },
+};
+const codexAgent = {
+  id: "codex", name: "Codex", command: "codex", args: [], env: {},
+  driver: "codex-app-server" as const, context: { kind: "native" as const },
+};
 
 test("selectProviderAccount honors an explicit account and maps only the provider credential variable", () => {
   const accounts = [
@@ -33,6 +44,22 @@ test("selectProviderAccount honors an explicit account and maps only the provide
 
 test("selectProviderAccount preserves legacy default-home behavior when no accounts are configured", () => {
   assert.equal(selectProviderAccount([], { id: "claude", driver: "claude-code" }, "claude-code"), undefined);
+});
+
+test("partial account configuration preserves the other provider's legacy harness", () => {
+  assert.deepEqual(
+    agentsWithoutConfiguredProviderAccounts([claudeAgent, codexAgent], [{ provider: "codex" }])
+      .map((agent) => agent.id),
+    ["claude"],
+  );
+});
+
+test("background account work prefers an explicit default, then a native agent", () => {
+  const wsl = { ...claudeAgent, id: "claude-wsl", context: { kind: "wsl" as const, distro: "Ubuntu" } };
+  assert.equal(agentForProviderAccount([wsl, claudeAgent], { id: "work", provider: "claude" })?.id, "claude");
+  assert.equal(agentForProviderAccount([
+    { ...wsl, defaultProviderAccountId: "work" }, claudeAgent,
+  ], { id: "work", provider: "claude" })?.id, "claude-wsl");
 });
 
 test("account login observations are isolated to each credential home", () => {

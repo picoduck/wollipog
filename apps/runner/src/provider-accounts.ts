@@ -38,6 +38,33 @@ export function providerForDriver(driver: AgentDriverKind): "claude" | "codex" |
   return null;
 }
 
+/** Background account work needs one provider CLI. Prefer an agent that explicitly defaults to
+ * this account, then a native context: account directories are runner-local host paths unless an
+ * operator deliberately binds the account to a target-context agent. */
+export function agentForProviderAccount(
+  agents: AgentDefinition[],
+  account: Pick<ProviderAccountDefinition, "id" | "provider">,
+  supportedDrivers?: AgentDriverKind[],
+): AgentDefinition | undefined {
+  const compatible = agents.filter((candidate) =>
+    providerForDriver(candidate.driver ?? "acp") === account.provider &&
+    (!supportedDrivers || supportedDrivers.includes(candidate.driver ?? "acp")));
+  return compatible.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
+    compatible.find((candidate) => (candidate.context?.kind ?? "native") === "native") ??
+    compatible[0];
+}
+
+export function agentsWithoutConfiguredProviderAccounts(
+  agents: AgentDefinition[],
+  accounts: Array<Pick<ProviderAccountDefinition, "provider">>,
+): AgentDefinition[] {
+  const configuredProviders = new Set(accounts.map((account) => account.provider));
+  return agents.filter((agent) => {
+    const provider = providerForDriver(agent.driver ?? "acp");
+    return !provider || !configuredProviders.has(provider);
+  });
+}
+
 export function providerAccountEnvironment(
   account: Pick<BoundProviderAccount, "provider" | "credentialHome">,
 ): Record<string, string> {

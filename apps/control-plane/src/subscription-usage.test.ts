@@ -31,6 +31,13 @@ function codexAgent(id = "codex"): AgentDefinition {
   };
 }
 
+function claudeAgent(id = "claude"): AgentDefinition {
+  return {
+    id, name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code",
+    context: { kind: "native" }, available: true,
+  };
+}
+
 function meta(runnerId: string, agents: AgentDefinition[] = [codexAgent()]): RunnerMetadata {
   return { runnerId, hostname: `${runnerId}-host`, os: "linux", version: "1", agents, workspaces: [] };
 }
@@ -186,6 +193,37 @@ test("one provider account on two Machines remains two independently validated s
   assert.throws(() => validateSubscriptionUsageSnapshot({
     ...accountSnapshot("runner-1", 10), providerAccountId: "personal",
   }, "runner-1", db, now), /not advertised/);
+  db.close();
+});
+
+test("an account for one provider preserves the other provider's legacy source", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const now = 1_000_000;
+  db.registerRunner({
+    ...meta("runner-1", [codexAgent(), claudeAgent()]),
+    providerAccounts: [{ id: "work", label: "Work", provider: "codex", authStatus: "authenticated" }],
+  }, now, PROTOCOL_VERSION, {
+    organizationId: "org_personal", owner: { kind: "user", userId: "alice" },
+  });
+
+  const projected = db.subscriptionUsageForPrincipal(human(), now).sources;
+  assert.deepEqual(projected.map((source) => [source.provider, source.providerAccountId, source.agentId]), [
+    ["claude", undefined, "claude"],
+    ["codex", "work", "codex"],
+  ]);
+  const claudeSourceId = createHash("sha256")
+    .update(JSON.stringify({ runnerId: "runner-1", agentId: "claude", provider: "claude", context: "native" }))
+    .digest("hex")
+    .slice(0, 32);
+  assert.doesNotThrow(() => validateSubscriptionUsageSnapshot({
+    sourceId: claudeSourceId,
+    runnerId: "runner-1",
+    agentId: "claude",
+    provider: "claude",
+    state: "available",
+    fetchedAt: now,
+    buckets: [],
+  }, "runner-1", db, now));
   db.close();
 });
 
