@@ -277,11 +277,18 @@ export function parseEnv(env: NodeJS.ProcessEnv = process.env): Partial<RunnerCo
  * startup compatibility while ensuring later child launches cannot inherit either name. */
 export function consumeRunnerCredentialEnvironment(
   env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
 ): { tokenFile?: string } {
   let tokenFile = env.RUNNER_TOKEN_FILE;
   for (const key of Object.keys(env)) {
     const normalized = key.toUpperCase();
-    if (normalized === "RUNNER_TOKEN_FILE" && tokenFile === undefined) tokenFile = env[key];
+    if (
+      normalized === "RUNNER_TOKEN_FILE" &&
+      tokenFile === undefined &&
+      platform === "win32"
+    ) {
+      tokenFile = env[key];
+    }
     if (normalized === "RUNNER_TOKEN" || normalized === "RUNNER_TOKEN_FILE") delete env[key];
   }
   return { tokenFile };

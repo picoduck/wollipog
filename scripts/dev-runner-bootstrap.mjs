@@ -263,6 +263,13 @@ export function developmentRunnerEnvironment(tokenFile, baseUrl, dataDir, inheri
   };
 }
 
+export function bindDevelopmentRunnerCredentialLifetime(child, credentialFile, host = process) {
+  const removeCredentialFile = () => credentialFile.remove();
+  host.once("exit", removeCredentialFile);
+  child.once("error", removeCredentialFile);
+  child.once("exit", removeCredentialFile);
+}
+
 function startRunner(tokenFile, baseUrl, configPath, dataDir, watch = true) {
   const tsxCli = fileURLToPath(import.meta.resolve("tsx/cli"));
   // Invoke Node + tsx by argv so config paths remain inert on every platform. Only the protected
@@ -293,23 +300,21 @@ export async function main() {
   let child;
   try {
     child = startRunner(credentialFile.path, baseUrl, configPath, dataDir, watch);
+    bindDevelopmentRunnerCredentialLifetime(child, credentialFile);
   } catch (error) {
     credentialFile.remove();
     throw error;
   }
-  process.once("exit", credentialFile.remove);
   const forward = (signal) => {
     if (!child.killed) child.kill(signal);
   };
   process.once("SIGINT", () => forward("SIGINT"));
   process.once("SIGTERM", () => forward("SIGTERM"));
   child.on("error", (error) => {
-    credentialFile.remove();
     console.error(`[dev-runner] runner launch failed: ${error.message}`);
     process.exitCode = 1;
   });
   child.on("exit", (code, signal) => {
-    credentialFile.remove();
     process.exitCode = signal ? 1 : (code ?? 1);
   });
 }

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
@@ -8,6 +9,7 @@ import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
+  bindDevelopmentRunnerCredentialLifetime,
   controlPlaneHttp,
   createDevelopmentRunnerCredentialFile,
   developmentConfigPath,
@@ -355,4 +357,35 @@ test("development runner credential handoff uses a protected temporary file and 
   credential.remove();
   credential.remove();
   assert.equal(existsSync(credential.path), false);
+});
+
+test("bootstrap starts the runner with the credential file rather than the token", () => {
+  const source = readFileSync(
+    fileURLToPath(new URL("./dev-runner-bootstrap.mjs", import.meta.url)),
+    "utf8",
+  );
+
+  assert.match(source, /startRunner\(credentialFile\.path,/u);
+  assert.doesNotMatch(source, /RUNNER_TOKEN\s*:/u);
+});
+
+test("credential file remains available until the runner or bootstrap exits", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-runner-lifetime-test-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const runnerExitCredential = createDevelopmentRunnerCredentialFile("runner-exit-token", root);
+  const runner = new EventEmitter();
+  const runnerHost = new EventEmitter();
+  bindDevelopmentRunnerCredentialLifetime(runner, runnerExitCredential, runnerHost);
+  assert.equal(existsSync(runnerExitCredential.path), true);
+  runner.emit("exit", 0, null);
+  assert.equal(existsSync(runnerExitCredential.path), false);
+
+  const hostExitCredential = createDevelopmentRunnerCredentialFile("host-exit-token", root);
+  const hostRunner = new EventEmitter();
+  const host = new EventEmitter();
+  bindDevelopmentRunnerCredentialLifetime(hostRunner, hostExitCredential, host);
+  assert.equal(existsSync(hostExitCredential.path), true);
+  host.emit("exit");
+  assert.equal(existsSync(hostExitCredential.path), false);
 });
