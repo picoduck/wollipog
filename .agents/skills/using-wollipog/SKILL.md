@@ -25,6 +25,9 @@ wollipog worktree create --branch <name> [--base <ref>] --json
 wollipog worktree attach --path <absolute-path> --json
 wollipog worktree select --path <absolute-path> --json
 wollipog worktree discard --path <absolute-path> --json
+wollipog decision request --request-id <id> --resource-key <key> --snapshot '<json>' --json
+wollipog decision get <occurrence-id> --json
+wollipog decision consume <occurrence-id> --snapshot '<json>' [--action '<json>'] --json
 ```
 
 An Orchestrator campaign must use the management tools as the policy boundary, not infer authority
@@ -53,6 +56,9 @@ For Automatic model or effort, use `get_agent_capabilities` and send the selecte
 `create_session` call; fixed values are server-enforced. The block is not blanket approval. Children
 must use `request_workflow_decision`, `get_workflow_decision`, and `consume_workflow_decision` for
 implementation questions, PR merge, merged-branch deletion, follow-up publication, and UI evidence.
+When those MCP tools are unavailable, use the equivalent self-scoped `wollipog decision request`,
+`get`, and `consume` commands above; the exact resource snapshot and optional PR-merge action are
+JSON objects. The CLI refuses `--session` for these commands and exposes no resolution operation.
 Only the current owner may resolve the exact pending occurrence. Authentication, secrets,
 persistent grants, governance, budgets, and tool guardrails remain human-only.
 If an exact armed PR merge command already succeeded but its approved occurrence remained

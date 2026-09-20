@@ -24,6 +24,7 @@ export function rootHelp(): string {
     "  session             Manage agent sessions",
     "  worktree            Create, attach, select, and discard session worktrees",
     "  artifact            Attach an image file to a session without passing its bytes through the model",
+    "  decision            Request, read, and consume typed workflow decisions for this session",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
@@ -45,7 +46,7 @@ export function rootHelp(): string {
     "  wollipog admin runner-credential rotate --runner RUNNER_ID --output ./runner.token",
     "  wollipog service uninstall  # preserves data by default",
     "",
-    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact",
+    "Topics: init, doctor, update, pair, service, admin, session, worktree, artifact, decision",
     "Run `wollipog help <topic>` for complete commands and options. Help is always text; operational commands use --json for stable machine-readable output.",
   ].join("\n");
 }
@@ -104,6 +105,19 @@ export function artifactHelp(): string {
   ].join("\n");
 }
 
+export function decisionHelp(): string {
+  return [
+    "Usage: wollipog decision <command> [options]",
+    "  decision request --request-id <id> --resource-key <key> --snapshot <json> [--json]",
+    "  decision get <occurrence-id> [--json]",
+    "  decision consume <occurrence-id> --snapshot <json> [--action <json>] [--json]",
+    "Options: --url <control-plane-origin>, --token-file <credential-file>.",
+    "The injected child session can request_workflow_decision, get_workflow_decision, and consume_workflow_decision only for itself; --session is refused.",
+    "Pass the exact typed resourceSnapshot as a JSON object in --snapshot. For a pr_merge consume, pass the exact WorkflowDecisionAction JSON object in --action; other categories omit it.",
+    "The control plane remains authoritative: it validates the category, policy owner, current resource snapshot, and one-shot consumption. This command cannot resolve its own decision.",
+  ].join("\n");
+}
+
 export function pairHelp(): string {
   return [
     "Usage: wollipog pair <command> [options]",
@@ -159,6 +173,11 @@ function helpForTopic(topic: string): string | null {
     case "artifact":
     case "artifacts":
       return artifactHelp();
+    case "decision":
+    case "decisions":
+    case "workflow-decision":
+    case "workflow-decisions":
+      return decisionHelp();
     default:
       return null;
   }

@@ -39,12 +39,15 @@ wollipog worktree attach [--session ID] --path PATH --json
 wollipog worktree select [--session ID] --path PATH --json
 wollipog worktree discard [--session ID] --path PATH --json
 wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
+wollipog decision request --request-id ID --resource-key KEY --snapshot JSON --json
+wollipog decision get OCCURRENCE_ID --json
+wollipog decision consume OCCURRENCE_ID --snapshot JSON [--action JSON] --json
 wollipog admin <pairing-url|status|user list|device list|device create|device revoke|runner-credential ...> [--json]
 wollipog service <install|status|restart|logs|upgrade|uninstall> [options]
 wollipog doctor
 wollipog update
 wollipog pair <create|list|revoke|url> [options]
-wollipog help [doctor|update|pair|service|admin|session|worktree|artifact]
+wollipog help [doctor|update|pair|service|admin|session|worktree|artifact|decision]
 ```
 
 `wollipog admin` is host administration for an SSH operator on the control-plane machine. It
@@ -657,6 +660,13 @@ child verification settles an approved evidence decision as consumed instead of 
 to consume it first; a pending evidence decision, and every other approved category, still blocks
 verification. A later policy change can revoke only approvals that have not been consumed; it does
 not claim to roll back an action already in progress.
+
+An injected child without the management MCP server uses the same shared handlers through
+`wollipog decision request`, `wollipog decision get`, and `wollipog decision consume`. The exact
+resource snapshot (and PR-merge action, when applicable) is passed as JSON. These commands are
+self-scoped: they reject `--session`, send the injected session principal on every request, and do
+not expose any resolution operation, so a child cannot target another session or approve itself.
+They require protocol v139 and fail before sending the operation to an older control plane.
 
 Protocol v150 adds a read-only reconciliation path for a PR merge that completed before its exact
 armed occurrence was consumed. The child must be resumed on the same App Server thread and submit
