@@ -294,6 +294,18 @@ export function consumeRunnerCredentialEnvironment(
   return { tokenFile };
 }
 
+/** Parse all runner settings before consuming credentials from the live environment. Keeping this
+ * order inside one tested operation preserves legacy RUNNER_TOKEN startup without leaving either
+ * credential input available to later child launches. */
+export function parseAndConsumeRunnerEnvironment(
+  env: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): { overrides: Partial<RunnerConfig>; tokenFile?: string } {
+  const overrides = parseEnv(env);
+  const { tokenFile } = consumeRunnerCredentialEnvironment(env, platform);
+  return { overrides, tokenFile };
+}
+
 /** Resolve only genuinely-relative paths; leave Windows (C:\) and POSIX/WSL (/…) absolutes intact. */
 export function resolveWorkspacePath(p: string): string {
   if (p.startsWith("/") || /^[a-zA-Z]:[\\/]/.test(p)) return p;

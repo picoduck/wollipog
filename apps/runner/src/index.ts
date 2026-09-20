@@ -52,10 +52,9 @@ import {
   isOrchestratorLaunch,
 } from "@wollipog/protocol";
 import {
-  consumeRunnerCredentialEnvironment,
   loadConfig,
+  parseAndConsumeRunnerEnvironment,
   parseArgs,
-  parseEnv,
   projectAgentDiscoveryEnvironment,
   resolveAgentEnvironment,
   resolveRunnerLocalAgentEnvironment,
@@ -273,8 +272,8 @@ if (parsed.showVersion) {
 
 // Connection/identity precedence: flags > env > config file. Lets the control plane launch a
 // runner remotely with no JSON on the box (--runner-id/--control-plane-url/--token/--workspace).
-const environmentOverrides = parseEnv();
-const credentialEnvironment = consumeRunnerCredentialEnvironment();
+const credentialEnvironment = parseAndConsumeRunnerEnvironment();
+const environmentOverrides = credentialEnvironment.overrides;
 const overrides: Partial<RunnerConfig> = { ...environmentOverrides, ...parsed.overrides };
 
 // --token-file / RUNNER_TOKEN_FILE: read the token from a file so the secret never appears in any

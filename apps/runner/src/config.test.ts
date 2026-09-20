@@ -8,6 +8,7 @@ import {
   DEFAULT_WORKTREE_PORTS,
   consumeRunnerCredentialEnvironment,
   loadConfig,
+  parseAndConsumeRunnerEnvironment,
   parseArgs,
   parseEnv,
   parseWorkspaceArg,
@@ -171,10 +172,9 @@ test("runner credential environment is consumed after legacy authentication is l
     RUNNER_TOKEN_FILE: "/run/secrets/runner-token",
     KEEP: "yes",
   } as NodeJS.ProcessEnv;
-  const loaded = parseEnv(env);
-  const consumed = consumeRunnerCredentialEnvironment(env);
+  const consumed = parseAndConsumeRunnerEnvironment(env);
 
-  assert.equal(loaded.token, "legacy-runner-token");
+  assert.equal(consumed.overrides.token, "legacy-runner-token");
   assert.equal(consumed.tokenFile, "/run/secrets/runner-token");
   assert.deepEqual(env, { KEEP: "yes" });
 });
