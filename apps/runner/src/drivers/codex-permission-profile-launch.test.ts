@@ -2,6 +2,11 @@
  * The #1336 slice 2 contract at each Codex launch path: a migrated mode sends the permission
  * profile and NO legacy sandbox policy, an unmigrated one is byte-for-byte what it is today, and
  * the two never travel together (Codex silently ignores the profile when they do).
+ *
+ * No mode migrates on codex-cli 0.155.1, because a deny entry costs a launch every
+ * APPROVED network escalation. The launch-path tests below therefore assert the byte-for-byte
+ * legacy argv for every mode, and the turn-params tests keep exercising the migrated shape with an
+ * explicitly supplied base — that code stays live for a build whose escalation survives a deny.
  */
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
@@ -82,30 +87,25 @@ test("an unmigrated mode keeps its legacy sandbox mode even with a hook state di
   }
 });
 
-test("a migrated mode sends the profile and NO -s, on a fresh thread", async () => {
-  const args = await execArgs("workspace-write", { hookStateDir: HOOK_DIR });
-  assert.ok(!args.includes("-s"), "the legacy sandbox mode is gone");
-  const overrides = codexPermissionProfileOverrides(":workspace", HOOK_DIR);
-  assert.ok(args.includes(overrides[0]), "the profile is defined");
-  assert.ok(args.includes(overrides[1]), "and selected");
-  // Both overrides precede the `exec` subcommand, where Codex parses global flags.
-  assert.ok(args.indexOf(overrides[1]) < args.indexOf("exec"));
+test("an approval-capable mode keeps its legacy sandbox mode, hook state directory or not", async () => {
+  // Every mode that could migrate routes to an approval-capable policy, so every one of them
+  // would lose an approved escalation's network under a deny entry (#1464). All stay on `-s`, and
+  // their argv is byte-for-byte the argv they had with no hook state directory at all.
+  for (const mode of ["auto-review", "on-request", "untrusted", "on-failure", "workspace-write", "read-only"]) {
+    const args = await execArgs(mode, { hookStateDir: HOOK_DIR });
+    assert.deepEqual(args, await execArgs(mode), `${mode} launches exactly as it did`);
+    assert.ok(args.includes("-s"), `${mode} still sends -s`);
+    assert.ok(!args.some((a) => a.startsWith("default_permissions=")), `${mode} selects no profile`);
+    assert.ok(!args.some((a) => a.startsWith("permissions.")), `${mode} defines no profile either`);
+  }
 });
 
-test("read-only maps to the :read-only profile, not :workspace", async () => {
-  const args = await execArgs("read-only", { hookStateDir: HOOK_DIR });
-  assert.ok(!args.includes("-s"));
-  assert.ok(args.includes(codexPermissionProfileOverrides(":read-only", HOOK_DIR)[0]));
-});
-
-test("a resumed read-only turn keeps the :workspace default it always had, and gains only the deny", async () => {
-  // Review finding CR-2.3: a resumed non-Orchestrator `codex exec` has never passed `-s`, so Codex
-  // resolved its own default. Selecting :read-only from the session's mode would take away writes.
-  const args = await execArgs("read-only", { hookStateDir: HOOK_DIR, resumeThread: "thread-1" });
-  assert.ok(!args.includes("-s"));
-  assert.ok(args.includes(codexPermissionProfileOverrides(":workspace", HOOK_DIR)[0]));
-  assert.ok(!args.includes(codexPermissionProfileOverrides(":read-only", HOOK_DIR)[0]));
-  assert.ok(args.includes("resume"));
+test("a resumed turn is byte-for-byte what it was before the profile existed", async () => {
+  // Review finding CR-2.3: a resumed non-Orchestrator `codex exec` has never passed `-s`, so it ran
+  // under Codex's own approval-capable default — which is withheld like every other one.
+  const withDir = await execArgs("read-only", { hookStateDir: HOOK_DIR, resumeThread: "thread-1" });
+  assert.deepEqual(withDir, await execArgs("read-only", { resumeThread: "thread-1" }));
+  assert.ok(withDir.includes("resume"));
 });
 
 test("a resumed Orchestrator turn still pins its explicit legacy mode", async () => {
@@ -168,7 +168,8 @@ test("the Orchestrator preset keeps its own policy, profile or not", () => {
 
 test("danger-full-access narrowed by a live managed worktree lands in the migrated group", () => {
   // The narrowing happens before the profile check, so a guarded Full Access session is on-request
-  // and CAN carry the deny when the running profile is :workspace.
+  // and CAN carry the deny when the running profile is :workspace. No launch selects a profile
+  // today, so this is the shape a future build would get, not one reachable now.
   const params = buildCodexTurnParams({ permissionMode: "danger-full-access" }, "t1", "/repo", [], undefined, true, ":workspace");
   assert.equal(params.sandboxPolicy, undefined);
   assert.equal(params.approvalPolicy, "on-request");

@@ -3,6 +3,11 @@
  * session's structured-driver mode is. The #1336 profile must therefore always be `:workspace`
  * there: selecting `:read-only` for a read-only session would silently take away write access the
  * TUI has always had (review finding CR-1.5).
+ *
+ * That implicit default is also approval-capable, so a TUI now carries no profile at all: a deny
+ * entry would leave an approved escalation without network access (#1464). What this file asserts
+ * is that the TUI's argv is unchanged by the hook state directory, and that the decision is still
+ * consulted for a Codex TUI and never for another provider's.
  */
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -45,10 +50,22 @@ async function tuiArgs(source: SessionMeta, hookStateDir?: string): Promise<stri
   return [...launch.args, ...seen.map((mode) => `mode:${mode}`)];
 }
 
-test("a read-only session's Codex TUI keeps its implicit :workspace sandbox and gains only the deny", async () => {
+test("a Codex TUI is asked about the profile as an implicit launch, and carries none", async () => {
+  // The implicit kind is what pins the TUI to `:workspace` rather than the session's mode, and
+  // it is also what the escalation gate withholds. Both facts are asserted here, so a future
+  // re-enable keeps the first one. Neither base's override reaches the argv.
   const args = await tuiArgs(meta({ config: { permissionMode: "read-only" } }), HOOK_DIR);
-  assert.ok(args.includes(codexPermissionProfileOverrides(":workspace", HOOK_DIR)[0]));
-  assert.ok(!args.includes(codexPermissionProfileOverrides(":read-only", HOOK_DIR)[0]));
+  assert.ok(args.includes("mode:implicit"), "the TUI is decided as an implicit launch");
+  for (const base of [":workspace", ":read-only"] as const) {
+    assert.ok(!args.includes(codexPermissionProfileOverrides(base, HOOK_DIR)[0]), base);
+  }
+  assert.ok(!args.some((arg) => arg.startsWith("default_permissions=")));
+});
+
+test("a Codex TUI's argv is unchanged by the hook state directory", async () => {
+  const withDir = await tuiArgs(meta({ config: { permissionMode: "read-only" } }), HOOK_DIR);
+  const withoutDir = await tuiArgs(meta({ config: { permissionMode: "read-only" } }));
+  assert.deepEqual(withDir, withoutDir);
 });
 
 test("a Codex TUI with no hook state directory launches exactly as before", async () => {

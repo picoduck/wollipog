@@ -16,6 +16,7 @@ import {
   codexPermissionProfileArgsActive,
   codexPermissionProfileBase,
   codexPermissionProfileDefeatedBy,
+  codexPermissionProfileEscalationLoss,
   codexPermissionProfileLaunchArgs,
   codexPermissionProfileOverrides,
   decideCodexPermissionProfile,
@@ -55,6 +56,45 @@ test("modes with no exact profile equivalent are left alone rather than downgrad
   // An unknown mode keeps its legacy policy: the safe direction is "no deny", never a different
   // sandbox from the one the user chose.
   assert.equal(codexPermissionProfileBase("some-future-mode"), null);
+});
+
+/* ---------------------------------------------------------------------------------------------
+ * Approved escalations — the regression #1464 shipped. Measured on codex-cli 0.155.1 against a
+ * real `codex app-server`, a scripted model provider, and a loopback HTTP server standing in for
+ * the network (ADR 0012), by `pnpm probe:codex-escalation`:
+ *
+ *   legacy `sandboxPolicy`, approved escalation  -> reached the server
+ *   profile + deny entry, approved escalation    -> blocked, on every approval path
+ *   profile + deny entry, no escalation          -> blocked (correct, and preserved)
+ *   profile WITHOUT a deny entry, approved       -> reached the server, so the deny is the cause
+ *
+ * A mode that can reach an approval therefore keeps its legacy policy.
+ * ------------------------------------------------------------------------------------------ */
+
+test("every mode that can approve an escalation is withheld from the profile", () => {
+  // All five workspace modes and read-only route to an approval-capable approvalPolicy in
+  // `buildCodexTurnParams`, so every one of them would lose an approved escalation's network.
+  for (const mode of ["auto-review", "on-request", "untrusted", "on-failure", "workspace-write", "read-only"]) {
+    assert.match(
+      codexPermissionProfileEscalationLoss({ kind: "explicit", permissionMode: mode }) ?? "",
+      /without network access/,
+      mode,
+    );
+  }
+  // A session that names no mode runs auto-review, which can approve one too.
+  for (const mode of [undefined, ""] as const) {
+    assert.ok(codexPermissionProfileEscalationLoss({ kind: "explicit", permissionMode: mode }), String(mode));
+  }
+  // A native TUI and a resumed `codex exec` turn run under Codex's own approval-capable default.
+  assert.ok(codexPermissionProfileEscalationLoss({ kind: "implicit" }));
+});
+
+test("a mode with no profile equivalent is not reported as an escalation loss", () => {
+  // These already keep their legacy policy for their own reasons; the escalation gate must not
+  // claim their refusal, or a launch would report the wrong reason for having stayed put.
+  for (const mode of ["danger-full-access", "orchestrator", "some-future-mode"]) {
+    assert.equal(codexPermissionProfileEscalationLoss({ kind: "explicit", permissionMode: mode }), null, mode);
+  }
 });
 
 /* ---------------------------------------------------------------------------------------------
@@ -522,27 +562,38 @@ const decisionBase = {
   cwd: "/repo", env: {}, nativeHostLaunch: true, platform: "linux" as const,
 };
 
-test("a migrated mode with a proven deny yields the profile argv", async () => {
-  const decision = await decideCodexPermissionProfile({ ...decisionBase, hookStateDir: HOOK_DIR }, proven);
-  assert.equal(decision.active, true);
-  assert.equal((decision as { base: string }).base, ":workspace");
+test("an approval-capable mode keeps its legacy launch, and is never even probed for it", async () => {
+  // Every mode that can migrate can also approve an escalation, and the deny would leave that
+  // approval without network access (#1464). Nothing migrates on codex-cli 0.155.1, and a withheld
+  // launch spawns no proof, so its timing is what it was before #1336 slice 2 too.
+  for (const legacy of [
+    { kind: "explicit", permissionMode: "auto-review" },
+    { kind: "explicit", permissionMode: "on-request" },
+    { kind: "explicit", permissionMode: "read-only" },
+    // A TUI and a resumed `codex exec` turn ran under Codex's own approval-capable default.
+    { kind: "implicit" },
+  ] as const) {
+    let probed = false;
+    const decision = await decideCodexPermissionProfile(
+      { ...decisionBase, legacy, hookStateDir: HOOK_DIR },
+      (async () => { probed = true; return { ok: true }; }) as never,
+    );
+    const label = JSON.stringify(legacy);
+    assert.equal(decision.active, false, label);
+    assert.match((decision as { reason: string }).reason, /without network access/, label);
+    assert.equal(probed, false, label);
+  }
 });
 
-test("an implicit launch always migrates as :workspace, never as the session's mode", async () => {
-  // Review findings CR-1.5 and CR-2.3: a TUI and a resumed `codex exec` turn never passed a legacy
-  // mode, so they ran under Codex's own default whatever the session's structured mode says.
-  const decision = await decideCodexPermissionProfile(
-    { ...decisionBase, legacy: { kind: "implicit" }, hookStateDir: HOOK_DIR }, proven,
-  );
-  assert.equal((decision as { base: string }).base, ":workspace");
-});
-
-test("no directory, an unmigrated mode, a defeating flag, or a failed proof all keep the legacy launch", async () => {
+test("no directory, an unmigrated mode, or a defeating flag each keeps the legacy launch", async () => {
   for (const [label, input, prove, pattern] of [
     ["no directory", { ...decisionBase, hookStateDir: undefined }, proven, /hook state directory/],
     ["unmigrated mode", { ...decisionBase, legacy: { kind: "explicit", permissionMode: "danger-full-access" }, hookStateDir: HOOK_DIR }, proven, /no equivalent profile/],
     ["defeating flag", { ...decisionBase, args: ["-s", "workspace-write"], hookStateDir: HOOK_DIR }, proven, /defeat a permission profile/],
-    ["failed proof", { ...decisionBase, hookStateDir: HOOK_DIR }, (async () => ({ ok: false, reason: "probe read the denied file" })) as never, /probe read/],
+    // Each of these still names its OWN cause rather than the escalation gate that now follows
+    // them all, so a launch that stayed put is still diagnosable from its reason. A failed proof
+    // is covered against `provenCodexPermissionProfile` directly instead, because the escalation
+    // gate settles every launch before the proof is reached.
   ] as const) {
     const decision = await decideCodexPermissionProfile(input as never, prove);
     assert.equal(decision.active, false, label);
@@ -559,6 +610,8 @@ test("a launch that does not run the host binary directly is never proven from t
     (async () => { probed = true; return { ok: true }; }) as never,
   );
   assert.equal(decision.active, false);
+  // Named by its own cause, not by the escalation gate that would refuse it anyway.
+  assert.match((decision as { reason: string }).reason, /not a native host launch/);
   assert.equal(probed, false);
 });
 
@@ -566,6 +619,7 @@ test("the deny is only claimed on Linux, the one platform it was measured on", a
   for (const platform of ["darwin", "win32"] as const) {
     const decision = await decideCodexPermissionProfile({ ...decisionBase, hookStateDir: HOOK_DIR, platform }, proven);
     assert.equal(decision.active, false, platform);
+    assert.match((decision as { reason: string }).reason, new RegExp(platform), platform);
   }
 });
 
@@ -621,7 +675,9 @@ test("launch arguments that move the configuration's directory keep the legacy l
     assert.equal(decision.active, false, args.join(" "));
     assert.equal(probed, false, args.join(" "));
   }
-  // A lowercase -c is a config override, not a directory.
+  // A lowercase -c is a config override, not a directory, so it gets past this check and is
+  // refused later for the escalation it would cost rather than for its arguments.
   const config = await decideCodexPermissionProfile({ ...decisionBase, args: ["-c", "model=\"o3\""], hookStateDir: HOOK_DIR }, proven);
-  assert.equal(config.active, true);
+  assert.equal(config.active, false);
+  assert.match((config as { reason: string }).reason, /without network access/);
 });

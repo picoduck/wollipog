@@ -224,10 +224,11 @@ the provider at creation time, not changing the sandbox rule.
 
 > **Two separate rules, by execution isolation mode.** Where the runner sandboxes its providers
 > (`executionIsolation.mode` of `bwrap` or `seatbelt`), the runner's own sandbox hides the directory
-> from every provider. In the default `provider` mode the runner sandboxes nothing, and a **Codex**
-> launch denies the directory through Codex's own permission profile instead. A **Claude** launch in
-> that mode has no OS boundary at all: the directory stays readable and writable to anything running
-> as the runner's user. What changed there (#1336 slice 3, native Linux only) is that **nothing in
+> from every provider. In the default `provider` mode the runner sandboxes nothing, and **no
+> provider has an OS boundary there today**: the directory stays readable and writable to anything
+> running as the runner's user. Codex's own permission profile can deny it — the machinery to do so
+> ships and is proven per launch — but on codex-cli 0.155.1 a `deny` entry also disables every
+> APPROVED network escalation, so no launch selects one (#1464). See "Codex in `provider` Mode". What changed there (#1336 slice 3, native Linux only) is that **nothing in
 > the directory decides the guard's verdict any more** — see "The Guard's Verdict in `provider`
 > Mode" — and, since #1472, that **it holds no manager policy hook credential and no circuit the
 > runner honours** — see "The Manager Policy Hook in `provider` Mode". Reading it is still possible,
@@ -275,24 +276,25 @@ runs, against the list of the session that owns the socket:
 | --- | --- | --- | --- |
 | Runner `bwrap`, native Linux | Yes: reads, enumeration, writes, `git clean` | Verdict socket | Real-kernel test in the Platform Isolation Ubuntu job (`managed-worktree-guard-sandbox.integration.test.ts`) |
 | Runner `seatbelt`, native macOS | Yes: reads, enumeration, writes | Verdict socket | **macOS CI only** (`managed-worktree-guard-seatbelt.integration.test.ts`), not verified on a developer machine |
-| Runner `provider` (the default), Codex structured launch | **Yes, by Codex's own permission profile** (see below) | No hook: the driver's own structured protection, from runner memory | `codex-permission-profile.test.ts` and `codex-permission-profile-launch.test.ts`, over behaviour measured on codex-cli 0.155.1 |
+| Runner `provider` (the default), Codex structured launch | **No on codex-cli 0.155.1.** The permission-profile deny works, but it costs every approved network escalation, so it is withheld (see below) | No hook: the driver's own structured protection, from runner memory | `codex-permission-profile.test.ts` and `codex-permission-profile-launch.test.ts`, over behaviour measured by `pnpm probe:codex-escalation` |
 | Runner `provider` (the default), Claude, native Linux | **No.** Readable and writable by the runner's OS user | **Runner memory, over an abstract verdict socket; the settings document is passed inline.** No file in the directory is consulted | `hook-settings.test.ts`, `managed-worktree-guard-socket.test.ts`, and a real claude 2.1.278 run (see below) |
 | Runner `provider`, Claude, macOS and Windows | **No** | Protections file and settings files, unchanged: neither platform has an abstract socket namespace | Existing guard tests; the command-text veto and the list tripwire are the only controls |
 | Direct WSL `bwrap` | No | No guard (WSL hook paths are not translated) | Unchanged |
 | `windows-job` | No: Job Objects do not restrict the filesystem | Protections file, unchanged | Unchanged |
 | `container` and `cloud` targets | Not reachable: the hook state directory is not in the workspace bind or snapshot | No guard (not provisioned there) | Unchanged |
-| Native TUI launches | Not by the runner, which does not sandbox a TUI. A native **Codex** TUI on Linux denies it through Codex's own permission profile when its configured sandbox is the plain `:workspace` built-in (see "Codex in `provider` Mode"); a Claude TUI does not | In `provider` mode on native Linux, Claude and Codex alike: runner memory over the abstract verdict socket. Elsewhere the protections file, or the session's path socket when a sandboxed launch already provisioned one | `agent-tui-memory-guard.test.ts` (real provisioning, real socket, real sidecar entry point), and a real Claude TUI under a pty. Codex deny: `agent-tui-codex-permission-profile.test.ts` |
+| Native TUI launches | Not by the runner, which does not sandbox a TUI. A native **Codex** TUI could deny it through Codex's own permission profile, but that is withheld on codex-cli 0.155.1 (see "Codex in `provider` Mode"); neither a Codex nor a Claude TUI denies it today | In `provider` mode on native Linux, Claude and Codex alike: runner memory over the abstract verdict socket. Elsewhere the protections file, or the session's path socket when a sandboxed launch already provisioned one | `agent-tui-memory-guard.test.ts` (real provisioning, real socket, real sidecar entry point), and a real Claude TUI under a pty. Codex deny: `agent-tui-codex-permission-profile.test.ts` |
 
 What the providers' own sandboxes can do in `provider` mode was measured (Linux, Claude Code 2.1.278,
-codex-cli 0.155.1). Claude's is not used; Codex's is, and carries the rule in `provider` mode:
+codex-cli 0.155.1). Neither is used by this rule today:
 
 - **Claude Code's sandbox** covers only Bash and the processes it starts. Hooks and MCP servers run
   outside it. It needs `bubblewrap` and `socat`; without them it warns and runs commands
   **unsandboxed** unless `sandbox.failIfUnavailable` is set. Enabling it also confines writes to the
   working directory and puts the network behind a domain allowlist for every session.
 - **Codex's sandbox** enforces a `deny` entry in a named permission profile at the OS level, for
-  reads, walks from an ancestor, writes, and renames. Hooks and MCP servers run outside it. The
-  runner now uses this in `provider` mode — see "Codex in `provider` mode" below.
+  reads, walks from an ancestor, writes, and renames. Hooks and MCP servers run outside it. #1464
+  used this in `provider` mode; it is withheld again because the same `deny` entry disables every
+  approved network escalation — see "Codex in `provider` Mode" below.
 
   An earlier version of this page said Codex *refuses* to combine the legacy
   `sandbox_mode`/`sandboxPolicy` with a permission profile. **That was wrong.** Re-measured on
@@ -477,10 +479,27 @@ What this does **not** deliver:
 
 ### Codex in `provider` Mode
 
-Where the runner sandboxes nothing, a Codex launch denies the hook state directory through Codex's
-own sandbox. A named permission profile carries one `deny` entry for the directory, and the launch
-sends **no legacy sandbox policy at all** — Codex silently ignores a profile whenever a policy is
-also present.
+Where the runner sandboxes nothing, a Codex launch **can** deny the hook state directory through
+Codex's own sandbox: a named permission profile carries one `deny` entry for the directory, and the
+launch sends **no legacy sandbox policy at all**, because Codex silently ignores a profile whenever
+a policy is also present.
+
+> **Withheld on codex-cli 0.155.1.** A `deny` entry also disables approved sandbox
+> escalation's network access. Measured with `pnpm probe:codex-escalation`: with the profile
+> active, a `sandbox_permissions: "require_escalated"` command approved by the user ("Allow Once"
+> and "Allow for Session" alike) or by Codex's own Guardian under `auto-review` still ran without
+> the network, while the identical turn on the legacy `sandboxPolicy` reached it. Codex keeps the
+> escalated command sandboxed so the deny stays enforced, and that retained sandbox has no network;
+> the approval buys the filesystem escape and not the network, reporting nothing. `gh`, `git fetch`
+> and every other approved network command then fails as though it had never been approved.
+>
+> Granting network in the profile is not a repair: `network = { enabled = true }` gives the network
+> to ordinary sandboxed commands too, and sending the legacy policy alongside it takes the network
+> back from the escalation as well. So the deny and an approved network escalation are mutually
+> exclusive on this build, and the escalation wins. Every mode that could migrate can reach an
+> approval, so **no launch migrates**; each keeps the legacy policy it had before #1336 slice 2,
+> and spawns no proof. Everything below describes machinery that stays in place, tested, for a
+> codex-cli whose escalation survives a deny — re-measure with the probe before re-enabling it.
 
 - **The mode is unchanged, and each launch proves it.** With nothing in the user's Codex
   configuration adjusting the sandbox, the legacy policies the runner sends ARE the built-in
@@ -519,14 +538,17 @@ also present.
   runner-sandboxed launch runs a different binary on a different filesystem, where a host-side proof
   would say nothing, so it keeps its legacy policy. macOS and Windows keep theirs too until measured.
 
+The table below is the shape a build without the escalation cost would get. On codex-cli 0.155.1
+every row reads **No**, because the escalation gate refuses them all.
+
 | Codex launch in `provider` mode | Hook state directory denied |
 | --- | --- |
-| `auto-review` (the default), `on-request`, `untrusted`, `on-failure`, `workspace-write` | Yes, through `:workspace`, when the launch's configured sandbox is the plain built-in |
-| `read-only` | Yes, through `:read-only`, on the same condition |
+| `auto-review` (the default), `on-request`, `untrusted`, `on-failure`, `workspace-write` | Withheld. Otherwise: through `:workspace`, when the launch's configured sandbox is the plain built-in |
+| `read-only` | Withheld. Otherwise: through `:read-only`, on the same condition |
 | A launch whose own Codex configuration adjusts its sandbox (`[sandbox_workspace_write]`, a selected `default_permissions` profile) | **No.** A profile would drop those settings, so the launch keeps its legacy policy |
 | `danger-full-access` | **No.** It has no sandbox, and `:danger-full-access` cannot be extended. Narrowed to `on-request` while a managed worktree is live, and then it is denied |
 | Orchestrator preset | **No.** Its policy has non-default writable roots that no projection reads back, so equivalence cannot be asserted |
-| Native Codex TUI, and a resumed `codex exec` turn | Yes, through `:workspace`, when Codex's own default for the launch is the plain `:workspace` built-in. Neither ever passed `-s` |
+| Native Codex TUI, and a resumed `codex exec` turn | Withheld: Codex's own default is approval-capable too. Otherwise: through `:workspace`, when that default is the plain `:workspace` built-in. Neither ever passed `-s` |
 | Any launch that is not native Linux on the runner host | **No.** Nothing proves the deny there |
 | Generic `acp` driver (an ACP-bridged Codex) | **No.** It spawns the catalog's command and arguments verbatim and injects no `-c` |
 | A launch whose own arguments carry `-s`/`--sandbox` (in any spelling, including `-svalue`, `-s=value`, and `--sandbox=value`) or `--dangerously-bypass-approvals-and-sandbox` | **No.** Those defeat a profile, so the launch is left on its legacy policy rather than having the user's flag stripped |
@@ -534,6 +556,8 @@ also present.
 
 Known limits of the `provider`-mode form:
 
+- **It is not in force at all on codex-cli 0.155.1.** See the callout above. `provider` mode is
+  back to the command-text veto for Codex as well as Claude, and #1336 stays open for both.
 - **MCP servers still reach it.** A configured stdio MCP server read the denied file at startup, so
   a user-configured filesystem server with a root above the hook directory is unaffected. This is
   the one #1336 acceptance criterion the mechanism does **not** meet, and #1336 stays open for it.
