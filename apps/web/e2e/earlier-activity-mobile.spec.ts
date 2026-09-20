@@ -11,7 +11,7 @@ test.use({
   reducedMotion: "reduce",
 });
 
-test("the first mobile touch traversal loads earlier activity", async ({ page }) => {
+test("the first native mobile touch traversal loads earlier activity", async ({ page, context }) => {
   await page.goto("/recovery-notice-e2e.html?pagination=1&height=720&width=412");
 
   const reader = page.locator(".detail-scroll");
@@ -28,25 +28,28 @@ test("the first mobile touch traversal loads earlier activity", async ({ page })
   });
   await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBe(320);
 
-  await reader.evaluate((element) => {
-    const dispatchTouch = (type: "touchstart" | "touchmove" | "touchend", clientY?: number) => {
-      const event = new Event(type, { bubbles: true });
-      Object.defineProperty(event, "touches", {
-        value: clientY === undefined ? [] : [{ clientY }],
-      });
-      element.dispatchEvent(event);
-    };
-    dispatchTouch("touchstart", 100);
-    for (const [scrollTop, clientY] of [[260, 200], [0, 300]]) {
-      dispatchTouch("touchmove", clientY);
-      element.scrollTop = scrollTop;
-      element.dispatchEvent(new Event("scroll", { bubbles: true }));
-    }
-    dispatchTouch("touchend");
+  const box = await reader.boundingBox();
+  expect(box).not.toBeNull();
+  const client = await context.newCDPSession(page);
+  const x = box!.x + box!.width / 2;
+  const startY = box!.y + 60;
+  const endY = box!.y + box!.height - 40;
+  await client.send("Input.dispatchTouchEvent", {
+    type: "touchStart",
+    touchPoints: [{ x, y: startY, id: 1 }],
   });
+  for (let step = 1; step <= 8; step += 1) {
+    const y = startY + ((endY - startY) * step) / 8;
+    await client.send("Input.dispatchTouchEvent", {
+      type: "touchMove",
+      touchPoints: [{ x, y, id: 1 }],
+    });
+    await page.waitForTimeout(16);
+  }
+  await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
 
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
-  await expect(control).toContainText("Loading Earlier Activity…");
+  await expect(control).toContainText("Loading earlier activity…");
 });
 
 test("an event-heavy mobile opening fills itself before exposing earlier activity", async ({ page }) => {
@@ -61,7 +64,8 @@ test("an event-heavy mobile opening fills itself before exposing earlier activit
     .toBeGreaterThan(160);
   await expect(control).toHaveCount(1);
   await expect(control).not.toBeInViewport();
-  await expect(control).toHaveText("Load Earlier Activity");
+  await expect(control).toHaveAttribute("data-state", "idle");
+  await expect(control.getByRole("button", { name: "Load Earlier Activity" })).toHaveCount(1);
   await expect(page.getByText("A response near the beginning of the loaded activity may be incomplete."))
     .toHaveCount(0);
   await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "following");
@@ -230,7 +234,7 @@ test("a downward finger drag at the head loads the next page without a scroll ev
   await dispatchTouch("touchmove", 170);
   await dispatchTouch("touchend");
   await expect(page.locator("body")).toHaveAttribute("data-tail-request-count", "2");
-  await expect(control).toContainText("Loading Earlier Activity…");
+  await expect(control).toContainText("Loading earlier activity…");
   await expect.poll(() => reader.evaluate((element) => element.scrollTop)).toBeGreaterThan(0);
   await expect(page.locator(".follow-tail-chip")).toHaveAttribute("data-follow-tail-state", "paused");
 });

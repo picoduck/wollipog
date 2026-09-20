@@ -665,7 +665,8 @@ test("an opening-window safety cut keeps one compact reach-back control", async 
       "the capped fallback does not grow into a prose-and-button row",
     );
     const load = control.querySelector("button") as HTMLButtonElement;
-    assert.equal(load.textContent, "Load Earlier Activity");
+    assert.equal(load.getAttribute("aria-label"), "Load Earlier Activity");
+    assert.equal(control.dataset.state, "idle");
     assert.equal(load.getAttribute("aria-describedby"), null,
       "the compact control has no missing visible description relationship");
     await act(async () => load.click());
@@ -715,6 +716,11 @@ test("an underfilled partial opening automatically reaches a complete scrollable
       "both the initial window and automatic opening fill request a semantic turn boundary");
     assert.equal(fixture.container.querySelector(".transcript-earlier-activity"), null,
       "the manual fallback stays out of the underfilled opening while recovery is active");
+    const announcement = fixture.container.querySelector(
+      "[data-earlier-activity-announcement]",
+    ) as HTMLElement;
+    assert.equal(announcement.textContent, "",
+      "opening recovery does not announce reader-navigation progress");
 
     const earlierPage = fixture.events.slice(-15, -7);
     assert.ok(earlierPage.some((entry) => entry.payload.kind === "user_message"));
@@ -733,7 +739,10 @@ test("an underfilled partial opening automatically reaches a complete scrollable
     assert.equal(pages.tailCalls.length, 2, "a complete scrollable window stops automatic paging");
     const fallback = fixture.container.querySelector(".transcript-earlier-activity") as HTMLElement;
     assert.ok(fallback, "older history remains reachable after bounded opening recovery");
-    assert.equal(fallback.textContent, "Load Earlier Activity");
+    assert.equal(fallback.dataset.state, "idle");
+    assert.equal(fallback.querySelector("button")?.getAttribute("aria-label"), "Load Earlier Activity");
+    assert.equal(announcement.textContent, "",
+      "completing opening recovery stays silent until the reader requests history");
   } finally {
     await unmountFixture(fixture);
   }
@@ -882,7 +891,8 @@ test("opening fill stops at its absolute page cap without duplicate requests", a
     await flushAsyncWork(20);
     assert.equal(pages.tailCalls.length, 11, "settling cannot issue a duplicate capped request");
     assert.equal(
-      (fixture.container.querySelector(".transcript-earlier-activity button") as HTMLButtonElement).textContent,
+      (fixture.container.querySelector(".transcript-earlier-activity button") as HTMLButtonElement)
+        .getAttribute("aria-label"),
       "Load Earlier Activity",
       "the pathological turn retains one compact manual fallback",
     );
@@ -1353,15 +1363,24 @@ test("an automatic load failure keeps an understandable manual retry path", asyn
     await flushAsyncWork();
     setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 1_600, scrollTop: 120 });
     await scrollReader(fixture.scroller, 120);
+    const announcement = fixture.container.querySelector(
+      "[data-earlier-activity-announcement]",
+    ) as HTMLElement;
+    assert.equal(announcement.textContent, "Loading earlier activity.");
+    assert.equal(fixture.container.querySelector(".transcript-earlier-activity")?.getAttribute("data-state"), "loading");
     await act(async () => pages.rejectTail());
     await flushAsyncWork();
 
     const control = fixture.container.querySelector(".transcript-earlier-activity") as HTMLElement;
+    assert.equal(control.dataset.state, "error");
     assert.ok(control.textContent!.includes("Could not load earlier activity."));
+    assert.equal(announcement.textContent, "Could not load earlier activity. Retry is available.");
     const retry = control.querySelector("button") as HTMLButtonElement;
     assert.equal(retry.disabled, false);
     await act(async () => retry.click());
     assert.equal(pages.tailCalls.length, 3, "the fallback control retries the failed page");
+    assert.equal(announcement.textContent, "Loading earlier activity.");
+    assert.equal(fixture.container.querySelector(".transcript-earlier-activity")?.getAttribute("data-state"), "loading");
 
     const earlierPage = fixture.events.slice(-16, -8);
     await act(async () => {
@@ -1373,6 +1392,8 @@ test("an automatic load failure keeps an understandable manual retry path", asyn
         cacheComplete: true,
       });
     });
+    await flushAsyncWork();
+    assert.equal(announcement.textContent, "Earlier activity loaded.");
     setScrollerMetrics(fixture.scroller, { clientHeight: 400, scrollHeight: 3_200, scrollTop: 1_600 });
     await scrollReader(fixture.scroller, 1_560);
     assert.equal(pages.tailCalls.length, 3, "a manual prepend uses the same settle gate");
