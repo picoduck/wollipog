@@ -622,7 +622,10 @@ So, for a native Linux host launch that the runner does not sandbox:
 - The manager hook's circuit is the one thing still read from disk before a spawn. It chooses
   between the combined document and the guard-only one, and both carry the guard.
 - The runner proves the socket once per address with the real sidecar. A socket that cannot be
-  created or proven leaves the launch in the file form, as it was before this slice.
+  created or proven leaves the launch in the file form, as it was before this slice. The proof is
+  held on the listening server, not in a set of addresses, so it goes with the server whenever the
+  socket closes — session deletion, shutdown, or re-creation under a new name — and a re-created
+  socket is proven again (#1476).
 
 What remains, stated plainly:
 

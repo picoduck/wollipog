@@ -366,7 +366,6 @@ sweepClaudeHookFiles(claudeHookHost.configDir);
 const guardSockets = new ManagedWorktreeGuardSockets(claudeHookHost.configDir);
 const sandboxHidesGuardState = config.executionIsolation.mode === "bwrap" ||
   config.executionIsolation.mode === "seatbelt";
-const provenMemoryGuardSockets = new Set<string>();
 
 /**
  * The abstract verdict socket for a launch the runner does not sandbox, proven once per address by
@@ -381,7 +380,7 @@ async function memoryGuardSocket(
       (meta.executionTarget && meta.executionTarget.adapter !== "host")) return undefined;
   try {
     const address = await guardSockets.ensure(meta.sessionId, "abstract");
-    if (provenMemoryGuardSockets.has(address)) return address;
+    if (guardSockets.isProven(meta.sessionId, address)) return address;
     // The probe is refused only after the runner has loaded this session's list, so the list has
     // to exist first. It is the live one, which provisioning is about to set again anyway.
     seedManagedWorktreeGuardMemory(meta.sessionId, protections());
@@ -391,7 +390,7 @@ async function memoryGuardSocket(
       socketPath: address,
     }, "unsandboxed", meta.worktreePath ?? meta.repoPath, 20_000);
     if (verdict.ok) {
-      provenMemoryGuardSockets.add(address);
+      guardSockets.markProven(meta.sessionId, address);
       return address;
     }
     log(`Managed worktree guard ${meta.sessionId}: verdict socket self-test failed (${withoutGuardSocketName(verdict.reason)}); the guard reads its file`);
