@@ -784,6 +784,16 @@ test("a command expansion is field-split before the wrapper prefixes are read", 
     { ...providerEnvironment, CMD: "git status --short" }), null);
 });
 
+test("an expanded env option stays an option inside nested argv", () => {
+  for (const command of [
+    `xargs env $OPTION PATH rm -rf ${protectedPath}`,
+    `find . -exec env $OPTION PATH rm -rf ${protectedPath} +`,
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, "/elsewhere", protection, { OPTION: "-u" }),
+      MANAGED_WORKTREE_REFUSAL, command);
+  }
+});
+
 test("after `--` a dashed word is an operand, not an option", () => {
   // A worktree whose own name begins with a dash is reached by `rm -- -managed`, and the option
   // exemption that keeps `rm -rf /tmp/x` placeable must not extend past the terminator.

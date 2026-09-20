@@ -113,10 +113,17 @@ function protectionRepository(path: string, protections: readonly ManagedWorktre
     pathContains(repoPath, path) || pathContains(worktreePath, path));
 }
 
-/** The raw text of a word token (a plain word or a glob), placeholders included. */
-function wordText(token: ShellToken | undefined): string | null {
+/** The raw text of a plain word, including one produced by field expansion. */
+function plainWordText(token: ShellToken | undefined): string | null {
   if (typeof token === "string") return token;
   if (token != null && typeof token === "object" && "expandedField" in token) return token.expandedField;
+  return null;
+}
+
+/** The raw text of a word token (a plain word or a glob), placeholders included. */
+function wordText(token: ShellToken | undefined): string | null {
+  const plain = plainWordText(token);
+  if (plain !== null) return plain;
   if (token != null && typeof token === "object" && "op" in token && token.op === "glob" &&
       "pattern" in token && typeof token.pattern === "string") return token.pattern;
   return null;
@@ -568,8 +575,9 @@ function commandWords(
   // so `A=$B B=$A` leaves both holding B's original value.
   const childEnvironment = new Map(environment);
   const assigned: string[] = [];
-  while (typeof tokens[index] === "string" && /^[A-Za-z_][A-Za-z0-9_]*=/u.test(tokens[index] as string)) {
-    const assignment = tokens[index] as string;
+  for (;;) {
+    const assignment = plainWordText(tokens[index]);
+    if (assignment === null || !/^[A-Za-z_][A-Za-z0-9_]*=/u.test(assignment)) break;
     const equals = assignment.indexOf("=");
     const name = assignment.slice(0, equals);
     childEnvironment.set(name, expandReferences(assignment.slice(equals + 1), cwd, childEnvironment));
@@ -615,10 +623,10 @@ function commandWords(
     }
     if (name === "env") {
       index += 1;
-      while (typeof tokens[index] === "string") {
+      while (plainWordText(tokens[index]) !== null) {
         // `env` reads its ARGV, so an assignment that arrived through an expansion
         // (`env "$ASSIGNMENT" sh -c ...`) is an assignment to it like any other.
-        const value = word(tokens[index], cwd, environment) ?? (tokens[index] as string);
+        const value = word(tokens[index], cwd, environment) ?? plainWordText(tokens[index])!;
         // Like a prefix assignment, this builds the environment of the command `env` runs; it is
         // not in effect while the shell expands the words of this very command.
         if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)) {
