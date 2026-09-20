@@ -657,6 +657,7 @@ export function provisionAgentControl(
         ...transportEnv,
         [ORCHESTRATOR_ENV_KEY]: "orchestrator",
       },
+      ...(memory ? { forwardEnv: true } : {}),
     }, orchestratorProjectPaths, integrationIsolation));
   } else if (orchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
@@ -666,6 +667,7 @@ export function provisionAgentControl(
         ...transportEnv,
         [ORCHESTRATOR_ENV_KEY]: "orchestrator",
       },
+      ...(memory ? { forwardEnv: true } : {}),
     };
     if ((spec.driver ?? "acp") === "acp") {
       const server: AcpMcpStdioServer = {

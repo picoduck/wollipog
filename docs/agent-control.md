@@ -16,9 +16,10 @@ The credential transport follows the runner's execution-isolation boundary:
 
 Provider-mode provisioning removes any token or acknowledgement file left at the session paths
 before launch. Reading, replacing, or deleting those paths therefore cannot reveal or select the
-credential the runner registered. The opaque relay key intentionally grants access to the same
-closed Agent Control route set the CLI/MCP surface exposes; it cannot authenticate a direct
-control-plane request or outlive the runner listener. Launch and resume re-register the
+credential the runner registered. The opaque relay key intentionally reaches the same Agent
+Control surface the CLI/MCP exposes; the control plane still enforces its closed method/route
+allowlist. The key cannot authenticate a direct control-plane request or outlive the runner
+listener. Launch and resume re-register the
 memory-held credential behind a fresh positive-acknowledgement fence. A runner restart forgets it,
 mints and registers a new credential during the next launch, and publishes a new relay endpoint.
 

@@ -50,11 +50,31 @@ test("the Agent Control relay rejects non-loopback endpoints and non-JSON reques
     const endpoint = await sockets.ensure("s_relay_shape");
     const fetchImpl = agentControlRelayFetch(endpoint, "k".repeat(32));
     await assert.rejects(() => fetchImpl("http://unused/api/sessions", {
-      method: "PUT",
-    }), /permits only GET and POST/);
+      method: "PATCH",
+    }), /permits only GET, POST, PUT, and DELETE/);
     await assert.rejects(() => fetchImpl("http://unused/api/sessions", {
       method: "POST", headers: { "content-type": "text/plain" }, body: "x",
     }), /permits only JSON/);
+  } finally {
+    await sockets.closeAll();
+  }
+});
+
+test("the Agent Control relay preserves every method used by the control-plane allowlist", async () => {
+  const methods: AgentControlRelayRequest["method"][] = ["GET", "POST", "PUT", "DELETE"];
+  const seen: AgentControlRelayRequest[] = [];
+  const sockets = new AgentControlRelaySockets(async (_sessionId, request) => {
+    seen.push(request);
+    return { status: 204, body: "" };
+  });
+  try {
+    const endpoint = await sockets.ensure("s_relay_methods");
+    const fetchImpl = agentControlRelayFetch(endpoint, "k".repeat(32));
+    for (const method of methods) {
+      const response = await fetchImpl("http://unused/api/governance/policies/p_example", { method });
+      assert.equal(response.status, 204);
+    }
+    assert.deepEqual(seen.map((request) => request.method), methods);
   } finally {
     await sockets.closeAll();
   }

@@ -27,7 +27,12 @@ import {
   type OrchestratorIsolationMode,
 } from "./orchestrator-preset.js";
 
-const mcp = { command: "/runner", args: ["agent", "mcp"], env: { WOLLIPOG_PERMISSION_PRESET: "orchestrator" } };
+const mcp = {
+  command: "/runner",
+  args: ["agent", "mcp"],
+  env: { WOLLIPOG_PERMISSION_PRESET: "orchestrator" },
+  forwardEnv: true,
+};
 
 test("Orchestrator instructions separate delegation from explicit parent implementation", () => {
   const provider = orchestratorInstructions(["/repo"], false);
@@ -386,6 +391,9 @@ test("native orchestrator flags enable bounded planning while disabling implemen
   assert.equal(codex.includes('approval_policy="never"'), false);
   assert.ok(codex.some((arg) => arg.includes('"default_tools_approval_mode" = "approve"')),
     "only the isolated runner-owned Wollipog MCP server is pre-approved");
+  assert.ok(codex.some((arg) => arg.includes('"env_vars" = ["WOLLIPOG_PERMISSION_PRESET"]')),
+    "Codex forwards MCP environment values without serializing them in argv");
+  assert.equal(codex.some((arg) => arg.includes('"WOLLIPOG_PERMISSION_PRESET" = "orchestrator"')), false);
   assert.equal(codex.some((arg) => arg.includes("exclude_tmpdir_env_var")), false,
     "TMPDIR names scratch and must remain writable through the explicit workspace root");
   for (const feature of ["hooks", "multi_agent", "plugins", "apps"]) {
@@ -609,7 +617,9 @@ test("the additive Codex Orchestrator adds only Wollipog's MCP server and instru
     const server = settings.find((setting) => setting.startsWith("mcp_servers."))!;
     assert.match(server, /^mcp_servers\.wollipog=\{/, "only the wollipog entry is named");
     assert.match(server, /"command" = "\/runner"/);
-    assert.match(server, /"WOLLIPOG_PERMISSION_PRESET" = "orchestrator"/, "the campaign tools stay exposed");
+    assert.match(server, /"env_vars" = \["WOLLIPOG_PERMISSION_PRESET"\]/,
+      "the campaign marker is forwarded without its value entering argv");
+    assert.doesNotMatch(server, /"WOLLIPOG_PERMISSION_PRESET" = "orchestrator"/);
     assert.match(server, /"enabled" = true/);
     const instructions = settings.find((setting) => setting.startsWith("developer_instructions="))!;
     assert.match(instructions, /You are running with the Wollipog Orchestrator role/);

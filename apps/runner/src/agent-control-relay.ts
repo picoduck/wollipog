@@ -18,7 +18,7 @@ export const AGENT_CONTROL_RELAY_KEY_ENV = "WOLLIPOG_AGENT_CONTROL_RELAY_KEY";
 
 export interface AgentControlRelayRequest {
   key: string;
-  method: "GET" | "POST";
+  method: "GET" | "POST" | "PUT" | "DELETE";
   path: string;
   contentType?: "application/json";
   body?: string;
@@ -39,7 +39,8 @@ function parseRequest(value: unknown): AgentControlRelayRequest {
   if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("relay request is not an object");
   const { key, method, path, contentType, body } = value as Record<string, unknown>;
   if (typeof key !== "string" || key.length < 16 || key.length > 256 ||
-      (method !== "GET" && method !== "POST") || typeof path !== "string" ||
+      (method !== "GET" && method !== "POST" && method !== "PUT" && method !== "DELETE") ||
+      typeof path !== "string" ||
       Buffer.byteLength(path, "utf8") > MAX_PATH_BYTES ||
       (contentType !== undefined && contentType !== "application/json") ||
       (body !== undefined && typeof body !== "string")) {
@@ -122,7 +123,9 @@ export function agentControlRelayFetch(endpoint: string, key: string): McpFetch 
   return async (url, init) => {
     const parsed = new URL(url);
     const method = init?.method?.toUpperCase() ?? "GET";
-    if (method !== "GET" && method !== "POST") throw new Error("Agent Control relay permits only GET and POST");
+    if (method !== "GET" && method !== "POST" && method !== "PUT" && method !== "DELETE") {
+      throw new Error("Agent Control relay permits only GET, POST, PUT, and DELETE");
+    }
     const contentType = Object.entries(init?.headers ?? {})
       .find(([name]) => name.toLowerCase() === "content-type")?.[1];
     if (contentType !== undefined && contentType !== "application/json") {

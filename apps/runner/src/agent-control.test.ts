@@ -799,6 +799,10 @@ test("a non-strict Codex Orchestrator launches as a normal session plus Wollipog
         assert.match(added[3]!, /^developer_instructions="You are running with the Wollipog Orchestrator role/);
         assert.equal(orchestrator.env.WOLLIPOG_PERMISSION_PRESET, "orchestrator",
           "the campaign tools are exposed on Wollipog's own server");
+        const relayKey = orchestrator.env[AGENT_CONTROL_RELAY_KEY_ENV]!;
+        assert.equal(args.some((arg) => arg.includes(relayKey)), false,
+          "the relay key is forwarded from the Codex environment, never serialized in argv");
+        assert.match(added[1]!, /"env_vars" = \[[^\]]*"WOLLIPOG_AGENT_CONTROL_RELAY_KEY"/u);
         assert.equal(existsSync(agentControlMcpConfigPath(root, orchestrator.sessionId)), false,
           "Codex needs no runner-written MCP config file beside the user's own");
         provisionAgentControl(orchestrator, control, () => {}, host);
@@ -819,6 +823,9 @@ test("a non-strict Codex Orchestrator launches as a normal session plus Wollipog
     legacy.config = { permissionMode: "orchestrator" };
     legacy.orchestrator = { strictProjectIsolation: false };
     provisionAgentControl(legacy, control, () => {}, host);
+    assert.equal(legacy.args.some((arg) => arg.includes(legacy.env[AGENT_CONTROL_RELAY_KEY_ENV]!)), false,
+      "the coupled Codex preset never serializes the relay key in argv");
+    assert.ok(legacy.args.some((arg) => /"env_vars" = \[[^\]]*"WOLLIPOG_AGENT_CONTROL_RELAY_KEY"/u.test(arg)));
     assert.ok(legacy.args.includes("--strict-config"), "an existing Codex Orchestrator keeps the preset");
     assert.ok(legacy.args.includes("--disable"));
     assert.ok(legacy.args.some((arg) => arg.startsWith("sandbox_mode=")));
