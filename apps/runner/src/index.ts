@@ -49,6 +49,7 @@ import {
   type SkillAdoptionMessage,
   type SkillAdoptionRecoveryMessage,
   type StartSessionMessage,
+  isOrchestratorLaunch,
 } from "@wollipog/protocol";
 import {
   loadConfig,
@@ -77,12 +78,14 @@ import {
   describeManagedSettings,
   managedSettingsGuardSocket,
   provisionClaudeHooks,
+  provisionCodexGuard,
   refreshClaudeGuardProtections,
   seedManagedWorktreeGuardMemory,
   removeClaudeHookFiles,
   runnerSettingsArgument,
   sweepClaudeHookFiles,
 } from "./hook-settings.js";
+import { CODEX_GUARD_DRIVERS } from "./codex-managed-worktree-guard.js";
 import {
   ManagedWorktreeGuardSockets,
   managedWorktreeGuardSocketDirectory,
@@ -707,6 +710,36 @@ const sessions = new SessionManager(() => {}, log, store, config.runnerId, (driv
       log,
       claudeHookHost,
     );
+    // #1499: a structured Codex launch carries the same `PreToolUse` guard a Codex TUI has had
+    // since #1377. Without it the managed-worktree veto lives only in the driver's approval
+    // handling, which is reachable only while every escalation is routed to the human — so
+    // `auto-review` silently became manual review in every session that owns a worktree. With it
+    // the veto runs at the tool-call boundary whoever reviews, and `buildCodexTurnParams` gives
+    // the turn back to Guardian.
+    //
+    // Unlike a TUI, a failure here is NOT a refusal. A structured session still has the driver's
+    // own approval-time veto, so an unguarded launch simply keeps routing escalations to the
+    // human, which is exactly the behaviour it had before this. The runner says which it got.
+    if (CODEX_GUARD_DRIVERS.has(meta.driver)) {
+      const codexGuardSocket = await memoryGuardSocket(
+        meta, () => sessions.managedWorktreeGuardProtections(meta));
+      const codexGuard = await provisionCodexGuard(
+        meta,
+        {
+          protections: sessions.managedWorktreeGuardProtections(meta),
+          cwd: meta.worktreePath ?? meta.repoPath,
+          ...(codexGuardSocket ? { guardSocket: codexGuardSocket } : {}),
+          isolateForeignHooks: isOrchestratorLaunch(meta),
+        },
+        log,
+        claudeHookHost,
+      );
+      meta.args = codexGuard.args;
+      if (!codexGuard.guardActive) {
+        log(`Codex managed worktree guard ${meta.sessionId}: not active for this session ` +
+          `(${codexGuard.reason ?? "unknown"}); escalations stay with the user`);
+      }
+    }
     await provisionAgentControl(
       meta,
       {

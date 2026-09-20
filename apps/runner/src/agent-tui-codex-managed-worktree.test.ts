@@ -24,6 +24,7 @@ import { UnguardedAgentTuiRegistry, unguardedAgentTuiNotice } from "./agent-tui-
 import {
   CODEX_HOOK_TRUST_BYPASS_FLAG,
   codexGuardArgsActive,
+  codexGuardActiveInArgs,
   codexGuardCommandString,
   codexGuardConfigOverride,
   codexHookInventoryProbe,
@@ -217,6 +218,12 @@ test("a Codex TUI for a session with a managed worktree carries the guard hook a
     const protectionsFile = protectionsFileOf(override);
     assert.equal(protectionsFile, claudeHookSessionProtectionsPath(dir, "s1377"));
     assert.deepEqual(readManagedWorktreeGuardProtections(protectionsFile), PROTECTED);
+
+    // The argv provisioning produced is the argv a driver re-derives `guardActive` from at every
+    // later spawn (#1499). If these two ever disagree, a guarded launch reports itself unguarded —
+    // or worse, an unguarded one reports a guard — so they are asserted against each other here.
+    assert.equal(codexGuardActiveInArgs(launch.args), true,
+      "provisioning's argv satisfies the driver's own re-derivation");
 
     // The inventory was enumerated with the same flags, in the TUI's directory, twice.
     assert.equal(harness.probes.length, 2, "read once for the hook's content hash, then again to prove the trust override landed (#1499)");

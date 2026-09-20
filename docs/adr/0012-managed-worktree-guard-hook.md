@@ -219,6 +219,99 @@ one (read-only: `hooks/list` only, counts printed, never commands):
   directory disqualifies every command. The runner's hook directory is `<dataDir>/hooks/<runnerKey>`, a leaf of
   runner state rather than a parent of a workspace, so this is a property of the probe layout.
 
+## Measurements (codex-cli 0.155.1, this machine, 2026-09-20): hook trust, and who may review an escalation
+
+#1377 gave a Codex TUI the `PreToolUse` managed-worktree guard. A STRUCTURED Codex launch
+(`codex-app-server`, `codex`) never got one: its worktree protection lived entirely in the driver's
+approval handling, where `commandTargetsManagedWorktree` vetoes a request before any grant is
+returned. That veto is reachable only while the request comes to this client, which is why
+`buildCodexTurnParams` forced `approvalsReviewer: "user"` whenever a runner-created worktree was
+live — and why `auto-review`, the default mode, silently became manual review in every
+issue-workflow session.
+
+Measured with `pnpm probe:codex-guard-hook`
+(`apps/runner/scripts/codex-guard-hook-probe.ts`), which is the harness this section was written
+from and is kept runnable. Nothing in it reaches the internet or a model: the model is a scripted
+local Responses-API server behind a throwaway `CODEX_HOME`, and the "guard" is a stand-in hook that
+writes the same deny payload `managedWorktreeGuardDenyPayload` writes and logs every invocation, so
+"never fired" is always distinguishable from "fired and allowed".
+
+### The trust bypass does nothing on `codex app-server`
+
+This is the fact everything else here rests on, and it contradicts what the TUI path assumes.
+
+| Entry point, identical argv | Hook invocations | Outcome |
+| --- | --- | --- |
+| `codex exec` | 1 | `Command blocked by PreToolUse hook: MANAGED_WORKTREE_REFUSAL`, and the CLI printed the `--dangerously-bypass-hook-trust is enabled` warning |
+| `codex app-server` | **0** | the command ran normally; no bypass warning, no hook process, no error |
+
+`hooks/list` on that same `app-server` launch reported the hook present, `enabled: true`,
+`source: sessionFlags`, `trustStatus: "untrusted"` — the documented silent skip. Marking the project
+trusted in `config.toml` changed nothing. Widening the matcher changed nothing. It is trust, not
+matching, and the flag simply never took effect for that subcommand.
+
+### A `trusted_hash` override does work, and is readable back
+
+`-c 'hooks.state={"<key>"={trusted_hash="<currentHash>"}}'`, with the bypass flag removed entirely,
+makes the hook run. `hooks/list` then reports `trustStatus: "trusted"`, so the effect can be proven
+rather than assumed — which is what `codexHookTrustVerdict` requires before any launch claims a
+guard. The hash is Codex's own digest of the hook's definition and moves with its command string and
+matcher, so it can only be read from the launch's own inventory, never computed.
+
+### The hook denies whoever approves
+
+Each row is one real `codex app-server` turn, with the hook trusted by hash:
+
+| Case | Hook invocations | Outcome |
+| --- | --- | --- |
+| protected command, no escalation | 1 | denied before execution — no `commandExecution` item at all |
+| protected command, escalated, this client accepts | 1 | **denied, and the approval was never raised** |
+| protected command, escalated, `approvalsReviewer: "auto_review"` | 1 | **denied** |
+| benign command, escalated | 1 | allowed through to the approval, then ran |
+| protected command, escalated, bypass flag instead of the override | 0 | ran |
+| protected command, escalated, no hook at all | 0 | ran |
+
+Escalation changes the sandbox a command runs in; it does not change whether `PreToolUse` fires or
+whether its deny is honoured. And the denial lands BEFORE the approval is raised, so a command
+targeting a managed worktree never becomes a prompt at all — the hook is a strictly earlier gate
+than the driver-side veto it stands in for, not an equal one.
+
+### Decision
+
+A structured Codex launch is provisioned with the same guard a TUI gets, and
+`buildCodexTurnParams` forces the reviewer to the human only when a managed worktree is live AND no
+guard is proven for that launch. Where one is proven, Guardian reviews escalations as it does in a
+session that owns no worktree, and the driver-side veto remains as a second layer rather than the
+only one.
+
+Three properties make that safe to rely on:
+
+- **`guardActive` is re-derived from the argv at every spawn** (`codexGuardActiveInArgs`), because a
+  driver re-spawns on its own for every resume and transport restart from args it was handed — the
+  same reason `prepareClaudeHookArgs` re-derives Claude's. It requires BOTH the hook override and
+  the trust override, since the hook override alone is the pre-#1499 contract and is unfalsifiable
+  wherever the bypass does nothing.
+- **A failed provisioning is not a refusal here.** Unlike a TUI, a structured session still has the
+  driver's approval-time veto, so an unguarded launch simply keeps routing escalations to the human
+  — exactly the behaviour it had before. The runner logs which it got.
+- **Provisioning stays at two enumerations**, on both the ordinary and the Orchestrator path. The
+  first reads the hash; the second carries the isolation override when there is one AND the trust
+  override, so both verdicts are read off the same authoritative inventory.
+
+### What this corrects in the sections above
+
+The #1377 measurements recorded that `--dangerously-bypass-hook-trust` "is what makes a session-flags
+hook run". That holds for a TUI and for `codex exec`, and is false for `codex app-server`. The older
+contract was also unfalsifiable: `codexGuardArgsActive` treated the flag's PRESENCE as proof, and
+`codexHookInventoryVerdict` checked trust only for FOREIGN hooks, never the runner's own — so on any
+entry point where the flag does nothing, the pair returned `guardActive: true` for a hook Codex
+silently skipped. Nothing wired the guard to an app-server before this, so that was latent rather
+than live, and it is closed by requiring the runner's own hook to come back trusted.
+
+Whether `trusted_hash` alone also suffices on the TUI and `codex exec` paths, letting the bypass be
+retired there too, is #1488 and is NOT measured here: both mechanisms travel on those launches, and
+the read-back is what decides.
+
 ## Measurements: Codex Permission Profiles (codex-cli 0.155.1, this machine, 2026-09-19)
 
 Can Codex's OWN sandbox deny the hook state directory in `provider` mode, where the runner does not
