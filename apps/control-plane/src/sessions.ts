@@ -11093,8 +11093,43 @@ export class SessionsService {
   hydrateRunnerSessions(runnerId: string, snapshots: SessionSnapshot[]): void {
     const now = Date.now();
     const byId = new Set(snapshots.map((s) => s.id));
+    const duplicateSnapshotIds = new Set<string>();
+    const seenSnapshotIds = new Set<string>();
+    for (const { id } of snapshots) {
+      if (seenSnapshotIds.has(id)) duplicateSnapshotIds.add(id);
+      seenSnapshotIds.add(id);
+    }
     const stopIntentIds = new Set(this.db.sessionStopIntentIds(runnerId));
-    for (const snap of snapshots) {
+    // Retained terminal sessions dominate reconnect snapshots. Their reconciliation is normally
+    // read-only outside updateSessionFromSnapshot, but committing every unchanged row separately
+    // can block the event loop long enough to miss the runner heartbeat on a large durable cache.
+    // Batch only sessions with no stop, workflow-decision, hook, or policy-resume obligations;
+    // everything with live service-level work remains on the exact per-session path below.
+    const terminalBatch = snapshots.flatMap((snap, snapshotIndex) => {
+      if (!isTerminal(snap.status) || duplicateSnapshotIds.has(snap.id) ||
+          stopIntentIds.has(snap.id) || this.db.isTombstoned(snap.id)) return [];
+      const existing = this.db.getSession(snap.id);
+      if (!existing || existing.runnerId !== runnerId || !isTerminal(existing.status) ||
+          this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
+          this.db.listOpenPolicyHookApprovals(snap.id).length > 0 ||
+          this.db.policyResumeStatus(snap.id) !== null) return [];
+      return [{ snap, snapshotIndex, campaignBefore: this.campaignAttentionController(existing) }];
+    });
+    const terminalBatchIndexes = new Set(terminalBatch.map(({ snapshotIndex }) => snapshotIndex));
+    const terminalHistories = this.db.updateSessionsFromSnapshots(terminalBatch.map(({ snap }) => snap), now);
+    for (const [index, { snap, campaignBefore }] of terminalBatch.entries()) {
+      if (terminalHistories[index]?.reset) {
+        const reset = this.db.getSession(snap.id)!;
+        this.hub.sessionEventsReset(snap.id, [], reset.eventEpoch ?? 0);
+        if (snap.seq > 0) this.rehydrate.add(snap.id);
+      }
+      this.gateOnPolicy(snap.id, now);
+      this.restorePendingWorkflowDecisionCards(snap.id);
+      this.hub.sessionChangedById(snap.id);
+      this.publishCampaignAttentionTransition(campaignBefore);
+    }
+    for (const [snapshotIndex, snap] of snapshots.entries()) {
+      if (terminalBatchIndexes.has(snapshotIndex)) continue;
       // A session the user deleted must not be recreated — re-issue the delete to the (now online)
       // runner and skip it. The tombstone is pruned below once the box stops reporting the id.
       if (this.db.isTombstoned(snap.id)) {
