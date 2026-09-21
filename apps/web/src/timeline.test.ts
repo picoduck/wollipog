@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { AGENT_SPAWN_OBSERVATION_CAP } from "@wollipog/protocol";
 import type { EventPayloadReference, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
 import {
+  advanceAutomaticAccountSwitchNotice,
   deriveSidePaneContent,
   deriveTimeline,
   groupTimeline,
@@ -1137,6 +1138,46 @@ test("provider account switches render as standalone timeline boundaries", () =>
     providerAccountLabel: "Work",
     automatic: true,
   });
+});
+
+test("automatic account switch notices ignore initial and earlier history but announce live events", () => {
+  const initial = advanceAutomaticAccountSwitchNotice({
+    sessionId: "s", seenThroughEventId: 0, initialized: false,
+  }, {
+    sessionId: "s",
+    historyReady: true,
+    loadedEventHighWater: 100,
+    items: [{ kind: "provider_account_switched", id: 80, providerAccountId: "old",
+      providerAccountLabel: "Old", automatic: true }],
+  });
+  assert.equal(initial.providerAccountLabel, undefined);
+  assert.equal(initial.state.seenThroughEventId, 100);
+
+  const earlier = advanceAutomaticAccountSwitchNotice(initial.state, {
+    sessionId: "s",
+    historyReady: true,
+    loadedEventHighWater: 100,
+    items: [{ kind: "provider_account_switched", id: 40, providerAccountId: "older",
+      providerAccountLabel: "Older", automatic: true }],
+  });
+  assert.equal(earlier.providerAccountLabel, undefined);
+
+  const live = advanceAutomaticAccountSwitchNotice(earlier.state, {
+    sessionId: "s",
+    historyReady: true,
+    loadedEventHighWater: 101,
+    items: [{ kind: "provider_account_switched", id: 101, providerAccountId: "backup",
+      providerAccountLabel: "Backup", automatic: true }],
+  });
+  assert.equal(live.providerAccountLabel, "Backup");
+  assert.equal(live.state.seenThroughEventId, 101);
+  assert.equal(advanceAutomaticAccountSwitchNotice(live.state, {
+    sessionId: "s",
+    historyReady: true,
+    loadedEventHighWater: 101,
+    items: [{ kind: "provider_account_switched", id: 101, providerAccountId: "backup",
+      providerAccountLabel: "Backup", automatic: true }],
+  }).providerAccountLabel, undefined);
 });
 
 test("only a matching completed provider checkpoint makes a user message edit-addressable", () => {

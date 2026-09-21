@@ -201,6 +201,52 @@ export type TimelineItem =
   | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
   | { kind: "provider_account_switched"; id: number; providerAccountId: string; providerAccountLabel: string; automatic?: boolean };
 
+export interface AutomaticAccountSwitchNoticeState {
+  sessionId: string;
+  seenThroughEventId: number;
+  initialized: boolean;
+}
+
+/** Advance the live-toast cursor without treating the initial or earlier-history page as new. */
+export function advanceAutomaticAccountSwitchNotice(
+  state: AutomaticAccountSwitchNoticeState,
+  input: {
+    sessionId: string;
+    historyReady: boolean;
+    loadedEventHighWater: number;
+    items: TimelineItem[];
+  },
+): { state: AutomaticAccountSwitchNoticeState; providerAccountLabel?: string } {
+  const current = state.sessionId === input.sessionId
+    ? state
+    : { sessionId: input.sessionId, seenThroughEventId: 0, initialized: false };
+  if (!input.historyReady) return { state: current };
+  if (!current.initialized) {
+    return {
+      state: {
+        sessionId: input.sessionId,
+        seenThroughEventId: input.loadedEventHighWater,
+        initialized: true,
+      },
+    };
+  }
+  const latest = input.items.reduce<Extract<TimelineItem, { kind: "provider_account_switched" }> | null>(
+    (found, item) => item.kind === "provider_account_switched" && item.automatic &&
+      (!found || item.id > found.id) ? item : found,
+    null,
+  );
+  return {
+    state: {
+      sessionId: input.sessionId,
+      seenThroughEventId: Math.max(current.seenThroughEventId, input.loadedEventHighWater),
+      initialized: true,
+    },
+    ...(latest && latest.id > current.seenThroughEventId
+      ? { providerAccountLabel: latest.providerAccountLabel }
+      : {}),
+  };
+}
+
 type AgentTextItem = Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
 const streamingTimelineItems = new WeakSet<AgentTextItem>();
 

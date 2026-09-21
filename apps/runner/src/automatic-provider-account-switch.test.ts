@@ -33,3 +33,11 @@ test("excludes exhausted and cooling-down accounts", () => {
     provider: "claude", currentAccountId: "current", cooldowns: { cooling: now + 1 }, now,
   }), null);
 });
+
+test("excludes authenticated accounts whose allowance state is unknown", () => {
+  assert.equal(selectAutomaticProviderAccount({
+    accounts: [account("current"), account("unknown")],
+    snapshots: [],
+    provider: "claude", currentAccountId: "current", cooldowns: {}, now,
+  }), null);
+});

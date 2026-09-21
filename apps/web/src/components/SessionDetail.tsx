@@ -51,7 +51,11 @@ import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
 import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
-import { type TimelineItem } from "../timeline.js";
+import {
+  advanceAutomaticAccountSwitchNotice,
+  type AutomaticAccountSwitchNoticeState,
+  type TimelineItem,
+} from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
 import {
   BackgroundDeliveryBadge,
@@ -2504,29 +2508,23 @@ function SessionDetailLoaded({
     session.status === "running" || session.status === "starting",
     timelineHistoryKey,
   );
-  const automaticAccountSwitchNotice = useRef<{ sessionId: string; eventId: number; initialized: boolean }>({
+  const automaticAccountSwitchNotice = useRef<AutomaticAccountSwitchNoticeState>({
     sessionId: session.id,
-    eventId: 0,
+    seenThroughEventId: 0,
     initialized: false,
   });
   useEffect(() => {
-    const latest = [...timelineItems].reverse().find((item) =>
-      item.kind === "provider_account_switched" && item.automatic);
-    const eventId = latest?.kind === "provider_account_switched" ? latest.id : 0;
-    if (automaticAccountSwitchNotice.current.sessionId !== session.id ||
-        !automaticAccountSwitchNotice.current.initialized) {
-      automaticAccountSwitchNotice.current = { sessionId: session.id, eventId, initialized: true };
-      return;
+    const update = advanceAutomaticAccountSwitchNotice(automaticAccountSwitchNotice.current, {
+      sessionId: session.id,
+      historyReady: eventHistory?.everComplete === true,
+      loadedEventHighWater: (evs ?? []).reduce((highest, event) => Math.max(highest, event.seq), 0),
+      items: timelineItems,
+    });
+    automaticAccountSwitchNotice.current = update.state;
+    if (update.providerAccountLabel) {
+      showToast(`Moved this session to ${update.providerAccountLabel} after its prior account exhausted a usage window.`);
     }
-    if (eventId > automaticAccountSwitchNotice.current.eventId &&
-        latest?.kind === "provider_account_switched") {
-      showToast(`Moved this session to ${latest.providerAccountLabel} after its prior account exhausted a usage window.`);
-    }
-    automaticAccountSwitchNotice.current.eventId = Math.max(
-      automaticAccountSwitchNotice.current.eventId,
-      eventId,
-    );
-  }, [session.id, showToast, timelineItems]);
+  }, [eventHistory?.everComplete, evs, session.id, showToast, timelineItems]);
   const observedLastEventAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || undefined;
   const activeTurnProgressProjector = useRef<IncrementalActiveTurnProgress | null>(null);
   activeTurnProgressProjector.current ??= new IncrementalActiveTurnProgress();
