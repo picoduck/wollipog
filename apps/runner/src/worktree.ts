@@ -235,6 +235,9 @@ export class WorktreeCleanupJournal {
   private completedRecords = new Map<string, WorktreeCleanupRecord>();
   private retainedRefs = new Map<string, RetainedWorktreeRefRecord>();
   private completedRetainedRefs = new Map<string, RetainedWorktreeRefRecord>();
+  /** First terminal results whose durable history write has not succeeded yet. These remain
+   * process-local because the pending row is still the durable retry authority. */
+  private pendingRetainedRefTerminals = new Map<string, RetainedWorktreeRefRecord>();
 
   constructor(dataDir = join(homedir(), ".agent-manager")) {
     mkdirSync(dataDir, { recursive: true });
@@ -387,8 +390,8 @@ export class WorktreeCleanupJournal {
     // Concurrent startup/periodic/post-cleanup sweeps can all hold the same pending snapshot.
     // The first terminal receipt is authoritative: a later stale sweep that observes the ref
     // already missing must not replace an exact `deleted` receipt with `already_missing`.
-    if (this.completedRetainedRefs.has(key)) return;
-    const completed = {
+    const existing = this.completedRetainedRefs.get(key) ?? this.pendingRetainedRefTerminals.get(key);
+    const completed = existing ?? {
       ...structuredClone(record),
       state,
       pendingReason: undefined,
@@ -396,14 +399,53 @@ export class WorktreeCleanupJournal {
       updatedAt: Date.now(),
       completedAt: Date.now(),
     } satisfies RetainedWorktreeRefRecord;
-    this.completedRetainedRefs.set(key, completed);
-    while (this.completedRetainedRefs.size > 256) {
-      const oldest = this.completedRetainedRefs.keys().next().value as string | undefined;
-      if (oldest === undefined) break;
-      this.completedRetainedRefs.delete(oldest);
+    this.persistRetainedRefTerminal(key, completed);
+  }
+
+  /** Resume only terminal persistence when a prior sweep already reached a terminal Git result.
+   * This avoids repeating deletion and preserves the first terminal reason after a failed write. */
+  resumeRetainedRefCompletion(record: RetainedWorktreeRefRecord): boolean {
+    const key = this.retainedRefKey(record);
+    const completed = this.completedRetainedRefs.get(key) ?? this.pendingRetainedRefTerminals.get(key);
+    if (!completed) return false;
+    this.persistRetainedRefTerminal(key, completed);
+    return true;
+  }
+
+  private persistRetainedRefTerminal(key: string, completed: RetainedWorktreeRefRecord): void {
+    // Keep exact first-terminal authority outside the bounded history map until both ordered
+    // writes finish. Otherwise 256 later completions could evict a receipt whose pending-row
+    // removal is still failing, and a later same-process sweep would re-run Git work.
+    this.pendingRetainedRefTerminals.set(key, completed);
+    if (!this.completedRetainedRefs.has(key)) {
+      const previous = new Map(this.completedRetainedRefs);
+      this.completedRetainedRefs.set(key, completed);
+      while (this.completedRetainedRefs.size > 256) {
+        const oldest = this.completedRetainedRefs.keys().next().value as string | undefined;
+        if (oldest === undefined) break;
+        this.completedRetainedRefs.delete(oldest);
+      }
+      try {
+        this.flushFile(this.retainedRefHistoryPath, this.retainedRefHistory());
+      } catch (error) {
+        this.completedRetainedRefs = previous;
+        throw error;
+      }
     }
-    this.flushFile(this.retainedRefHistoryPath, this.retainedRefHistory());
-    if (this.retainedRefs.delete(key)) this.flushRetainedRefs();
+
+    if (!this.retainedRefs.has(key)) {
+      this.pendingRetainedRefTerminals.delete(key);
+      return;
+    }
+    const previous = new Map(this.retainedRefs);
+    this.retainedRefs.delete(key);
+    try {
+      this.flushRetainedRefs();
+    } catch (error) {
+      this.retainedRefs = previous;
+      throw error;
+    }
+    this.pendingRetainedRefTerminals.delete(key);
   }
 
   private key(record: WorktreeCleanupRecord): string {

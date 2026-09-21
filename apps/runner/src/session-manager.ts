@@ -3123,6 +3123,7 @@ export class SessionManager {
 
   private async reapRetainedRef(record: RetainedWorktreeRefRecord): Promise<void> {
     if (!record.armedAt) return;
+    if (this.cleanupJournal.resumeRetainedRefCompletion(record)) return;
     const result = await reclaimRetainedWorktreeRef(record, { context: record.context });
     if (result.state === "pending") {
       if (record.pendingReason === result.reason) return;

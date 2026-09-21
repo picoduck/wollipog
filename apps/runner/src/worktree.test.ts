@@ -1356,6 +1356,219 @@ test("retained ref journal survives restart and never re-arms a completed or rep
   }
 });
 
+test("retained ref terminal persistence rolls back a failed pending-row write", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-terminal-pending-"));
+  try {
+    const record: RetainedWorktreeRefRecord = {
+      sessionId: "s1",
+      worktreeId: "wt1",
+      cleanupId: "cleanup-1",
+      repoPath: "/repo",
+      context: { kind: "native" },
+      branch: "fix/retained",
+      expectedOid: "a".repeat(40),
+      reasons: ["recorded_branch"],
+      state: "pending",
+      armedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const journal = new WorktreeCleanupJournal(dataDir);
+    journal.addRetainedRef(record);
+    const internals = journal as unknown as {
+      flushFile(path: string, records: unknown[]): void;
+    };
+    const flushFile = internals.flushFile.bind(journal);
+    let failPendingWrite = true;
+    internals.flushFile = (path, records) => {
+      if (failPendingWrite && path === join(dataDir, "worktree-retained-refs.json")) {
+        throw new Error("injected pending-row write failure");
+      }
+      flushFile(path, records);
+    };
+
+    assert.throws(
+      () => journal.finishRetainedRef(record, "completed", "deleted"),
+      /injected pending-row write failure/,
+    );
+    assert.equal(journal.listRetainedRefs().length, 1,
+      "the in-memory pending row rolls back when its durable removal fails");
+    assert.equal(JSON.parse(readFileSync(join(dataDir, "worktree-retained-refs.json"), "utf8")).length, 1,
+      "the durable pending row remains until its terminal receipt is safely stored");
+    assert.equal(journal.retainedRefHistory()[0]?.terminalReason, "deleted");
+
+    failPendingWrite = false;
+    assert.equal(journal.resumeRetainedRefCompletion(record), true);
+    journal.finishRetainedRef(record, "completed", "already_missing");
+    assert.equal(journal.listRetainedRefs().length, 0);
+    assert.equal(journal.retainedRefHistory().length, 1);
+    assert.equal(journal.retainedRefHistory()[0]?.terminalReason, "deleted",
+      "a later stale result cannot replace the first terminal reason");
+    assert.equal(new WorktreeCleanupJournal(dataDir).listRetainedRefs().length, 0,
+      "the same-process retry durably removes the pending row");
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("same-process retained ref sweeps retry failed terminal history without deleting again", {
+  skip: !haveGit(),
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-terminal-retry-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const main = execFileSync("git", ["-C", repo, "rev-parse", "main"], { encoding: "utf8" }).trim();
+    const branch = "fix/retry-terminal-history";
+    execFileSync("git", ["-C", repo, "branch", branch, main]);
+    execFileSync("git", ["-C", repo, "push", "-u", "origin", branch]);
+    const reflog = execFileSync(
+      "git",
+      ["-C", repo, "reflog", "show", "--max-count=1", "--date=raw", "--format=%H%x00%gD%x00%gs", `refs/heads/${branch}`],
+      { encoding: "utf8" },
+    );
+    const commonDir = execFileSync(
+      "git", ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"], { encoding: "utf8" },
+    ).trim();
+    const refLogStat = statSync(join(commonDir, "logs", "refs", "heads", ...branch.split("/")));
+    const fileIdentity = `${refLogStat.dev}:${refLogStat.ino}:${refLogStat.birthtimeMs}:${refLogStat.ctimeMs}:${refLogStat.size}`;
+    const record: RetainedWorktreeRefRecord = {
+      sessionId: "s_retry",
+      worktreeId: "wt-retry",
+      cleanupId: "cleanup-retry",
+      repoPath: repo,
+      context: { kind: "native" },
+      branch,
+      expectedOid: main,
+      identityToken: createHash("sha256").update(reflog).update("\0").update(fileIdentity).digest("hex"),
+      reasons: ["recorded_branch"],
+      state: "pending",
+      armedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const logs: string[] = [];
+    manager = new SessionManager(
+      () => {},
+      (message) => logs.push(message),
+      new SessionStore(join(dataDir, "sessions")),
+      "runner",
+      undefined,
+      undefined,
+      dataDir,
+    );
+    const privateManager = manager as unknown as {
+      cleanupJournal: WorktreeCleanupJournal;
+      replayRetainedRefReclaims(): Promise<void>;
+    };
+    privateManager.cleanupJournal.addRetainedRef(record);
+    const journalInternals = privateManager.cleanupJournal as unknown as {
+      flushFile(path: string, records: unknown[]): void;
+    };
+    const flushFile = journalInternals.flushFile.bind(privateManager.cleanupJournal);
+    let remainingHistoryFailures = 2;
+    let historyAttempts = 0;
+    journalInternals.flushFile = (path, records) => {
+      if (path === join(dataDir, "worktree-retained-ref-history.json")) {
+        historyAttempts++;
+        if (remainingHistoryFailures-- > 0) throw new Error("injected terminal history ENOSPC");
+      }
+      flushFile(path, records);
+    };
+
+    await privateManager.replayRetainedRefReclaims();
+    assert.throws(() => execFileSync(
+      "git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+    ), "the compare-and-delete completes before terminal history persistence fails");
+    assert.equal(privateManager.cleanupJournal.listRetainedRefs().length, 1);
+    assert.equal(new WorktreeCleanupJournal(dataDir).listRetainedRefs().length, 1,
+      "a history failure leaves the durable pending row available to the same process and restart recovery");
+    assert.equal(privateManager.cleanupJournal.retainedRefHistory().length, 0,
+      "a failed history write rolls back the in-memory terminal map");
+
+    const recreatedHead = execFileSync(
+      "git", ["-C", repo, "commit-tree", `${main}^{tree}`, "-p", main, "-m", "recreated"], { encoding: "utf8" },
+    ).trim();
+    execFileSync("git", ["-C", repo, "update-ref", `refs/heads/${branch}`, recreatedHead]);
+    await privateManager.replayRetainedRefReclaims();
+    assert.equal(execFileSync("git", ["-C", repo, "rev-parse", branch], { encoding: "utf8" }).trim(), recreatedHead,
+      "a terminal-persistence retry never repeats deletion against a recreated ref");
+    assert.equal(historyAttempts, 2, "each maintenance sweep makes at most one persistence attempt");
+    assert.equal(logs.filter((line) => line.includes("injected terminal history ENOSPC")).length, 2,
+      "every failed bounded sweep emits an operator-visible diagnostic");
+
+    await privateManager.replayRetainedRefReclaims();
+    assert.equal(historyAttempts, 3);
+    assert.equal(privateManager.cleanupJournal.listRetainedRefs().length, 0);
+    assert.equal(privateManager.cleanupJournal.retainedRefHistory()[0]?.terminalReason, "deleted",
+      "storage recovery preserves the first terminal authority rather than recording already_missing");
+    assert.equal(execFileSync("git", ["-C", repo, "rev-parse", branch], { encoding: "utf8" }).trim(), recreatedHead);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pending retained ref terminals survive bounded history eviction until the second write succeeds", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-terminal-cap-"));
+  try {
+    const record = (index: number): RetainedWorktreeRefRecord => ({
+      sessionId: "s1",
+      worktreeId: `wt-${index}`,
+      cleanupId: `cleanup-${index}`,
+      repoPath: "/repo",
+      context: { kind: "native" },
+      branch: `fix/retained-${index}`,
+      expectedOid: index.toString(16).padStart(40, "0"),
+      reasons: ["recorded_branch"],
+      state: "pending",
+      armedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const journal = new WorktreeCleanupJournal(dataDir);
+    const first = record(1);
+    journal.addRetainedRef(first);
+    const internals = journal as unknown as {
+      flushFile(path: string, records: unknown[]): void;
+    };
+    const pendingPath = join(dataDir, "worktree-retained-refs.json");
+    let failPendingWrite = true;
+    internals.flushFile = (path) => {
+      if (failPendingWrite && path === pendingPath) throw new Error("injected pending-row ENOSPC");
+    };
+
+    assert.throws(
+      () => journal.finishRetainedRef(first, "completed", "deleted"),
+      /injected pending-row ENOSPC/,
+    );
+    for (let index = 2; index <= 257; index++) {
+      const later = record(index);
+      failPendingWrite = false;
+      journal.addRetainedRef(later);
+      failPendingWrite = true;
+      assert.throws(
+        () => journal.finishRetainedRef(later, "completed", "already_missing"),
+        /injected pending-row ENOSPC/,
+      );
+    }
+    assert.equal(journal.retainedRefHistory().length, 256, "durable terminal history remains bounded");
+    assert.equal(journal.retainedRefHistory().some((item) => item.cleanupId === first.cleanupId), false,
+      "the oldest receipt is evicted from the bounded history map");
+
+    failPendingWrite = false;
+    assert.equal(journal.resumeRetainedRefCompletion(first), true,
+      "the process-local retry slot retains first-terminal authority past history eviction");
+    const restored = journal.retainedRefHistory().find((item) => item.cleanupId === first.cleanupId);
+    assert.equal(restored?.terminalReason, "deleted");
+    assert.equal(journal.listRetainedRefs().some((item) => item.cleanupId === first.cleanupId), false);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("cleanup journal retains a bounded completed teardown receipt", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "wollipog-cleanup-history-"));
   try {
