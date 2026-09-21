@@ -78,6 +78,7 @@ export function SnoozeDialog({
   const localTimeZone = browserTimeZone();
   const timeZone = loadedReminder && !scheduleTouched ? loadedReminder.timeZone : localTimeZone;
   const returnedReminder = loadedReminder?.state === "fired" ? loadedReminder : undefined;
+  const reschedulingFiredReminder = returnedReminder !== undefined && !creatingFromDraft;
   const currentReminder = reconciled ? reconciled.reminder ?? undefined : reminder;
   const mutationReminder = creatingFromDraft ? undefined : loadedReminder;
   const conflict = submitting ? null : reminderConflict(mutationReminder, currentReminder);
@@ -100,14 +101,18 @@ export function SnoozeDialog({
     matchTriggerWidth: true,
   });
   const parsed = useMemo(() => {
-    if (loadedReminder && !scheduleTouched) return storedReminderSchedule(loadedReminder);
+    if (loadedReminder && !scheduleTouched) {
+      return returnedReminder ? null : storedReminderSchedule(loadedReminder);
+    }
     if (selectedSuggestion) return selectedSuggestion;
     if (selectedPreset) return parseReminderExpression(selectedPreset, new Date());
     return exact
       ? exactReminderSchedule(exact)
       : parseReminderExpression(expression, new Date());
-  }, [exact, expression, localTimeZone, loadedReminder, scheduleTouched, selectedPreset, selectedSuggestion]);
-  const scheduleSource = loadedReminder && !scheduleTouched
+  }, [exact, expression, localTimeZone, loadedReminder, returnedReminder, scheduleTouched, selectedPreset, selectedSuggestion]);
+  const scheduleSource = returnedReminder && !scheduleTouched
+    ? "None Selected"
+    : loadedReminder && !scheduleTouched
     ? "Stored Reminder"
     : selectedSuggestion
       ? "Autocomplete"
@@ -198,6 +203,7 @@ export function SnoozeDialog({
         wakePolicy,
         expectedRevision: mutationReminder?.revision ?? 0,
         ...(mutationReminder ? { expectedReminderId: mutationReminder.reminderId } : {}),
+        ...(reschedulingFiredReminder ? { rescheduleFired: true } : {}),
       }, mutationReminder);
       onClose();
     } catch (cause) {
@@ -239,7 +245,11 @@ export function SnoozeDialog({
     <Modal
       {...(returnFocusRef ? { returnFocusRef } : {})}
       className="snooze-dialog"
-      title={creatingFromDraft ? "Create New Reminder" : loadedReminder ? "Edit Reminder" : "Snooze Session"}
+      title={creatingFromDraft
+        ? "Create New Reminder"
+        : reschedulingFiredReminder
+          ? "Snooze Again"
+          : loadedReminder ? "Edit Reminder" : "Snooze Session"}
       onClose={onClose}
       describedBy="snooze-description"
       footer={<>
@@ -261,7 +271,13 @@ export function SnoozeDialog({
           disabled={!parsed || submitting}
           aria-disabled={Boolean(conflict) || undefined}
         >
-          {submitting ? "Saving…" : creatingFromDraft ? "Create New Reminder" : loadedReminder ? "Update Reminder" : "Snooze Session"}
+          {submitting
+            ? "Saving…"
+            : creatingFromDraft
+              ? "Create New Reminder"
+              : reschedulingFiredReminder
+                ? "Snooze Again"
+                : loadedReminder ? "Update Reminder" : "Snooze Session"}
         </button>
       </>}
     >

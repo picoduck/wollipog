@@ -12585,6 +12585,7 @@ export class ControlPlaneDb {
     wakePolicy: SessionReminderWakePolicy;
     expectedRevision?: number;
     expectedReminderId?: string;
+    rescheduleFired?: boolean;
     restoreFired?: { firedAt: number; wakeReason: SessionReminderWakeReason };
     now: number;
   }): SessionReminderMutationResult {
@@ -12602,6 +12603,12 @@ export class ControlPlaneDb {
         input.expectedReminderId !== undefined ||
         (input.expectedRevision !== undefined && input.expectedRevision !== 0)
       )) return { kind: "missing" };
+      if (input.rescheduleFired) {
+        if (!current) return { kind: "missing" };
+        if (current.state !== "fired") {
+          return { kind: "conflict", reminder: this.sessionReminderView(current) };
+        }
+      }
       const session = this.stmt("SELECT 1 AS found FROM sessions WHERE id=?").get(input.sessionId) as
         | { found: number } | undefined;
       if (!session) return { kind: "missing" };
@@ -12612,7 +12619,7 @@ export class ControlPlaneDb {
       ).get(input.sessionId) as { seq: number };
 
       if (current) {
-        const preservesObservedFiredState = input.restoreFired === undefined &&
+        const preservesObservedFiredState = !input.rescheduleFired && input.restoreFired === undefined &&
           current.state === "fired" && input.scheduledFor === current.scheduled_for;
         if (preservesObservedFiredState) {
           this.stmt(
