@@ -2342,12 +2342,16 @@ test("negotiated child questions coexist and completion cancels only their exact
   const root1 = ask("root", "root-1");
   const root2 = ask("root", "root-2");
   assert.deepEqual(await root1, { answers: {} }, "root replacement still applies with children pending");
-  // A root notification is authoritative only while a prompt is awaiting its turn.
+  // A root notification is authoritative only while a prompt is awaiting its turn and its
+  // turn/start response has established the causal boundary for this generation.
   (h.driver as any).promptBusy = true;
   (h.driver as any).turnResolve = () => {};
+  (h.driver as any).turnStartResponseGeneration = (h.driver as any).promptGeneration;
   notifications.get("turn/started")!({ threadId: "root", turn: { id: "root-turn" } });
-  assert.deepEqual(await root2, { answers: {} });
+  assert.equal((h.driver as any).pendingQuestions.has("root-2"), true,
+    "starting the confirmed turn keeps its live root question pending");
   notifications.get("turn/completed")!({ threadId: "root", turn: { id: "root-turn", status: "completed" } });
+  assert.deepEqual(await root2, { answers: {} });
   notifications.get("item/completed")!({
     threadId: "root", item: { type: "collabAgentToolCall", id: "spawn-a", tool: "spawnAgent",
       status: "completed", senderThreadId: "root", receiverThreadIds: ["a"],
