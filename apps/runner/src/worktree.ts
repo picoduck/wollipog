@@ -191,6 +191,19 @@ export type RetainedWorktreeRefTerminalReason =
   | "identity_unproved"
   | "delivery_unproved";
 
+export type RetainedWorktreeRefIdentityProof = {
+  stage: "capture" | "reclaim";
+  status: "proved" | "unavailable" | "changed";
+  reason:
+    | "proof_recorded"
+    | "reflogs_disabled"
+    | "unsupported_ref_storage"
+    | "metadata_read_failed"
+    | "ref_oid_changed"
+    | "identity_rotated"
+    | "legacy_unclassified";
+};
+
 /** Durable ownership of one local branch deliberately left behind by safe worktree removal. */
 export interface RetainedWorktreeRefRecord {
   sessionId: string;
@@ -203,6 +216,8 @@ export interface RetainedWorktreeRefRecord {
   expectedOid: string;
   /** Hash of the latest reflog entry and its file identity; distinguishes same-OID recreation. */
   identityToken?: string;
+  /** Bounded, path-free explanation of the identity evidence captured for this exact row. */
+  identityProof?: RetainedWorktreeRefIdentityProof;
   reasons: RetainedWorktreeRefReason[];
   /** Exact merged-head proof already accepted by worktree cleanup, when one exists. */
   verifiedMergedHead?: string;
@@ -221,8 +236,74 @@ export interface RetainedWorktreeRefCandidate {
   branch: string;
   expectedOid: string;
   identityToken?: string;
+  identityProof: RetainedWorktreeRefIdentityProof;
   reasons: RetainedWorktreeRefReason[];
   verifiedMergedHead?: string;
+}
+
+export interface RetainedWorktreeRefDiagnostic {
+  /** Stable opaque coordinates for support correlation; raw branch and repository values stay local. */
+  recordId: string;
+  generationId: string;
+  state: "pending" | "deleted" | "already_absent" | "retained";
+  reason: RetainedWorktreeRefPendingReason | RetainedWorktreeRefTerminalReason |
+    "not_armed" | "awaiting_reclamation";
+  identityProof: RetainedWorktreeRefIdentityProof;
+}
+
+function retainedRefOpaqueId(salt: string, ...values: Array<string | undefined>): string {
+  return createHash("sha256").update(salt).update("\0").update(values.map((value) => value ?? "legacy").join("\0"))
+    .digest("hex").slice(0, 16);
+}
+
+/** Project runner-private reclamation rows into deterministic, bounded operator diagnostics. */
+export function retainedWorktreeRefDiagnostics(
+  pending: RetainedWorktreeRefRecord[],
+  history: RetainedWorktreeRefRecord[],
+  salt: string,
+  limit = 256,
+): { records: RetainedWorktreeRefDiagnostic[]; omitted: number } {
+  const authoritative = new Map<string, RetainedWorktreeRefRecord>();
+  const key = (record: RetainedWorktreeRefRecord) =>
+    `${record.sessionId}\0${record.worktreeId ?? "legacy"}\0${record.cleanupId ?? "legacy-cleanup"}\0${record.branch}`;
+  for (const record of pending) authoritative.set(key(record), record);
+  for (const record of history) authoritative.set(key(record), record);
+  const records = [...authoritative.values()].map((record): RetainedWorktreeRefDiagnostic => {
+    const terminal = record.terminalReason;
+    const state = terminal === "deleted"
+      ? "deleted" as const
+      : terminal === "already_missing"
+        ? "already_absent" as const
+        : record.state === "retained"
+          ? "retained" as const
+          : "pending" as const;
+    const reason = terminal ?? (!record.armedAt
+      ? "not_armed" as const
+      : record.pendingReason ?? "awaiting_reclamation" as const);
+    const identityProof = record.identityProof ?? (record.identityToken
+      ? { stage: "capture", status: "proved", reason: "proof_recorded" } as const
+      : { stage: "capture", status: "unavailable", reason: "legacy_unclassified" } as const);
+    return {
+      recordId: retainedRefOpaqueId(
+        salt,
+        record.sessionId,
+        record.worktreeId,
+        record.cleanupId,
+        record.branch,
+      ),
+      generationId: retainedRefOpaqueId(salt, record.sessionId, record.worktreeId, record.cleanupId),
+      state,
+      reason,
+      identityProof,
+    };
+  }).sort((left, right) => {
+    const priority = (state: RetainedWorktreeRefDiagnostic["state"]): number =>
+      state === "retained" ? 0 : state === "pending" ? 1 : 2;
+    return priority(left.state) - priority(right.state) ||
+      (left.recordId < right.recordId ? -1 : left.recordId > right.recordId ? 1 : 0);
+  });
+  const boundedLimit = Math.max(0, Math.min(256, Math.trunc(limit)));
+  return { records: records.slice(0, boundedLimit), omitted: Math.max(0, records.length - boundedLimit) };
 }
 
 /** Native-host cleanup journal. Session rows can be deleted immediately while failed context
@@ -1338,12 +1419,13 @@ export type SafeWorktreeDiscardResult =
     };
 
 export type RetainedWorktreeRefReclaimResult =
-  | { state: "pending"; reason: RetainedWorktreeRefPendingReason }
-  | { state: "completed"; reason: "deleted" | "already_missing" }
+  | { state: "pending"; reason: RetainedWorktreeRefPendingReason; identityProof?: RetainedWorktreeRefIdentityProof }
+  | { state: "completed"; reason: "deleted" | "already_missing"; identityProof?: RetainedWorktreeRefIdentityProof }
   | {
       state: "retained";
       reason: "default_branch" | "default_unproved_at_handoff" | "ref_changed_or_recreated" |
         "identity_unproved" | "delivery_unproved";
+      identityProof?: RetainedWorktreeRefIdentityProof;
     };
 
 async function localBranchOid(
@@ -1367,45 +1449,67 @@ async function localBranchIdentity(
   context: AgentContext,
   repoPath: string,
   ref: string,
-): Promise<{ oid: string; identityToken?: string } | undefined> {
+): Promise<{
+  oid: string;
+  identityToken?: string;
+  identityProof: RetainedWorktreeRefIdentityProof;
+} | undefined> {
   const oid = await localBranchOid(context, repoPath, ref);
   if (!oid) return undefined;
   let identityToken: string | undefined;
+  let identityProof: RetainedWorktreeRefIdentityProof = {
+    stage: "capture",
+    status: "unavailable",
+    reason: "metadata_read_failed",
+  };
   try {
-    const reflog = await command(context, repoPath, [
-      "reflog", "show", "--max-count=1", "--date=raw",
-      "--format=%H%x00%gD%x00%gs",
-      ref,
-    ]);
-    const commonDir = (await command(
-      context,
-      repoPath,
-      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )).trim().replace(/[\\/]+$/u, "");
-    const reflogPath = context.kind === "wsl"
-      ? `${commonDir}/logs/${ref}`
-      : join(commonDir, "logs", ...ref.split("/"));
-    const fileIdentity = context.kind === "wsl"
-      ? (await runContextCommand(
+    const refFormat = (await command(context, repoPath, ["rev-parse", "--show-ref-format"])).trim();
+    // Git versions before ref-storage selection echo the unknown option. Those versions support
+    // only loose/packed files, so the reflog-file proof below remains valid. Any recognized or
+    // future non-files backend is unsupported until it has an equally strong generation proof.
+    if (refFormat !== "files" && refFormat !== "--show-ref-format") {
+      identityProof = { stage: "capture", status: "unavailable", reason: "unsupported_ref_storage" };
+    } else {
+      const reflog = await command(context, repoPath, [
+        "reflog", "show", "--max-count=1", "--date=raw",
+        "--format=%H%x00%gD%x00%gs",
+        ref,
+      ]);
+      if (!reflog) {
+        identityProof = { stage: "capture", status: "unavailable", reason: "reflogs_disabled" };
+      } else {
+        const commonDir = (await command(
           context,
-          "stat",
-          ["-c", "%d:%i:%w:%z:%s", "--", reflogPath],
-          { cwd: "/", timeoutMs: 8_000 },
-        )).stdout.trim()
-      : (() => {
-          const stat = statSync(reflogPath);
-          return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.ctimeMs}:${stat.size}`;
-        })();
-    if (reflog && fileIdentity) {
-      identityToken = createHash("sha256").update(reflog).update("\0").update(fileIdentity).digest("hex");
+          repoPath,
+          ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+        )).trim().replace(/[\\/]+$/u, "");
+        const reflogPath = context.kind === "wsl"
+          ? `${commonDir}/logs/${ref}`
+          : join(commonDir, "logs", ...ref.split("/"));
+        const fileIdentity = context.kind === "wsl"
+          ? (await runContextCommand(
+              context,
+              "stat",
+              ["-c", "%d:%i:%w:%z:%s", "--", reflogPath],
+              { cwd: "/", timeoutMs: 8_000 },
+            )).stdout.trim()
+          : (() => {
+              const stat = statSync(reflogPath);
+              return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.ctimeMs}:${stat.size}`;
+            })();
+        if (fileIdentity) {
+          identityToken = createHash("sha256").update(reflog).update("\0").update(fileIdentity).digest("hex");
+          identityProof = { stage: "capture", status: "proved", reason: "proof_recorded" };
+        }
+      }
     }
   } catch {
-    // A missing reflog is not permission to delete. Persist the OID-only ownership record and
-    // let reclamation terminally retain it as identity_unproved.
+    // Raw Git/stat diagnostics may contain paths or repository data. Persist only the fixed
+    // classification and let reclamation retain the OID-only row.
   }
   const confirmedOid = await localBranchOid(context, repoPath, ref);
   if (confirmedOid !== oid) throw new Error("local branch changed while its identity was captured");
-  return { oid, ...(identityToken ? { identityToken } : {}) };
+  return { oid, ...(identityToken ? { identityToken } : {}), identityProof };
 }
 
 async function retainedRefDeliveryProven(
@@ -1479,13 +1583,34 @@ export async function reclaimRetainedWorktreeRef(
     const currentIdentity = await localBranchIdentity(context, record.repoPath, ref);
     if (!currentIdentity) return { state: "completed", reason: "already_missing" };
     if (currentIdentity.oid !== record.expectedOid) {
-      return { state: "retained", reason: "ref_changed_or_recreated" };
+      return {
+        state: "retained",
+        reason: "ref_changed_or_recreated",
+        identityProof: { stage: "reclaim", status: "changed", reason: "ref_oid_changed" },
+      };
     }
-    if (!record.identityToken || !currentIdentity.identityToken) {
-      return { state: "retained", reason: "identity_unproved" };
+    if (!record.identityToken) {
+      return {
+        state: "retained",
+        reason: "identity_unproved",
+        identityProof: record.identityProof ?? {
+          stage: "capture", status: "unavailable", reason: "legacy_unclassified",
+        },
+      };
+    }
+    if (!currentIdentity.identityToken) {
+      return {
+        state: "retained",
+        reason: "identity_unproved",
+        identityProof: { ...currentIdentity.identityProof, stage: "reclaim" },
+      };
     }
     if (currentIdentity.identityToken !== record.identityToken) {
-      return { state: "retained", reason: "ref_changed_or_recreated" };
+      return {
+        state: "retained",
+        reason: "ref_changed_or_recreated",
+        identityProof: { stage: "reclaim", status: "changed", reason: "identity_rotated" },
+      };
     }
     if (!await retainedRefDeliveryProven(record, context, ref, defaultBranch)) {
       return { state: "retained", reason: "delivery_unproved" };
@@ -1504,17 +1629,38 @@ export async function reclaimRetainedWorktreeRef(
     if (finallyCheckedOut) return { state: "pending", reason: "checked_out" };
     const finalIdentity = await localBranchIdentity(context, record.repoPath, ref);
     if (!finalIdentity) return { state: "completed", reason: "already_missing" };
-    if (finalIdentity.oid !== record.expectedOid || finalIdentity.identityToken !== record.identityToken) {
-      return { state: "retained", reason: "ref_changed_or_recreated" };
+    if (finalIdentity.oid !== record.expectedOid) {
+      return {
+        state: "retained",
+        reason: "ref_changed_or_recreated",
+        identityProof: { stage: "reclaim", status: "changed", reason: "ref_oid_changed" },
+      };
+    }
+    if (finalIdentity.identityToken !== record.identityToken) {
+      return {
+        state: "retained",
+        reason: "ref_changed_or_recreated",
+        identityProof: finalIdentity.identityToken
+          ? { stage: "reclaim", status: "changed", reason: "identity_rotated" }
+          : { ...finalIdentity.identityProof, stage: "reclaim" },
+      };
     }
     try {
       await command(context, record.repoPath, ["update-ref", "-d", ref, record.expectedOid]);
-      return { state: "completed", reason: "deleted" };
+      return {
+        state: "completed",
+        reason: "deleted",
+        identityProof: { stage: "reclaim", status: "proved", reason: "proof_recorded" },
+      };
     } catch {
       const after = await localBranchOid(context, record.repoPath, ref);
       if (!after) return { state: "completed", reason: "already_missing" };
       if (after !== record.expectedOid) {
-        return { state: "retained", reason: "ref_changed_or_recreated" };
+        return {
+          state: "retained",
+          reason: "ref_changed_or_recreated",
+          identityProof: { stage: "reclaim", status: "changed", reason: "ref_oid_changed" },
+        };
       }
       return { state: "pending", reason: "git_unavailable" };
     }
@@ -1676,6 +1822,7 @@ export async function discardWorktreeIfSafe(
           branch: recordedBranch,
           expectedOid: recordedIdentity.oid,
           ...(recordedIdentity.identityToken ? { identityToken: recordedIdentity.identityToken } : {}),
+          identityProof: recordedIdentity.identityProof,
           reasons: ["recorded_branch"],
         });
       }
@@ -1688,6 +1835,7 @@ export async function discardWorktreeIfSafe(
       branch,
       expectedOid: head,
       ...(checkedOutIdentity.identityToken ? { identityToken: checkedOutIdentity.identityToken } : {}),
+      identityProof: checkedOutIdentity.identityProof,
       reasons: preserveCheckedOutRef ? checkedOutRefReasons : ["deletion_intent"],
       ...(checkedOutVerifiedMergedHead ? { verifiedMergedHead: checkedOutVerifiedMergedHead } : {}),
     };
@@ -1719,6 +1867,7 @@ export async function discardWorktreeIfSafe(
         branch: checkedOutCandidate.branch,
         expectedOid: checkedOutCandidate.expectedOid,
         ...(checkedOutCandidate.identityToken ? { identityToken: checkedOutCandidate.identityToken } : {}),
+        identityProof: checkedOutCandidate.identityProof,
         reasons: checkedOutCandidate.reasons,
         ...(checkedOutCandidate.verifiedMergedHead
           ? { verifiedMergedHead: checkedOutCandidate.verifiedMergedHead }

@@ -22,11 +22,18 @@ import { runContextCommand } from "./context-command.js";
 import { CheckpointRefOwnershipLedger } from "./checkpoint-ref-ownership.js";
 import { canIgnoreRunnerDataDirDirectorySyncError } from "./runner-data-dir.js";
 import type { SessionMeta } from "./session-store.js";
-import { WorktreeCleanupJournal, type WorktreeCleanupRecord } from "./worktree.js";
+import {
+  retainedWorktreeRefDiagnostics,
+  WorktreeCleanupJournal,
+  type RetainedWorktreeRefIdentityProof,
+  type RetainedWorktreeRefRecord,
+  type WorktreeCleanupRecord,
+} from "./worktree.js";
 
 const OWNER_FILE = ".wollipog-runner-owner-v2.json";
 const ACTIVE_LEASE = ".wollipog-runner-active-v1.lock";
 const MAX_JSON_BYTES = 256 * 1024;
+const MAX_RETAINED_REF_JSON_BYTES = 2 * 1024 * 1024;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 
 type DoctorCommand = "inventory" | "adopt-checkpoints" | "adopt-provider-state" | "quarantine-wsl";
@@ -96,11 +103,11 @@ function parseDoctorArgs(argv: string[]): DoctorArgs {
   return { command, dataDir: resolve(dataDir), sessionId, distro, acknowledged };
 }
 
-function protectedJson<T>(path: string): T {
+function protectedJson<T>(path: string, maxBytes = MAX_JSON_BYTES): T {
   const fd = openSync(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const stat = fstatSync(fd);
-    if (!stat.isFile() || stat.size > MAX_JSON_BYTES) throw new Error(`unsafe state metadata: ${basename(path)}`);
+    if (!stat.isFile() || stat.size > maxBytes) throw new Error(`unsafe state metadata: ${basename(path)}`);
     try {
       return JSON.parse(readFileSync(fd, "utf8")) as T;
     } catch {
@@ -324,6 +331,59 @@ function storedMetas(dataDir: string): { metas: SessionMeta[]; unreadable: numbe
   return { metas, unreadable };
 }
 
+const RETAINED_REF_STATES = new Set(["pending", "completed", "retained"]);
+const RETAINED_REF_PENDING_REASONS = new Set(["checked_out", "default_unknown", "git_unavailable"]);
+const RETAINED_REF_TERMINAL_REASONS = new Set([
+  "deleted", "already_missing", "default_branch", "default_unproved_at_handoff",
+  "ref_changed_or_recreated", "identity_unproved", "delivery_unproved",
+]);
+const IDENTITY_PROOF_STAGES = new Set(["capture", "reclaim"]);
+const IDENTITY_PROOF_STATUSES = new Set(["proved", "unavailable", "changed"]);
+const IDENTITY_PROOF_REASONS = new Set([
+  "proof_recorded", "reflogs_disabled", "unsupported_ref_storage", "metadata_read_failed",
+  "ref_oid_changed", "identity_rotated", "legacy_unclassified",
+]);
+
+function validIdentityProof(value: unknown): value is RetainedWorktreeRefIdentityProof {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const proof = value as Partial<RetainedWorktreeRefIdentityProof>;
+  return IDENTITY_PROOF_STAGES.has(proof.stage ?? "") &&
+    IDENTITY_PROOF_STATUSES.has(proof.status ?? "") && IDENTITY_PROOF_REASONS.has(proof.reason ?? "");
+}
+
+function validRetainedRefRecord(value: unknown): value is RetainedWorktreeRefRecord {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const record = value as Partial<RetainedWorktreeRefRecord>;
+  const reasonsMatchState = record.state === "pending"
+    ? record.terminalReason === undefined
+    : record.state === "completed"
+      ? record.pendingReason === undefined &&
+        (record.terminalReason === "deleted" || record.terminalReason === "already_missing")
+      : record.pendingReason === undefined && record.terminalReason !== undefined &&
+        record.terminalReason !== "deleted" && record.terminalReason !== "already_missing";
+  return typeof record.sessionId === "string" && typeof record.repoPath === "string" &&
+    !!record.context && typeof record.context === "object" && typeof record.branch === "string" &&
+    typeof record.expectedOid === "string" && Array.isArray(record.reasons) &&
+    RETAINED_REF_STATES.has(record.state ?? "") &&
+    (record.pendingReason === undefined || RETAINED_REF_PENDING_REASONS.has(record.pendingReason)) &&
+    (record.terminalReason === undefined || RETAINED_REF_TERMINAL_REASONS.has(record.terminalReason)) &&
+    (record.identityProof === undefined || validIdentityProof(record.identityProof)) && reasonsMatchState;
+}
+
+function retainedRefRows(dataDir: string, name: string): { records: RetainedWorktreeRefRecord[]; unreadable: number } {
+  const path = join(dataDir, name);
+  if (!existsSync(path)) return { records: [], unreadable: 0 };
+  let parsed: unknown;
+  try {
+    parsed = protectedJson<unknown>(path, MAX_RETAINED_REF_JSON_BYTES);
+  } catch {
+    return { records: [], unreadable: 1 };
+  }
+  if (!Array.isArray(parsed)) return { records: [], unreadable: 1 };
+  const records = parsed.filter(validRetainedRefRecord);
+  return { records, unreadable: parsed.length - records.length };
+}
+
 async function inventoryWsl(distro: string): Promise<{ available: boolean; legacyRoots: number }> {
   const context = { kind: "wsl" as const, distro };
   try {
@@ -350,13 +410,24 @@ export async function runStateDoctor(
     if (args.command === "inventory") {
       const { metas, unreadable } = storedMetas(dataDir);
       const wsl = args.distro ? await inventoryWsl(args.distro) : undefined;
+      const retained = retainedRefRows(dataDir, "worktree-retained-refs.json");
+      const retainedHistory = retainedRefRows(dataDir, "worktree-retained-ref-history.json");
+      const retainedRefReclamation = retainedWorktreeRefDiagnostics(
+        retained.records,
+        retainedHistory.records,
+        ownerHash,
+      );
       const report = {
-        version: 1,
+        version: 2,
         ownerId: createHash("sha256").update(ownerHash).digest("hex").slice(0, 16),
         legacyCheckpointSessions: metas.filter((meta) => meta.checkpointRefVersion === undefined && meta.worktreePath).length,
         legacyWslWorktrees: metas.filter((meta) => meta.context.kind === "wsl" && meta.worktreePath && !meta.worktreePath.includes("/runner-instances/")).length,
         legacyWslProviderSessions: metas.filter((meta) => meta.context.kind === "wsl" && meta.providerStateVersion !== 3).length,
         unreadableSessionMetadata: unreadable,
+        retainedRefReclamation: {
+          ...retainedRefReclamation,
+          unreadableRecords: retained.unreadable + retainedHistory.unreadable,
+        },
         ...(wsl ? { wsl } : {}),
       };
       writeOutput(`${JSON.stringify(report, null, 2)}\n`);

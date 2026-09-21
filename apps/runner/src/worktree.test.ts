@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -749,10 +749,12 @@ test("changed-branch discard durably hands off every preserved ref before remova
     assert.deepEqual(retained.map(({ identityToken: _identityToken, ...candidate }) => candidate), [{
       branch: "agent/retained-recorded",
       expectedOid: head,
+      identityProof: { stage: "capture", status: "proved", reason: "proof_recorded" },
       reasons: ["recorded_branch"],
     }, {
       branch: "fix/retained-checked-out",
       expectedOid: head,
+      identityProof: { stage: "capture", status: "proved", reason: "proof_recorded" },
       reasons: ["shared_checkout"],
     }]);
     assert.ok(retained.every((candidate) => /^[a-f0-9]{64}$/u.test(candidate.identityToken ?? "")),
@@ -772,6 +774,40 @@ test("changed-branch discard durably hands off every preserved ref before remova
     }), { removed: false, reason: "unavailable" });
     assert.equal(existsSync(refused.path), true,
       "worktree removal cannot outrun durable retained-ref ownership");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("reflogs-disabled handoff records a bounded proof failure and retains deletion authority", {
+  skip: !haveGit(),
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-no-reflog-"));
+  try {
+    const dataDir = join(root, "data");
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "config", "core.logAllRefUpdates", "false"]);
+    const requested = await createRequestedWorktree(repo, "s_no_reflog", {
+      baseRef: "HEAD",
+      branch: "fix/no-reflog",
+    }, { dataDir });
+    execFileSync("git", ["-C", requested.path, "push", "-u", "origin", requested.branch]);
+    const retained: RetainedWorktreeRefCandidate[] = [];
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_no_reflog", {
+      ...requested,
+      source: "created",
+    }, {
+      dataDir,
+      retainRefs: async (candidates) => { retained.push(...structuredClone(candidates)); },
+    }), { removed: true });
+    assert.equal(retained.length, 1);
+    assert.equal(retained[0]?.identityToken, undefined);
+    assert.deepEqual(retained[0]?.identityProof, {
+      stage: "capture",
+      status: "unavailable",
+      reason: "reflogs_disabled",
+    });
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/no-reflog"]);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -947,7 +983,11 @@ test("retained ref reclamation is exact, checkout-aware, default-safe, and idemp
     const shared = record("fix/shared-retained", main, { reasons: ["shared_checkout"] });
     assert.deepEqual(await reclaimRetainedWorktreeRef(shared), { state: "pending", reason: "checked_out" });
     execFileSync("git", ["-C", sibling, "switch", "--detach"]);
-    assert.deepEqual(await reclaimRetainedWorktreeRef(shared), { state: "completed", reason: "deleted" });
+    assert.deepEqual(await reclaimRetainedWorktreeRef(shared), {
+      state: "completed",
+      reason: "deleted",
+      identityProof: { stage: "reclaim", status: "proved", reason: "proof_recorded" },
+    });
     assert.deepEqual(await reclaimRetainedWorktreeRef(shared), { state: "completed", reason: "already_missing" },
       "a crash after compare-and-delete is idempotently finalized");
 
@@ -956,6 +996,7 @@ test("retained ref reclamation is exact, checkout-aware, default-safe, and idemp
     execFileSync("git", ["-C", repo, "update-ref", "refs/heads/fix/advanced-retained", newCommit(main, "advance")]);
     assert.deepEqual(await reclaimRetainedWorktreeRef(advanced), {
       state: "retained", reason: "ref_changed_or_recreated",
+      identityProof: { stage: "reclaim", status: "changed", reason: "ref_oid_changed" },
     });
 
     publish("fix/recreated-retained");
@@ -964,6 +1005,7 @@ test("retained ref reclamation is exact, checkout-aware, default-safe, and idemp
     execFileSync("git", ["-C", repo, "update-ref", "refs/heads/fix/recreated-retained", newCommit(main, "reuse")]);
     assert.deepEqual(await reclaimRetainedWorktreeRef(recreated), {
       state: "retained", reason: "ref_changed_or_recreated",
+      identityProof: { stage: "reclaim", status: "changed", reason: "ref_oid_changed" },
     });
 
     publish("fix/same-oid-recreated-retained");
@@ -972,13 +1014,26 @@ test("retained ref reclamation is exact, checkout-aware, default-safe, and idemp
     execFileSync("git", ["-C", repo, "branch", "fix/same-oid-recreated-retained", main]);
     assert.deepEqual(await reclaimRetainedWorktreeRef(sameOidRecreated), {
       state: "retained", reason: "ref_changed_or_recreated",
+      identityProof: { stage: "reclaim", status: "changed", reason: "identity_rotated" },
     }, "same-name recreation is retained even when it points to the captured commit");
 
-    publish("fix/unproved-identity-retained");
-    assert.deepEqual(await reclaimRetainedWorktreeRef(record("fix/unproved-identity-retained", main, {
-      identityToken: undefined,
-    })), { state: "retained", reason: "identity_unproved" },
-    "records without generation proof are never retroactively granted deletion ownership");
+    for (const reason of [
+      "reflogs_disabled",
+      "unsupported_ref_storage",
+      "metadata_read_failed",
+      "legacy_unclassified",
+    ] as const) {
+      const branch = `fix/unproved-${reason.replaceAll("_", "-")}`;
+      publish(branch);
+      assert.deepEqual(await reclaimRetainedWorktreeRef(record(branch, main, {
+        identityToken: undefined,
+        identityProof: { stage: "capture", status: "unavailable", reason },
+      })), {
+        state: "retained",
+        reason: "identity_unproved",
+        identityProof: { stage: "capture", status: "unavailable", reason },
+      }, `${reason} never grants deletion ownership`);
+    }
 
     publish("fix/default-at-handoff-retained");
     execFileSync("git", ["-C", repo, "branch", "develop", main]);
@@ -1054,7 +1109,11 @@ test("retained ref reclamation is exact, checkout-aware, default-safe, and idemp
       beforeDelete: async () => {
         execFileSync("git", ["-C", repo, "update-ref", "refs/heads/fix/racing-retained", racingHead]);
       },
-    }), { state: "retained", reason: "ref_changed_or_recreated" },
+    }), {
+      state: "retained",
+      reason: "ref_changed_or_recreated",
+      identityProof: { stage: "reclaim", status: "changed", reason: "ref_oid_changed" },
+    },
     "the final object-id compare retains an advance racing deletion");
     assert.equal(execFileSync("git", ["-C", repo, "rev-parse", "fix/racing-retained"], {
       encoding: "utf8",
@@ -1488,15 +1547,17 @@ test("retained ref reclaims coalesce one cleanup generation without blocking ind
   const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-lanes-"));
   let manager: SessionManager | undefined;
   try {
+    const logs: string[] = [];
     manager = new SessionManager(
       () => {},
-      () => {},
+      (message) => logs.push(message),
       new SessionStore(join(dataDir, "sessions")),
       "runner",
       undefined,
       undefined,
       dataDir,
     );
+    (manager as unknown as { runnerOwnerHash?: string }).runnerOwnerHash = "f".repeat(64);
     const internals = manager as unknown as {
       cleanupJournal: WorktreeCleanupJournal;
       retainedRefReclaimLanes: Map<string, Promise<void>>;
@@ -1568,6 +1629,89 @@ test("retained ref reclaims coalesce one cleanup generation without blocking ind
       ],
       "each exact identity retains the authoritative attempt's deterministic terminal reason",
     );
+    const diagnosticLogs = logs.filter((line) => line.includes("retained ref reclamation"));
+    assert.equal(diagnosticLogs.length, 3);
+    assert.ok(diagnosticLogs.every((line) =>
+      /record=[a-f0-9]{16} generation=[a-f0-9]{16} state=/u.test(line)),
+    "logs expose stable opaque coordinates");
+    assert.ok(diagnosticLogs.every((line) => !line.includes("branch=")),
+      "logs do not emit a dictionary-testable branch identifier");
+    assert.ok(diagnosticLogs.some((line) => line.includes("state=deleted reason=deleted")));
+    assert.ok(diagnosticLogs.some((line) => line.includes("state=already_absent reason=already_missing")));
+    assert.ok(diagnosticLogs.some((line) => line.includes("state=retained reason=delivery_unproved")));
+    assert.ok(diagnosticLogs.every((line) => !line.includes("/repo") && !line.includes("fix/")),
+      "logs do not expose repository paths or branch names");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("retained-ref diagnostics prioritize actionable rows within the bounded inventory", () => {
+  const base = (suffix: string): RetainedWorktreeRefRecord => ({
+    sessionId: `s_${suffix}`,
+    worktreeId: `wt-${suffix}`,
+    cleanupId: `cleanup-${suffix}`,
+    repoPath: "/private/repo",
+    context: { kind: "native" },
+    branch: `private/${suffix}`,
+    expectedOid: "a".repeat(40),
+    reasons: ["recorded_branch"],
+    state: "completed",
+    terminalReason: "deleted",
+    identityProof: { stage: "reclaim", status: "proved", reason: "proof_recorded" },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const history = Array.from({ length: 256 }, (_, index) => base(`deleted-${index}`));
+  const retained = {
+    ...base("retained"),
+    state: "retained" as const,
+    terminalReason: "identity_unproved" as const,
+  };
+  const pending = {
+    ...base("pending"),
+    state: "pending" as const,
+    terminalReason: undefined,
+    pendingReason: "checked_out" as const,
+    armedAt: 1,
+  };
+
+  const diagnostics = retainedWorktreeRefDiagnostics([pending], [...history, retained], "f".repeat(64));
+  assert.equal(diagnostics.records.length, 256);
+  assert.equal(diagnostics.omitted, 2);
+  assert.deepEqual(diagnostics.records.slice(0, 2).map((record) => record.state), ["retained", "pending"]);
+});
+
+test("retained-ref logs are suppressed without an owner-scoped salt", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-no-log-salt-"));
+  let manager: SessionManager | undefined;
+  try {
+    const logs: string[] = [];
+    manager = new SessionManager(
+      () => {},
+      (message) => logs.push(message),
+      new SessionStore(join(dataDir, "sessions")),
+      "runner",
+      undefined,
+      undefined,
+      dataDir,
+    );
+    const internals = manager as unknown as {
+      logRetainedRefState(record: RetainedWorktreeRefRecord): void;
+    };
+    internals.logRetainedRefState({
+      sessionId: "s_secret",
+      repoPath: "/private/repo",
+      context: { kind: "native" },
+      branch: "private/customer",
+      expectedOid: "a".repeat(40),
+      reasons: ["recorded_branch"],
+      state: "pending",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    assert.deepEqual(logs, []);
   } finally {
     manager?.shutdownAll();
     rmSync(dataDir, { recursive: true, force: true });
@@ -1818,8 +1962,11 @@ test("same-process retained ref sweeps retry failed terminal history without del
     assert.equal(execFileSync("git", ["-C", repo, "rev-parse", branch], { encoding: "utf8" }).trim(), recreatedHead,
       "a terminal-persistence retry never repeats deletion against a recreated ref");
     assert.equal(historyAttempts, 2, "each maintenance sweep makes at most one persistence attempt");
-    assert.equal(logs.filter((line) => line.includes("injected terminal history ENOSPC")).length, 2,
-      "every failed bounded sweep emits an operator-visible diagnostic");
+    assert.equal(logs.filter((line) =>
+      line.includes("needs retry after durable state update")).length, 2,
+    "every failed bounded sweep emits a sanitized operator-visible diagnostic");
+    assert.equal(logs.some((line) => line.includes("injected terminal history ENOSPC")), false,
+      "raw persistence diagnostics never reach runner logs");
 
     await privateManager.replayRetainedRefReclaims();
     assert.equal(historyAttempts, 3);

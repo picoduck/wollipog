@@ -184,8 +184,16 @@ closed because the Windows relay cannot hold target-local no-follow directory ha
 exec. Use a supported native, container, or cloud execution target. Container and cloud provider
 homes are independent.
 
-After stopping every pre-migration runner for the account, use `--state-doctor inventory` to
-review legacy state. The doctor prints redacted counts rather than contents. Its
+After stopping every runner for the account, use `--state-doctor inventory` to review legacy state
+and retained-ref reclamation. Each retained-ref row reports an opaque record and cleanup-generation
+identifier; `pending`, `deleted`, `already_absent`, or `retained` state; a fixed reason;
+and the identity-proof stage, status, and fixed reason. Repository paths, branch names, session
+identifiers, usernames, identity tokens, and raw Git or filesystem output are never printed. The
+inventory is capped at 256 deterministic rows and reports the omitted or unreadable count. Its
+bounded view prioritizes terminally retained and pending rows ahead of old successful receipts.
+Current owner-attested runners emit the same fixed diagnostic fields with owner-scoped identifiers;
+legacy managers without that salt suppress those log rows rather than emit linkable coordinates.
+The
 `adopt-checkpoints` and `adopt-provider-state` actions copy legacy state into the attested namespace
 without deleting sources; `quarantine-wsl` atomically moves the ambiguous shared provider/worktree
 roots aside. Mutations require `--ack-all-legacy-runners-stopped` and refuse an active data lease.
