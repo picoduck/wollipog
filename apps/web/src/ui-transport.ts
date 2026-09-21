@@ -66,7 +66,9 @@ export function createBrowserUiConnection(options: BrowserUiConnectionOptions): 
         }
       }
       const token = options.token?.();
-      const url = `${origin}/ui${token ? `?token=${encodeURIComponent(token)}` : ""}`;
+      const parameters = new URLSearchParams({ protocolVersion: String(PROTOCOL_VERSION) });
+      if (token) parameters.set("token", token);
+      const url = `${origin}/ui?${parameters.toString()}`;
       const createSocket = options.createWebSocket ?? ((target: string) => new WebSocket(target) as UiSocket);
       const socket = createSocket(url);
       sockets.add(socket);
@@ -84,3 +86,4 @@ export function createBrowserUiConnection(options: BrowserUiConnectionOptions): 
     },
   };
 }
+import { PROTOCOL_VERSION } from "@wollipog/protocol";

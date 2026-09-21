@@ -146,6 +146,7 @@ export const UI_CONNECTION_RATE_WINDOW_MS = 10_000;
 export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_CONNECTION = 1_024;
 export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_WINDOW = 128;
 export const UI_BACKGROUND_OBSERVATION_RATE_WINDOW_MS = 10_000;
+export const INDEFINITE_SESSION_REMINDER_UI_PROTOCOL = 174;
 
 interface OutboundFrame {
   data: string;
@@ -157,6 +158,8 @@ interface OutboundFrame {
  * force-close it — so revoking a device immediately severs its live stream. */
 interface UiClientInfo {
   deviceId: string | null;
+  /** Browser/desktop bundle protocol. Missing means a pre-negotiation UI. */
+  uiProtocolVersion?: number | null;
   principal?: AuthPrincipal;
   visibleSessionIds?: Set<string>;
   visibleRunnerIds?: Set<string>;
@@ -169,6 +172,8 @@ interface UiClientInfo {
   sending?: boolean;
   lastSubscriptionRevision?: number;
   observedBackgroundDeliveryKeys?: Set<string>;
+  /** Pending Someday sessions omitted from a legacy UI's compatibility projection. */
+  hiddenIndefiniteReminderSessionIds?: Set<string>;
   backgroundObservationWindowStartedAt?: number;
   backgroundObservationsInWindow?: number;
 }
@@ -534,13 +539,21 @@ export class Hub {
     }
     if (!this.admitUiConnectionStart(info, now)) return false;
     const runners = info.principal ? this.db.listRunnersForPrincipal(info.principal) : this.db.listRunners();
-    const sessions = info.principal ? this.db.listSessionsForPrincipal(info.principal) : this.db.listSessions();
+    const allSessions = info.principal ? this.db.listSessionsForPrincipal(info.principal) : this.db.listSessions();
     const projects = info.principal ? this.db.listProjectsForPrincipal(info.principal, true) : this.db.listProjects(true);
     const globalAdmin = info.principal === undefined || this.isGlobalAdmin(info.principal);
     const reminderUserId = info.principal === undefined ? LOCAL_OWNER_USER_ID
       : info.principal.kind === "human" ? info.principal.userId : null;
-    const reminders = reminderUserId === null ? [] : this.db.listSessionReminders(reminderUserId)
+    const allReminders = reminderUserId === null ? [] : this.db.listSessionReminders(reminderUserId)
       .filter((reminder) => info.principal === undefined || this.db.canAccessSession(info.principal, reminder.sessionId));
+    const supportsIndefiniteReminders = this.supportsIndefiniteReminders(info);
+    info.hiddenIndefiniteReminderSessionIds = new Set(supportsIndefiniteReminders ? [] : allReminders
+      .filter((reminder) => reminder.scheduleKind === "someday" && reminder.state === "pending")
+      .map((reminder) => reminder.sessionId));
+    const sessions = allSessions.filter((session) => !info.hiddenIndefiniteReminderSessionIds!.has(session.id));
+    const reminders = supportsIndefiniteReminders
+      ? allReminders
+      : allReminders.filter((reminder) => reminder.scheduleKind !== "someday");
     const worktreeSetupNoticeDismissals = reminderUserId === null
       ? [] : this.db.worktreeSetupNoticeDismissals(reminderUserId);
     info.visibleRunnerIds = new Set(runners.map((runner) => runner.runnerId));
@@ -561,6 +574,7 @@ export class Hub {
         stopFailureRecovery: true,
         unarchiveAndRestart: true,
         sessionReminders: true,
+        indefiniteSessionReminders: true,
         worktreeSetupConfig: true,
         orchestratorRole: true,
       },
@@ -592,6 +606,7 @@ export class Hub {
     info.subscribedSessionIds?.clear();
     info.subscribedPodIds?.clear();
     info.observedBackgroundDeliveryKeys?.clear();
+    info.hiddenIndefiniteReminderSessionIds?.clear();
   }
 
   /** Replace the high-volume live stream selection. Undefined means a pre-subscription dashboard
@@ -615,7 +630,7 @@ export class Hub {
 
     const acceptedSessionIds = [...new Set(info.principal
       ? sessionIds.filter((sessionId) => this.db.canAccessSession(info.principal!, sessionId))
-      : sessionIds)].sort();
+      : sessionIds)].filter((sessionId) => !info.hiddenIndefiniteReminderSessionIds?.has(sessionId)).sort();
     const acceptedPodIds = [...new Set(info.principal && !this.isGlobalAdmin(info.principal) ? [] : podIds)].sort();
     info.subscribedSessionIds = new Set(acceptedSessionIds);
     info.subscribedPodIds = new Set(acceptedPodIds);
@@ -966,6 +981,7 @@ export class Hub {
       const visible = (info.visibleSessionIds?.has(sessionId) ?? true) ||
         (info.subscribedSessionIds?.has(sessionId) ?? false);
       info.visibleSessionIds?.delete(sessionId);
+      info.hiddenIndefiniteReminderSessionIds?.delete(sessionId);
       return visible;
     });
     if (refreshProject) {
@@ -1132,22 +1148,78 @@ export class Hub {
     for (const [client, info] of this.uiClients) {
       if (!this.isSubscribed(info, msg)) continue;
       if (!(predicate ? predicate(info.principal, info) : this.canReceive(info.principal, msg))) continue;
-      let clientData = data;
-      if (msg.type === "runner_upsert" && info.principal !== undefined) {
-        const runner = this.db.listRunnersForPrincipal(info.principal)
-          .find((item) => item.runnerId === msg.runner.runnerId);
-        if (!runner) continue;
-        clientData = JSON.stringify({ type: "runner_upsert", runner } satisfies ControlPlaneToUi);
+      const projectedMessages = this.compatibilityProjection(info, msg);
+      for (const projected of projectedMessages) {
+        let clientData = projected === msg ? data : JSON.stringify(projected);
+        if (projected.type === "runner_upsert" && info.principal !== undefined) {
+          const runner = this.db.listRunnersForPrincipal(info.principal)
+            .find((item) => item.runnerId === projected.runner.runnerId);
+          if (!runner) continue;
+          clientData = JSON.stringify({ type: "runner_upsert", runner } satisfies ControlPlaneToUi);
+        }
+        if (projected.type === "project_upsert" && info.principal !== undefined) {
+          const project = this.db.getProjectForPrincipal(info.principal, projected.project.id);
+          if (!project) continue;
+          clientData = JSON.stringify({ type: "project_upsert", project } satisfies ControlPlaneToUi);
+        }
+        if (projected.type === "session_upsert") info.visibleSessionIds?.add(projected.session.id);
+        if (projected.type === "runner_upsert") info.visibleRunnerIds?.add(projected.runner.runnerId);
+        if (projected.type === "project_upsert") info.visibleProjectIds?.add(projected.project.id);
+        this.sendRaw(client, clientData, this.coalesceKey(projected));
       }
-      if (msg.type === "project_upsert" && info.principal !== undefined) {
-        const project = this.db.getProjectForPrincipal(info.principal, msg.project.id);
-        if (!project) continue;
-        clientData = JSON.stringify({ type: "project_upsert", project } satisfies ControlPlaneToUi);
+    }
+  }
+
+  private supportsIndefiniteReminders(info: UiClientInfo): boolean {
+    return (info.uiProtocolVersion ?? 0) >= INDEFINITE_SESSION_REMINDER_UI_PROTOCOL;
+  }
+
+  /** A pre-v174 UI assumes every reminder has an instant and crashes on the Someday shape. Keep
+   * pending Someday sessions absent from that client's projection, then reveal the session when
+   * the reminder fires, is removed, or becomes timed. Canonical storage and current clients never
+   * receive a fabricated compatibility timestamp. */
+  private compatibilityProjection(info: UiClientInfo, msg: ControlPlaneToUi): ControlPlaneToUi[] {
+    if (this.supportsIndefiniteReminders(info)) return [msg];
+    const hidden = info.hiddenIndefiniteReminderSessionIds ??= new Set();
+    if (msg.type === "session_reminder_upsert") {
+      const { reminder } = msg;
+      if (reminder.scheduleKind === "someday") {
+        if (reminder.state === "pending") {
+          const wasVisible = info.visibleSessionIds?.delete(reminder.sessionId) ?? false;
+          hidden.add(reminder.sessionId);
+          return wasVisible ? [{ type: "session_removed", sessionId: reminder.sessionId }] : [];
+        }
+        const wasHidden = hidden.delete(reminder.sessionId);
+        const session = wasHidden ? this.db.getSession(reminder.sessionId) : null;
+        return session ? [{ type: "session_upsert", session: this.withQueue(session) }] : [];
       }
-      if (msg.type === "session_upsert") info.visibleSessionIds?.add(msg.session.id);
-      if (msg.type === "runner_upsert") info.visibleRunnerIds?.add(msg.runner.runnerId);
-      if (msg.type === "project_upsert") info.visibleProjectIds?.add(msg.project.id);
-      this.sendRaw(client, clientData, this.coalesceKey(msg));
+      const wasHidden = hidden.delete(reminder.sessionId);
+      const session = wasHidden ? this.db.getSession(reminder.sessionId) : null;
+      return session
+        ? [{ type: "session_upsert", session: this.withQueue(session) }, msg]
+        : [msg];
+    }
+    if (msg.type === "session_reminder_removed" && hidden.delete(msg.sessionId)) {
+      const session = this.db.getSession(msg.sessionId);
+      return session ? [{ type: "session_upsert", session: this.withQueue(session) }] : [];
+    }
+    const sessionId = this.sessionIdForCompatibility(msg);
+    return sessionId && hidden.has(sessionId) ? [] : [msg];
+  }
+
+  private sessionIdForCompatibility(msg: ControlPlaneToUi): string | undefined {
+    switch (msg.type) {
+      case "session_upsert":
+        return msg.session.id;
+      case "session_removed":
+      case "session_events_reset":
+      case "shell_output":
+      case "shell_exit":
+        return msg.sessionId;
+      case "session_event":
+        return msg.event.sessionId;
+      default:
+        return undefined;
     }
   }
 

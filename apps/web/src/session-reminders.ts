@@ -97,6 +97,9 @@ export function sortSessionsForReminders(
     const leftReminder = reminders.get(left.id);
     const rightReminder = reminders.get(right.id);
     if (mode === "snoozed") {
+      const leftSomeday = leftReminder?.scheduleKind === "someday";
+      const rightSomeday = rightReminder?.scheduleKind === "someday";
+      if (leftSomeday !== rightSomeday) return leftSomeday ? 1 : -1;
       const leftScheduledFor = leftReminder?.scheduledFor;
       const rightScheduledFor = rightReminder?.scheduledFor;
       if (leftScheduledFor === undefined || rightScheduledFor === undefined) return 0;
@@ -111,12 +114,16 @@ export function sortSessionsForReminders(
 }
 
 export function reminderBadgeLabel(reminder: SessionReminderView): string {
-  if (reminder.state === "pending") return "Snoozed";
+  if (reminder.state === "pending") return reminder.scheduleKind === "someday" ? "Someday" : "Snoozed";
   if (reminder.wakeReason !== "scheduled") return "Activity Reminder";
   return "Returned from Snooze";
 }
 
 export function reminderBadgeDescription(reminder: SessionReminderView): string {
+  if (reminder.scheduleKind === "someday") {
+    if (reminder.state === "pending") return "Snoozed Someday with no automatic return time.";
+    return "Activity returned this session from a Someday snooze.";
+  }
   const instant = formatReminderInstant(reminder.scheduledFor, reminder.timeZone);
   if (reminder.state === "pending") return `Snoozed until ${instant}.`;
   if (reminder.wakeReason === "scheduled") return `Returned from snooze. Snooze ended ${instant}.`;

@@ -290,6 +290,8 @@ export interface State {
   unarchiveAndRestartSupported: boolean;
   /** True when the control plane provides durable, user-scoped reminder snapshots and deltas. */
   sessionRemindersSupported: boolean;
+  /** True when reminder writes may omit a timer and use the explicit Someday schedule kind. */
+  indefiniteSessionRemindersSupported: boolean;
   worktreeSetupConfigSupported: boolean;
   /** True when session creation accepts a Session Role independent of the provider permission mode. */
   orchestratorRoleSupported: boolean;
@@ -1088,6 +1090,7 @@ function reducer(state: State, action: Action): State {
             stopFailureRecoverySupported: msg.capabilities?.stopFailureRecovery === true,
             unarchiveAndRestartSupported: msg.capabilities?.unarchiveAndRestart === true,
             sessionRemindersSupported: msg.capabilities?.sessionReminders === true,
+            indefiniteSessionRemindersSupported: msg.capabilities?.indefiniteSessionReminders === true,
             worktreeSetupConfigSupported: msg.capabilities?.worktreeSetupConfig === true,
             orchestratorRoleSupported: msg.capabilities?.orchestratorRole === true,
             runners: new Map(msg.runners.map((r) => [r.runnerId, r])),
@@ -1469,6 +1472,7 @@ function initialState(
     stopFailureRecoverySupported: false,
     unarchiveAndRestartSupported: false,
     sessionRemindersSupported: false,
+    indefiniteSessionRemindersSupported: false,
     worktreeSetupConfigSupported: false,
     orchestratorRoleSupported: false,
     runners: new Map(),

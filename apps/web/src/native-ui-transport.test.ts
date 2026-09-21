@@ -37,6 +37,7 @@ test("native UI sockets buffer early events, send only after open, and preserve 
   channels[0]!.onmessage({ type: "close", code: 1008 });
   assert.deepEqual(events, ["open", "world", "close:1008"]);
   assert.deepEqual(calls.map(({ command }) => command), ["remote_ui_open", "remote_ui_send"]);
+  assert.equal(calls[0]?.args?.protocolVersion, 174);
   assert.doesNotMatch(JSON.stringify(calls), /token|https?:\/\//);
 });
 

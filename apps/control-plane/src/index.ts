@@ -187,7 +187,11 @@ import {
 } from "./git-route.js";
 import { editorAdvertisesLocation, parseSessionHostAction } from "./host-actions.js";
 import { validateForgeReviewSync, validateGitHubReviewSync } from "./review-findings.js";
-import { Hub, isRunnerRequestTimeoutError } from "./hub.js";
+import {
+  Hub,
+  INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
+  isRunnerRequestTimeoutError,
+} from "./hub.js";
 import {
   buildRunnerWsUrl,
   isAllowedOrigin,
@@ -283,6 +287,14 @@ const TAILNET_ONLY = process.env.CONTROL_PLANE_TAILNET_ONLY === "1";
 const TOKEN = process.env.CONTROL_PLANE_TOKEN ?? "dev-local-token";
 const DB_PATH = process.env.CONTROL_PLANE_DB ?? "data/control-plane.db";
 const ARTIFACT_BLOB_DIR = process.env.CONTROL_PLANE_ARTIFACT_DIR;
+
+function parseUiProtocolVersion(query: unknown): number | null {
+  if (!query || typeof query !== "object") return null;
+  const raw = (query as Record<string, unknown>).protocolVersion;
+  if (typeof raw !== "string" || !/^\d{1,6}$/.test(raw)) return null;
+  const version = Number(raw);
+  return Number.isSafeInteger(version) && version > 0 ? version : null;
+}
 const HEARTBEAT_INTERVAL_MS = Number(process.env.CONTROL_PLANE_HEARTBEAT_MS ?? 10_000);
 const RUNNER_PRE_AUTH_TIMEOUT_MS = runnerAuthTimeoutMs(process.env.CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS);
 // A runner heartbeat every HEARTBEAT_INTERVAL_MS refreshes last_seen. If none lands within three
@@ -1622,6 +1634,7 @@ app.register(async (instance) => {
   const admitted = hub.addUiClient(client, {
     deviceId: authenticated.principal.kind === "human" ? authenticated.principal.deviceId : null,
     principal: authenticated.principal,
+    uiProtocolVersion: parseUiProtocolVersion(req.query),
     close: (code = 1008, reason = "authorization changed") => socket.close(code, reason),
   });
   if (!admitted) {
@@ -4995,7 +5008,16 @@ app.get("/api/sessions/:id/reminder", async (req, reply) => {
   // The central authorization gate has already required access to this exact session. The user id
   // remains part of the database key so an organization peer can never observe the owner's row.
   reply.header("cache-control", "no-store");
-  return { reminder: db.getSessionReminder(id, human.userId) };
+  const reminder = db.getSessionReminder(id, human.userId);
+  if (
+    reminder?.scheduleKind === "someday"
+    && (parseUiProtocolVersion(req.query) ?? 0) < INDEFINITE_SESSION_REMINDER_UI_PROTOCOL
+  ) {
+    return reply.code(409).send({
+      error: "This reminder uses Someday and requires Wollipog protocol v174. Update this client and try again.",
+    });
+  }
+  return { reminder };
 });
 
 app.delete("/api/sessions/:id/reminder", async (req, reply) => {

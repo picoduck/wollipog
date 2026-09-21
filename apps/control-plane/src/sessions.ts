@@ -8399,26 +8399,37 @@ export class SessionsService {
     const current = this.db.getSessionReminder(sessionId, userId);
     const now = Date.now();
     const scheduleHorizon = 10 * 366 * 86_400_000;
+    const scheduleKind = request.scheduleKind ?? "timed";
+    if (scheduleKind !== "timed" && scheduleKind !== "someday") {
+      return fail("scheduleKind must be timed or someday; update this client if Someday is unavailable", 400);
+    }
     const restoresCurrentRevision = current !== null && request.expectedRevision === current.revision;
     const restoresRemovedInstant = current === null && request.expectedRevision === 0;
-    const restoresPastInstant = request.scheduledFor! <= now &&
+    const restoresPastInstant = scheduleKind === "timed" && request.scheduledFor! <= now &&
       (restoresCurrentRevision || restoresRemovedInstant);
-    if (!Number.isSafeInteger(request.scheduledFor) ||
-        request.scheduledFor! < now - scheduleHorizon || request.scheduledFor! > now + scheduleHorizon ||
-        (request.scheduledFor! <= now && !restoresPastInstant)) {
-      return fail("scheduledFor must be within ten years; past instants require an explicit optimistic revision", 400);
-    }
-    if (typeof request.timeZone !== "string" || !request.timeZone || request.timeZone.length > 128) {
-      return fail("timeZone must be a valid IANA time-zone identifier", 400);
-    }
-    try {
-      new Intl.DateTimeFormat("en", { timeZone: request.timeZone }).format(now);
-    } catch {
-      return fail("timeZone must be a valid IANA time-zone identifier", 400);
+    if (scheduleKind === "timed") {
+      if (!Number.isSafeInteger(request.scheduledFor) ||
+          request.scheduledFor! < now - scheduleHorizon || request.scheduledFor! > now + scheduleHorizon ||
+          (request.scheduledFor! <= now && !restoresPastInstant)) {
+        return fail("scheduledFor must be within ten years; past instants require an explicit optimistic revision", 400);
+      }
+      if (typeof request.timeZone !== "string" || !request.timeZone || request.timeZone.length > 128) {
+        return fail("timeZone must be a valid IANA time-zone identifier", 400);
+      }
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: request.timeZone }).format(now);
+      } catch {
+        return fail("timeZone must be a valid IANA time-zone identifier", 400);
+      }
+    } else if (request.scheduledFor !== undefined || request.timeZone !== undefined) {
+      return fail("Someday must not include a scheduledFor instant or timeZone", 400);
     }
     if (typeof request.originalExpression !== "string" || !request.originalExpression.trim() ||
         request.originalExpression.length > 200 || /[\u0000-\u001f\u007f]/u.test(request.originalExpression)) {
       return fail("originalExpression must contain 1 to 200 visible characters", 400);
+    }
+    if (scheduleKind === "someday" && request.originalExpression.trim().toLocaleLowerCase() !== "someday") {
+      return fail("Someday reminders require the Someday expression", 400);
     }
     if (request.wakePolicy !== "until_activity" && request.wakePolicy !== "regardless") {
       return fail("wakePolicy must be until_activity or regardless", 400);
@@ -8440,7 +8451,7 @@ export class SessionsService {
         request.expectedReminderId === undefined || restoreFired !== undefined)) {
       return fail("Snooze Again requires the exact fired reminder and cannot restore fired state", 400);
     }
-    if (request.rescheduleFired && request.scheduledFor! <= now) {
+    if (request.rescheduleFired && scheduleKind === "timed" && request.scheduledFor! <= now) {
       return fail("Snooze Again requires a newly selected future schedule", 400);
     }
     const validWakeReasons = new Set(["scheduled", "agent_response", "approval", "question", "failure", "background_job"]);
@@ -8453,8 +8464,10 @@ export class SessionsService {
     const result = this.db.setSessionReminder({
       sessionId,
       userId,
-      scheduledFor: request.scheduledFor!,
-      timeZone: request.timeZone,
+      scheduleKind,
+      ...(scheduleKind === "timed"
+        ? { scheduledFor: request.scheduledFor!, timeZone: request.timeZone! }
+        : {}),
       originalExpression: request.originalExpression.trim(),
       wakePolicy: request.wakePolicy,
       ...(request.expectedRevision === undefined ? {} : { expectedRevision: request.expectedRevision }),

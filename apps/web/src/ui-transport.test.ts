@@ -31,7 +31,10 @@ test("browser UI connections snapshot a credential into each new socket URL", as
   connection.createSocket();
   token = null;
   connection.createSocket();
-  assert.deepEqual(urls, ["wss://a.example.test/ui?token=paired%20secret", "wss://a.example.test/ui"]);
+  assert.deepEqual(urls, [
+    "wss://a.example.test/ui?protocolVersion=174&token=paired+secret",
+    "wss://a.example.test/ui?protocolVersion=174",
+  ]);
   connection.close();
   await assert.rejects(async () => connection.createSocket(), (error: unknown) =>
     error instanceof DOMException && error.name === "AbortError");

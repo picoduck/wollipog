@@ -25,6 +25,7 @@ const REMINDER_PRESETS = [
   { expression: "tomorrow morning", label: "Tomorrow Morning" },
   { expression: "next week", label: "Next Week" },
   { expression: "next month", label: "Next Month" },
+  { expression: "someday", label: "Someday" },
 ] as const;
 type ReminderPresetExpression = typeof REMINDER_PRESETS[number]["expression"];
 const REMINDER_PRESET_OPTIONS = REMINDER_PRESETS.map((preset) => ({
@@ -39,12 +40,15 @@ export function SnoozeDialog({
   onRemove,
   onReconcile,
   returnFocusRef,
+  supportsSomeday = false,
 }: {
   reminder?: SessionReminderView;
   onClose: () => void;
   onSave: (request: SetSessionReminderRequest, previous?: SessionReminderView) => Promise<void>;
   onRemove?: (previous: SessionReminderView) => Promise<void>;
   onReconcile?: () => Promise<SessionReminderView | null>;
+  /** Capability-gated because older control planes require a scheduled instant. */
+  supportsSomeday?: boolean;
   /** Where focus returns on close when the dialog was opened from a context menu (#154). */
   returnFocusRef?: { current: HTMLElement | null };
 }) {
@@ -76,15 +80,17 @@ export function SnoozeDialog({
   const liveReminderKeyRef = useRef(liveReminderKey);
   liveReminderKeyRef.current = liveReminderKey;
   const localTimeZone = browserTimeZone();
-  const timeZone = loadedReminder && !scheduleTouched ? loadedReminder.timeZone : localTimeZone;
+  const storedTimeZone = loadedReminder?.scheduleKind === "someday" ? undefined : loadedReminder?.timeZone;
+  const timeZone = loadedReminder && !scheduleTouched ? storedTimeZone : localTimeZone;
   const returnedReminder = loadedReminder?.state === "fired" ? loadedReminder : undefined;
   const reschedulingFiredReminder = returnedReminder !== undefined && !creatingFromDraft;
   const currentReminder = reconciled ? reconciled.reminder ?? undefined : reminder;
   const mutationReminder = creatingFromDraft ? undefined : loadedReminder;
   const conflict = submitting ? null : reminderConflict(mutationReminder, currentReminder);
   const suggestions = useMemo(
-    () => suggestReminderExpressions(expression, new Date()),
-    [expression],
+    () => suggestReminderExpressions(expression, new Date())
+      .filter((suggestion) => supportsSomeday || suggestion.scheduleKind !== "someday"),
+    [expression, supportsSomeday],
   );
   const activeSuggestionIndex = suggestions.length === 0 || activeSuggestion < 0
     ? -1
@@ -105,11 +111,15 @@ export function SnoozeDialog({
       return returnedReminder ? null : storedReminderSchedule(loadedReminder);
     }
     if (selectedSuggestion) return selectedSuggestion;
-    if (selectedPreset) return parseReminderExpression(selectedPreset, new Date());
-    return exact
+    if (selectedPreset) {
+      const preset = parseReminderExpression(selectedPreset, new Date());
+      return preset?.scheduleKind === "someday" && !supportsSomeday ? null : preset;
+    }
+    const schedule = exact
       ? exactReminderSchedule(exact)
       : parseReminderExpression(expression, new Date());
-  }, [exact, expression, localTimeZone, loadedReminder, returnedReminder, scheduleTouched, selectedPreset, selectedSuggestion]);
+    return schedule?.scheduleKind === "someday" && !supportsSomeday ? null : schedule;
+  }, [exact, expression, localTimeZone, loadedReminder, returnedReminder, scheduleTouched, selectedPreset, selectedSuggestion, supportsSomeday]);
   const scheduleSource = returnedReminder && !scheduleTouched
     ? "None Selected"
     : loadedReminder && !scheduleTouched
@@ -123,9 +133,13 @@ export function SnoozeDialog({
         : expression.trim()
           ? "Natural Language"
           : "None Selected";
-  const scheduleMessage = parsed
+  const scheduleMessage = parsed?.scheduleKind === "someday"
+    ? "Someday — no automatic return time."
+    : parsed
     ? formatReminderInstant(parsed.scheduledFor, parsed.timeZone)
-    : invalidScheduleMessage(expression, exact, selectedPreset);
+    : invalidScheduleMessage(expression, exact, selectedPreset, supportsSomeday);
+  const showingSomeday = parsed?.scheduleKind === "someday" ||
+    (!scheduleTouched && loadedReminder?.scheduleKind === "someday");
 
   useLayoutEffect(() => {
     if (!focusExpressionAfterReloadRef.current) return;
@@ -198,13 +212,14 @@ export function SnoozeDialog({
     setError(null);
     setReconciliationFailed(false);
     try {
-      await onSave({
+      const request: SetSessionReminderRequest = {
         ...schedule,
         wakePolicy,
         expectedRevision: mutationReminder?.revision ?? 0,
         ...(mutationReminder ? { expectedReminderId: mutationReminder.reminderId } : {}),
         ...(reschedulingFiredReminder ? { rescheduleFired: true } : {}),
-      }, mutationReminder);
+      };
+      await onSave(request, mutationReminder);
       onClose();
     } catch (cause) {
       setError((cause as Error).message);
@@ -286,7 +301,9 @@ export function SnoozeDialog({
           {creatingFromDraft
             ? "The preserved schedule, time zone, and wake policy will create a new reminder. The removed reminder will not be restored."
             : returnedReminder
-            ? `This session returned from snooze after ${formatReminderInstant(returnedReminder.scheduledFor, returnedReminder.timeZone)}. Choose a new time to snooze it again.`
+            ? returnedReminder.scheduleKind === "someday"
+              ? "This session returned from a Someday snooze after activity. Choose a new schedule to snooze it again."
+              : `This session returned from snooze after ${formatReminderInstant(returnedReminder.scheduledFor, returnedReminder.timeZone)}. Choose a new time to snooze it again.`
             : "Snoozing changes Inbox visibility only. Running work and lifecycle state continue unchanged."}
         </p>
         <span className="sr-only" role="status" aria-live="polite">
@@ -320,7 +337,9 @@ export function SnoozeDialog({
         <SegmentedControl
           className="snooze-presets"
           label="Reminder Presets"
-          options={REMINDER_PRESET_OPTIONS}
+          options={supportsSomeday
+            ? REMINDER_PRESET_OPTIONS
+            : REMINDER_PRESET_OPTIONS.filter((option) => option.value !== "someday")}
           value={selectedPreset}
           onChange={(preset) => {
             setScheduleTouched(true);
@@ -409,7 +428,9 @@ export function SnoozeDialog({
                 <span className="ui-select-option-body">
                   <span>{suggestion.originalExpression}</span>
                   <small className="ui-select-option-desc">
-                    {formatReminderInstant(suggestion.scheduledFor, suggestion.timeZone)}
+                    {suggestion.scheduleKind === "someday"
+                      ? "No automatic return time"
+                      : formatReminderInstant(suggestion.scheduledFor, suggestion.timeZone)}
                   </small>
                 </span>
               )}
@@ -426,20 +447,24 @@ export function SnoozeDialog({
           options={[
             {
               value: "until_activity", title: "Until Activity",
-              description: "Return at this time or sooner for an agent response, approval, question, failure, or managed background result.",
+              description: parsed?.scheduleKind === "someday"
+                ? "Return for an agent response, approval, question, failure, or managed background result. There is no automatic return time."
+                : "Return at this time or sooner for an agent response, approval, question, failure, or managed background result.",
             },
             {
               value: "regardless", title: "Regardless",
-              description: "Return only at the scheduled time. Approvals, questions, and failures remain available on the session in Snoozed.",
+              description: parsed?.scheduleKind === "someday"
+                ? "Stay snoozed until you reschedule or remove the reminder. Approvals, questions, and failures remain available in Snoozed."
+                : "Return only at the scheduled time. Approvals, questions, and failures remain available on the session in Snoozed.",
             },
           ]}
           onChange={setWakePolicy}
         />
         <div className="snooze-preview" role="status" aria-live="polite">
-          <strong>Scheduled Instant</strong>
+          <strong>{showingSomeday ? "Return Schedule" : "Scheduled Instant"}</strong>
           <span>{scheduleMessage}</span>
           <span>Schedule Source: {scheduleSource}</span>
-          <span>Time Zone: {timeZone}</span>
+          <span>Time Zone: {showingSomeday ? "Not Applicable" : timeZone}</span>
         </div>
       </form>
     </Modal>
@@ -468,11 +493,15 @@ function invalidScheduleMessage(
   expression: string,
   exact: string,
   selectedPreset: ReminderPresetExpression | null,
+  supportsSomeday: boolean,
 ): string {
   if (exact) return "Choose an exact date and time in the future.";
   if (selectedPreset === "later today") return "Later Today is no longer available. Choose another future schedule.";
   const normalized = expression.trim().toLocaleLowerCase().replace(/\s+/g, " ");
   if (!normalized) return "Choose a preset or enter a future schedule.";
+  if (normalized === "someday" && !supportsSomeday) {
+    return "Someday requires a newer control plane. Update Wollipog or choose a timed schedule.";
+  }
   if (/^\d{1,4}[/-]\d{1,2}[/-]\d{1,4}$/.test(normalized)) {
     return "Numeric dates are ambiguous. Use Exact Date and Time instead.";
   }
