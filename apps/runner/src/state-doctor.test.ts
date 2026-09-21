@@ -138,7 +138,7 @@ test("state doctor reports bounded retained-ref states and identity diagnostics 
   for (const record of report.retainedRefReclamation.records) {
     assert.match(String(record.recordId), /^[a-f0-9]{16}$/u);
     assert.match(String(record.generationId), /^[a-f0-9]{16}$/u);
-    assert.match(String(record.branchId), /^[a-f0-9]{16}$/u);
+    assert.equal("branchId" in record, false, "low-entropy branch names do not receive dictionary-testable ids");
   }
   for (const sensitive of [secretRepo, "private-user", "private/customer", "s_private", "cleanup-"]) {
     assert.equal(output.includes(sensitive), false, `inventory leaked ${sensitive}`);

@@ -1632,8 +1632,10 @@ test("retained ref reclaims coalesce one cleanup generation without blocking ind
     const diagnosticLogs = logs.filter((line) => line.includes("retained ref reclamation"));
     assert.equal(diagnosticLogs.length, 3);
     assert.ok(diagnosticLogs.every((line) =>
-      /record=[a-f0-9]{16} generation=[a-f0-9]{16} branch=[a-f0-9]{16} state=/u.test(line)),
+      /record=[a-f0-9]{16} generation=[a-f0-9]{16} state=/u.test(line)),
     "logs expose stable opaque coordinates");
+    assert.ok(diagnosticLogs.every((line) => !line.includes("branch=")),
+      "logs do not emit a dictionary-testable branch identifier");
     assert.ok(diagnosticLogs.some((line) => line.includes("state=deleted reason=deleted")));
     assert.ok(diagnosticLogs.some((line) => line.includes("state=already_absent reason=already_missing")));
     assert.ok(diagnosticLogs.some((line) => line.includes("state=retained reason=delivery_unproved")));
@@ -1681,7 +1683,7 @@ test("retained-ref diagnostics prioritize actionable rows within the bounded inv
   assert.deepEqual(diagnostics.records.slice(0, 2).map((record) => record.state), ["retained", "pending"]);
 });
 
-test("retained-ref logs are suppressed without a private owner salt", () => {
+test("retained-ref logs are suppressed without an owner-scoped salt", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-no-log-salt-"));
   let manager: SessionManager | undefined;
   try {

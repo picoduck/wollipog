@@ -245,7 +245,6 @@ export interface RetainedWorktreeRefDiagnostic {
   /** Stable opaque coordinates for support correlation; raw branch and repository values stay local. */
   recordId: string;
   generationId: string;
-  branchId: string;
   state: "pending" | "deleted" | "already_absent" | "retained";
   reason: RetainedWorktreeRefPendingReason | RetainedWorktreeRefTerminalReason |
     "not_armed" | "awaiting_reclamation";
@@ -293,7 +292,6 @@ export function retainedWorktreeRefDiagnostics(
         record.branch,
       ),
       generationId: retainedRefOpaqueId(salt, record.sessionId, record.worktreeId, record.cleanupId),
-      branchId: retainedRefOpaqueId(salt, record.branch),
       state,
       reason,
       identityProof,
