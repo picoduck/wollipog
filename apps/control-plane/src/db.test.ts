@@ -1444,6 +1444,43 @@ test("Machine Runner Capacity is durable, conflict-safe, and re-established afte
   }
 });
 
+test("Automatic Account Switching is disabled by default and persists revisioned Machine choices", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-automatic-account-switch-"));
+  const location = join(temp, "control-plane.sqlite");
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(meta(), 100, PROTOCOL_VERSION);
+    assert.deepEqual(db.getRunner("runner-1")?.automaticAccountSwitching, {
+      enabled: false,
+      revision: 0,
+    });
+    assert.deepEqual(db.setMachineAutomaticAccountSwitch("runner-1", true, 0, 110), {
+      ok: true,
+      configuration: { enabled: true, revision: 1 },
+    });
+    assert.deepEqual(db.setMachineAutomaticAccountSwitch("runner-1", false, 0, 111), {
+      ok: false,
+      configuration: { enabled: true, revision: 1 },
+    });
+    db.setMachineDisplayName("runner-1", "");
+    db.close();
+    db = ControlPlaneDb.open(location);
+    assert.deepEqual(db.machineAutomaticAccountSwitchConfiguration("runner-1"), {
+      enabled: true,
+      revision: 1,
+    });
+    db.registerRunner(meta(), 200, PROTOCOL_VERSION);
+    assert.deepEqual(db.getRunner("runner-1")?.automaticAccountSwitching, {
+      enabled: true,
+      revision: 1,
+    });
+  } finally {
+    db?.close();
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("capacity dimensions and overflow diagnostics are accepted only from protocol-v135 runners", () => {
   const db = ControlPlaneDb.open(":memory:");
   const runtime = {

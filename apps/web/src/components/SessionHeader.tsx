@@ -505,7 +505,11 @@ export function SessionHeader({
       )}
       <div className="session-header-statuses" ref={statusesRef}>
         {session.providerAccountLabel && (
-          <span className="tag" title="Provider account">{session.providerAccountLabel}</span>
+          <span className="tag" title={session.providerAccountAutomaticallySelected
+            ? "Automatically selected provider account"
+            : "Provider account"}>
+            {session.providerAccountAutomaticallySelected ? "Auto: " : ""}{session.providerAccountLabel}
+          </span>
         )}
         {renderNoninteractiveStatuses()}
         {activeSubagents && (

@@ -892,7 +892,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     () => runnerSupportsProtocol(controlPlaneProtocolVersion, "providerLogin"),
   ),
   (agentId, driver, context, update, providerAccountId) => {
-    subscriptionUsage.observe(agentId, driver, context, update, providerAccountId);
+    return subscriptionUsage.observe(agentId, driver, context, update, providerAccountId);
   },
   config.workspaces.map((workspace) => workspace.path),
   (meta) => {
@@ -926,6 +926,8 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     const env = runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
     return (provider === "claude" ? env.CLAUDE_CONFIG_DIR : env.CODEX_HOME) ?? env.HOME ?? homedir();
   },
+  providerAccountsForControlPlane,
+  () => subscriptionUsage.inventory(),
 );
 authorizeSubscriptionUsageProbe = (agent, env, sourceId) =>
   sessions.prepareSubscriptionUsageProbe(agent, env, sourceId);
@@ -1736,6 +1738,10 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           metadata.runtime!.maxConcurrentSessions = msg.runnerCapacity.configuredUnits;
         }
       }
+      if (msg.automaticAccountSwitching &&
+          runnerSupportsProtocol(controlPlaneProtocolVersion, "automaticProviderAccountSwitch")) {
+        sessions.configureAutomaticAccountSwitch(msg.automaticAccountSwitching);
+      }
       log(`registered (heartbeat every ${msg.heartbeatIntervalMs}ms)`);
       if (ws) startHeartbeat(ws, msg.heartbeatIntervalMs);
       flushOutbox();
@@ -2316,6 +2322,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       if (sessions.configureCapacity(msg)) {
         metadata.runtime!.maxConcurrentSessions = msg.configuredUnits;
         log(`Runner Capacity updated to ${msg.configuredUnits} units (revision ${msg.revision})`);
+      }
+      break;
+    case "configure_automatic_account_switch":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "automaticProviderAccountSwitch")) break;
+      if (sessions.configureAutomaticAccountSwitch(msg)) {
+        log(`Automatic Account Switching ${msg.enabled ? "enabled" : "disabled"} (revision ${msg.revision})`);
       }
       break;
     case "refresh_subscription_usage":

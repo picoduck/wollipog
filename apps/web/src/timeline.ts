@@ -199,7 +199,7 @@ export type TimelineItem =
   | { kind: "checkpoint_restored"; id: number; turn: number }
   | { kind: "conversation_checkpoint"; id: number; turn: number }
   | { kind: "conversation_forked"; id: number; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
-  | { kind: "provider_account_switched"; id: number; providerAccountId: string; providerAccountLabel: string };
+  | { kind: "provider_account_switched"; id: number; providerAccountId: string; providerAccountLabel: string; automatic?: boolean };
 
 type AgentTextItem = Extract<TimelineItem, { kind: "agent_message" | "agent_thought" }>;
 const streamingTimelineItems = new WeakSet<AgentTextItem>();
@@ -1147,6 +1147,7 @@ export class TimelineBuilder {
           id: ev.seq,
           providerAccountId: p.providerAccountId,
           providerAccountLabel: p.providerAccountLabel,
+          ...(p.automatic ? { automatic: true } : {}),
         }) - 1);
         break;
       case "error":

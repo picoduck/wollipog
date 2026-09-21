@@ -230,6 +230,32 @@ test("Machine settings explain live Runner Capacity and apply an authorized incr
   await expect(dialog.getByLabel("Runner Capacity Usage")).toContainText("12 Units");
 });
 
+test("Machine settings require the terms warning before enabling Automatic Account Switching", async ({ page }) => {
+  await page.getByRole("button", { name: "Manage" }).click();
+  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
+  await expect(dialog.getByRole("heading", { name: "Automatic Account Switching" })).toBeVisible();
+  await expect(dialog.getByText("Disabled. Provider usage limits continue to park sessions as before.", {
+    exact: true,
+  })).toBeVisible();
+
+  await dialog.getByRole("button", { name: "Enable Automatic Switching" }).click();
+  const warning = page.getByRole("dialog", { name: "Enable Automatic Account Switching?" });
+  await expect(warning).toContainText("prohibit circumventing rate limits");
+  await expect(warning).toContainText("You are responsible");
+  await page.screenshot({
+    path: "test-results/automatic-account-switching/enable-warning.png",
+    fullPage: true,
+  });
+  await warning.getByRole("button", { name: "Enable Automatic Switching" }).click();
+
+  await expect(dialog.getByRole("button", { name: "Disable Automatic Switching" })).toBeVisible();
+  await expect(dialog.getByText(/Enabled. Exhausted, unauthenticated, and cooling-down accounts/)).toBeVisible();
+  await page.screenshot({
+    path: "test-results/automatic-account-switching/machine-setting-enabled.png",
+    fullPage: true,
+  });
+});
+
 test("ordinary members can inspect Runner Capacity but cannot change it", async ({ page }) => {
   await page.goto("/machine-management-e2e.html?role=viewer");
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();

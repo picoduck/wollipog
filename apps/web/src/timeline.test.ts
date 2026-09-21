@@ -1124,6 +1124,19 @@ test("provider account switches render as standalone timeline boundaries", () =>
   });
   assert.ok(groupTimeline(items).some((group) =>
     group.kind === "item" && group.item.kind === "provider_account_switched"));
+  const automatic = deriveTimeline([ev({
+    kind: "provider_account_switched",
+    providerAccountId: "work",
+    providerAccountLabel: "Work",
+    automatic: true,
+  })])[0];
+  assert.deepEqual(automatic, {
+    kind: "provider_account_switched",
+    id: automatic?.id,
+    providerAccountId: "work",
+    providerAccountLabel: "Work",
+    automatic: true,
+  });
 });
 
 test("only a matching completed provider checkpoint makes a user message edit-addressable", () => {

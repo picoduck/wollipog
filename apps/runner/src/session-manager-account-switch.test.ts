@@ -3,7 +3,13 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import type { AgentDriverKind, RunnerToControlPlane, SessionLaunchSpec } from "@wollipog/protocol";
+import type {
+  AgentDriverKind,
+  ProviderAccountDefinition,
+  RunnerToControlPlane,
+  SessionLaunchSpec,
+  SubscriptionUsageSnapshot,
+} from "@wollipog/protocol";
 import { SessionManager, type ProviderAccountResolver } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
 
@@ -544,6 +550,79 @@ test("account-switch failure reasons are bounded and control-free", async () => 
     const reason = made.store.readMeta(spec.sessionId)?.providerAccountSwitchFailure?.reason ?? "";
     assert.equal(reason.length, 500);
     assert.doesNotMatch(reason, /[\p{Cc}\p{Cf}]/u);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an exhausted structured window schedules an automatic switch only after the turn settles", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-automatic-"));
+  const messages: RunnerToControlPlane[] = [];
+  const launches: string[] = [];
+  let usageCallback: ((update: { provider: "codex"; kind: "sparse"; payload: unknown }) => void) | undefined;
+  let manager: SessionManager | undefined;
+  try {
+    const made = makeManager(root, (_driver: unknown, launch: { env: Record<string, string> }, callbacks: {
+      onSubscriptionUsage?: typeof usageCallback;
+    }) => {
+      launches.push(launch.env.CODEX_HOME!);
+      usageCallback = callbacks.onSubscriptionUsage;
+      return {
+        pid: launches.length,
+        initialize: async () => {},
+        newSession: async () => {},
+        prompt: async () => {
+          usageCallback?.({ provider: "codex", kind: "sparse", payload: {} });
+          return "refusal" as const;
+        },
+        lastTurnError: () => "usage limit reached",
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: async () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => "codex-thread",
+      };
+    }, messages);
+    manager = made.manager;
+    const now = Date.now();
+    const current: SubscriptionUsageSnapshot = {
+      sourceId: "work", runnerId: "runner", agentId: "codex", provider: "codex",
+      providerAccountId: "work", state: "available", fetchedAt: now,
+      buckets: [{ id: "five_hour", label: "Five Hour", remainingPercent: 0, usedPercent: 100,
+        status: "exhausted", resetsAt: now + 60_000 }],
+    };
+    const backup: SubscriptionUsageSnapshot = {
+      sourceId: "backup", runnerId: "runner", agentId: "codex", provider: "codex",
+      providerAccountId: "backup", state: "available", fetchedAt: now,
+      buckets: [{ id: "five_hour", label: "Five Hour", remainingPercent: 70, usedPercent: 30,
+        status: "available", resetsAt: now + 60_000 }],
+    };
+    const definitions: ProviderAccountDefinition[] = [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+      { id: "backup", label: "Backup", provider: "codex", authStatus: "authenticated" },
+    ];
+    const internals = manager as unknown as {
+      onSubscriptionUsageUpdate: () => SubscriptionUsageSnapshot;
+      providerAccounts: () => ProviderAccountDefinition[];
+      subscriptionUsageInventory: () => SubscriptionUsageSnapshot[];
+    };
+    internals.onSubscriptionUsageUpdate = () => current;
+    internals.providerAccounts = () => definitions;
+    internals.subscriptionUsageInventory = () => [current, backup];
+    assert.equal(manager.configureAutomaticAccountSwitch({ enabled: true, revision: 1 }), true);
+    const spec = launchSpec(root, "codex-app-server", "work");
+    assert.equal(await manager.start(spec), true);
+    made.store.patchMeta(spec.sessionId, { agentSessionId: "codex-thread" });
+
+    assert.equal(manager.prompt(spec.sessionId, "continue"), true);
+    await waitFor(() => launches.length === 2, "automatic account switch did not resume the conversation");
+
+    assert.deepEqual(launches, [accounts.work.credentialHome, accounts.backup.credentialHome]);
+    assert.equal(made.store.readMeta(spec.sessionId)?.providerAccountId, "backup");
+    assert.equal(made.store.readMeta(spec.sessionId)?.providerAccountAutomaticallySelected, true);
+    assert.equal(made.store.readEvents(spec.sessionId).some((event) =>
+      event.payload.kind === "provider_account_switched" && event.payload.automatic === true), true);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

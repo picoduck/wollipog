@@ -155,6 +155,7 @@ import {
   type RunnerCapacityBlocker,
   type RunnerCapacityConfiguration,
   type RunnerCapacityState,
+  type RunnerAutomaticAccountSwitchConfiguration,
   type RunnerRuntimeInfo,
   type RunnerCredentialView,
   type RunnerStatus,
@@ -485,7 +486,10 @@ CREATE TABLE IF NOT EXISTS machine_overrides (
   display_name        TEXT,
   runner_capacity     INTEGER CHECK (runner_capacity BETWEEN 1 AND 256),
   capacity_revision   INTEGER NOT NULL DEFAULT 0 CHECK (capacity_revision >= 0),
-  capacity_updated_at INTEGER
+  capacity_updated_at INTEGER,
+  automatic_account_switch INTEGER NOT NULL DEFAULT 0 CHECK (automatic_account_switch IN (0, 1)),
+  automatic_account_switch_revision INTEGER NOT NULL DEFAULT 0 CHECK (automatic_account_switch_revision >= 0),
+  automatic_account_switch_updated_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -594,6 +598,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   agent_id       TEXT,
   provider_account_id TEXT,
   provider_account_label TEXT,
+  provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1)),
   provider_account_switch_failure TEXT,
   title          TEXT NOT NULL DEFAULT '',
   title_source   TEXT NOT NULL DEFAULT 'generated',
@@ -2517,6 +2522,7 @@ interface SessionRow {
   agent_id: string | null;
   provider_account_id: string | null;
   provider_account_label: string | null;
+  provider_account_automatically_selected: number;
   provider_account_switch_failure: string | null;
   title: string;
   title_source: string | null;
@@ -4695,6 +4701,9 @@ export class ControlPlaneDb {
       "runner_capacity INTEGER CHECK (runner_capacity BETWEEN 1 AND 256)",
       "capacity_revision INTEGER NOT NULL DEFAULT 0 CHECK (capacity_revision >= 0)",
       "capacity_updated_at INTEGER",
+      "automatic_account_switch INTEGER NOT NULL DEFAULT 0 CHECK (automatic_account_switch IN (0, 1))",
+      "automatic_account_switch_revision INTEGER NOT NULL DEFAULT 0 CHECK (automatic_account_switch_revision >= 0)",
+      "automatic_account_switch_updated_at INTEGER",
     ]) {
       try {
         db.exec(`ALTER TABLE machine_overrides ADD COLUMN ${column}`);
@@ -4710,6 +4719,7 @@ export class ControlPlaneDb {
     for (const column of [
       "provider_account_id TEXT",
       "provider_account_label TEXT",
+      "provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1))",
       "provider_account_switch_failure TEXT",
     ]) {
       try { db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`); } catch { /* column already present */ }
@@ -5547,7 +5557,9 @@ export class ControlPlaneDb {
     const trimmed = displayName.trim();
     if (!trimmed) {
       this.stmt("UPDATE machine_overrides SET display_name=NULL WHERE runner_id=?").run(runnerId);
-      this.stmt("DELETE FROM machine_overrides WHERE runner_id=? AND runner_capacity IS NULL").run(runnerId);
+      this.stmt(
+        "DELETE FROM machine_overrides WHERE runner_id=? AND runner_capacity IS NULL AND automatic_account_switch=0 AND automatic_account_switch_revision=0",
+      ).run(runnerId);
       return;
     }
     this.stmt(
@@ -5564,6 +5576,50 @@ export class ControlPlaneDb {
       configuredUnits: row.runner_capacity,
       revision: row.capacity_revision,
     };
+  }
+
+  machineAutomaticAccountSwitchConfiguration(
+    runnerId: string,
+  ): RunnerAutomaticAccountSwitchConfiguration | null {
+    const row = this.stmt(
+      `SELECT automatic_account_switch, automatic_account_switch_revision,
+              automatic_account_switch_updated_at
+       FROM machine_overrides WHERE runner_id=?`,
+    ).get(runnerId) as {
+      automatic_account_switch: number;
+      automatic_account_switch_revision: number;
+      automatic_account_switch_updated_at: number | null;
+    } | undefined;
+    if (!row || row.automatic_account_switch_updated_at == null) return null;
+    return {
+      enabled: row.automatic_account_switch === 1,
+      revision: row.automatic_account_switch_revision,
+    };
+  }
+
+  setMachineAutomaticAccountSwitch(
+    runnerId: string,
+    enabled: boolean,
+    expectedRevision: number,
+    now: number,
+  ): { ok: true; configuration: RunnerAutomaticAccountSwitchConfiguration } |
+     { ok: false; configuration: RunnerAutomaticAccountSwitchConfiguration | null } {
+    return this.atomic(() => {
+      const current = this.machineAutomaticAccountSwitchConfiguration(runnerId);
+      if ((current?.revision ?? 0) !== expectedRevision) return { ok: false, configuration: current };
+      const revision = expectedRevision + 1;
+      this.stmt(
+        `INSERT INTO machine_overrides
+           (runner_id, automatic_account_switch, automatic_account_switch_revision,
+            automatic_account_switch_updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(runner_id) DO UPDATE SET
+           automatic_account_switch=excluded.automatic_account_switch,
+           automatic_account_switch_revision=excluded.automatic_account_switch_revision,
+           automatic_account_switch_updated_at=excluded.automatic_account_switch_updated_at`,
+      ).run(runnerId, enabled ? 1 : 0, revision, now);
+      return { ok: true, configuration: { enabled, revision } };
+    });
   }
 
   setMachineRunnerCapacity(
@@ -9797,6 +9853,12 @@ export class ControlPlaneDb {
             };
       }
     }
+    if (runnerSupportsProtocol(row.protocol_version, "automaticProviderAccountSwitch")) {
+      view.automaticAccountSwitching = this.machineAutomaticAccountSwitchConfiguration(row.runner_id) ?? {
+        enabled: false,
+        revision: 0,
+      };
+    }
     if (runnerSupportsProtocol(row.protocol_version, "executionTargets")) {
       const hostTargets = executionTargetsForRunner(view, this.boxIdForRunner(row.runner_id) !== null);
       let runnerTargets: ExecutionTargetDefinition[] = [];
@@ -11367,8 +11429,9 @@ export class ControlPlaneDb {
         snap.adopted ? 1 : 0,
       );
       if (snap.providerAccountId) {
-        this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
-          .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId, snap.id);
+        this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=?, provider_account_automatically_selected=? WHERE id=?")
+          .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId,
+            snap.providerAccountAutomaticallySelected ? 1 : 0, snap.id);
       }
       if (snap.providerAccountSwitchFailure !== undefined) {
         this.stmt("UPDATE sessions SET provider_account_switch_failure=? WHERE id=?")
@@ -11668,8 +11731,9 @@ export class ControlPlaneDb {
       id,
     );
     if (snap.providerAccountId) {
-      this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
-        .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId, id);
+      this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=?, provider_account_automatically_selected=? WHERE id=?")
+        .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId,
+          snap.providerAccountAutomaticallySelected ? 1 : 0, id);
     }
     if (snap.providerAccountSwitchFailure !== undefined) {
       this.stmt("UPDATE sessions SET provider_account_switch_failure=? WHERE id=?")
@@ -17247,6 +17311,7 @@ export class ControlPlaneDb {
       agentName,
       providerAccountId: row.provider_account_id ?? undefined,
       providerAccountLabel: row.provider_account_label ?? undefined,
+      providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
       providerAccountSwitchFailure:
         parseJson<ProviderAccountSwitchFailureView>(row.provider_account_switch_failure) ?? undefined,
       title: row.title,

@@ -93,6 +93,7 @@ let runner: RunnerView | null = {
   protocolVersion: PROTOCOL_VERSION,
   agentsRefreshed: true,
   canManage: identityRole !== "viewer",
+  automaticAccountSwitching: { enabled: false, revision: 0 },
   capacity: {
     configuredUnits: 16,
     revision: 2,
@@ -240,6 +241,21 @@ const client = {
     };
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { capacity: { configuredUnits: runner.capacity.configuredUnits, revision: runner.capacity.revision } };
+  },
+  updateMachineAutomaticAccountSwitching: async (
+    _runnerId: string,
+    body: { enabled: boolean; expectedRevision: number },
+  ) => {
+    if (!runner?.automaticAccountSwitching) throw new Error("runner not found");
+    if (body.expectedRevision !== runner.automaticAccountSwitching.revision) {
+      throw new Error("Automatic Account Switching changed in another client");
+    }
+    runner.automaticAccountSwitching = {
+      enabled: body.enabled,
+      revision: body.expectedRevision + 1,
+    };
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { automaticAccountSwitching: structuredClone(runner.automaticAccountSwitching) };
   },
   listDirectory: async (_runnerId: string, path: string) => {
     if (!path) {

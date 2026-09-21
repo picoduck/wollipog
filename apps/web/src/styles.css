@@ -7600,6 +7600,10 @@ button.file-head.source-path-link {
 .machine-danger-zone p {
   color: var(--text-dim);
 }
+.automatic-account-switch-button {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
 .machine-workspace-list {
   max-height: 190px;
   overflow-y: auto;

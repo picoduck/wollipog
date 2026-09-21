@@ -186,12 +186,14 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 172", () => {
-  assert.equal(PROTOCOL_VERSION, 172);
+test("PROTOCOL_VERSION is 173", () => {
+  assert.equal(PROTOCOL_VERSION, 173);
   assert.equal(runnerSupportsProtocol(170, "sessionProviderAccountSwitch"), false);
   assert.equal(runnerSupportsProtocol(171, "sessionProviderAccountSwitch"), true);
   assert.equal(runnerSupportsProtocol(171, "accountScopedAgentSkills"), false);
   assert.equal(runnerSupportsProtocol(172, "accountScopedAgentSkills"), true);
+  assert.equal(runnerSupportsProtocol(172, "automaticProviderAccountSwitch"), false);
+  assert.equal(runnerSupportsProtocol(173, "automaticProviderAccountSwitch"), true);
   assert.equal(runnerSupportsProtocol(169, "providerAccounts"), false);
   assert.equal(runnerSupportsProtocol(170, "providerAccounts"), true);
   assert.equal(runnerSupportsProtocol(170, "providerLogin"), false);
@@ -1040,6 +1042,10 @@ test("additive session-event kinds use explicit older-peer policies without muta
   } as const;
   assert.equal(projectSessionEventPayloadForProtocol(accountSwitch, 170), null);
   assert.equal(projectSessionEventPayloadForProtocol(accountSwitch, 171), accountSwitch);
+  const automaticAccountSwitch = { ...accountSwitch, automatic: true } as const;
+  assert.deepEqual(projectSessionEventPayloadForProtocol(automaticAccountSwitch, 171), accountSwitch);
+  assert.deepEqual(projectSessionEventPayloadForProtocol(automaticAccountSwitch, 172), accountSwitch);
+  assert.equal(projectSessionEventPayloadForProtocol(automaticAccountSwitch, 173), automaticAccountSwitch);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(170), true);
   assert.equal(sessionEventWireProjectionRequiredForProtocol(171), false);
   assert.equal(sessionEventWireProjectionVariant(170), 1);
