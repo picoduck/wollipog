@@ -591,6 +591,15 @@ interface ProviderRetirement {
   parkingGeneration?: number;
 }
 
+interface ApprovedProviderAuthentication {
+  recoveryId: string;
+  identityId: string;
+}
+
+type ProviderReplacementResult =
+  | { status: "launched"; entry: ActiveSession; queuedWork: boolean }
+  | { status: "not_resumable" | "lock_unavailable" | "retirement_failed" | "launch_failed" | "stopped" | "superseded" };
+
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
  * handshake; driver identity alone is never enough. */
 /** A stop reason alone never says why the provider produced nothing. When the driver captured the
@@ -6576,7 +6585,12 @@ export class SessionManager {
     return false;
   }
 
-  private async launch(meta: SessionMeta, resumeId: string | undefined, launchGeneration: number): Promise<boolean> {
+  private async launch(
+    meta: SessionMeta,
+    resumeId: string | undefined,
+    launchGeneration: number,
+    approvedAuthentication?: ApprovedProviderAuthentication,
+  ): Promise<boolean> {
     const launchStarted = Date.now();
     const sessionId = meta.sessionId;
     if (!this.launchIsCurrent(sessionId, launchGeneration)) return false;
@@ -6662,7 +6676,7 @@ export class SessionManager {
           priorSessionSlashCommands !== meta.sessionSlashCommands)) {
         this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       }
-      if (!await this.preflightProviderAuthentication(meta, launchGeneration)) return false;
+      if (!await this.preflightProviderAuthentication(meta, launchGeneration, approvedAuthentication)) return false;
       if (meta.executionTarget?.adapter !== "container" && meta.executionTarget?.adapter !== "cloud" &&
           this.executionIsolation.mode === "bwrap" &&
           meta.providerStateVersion !== (meta.context.kind === "wsl" ? 3 : 2)) {
@@ -7646,7 +7660,7 @@ export class SessionManager {
     if ((durableAuthenticationBlock || projectedAuthenticationBlock) && syntheticRecovery) return false;
     if (durableAuthenticationBlock && this.providerAuthRecovery && !syntheticRecovery) {
       const guidance = this.blockedPromptAuthenticationGuidance(persistedMeta!);
-      if (durable && persistedMeta!.providerAuthBlock!.delivery === "not_delivered") {
+      if (durable) {
         return this.retainDurableProviderAuthenticationPrompt(
           persistedMeta!,
           text,
@@ -7663,7 +7677,6 @@ export class SessionManager {
         text: guidance,
       });
       this.emitStatus(sessionId, "input_required", "Provider authentication is required");
-      durable?.failed(guidance, "PROVIDER_AUTHENTICATION_REQUIRED");
       return false;
     }
     // Adapters without an exact-context status probe receive the bounded legacy projection only.
@@ -10004,6 +10017,142 @@ export class SessionManager {
     return promise;
   }
 
+  /** Replace one idle persistent provider with a fresh process while preserving the exact
+   * conversation, admission slot, cross-process lock, and FIFO. Account switching and accepted
+   * external credential changes must cross this same lifecycle boundary: neither path may expose
+   * a promptable session between retiring the old process and readying its replacement. */
+  private async replaceProviderProcess(
+    sessionId: string,
+    entry: ActiveSession,
+    options: {
+      replacementMeta: () => SessionMeta | undefined;
+      queueFailureReason: string;
+      approvedAuthentication?: ApprovedProviderAuthentication;
+      onLaunched?: (entry: ActiveSession) => void;
+    },
+  ): Promise<ProviderReplacementResult> {
+    this.captureAgentSessionId(sessionId, entry.client);
+    const resumable = this.store.readMeta(sessionId);
+    const resumeId = resumable?.agentSessionId ?? undefined;
+    const hasConversation = (resumable?.seq ?? 0) > 0;
+    if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
+      return { status: "not_resumable" };
+    }
+
+    let replacementLockHeld = false;
+    if (resumeId) {
+      if (!this.store.acquireLock(sessionId, this.lockOwner)) return { status: "lock_unavailable" };
+      replacementLockHeld = true;
+    }
+
+    const launchGeneration = this.beginLaunchGeneration(sessionId);
+    this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
+    const queued = entry.queue.splice(0);
+    if (queued.length) this.preLaunchQueues.set(sessionId, queued);
+    this.deleteActiveSession(sessionId, entry, false, false);
+    this.emitQueue(sessionId);
+    let launched = false;
+    let preserveLockForQueue = false;
+    let result: ProviderReplacementResult = { status: "launch_failed" };
+    try {
+      try {
+        const retirement = this.beginProviderRetirement(sessionId, entry, {
+          preserveAdmission: true,
+          preserveLock: true,
+          acceptPromptsDuringHandoff: true,
+        });
+        await retirement.promise;
+        if (this.closing.get(sessionId) === retirement) {
+          throw new Error("provider process retirement is unconfirmed");
+        }
+      } catch (error) {
+        const retirement = this.closing.get(sessionId);
+        if (retirement?.client === entry.client) {
+          retirement.preserveAdmission = false;
+          retirement.preserveLock = false;
+          retirement.acceptPromptsDuringHandoff = false;
+        }
+        this.log(`session ${sessionId} provider disposal failed during replacement: ${errText(error)}`);
+        result = { status: "retirement_failed" };
+        return result;
+      }
+
+      const fresh = options.replacementMeta();
+      if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) {
+        result = { status: "superseded" };
+        return result;
+      }
+      try {
+        launched = await this.launch(
+          fresh,
+          resumeId,
+          launchGeneration,
+          options.approvedAuthentication,
+        );
+      } catch (error) {
+        this.log(`session ${sessionId} provider launch failed during replacement: ${errText(error)}`);
+      }
+      if (!launched) {
+        const failedEntry = this.active.get(sessionId);
+        if (failedEntry?.launchGeneration === launchGeneration) {
+          this.deleteActiveSession(sessionId, failedEntry, false);
+          try {
+            await this.beginProviderRetirement(sessionId, failedEntry).promise;
+          } catch (error) {
+            this.log(`session ${sessionId} failed replacement disposal: ${errText(error)}`);
+          }
+        }
+        result = this.launchWasSuperseded(sessionId, launchGeneration)
+          ? { status: "superseded" }
+          : { status: "launch_failed" };
+        return result;
+      }
+
+      const replacementEntry = this.active.get(sessionId);
+      if (this.store.readMeta(sessionId)?.status === "stopped") {
+        if (replacementEntry) {
+          this.deleteActiveSession(sessionId, replacementEntry, false);
+          try {
+            await this.beginProviderRetirement(sessionId, replacementEntry).promise;
+          } catch (error) {
+            this.log(`session ${sessionId} stopped replacement disposal failed: ${errText(error)}`);
+          }
+        }
+        launched = false;
+        result = { status: "stopped" };
+        return result;
+      }
+      if (!replacementEntry) {
+        launched = false;
+        result = { status: "launch_failed" };
+        return result;
+      }
+
+      options.onLaunched?.(replacementEntry);
+      const hasQueuedWork = (this.preLaunchQueues.get(sessionId)?.length ?? 0) > 0;
+      this.activatePreLaunchQueue(sessionId);
+      preserveLockForQueue = hasQueuedWork;
+      result = { status: "launched", entry: replacementEntry, queuedWork: hasQueuedWork };
+      return result;
+    } finally {
+      const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
+      const ownsGeneration = this.launchGenerations.get(sessionId) === launchGeneration;
+      const retirementPending = this.closing.has(sessionId);
+      if (!launched && ownsGeneration && !superseded) {
+        this.rejectPreLaunchQueue(sessionId, options.queueFailureReason);
+      }
+      if (this.preLaunchAdmissionGenerations.get(sessionId) === launchGeneration) {
+        this.preLaunchAdmissionGenerations.delete(sessionId);
+      }
+      this.finishLaunchGeneration(sessionId, launchGeneration);
+      if (!launched && !superseded && !retirementPending) this.releaseAdmissionIfInactive(sessionId);
+      else if (!launched && !retirementPending && this.store.readMeta(sessionId)?.status === "stopped") {
+        this.releaseAdmissionIfInactive(sessionId);
+      }
+      if (replacementLockHeld && !preserveLockForQueue && !retirementPending) this.clearLock(sessionId);
+    }
+  }
+
   private async performSelectedProviderAccountSwitch(
     sessionId: string,
     entry: ActiveSession,
@@ -10025,152 +10174,50 @@ export class SessionManager {
       this.parkProviderAccountSwitchFailure(sessionId, pending, errText(error));
       return;
     }
-    this.captureAgentSessionId(sessionId, entry.client);
-    const resumable = this.store.readMeta(sessionId);
-    const resumeId = resumable?.agentSessionId ?? undefined;
-    const hasConversation = (resumable?.seq ?? 0) > 0;
-    if (!resumable || (!resumeId && hasConversation) || (resumeId && !canResumeSession(resumable))) {
-      entry.pendingProviderAccountSwitch = undefined;
-      this.parkProviderAccountSwitchFailure(
-        sessionId,
-        target,
-        "the provider conversation cannot be resumed under another account",
-      );
+    const result = await this.replaceProviderProcess(sessionId, entry, {
+      replacementMeta: () => {
+        const fresh = this.store.readMeta(sessionId);
+        if (!fresh) return undefined;
+        const switched = this.store.patchMeta(
+          sessionId,
+          this.providerAccountBindingPatch(fresh, target),
+        );
+        if (switched) this.store.flush(sessionId);
+        return switched ?? undefined;
+      },
+      queueFailureReason: this.store.readMeta(sessionId)?.status === "stopped"
+        ? "session stopped before the selected-account provider resumed"
+        : "provider could not resume with the selected account",
+      onLaunched: (replacementEntry) => {
+        const latestMeta = this.store.readMeta(sessionId);
+        replacementEntry.pendingProviderAccountSwitch = latestMeta
+          ? this.pendingProviderAccount(latestMeta)
+          : undefined;
+        this.emitEvent(sessionId, {
+          kind: "provider_account_switched",
+          providerAccountId: target.id,
+          providerAccountLabel: target.label,
+          ...(latestMeta?.providerAccountAutomaticallySelected ? { automatic: true } : {}),
+        });
+        const latest = this.store.patchMeta(sessionId, { providerAccountSwitchFailure: undefined });
+        if (latest) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(latest) });
+      },
+    });
+    if (result.status === "launched") {
+      if (!result.queuedWork) this.emitStatus(sessionId, "idle");
+      if (result.entry.pendingProviderAccountSwitch) setImmediate(() => this.scheduleDrain(sessionId));
       return;
     }
-    let switchLockHeld = false;
-    if (resumeId) {
-      if (!this.store.acquireLock(sessionId, this.lockOwner)) {
-        this.parkProviderAccountSwitchFailure(
-          sessionId,
-          target,
-          "this session is being driven by another runner process",
-        );
-        return;
-      }
-      switchLockHeld = true;
-    }
-
-    const launchGeneration = this.beginLaunchGeneration(sessionId);
-    this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
-    const queued = entry.queue.splice(0);
-    if (queued.length) this.preLaunchQueues.set(sessionId, queued);
-    this.deleteActiveSession(sessionId, entry, false, false);
-    this.emitQueue(sessionId);
-    let launched = false;
-    let preserveLockForQueue = false;
-    try {
-      try {
-        const retirement = this.beginProviderRetirement(sessionId, entry, {
-          preserveAdmission: true,
-          preserveLock: true,
-          acceptPromptsDuringHandoff: true,
-        });
-        await retirement.promise;
-        if (this.closing.get(sessionId) === retirement) {
-          throw new Error("provider process retirement is unconfirmed");
-        }
-      } catch (error) {
-        const retirement = this.closing.get(sessionId);
-        if (retirement?.client === entry.client) {
-          retirement.preserveAdmission = false;
-          retirement.preserveLock = false;
-          retirement.acceptPromptsDuringHandoff = false;
-        }
-        this.log(`session ${sessionId} provider disposal failed during account switch: ${errText(error)}`);
-        this.parkProviderAccountSwitchFailure(
-          sessionId,
-          target,
-          "the previous provider could not be stopped",
-        );
-        return;
-      }
-      const fresh = this.store.readMeta(sessionId);
-      if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) return;
-      const switched = this.store.patchMeta(
-        sessionId,
-        this.providerAccountBindingPatch(fresh, target),
-      );
-      if (!switched) return;
-      this.store.flush(sessionId);
-      try {
-        launched = await this.launch(switched, resumeId, launchGeneration);
-      } catch (error) {
-        this.log(`session ${sessionId} provider launch failed during account switch: ${errText(error)}`);
-      }
-      if (!launched) {
-        const failedEntry = this.active.get(sessionId);
-        if (failedEntry?.launchGeneration === launchGeneration) {
-          this.deleteActiveSession(sessionId, failedEntry, false);
-          try {
-            await this.beginProviderRetirement(sessionId, failedEntry).promise;
-          } catch (error) {
-            this.log(`session ${sessionId} failed account-switch replacement disposal: ${errText(error)}`);
-          }
-        }
-        if (this.launchIsCurrent(sessionId, launchGeneration) &&
-            this.store.readMeta(sessionId)?.status !== "stopped") {
-          this.parkProviderAccountSwitchFailure(
-            sessionId,
-            target,
-            "the provider could not resume this conversation with the selected account",
-          );
-        }
-        return;
-      }
-      const reboundEntry = this.active.get(sessionId);
-      if (this.store.readMeta(sessionId)?.status === "stopped") {
-        if (reboundEntry) {
-          this.deleteActiveSession(sessionId, reboundEntry, false);
-          try {
-            await this.beginProviderRetirement(sessionId, reboundEntry).promise;
-          } catch (disposeError) {
-            this.log(`session ${sessionId} stopped account-switch replacement disposal failed: ${errText(disposeError)}`);
-          }
-        }
-        launched = false;
-        return;
-      }
-      const latestMeta = this.store.readMeta(sessionId);
-      const followUp = latestMeta ? this.pendingProviderAccount(latestMeta) : undefined;
-      if (reboundEntry) reboundEntry.pendingProviderAccountSwitch = followUp;
-      this.emitEvent(sessionId, {
-        kind: "provider_account_switched",
-        providerAccountId: target.id,
-        providerAccountLabel: target.label,
-        ...(latestMeta?.providerAccountAutomaticallySelected ? { automatic: true } : {}),
-      });
-      const latest = this.store.patchMeta(sessionId, { providerAccountSwitchFailure: undefined });
-      if (latest) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(latest) });
-      const hasQueuedWork = (this.preLaunchQueues.get(sessionId)?.length ?? 0) > 0;
-      this.activatePreLaunchQueue(sessionId);
-      preserveLockForQueue = hasQueuedWork;
-      if (!hasQueuedWork) this.emitStatus(sessionId, "idle");
-      if (reboundEntry?.pendingProviderAccountSwitch) {
-        setImmediate(() => this.scheduleDrain(sessionId));
-      }
-    } finally {
-      const superseded = this.launchWasSuperseded(sessionId, launchGeneration);
-      const ownsGeneration = this.launchGenerations.get(sessionId) === launchGeneration;
-      const retirementPending = this.closing.has(sessionId);
-      if (!launched && ownsGeneration && !superseded) {
-        this.rejectPreLaunchQueue(
-          sessionId,
-          this.store.readMeta(sessionId)?.status === "stopped"
-            ? "session stopped before the selected-account provider resumed"
-            : "provider could not resume with the selected account",
-        );
-      }
-      if (this.preLaunchAdmissionGenerations.get(sessionId) === launchGeneration) {
-        this.preLaunchAdmissionGenerations.delete(sessionId);
-      }
-      this.finishLaunchGeneration(sessionId, launchGeneration);
-      if (!launched && !superseded && !retirementPending) this.releaseAdmissionIfInactive(sessionId);
-      else if (!launched && !retirementPending && this.store.readMeta(sessionId)?.status === "stopped") {
-        this.releaseAdmissionIfInactive(sessionId);
-      }
-      if (switchLockHeld && !preserveLockForQueue && !retirementPending) this.clearLock(sessionId);
-    }
+    entry.pendingProviderAccountSwitch = undefined;
+    if (result.status === "stopped" || result.status === "superseded") return;
+    const reason = result.status === "not_resumable"
+      ? "the provider conversation cannot be resumed under another account"
+      : result.status === "lock_unavailable"
+      ? "this session is being driven by another runner process"
+      : result.status === "retirement_failed"
+      ? "the previous provider could not be stopped"
+      : "the provider could not resume this conversation with the selected account";
+    this.parkProviderAccountSwitchFailure(sessionId, target, reason);
   }
 
   private resumeDeferredHandoff(sessionId: string): void {
@@ -14951,7 +14998,11 @@ export class SessionManager {
     this.emitEvent(sessionId, { kind: "stderr", text });
   }
 
-  private async preflightProviderAuthentication(meta: SessionMeta, launchGeneration: number): Promise<boolean> {
+  private async preflightProviderAuthentication(
+    meta: SessionMeta,
+    launchGeneration: number,
+    approvedAuthentication?: ApprovedProviderAuthentication,
+  ): Promise<boolean> {
     // Provider-native status commands are themselves general provider executions. Direct WSL's
     // narrow launcher path must not run one outside the prepared boundary before isolation exists.
     if (this.executionIsolation.mode === "bwrap" && meta.context.kind === "wsl" &&
@@ -14970,6 +15021,14 @@ export class SessionManager {
       return false;
     }
     if (observation.status !== "authenticated") return true;
+    if (approvedAuthentication &&
+        current.providerAuthBlock?.recoveryId === approvedAuthentication.recoveryId &&
+        observation.identityId === approvedAuthentication.identityId) {
+      // A changed-account recovery must keep its durable admission barrier until the fresh
+      // persistent process is ready. This launch-local proof allows only the replacement
+      // generation through preflight; it does not clear or resolve the recovery incident.
+      return true;
+    }
     const expected = current.providerAuthBlock?.expectedIdentityId ?? current.providerCredentialIdentityId;
     const expectedEvidence = current.providerAuthBlock?.expectedIdentityEvidence ??
       current.providerCredentialIdentityEvidence;
@@ -15108,7 +15167,10 @@ export class SessionManager {
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
   ): boolean {
     const block = meta.providerAuthBlock;
-    if (!block || block.delivery !== "not_delivered") return false;
+    if (!block) return false;
+    // A prompt received after the authentication barrier is installed is known not to have
+    // crossed into the provider even when the interrupted prompt that created the incident has
+    // uncertain delivery. Retain this newer durable command independently and replay it once.
     // A runner restart resets the in-memory allocator. Observe every durable FIFO coordinate
     // before assigning a newcomer so work submitted after the restart cannot jump ahead of the
     // retained pre-crash messages whose journal handles have not been reclaimed yet.
@@ -15832,6 +15894,48 @@ export class SessionManager {
       const retainedEvidence = targetOnly
         ? observation.identityEvidence
         : mergeProviderAuthIdentityEvidence(block.expectedIdentityEvidence, observation.identityEvidence);
+      const acceptedIdentityChanged = targetOnly && meta.driver === "codex-app-server" &&
+        !!observation.identityId &&
+        !compareProviderAuthIdentity(
+          block.expectedIdentityId,
+          block.expectedIdentityEvidence,
+          observation,
+        ).matches;
+      const candidateSessionId = meta.sessionId;
+      const staleEntry = acceptedIdentityChanged ? this.active.get(candidateSessionId) : undefined;
+      if (staleEntry) {
+        const replacement = await this.replaceProviderProcess(candidateSessionId, staleEntry, {
+          replacementMeta: () => this.store.readMeta(candidateSessionId) ?? undefined,
+          queueFailureReason: "provider could not resume after authentication changed",
+          approvedAuthentication: {
+            recoveryId: block.recoveryId,
+            identityId: observation.identityId!,
+          },
+        });
+        if (replacement.status !== "launched") {
+          const current = this.store.readMeta(candidateSessionId);
+          if (current?.providerAuthBlock?.recoveryId === block.recoveryId && current.status !== "stopped") {
+            const detail = replacement.status === "not_resumable"
+              ? "The existing Codex conversation has no resumable thread identifier. The stale provider was not reused."
+              : replacement.status === "lock_unavailable"
+              ? "Another runner owns this session. Retry authentication recovery after that runner releases it."
+              : replacement.status === "retirement_failed"
+              ? "The stale Codex process could not be stopped. It was not reused; retry authentication recovery after it exits."
+              : "Codex could not resume the existing conversation with the accepted account. Retry authentication recovery.";
+            const pendingApproval = this.providerAuthenticationProjection(current, current.providerAuthBlock, detail);
+            const updated = this.store.patchMeta(candidateSessionId, {
+              pendingApproval,
+              status: "input_required",
+            });
+            this.store.flush(candidateSessionId);
+            this.emitStatus(candidateSessionId, "input_required", detail);
+            if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+          }
+          continue;
+        }
+        meta = this.store.readMeta(candidateSessionId) ?? meta;
+        block = meta.providerAuthBlock ?? block;
+      }
       // A persisted retry can carry an ordinal greater than this process's fresh in-memory
       // high-water. Observe it before clearing the durable block: once prompts are admitted again,
       // every newer prompt must sort after the retained pre-crash work even if it races this
