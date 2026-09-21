@@ -156,7 +156,7 @@ async function waitForValue<T>(
 }
 
 function authenticatedUiUrl(wsBase: string, token: string): string {
-  return `${wsBase}/ui?token=${encodeURIComponent(token)}`;
+  return `${wsBase}/ui?protocolVersion=${PROTOCOL_VERSION}&token=${encodeURIComponent(token)}`;
 }
 
 async function closeAfter(socket: StrictSocket, sendInvalid: () => void): Promise<{ code: number; reason: string }> {

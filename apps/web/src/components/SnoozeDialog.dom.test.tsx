@@ -1081,6 +1081,18 @@ test("Someday is capability-gated, saves without a timer, and can be edited into
   assert.equal(saved[1]?.expectedRevision, 2);
 
   await act(async () => { secondRoot.unmount(); });
+  const firedRoot = createRoot(container);
+  await act(async () => {
+    firedRoot.render(<SnoozeDialog
+      reminder={{ ...existing, state: "fired", firedAt: 3, wakeReason: "agent_response" }}
+      supportsSomeday
+      onClose={() => undefined}
+      onSave={async () => undefined}
+    />);
+  });
+  assert.match(container.querySelector(".snooze-preview")?.textContent ?? "", /Return Schedule/);
+  assert.match(container.querySelector(".snooze-preview")?.textContent ?? "", /Time Zone: Not Applicable/);
+  await act(async () => { firedRoot.unmount(); });
   container.remove();
 });
 

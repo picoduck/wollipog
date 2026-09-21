@@ -138,6 +138,8 @@ export function SnoozeDialog({
     : parsed
     ? formatReminderInstant(parsed.scheduledFor, parsed.timeZone)
     : invalidScheduleMessage(expression, exact, selectedPreset, supportsSomeday);
+  const showingSomeday = parsed?.scheduleKind === "someday" ||
+    (!scheduleTouched && loadedReminder?.scheduleKind === "someday");
 
   useLayoutEffect(() => {
     if (!focusExpressionAfterReloadRef.current) return;
@@ -459,10 +461,10 @@ export function SnoozeDialog({
           onChange={setWakePolicy}
         />
         <div className="snooze-preview" role="status" aria-live="polite">
-          <strong>Scheduled Instant</strong>
+          <strong>{showingSomeday ? "Return Schedule" : "Scheduled Instant"}</strong>
           <span>{scheduleMessage}</span>
           <span>Schedule Source: {scheduleSource}</span>
-          <span>Time Zone: {parsed?.scheduleKind === "someday" ? "Not Applicable" : timeZone}</span>
+          <span>Time Zone: {showingSomeday ? "Not Applicable" : timeZone}</span>
         </div>
       </form>
     </Modal>

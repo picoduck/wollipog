@@ -1,4 +1,5 @@
 import { Channel, invoke } from "@tauri-apps/api/core";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import type { UiConnectionRuntime, UiSocket, UiSocketCloseEvent } from "./ui-transport.js";
 
 export type NativeUiEvent =
@@ -48,6 +49,7 @@ class NativeUiSocket implements UiSocket {
     this.opened = desktop.invoke<void>("remote_ui_open", {
       runtimeKey,
       socketId,
+      protocolVersion: PROTOCOL_VERSION,
       onEvent: channel,
     }).catch(() => this.fail());
     queueMicrotask(() => {

@@ -1158,6 +1158,103 @@ test("reminder snapshots and live fan-out require exact owner and session access
   assert.deepEqual(messages.get("owner"), []);
 });
 
+test("legacy UI clients never receive the no-timer shape or expose pending Someday sessions as Active", () => {
+  const liveSession = {
+    id: "someday-session",
+    runnerId: "runner",
+    workspaceId: null,
+    projectId: null,
+    title: "Someday Session",
+    status: "idle",
+    archived: false,
+    pendingApproval: null,
+  } as SessionView;
+  const someday = (state: "pending" | "fired"): SessionReminderView => ({
+    reminderId: "rem-someday",
+    sessionId: liveSession.id,
+    scheduleKind: "someday",
+    originalExpression: "Someday",
+    wakePolicy: "regardless",
+    state,
+    revision: state === "pending" ? 1 : 2,
+    createdAt: 1,
+    updatedAt: 2,
+    ...(state === "fired" ? { firedAt: 2, wakeReason: "agent_response" as const } : {}),
+  });
+  const timed: SessionReminderView = {
+    reminderId: "rem-someday",
+    sessionId: liveSession.id,
+    scheduleKind: "timed",
+    scheduledFor: 10_000,
+    timeZone: "UTC",
+    originalExpression: "In 1 Hour",
+    wakePolicy: "regardless",
+    state: "pending",
+    revision: 3,
+    createdAt: 1,
+    updatedAt: 3,
+  };
+  const db = {
+    ...snapshotDb,
+    listSessionsForPrincipal: () => [liveSession],
+    listSessionReminders: () => [someday("pending")],
+    canAccessSession: () => true,
+    getSession: () => liveSession,
+  } as unknown as ControlPlaneDb;
+  const hub = new Hub(db);
+  const messages = new Map<string, Array<Record<string, unknown>>>();
+  const add = (name: string, uiProtocolVersion: number) => {
+    const received: Array<Record<string, unknown>> = [];
+    messages.set(name, received);
+    hub.addUiClient({ send: (data) => received.push(JSON.parse(data) as Record<string, unknown>) }, {
+      deviceId: name,
+      uiProtocolVersion,
+      principal: {
+        kind: "human", actorId: "user-a", userId: "user-a", userName: "User A",
+        organizationId: "org", organizationName: "Org", role: "viewer", deviceId: name,
+        localBootstrap: false,
+      },
+      close: () => {},
+    });
+  };
+
+  add("legacy", 172);
+  add("current", 173);
+  assert.deepEqual((messages.get("legacy")![0]!.sessions as SessionView[]).map(({ id }) => id), []);
+  assert.deepEqual(messages.get("legacy")![0]!.reminders, []);
+  assert.deepEqual((messages.get("current")![0]!.sessions as SessionView[]).map(({ id }) => id), [liveSession.id]);
+  assert.equal((messages.get("current")![0]!.reminders as SessionReminderView[])[0]?.scheduleKind, "someday");
+  for (const received of messages.values()) received.length = 0;
+
+  hub.sessionReminderChanged("user-a", timed);
+  assert.deepEqual(messages.get("legacy")?.map(({ type }) => type), ["session_upsert", "session_reminder_upsert"]);
+  assert.deepEqual(messages.get("current")?.map(({ type }) => type), ["session_reminder_upsert"]);
+  for (const received of messages.values()) received.length = 0;
+
+  hub.sessionReminderChanged("user-a", someday("pending"));
+  assert.deepEqual(messages.get("legacy")?.map(({ type }) => type), ["session_removed"]);
+  assert.deepEqual(messages.get("current")?.map(({ type }) => type), ["session_reminder_upsert"]);
+  for (const received of messages.values()) received.length = 0;
+
+  hub.sessionChanged(liveSession, false);
+  assert.deepEqual(messages.get("legacy"), [], "ordinary deltas cannot reveal a compatibility-hidden session");
+  assert.deepEqual(messages.get("current")?.map(({ type }) => type), ["session_upsert"]);
+  for (const received of messages.values()) received.length = 0;
+
+  hub.sessionReminderRemoved("user-a", liveSession.id);
+  assert.deepEqual(messages.get("legacy")?.map(({ type }) => type), ["session_upsert"]);
+  assert.deepEqual(messages.get("current")?.map(({ type }) => type), ["session_reminder_removed"]);
+  for (const received of messages.values()) received.length = 0;
+
+  hub.sessionReminderChanged("user-a", someday("pending"));
+  for (const received of messages.values()) received.length = 0;
+
+  hub.sessionReminderChanged("user-a", someday("fired"));
+  assert.deepEqual(messages.get("legacy")?.map(({ type }) => type), ["session_upsert"]);
+  assert.deepEqual(messages.get("current")?.map(({ type }) => type), ["session_reminder_upsert"]);
+  assert.equal(messages.get("legacy")?.some(({ type }) => type === "session_reminder_upsert"), false);
+});
+
 test("generic reminder fan-out fails closed without exact ownership", () => {
   const db = { ...snapshotDb, canAccessSession: () => true } as unknown as ControlPlaneDb;
   const hub = new Hub(db);

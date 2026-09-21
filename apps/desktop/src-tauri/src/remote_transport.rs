@@ -455,6 +455,7 @@ fn bearer(secret: &SecretString) -> Result<HeaderValue, String> {
 fn websocket_request(
     endpoint: &CanonicalRemoteOrigin,
     secret: &SecretString,
+    protocol_version: u32,
 ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, String> {
     let mut socket_url = Url::parse(&endpoint.origin)
         .map_err(|_| "The remote UI address is invalid.".to_string())?;
@@ -467,6 +468,9 @@ fn websocket_request(
         .set_scheme(scheme)
         .map_err(|_| "The remote UI address is invalid.".to_string())?;
     socket_url.set_path("/ui");
+    socket_url
+        .query_pairs_mut()
+        .append_pair("protocolVersion", &protocol_version.to_string());
     let mut request = socket_url
         .as_str()
         .into_client_request()
@@ -1068,6 +1072,7 @@ pub(crate) async fn remote_ui_open(
     transport: State<'_, RemoteTransport>,
     runtime_key: String,
     socket_id: String,
+    protocol_version: u32,
     on_event: Channel<NativeUiEvent>,
 ) -> Result<(), String> {
     valid_identifier(&runtime_key, MAX_RUNTIME_KEY_BYTES, "runtime")?;
@@ -1083,6 +1088,7 @@ pub(crate) async fn remote_ui_open(
             lease,
             receiver,
             socket_cancel,
+            protocol_version,
             on_event,
         )
         .await;
@@ -1097,6 +1103,7 @@ async fn run_socket(
     lease: RuntimeLease,
     mut commands: mpsc::Receiver<SocketCommand>,
     mut socket_cancel: watch::Receiver<bool>,
+    protocol_version: u32,
     on_event: Channel<NativeUiEvent>,
 ) {
     let mut runtime_cancel = lease.cancel.subscribe();
@@ -1126,7 +1133,7 @@ async fn run_socket(
         let _ = on_event.send(NativeUiEvent::Close { code: 1008 });
         return;
     }
-    let request = match websocket_request(&lease.profile_origin, &lease.secret) {
+    let request = match websocket_request(&lease.profile_origin, &lease.secret, protocol_version) {
         Ok(request) => request,
         Err(_) => {
             let _ = on_event.send(NativeUiEvent::Error);
@@ -1598,6 +1605,7 @@ mod tests {
             lease,
             receiver,
             socket_cancel,
+            173,
             channel,
         ));
 
@@ -1710,8 +1718,11 @@ mod tests {
     fn websocket_handshake_keeps_the_bearer_out_of_the_url_and_marks_it_sensitive() {
         let endpoint = canonical_remote_origin("https://example.test:4317").unwrap();
         let secret = SecretString::from("sentinel-pairing-token".to_string());
-        let request = websocket_request(&endpoint, &secret).unwrap();
-        assert_eq!(request.uri().to_string(), "wss://example.test:4317/ui");
+        let request = websocket_request(&endpoint, &secret, 173).unwrap();
+        assert_eq!(
+            request.uri().to_string(),
+            "wss://example.test:4317/ui?protocolVersion=173"
+        );
         assert!(!request.uri().to_string().contains("sentinel"));
         let authorization = request.headers().get(AUTHORIZATION).unwrap();
         assert_eq!(authorization, "Bearer sentinel-pairing-token");
@@ -1756,7 +1767,7 @@ mod tests {
         });
         let endpoint = canonical_remote_origin(&format!("http://{address}")).unwrap();
         let secret = SecretString::from("sentinel-pairing-token".to_string());
-        let request = websocket_request(&endpoint, &secret).unwrap();
+        let request = websocket_request(&endpoint, &secret, 173).unwrap();
         let mut socket = connect_websocket(&endpoint, request, WebSocketConfig::default())
             .await
             .unwrap();
@@ -1766,7 +1777,7 @@ mod tests {
             "world"
         );
         let (uri, authorization) = received.await.unwrap();
-        assert_eq!(uri, "/ui");
+        assert_eq!(uri, "/ui?protocolVersion=173");
         assert_eq!(authorization, "Bearer sentinel-pairing-token");
         assert!(!uri.contains("sentinel"));
         server.await.unwrap();
@@ -1785,7 +1796,7 @@ mod tests {
         let started = Instant::now();
         assert!(connect_websocket(
             &endpoint,
-            websocket_request(&endpoint, &secret).unwrap(),
+            websocket_request(&endpoint, &secret, 173).unwrap(),
             WebSocketConfig::default(),
         )
         .await
