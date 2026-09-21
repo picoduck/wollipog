@@ -1,6 +1,7 @@
 import { browserRandomUUID } from "../browser-crypto.js";
 import {
   type KeyboardEvent,
+  type MouseEvent as ReactMouseEvent,
   type ReactNode,
   useCallback,
   useEffect,
@@ -245,6 +246,9 @@ const COMPOSER_POINTER_CLICK_FALLBACK_MS = 500;
 const EARLIER_ACTIVITY_TRIGGER_PX = 160;
 const EARLIER_ACTIVITY_REARM_DISTANCE_PX = 32;
 const EARLIER_ACTIVITY_REARM_FRAMES = 8;
+/** The virtual list owns an eight-frame post-prepend measurement window. Reveal keyboard focus
+ * after that window plus two boundary frames so its final correction cannot hide the fallback. */
+const EARLIER_ACTIVITY_FOCUS_REVEAL_FRAMES = 10;
 /** One reader gesture rarely maps to one scroll event: a wheel tick or reading key under smooth
  * scrolling, and a touch drag with its momentum, each emit a stream of scroll events. An armed
  * traversal survives that stream while it keeps moving upward and expires after this idle gap. */
@@ -2130,7 +2134,10 @@ function SessionDetailLoaded({
     olderInFlightRef.current = true;
     // Every dispatch carries the base this page was requested below. A reopen re-reads the tail,
     // so a page that outlives its window must be dropped rather than prepended under a newer one.
-    beginOlderEventsLoad(sessionId, base, epoch);
+    if (!beginOlderEventsLoad(sessionId, base, epoch)) {
+      olderInFlightRef.current = false;
+      return false;
+    }
     void loadOlderSessionEvents(sessionId, base, epoch, api.getSessionEventTailPage, alignToTurn)
       .then((page) => {
         if (page) {
@@ -2396,7 +2403,7 @@ function SessionDetailLoaded({
     requestEarlierFromInputAtHead();
   }, [requestEarlierFromInputAtHead]);
 
-  const loadEarlierFromControl = useCallback(() => {
+  const loadEarlierFromControl = useCallback((): boolean => {
     const state = automaticEarlierLoadRef.current;
     if (state.historyKey !== timelineHistoryKey) {
       cancelEarlierActivitySettle();
@@ -2407,11 +2414,12 @@ function SessionDetailLoaded({
       state.readerStarted = false;
     }
     const base = eventWindow?.baseSeq;
-    if (base === undefined || !loadOlder()) return;
+    if (base === undefined || !loadOlder()) return false;
     clearEarlierActivityIntent();
     state.readerStarted = true;
     state.nextTriggerTop = null;
     state.requestedBase = base;
+    return true;
   }, [cancelEarlierActivitySettle, clearEarlierActivityIntent, eventWindow?.baseSeq, loadOlder, timelineHistoryKey]);
 
   // Once a prepend settles, require a fresh upward traversal before requesting another page. The
@@ -4793,11 +4801,13 @@ function SessionDetailLoaded({
                     ? "Earlier activity loaded."
                     : ""}
               </div>
-              {eventWindow?.hasOlder === true && items.length > 0 && openingHistoryFillSettled && (
+              {items.length > 0 && openingHistoryFillSettled && (
                 <EarlierActivityControl
-                  loading={eventWindow.loadingOlder}
-                  error={eventWindow.error}
+                  available={eventWindow?.hasOlder === true}
+                  loading={eventWindow?.loadingOlder === true}
+                  error={eventWindow?.error ?? null}
                   onLoad={loadEarlierFromControl}
+                  fallbackFocusRef={scrollRef}
                 />
               )}
               {transcript.body !== "timeline" && standaloneRequestCard}
@@ -6938,39 +6948,129 @@ function TranscriptSkeleton() {
 
 /** Head of a bounded window: the transcript continues above, but only on request. Rendering it as a
  * real button keeps the reach-back available without a pointer scroll. */
-function EarlierActivityControl({
+export function EarlierActivityControl({
+  available,
   loading,
   error,
   onLoad,
+  fallbackFocusRef,
 }: {
+  available: boolean;
   loading: boolean;
   error: string | null;
-  onLoad: () => void;
+  onLoad: () => boolean;
+  fallbackFocusRef: { current: HTMLElement | null };
 }) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  const actionRef = useRef<HTMLButtonElement>(null);
+  const keyboardRequestRef = useRef(false);
+  const loadingFocusEstablishedRef = useRef(false);
+
+  useLayoutEffect(() => {
+    if (!keyboardRequestRef.current) return;
+    const root = rootRef.current;
+    if (!root) return;
+    if (loading) {
+      // Hand focus to the persistent loading target once. Later in-flight state changes must not
+      // reclaim it if the reader has already moved to another control.
+      if (!loadingFocusEstablishedRef.current) {
+        root.focus();
+        loadingFocusEstablishedRef.current = true;
+      }
+      return;
+    }
+    loadingFocusEstablishedRef.current = false;
+
+    if (root.ownerDocument.activeElement !== root) {
+      keyboardRequestRef.current = false;
+      return;
+    }
+    if (!available) {
+      keyboardRequestRef.current = false;
+      fallbackFocusRef.current?.focus();
+      return;
+    }
+    if (error) {
+      keyboardRequestRef.current = false;
+      actionRef.current?.focus();
+      return;
+    }
+
+    // A successful prepend corrects the virtual-list anchor in the following animation frames.
+    // Restore the fallback afterwards so its native focus reveal is not immediately undone. Keep
+    // checking ownership because the reader may move to another control while those frames settle.
+    const view = root.ownerDocument.defaultView;
+    if (!view) return;
+    let revealFrame = 0;
+    const revealAfterAnchor = (frames: number) => {
+      revealFrame = view.requestAnimationFrame(() => {
+        if (root.ownerDocument.activeElement !== root) {
+          keyboardRequestRef.current = false;
+          return;
+        }
+        if (frames > 1) {
+          revealAfterAnchor(frames - 1);
+          return;
+        }
+        keyboardRequestRef.current = false;
+        const action = actionRef.current;
+        action?.focus();
+        action?.scrollIntoView({ block: "nearest" });
+      });
+    };
+    revealAfterAnchor(EARLIER_ACTIVITY_FOCUS_REVEAL_FRAMES);
+    return () => {
+      if (revealFrame) view.cancelAnimationFrame(revealFrame);
+    };
+  }, [available, error, fallbackFocusRef, loading]);
+
+  const load = (event: ReactMouseEvent<HTMLButtonElement>) => {
+    // Keyboard and assistive-technology activation dispatch a click with no click count. Pointer
+    // users keep the browser's normal focus behavior instead of being moved after the request.
+    const started = onLoad();
+    keyboardRequestRef.current = event.detail === 0 && started;
+    loadingFocusEstablishedRef.current = false;
+  };
+
+  // Keep the root's DOM identity for the exhaustion commit so focus ownership can be checked
+  // before moving it to the stable transcript region. This empty anchor has no layout or a11y
+  // surface and remains inert for sessions that opened with no earlier history.
   if (loading) {
     return (
-      <div className="transcript-earlier-activity" data-state="loading">
+      <div
+        ref={rootRef}
+        className="transcript-earlier-activity"
+        data-state="loading"
+        tabIndex={-1}
+        role="group"
+        aria-label="Loading Earlier Activity"
+      >
         <Spinner decorative />
         <span>Loading earlier activity…</span>
       </div>
     );
   }
 
+  if (!available) {
+    return <div ref={rootRef} data-earlier-activity-focus-anchor tabIndex={-1} aria-hidden="true" />;
+  }
+
   if (error) {
     return (
-      <div className="transcript-earlier-activity error" data-state="error">
+      <div ref={rootRef} className="transcript-earlier-activity error" data-state="error" tabIndex={-1}>
         <span>{error}</span>
-        <button className="btn ghost sm" type="button" onClick={onLoad}>Retry</button>
+        <button ref={actionRef} className="btn ghost sm" type="button" onClick={load}>Retry</button>
       </div>
     );
   }
 
   return (
-    <div className="transcript-earlier-activity" data-state="idle">
+    <div ref={rootRef} className="transcript-earlier-activity" data-state="idle" tabIndex={-1}>
       <button
+        ref={actionRef}
         className="icon-btn transcript-earlier-activity-fallback"
         type="button"
-        onClick={onLoad}
+        onClick={load}
         aria-label="Load Earlier Activity"
         title="Load Earlier Activity"
       >

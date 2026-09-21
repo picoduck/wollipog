@@ -1529,7 +1529,7 @@ interface StoreValue extends State {
     eventEpoch?: number,
     turnAligned?: boolean,
   ) => void;
-  beginOlderEventsLoad: (sessionId: string, requestedBase: number, eventEpoch?: number) => void;
+  beginOlderEventsLoad: (sessionId: string, requestedBase: number, eventEpoch?: number) => boolean;
   failOlderEventsLoad: (sessionId: string, error: string, requestedBase: number, eventEpoch?: number) => void;
   eventWindowBase: (sessionId: string) => number;
   loadSession: (session: SessionView) => void;
@@ -1666,7 +1666,11 @@ export class Store {
     sessionId: string,
     requestedBase: number,
     eventEpoch = sessionEventEpoch(this.state.sessions.get(sessionId)),
-  ): void => this.dispatch({ type: "events_older_loading", sessionId, eventEpoch, requestedBase });
+  ): boolean => {
+    const before = this.state;
+    this.dispatch({ type: "events_older_loading", sessionId, eventEpoch, requestedBase });
+    return this.state !== before;
+  };
   failOlderEventsLoad = (
     sessionId: string,
     error: string,

@@ -218,13 +218,50 @@ test("a failed automatic load exposes Retry and a successful retry restores the 
   await expect(retry).toBeVisible();
   await expect(announcement).toHaveText("Could not load earlier activity. Retry is available.");
 
-  await retry.click();
+  await retry.focus();
+  await page.keyboard.press("Enter");
   await expect(control).toHaveAttribute("data-state", "loading");
+  await expect(control).toBeFocused();
   await expect(announcement).toHaveText("Loading earlier activity.");
   await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("3");
   await expect(announcement).toHaveText("Earlier activity loaded.");
   await expect(control).toHaveAttribute("data-state", "idle");
-  await expect(control.getByRole("button", { name: "Load Earlier Activity" })).toBeVisible();
+  await expect(control.getByRole("button", { name: "Load Earlier Activity" })).toBeFocused();
+  await expect(control.getByRole("button", { name: "Load Earlier Activity" })).toBeInViewport();
+});
+
+test("keyboard fallback activation keeps focus through loading and history exhaustion", async ({ page }) => {
+  await page.goto(
+    "/recovery-notice-e2e.html?pagination=resolve&one-earlier-page=1&pagination-delay=300&height=800&width=1000",
+  );
+  const reader = page.locator(".detail-scroll");
+  const control = page.locator(".transcript-earlier-activity");
+  await positionPausedReader(page, reader, 0);
+
+  const fallback = control.getByRole("button", { name: "Load Earlier Activity" });
+  await fallback.focus();
+  await page.keyboard.press("Enter");
+  await expect(control).toHaveAttribute("data-state", "loading");
+  await expect(control).toBeFocused();
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
+  await expect(control).toHaveCount(0);
+  await expect(reader).toBeFocused();
+});
+
+test("pointer fallback activation does not force focus through pagination", async ({ page }) => {
+  await page.goto(
+    "/recovery-notice-e2e.html?pagination=resolve&pagination-delay=300&height=800&width=1000",
+  );
+  const reader = page.locator(".detail-scroll");
+  const control = page.locator(".transcript-earlier-activity");
+  await positionPausedReader(page, reader, 0);
+
+  await control.getByRole("button", { name: "Load Earlier Activity" }).click();
+  await expect(control).toHaveAttribute("data-state", "loading");
+  await expect(control).not.toBeFocused();
+  await expect.poll(() => page.locator("body").getAttribute("data-tail-request-count")).toBe("2");
+  await expect(control).toHaveAttribute("data-state", "idle");
+  await expect(control.getByRole("button", { name: "Load Earlier Activity" })).not.toBeFocused();
 });
 
 test("exhausting earlier history removes the fallback and ignores further head input", async ({ page }) => {
