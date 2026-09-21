@@ -538,6 +538,7 @@ export function SkillsView() {
                     desired,
                     reported: machine?.reported,
                     skillName: detail.name,
+                    providerAccounts: runner.providerAccounts,
                   });
                   const unmanaged = reportedUnmanagedSkills(machine?.reported);
                   const removals = reportedSkillLinkRemovals(machine?.reported);
@@ -565,8 +566,12 @@ export function SkillsView() {
                           <h5>Unmanaged Skills</h5>
                           <ul>
                             {unmanaged.map((entry) => (
-                              <li key={`${entry.agentId}:${entry.name}`}>
+                              <li key={`${entry.providerAccountId ?? "legacy"}:${entry.agentId}:${entry.name}`}>
                                 <strong>{entry.name}</strong>
+                                {entry.providerAccountId && <span className="muted"> · {
+                                  runner.providerAccounts?.find((account) => account.id === entry.providerAccountId)?.label ??
+                                    "Provider Account"
+                                }</span>}
                                 <span className="muted"> · {entry.agentId}</span>
                                 {entry.description && <span className="muted"> — {entry.description}</span>}
                               </li>
@@ -597,6 +602,10 @@ export function SkillsView() {
                                 {removals.map((entry, index) => (
                                   <li key={`${entry.path}:${entry.reason}:${index}`}>
                                     <strong>{entry.path}</strong>
+                                    {entry.providerAccountId && <span className="muted"> · {
+                                      runner.providerAccounts?.find((account) => account.id === entry.providerAccountId)?.label ??
+                                        "Provider Account"
+                                    }</span>}
                                     <span className="muted"> — {entry.reason}</span>
                                   </li>
                                 ))}

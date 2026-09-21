@@ -112,6 +112,39 @@ test("native placeholders are replaced by authoritative WSL link state", () => {
   assert.equal(merged.unmanaged.length, 1);
 });
 
+test("WSL merging preserves base and sibling provider-account outcomes", () => {
+  const merged = mergeWslSkillsResult({
+    deployed: [
+      { name: "review", digest, links: [
+        { agentId: "claude", status: "linked" },
+        { agentId: "codex-wsl-Ubuntu", status: "unsupported" },
+      ] },
+      { name: "review", digest, providerAccountId: "work",
+        links: [{ agentId: "codex", status: "conflict", detail: "Unmanaged directory" }] },
+      { name: "review", digest, providerAccountId: "personal",
+        links: [{ agentId: "codex", status: "linked" }] },
+    ],
+    unmanaged: [],
+    removedLinks: [],
+  }, {
+    deployed: [{ name: "review", digest,
+      links: [{ agentId: "codex-wsl-Ubuntu", status: "linked" }] }],
+    unmanaged: [],
+    removedLinks: [],
+  }, agents);
+
+  assert.deepEqual(merged.deployed, [
+    { name: "review", digest, links: [
+      { agentId: "claude", status: "linked" },
+      { agentId: "codex-wsl-Ubuntu", status: "linked" },
+    ] },
+    { name: "review", digest, providerAccountId: "work",
+      links: [{ agentId: "codex", status: "conflict", detail: "Unmanaged directory" }] },
+    { name: "review", digest, providerAccountId: "personal",
+      links: [{ agentId: "codex", status: "linked" }] },
+  ]);
+});
+
 test("native placeholders remain for WSL agents the adapter cannot safely reconcile", () => {
   const unreconciled: AgentDefinition[] = [
     { ...agents[1]!, id: "invalid-distro", context: { kind: "wsl", distro: "../Ubuntu" } },

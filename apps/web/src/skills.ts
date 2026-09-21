@@ -33,7 +33,7 @@ export interface SkillVersionSummary {
   files?: SkillFile[];
   gitSource?: SkillGitSource & { path: string; commit: string };
   machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number;
-    context?: AgentContext };
+    context?: AgentContext; providerAccountId?: string };
 }
 
 export interface SkillGitSource { url: string; ref: string; subdirectory: string }
@@ -66,6 +66,7 @@ export interface MachineSkillAdoptionResult {
   status: "adopted" | "rejected" | "recovery_required";
   operationId?: string;
   backupDirectory?: string;
+  providerAccountId?: string;
   error?: string;
 }
 export interface MachineSkillRecovery {
@@ -300,25 +301,37 @@ export function skillDeployBadge(input: {
   desired: Pick<RunnerDesiredSkill, "versionDigest" | "targets"> | undefined;
   reported: ReportedSkillsState | null | undefined;
   skillName: string;
+  providerAccounts?: ReadonlyArray<{ id: string; label: string }>;
 }): SkillDeployBadge {
   if (!input.runnerOnline) return badge("offline");
   if (input.loading) return badge("pending", "Skills status has not loaded.");
   if (input.loadError) return badge("error", input.loadError);
   if (!input.desired) return badge("pending", "No assignment targets this machine yet.");
-  const deployed = input.reported?.deployed?.find((entry) => entry.name === input.skillName);
-  if (!deployed) {
+  const deployed = input.reported?.deployed?.filter((entry) => entry.name === input.skillName) ?? [];
+  if (!deployed.length) {
     return input.reported?.error
       ? badge("error", input.reported.error)
       : badge("pending", "This machine has not reported this skill yet.");
   }
-  const links = deployed.links ?? [];
-  const conflicted = links.find((link) => link.status === "conflict");
-  if (conflicted) return badge("conflict", conflicted.detail ?? `A conflicting file blocks ${conflicted.agentId}.`);
-  const failed = links.find((link) => link.status === "error" || link.status === "unsupported");
-  if (deployed.error || failed) return badge("error", deployed.error ?? failed?.detail);
-  if (deployed.digest !== input.desired.versionDigest) {
+  const scopedDetail = (row: DeployedSkillState, detail: string | undefined) => {
+    if (!row.providerAccountId) return detail;
+    const label = input.providerAccounts?.find((account) => account.id === row.providerAccountId)?.label ??
+      "Provider Account";
+    return `${label}: ${detail ?? "deployment did not succeed"}`;
+  };
+  for (const row of deployed) {
+    const conflicted = row.links?.find((link) => link.status === "conflict");
+    if (conflicted) return badge("conflict", scopedDetail(row,
+      conflicted.detail ?? `A conflicting file blocks ${conflicted.agentId}.`));
+  }
+  for (const row of deployed) {
+    const failed = row.links?.find((link) => link.status === "error" || link.status === "unsupported");
+    if (row.error || failed) return badge("error", scopedDetail(row, row.error ?? failed?.detail));
+  }
+  if (deployed.some((row) => row.digest !== input.desired!.versionDigest)) {
     return badge("pending", "An older version is deployed. Sync to update it.");
   }
+  const links = deployed.flatMap((row) => row.links ?? []);
   const linked = new Set(links.filter((link) => link.status === "linked").map((link) => link.agentId));
   const missing = input.desired.targets.filter((target) => !linked.has(target.agentId));
   if (missing.length) {

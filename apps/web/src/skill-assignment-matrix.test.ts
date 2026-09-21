@@ -38,6 +38,65 @@ test("link errors and conflicts remain visible", () => {
   failed.reported!.error = "Sync failed";
   assert.equal(skillAgentMatrixCell(runner, agent, "review", failed).reported, "Error");
 });
+test("account-scoped matrix rows aggregate per agent without hiding sibling conflicts", () => {
+  const accountRunner = {
+    ...runner,
+    protocolVersion: 172,
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "codex", authStatus: "authenticated" },
+    ],
+  } as RunnerView;
+  const scoped = state();
+  scoped.reported!.deployed = [
+    { name: "review", digest: "digest", links: [{ agentId: "claude", status: "linked" }] },
+    { name: "review", digest: "digest", providerAccountId: "work",
+      links: [{ agentId: agent.id, status: "linked" }] },
+    { name: "review", digest: "digest", providerAccountId: "personal",
+      links: [{ agentId: agent.id, status: "conflict", detail: "Unmanaged directory" }] },
+  ];
+  assert.deepEqual(skillAgentMatrixCell(accountRunner, agent, "review", scoped), {
+    desired: "Manual Only",
+    reported: "Conflict",
+    detail: "Personal: Unmanaged directory",
+  });
+
+  scoped.reported!.deployed[2]!.links[0] = { agentId: agent.id, status: "linked" };
+  assert.deepEqual(skillAgentMatrixCell(accountRunner, agent, "review", scoped), {
+    desired: "Manual Only",
+    reported: "Linked",
+    detail: undefined,
+  });
+});
+test("account-scoped native rows do not make a healthy WSL link look unreported", () => {
+  const wslAgent = { ...agent, id: "codex-wsl-Ubuntu",
+    context: { kind: "wsl" as const, distro: "Ubuntu" } };
+  const accountRunner = {
+    ...runner,
+    os: "windows",
+    protocolVersion: 172,
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "codex", authStatus: "authenticated" },
+    ],
+  } as RunnerView;
+  const scoped: RunnerSkillsResponse = {
+    desired: [{ name: "review", versionDigest: "digest",
+      targets: [{ agentId: wslAgent.id, invocation: "manual" }] }],
+    reported: { deployed: [
+      { name: "review", digest: "digest", links: [{ agentId: wslAgent.id, status: "linked" }] },
+      { name: "review", digest: "digest", providerAccountId: "work",
+        links: [{ agentId: agent.id, status: "linked" }] },
+      { name: "review", digest: "digest", providerAccountId: "personal",
+        links: [{ agentId: agent.id, status: "linked" }] },
+    ] },
+  };
+  assert.deepEqual(skillAgentMatrixCell(accountRunner, wslAgent, "review", scoped), {
+    desired: "Manual Only",
+    reported: "Linked",
+    detail: undefined,
+  });
+});
 test("unsupported WSL context details pass through to the assignment matrix", () => {
   const failed = state();
   failed.reported!.deployed![0]!.links[0] = {

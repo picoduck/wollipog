@@ -133,12 +133,12 @@ import { ProviderLoginSupervisor } from "./provider-login.js";
 import {
   agentForProviderAccount,
   agentWithDefaultProviderAccount,
-  agentsWithoutConfiguredProviderAccounts,
   mergeProviderAccountAuthStatus,
   providerAccountDefinition,
   providerAccountEnvironment,
   providerForDriver,
   selectProviderAccount,
+  skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
@@ -1273,7 +1273,12 @@ function startTrackedSession(
  * arrives on this process; removal sweeps and store GC never run before then, so a fresh runner
  * cannot tear down links deployed by its previous incarnation on a scan-only pass. */
 let lastDesiredSkills: ReconcileSkillEntry[] | null = null;
-const machineSkillSnapshots = new MachineSkillSnapshots({ home: homedir(), agents: () => metadata.agents });
+const machineSkillSnapshots = new MachineSkillSnapshots({
+  home: homedir(),
+  agents: () => metadata.agents,
+  providerAccounts: () => config.providerAccounts,
+  accountScopesEnabled: () => runnerSupportsProtocol(controlPlaneProtocolVersion, "accountScopedAgentSkills"),
+});
 const chunkedSkillsSync = new ChunkedSkillsSyncAssembler({
   runnerId: config.runnerId,
   needsContent: (entry) =>
@@ -1325,7 +1330,19 @@ function queueSkillsReconcile(requestId?: string): void {
     const desired = lastDesiredSkills;
     try {
       const allowRemovals = desired !== null && !chunkedSkillsSync.inProgress;
-      const baseAgents = agentsWithoutConfiguredProviderAccounts(metadata.agents, config.providerAccounts);
+      const accountScopesEnabled = runnerSupportsProtocol(
+        controlPlaneProtocolVersion,
+        "accountScopedAgentSkills",
+      );
+      // Filesystem reconciliation always follows the runner's configured credential homes. Older
+      // control planes receive the same merged, unscoped rows they did before account identity was
+      // added to the wire protocol; they must not redirect deployment into the process HOME.
+      const reconciliationPlan = skillReconciliationProviderAccountPlan(
+        metadata.agents,
+        config.providerAccounts,
+        accountScopesEnabled,
+      );
+      const baseAgents = reconciliationPlan.baseAgents;
       const baseHarnessScope = new Set(baseAgents.flatMap((agent) => {
         const relDir = SKILL_DIRS[agent.driver ?? "acp"];
         return relDir ? [relDir] : [];
@@ -1337,7 +1354,7 @@ function queueSkillsReconcile(requestId?: string): void {
       // An account may intentionally name the provider's conventional credential home. In that
       // case the base and account passes share one harness directory; keep it in the base pass so
       // the sweep does not remove and immediately recreate the same managed links.
-      for (const account of config.providerAccounts) {
+      for (const { account } of reconciliationPlan.accountScopes) {
         const relDir = account.provider === "claude" ? ".claude/skills" : ".codex/skills";
         if (resolve(account.directory, "skills") === resolve(homedir(), relDir)) {
           baseHarnessScope.add(relDir);
@@ -1360,7 +1377,7 @@ function queueSkillsReconcile(requestId?: string): void {
         removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
         previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
       });
-      for (const account of config.providerAccounts) {
+      for (const { account, providerAccountId } of reconciliationPlan.accountScopes) {
         const accountAgents = metadata.agents.filter((agent) => account.provider === "claude"
           ? agent.driver === "claude-code"
           : agent.driver === "codex" || agent.driver === "codex-app-server");
@@ -1374,6 +1391,7 @@ function queueSkillsReconcile(requestId?: string): void {
           harnessScope: [relDir],
           reportUnknownTargets: false,
           manageCanonical: false,
+          providerAccountId,
           desired: desired ?? [],
           allowRemovals,
           log,
@@ -1419,9 +1437,10 @@ function queueSkillAdoption(msg: SkillAdoptionMessage): void {
       home: homedir(),
       dataDir: config.dataDir,
       agents: metadata.agents,
+      providerAccounts: () => config.providerAccounts,
       snapshots: machineSkillSnapshots,
       desired: lastDesiredSkills,
-      acquireProviderHomeLease: () => sessions.acquireSkillReconciliationProviderHome(homedir()),
+      acquireProviderHomeLease: (home) => sessions.acquireSkillReconciliationProviderHome(home),
     });
     sendUp(result);
     // A completed or interrupted transaction may have changed the source path. Reconcile and
@@ -1441,7 +1460,14 @@ function queueSkillAdoptionRecovery(msg: SkillAdoptionRecoveryMessage): void {
       return;
     }
     if (msg.operation === "list") {
-      const listed = listSkillAdoptionRecovery(homedir(), config.dataDir, metadata.agents);
+      const listed = listSkillAdoptionRecovery(
+        homedir(),
+        config.dataDir,
+        metadata.agents,
+        runnerSupportsProtocol(controlPlaneProtocolVersion, "accountScopedAgentSkills")
+          ? config.providerAccounts
+          : [],
+      );
       sendUp(recoveryResult(config.runnerId, msg.requestId, { status: "listed", ...listed }));
       return;
     }
@@ -1456,8 +1482,11 @@ function queueSkillAdoptionRecovery(msg: SkillAdoptionRecoveryMessage): void {
       home: homedir(),
       dataDir: config.dataDir,
       agents: metadata.agents,
+      providerAccounts: runnerSupportsProtocol(controlPlaneProtocolVersion, "accountScopedAgentSkills")
+        ? config.providerAccounts
+        : [],
       operationId: msg.operationId,
-      acquireProviderHomeLease: () => sessions.acquireSkillReconciliationProviderHome(homedir()),
+      acquireProviderHomeLease: (home) => sessions.acquireSkillReconciliationProviderHome(home),
     });
     sendUp(recoveryResult(config.runnerId, msg.requestId, result));
     // A restore attempt can move a managed link or source directory. Publish converged inventory

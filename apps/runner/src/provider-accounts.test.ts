@@ -14,6 +14,7 @@ import {
   providerAccountDefinition,
   providerAccountEnvironment,
   selectProviderAccount,
+  skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
 
 const claudeAgent = {
@@ -72,6 +73,28 @@ test("partial account configuration preserves the other provider's legacy harnes
       .map((agent) => agent.id),
     ["claude"],
   );
+});
+
+test("skill reconciliation keeps account homes active while older peers receive unscoped rows", () => {
+  const accounts = [
+    { id: "work", label: "Work", provider: "codex" as const, directory: "/credentials/work" },
+    { id: "personal", label: "Personal", provider: "codex" as const, directory: "/credentials/personal" },
+  ];
+  const legacy = skillReconciliationProviderAccountPlan([claudeAgent, codexAgent], accounts, false);
+  assert.deepEqual(legacy.baseAgents.map((agent) => agent.id), ["claude"]);
+  assert.deepEqual(legacy.accountScopes.map(({ account, providerAccountId }) => [
+    account.directory,
+    providerAccountId,
+  ]), [
+    ["/credentials/work", undefined],
+    ["/credentials/personal", undefined],
+  ]);
+
+  const scoped = skillReconciliationProviderAccountPlan([claudeAgent, codexAgent], accounts, true);
+  assert.deepEqual(scoped.accountScopes.map(({ providerAccountId }) => providerAccountId), [
+    "work",
+    "personal",
+  ]);
 });
 
 test("background account work selects only a context compatible with the credential home", () => {

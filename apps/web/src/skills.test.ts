@@ -131,6 +131,21 @@ test("deploy badges rank offline, conflict, error, digest and link gaps, then de
   assert.equal(conflictBadge.status, "conflict");
   assert.equal(conflictBadge.detail, "A real directory is in the way.");
 
+  const accountConflict = skillDeployBadge({
+    runnerOnline: true,
+    desired,
+    skillName: "code-review",
+    providerAccounts: [{ id: "work", label: "Work" }, { id: "personal", label: "Personal" }],
+    reported: { deployed: [
+      { name: "code-review", digest: "d1", providerAccountId: "work",
+        links: [{ agentId: "claude", status: "linked" }] },
+      { name: "code-review", digest: "d1", providerAccountId: "personal",
+        links: [{ agentId: "claude", status: "conflict", detail: "A real directory is in the way." }] },
+    ] },
+  });
+  assert.equal(accountConflict.status, "conflict");
+  assert.equal(accountConflict.detail, "Personal: A real directory is in the way.");
+
   const unsupported = { deployed: [{ name: "code-review", digest: "d1", links: [
     { agentId: "claude", status: "unsupported" as const, detail: "Windows deployment is not yet supported" },
   ] }] };

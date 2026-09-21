@@ -48,3 +48,21 @@ test("a healthy long-running manual sync remains visibly in progress", async ({ 
   await expect(page.locator(".skills-machine").getByRole("button", { name: "Sync Now" })).toBeVisible({ timeout: 2_000 });
   await expect(page.getByRole("alert")).toHaveCount(0);
 });
+
+test("account-scoped outcomes identify the credential home without exposing opaque ids or paths", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.goto("/skills-removals-e2e.html?accountScopes=1");
+  await page.getByRole("button", { name: /code-review/i }).click();
+
+  const machine = page.locator(".skills-machine");
+  await expect(machine).toContainText("Personal Account: A local directory blocks this link.");
+  await expect(machine).toContainText("account-notes · Personal Account · claude");
+  await expect(machine.locator(".skills-removals")).toContainText("Work Account");
+  await expect(machine.locator(".skills-removals")).toContainText("Personal Account");
+  const matrixRow = page.getByRole("row", { name: /Claude/ });
+  await expect(matrixRow).toContainText("Conflict");
+  await expect(matrixRow).toContainText("Personal Account: A local directory blocks this link.");
+  await expect(machine).not.toContainText("acct-work");
+  await expect(machine).not.toContainText("acct-personal");
+  await expect(machine).not.toContainText("/credential-home/");
+});

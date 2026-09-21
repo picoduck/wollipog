@@ -10,6 +10,8 @@ import type { RunnerSkillsResponse } from "../skills.js";
 import { SkillsView } from "../components/SkillsView.js";
 import "../styles.css";
 
+const accountScopes = new URLSearchParams(location.search).has("accountScopes");
+
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "runner-host",
@@ -35,10 +37,16 @@ const runner: RunnerView = {
       { id: "wsl", name: "WSL Codex", command: "codex", args: [], env: {}, driver: "codex" as const, context: { kind: "wsl" as const, distro: "Ubuntu" }, available: true },
     ] : []),
   ],
+  ...(accountScopes ? { providerAccounts: [
+    { id: "acct-work", label: "Work Account", provider: "claude" as const, authStatus: "authenticated" as const },
+    { id: "acct-personal", label: "Personal Account", provider: "claude" as const, authStatus: "authenticated" as const },
+  ] } : {}),
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: new URLSearchParams(location.search).has("legacySkills")
+  protocolVersion: accountScopes
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.accountScopedAgentSkills
+    : new URLSearchParams(location.search).has("legacySkills")
     ? 1
     : new URLSearchParams(location.search).has("legacyRecovery")
       ? RUNNER_CAPABILITY_MIN_PROTOCOL.machineSkillAdoptionRecovery - 1
@@ -106,20 +114,30 @@ const runnerSkills: RunnerSkillsResponse = {
     targets: [{ agentId: "claude", invocation: "agent" }],
   }],
   reported: {
-    deployed: [{
-      name: "code-review",
-      digest: "d1",
+    deployed: accountScopes ? [{
+      name: "code-review", digest: "d1", providerAccountId: "acct-work",
+      links: [{ agentId: "claude", status: "linked" }],
+    }, {
+      name: "code-review", digest: "d1", providerAccountId: "acct-personal",
+      links: [{ agentId: "claude", status: "conflict", detail: "A local directory blocks this link." }],
+    }] : [{
+      name: "code-review", digest: "d1",
       links: [{ agentId: "claude", status: "linked" }],
     }],
-    unmanaged: [],
+    unmanaged: accountScopes
+      ? [{ agentId: "claude", name: "account-notes", description: "Local account skill",
+          providerAccountId: "acct-personal" }]
+      : [],
     removals: [
       {
         path: "~/.codex/skills/retired-skill-with-a-long-name",
         reason: "No longer in the desired skill list.",
+        ...(accountScopes ? { providerAccountId: "acct-work" } : {}),
       },
       {
         path: "~/.claude/skills/conflicted-canonical-skill",
         reason: "The canonical location it routes through is conflicted.",
+        ...(accountScopes ? { providerAccountId: "acct-personal" } : {}),
       },
     ],
     removalsUpdatedAt: removalsReportedAt,
@@ -147,7 +165,9 @@ const client = {
     latestVersion: {
       id: "v1",
       digest: "d1",
-      machineSource: { runnerId: "runner-1", sourceDirectory: ".codex/skills", name: "code-review", digest: "b".repeat(64), importedAt: reportedAt },
+      machineSource: { runnerId: "runner-1", sourceDirectory: ".codex/skills", name: "code-review",
+        digest: "b".repeat(64), importedAt: reportedAt,
+        ...(accountScopes ? { providerAccountId: "acct-work" } : {}) },
       createdAt: reportedAt,
       files: [{
         path: "SKILL.md",

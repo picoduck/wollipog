@@ -521,7 +521,10 @@
 //      Runner-owned provider login supervisors also expose bounded, secret-minimized progress, accept
 //      one-shot paste-back codes, and persist newly authenticated accounts without sending provider
 //      credentials through the control plane. Older runners retain instruction-only auth cards.
-export const PROTOCOL_VERSION = 171;
+// 172: account-scoped skill inventory, discovery, adoption, and recovery carry the opaque
+//      provider-account id that resolves the credential home on the runner. Older peers retain
+//      legacy default-home skill behavior rather than merging or mutating an ambiguous scope.
+export const PROTOCOL_VERSION = 172;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -650,6 +653,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionProviderAccountSwitch: 171,
   providerAccounts: 170,
   providerLogin: 171,
+  accountScopedAgentSkills: 172,
   piHarness: 155,
   piExternalSessions: 156,
   verifiedAgentAvailability: 154,
@@ -1166,6 +1170,8 @@ export interface SkillLinkState {
 export interface DeployedSkillState {
   name: string;
   digest: string;
+  /** Opaque runner account-home identity. Absent means the legacy process home. */
+  providerAccountId?: string;
   links: SkillLinkState[];
   error?: string;
 }
@@ -1175,6 +1181,8 @@ export interface UnmanagedSkillInfo {
   agentId: string;
   name: string;
   description?: string;
+  /** Opaque runner account-home identity. Absent means the legacy process home. */
+  providerAccountId?: string;
 }
 
 /** Ephemeral discovery identity, not a path accepted from a client. */
@@ -1183,6 +1191,8 @@ export interface MachineSkillCandidate {
   name: string;
   sourceDirectory: string;
   generation: string;
+  /** Opaque runner account-home identity. Absent means the legacy process home. */
+  providerAccountId?: string;
   /** Absent means the runner's native host. WSL candidates stay in their named distro. */
   context?: AgentContext;
 }
@@ -1223,6 +1233,8 @@ export interface SkillAdoptionResultMessage {
   status: "adopted" | "rejected" | "recovery_required";
   operationId?: string;
   backupDirectory?: string;
+  /** Echoes the adopted account-home scope. Absent means the legacy process home. */
+  providerAccountId?: string;
   error?: string;
 }
 
@@ -1232,6 +1244,8 @@ export interface SkillAdoptionRecoveryOperation {
   sourceDirectory: string;
   name: string;
   digest: string;
+  /** Opaque runner account-home identity. Absent means the legacy process home. */
+  providerAccountId?: string;
   state: "intent_only" | "source_preserved" | "managed_linked" | "restored" | "blocked";
   detail: string;
 }
@@ -1262,6 +1276,8 @@ export interface SkillLinkRemoval {
   path: string;
   /** Sanitized human-readable explanation of why the runner removed the link. */
   reason: string;
+  /** Opaque runner account-home identity. Absent means the legacy process home. */
+  providerAccountId?: string;
 }
 
 export const SKILL_MAX_FILES = 64;

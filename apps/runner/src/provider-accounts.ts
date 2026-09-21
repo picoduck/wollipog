@@ -96,6 +96,23 @@ export function agentsWithoutConfiguredProviderAccounts(
   });
 }
 
+export function skillReconciliationProviderAccountPlan(
+  agents: AgentDefinition[],
+  accounts: RunnerProviderAccount[],
+  exposeAccountScope: boolean,
+): {
+  baseAgents: AgentDefinition[];
+  accountScopes: Array<{ account: RunnerProviderAccount; providerAccountId?: string }>;
+} {
+  return {
+    baseAgents: agentsWithoutConfiguredProviderAccounts(agents, accounts),
+    accountScopes: accounts.map((account) => ({
+      account,
+      ...(exposeAccountScope ? { providerAccountId: account.id } : {}),
+    })),
+  };
+}
+
 export function providerAccountEnvironment(
   account: Pick<BoundProviderAccount, "provider" | "credentialHome">,
 ): Record<string, string> {

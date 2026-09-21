@@ -6,6 +6,7 @@ import { registerMachineSkillRoutes } from "./skill-machine-route.js";
 import { validateSkillPayload } from "./skills.js";
 import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import type { SkillsSyncPusher } from "./skills-route.js";
+import { RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
 
 test("adoption preflight revalidates the source and current authority, rejects stale reads, and never deploys", async (t) => {
   const db = ControlPlaneDb.open(":memory:");
@@ -278,6 +279,63 @@ test("WSL snapshot candidates require protocol 125 and retain distro provenance"
   assert.equal(imported.statusCode, 200, imported.body);
   const version = db.getSkillVersion(imported.json().skill.latestVersion.id)!;
   assert.deepEqual(version.machineSource?.context, { kind: "wsl", distro: "Ubuntu" });
+});
+
+test("account-scoped candidates require capability and preserve only opaque provenance", async (t) => {
+  const db = ControlPlaneDb.open(":memory:");
+  const app = Fastify();
+  t.after(async () => { await app.close(); db.close(); });
+  const owner: HumanPrincipal = { kind: "human", actorId: LOCAL_OWNER_USER_ID, userId: LOCAL_OWNER_USER_ID,
+    userName: "Owner", organizationId: PERSONAL_ORGANIZATION_ID, organizationName: "Personal",
+    role: "owner", deviceId: null, localBootstrap: true };
+  const candidate = { id: "account-opaque", name: "review", sourceDirectory: ".codex/skills",
+    generation: "a".repeat(64), providerAccountId: "work",
+    privateCredentialHome: "/private/account/home" };
+  const payload = validateSkillPayload({ name: "review", files: [
+    { path: "SKILL.md", encoding: "utf8", content: "---\nname: review\n---\nAccount\n" },
+  ] });
+  if (!payload.ok) throw new Error();
+  const meta = { runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" as const,
+      context: { kind: "native" as const } },
+  ], providerAccounts: [{ id: "work", label: "Work", provider: "codex" as const,
+    authStatus: "authenticated" as const }], workspaces: [] };
+  db.registerRunner(meta, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.accountScopedAgentSkills - 1);
+  registerMachineSkillRoutes(app, { db, requestHuman: () => owner, requestPrincipal: () => owner,
+    pushSkillsSync: (() => {}) as SkillsSyncPusher,
+    hub: { isRunnerOnline: () => true, sendToRunner: () => true,
+      requestFromRunner: async (runnerId, requestId, request) => request.type === "skill_snapshot" && request.operation === "list"
+        ? { type: "skill_snapshot_result", runnerId, requestId, candidates: [candidate] }
+        : { type: "skill_snapshot_result", runnerId, requestId,
+            snapshot: { candidate, files: payload.files, digest: payload.digest } } },
+  });
+  const discover = () => app.inject({ method: "POST", url: "/api/runners/runner-1/skill-snapshots" });
+  assert.equal((await discover()).statusCode, 502, "an older peer cannot accept an ambiguous account candidate");
+  db.registerRunner(meta, 2, RUNNER_CAPABILITY_MIN_PROTOCOL.accountScopedAgentSkills);
+  const listed = await discover();
+  assert.equal(listed.statusCode, 200, listed.body);
+  assert.equal(listed.json().candidates[0].providerAccountId, "work");
+  assert.doesNotMatch(listed.body, /privateCredentialHome|private\/account/u);
+  const discoveryId = listed.json().discoveryId;
+  const preview = await app.inject({ method: "POST", url: `/api/skill-machine/${discoveryId}/preview`,
+    payload: { candidateId: candidate.id } });
+  assert.equal(preview.statusCode, 200, preview.body);
+  const imported = await app.inject({ method: "POST", url: `/api/skill-machine/${discoveryId}/import`,
+    payload: { previewId: preview.json().previewId } });
+  assert.equal(imported.statusCode, 200, imported.body);
+  const skill = imported.json().skill;
+  assert.equal(db.getSkillVersion(skill.latestVersion.id)?.machineSource?.providerAccountId, "work");
+  db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "runner-1",
+    agentSelector: { kind: "agent", agentId: "codex" } });
+  const adoptionPreview = await app.inject({ method: "POST", url: `/api/skill-machine/${discoveryId}/preview`,
+    payload: { candidateId: candidate.id } });
+  assert.equal(adoptionPreview.statusCode, 200, adoptionPreview.body);
+  const preflight = await app.inject({ method: "POST",
+    url: `/api/skill-machine/${discoveryId}/adoption-preflight`,
+    payload: { previewId: adoptionPreview.json().previewId } });
+  assert.equal(preflight.statusCode, 200, preflight.body);
+  assert.equal(preflight.json().mutationSupported, true,
+    "an explicit native agent context can read an account-scoped native candidate");
 });
 
 test("adoption requires a fresh explicit approval, prepares desired state, and correlates the runner result", async (t) => {

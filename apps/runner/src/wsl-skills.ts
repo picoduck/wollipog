@@ -224,13 +224,18 @@ export function mergeWslSkillsResult(
     return context?.kind === "wsl" && validWslDistroName(context.distro) &&
       SKILL_DIRS[agent.driver ?? "acp"] ? [agent.id] : [];
   }));
-  const rows = new Map(native.deployed.map((row) => [row.name, {
+  const key = (row: Pick<DeployedSkillState, "name" | "digest" | "providerAccountId">) =>
+    `${row.name}\0${row.digest}\0${row.providerAccountId ?? ""}`;
+  const rows = new Map(native.deployed.map((row) => [key(row), {
     ...row,
     links: row.links.filter((link) => !wslAgents.has(link.agentId)),
   }]));
   for (const incoming of wsl.deployed) {
-    const row = rows.get(incoming.name);
-    if (!row) rows.set(incoming.name, { ...incoming, links: [...incoming.links] });
+    // WSL runs in its distro-local provider home, not a host account's credential home. Merge its
+    // authoritative links only into the matching unscoped row and leave every account row intact.
+    const rowKey = key({ ...incoming, providerAccountId: undefined });
+    const row = rows.get(rowKey);
+    if (!row) rows.set(rowKey, { ...incoming, links: [...incoming.links] });
     else {
       row.links.push(...incoming.links);
       if (incoming.error) row.error = row.error ? `${row.error} ${incoming.error}` : incoming.error;
