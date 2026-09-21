@@ -594,6 +594,7 @@ interface ProviderRetirement {
 interface ApprovedProviderAuthentication {
   recoveryId: string;
   identityId?: string;
+  identityEvidence?: ProviderAuthObservation["identityEvidence"];
 }
 
 type ProviderReplacementResult =
@@ -10026,7 +10027,7 @@ export class SessionManager {
     entry: ActiveSession,
     options: {
       replacementMeta: () => SessionMeta | undefined;
-      queueFailureReason: string;
+      queueFailureReason: () => string;
       approvedAuthentication?: ApprovedProviderAuthentication;
       onLaunched?: (entry: ActiveSession) => void;
     },
@@ -10077,6 +10078,13 @@ export class SessionManager {
         return result;
       }
 
+      // replacementMeta may durably change the selected provider account. Fence superseding Stop,
+      // Delete, and Restart generations before invoking it, then recheck after its synchronous
+      // mutation so no stale continuation can launch from a state it no longer owns.
+      if (!this.launchIsCurrent(sessionId, launchGeneration)) {
+        result = { status: "superseded" };
+        return result;
+      }
       const fresh = options.replacementMeta();
       if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) {
         result = { status: "superseded" };
@@ -10139,7 +10147,7 @@ export class SessionManager {
       const ownsGeneration = this.launchGenerations.get(sessionId) === launchGeneration;
       const retirementPending = this.closing.has(sessionId);
       if (!launched && ownsGeneration && !superseded) {
-        this.rejectPreLaunchQueue(sessionId, options.queueFailureReason);
+        this.rejectPreLaunchQueue(sessionId, options.queueFailureReason());
       }
       if (this.preLaunchAdmissionGenerations.get(sessionId) === launchGeneration) {
         this.preLaunchAdmissionGenerations.delete(sessionId);
@@ -10185,7 +10193,7 @@ export class SessionManager {
         if (switched) this.store.flush(sessionId);
         return switched ?? undefined;
       },
-      queueFailureReason: this.store.readMeta(sessionId)?.status === "stopped"
+      queueFailureReason: () => this.store.readMeta(sessionId)?.status === "stopped"
         ? "session stopped before the selected-account provider resumed"
         : "provider could not resume with the selected account",
       onLaunched: (replacementEntry) => {
@@ -15022,10 +15030,18 @@ export class SessionManager {
     }
     if (approvedAuthentication && observation.status !== "authenticated") return false;
     if (observation.status !== "authenticated") return true;
+    const approvedIdentityMatches = approvedAuthentication?.identityId !== undefined
+      ? observation.identityId === approvedAuthentication.identityId
+      : approvedAuthentication?.identityEvidence
+      ? compareProviderAuthIdentity(
+          undefined,
+          approvedAuthentication.identityEvidence,
+          observation,
+        ).matches
+      : observation.identityId === undefined && observation.identityEvidence === undefined;
     if (approvedAuthentication &&
         current.providerAuthBlock?.recoveryId === approvedAuthentication.recoveryId &&
-        (approvedAuthentication.identityId === undefined ||
-          observation.identityId === approvedAuthentication.identityId)) {
+        approvedIdentityMatches) {
       // A changed-account recovery must keep its durable admission barrier until the fresh
       // persistent process is ready. This launch-local proof allows only the replacement
       // generation through preflight; it does not clear or resolve the recovery incident.
@@ -15905,10 +15921,13 @@ export class SessionManager {
       if (staleEntry) {
         const replacement = await this.replaceProviderProcess(candidateSessionId, staleEntry, {
           replacementMeta: () => this.store.readMeta(candidateSessionId) ?? undefined,
-          queueFailureReason: "provider could not resume after authentication changed",
+          queueFailureReason: () => "provider could not resume after authentication changed",
           approvedAuthentication: {
             recoveryId: block.recoveryId,
             ...(observation.identityId ? { identityId: observation.identityId } : {}),
+            ...(observation.identityEvidence
+              ? { identityEvidence: observation.identityEvidence }
+              : {}),
           },
         });
         if (replacement.status !== "launched") {
@@ -15970,6 +15989,12 @@ export class SessionManager {
             : "auth:automatic-retry",
         });
       }
+      if (block.delivery === "uncertain") {
+        this.emitEvent(meta.sessionId, {
+          kind: "stderr",
+          text: "Authentication was restored, but the interrupted prompt was not retried because provider delivery was uncertain.",
+        });
+      }
       if (durableRetries.length) {
         this.settleResolvedProviderAuthentication(meta.sessionId);
       } else if (retry) {
@@ -15988,12 +16013,6 @@ export class SessionManager {
           true,
         );
       } else {
-        if (block.delivery === "uncertain") {
-          this.emitEvent(meta.sessionId, {
-            kind: "stderr",
-            text: "Authentication was restored, but the interrupted prompt was not retried because provider delivery was uncertain.",
-          });
-        }
         this.emitStatus(meta.sessionId, "idle");
         if (this.recoveryQueues.has(meta.sessionId)) {
           setImmediate(() => void this.recoverQueuedAppServer(meta.sessionId));

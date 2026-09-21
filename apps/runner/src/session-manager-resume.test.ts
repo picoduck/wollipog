@@ -2144,6 +2144,9 @@ test("wrong-account revalidation fails closed and uncertain delivery is never re
     assert.deepEqual(h.prompts, ["possibly delivered", "queued while account replacement is blocked"],
       "the uncertain prompt is not replayed and blocked known-undelivered work is replayed once");
     assert.deepEqual(retainedReceipts, ["queued", "queued", "started", "completed"]);
+    assert.equal(h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "stderr" && /interrupted prompt was not retried/iu.test(event.payload.text)).length, 1,
+    "uncertain interrupted work stays visible even while newer retained work replays");
     assert.equal(
       h.store.readEvents("resume-session").findLast((event) => event.payload.kind === "permission_resolved")?.payload.optionId,
       "auth:accept-current",
@@ -2224,11 +2227,15 @@ test("changed-account replacement failure keeps one actionable recovery card and
   }
 });
 
-for (const scenario of ["identity unavailable", "replacement probe unknown"] as const) {
+for (const scenario of [
+  "identity unavailable",
+  "replacement probe unknown",
+  "identity appears after acceptance",
+] as const) {
   test(`changed-account replacement is safe when ${scenario}`, async () => {
     let h!: ReturnType<typeof harness>;
     let authenticationFailures = 0;
-    const accepted = scenario === "identity unavailable"
+    const accepted = scenario === "identity unavailable" || scenario === "identity appears after acceptance"
       ? { status: "authenticated" as const }
       : { status: "authenticated" as const, identityId: "account-b" };
     const observations = [
@@ -2238,6 +2245,8 @@ for (const scenario of ["identity unavailable", "replacement probe unknown"] as 
       accepted,
       scenario === "replacement probe unknown"
         ? { status: "unknown" as const }
+        : scenario === "identity appears after acceptance"
+        ? { status: "authenticated" as const, identityId: "account-c" }
         : accepted,
     ];
     const controller: ProviderAuthRecoveryController = {
@@ -2264,7 +2273,7 @@ for (const scenario of ["identity unavailable", "replacement probe unknown"] as 
       h.manager.resolvePermission("resume-session", requestId, "auth:accept-current");
       for (let index = 0; index < 40 && h.disposals.length < 1; index += 1) await shortDelay();
       for (let index = 0; index < 20 &&
-        scenario === "replacement probe unknown" &&
+        scenario !== "identity unavailable" &&
         !/could not resume/iu.test(h.store.readMeta("resume-session")?.pendingApproval?.context?.input ?? ""); index += 1) {
         await shortDelay();
       }
@@ -2274,7 +2283,7 @@ for (const scenario of ["identity unavailable", "replacement probe unknown"] as 
         assert.equal(h.launches.length, 2, "an identity-limited provider still gets a fresh accepted process");
         assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
       } else {
-        assert.equal(h.launches.length, 1, "an inconclusive fresh probe cannot construct the replacement");
+        assert.equal(h.launches.length, 1, "a fresh probe that cannot match acceptance cannot construct the replacement");
         assert.equal((h.manager as any).active.has("resume-session"), false);
         assert.equal(h.store.readMeta("resume-session")?.providerCredentialIdentityId, "account-a");
         assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock?.recoveryId,
