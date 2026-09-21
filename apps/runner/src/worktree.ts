@@ -171,6 +171,7 @@ export interface WorktreeCleanupRecord {
 }
 
 export type RetainedWorktreeRefReason =
+  | "deletion_intent"
   | "recorded_branch"
   | "shared_checkout"
   | "default_branch"
@@ -1512,6 +1513,8 @@ export async function discardWorktreeIfSafe(
   options: WorktreeOptions & {
     verifiedMergedHead?: string;
     beforeRemove?: () => Promise<void>;
+    /** Fault-injection boundary after Git removes the worktree but before branch cleanup. */
+    afterRemove?: () => Promise<void>;
     retainRefs?: (refs: RetainedWorktreeRefCandidate[]) => Promise<void>;
   } = {},
 ): Promise<SafeWorktreeDiscardResult> {
@@ -1656,19 +1659,18 @@ export async function discardWorktreeIfSafe(
         });
       }
     }
-    if (preserveCheckedOutRef) {
-      const checkedOutIdentity = await localBranchIdentity(context, repoPath, ref);
-      if (!checkedOutIdentity || checkedOutIdentity.oid !== head) {
-        return { removed: false, reason: "unavailable" };
-      }
-      retainedRefs.push({
-        branch,
-        expectedOid: head,
-        ...(checkedOutIdentity.identityToken ? { identityToken: checkedOutIdentity.identityToken } : {}),
-        reasons: checkedOutRefReasons,
-        ...(checkedOutVerifiedMergedHead ? { verifiedMergedHead: checkedOutVerifiedMergedHead } : {}),
-      });
+    const checkedOutIdentity = await localBranchIdentity(context, repoPath, ref);
+    if (!checkedOutIdentity || checkedOutIdentity.oid !== head) {
+      return { removed: false, reason: "unavailable" };
     }
+    const checkedOutCandidate: RetainedWorktreeRefCandidate = {
+      branch,
+      expectedOid: head,
+      ...(checkedOutIdentity.identityToken ? { identityToken: checkedOutIdentity.identityToken } : {}),
+      reasons: preserveCheckedOutRef ? checkedOutRefReasons : ["deletion_intent"],
+      ...(checkedOutVerifiedMergedHead ? { verifiedMergedHead: checkedOutVerifiedMergedHead } : {}),
+    };
+    retainedRefs.push(checkedOutCandidate);
     if (retainedRefs.length) await options.retainRefs?.(retainedRefs);
 
     // Hooks/process retirement are intentionally after the first complete safety proof and before
@@ -1683,10 +1685,28 @@ export async function discardWorktreeIfSafe(
     const finalHead = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
     if (finalHead !== head) return { removed: false, reason: "unpushed" };
     await command(context, repoPath, ["worktree", "remove", handle.path], 120_000);
-    // For a changed checkout `ref` is the branch actually removed with the worktree; the recorded
-    // branch is deliberately untouched, whether its ref still exists or has already disappeared.
-    if (!preserveCheckedOutRef) {
-      await command(context, repoPath, ["update-ref", "-d", ref, head]);
+    await options.afterRemove?.();
+    // Production supplies retainRefs, so branch cleanup is replayed only after the caller durably
+    // records successful worktree removal and arms this cleanup generation. Keep the standalone
+    // helper synchronous for callers without a journal, but use the same fail-closed reclaimer
+    // rather than the old OID-only update-ref. A preserved ref is deliberately left alone.
+    if (!options.retainRefs && !preserveCheckedOutRef) {
+      await reclaimRetainedWorktreeRef({
+        sessionId,
+        repoPath,
+        context,
+        branch: checkedOutCandidate.branch,
+        expectedOid: checkedOutCandidate.expectedOid,
+        ...(checkedOutCandidate.identityToken ? { identityToken: checkedOutCandidate.identityToken } : {}),
+        reasons: checkedOutCandidate.reasons,
+        ...(checkedOutCandidate.verifiedMergedHead
+          ? { verifiedMergedHead: checkedOutCandidate.verifiedMergedHead }
+          : {}),
+        state: "pending",
+        armedAt: Date.now(),
+        createdAt: Date.now(),
+        updatedAt: Date.now(),
+      }, { context });
     }
     await command(context, repoPath, ["worktree", "prune"]);
     return { removed: true };
