@@ -442,6 +442,9 @@ export class CodexAppServerDriver implements Driver {
   /** A completion can race ahead of both turn/started and the turn/start response. Keep identified
    * completions inert until the active prompt confirms the same provider turn. */
   private readonly deferredTurnCompletions = new Map<string, Json>();
+  /** The request response is the causal boundary between predecessor notifications and this
+   * prompt. A turn/started notification before it is provisional and cannot bind ownership. */
+  private turnStartResponseGeneration: number | null = null;
   private promptBusy = false;
   /** Provider diagnostics are held until startup succeeds so an expected unsupported-feature
    * retry does not surface a false session error. */
@@ -895,7 +898,6 @@ export class CodexAppServerDriver implements Driver {
     if (this.stagedImages?.generation === generation && this.stagedImages.turnId == null) {
       this.stagedImages = { ...this.stagedImages, turnId: id };
     }
-    this.declinePendingRequests("provider_resolved", true);
     const deferred = this.deferredTurnCompletions.get(id);
     this.deferredTurnCompletions.clear();
     if (deferred) this.completeRootTurn(deferred, generation, id);
@@ -939,6 +941,7 @@ export class CodexAppServerDriver implements Driver {
     this.lastTurnId = null;
     const generation = ++this.promptGeneration;
     this.deferredTurnCompletions.clear();
+    this.turnStartResponseGeneration = null;
     let staged: StagedPromptImages;
     try {
       staged = await this.imageStager(images ?? [], this.opts.context);
@@ -984,6 +987,7 @@ export class CodexAppServerDriver implements Driver {
       this.peer!.request("turn/start", params).then((response: Json) => {
         // Notifications may precede the response, including completion or a later turn.
         if (generation !== this.promptGeneration || !this.turnResolve || !this.promptBusy) return;
+        this.turnStartResponseGeneration = generation;
         const id = response?.turn?.id;
         if (typeof id === "string" && id) this.confirmRootTurn(id, generation);
         if (!this.turnId) {
@@ -1187,6 +1191,7 @@ export class CodexAppServerDriver implements Driver {
     this.promptBusy = false;
     this.promptGeneration++;
     this.deferredTurnCompletions.clear();
+    this.turnStartResponseGeneration = null;
     void this.cleanupStagedImages(owner).finally(() => {
       resolve(r);
     });
@@ -1594,7 +1599,9 @@ export class CodexAppServerDriver implements Driver {
       }
       if (!this.promptBusy || !this.turnResolve || p?.turn?.id === this.completedTurnId) return;
       const id = p?.turn?.id;
-      if (typeof id === "string" && id) this.confirmRootTurn(id);
+      if (typeof id === "string" && id && this.turnStartResponseGeneration === this.promptGeneration) {
+        this.confirmRootTurn(id);
+      }
       // prompt() already opened this accounting interval before turn/start. Do not reset it here:
       // App Server notifications are allowed to arrive before the turn/start response.
     });
@@ -1743,11 +1750,9 @@ export class CodexAppServerDriver implements Driver {
         }
         return;
       }
-      this.declinePendingRequests("provider_resolved", true);
-      this.streamedAgentResponse = false;
-      this.emitDriverError(p?.error);
-      this.closeTurnUsage();
-      this.settleTurn("refusal");
+      const id = p?.turn?.id ?? p?.turnId;
+      if (typeof id !== "string" || !id || id !== this.turnId || !this.promptBusy || !this.turnResolve) return;
+      this.completeRootTurn({ ...p, turn: { ...p?.turn, id, status: "failed", error: p?.error } }, this.promptGeneration, id);
     });
     peer.onNotification("error", (p: Json) => {
       this.emitDriverError(p?.error ?? p?.message);

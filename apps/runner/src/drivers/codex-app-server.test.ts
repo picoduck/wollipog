@@ -1207,6 +1207,24 @@ test("failed turn with a bare-string error remains user-readable", async () => {
   assert.deepEqual(h.events, [{ kind: "error", message: "provider failed" }]);
 });
 
+test("identified turn/failed settles only its matching active root turn", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  (h.driver as any).threadId = "root-failed";
+  (h.driver as any).turnId = "turn-failed";
+  (h.driver as any).promptBusy = true;
+  const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+
+  notifications.get("turn/failed")!({
+    threadId: "root-failed",
+    turnId: "turn-failed",
+    error: { message: "provider failed" },
+  });
+
+  assert.equal(await reason, "refusal");
+  assert.deepEqual(h.events, [{ kind: "error", message: "provider failed" }]);
+});
+
 test("interrupted turn/completed maps to cancelled", async () => {
   const h = makeHarness();
   const notifications = new Map<string, (params: any) => void>();
@@ -1249,6 +1267,7 @@ test("turn settlement closes the active id but retains the provider turn used by
   });
   (h.driver as any).promptBusy = true;
   (h.driver as any).turnResolve = () => {};
+  (h.driver as any).turnStartResponseGeneration = 0;
   notifications.get("turn/started")!({ turn: { id: "turn-provider-7" } });
   notifications.get("turn/completed")!({ turn: { id: "turn-provider-7", status: "completed" } });
   assert.equal((h.driver as any).turnId, null);
@@ -1261,6 +1280,7 @@ test("a second prompt missing turn/started cannot reuse the first completed turn
   const notifications = notificationHandlers(h.driver);
   (h.driver as any).promptBusy = true;
   (h.driver as any).turnResolve = () => {};
+  (h.driver as any).turnStartResponseGeneration = 0;
   notifications.get("turn/started")!({ turn: { id: "first-completed-turn" } });
   notifications.get("turn/completed")!({ turn: { id: "first-completed-turn", status: "completed" } });
   assert.equal(h.driver.agentTurnId(), "first-completed-turn", "the completed checkpoint remains available between turns");
@@ -1312,17 +1332,17 @@ test("late turn/start responses cannot resurrect a completed turn or overwrite a
   const first = h.driver.prompt("first");
   await nextTask();
   const firstRespond = respond;
-  notifications.get("turn/started")!({ turn: { id: "old" } });
-  notifications.get("turn/completed")!({ turn: { id: "old", status: "completed" } });
-  await first;
+  h.driver.cancel();
+  assert.equal(await first, "cancelled");
   const second = h.driver.prompt("second");
   await nextTask();
   firstRespond({ turn: { id: "old", status: "inProgress" } });
   await nextTask();
   assert.equal(h.driver.activeSteeringTurnId(), null);
-  notifications.get("turn/started")!({ turn: { id: "newest" } });
-  respond({ turn: { id: "initial", status: "inProgress" } });
+  respond({ turn: { id: "newest", status: "inProgress" } });
   await nextTask();
+  assert.equal(h.driver.activeSteeringTurnId(), "newest");
+  notifications.get("turn/started")!({ turn: { id: "old" } });
   assert.equal(h.driver.activeSteeringTurnId(), "newest");
   notifications.get("turn/completed")!({ turn: { id: "newest", status: "completed" } });
   await second;
@@ -1337,8 +1357,9 @@ test("a late completion from a cancelled pre-id turn cannot settle a new image p
   }));
   const notifications = notificationHandlers(h.driver);
   (h.driver as any).threadId = "thread-auth-recovery";
+  let respond!: (value: unknown) => void;
   (h.driver as any).peer = {
-    request: async () => new Promise(() => {}),
+    request: () => new Promise((resolve) => { respond = resolve; }),
     notify: () => {},
   };
 
@@ -1352,6 +1373,10 @@ test("a late completion from a cancelled pre-id turn cannot settle a new image p
   const recovered = h.driver.prompt("inspect", [{ mimeType: "image/png", data: "cHg=" }]);
   void recovered.then(() => { settled = true; });
   await nextTask();
+  notifications.get("turn/started")!({
+    threadId: "thread-auth-recovery",
+    turn: { id: "cancelled-before-id-arrived" },
+  });
   notifications.get("turn/completed")!({
     threadId: "thread-auth-recovery",
     turn: { id: "cancelled-before-id-arrived", status: "interrupted" },
@@ -1359,22 +1384,63 @@ test("a late completion from a cancelled pre-id turn cannot settle a new image p
   notifications.get("turn/completed")!({
     threadId: "thread-auth-recovery",
     turn: { id: "cancelled-before-id-arrived", status: "interrupted" },
+  });
+  notifications.get("turn/failed")!({
+    threadId: "thread-auth-recovery",
+    turnId: "cancelled-before-id-arrived",
+    error: { message: "late predecessor failure" },
   });
   await nextTask();
 
   assert.equal(settled, false, "the old completion does not settle the replacement prompt");
   assert.equal(cleaned, cleanedAfterInterrupted, "the replacement prompt's staged image remains available");
 
-  notifications.get("turn/started")!({
-    threadId: "thread-auth-recovery",
-    turn: { id: "replacement-turn" },
-  });
+  respond({ turn: { id: "replacement-turn", status: "inProgress" } });
+  await nextTask();
   notifications.get("turn/completed")!({
     threadId: "thread-auth-recovery",
     turn: { id: "replacement-turn", status: "completed" },
   });
   assert.equal(await recovered, "end_turn");
   assert.equal(cleaned, cleanedAfterInterrupted + 1);
+});
+
+test("the turn/start response preserves provider requests admitted after an early started notification", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  (h.driver as any).threadId = "thread-response-boundary";
+  let respond!: (value: unknown) => void;
+  (h.driver as any).peer = {
+    request: () => new Promise((resolve) => { respond = resolve; }),
+    notify: () => {},
+  };
+
+  const turn = h.driver.prompt("work");
+  await nextTask();
+  notifications.get("turn/started")!({
+    threadId: "thread-response-boundary",
+    turn: { id: "current-turn" },
+  });
+  let approvalResponse: unknown;
+  const approvals: Map<string, any> = (h.driver as any).pendingApprovals;
+  approvals.set("live-approval", {
+    method: "item/commandExecution/requestApproval",
+    params: { command: "pnpm test" },
+    resolve: (response: unknown) => { approvalResponse = response; },
+  });
+
+  respond({ turn: { id: "current-turn", status: "inProgress" } });
+  await nextTask();
+  assert.equal(approvals.has("live-approval"), true);
+  assert.equal(approvalResponse, undefined);
+  assert.equal(h.driver.resolvePermission("live-approval", "allow"), true);
+  assert.deepEqual(approvalResponse, { decision: "accept" });
+
+  notifications.get("turn/completed")!({
+    threadId: "thread-response-boundary",
+    turn: { id: "current-turn", status: "completed" },
+  });
+  assert.equal(await turn, "end_turn");
 });
 
 test("missing coordinates explain the running server identity rather than assuming the installed CLI version", async () => {
