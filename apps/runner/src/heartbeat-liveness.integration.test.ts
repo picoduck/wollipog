@@ -77,7 +77,7 @@ interface FakeControlPlane {
 // A minimal control plane that answers the attestation probe and upgrades /runner sockets. Crucially
 // it runs with autoPong DISABLED, so it receives the runner's ws-level pings but never replies — the
 // exact half-open signature (socket readable as OPEN, peer silent) the runner must detect.
-async function startFakeControlPlane(): Promise<FakeControlPlane> {
+async function startFakeControlPlane(options: { pongAfterPingCount?: number } = {}): Promise<FakeControlPlane> {
   const port = await reservePort();
   const wss = new WebSocketServer({ noServer: true, autoPong: false });
   const connections: import("ws").WebSocket[] = [];
@@ -102,6 +102,13 @@ async function startFakeControlPlane(): Promise<FakeControlPlane> {
     wss.handleUpgrade(req, socket, head, (ws) => {
       const index = connections.length;
       connections.push(ws);
+      let pingCount = 0;
+      ws.on("ping", (data) => {
+        pingCount++;
+        if (options.pongAfterPingCount !== undefined && pingCount >= options.pongAfterPingCount) {
+          ws.pong(data);
+        }
+      });
       // Acknowledge registration with a short heartbeat so the runner pings quickly; never pong.
       ws.on("message", (data: Buffer) => {
         let message: unknown;
@@ -175,8 +182,8 @@ test(
     });
 
     // First connection: the runner attests, registers, and starts heartbeating (pinging) at 250ms.
-    // The server never pongs, so after MAX_MISSED_HEARTBEAT_PONGS (2) unanswered pings the runner
-    // must terminate this socket rather than keep writing frames into it.
+    // The server never pongs, so after the bounded initial grace the runner must terminate this
+    // socket rather than keep writing frames into it.
     const first = await cp.waitForConnection(0, 30_000, () => `runner never connected\n${output}`);
     for (let attempt = 0; attempt < 100 && !output.includes("terminating socket to reconnect"); attempt++) {
       assert.equal(child.exitCode, null, `runner exited before detecting the dead socket\n${output}`);
@@ -201,5 +208,47 @@ test(
     // connection proves it recovered rather than wedging on the dead socket.
     await cp.waitForConnection(1, 30_000, () => `runner never reconnected after terminate\n${output}`);
     assert.equal(child.exitCode, null, `runner exited instead of reconnecting\n${output}`);
+  },
+);
+
+test(
+  "the runner allows a delayed first pong during control-plane registration",
+  { timeout: 60_000 },
+  async (t) => {
+    // A production control plane can spend more than two heartbeat intervals synchronously
+    // reconciling retained sessions after it sends `registered`. Answer the third ping to model the
+    // queued pong becoming processable once that registration work yields.
+    const cp = await startFakeControlPlane({ pongAfterPingCount: 3 });
+    const temp = mkdtempSync(join(tmpdir(), "wollipog-runner-startup-grace-"));
+    let output = "";
+    const child = spawn(process.execPath, ["--import", "tsx", "apps/runner/src/cli.ts"], {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        RUNNER_ID: "runner-startup-grace",
+        RUNNER_TOKEN: "runner-startup-grace-token",
+        CONTROL_PLANE_URL: `ws://127.0.0.1:${cp.port}/runner`,
+        RUNNER_DATA_DIR: temp,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    const capture = (chunk: unknown) => { output = (output + String(chunk)).slice(-65_536); };
+    child.stdout?.on("data", capture);
+    child.stderr?.on("data", capture);
+
+    t.after(async () => {
+      await stopChild(child);
+      await cp.close();
+      rmSync(temp, { recursive: true, force: true });
+    });
+
+    const first = await cp.waitForConnection(0, 30_000, () => `runner never connected\n${output}`);
+    await delay(1_500);
+
+    assert.equal(child.exitCode, null, `runner exited during initial pong grace\n${output}`);
+    assert.equal(first.readyState, 1, `runner replaced the healthy startup socket\n${output}`);
+    assert.equal(cp.connections.length, 1, `runner reconnected despite the delayed pong\n${output}`);
+    assert.doesNotMatch(output, /control plane heartbeat unanswered/, output);
   },
 );
