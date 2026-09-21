@@ -1157,6 +1157,12 @@ app.register(async (instance) => {
         // Registration completes with the machine's authoritative desired skill set so a fresh
         // (or reconnected) runner converges without waiting for the next library mutation.
         pushSkillsSync(runnerId);
+        // Registration reconciliation is synchronous and can legitimately outlast a heartbeat
+        // interval on a runner with many live sessions. The runner starts heartbeats as soon as it
+        // receives `registered`, but those frames cannot be handled until this callback yields.
+        // Refresh liveness at that yield boundary so the sweep measures silence after registration,
+        // rather than charging the runner for time the control plane spent reconciling its state.
+        db.touch(runnerId, Date.now());
         app.log.info(
           `runner online: ${runnerId} (${msg.runner.hostname}, ${msg.runner.os}) ` +
             `agents=[${msg.runner.agents.map((a) => a.id).join(", ")}]`,
