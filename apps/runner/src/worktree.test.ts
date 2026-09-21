@@ -413,6 +413,7 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
   const dataDir = join(root, "data");
   try {
     const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
     const clean = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
       branch: "fix/clean-pushed",
@@ -489,6 +490,7 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
     assert.equal(existsSync(verifiedMerged.path), false,
       "the exact forge-verified merged head replaces only the missing upstream proof");
 
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "-d"]);
     const unknownDefault = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
       branch: "agent/unknown-default",
@@ -638,18 +640,22 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
     ]);
     execFileSync("git", ["-C", repo, "push", "origin", removedBeforeRetry.branch]);
     let missingRegistrationCleanupRan = false;
+    let missingRegistrationClaimedRef = false;
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
       ...removedBeforeRetry,
       source: "created",
     }, {
       dataDir,
       beforeRemove: async () => { missingRegistrationCleanupRan = true; },
+      retainRefs: async () => { missingRegistrationClaimedRef = true; },
     }), { removed: true });
     assert.equal(missingRegistrationCleanupRan, true,
       "missing-registration replay still retires descendants and runs teardown");
     assert.equal(execFileSync("git", ["-C", repo, "rev-parse", removedBeforeRetry.branch], {
       encoding: "utf8",
     }).trim(), removedAdvanced, "missing-registration replay never claims the current branch generation");
+    assert.equal(missingRegistrationClaimedRef, false,
+      "legacy missing-registration cleanup creates no retroactive deletion intent");
 
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
       path: join(root, "operator-owned"),
@@ -666,6 +672,7 @@ test("safe discard preserves a shared unchanged branch but deletes an exclusive 
   const dataDir = join(root, "data");
   try {
     const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
     const shared = await createRequestedWorktree(repo, "s_shared_unchanged", {
       baseRef: "HEAD",
       branch: "fix/shared-unchanged",
@@ -766,6 +773,117 @@ test("changed-branch discard durably hands off every preserved ref before remova
     assert.equal(existsSync(refused.path), true,
       "worktree removal cannot outrun durable retained-ref ownership");
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("non-preserved branch deletion intents replay across the post-removal crash window", {
+  skip: !haveGit(),
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-deletion-intent-replay-"));
+  const dataDir = join(root, "data");
+  const sessionId = "s_deletion_intent_replay";
+  let manager: SessionManager | undefined;
+  let restarted: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId, agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "deletion intent",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    (manager as unknown as { discoverMergedWorktreePullRequest: () => Promise<null> })
+      .discoverMergedWorktreePullRequest = async () => null;
+
+    const crashAfterRemoval = manager as unknown as {
+      discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe;
+    };
+    const discard = crashAfterRemoval.discardSessionWorktreeIfSafe.bind(manager);
+    crashAfterRemoval.discardSessionWorktreeIfSafe = (repoPath, id, handle, options = {}) =>
+      discard(repoPath, id, handle, {
+        ...options,
+        afterRemove: async () => { throw new Error("injected crash after worktree removal"); },
+      });
+
+    const removed = await manager.requestWorktree(sessionId, {
+      baseRef: "HEAD", branch: "fix/deletion-intent-removed",
+    });
+    execFileSync("git", ["-C", removed.worktree.path, "push", "-u", "origin", removed.worktree.branch]);
+    const removedHead = execFileSync("git", ["-C", removed.worktree.path, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    await assert.rejects(
+      manager.discardWorktree(sessionId, removed.worktree.path),
+      /Git state is unavailable or changed during cleanup/,
+    );
+
+    const recreated = await manager.requestWorktree(sessionId, {
+      baseRef: "HEAD", branch: "fix/deletion-intent-recreated",
+    });
+    execFileSync("git", ["-C", recreated.worktree.path, "push", "-u", "origin", recreated.worktree.branch]);
+    const recreatedHead = execFileSync("git", ["-C", recreated.worktree.path, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    await assert.rejects(
+      manager.discardWorktree(sessionId, recreated.worktree.path),
+      /Git state is unavailable or changed during cleanup/,
+    );
+
+    const crashedJournal = new WorktreeCleanupJournal(dataDir);
+    const intents = crashedJournal.listRetainedRefs();
+    assert.equal(intents.length, 2);
+    assert.ok(intents.every((intent) => intent.reasons.includes("deletion_intent")));
+    assert.ok(intents.every((intent) => intent.armedAt === undefined),
+      "worktree removal alone does not arm a deletion generation");
+    assert.ok(intents.every((intent) => /^[a-f0-9]{64}$/u.test(intent.identityToken ?? "")),
+      "each intent durably captures exact reflog/file identity before removal");
+    assert.equal(intents.find((intent) => intent.branch === removed.worktree.branch)?.expectedOid, removedHead);
+    assert.equal(intents.find((intent) => intent.branch === recreated.worktree.branch)?.expectedOid, recreatedHead);
+    assert.equal(new Set(intents.map((intent) => intent.cleanupId)).size, 2,
+      "each cleanup occurrence owns an independent generation");
+    assert.equal(existsSync(removed.worktree.path), false);
+    assert.equal(existsSync(recreated.worktree.path), false);
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${removed.worktree.branch}`]);
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${recreated.worktree.branch}`]);
+
+    manager.shutdownAll();
+    manager = undefined;
+    execFileSync("git", ["-C", repo, "update-ref", "-d", `refs/heads/${recreated.worktree.branch}`, recreatedHead]);
+    execFileSync("git", ["-C", repo, "branch", recreated.worktree.branch, recreatedHead]);
+
+    restarted = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    (restarted as unknown as { discoverMergedWorktreePullRequest: () => Promise<null> })
+      .discoverMergedWorktreePullRequest = async () => null;
+    restarted.reconcileStore();
+    await waitForCondition(
+      () => new WorktreeCleanupJournal(dataDir).list().length === 0,
+      "restart replay did not finish the interrupted worktree cleanup generations",
+    );
+    await waitForCondition(
+      () => new WorktreeCleanupJournal(dataDir).retainedRefHistory().length === 2,
+      "restart replay did not persist both terminal deletion receipts",
+    );
+
+    assert.throws(() => execFileSync(
+      "git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${removed.worktree.branch}`],
+    ), "the unchanged exact generation is deleted after restart");
+    assert.equal(execFileSync("git", ["-C", repo, "rev-parse", recreated.worktree.branch], {
+      encoding: "utf8",
+    }).trim(), recreatedHead, "a same-name same-OID recreation is retained");
+    const receipts = new WorktreeCleanupJournal(dataDir).retainedRefHistory();
+    assert.equal(receipts.find((receipt) => receipt.branch === removed.worktree.branch)?.terminalReason, "deleted");
+    assert.equal(
+      receipts.find((receipt) => receipt.branch === recreated.worktree.branch)?.terminalReason,
+      "ref_changed_or_recreated",
+    );
+  } finally {
+    manager?.shutdownAll();
+    restarted?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -990,6 +1108,16 @@ test("managed discard verifies a changed checkout and names an unproved branch",
     execFileSync("git", [
       "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/agent/s_changed_branch",
     ]);
+    await waitForCondition(() => {
+      try {
+        execFileSync("git", [
+          "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/merged-changed-branch",
+        ]);
+        return false;
+      } catch {
+        return true;
+      }
+    }, "the armed deletion intent did not reclaim the changed checkout branch");
     assert.throws(() => execFileSync("git", [
       "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/merged-changed-branch",
     ]));
