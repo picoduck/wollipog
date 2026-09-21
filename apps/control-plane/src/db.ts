@@ -3958,7 +3958,7 @@ export class ControlPlaneDb {
       try {
         db.exec(`
           BEGIN IMMEDIATE;
-          CREATE TABLE session_reminders_v173 (
+          CREATE TABLE session_reminders_v174 (
             reminder_id TEXT NOT NULL UNIQUE,
             session_id TEXT NOT NULL,
             user_id TEXT NOT NULL,
@@ -3980,7 +3980,7 @@ export class ControlPlaneDb {
             FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
             FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
           );
-          INSERT INTO session_reminders_v173
+          INSERT INTO session_reminders_v174
             (reminder_id,session_id,user_id,schedule_kind,scheduled_for,time_zone,
              original_expression,wake_policy,state,revision,baseline_event_seq,wake_reason,
              fired_at,created_at,updated_at)
@@ -3989,7 +3989,7 @@ export class ControlPlaneDb {
                    fired_at,created_at,updated_at
             FROM session_reminders;
           DROP TABLE session_reminders;
-          ALTER TABLE session_reminders_v173 RENAME TO session_reminders;
+          ALTER TABLE session_reminders_v174 RENAME TO session_reminders;
           CREATE INDEX idx_session_reminders_due
             ON session_reminders(state, scheduled_for, session_id, user_id)
             WHERE schedule_kind='timed';

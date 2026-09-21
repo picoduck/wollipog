@@ -5014,7 +5014,7 @@ app.get("/api/sessions/:id/reminder", async (req, reply) => {
     && (parseUiProtocolVersion(req.query) ?? 0) < INDEFINITE_SESSION_REMINDER_UI_PROTOCOL
   ) {
     return reply.code(409).send({
-      error: "This reminder uses Someday and requires Wollipog protocol v173. Update this client and try again.",
+      error: "This reminder uses Someday and requires Wollipog protocol v174. Update this client and try again.",
     });
   }
   return { reminder };

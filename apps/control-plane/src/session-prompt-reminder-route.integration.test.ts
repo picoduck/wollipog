@@ -460,7 +460,7 @@ test("prompt route acknowledges fired reminders only for accepted human principa
   );
   const legacyReadBody = await legacyRead.json() as Record<string, unknown>;
   assert.equal(legacyRead.status, 409);
-  assert.match(String(legacyReadBody.error), /protocol v173.*update/i);
+  assert.match(String(legacyReadBody.error), /protocol v174.*update/i);
   assert.equal(legacyReadBody.reminder, undefined,
     "legacy reconciliation must never receive a Someday payload it cannot parse");
 

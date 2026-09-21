@@ -1219,7 +1219,7 @@ test("legacy UI clients never receive the no-timer shape or expose pending Somed
   };
 
   add("legacy", 172);
-  add("current", 173);
+  add("current", 174);
   assert.deepEqual((messages.get("legacy")![0]!.sessions as SessionView[]).map(({ id }) => id), []);
   assert.deepEqual(messages.get("legacy")![0]!.reminders, []);
   assert.deepEqual((messages.get("current")![0]!.sessions as SessionView[]).map(({ id }) => id), [liveSession.id]);

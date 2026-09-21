@@ -146,7 +146,7 @@ export const UI_CONNECTION_RATE_WINDOW_MS = 10_000;
 export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_CONNECTION = 1_024;
 export const MAX_UI_BACKGROUND_OBSERVATIONS_PER_WINDOW = 128;
 export const UI_BACKGROUND_OBSERVATION_RATE_WINDOW_MS = 10_000;
-export const INDEFINITE_SESSION_REMINDER_UI_PROTOCOL = 173;
+export const INDEFINITE_SESSION_REMINDER_UI_PROTOCOL = 174;
 
 interface OutboundFrame {
   data: string;
@@ -1174,7 +1174,7 @@ export class Hub {
     return (info.uiProtocolVersion ?? 0) >= INDEFINITE_SESSION_REMINDER_UI_PROTOCOL;
   }
 
-  /** A pre-v173 UI assumes every reminder has an instant and crashes on the Someday shape. Keep
+  /** A pre-v174 UI assumes every reminder has an instant and crashes on the Someday shape. Keep
    * pending Someday sessions absent from that client's projection, then reveal the session when
    * the reminder fires, is removed, or becomes timed. Canonical storage and current clients never
    * receive a fabricated compatibility timestamp. */

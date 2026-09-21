@@ -301,7 +301,7 @@ test("Someday survives restart and file-level backup restore", () => {
   }
 });
 
-test("opening a pre-v173 database migrates timed reminders without changing their identity", () => {
+test("opening a pre-v174 database migrates timed reminders without changing their identity", () => {
   const directory = mkdtempSync(join(tmpdir(), "wollipog-reminder-migration-"));
   const database = join(directory, "control-plane.sqlite");
   try {
