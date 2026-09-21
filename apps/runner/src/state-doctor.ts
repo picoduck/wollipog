@@ -44,6 +44,7 @@ export type StateDoctorDurabilityOperation =
   | "fsync-file"
   | "fsync-directory"
   | "rename"
+  | "retained-ref-journal-write"
   | "checkpoint-refs-adopted"
   | "checkpoint-owner-published"
   | "session-meta-published";
@@ -247,7 +248,11 @@ function refuseDeletedSession(dataDir: string, sessionId: string): void {
   }
 }
 
-function retireMatchingLegacyCleanup(dataDir: string, meta: SessionMeta): void {
+function retireMatchingLegacyCleanup(
+  dataDir: string,
+  meta: SessionMeta,
+  options: StateDoctorOptions,
+): void {
   if (!meta.worktreePath) throw new Error("checkpoint adoption requires a persisted worktree path");
   const journalPath = join(dataDir, "worktree-cleanup.json");
   if (!existsSync(journalPath)) return;
@@ -270,9 +275,34 @@ function retireMatchingLegacyCleanup(dataDir: string, meta: SessionMeta): void {
     throw new Error("worktree cleanup record does not exactly match the live legacy session; refusing checkpoint adoption");
   }
   const journal = new WorktreeCleanupJournal(dataDir);
-  journal.remove(meta.sessionId);
-  if (new WorktreeCleanupJournal(dataDir).list().some((record) => record.sessionId === meta.sessionId)) {
+  const unarmedForSession = journal.listRetainedRefs().some((record) =>
+    record.sessionId === cleanup.sessionId && !record.armedAt);
+  if (unarmedForSession && (!cleanup.worktreeId || !cleanup.cleanupId)) {
+    throw new Error("worktree cleanup record lacks a complete retained-ref identity; refusing checkpoint adoption");
+  }
+  if (cleanup.worktreeId && cleanup.cleanupId) {
+    journal.removeUnarmedRetainedRefs(
+      cleanup.sessionId,
+      cleanup.worktreeId,
+      cleanup.cleanupId,
+      () => beforeDurabilityOperation(
+        options,
+        "retained-ref-journal-write",
+        join(dataDir, "worktree-retained-refs.json"),
+      ),
+    );
+  }
+  journal.remove(cleanup.sessionId, cleanup.worktreeId ?? "legacy");
+  const durable = new WorktreeCleanupJournal(dataDir);
+  if (durable.list().some((record) =>
+    record.sessionId === cleanup.sessionId &&
+    (record.worktreeId ?? "legacy") === (cleanup.worktreeId ?? "legacy"))) {
     throw new Error("worktree cleanup record remained after durable retirement");
+  }
+  if (cleanup.worktreeId && cleanup.cleanupId && durable.listRetainedRefs().some((record) =>
+    record.sessionId === cleanup.sessionId && record.worktreeId === cleanup.worktreeId &&
+    record.cleanupId === cleanup.cleanupId && !record.armedAt)) {
+    throw new Error("matching unarmed retained-ref rows remained after durable retirement");
   }
 }
 
@@ -350,7 +380,7 @@ export async function runStateDoctor(
       refuseDeletedSession(dataDir, meta.sessionId);
       // Retire only an exact legacy cleanup tuple before changing any ownership namespace. A crash
       // from here leaves the live legacy row/worktree intact and makes retry safe.
-      retireMatchingLegacyCleanup(dataDir, meta);
+      retireMatchingLegacyCleanup(dataDir, meta, options);
       const count = await withGitExecutionContext(meta.context, () =>
         adoptLegacyCheckpointRefs(meta.repoPath, meta.sessionId, ownerHash));
       beforeDurabilityOperation(options, "checkpoint-refs-adopted", meta.sessionId);
