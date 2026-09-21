@@ -70,6 +70,7 @@ interface FakeControlPlane {
   wss: InstanceType<typeof WebSocketServer>;
   /** Every /runner socket the runner has opened, in connection order. */
   connections: import("ws").WebSocket[];
+  pingCount(index: number): number;
   waitForConnection(index: number, timeoutMs: number, context: () => string): Promise<import("ws").WebSocket>;
   close(): Promise<void>;
 }
@@ -81,6 +82,7 @@ async function startFakeControlPlane(options: { pongAfterPingCount?: number } = 
   const port = await reservePort();
   const wss = new WebSocketServer({ noServer: true, autoPong: false });
   const connections: import("ws").WebSocket[] = [];
+  const pingCounts: number[] = [];
   const waiters = new Map<number, () => void>();
   const server = createServer((req, res) => {
     if (req.method === "GET" && req.url && req.url.includes("/runner/attestation/")) {
@@ -102,10 +104,10 @@ async function startFakeControlPlane(options: { pongAfterPingCount?: number } = 
     wss.handleUpgrade(req, socket, head, (ws) => {
       const index = connections.length;
       connections.push(ws);
-      let pingCount = 0;
+      pingCounts[index] = 0;
       ws.on("ping", (data) => {
-        pingCount++;
-        if (options.pongAfterPingCount !== undefined && pingCount >= options.pongAfterPingCount) {
+        pingCounts[index]++;
+        if (options.pongAfterPingCount !== undefined && pingCounts[index] >= options.pongAfterPingCount) {
           ws.pong(data);
         }
       });
@@ -137,6 +139,7 @@ async function startFakeControlPlane(options: { pongAfterPingCount?: number } = 
     server,
     wss,
     connections,
+    pingCount: (index) => pingCounts[index] ?? 0,
     waitForConnection(index, timeoutMs, context) {
       if (connections[index]) return Promise.resolve(connections[index]);
       const arrived = new Promise<import("ws").WebSocket>((resolvePromise) => {
@@ -247,6 +250,7 @@ test(
     await delay(1_500);
 
     assert.equal(child.exitCode, null, `runner exited during initial pong grace\n${output}`);
+    assert.ok(cp.pingCount(0) >= 3, `runner did not exercise the delayed-pong grace path\n${output}`);
     assert.equal(first.readyState, 1, `runner replaced the healthy startup socket\n${output}`);
     assert.equal(cp.connections.length, 1, `runner reconnected despite the delayed pong\n${output}`);
     assert.doesNotMatch(output, /control plane heartbeat unanswered/, output);
