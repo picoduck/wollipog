@@ -185,6 +185,46 @@ test("identical quiescent terminal snapshots do not rewrite durable state", () =
   assert.equal(db.getSession(changed[0]!.id)?.preview, "new terminal preview");
 });
 
+test("registration and negotiated terminal snapshot identities remain independently replayable", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new Hub(db);
+  const svc = new SessionsService(db, hub, NOOP_LOG);
+  const registration: SessionSnapshot = {
+    ...snapshot(),
+    id: "dual-wire-identity",
+    status: "stopped",
+    seq: 0,
+    historyEpoch: undefined,
+  };
+  const negotiated: SessionSnapshot = {
+    ...registration,
+    config: { serviceTier: "fast" },
+    backgroundWorkTracking: "managed",
+    seq: 2,
+    historyEpoch: 9,
+  };
+  svc.hydrateRunnerSessions(RUNNER_ID, [registration]);
+  db.updateSessionFromSnapshot(negotiated.id, negotiated, 10);
+
+  const sqlite = (db as unknown as {
+    db: { prepare(sql: string): { get(): { changes: number } } };
+  }).db;
+  const totalChanges = () => sqlite.prepare("SELECT total_changes() AS changes").get().changes;
+  const beforeRegistrationReplay = totalChanges();
+
+  svc.hydrateRunnerSessions(RUNNER_ID, [registration]);
+
+  assert.equal(totalChanges(), beforeRegistrationReplay,
+    "the pre-negotiation identity survives a following negotiated runtime snapshot");
+  const beforeRuntimeReplay = totalChanges();
+
+  db.updateSessionFromSnapshot(negotiated.id, negotiated, 20);
+
+  assert.equal(totalChanges(), beforeRuntimeReplay,
+    "the full runtime identity survives a following registration snapshot replay");
+});
+
 test("terminal snapshot fast path yields to history reset and durable cleanup", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);

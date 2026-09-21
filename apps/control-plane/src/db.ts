@@ -594,6 +594,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   runner_history_epoch INTEGER,
   runner_history_tail_seq INTEGER NOT NULL DEFAULT 0,
   runner_snapshot_fingerprint TEXT,
+  runner_registration_snapshot_fingerprint TEXT,
   adopted        INTEGER NOT NULL DEFAULT 0,
   acp_session_context TEXT,
   CHECK (policy_resume_status IS NULL OR policy_resume_status='idle'),
@@ -2527,6 +2528,7 @@ interface SessionRow {
   runner_history_epoch: number | null;
   runner_history_tail_seq: number;
   runner_snapshot_fingerprint: string | null;
+  runner_registration_snapshot_fingerprint: string | null;
 }
 
 interface SessionStopIntentRow {
@@ -4676,6 +4678,10 @@ export class ControlPlaneDb {
       // Exact runner snapshot last reconciled into this row. Reconnect hydration uses this only
       // for quiescent terminal sessions, whose identical snapshots have no service-level work.
       "runner_snapshot_fingerprint TEXT",
+      // Registration snapshots precede protocol negotiation and therefore differ structurally
+      // from the full runtime snapshot published immediately afterward. Track both identities so
+      // alternating wire projections do not force an otherwise identical terminal replay.
+      "runner_registration_snapshot_fingerprint TEXT",
       // adopted-from-CLI marker (gates the reprocess action).
       "adopted INTEGER NOT NULL DEFAULT 0",
       // Phase 7 (cost-budget gating): accumulated-cost ceiling (USD). NULL ⇒ unlimited. CP-only —
@@ -11230,8 +11236,8 @@ export class ControlPlaneDb {
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_work_tracking, history_quarantine, capacity_wait, status, use_worktree, worktree_path, workspace_path, archived,
              driver, model, resolved_model, effort, service_tier, permission_mode, agent_capabilities, preview, pending_approval, input_tokens, output_tokens, context_tokens_used, context_window, cost_usd,
               acp_session_context, created_at, updated_at, last_event_at, hydrated_seq, runner_history_epoch, runner_history_tail_seq,
-              runner_snapshot_fingerprint, adopted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
+              runner_snapshot_fingerprint, runner_registration_snapshot_fingerprint, adopted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)`,
       )
       .run(
         snap.id,
@@ -11278,6 +11284,7 @@ export class ControlPlaneDb {
         snap.updatedAt,
         snap.historyEpoch ?? null,
         snap.seq,
+        ControlPlaneDb.sessionSnapshotFingerprint(snap),
         ControlPlaneDb.sessionSnapshotFingerprint(snap),
         snap.adopted ? 1 : 0,
       );
@@ -11347,7 +11354,7 @@ export class ControlPlaneDb {
     if ((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
       throw new Error("updateSessionFromSnapshot requires an autocommit connection");
     }
-    const history = this.atomic(() => this.updateSessionFromSnapshotInTransaction(id, snap, now));
+    const history = this.atomic(() => this.updateSessionFromSnapshotInTransaction(id, snap, now, "runtime"));
     if (history?.reset) this.collectWorkflowArtifactBlobs();
     this.maybeMaintainUsageAggregation();
     return history;
@@ -11365,7 +11372,7 @@ export class ControlPlaneDb {
       throw new Error("updateSessionsFromSnapshots requires an autocommit connection");
     }
     const histories = this.atomic(() => snapshots.map((snap) =>
-      this.updateSessionFromSnapshotInTransaction(snap.id, snap, now, true)));
+      this.updateSessionFromSnapshotInTransaction(snap.id, snap, now, "registration")));
     if (histories.some((history) => history?.reset)) this.collectWorkflowArtifactBlobs();
     this.maybeMaintainUsageAggregation();
     return histories;
@@ -11375,13 +11382,13 @@ export class ControlPlaneDb {
     id: string,
     snap: SessionSnapshot,
     now: number,
-    skipIdentical = false,
+    replayKind: "registration" | "runtime",
   ): RunnerHistoryReconciliation | null {
     const snapshotFingerprint = ControlPlaneDb.sessionSnapshotFingerprint(snap);
-    if (skipIdentical) {
+    if (isTerminal(snap.status)) {
       const stored = this.stmt(
-        `SELECT runner_snapshot_fingerprint, runner_history_epoch, runner_history_tail_seq,
-                hydrated_seq, event_epoch,
+        `SELECT status, runner_snapshot_fingerprint, runner_registration_snapshot_fingerprint,
+                runner_history_epoch, runner_history_tail_seq, hydrated_seq, event_epoch,
                 EXISTS (
                   SELECT 1 FROM session_prompt_commands
                    WHERE session_id=? AND state IN ('pending','sent','accepted','queued','started')
@@ -11393,7 +11400,9 @@ export class ControlPlaneDb {
                 ) AS has_pending_status_settlement
            FROM sessions WHERE id=?`,
       ).get(id, id, id) as {
+        status: SessionStatus;
         runner_snapshot_fingerprint: string | null;
+        runner_registration_snapshot_fingerprint: string | null;
         runner_history_epoch: number | null;
         runner_history_tail_seq: number;
         hydrated_seq: number;
@@ -11401,7 +11410,10 @@ export class ControlPlaneDb {
         has_open_prompt_command: number;
         has_pending_status_settlement: number;
       } | undefined;
-      if (stored?.runner_snapshot_fingerprint === snapshotFingerprint &&
+      const storedFingerprint = replayKind === "registration"
+        ? stored?.runner_registration_snapshot_fingerprint
+        : stored?.runner_snapshot_fingerprint;
+      if (stored && isTerminal(stored.status) && storedFingerprint === snapshotFingerprint &&
           stored.has_open_prompt_command === 0 && stored.has_pending_status_settlement === 0) {
         return {
           reset: false,
@@ -11525,6 +11537,7 @@ export class ControlPlaneDb {
       `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
           model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
           acp_session_context=COALESCE(?, acp_session_context), runner_snapshot_fingerprint=?,
+          runner_registration_snapshot_fingerprint=COALESCE(?, runner_registration_snapshot_fingerprint),
           updated_at=? WHERE id=?`,
     )
     .run(
@@ -11572,6 +11585,7 @@ export class ControlPlaneDb {
       snap.adopted ? 1 : 0,
       snap.acpSessionContext ? JSON.stringify(snap.acpSessionContext) : null,
       snapshotFingerprint,
+      replayKind === "registration" ? snapshotFingerprint : null,
       now,
       id,
     );
@@ -12305,6 +12319,7 @@ export class ControlPlaneDb {
       this.stmt(
         `UPDATE sessions SET hydrated_seq=0, message_count=0, last_event_at=NULL, preview=NULL,
             runner_history_epoch=NULL, runner_history_tail_seq=0, runner_snapshot_fingerprint=NULL,
+            runner_registration_snapshot_fingerprint=NULL,
             event_epoch=event_epoch+1 WHERE id=?`,
       ).run(id);
       this.db.exec("COMMIT");
