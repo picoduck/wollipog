@@ -70,7 +70,7 @@ test("Snooze suggestions remain touch-sized and contained on mobile", async ({ p
   await openNewSnoozeDialog(page);
 
   const expression = page.getByRole("combobox", { name: "Natural Language" });
-  await expression.fill("in 2");
+  await expression.fill("fri aft");
   const listbox = page.getByRole("listbox", { name: "Schedule Suggestions" });
   await expect(listbox).toBeVisible();
   const geometry = await listbox.evaluate((element) => {
@@ -85,13 +85,28 @@ test("Snooze suggestions remain touch-sized and contained on mobile", async ({ p
   if (EVIDENCE_CAPTURE) await page.screenshot({ path: testInfo.outputPath("mobile-suggestions.png") });
   await pause(3_000);
 
-  await listbox.getByRole("option").filter({ hasText: "In 2 Hours" }).click();
-  await expect(expression).toHaveValue("In 2 Hours");
+  await listbox.getByRole("option").filter({ hasText: "Friday Afternoon" }).click();
+  await expect(expression).toHaveValue("Friday Afternoon");
   await expect(listbox).toHaveCount(0);
   await expect(page.getByText("Schedule Source: Autocomplete")).toBeVisible();
   await expect(page.getByRole("button", { name: "Snooze Session", exact: true })).toBeEnabled();
   if (EVIDENCE_CAPTURE) await page.screenshot({ path: testInfo.outputPath("mobile-selected.png") });
   await pause(4_000);
+});
+
+test("calendar-relative presets and weekday clocks use the same authoritative preview", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await openNewSnoozeDialog(page);
+
+  await page.getByRole("radio", { name: "Next Month" }).click();
+  await expect(page.getByText("Schedule Source: Preset — Next Month")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Snooze Session", exact: true })).toBeEnabled();
+
+  const expression = page.getByRole("combobox", { name: "Natural Language" });
+  await expression.fill("wed at 15:30");
+  await expect(page.getByRole("listbox", { name: "Schedule Suggestions" })).toBeVisible();
+  await expect(page.locator(".snooze-preview")).toContainText("Schedule Source: Natural Language");
+  await expect(page.getByRole("button", { name: "Snooze Session", exact: true })).toBeEnabled();
 });
 
 test("a stationary pointer does not choose a suggestion for typed Enter submission", async ({ page }) => {

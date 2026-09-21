@@ -23,8 +23,8 @@ import {
 const REMINDER_PRESETS = [
   { expression: "later today", label: "Later Today" },
   { expression: "tomorrow morning", label: "Tomorrow Morning" },
-  { expression: "in 1 day", label: "In 1 Day" },
-  { expression: "in 7 days", label: "In 7 Days" },
+  { expression: "next week", label: "Next Week" },
+  { expression: "next month", label: "Next Month" },
 ] as const;
 type ReminderPresetExpression = typeof REMINDER_PRESETS[number]["expression"];
 const REMINDER_PRESET_OPTIONS = REMINDER_PRESETS.map((preset) => ({
