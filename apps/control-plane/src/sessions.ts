@@ -11145,8 +11145,7 @@ export class SessionsService {
         } else if (snap.status !== "idle") {
           this.db.clearPolicyResumeStatus(snap.id);
         }
-        const history = this.db.reconcileRunnerHistory(snap.id, snap.historyEpoch, snap.seq);
-        this.db.updateSessionFromSnapshot(snap.id, snap, now);
+        const history = this.db.updateSessionFromSnapshot(snap.id, snap, now);
         if (history?.reset) {
           const reset = this.db.getSession(snap.id)!;
           this.hub.sessionEventsReset(snap.id, [], reset.eventEpoch ?? 0);
@@ -11247,8 +11246,7 @@ export class SessionsService {
     } else if (runtimeSnapshot.status !== "idle") {
       this.db.clearPolicyResumeStatus(snapshot.id);
     }
-    const history = this.db.reconcileRunnerHistory(snapshot.id, runtimeSnapshot.historyEpoch, runtimeSnapshot.seq);
-    this.db.updateSessionFromSnapshot(snapshot.id, runtimeSnapshot, now);
+    const history = this.db.updateSessionFromSnapshot(snapshot.id, runtimeSnapshot, now);
     if (history?.reset) {
       const reset = this.db.getSession(snapshot.id)!;
       this.hub.sessionEventsReset(snapshot.id, [], reset.eventEpoch ?? 0);

@@ -11332,10 +11332,28 @@ export class ControlPlaneDb {
    * board_column + archived (the user's view state) and a CP-only cost-budget pause. workspace_id
    * is normally retained as CP-owned grouping; the sole exception is a legacy adopted placeholder
    * whose first authoritative runner snapshot supplies the cwd that was intentionally not trusted. */
-  updateSessionFromSnapshot(id: string, snap: SessionSnapshot, now: number): void {
+  updateSessionFromSnapshot(
+    id: string,
+    snap: SessionSnapshot,
+    now: number,
+  ): RunnerHistoryReconciliation | null {
+    if ((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
+      throw new Error("updateSessionFromSnapshot requires an autocommit connection");
+    }
+    const history = this.atomic(() => this.updateSessionFromSnapshotInTransaction(id, snap, now));
+    if (history?.reset) this.collectWorkflowArtifactBlobs();
+    this.maybeMaintainUsageAggregation();
+    return history;
+  }
+
+  private updateSessionFromSnapshotInTransaction(
+    id: string,
+    snap: SessionSnapshot,
+    now: number,
+  ): RunnerHistoryReconciliation | null {
     // Reconcile the runner-owned generation before applying its metadata. A migrated unknown epoch
     // adopts the first v54 epoch in place; only a change between two known epochs replaces cache.
-    this.reconcileRunnerHistory(id, snap.historyEpoch, snap.seq);
+    const history = this.reconcileRunnerHistoryInTransaction(id, snap.historyEpoch, snap.seq);
     // A guardrail pause (cost budget / tool-call limit) is set entirely control-plane-side; the
     // runner's snapshot knows nothing of it, so we must not let it revert status→idle +
     // pending→null and resume over-limit work.
@@ -11415,177 +11433,170 @@ export class ControlPlaneDb {
     const title = keepControlPlaneTitle ? existing!.title : snap.title;
     const titleSource = keepControlPlaneTitle ? existing!.title_source ?? "generated" : snapshotTitleSource;
     const semanticTitle = keepControlPlaneTitle && existing?.semantic_title === 1 ? 1 : 0;
-    this.db.exec("BEGIN");
-    try {
-      if (authoritativeImportPath && authoritativeScope) {
-        const ownerId = authoritativeScope.owner.kind === "organization"
-          ? authoritativeScope.owner.organizationId
-          : authoritativeScope.owner.kind === "user"
-            ? authoritativeScope.owner.userId
-            : authoritativeScope.owner.teamId;
-        this.stmt(
-          `UPDATE session_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=?
-           WHERE session_id=?`,
-        ).run(
-          authoritativeScope.organizationId,
-          authoritativeScope.owner.kind,
-          ownerId,
-          now,
-          id,
-        );
-        this.stmt(
-          `UPDATE sessions SET workspace_id=?, project_id=?, project_location_id=? WHERE id=?`,
-        ).run(
-          authoritativeWorkspaceId,
-          authoritativeProjectLocation?.projectId ?? null,
-          authoritativeProjectLocation?.id ?? null,
-          id,
-        );
-      }
+    if (authoritativeImportPath && authoritativeScope) {
+      const ownerId = authoritativeScope.owner.kind === "organization"
+        ? authoritativeScope.owner.organizationId
+        : authoritativeScope.owner.kind === "user"
+          ? authoritativeScope.owner.userId
+          : authoritativeScope.owner.teamId;
       this.stmt(
-        `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
-            model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
-            acp_session_context=COALESCE(?, acp_session_context),
-            updated_at=? WHERE id=?`,
-      )
-      .run(
-        status,
-        title,
-        titleSource,
-        semanticTitle,
-        snap.providerUpdatedAt ?? null,
-        backgroundWorkStateForStorage(snap.backgroundWorkState),
-        snap.backgroundWorkTracking ?? null,
-        // Three-valued, matching the snapshot field: SQL NULL carries no information and preserves
-        // whatever is stored; the empty-string sentinel is a supporting runner saying the
-        // conversation is healthy, which NULLIF turns into a real clear.
-        historyQuarantineForStorage(snap.historyQuarantine),
-        worktreeRecoveryForStorage(snap.worktreeRecovery),
-        capacityWaitForStorage(
-          status,
-          snap.capacityWait,
-          snap.capacityWait?.kind === "active_turn_capacity" && runnerSupportsProtocol(
-            existing ? this.getRunner(existing.runner_id)?.protocolVersion : null,
-            "runnerCapacityDimensions",
-          ),
-          snap.capacityWait?.kind === "capacity_lock" && runnerSupportsProtocol(
-            existing ? this.getRunner(existing.runner_id)?.protocolVersion : null,
-            "capacityLockDiagnostics",
-          ),
-        ),
-        snap.preview,
-        pendingJson,
-        snap.worktreePath,
-        snap.worktrees ? JSON.stringify(snap.worktrees) : null,
-        snap.workspacePath ?? null,
-        snap.useWorktree ? 1 : 0,
-        snap.config.model ?? null,
-        snap.resolvedModel ?? null,
-        snap.config.effort ?? null,
-        snap.config.serviceTier ?? null,
-        snap.config.permissionMode ?? null,
-        snap.agentCapabilities ? JSON.stringify(snap.agentCapabilities) : null,
-        snap.tokensIn,
-        snap.tokensOut,
-        snap.contextTokensUsed ?? null,
-        snap.contextWindow ?? null,
-        snap.costUsd,
-        snap.adopted ? 1 : 0,
-        snap.acpSessionContext ? JSON.stringify(snap.acpSessionContext) : null,
+        `UPDATE session_ownership SET organization_id=?, owner_kind=?, owner_id=?, updated_at=?
+         WHERE session_id=?`,
+      ).run(
+        authoritativeScope.organizationId,
+        authoritativeScope.owner.kind,
+        ownerId,
         now,
         id,
       );
-      if (snap.providerAccountId) {
-        this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
-          .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId, id);
-      }
-      if (snap.providerAccountSwitchFailure !== undefined) {
-        this.stmt("UPDATE sessions SET provider_account_switch_failure=? WHERE id=?")
-          .run(snap.providerAccountSwitchFailure
-            ? JSON.stringify(snap.providerAccountSwitchFailure)
-            : null, id);
-      }
-      if (snap.executionTarget) {
-        this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
-          .run(JSON.stringify(snap.executionTarget), id);
-      }
-      const handoff = validateExecutionHandoffReceipt(
-        snap.executionHandoff,
-        snap.executionTarget,
-        expectedHandoffRequest,
-        expectedHandoffBudgetUsd,
+      this.stmt(
+        `UPDATE sessions SET workspace_id=?, project_id=?, project_location_id=? WHERE id=?`,
+      ).run(
+        authoritativeWorkspaceId,
+        authoritativeProjectLocation?.projectId ?? null,
+        authoritativeProjectLocation?.id ?? null,
+        id,
       );
-      if (handoff) {
-        const request = expectedHandoffRequest ?? {
-          ...(handoff.sourceSessionId ? { sourceSessionId: handoff.sourceSessionId } : {}),
-          artifacts: handoff.artifacts,
-        };
-        this.stmt("UPDATE sessions SET execution_handoff_request=?, execution_handoff=? WHERE id=?")
-          .run(JSON.stringify(request), JSON.stringify(handoff), id);
-      }
-      this.enqueueOutboundStatusEventsInTransaction({
-        sessionId: id,
-        previousStatus: existing?.status,
-        status,
-        pending: parseJson<PendingApproval>(pendingJson),
-        costUsd: snap.costUsd,
-        costBudgetUsd: existing?.cost_budget_usd ?? undefined,
-        now,
-      });
-      const previousWorktrees = parseJson<SessionWorktreeView[]>(existing?.worktrees ?? null) ?? [];
-      const previousPullRequests = new Map(previousWorktrees.flatMap((worktree) =>
-        worktree.pullRequest ? [[worktree.pullRequest.url, worktree.pullRequest] as const] : []));
-      for (const worktree of snap.worktrees ?? []) {
-        const pullRequest = worktree.pullRequest;
-        if (!pullRequest) continue;
-        const prior = previousPullRequests.get(pullRequest.url);
-        if (pullRequest.state === "open" && !prior) {
-          this.enqueueOutboundSessionEventInTransaction({
-            sourceKey: `pull-request-opened:${id}:${pullRequest.url}`,
-            kind: "pull_request.opened",
-            sessionId: id,
-            occurredAt: now,
-            detail: { branch: worktree.branch, pullRequest: { url: pullRequest.url, state: "open" } },
-          });
-        } else if (pullRequest.state === "merged" && prior?.state !== "merged" && pullRequest.headOid) {
-          this.enqueueOutboundSessionEventInTransaction({
-            sourceKey: `pull-request-merged:${id}:${pullRequest.url}:${pullRequest.headOid}`,
-            kind: "pull_request.merged",
-            sessionId: id,
-            occurredAt: now,
-            detail: {
-              branch: worktree.branch,
-              pullRequest: { url: pullRequest.url, state: "merged", headOid: pullRequest.headOid },
-            },
-          });
-        }
-      }
-      this.reconcileUsageSnapshotInTransaction(id, snap, now);
-      this.upsertManagedBackgroundJobsInTransaction(id, snap.backgroundJobs, now);
-      // Session terminality is the retry fence regardless of which service path observed it;
-      // snapshots (hydration and runtime updates) must fence in the same transaction so a pending
-      // durable prompt can never be re-delivered into a session this snapshot terminalized.
-      // The same authority orphans any armed settlement marker: a post-restart hydration of a
-      // dead run must not leave it to suppress a later run's Ready.
-      if (isTerminal(status)) {
-        this.cancelSessionPromptCommands(
-          id,
-          `session became ${status} before durable prompt delivery completed`,
-          now,
-        );
-        this.stmt(
-          `UPDATE managed_background_deliveries
-              SET status_settlement_pending_at=NULL, updated_at=MAX(updated_at, ?)
-            WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
-              AND status_settled_at IS NULL`,
-        ).run(now, id);
-      }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
     }
-    this.maybeMaintainUsageAggregation();
+    this.stmt(
+      `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
+          model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
+          acp_session_context=COALESCE(?, acp_session_context),
+          updated_at=? WHERE id=?`,
+    )
+    .run(
+      status,
+      title,
+      titleSource,
+      semanticTitle,
+      snap.providerUpdatedAt ?? null,
+      backgroundWorkStateForStorage(snap.backgroundWorkState),
+      snap.backgroundWorkTracking ?? null,
+      // Three-valued, matching the snapshot field: SQL NULL carries no information and preserves
+      // whatever is stored; the empty-string sentinel is a supporting runner saying the
+      // conversation is healthy, which NULLIF turns into a real clear.
+      historyQuarantineForStorage(snap.historyQuarantine),
+      worktreeRecoveryForStorage(snap.worktreeRecovery),
+      capacityWaitForStorage(
+        status,
+        snap.capacityWait,
+        snap.capacityWait?.kind === "active_turn_capacity" && runnerSupportsProtocol(
+          existing ? this.getRunner(existing.runner_id)?.protocolVersion : null,
+          "runnerCapacityDimensions",
+        ),
+        snap.capacityWait?.kind === "capacity_lock" && runnerSupportsProtocol(
+          existing ? this.getRunner(existing.runner_id)?.protocolVersion : null,
+          "capacityLockDiagnostics",
+        ),
+      ),
+      snap.preview,
+      pendingJson,
+      snap.worktreePath,
+      snap.worktrees ? JSON.stringify(snap.worktrees) : null,
+      snap.workspacePath ?? null,
+      snap.useWorktree ? 1 : 0,
+      snap.config.model ?? null,
+      snap.resolvedModel ?? null,
+      snap.config.effort ?? null,
+      snap.config.serviceTier ?? null,
+      snap.config.permissionMode ?? null,
+      snap.agentCapabilities ? JSON.stringify(snap.agentCapabilities) : null,
+      snap.tokensIn,
+      snap.tokensOut,
+      snap.contextTokensUsed ?? null,
+      snap.contextWindow ?? null,
+      snap.costUsd,
+      snap.adopted ? 1 : 0,
+      snap.acpSessionContext ? JSON.stringify(snap.acpSessionContext) : null,
+      now,
+      id,
+    );
+    if (snap.providerAccountId) {
+      this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=? WHERE id=?")
+        .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId, id);
+    }
+    if (snap.providerAccountSwitchFailure !== undefined) {
+      this.stmt("UPDATE sessions SET provider_account_switch_failure=? WHERE id=?")
+        .run(snap.providerAccountSwitchFailure
+          ? JSON.stringify(snap.providerAccountSwitchFailure)
+          : null, id);
+    }
+    if (snap.executionTarget) {
+      this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
+        .run(JSON.stringify(snap.executionTarget), id);
+    }
+    const handoff = validateExecutionHandoffReceipt(
+      snap.executionHandoff,
+      snap.executionTarget,
+      expectedHandoffRequest,
+      expectedHandoffBudgetUsd,
+    );
+    if (handoff) {
+      const request = expectedHandoffRequest ?? {
+        ...(handoff.sourceSessionId ? { sourceSessionId: handoff.sourceSessionId } : {}),
+        artifacts: handoff.artifacts,
+      };
+      this.stmt("UPDATE sessions SET execution_handoff_request=?, execution_handoff=? WHERE id=?")
+        .run(JSON.stringify(request), JSON.stringify(handoff), id);
+    }
+    this.enqueueOutboundStatusEventsInTransaction({
+      sessionId: id,
+      previousStatus: existing?.status,
+      status,
+      pending: parseJson<PendingApproval>(pendingJson),
+      costUsd: snap.costUsd,
+      costBudgetUsd: existing?.cost_budget_usd ?? undefined,
+      now,
+    });
+    const previousWorktrees = parseJson<SessionWorktreeView[]>(existing?.worktrees ?? null) ?? [];
+    const previousPullRequests = new Map(previousWorktrees.flatMap((worktree) =>
+      worktree.pullRequest ? [[worktree.pullRequest.url, worktree.pullRequest] as const] : []));
+    for (const worktree of snap.worktrees ?? []) {
+      const pullRequest = worktree.pullRequest;
+      if (!pullRequest) continue;
+      const prior = previousPullRequests.get(pullRequest.url);
+      if (pullRequest.state === "open" && !prior) {
+        this.enqueueOutboundSessionEventInTransaction({
+          sourceKey: `pull-request-opened:${id}:${pullRequest.url}`,
+          kind: "pull_request.opened",
+          sessionId: id,
+          occurredAt: now,
+          detail: { branch: worktree.branch, pullRequest: { url: pullRequest.url, state: "open" } },
+        });
+      } else if (pullRequest.state === "merged" && prior?.state !== "merged" && pullRequest.headOid) {
+        this.enqueueOutboundSessionEventInTransaction({
+          sourceKey: `pull-request-merged:${id}:${pullRequest.url}:${pullRequest.headOid}`,
+          kind: "pull_request.merged",
+          sessionId: id,
+          occurredAt: now,
+          detail: {
+            branch: worktree.branch,
+            pullRequest: { url: pullRequest.url, state: "merged", headOid: pullRequest.headOid },
+          },
+        });
+      }
+    }
+    this.reconcileUsageSnapshotInTransaction(id, snap, now);
+    this.upsertManagedBackgroundJobsInTransaction(id, snap.backgroundJobs, now);
+    // Session terminality is the retry fence regardless of which service path observed it;
+    // snapshots (hydration and runtime updates) must fence in the same transaction so a pending
+    // durable prompt can never be re-delivered into a session this snapshot terminalized.
+    // The same authority orphans any armed settlement marker: a post-restart hydration of a
+    // dead run must not leave it to suppress a later run's Ready.
+    if (isTerminal(status)) {
+      this.cancelSessionPromptCommands(
+        id,
+        `session became ${status} before durable prompt delivery completed`,
+        now,
+      );
+      this.stmt(
+        `UPDATE managed_background_deliveries
+            SET status_settlement_pending_at=NULL, updated_at=MAX(updated_at, ?)
+          WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
+            AND status_settled_at IS NULL`,
+      ).run(now, id);
+    }
+    return history;
   }
 
   /** Monotonic mirror of projection-safe runner facts. Absence means a pre-v82 runner and leaves
@@ -12097,85 +12108,89 @@ export class ControlPlaneDb {
     historyEpoch: number | undefined,
     tailSeq: number,
   ): RunnerHistoryReconciliation | null {
+    if ((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
+      throw new Error("reconcileRunnerHistory requires an autocommit connection");
+    }
+    const result = this.atomic(() => this.reconcileRunnerHistoryInTransaction(id, historyEpoch, tailSeq));
+    if (result?.reset) this.collectWorkflowArtifactBlobs();
+    return result;
+  }
+
+  private reconcileRunnerHistoryInTransaction(
+    id: string,
+    historyEpoch: number | undefined,
+    tailSeq: number,
+  ): RunnerHistoryReconciliation | null {
     if (!Number.isSafeInteger(tailSeq) || tailSeq < 0) {
       throw new RangeError("tailSeq must be a non-negative safe integer");
     }
     if (historyEpoch !== undefined && (!Number.isSafeInteger(historyEpoch) || historyEpoch < 0)) {
       throw new RangeError("historyEpoch must be a non-negative safe integer when present");
     }
-    this.db.exec("BEGIN");
-    try {
-      const before = this.stmt(
-        `SELECT runner_history_epoch, runner_history_tail_seq, hydrated_seq, event_epoch
-           FROM sessions WHERE id=?`,
-      ).get(id) as {
-        runner_history_epoch: number | null;
-        runner_history_tail_seq: number;
-        hydrated_seq: number;
-        event_epoch: number;
-      } | undefined;
-      if (!before) {
-        this.db.exec("ROLLBACK");
-        return null;
-      }
-      const reset = historyEpoch !== undefined && before.runner_history_epoch !== null &&
-        before.runner_history_epoch !== historyEpoch;
-      // A same-generation runner tail is monotonic. Preserve a newer snapshot/cursor if a delayed
-      // runtime snapshot arrives after it; a newly adopted epoch must also cover migrated cache.
-      const settledTail = reset
-        ? tailSeq
-        : Math.max(tailSeq, before.runner_history_tail_seq, before.hydrated_seq);
-      if (reset) {
-        this.stmt(
-          `DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL
-             AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'`,
-        ).run(id);
-        this.stmt("DELETE FROM session_events WHERE session_id=?").run(id);
-        this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
-        this.stmt(
-          `UPDATE managed_background_deliveries
-              SET transcript_projected_at=NULL, projected_event_epoch=NULL, projected_event_seq=NULL
-            WHERE session_id=? AND transcript_projected_at IS NOT NULL`,
-        ).run(id);
-        this.stmt(
-          `UPDATE sessions
-              SET runner_history_epoch=?, runner_history_tail_seq=?, hydrated_seq=0,
-                  message_count=0, last_event_at=NULL, preview=NULL, event_epoch=event_epoch+1
-            WHERE id=?`,
-        ).run(historyEpoch, settledTail, id);
-      } else if (historyEpoch !== undefined) {
-        this.stmt(
-          "UPDATE sessions SET runner_history_epoch=?, runner_history_tail_seq=? WHERE id=?",
-        ).run(historyEpoch, settledTail, id);
-      } else {
-        // A pre-v54 snapshot cannot prove a generation. Preserve any epoch learned earlier, but its
-        // advertised tail is still useful to legacy completeness diagnostics.
-        this.stmt("UPDATE sessions SET runner_history_tail_seq=? WHERE id=?").run(settledTail, id);
-      }
-      const after = this.stmt(
-        `SELECT runner_history_epoch, runner_history_tail_seq, hydrated_seq, event_epoch
-           FROM sessions WHERE id=?`,
-      ).get(id) as {
-        runner_history_epoch: number | null;
-        runner_history_tail_seq: number;
-        hydrated_seq: number;
-        event_epoch: number;
-      };
-      this.db.exec("COMMIT");
-      if (reset) this.collectWorkflowArtifactBlobs();
-      return {
-        reset,
-        historyEpoch: after.runner_history_epoch,
-        tailSeq: after.runner_history_tail_seq,
-        hydratedSeq: after.hydrated_seq,
-        eventEpoch: after.event_epoch,
-        complete: after.runner_history_epoch !== null &&
-          after.hydrated_seq >= after.runner_history_tail_seq,
-      };
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
+    const before = this.stmt(
+      `SELECT runner_history_epoch, runner_history_tail_seq, hydrated_seq, event_epoch
+         FROM sessions WHERE id=?`,
+    ).get(id) as {
+      runner_history_epoch: number | null;
+      runner_history_tail_seq: number;
+      hydrated_seq: number;
+      event_epoch: number;
+    } | undefined;
+    if (!before) {
+      return null;
     }
+    const reset = historyEpoch !== undefined && before.runner_history_epoch !== null &&
+      before.runner_history_epoch !== historyEpoch;
+    // A same-generation runner tail is monotonic. Preserve a newer snapshot/cursor if a delayed
+    // runtime snapshot arrives after it; a newly adopted epoch must also cover migrated cache.
+    const settledTail = reset
+      ? tailSeq
+      : Math.max(tailSeq, before.runner_history_tail_seq, before.hydrated_seq);
+    if (reset) {
+      this.stmt(
+        `DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL
+           AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'`,
+      ).run(id);
+      this.stmt("DELETE FROM session_events WHERE session_id=?").run(id);
+      this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
+      this.stmt(
+        `UPDATE managed_background_deliveries
+            SET transcript_projected_at=NULL, projected_event_epoch=NULL, projected_event_seq=NULL
+          WHERE session_id=? AND transcript_projected_at IS NOT NULL`,
+      ).run(id);
+      this.stmt(
+        `UPDATE sessions
+            SET runner_history_epoch=?, runner_history_tail_seq=?, hydrated_seq=0,
+                message_count=0, last_event_at=NULL, preview=NULL, event_epoch=event_epoch+1
+          WHERE id=?`,
+      ).run(historyEpoch, settledTail, id);
+    } else if (historyEpoch !== undefined) {
+      this.stmt(
+        "UPDATE sessions SET runner_history_epoch=?, runner_history_tail_seq=? WHERE id=?",
+      ).run(historyEpoch, settledTail, id);
+    } else {
+      // A pre-v54 snapshot cannot prove a generation. Preserve any epoch learned earlier, but its
+      // advertised tail is still useful to legacy completeness diagnostics.
+      this.stmt("UPDATE sessions SET runner_history_tail_seq=? WHERE id=?").run(settledTail, id);
+    }
+    const after = this.stmt(
+      `SELECT runner_history_epoch, runner_history_tail_seq, hydrated_seq, event_epoch
+         FROM sessions WHERE id=?`,
+    ).get(id) as {
+      runner_history_epoch: number | null;
+      runner_history_tail_seq: number;
+      hydrated_seq: number;
+      event_epoch: number;
+    };
+    return {
+      reset,
+      historyEpoch: after.runner_history_epoch,
+      tailSeq: after.runner_history_tail_seq,
+      hydratedSeq: after.hydrated_seq,
+      eventEpoch: after.event_epoch,
+      complete: after.runner_history_epoch !== null &&
+        after.hydrated_seq >= after.runner_history_tail_seq,
+    };
   }
 
   getRunnerHistoryState(id: string): RunnerHistoryState | null {
@@ -14258,6 +14273,17 @@ export class ControlPlaneDb {
 
   /** A later live execution frame invalidates every previously swallowed settle marker. */
   clearPolicyResumeStatus(sessionId: string): number {
+    const dirty = this.stmt(
+      `SELECT 1 AS present
+         FROM sessions
+        WHERE id=? AND policy_resume_status IS NOT NULL
+        UNION ALL
+       SELECT 1 AS present
+         FROM policy_hook_approvals
+        WHERE session_id=? AND status IN ('queued','pending') AND resume_status IS NOT NULL
+        LIMIT 1`,
+    ).get(sessionId, sessionId);
+    if (!dirty) return 0;
     return this.atomic(() => {
       const sessionChange = Number(this.stmt(
         "UPDATE sessions SET policy_resume_status=NULL WHERE id=? AND policy_resume_status IS NOT NULL",
