@@ -1091,6 +1091,9 @@ export class CodexAppServerDriver implements Driver {
 
   cancel(): void {
     this.cancelled = true;
+    // A live turn advances the fence in settleTurn(). Initialization and image staging do not yet
+    // have a resolver, so invalidate their captured generation here instead.
+    if (!this.turnResolve) this.promptGeneration++;
     if (this.threadId && this.peer) {
       try {
         this.peer.notify("turn/interrupt", { threadId: this.threadId });
@@ -1128,6 +1131,9 @@ export class CodexAppServerDriver implements Driver {
   dispose(): void {
     this.disposed = true;
     this.cancelled = true;
+    // Match cancel(): settleTurn owns the live-turn transition, while pre-turn async work needs an
+    // immediate generation fence so it cannot launch or submit after disposal.
+    if (!this.turnResolve) this.promptGeneration++;
     // Shutdown is deliberately non-destructive: interrupt the live turn and unblock every
     // parked server request, but never archive/delete the durable Codex thread.
     if (this.threadId && this.peer) {
