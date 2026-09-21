@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, sym
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -1557,6 +1557,7 @@ test("retained ref reclaims coalesce one cleanup generation without blocking ind
       undefined,
       dataDir,
     );
+    (manager as unknown as { runnerOwnerHash?: string }).runnerOwnerHash = "f".repeat(64);
     const internals = manager as unknown as {
       cleanupJournal: WorktreeCleanupJournal;
       retainedRefReclaimLanes: Map<string, Promise<void>>;
@@ -1638,6 +1639,77 @@ test("retained ref reclaims coalesce one cleanup generation without blocking ind
     assert.ok(diagnosticLogs.some((line) => line.includes("state=retained reason=delivery_unproved")));
     assert.ok(diagnosticLogs.every((line) => !line.includes("/repo") && !line.includes("fix/")),
       "logs do not expose repository paths or branch names");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("retained-ref diagnostics prioritize actionable rows within the bounded inventory", () => {
+  const base = (suffix: string): RetainedWorktreeRefRecord => ({
+    sessionId: `s_${suffix}`,
+    worktreeId: `wt-${suffix}`,
+    cleanupId: `cleanup-${suffix}`,
+    repoPath: "/private/repo",
+    context: { kind: "native" },
+    branch: `private/${suffix}`,
+    expectedOid: "a".repeat(40),
+    reasons: ["recorded_branch"],
+    state: "completed",
+    terminalReason: "deleted",
+    identityProof: { stage: "reclaim", status: "proved", reason: "proof_recorded" },
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const history = Array.from({ length: 256 }, (_, index) => base(`deleted-${index}`));
+  const retained = {
+    ...base("retained"),
+    state: "retained" as const,
+    terminalReason: "identity_unproved" as const,
+  };
+  const pending = {
+    ...base("pending"),
+    state: "pending" as const,
+    terminalReason: undefined,
+    pendingReason: "checked_out" as const,
+    armedAt: 1,
+  };
+
+  const diagnostics = retainedWorktreeRefDiagnostics([pending], [...history, retained], "f".repeat(64));
+  assert.equal(diagnostics.records.length, 256);
+  assert.equal(diagnostics.omitted, 2);
+  assert.deepEqual(diagnostics.records.slice(0, 2).map((record) => record.state), ["retained", "pending"]);
+});
+
+test("retained-ref logs are suppressed without a private owner salt", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-no-log-salt-"));
+  let manager: SessionManager | undefined;
+  try {
+    const logs: string[] = [];
+    manager = new SessionManager(
+      () => {},
+      (message) => logs.push(message),
+      new SessionStore(join(dataDir, "sessions")),
+      "runner",
+      undefined,
+      undefined,
+      dataDir,
+    );
+    const internals = manager as unknown as {
+      logRetainedRefState(record: RetainedWorktreeRefRecord): void;
+    };
+    internals.logRetainedRefState({
+      sessionId: "s_secret",
+      repoPath: "/private/repo",
+      context: { kind: "native" },
+      branch: "private/customer",
+      expectedOid: "a".repeat(40),
+      reasons: ["recorded_branch"],
+      state: "pending",
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    assert.deepEqual(logs, []);
   } finally {
     manager?.shutdownAll();
     rmSync(dataDir, { recursive: true, force: true });

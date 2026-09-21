@@ -131,6 +131,10 @@ test("state doctor reports bounded retained-ref states and identity diagnostics 
       (record.identityProof as { reason: string }).reason))].sort(),
     ["identity_rotated", "metadata_read_failed", "proof_recorded", "reflogs_disabled", "unsupported_ref_storage"],
   );
+  assert.deepEqual(
+    [...new Set(report.retainedRefReclamation.records.map((record) => record.reason))].sort(),
+    ["already_missing", "checked_out", "deleted", "identity_unproved", "not_armed", "ref_changed_or_recreated"],
+  );
   for (const record of report.retainedRefReclamation.records) {
     assert.match(String(record.recordId), /^[a-f0-9]{16}$/u);
     assert.match(String(record.generationId), /^[a-f0-9]{16}$/u);
@@ -139,6 +143,32 @@ test("state doctor reports bounded retained-ref states and identity diagnostics 
   for (const sensitive of [secretRepo, "private-user", "private/customer", "s_private", "cleanup-"]) {
     assert.equal(output.includes(sensitive), false, `inventory leaked ${sensitive}`);
   }
+});
+
+test("state doctor rejects inconsistent retained-ref state and reason tuples", async (t) => {
+  const root = fixture(t);
+  writeFileSync(join(root, "worktree-retained-ref-history.json"), `${JSON.stringify([{
+    sessionId: "s_corrupt",
+    worktreeId: "wt-corrupt",
+    cleanupId: "cleanup-corrupt",
+    repoPath: "/private/repo",
+    context: { kind: "native" },
+    branch: "private/corrupt",
+    expectedOid: "a".repeat(40),
+    reasons: ["recorded_branch"],
+    state: "completed",
+    createdAt: 1,
+    updatedAt: 1,
+  }])}\n`, { mode: 0o600 });
+
+  const output = await capture(["runner", "--state-doctor", "inventory", "--data-dir", root]);
+  const report = JSON.parse(output) as {
+    retainedRefReclamation: { records: unknown[]; unreadableRecords: number };
+  };
+  assert.deepEqual(report.retainedRefReclamation.records, []);
+  assert.equal(report.retainedRefReclamation.unreadableRecords, 1);
+  assert.equal(output.includes("s_corrupt"), false);
+  assert.equal(output.includes("private/corrupt"), false);
 });
 
 test("state doctor holds an exclusive runner-compatible maintenance lease through inventory", async (t) => {

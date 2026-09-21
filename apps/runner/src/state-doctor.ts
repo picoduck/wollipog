@@ -354,13 +354,20 @@ function validIdentityProof(value: unknown): value is RetainedWorktreeRefIdentit
 function validRetainedRefRecord(value: unknown): value is RetainedWorktreeRefRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const record = value as Partial<RetainedWorktreeRefRecord>;
+  const reasonsMatchState = record.state === "pending"
+    ? record.terminalReason === undefined
+    : record.state === "completed"
+      ? record.pendingReason === undefined &&
+        (record.terminalReason === "deleted" || record.terminalReason === "already_missing")
+      : record.pendingReason === undefined && record.terminalReason !== undefined &&
+        record.terminalReason !== "deleted" && record.terminalReason !== "already_missing";
   return typeof record.sessionId === "string" && typeof record.repoPath === "string" &&
     !!record.context && typeof record.context === "object" && typeof record.branch === "string" &&
     typeof record.expectedOid === "string" && Array.isArray(record.reasons) &&
     RETAINED_REF_STATES.has(record.state ?? "") &&
     (record.pendingReason === undefined || RETAINED_REF_PENDING_REASONS.has(record.pendingReason)) &&
     (record.terminalReason === undefined || RETAINED_REF_TERMINAL_REASONS.has(record.terminalReason)) &&
-    (record.identityProof === undefined || validIdentityProof(record.identityProof));
+    (record.identityProof === undefined || validIdentityProof(record.identityProof)) && reasonsMatchState;
 }
 
 function retainedRefRows(dataDir: string, name: string): { records: RetainedWorktreeRefRecord[]; unreadable: number } {

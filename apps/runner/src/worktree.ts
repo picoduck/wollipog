@@ -261,7 +261,7 @@ function retainedRefOpaqueId(salt: string, ...values: Array<string | undefined>)
 export function retainedWorktreeRefDiagnostics(
   pending: RetainedWorktreeRefRecord[],
   history: RetainedWorktreeRefRecord[],
-  salt = "",
+  salt: string,
   limit = 256,
 ): { records: RetainedWorktreeRefDiagnostic[]; omitted: number } {
   const authoritative = new Map<string, RetainedWorktreeRefRecord>();
@@ -298,7 +298,12 @@ export function retainedWorktreeRefDiagnostics(
       reason,
       identityProof,
     };
-  }).sort((left, right) => left.recordId < right.recordId ? -1 : left.recordId > right.recordId ? 1 : 0);
+  }).sort((left, right) => {
+    const priority = (state: RetainedWorktreeRefDiagnostic["state"]): number =>
+      state === "retained" ? 0 : state === "pending" ? 1 : 2;
+    return priority(left.state) - priority(right.state) ||
+      (left.recordId < right.recordId ? -1 : left.recordId > right.recordId ? 1 : 0);
+  });
   const boundedLimit = Math.max(0, Math.min(256, Math.trunc(limit)));
   return { records: records.slice(0, boundedLimit), omitted: Math.max(0, records.length - boundedLimit) };
 }
@@ -1864,6 +1869,7 @@ export async function discardWorktreeIfSafe(
         branch: checkedOutCandidate.branch,
         expectedOid: checkedOutCandidate.expectedOid,
         ...(checkedOutCandidate.identityToken ? { identityToken: checkedOutCandidate.identityToken } : {}),
+        identityProof: checkedOutCandidate.identityProof,
         reasons: checkedOutCandidate.reasons,
         ...(checkedOutCandidate.verifiedMergedHead
           ? { verifiedMergedHead: checkedOutCandidate.verifiedMergedHead }

@@ -190,6 +190,10 @@ and branch identifier; `pending`, `deleted`, `already_absent`, or `retained` sta
 and the identity-proof stage, status, and fixed reason. Repository paths, branch names, session
 identifiers, usernames, identity tokens, and raw Git or filesystem output are never printed. The
 inventory is capped at 256 deterministic rows and reports the omitted or unreadable count. Its
+bounded view prioritizes terminally retained and pending rows ahead of old successful receipts.
+Current owner-attested runners emit the same fixed diagnostic fields with owner-salted identifiers;
+legacy managers without a private owner salt suppress those log rows rather than emit reversible
+branch digests. The
 `adopt-checkpoints` and `adopt-provider-state` actions copy legacy state into the attested namespace
 without deleting sources; `quarantine-wsl` atomically moves the ambiguous shared provider/worktree
 roots aside. Mutations require `--ack-all-legacy-runners-stopped` and refuse an active data lease.

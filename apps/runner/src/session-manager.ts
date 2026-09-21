@@ -3175,15 +3175,19 @@ export class SessionManager {
   }
 
   private logRetainedRefState(record: RetainedWorktreeRefRecord): void {
+    // Without the private attested owner hash, low-entropy branch names would make an unsalted
+    // digest reversible by dictionary. Legacy/no-owner managers keep diagnostics on the offline
+    // state-doctor surface instead of emitting linkable identifiers.
+    if (!this.runnerOwnerHash) return;
     const diagnostic = retainedWorktreeRefDiagnostics(
       record.state === "pending" ? [record] : [],
       record.state === "pending" ? [] : [record],
-      this.runnerOwnerHash ?? "",
+      this.runnerOwnerHash,
       1,
     ).records[0];
     if (!diagnostic) return;
     this.log(
-      `retained ref reclamation for ${boundedSessionIdForLog(record.sessionId)}: ` +
+      "retained ref reclamation: " +
       `record=${diagnostic.recordId} generation=${diagnostic.generationId} branch=${diagnostic.branchId} ` +
       `state=${diagnostic.state} reason=${diagnostic.reason} ` +
       `identity=${diagnostic.identityProof.stage}/${diagnostic.identityProof.status}/${diagnostic.identityProof.reason}`,
