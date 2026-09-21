@@ -185,6 +185,76 @@ test("identical quiescent terminal snapshots do not rewrite durable state", () =
   assert.equal(db.getSession(changed[0]!.id)?.preview, "new terminal preview");
 });
 
+test("terminal snapshot fast path yields to history reset and durable cleanup", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new Hub(db);
+  const svc = new SessionsService(db, hub, NOOP_LOG);
+  const historySnapshot: SessionSnapshot = {
+    ...snapshot(),
+    id: "history-reset",
+    status: "stopped",
+    preview: "runner preview",
+    historyEpoch: 7,
+  };
+  const promptSnapshot: SessionSnapshot = {
+    ...snapshot(),
+    id: "prompt-cleanup",
+    status: "stopped",
+    seq: 0,
+    historyEpoch: 1,
+  };
+  const settlementSnapshot: SessionSnapshot = {
+    ...snapshot(),
+    id: "settlement-cleanup",
+    status: "stopped",
+    seq: 0,
+    historyEpoch: 1,
+  };
+  svc.hydrateRunnerSessions(RUNNER_ID, [historySnapshot, promptSnapshot, settlementSnapshot]);
+
+  db.clearSessionEvents(historySnapshot.id);
+  db.stageSessionPromptCommand({
+    commandId: "pending-terminal-prompt",
+    sessionId: promptSnapshot.id,
+    runnerId: RUNNER_ID,
+    payloadJson: JSON.stringify({ text: "must be fenced" }),
+    payloadSha256: "0".repeat(64),
+    expiresAt: 100_000,
+    now: 10,
+  });
+  const sqlite = (db as unknown as {
+    db: {
+      prepare(sql: string): {
+        run(...values: unknown[]): unknown;
+        get(...values: unknown[]): { pending: number | null };
+      };
+    };
+  }).db;
+  sqlite.prepare(
+    `INSERT INTO managed_background_deliveries
+       (session_id,continuation_id,parent_turn_id,status_settlement_pending_at,updated_at)
+     VALUES (?,?,?,?,?)`,
+  ).run(settlementSnapshot.id, "continuation-1", "turn-1", 11, 11);
+
+  svc.hydrateRunnerSessions(RUNNER_ID, [historySnapshot, promptSnapshot, settlementSnapshot]);
+
+  assert.deepEqual(db.getRunnerHistoryState(historySnapshot.id), {
+    historyEpoch: 7,
+    tailSeq: 2,
+    hydratedSeq: 0,
+    eventEpoch: 1,
+    complete: false,
+  });
+  assert.equal(db.getSession(historySnapshot.id)?.preview, "runner preview");
+  assert.equal(db.getSessionPromptCommand("pending-terminal-prompt")?.state, "failed");
+  const settlement = sqlite.prepare(
+    `SELECT status_settlement_pending_at AS pending
+       FROM managed_background_deliveries WHERE session_id=? AND continuation_id=?`,
+  ).get(settlementSnapshot.id, "continuation-1");
+  assert.equal(settlement.pending, null);
+});
+
 test("terminal snapshot batching excludes sessions with durable reconciliation work", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);

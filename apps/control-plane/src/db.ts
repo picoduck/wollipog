@@ -12304,7 +12304,8 @@ export class ControlPlaneDb {
       ).run(id);
       this.stmt(
         `UPDATE sessions SET hydrated_seq=0, message_count=0, last_event_at=NULL, preview=NULL,
-            runner_history_epoch=NULL, runner_history_tail_seq=0, event_epoch=event_epoch+1 WHERE id=?`,
+            runner_history_epoch=NULL, runner_history_tail_seq=0, runner_snapshot_fingerprint=NULL,
+            event_epoch=event_epoch+1 WHERE id=?`,
       ).run(id);
       this.db.exec("COMMIT");
       this.collectWorkflowArtifactBlobs();
