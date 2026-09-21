@@ -1511,6 +1511,64 @@ test("same-process retained ref sweeps retry failed terminal history without del
   }
 });
 
+test("pending retained ref terminals survive bounded history eviction until the second write succeeds", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-terminal-cap-"));
+  try {
+    const record = (index: number): RetainedWorktreeRefRecord => ({
+      sessionId: "s1",
+      worktreeId: `wt-${index}`,
+      cleanupId: `cleanup-${index}`,
+      repoPath: "/repo",
+      context: { kind: "native" },
+      branch: `fix/retained-${index}`,
+      expectedOid: index.toString(16).padStart(40, "0"),
+      reasons: ["recorded_branch"],
+      state: "pending",
+      armedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const journal = new WorktreeCleanupJournal(dataDir);
+    const first = record(1);
+    journal.addRetainedRef(first);
+    const internals = journal as unknown as {
+      flushFile(path: string, records: unknown[]): void;
+    };
+    const pendingPath = join(dataDir, "worktree-retained-refs.json");
+    let failPendingWrite = true;
+    internals.flushFile = (path) => {
+      if (failPendingWrite && path === pendingPath) throw new Error("injected pending-row ENOSPC");
+    };
+
+    assert.throws(
+      () => journal.finishRetainedRef(first, "completed", "deleted"),
+      /injected pending-row ENOSPC/,
+    );
+    for (let index = 2; index <= 257; index++) {
+      const later = record(index);
+      failPendingWrite = false;
+      journal.addRetainedRef(later);
+      failPendingWrite = true;
+      assert.throws(
+        () => journal.finishRetainedRef(later, "completed", "already_missing"),
+        /injected pending-row ENOSPC/,
+      );
+    }
+    assert.equal(journal.retainedRefHistory().length, 256, "durable terminal history remains bounded");
+    assert.equal(journal.retainedRefHistory().some((item) => item.cleanupId === first.cleanupId), false,
+      "the oldest receipt is evicted from the bounded history map");
+
+    failPendingWrite = false;
+    assert.equal(journal.resumeRetainedRefCompletion(first), true,
+      "the process-local retry slot retains first-terminal authority past history eviction");
+    const restored = journal.retainedRefHistory().find((item) => item.cleanupId === first.cleanupId);
+    assert.equal(restored?.terminalReason, "deleted");
+    assert.equal(journal.listRetainedRefs().some((item) => item.cleanupId === first.cleanupId), false);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("cleanup journal retains a bounded completed teardown receipt", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "wollipog-cleanup-history-"));
   try {

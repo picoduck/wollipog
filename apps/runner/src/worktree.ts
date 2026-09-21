@@ -392,7 +392,6 @@ export class WorktreeCleanupJournal {
       updatedAt: Date.now(),
       completedAt: Date.now(),
     } satisfies RetainedWorktreeRefRecord;
-    this.pendingRetainedRefTerminals.set(key, completed);
     this.persistRetainedRefTerminal(key, completed);
   }
 
@@ -407,6 +406,10 @@ export class WorktreeCleanupJournal {
   }
 
   private persistRetainedRefTerminal(key: string, completed: RetainedWorktreeRefRecord): void {
+    // Keep exact first-terminal authority outside the bounded history map until both ordered
+    // writes finish. Otherwise 256 later completions could evict a receipt whose pending-row
+    // removal is still failing, and a later same-process sweep would re-run Git work.
+    this.pendingRetainedRefTerminals.set(key, completed);
     if (!this.completedRetainedRefs.has(key)) {
       const previous = new Map(this.completedRetainedRefs);
       this.completedRetainedRefs.set(key, completed);
@@ -422,9 +425,11 @@ export class WorktreeCleanupJournal {
         throw error;
       }
     }
-    this.pendingRetainedRefTerminals.delete(key);
 
-    if (!this.retainedRefs.has(key)) return;
+    if (!this.retainedRefs.has(key)) {
+      this.pendingRetainedRefTerminals.delete(key);
+      return;
+    }
     const previous = new Map(this.retainedRefs);
     this.retainedRefs.delete(key);
     try {
@@ -433,6 +438,7 @@ export class WorktreeCleanupJournal {
       this.retainedRefs = previous;
       throw error;
     }
+    this.pendingRetainedRefTerminals.delete(key);
   }
 
   private key(record: WorktreeCleanupRecord): string {
