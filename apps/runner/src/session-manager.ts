@@ -202,6 +202,7 @@ import {
   removeRequestedWorktreeBoundary,
   removeWorktree,
   reclaimRetainedWorktreeRef,
+  retainedWorktreeRefDiagnostics,
   requestedWorktreeBoundary,
   sameWorktreePath,
   worktreeBranch,
@@ -3065,7 +3066,7 @@ export class SessionManager {
     const retainRefs = async (candidates: RetainedWorktreeRefCandidate[]) => {
       const now = Date.now();
       for (const candidate of candidates) {
-        this.cleanupJournal.addRetainedRef({
+        const durable = this.cleanupJournal.addRetainedRef({
           sessionId: record.sessionId,
           ...(record.worktreeId ? { worktreeId: record.worktreeId } : {}),
           cleanupId: record.cleanupId,
@@ -3074,12 +3075,14 @@ export class SessionManager {
           branch: candidate.branch,
           expectedOid: candidate.expectedOid,
           ...(candidate.identityToken ? { identityToken: candidate.identityToken } : {}),
+          identityProof: candidate.identityProof,
           reasons: candidate.reasons,
           ...(candidate.verifiedMergedHead ? { verifiedMergedHead: candidate.verifiedMergedHead } : {}),
           state: "pending",
           createdAt: now,
           updatedAt: now,
         });
+        this.logRetainedRefState(durable);
       }
     };
     const beforeRemove = async () => {
@@ -3149,6 +3152,13 @@ export class SessionManager {
         this.worktreePortAllocator.release(this.worktreePortOwner(record.sessionId, record.worktreeId));
       }
       this.cleanupJournal.armRetainedRefs(record.sessionId, record.worktreeId, record.cleanupId);
+      for (const retained of this.cleanupJournal.listRetainedRefs()) {
+        if (retained.sessionId === record.sessionId &&
+            (retained.worktreeId ?? "legacy") === (record.worktreeId ?? "legacy") &&
+            (retained.cleanupId ?? "legacy-cleanup") === (record.cleanupId ?? "legacy-cleanup")) {
+          this.logRetainedRefState(retained);
+        }
+      }
       record.completedAt = Date.now();
       this.cleanupJournal.complete(record);
       this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
@@ -3164,21 +3174,53 @@ export class SessionManager {
     return reclaimRetainedWorktreeRef(record, { context: record.context });
   }
 
+  private logRetainedRefState(record: RetainedWorktreeRefRecord): void {
+    const diagnostic = retainedWorktreeRefDiagnostics(
+      record.state === "pending" ? [record] : [],
+      record.state === "pending" ? [] : [record],
+      this.runnerOwnerHash ?? "",
+      1,
+    ).records[0];
+    if (!diagnostic) return;
+    this.log(
+      `retained ref reclamation for ${boundedSessionIdForLog(record.sessionId)}: ` +
+      `record=${diagnostic.recordId} generation=${diagnostic.generationId} branch=${diagnostic.branchId} ` +
+      `state=${diagnostic.state} reason=${diagnostic.reason} ` +
+      `identity=${diagnostic.identityProof.stage}/${diagnostic.identityProof.status}/${diagnostic.identityProof.reason}`,
+    );
+  }
+
   private async reapRetainedRefAttempt(identity: RetainedWorktreeRefRecord): Promise<void> {
     // A scheduled sweep can outlive the row it captured. Reloading inside the admitted lane keeps
     // terminal receipts authoritative and picks up the latest durable pending reason after a retry.
     const record = this.cleanupJournal.currentRetainedRef(identity);
     if (!record?.armedAt) return;
-    if (this.cleanupJournal.resumeRetainedRefCompletion(record)) return;
-    const result = await this.reclaimRetainedRef(record);
-    if (result.state === "pending") {
-      if (record.pendingReason === result.reason) return;
-      record.pendingReason = result.reason;
-      record.updatedAt = Date.now();
-      this.cleanupJournal.updateRetainedRef(record);
+    if (this.cleanupJournal.resumeRetainedRefCompletion(record)) {
+      const key = this.cleanupJournal.retainedRefIdentityKey(record);
+      const completed = this.cleanupJournal.retainedRefHistory()
+        .find((candidate) => this.cleanupJournal.retainedRefIdentityKey(candidate) === key);
+      if (completed) this.logRetainedRefState(completed);
       return;
     }
+    const result = await this.reclaimRetainedRef(record);
+    if (result.state === "pending") {
+      if (record.pendingReason === result.reason &&
+          isDeepStrictEqual(record.identityProof, result.identityProof ?? record.identityProof)) return;
+      record.pendingReason = result.reason;
+      if (result.identityProof) record.identityProof = result.identityProof;
+      record.updatedAt = Date.now();
+      this.cleanupJournal.updateRetainedRef(record);
+      this.logRetainedRefState(record);
+      return;
+    }
+    if (result.identityProof) record.identityProof = result.identityProof;
     this.cleanupJournal.finishRetainedRef(record, result.state, result.reason);
+    this.logRetainedRefState({
+      ...record,
+      state: result.state,
+      pendingReason: undefined,
+      terminalReason: result.reason,
+    });
   }
 
   private reapRetainedRef(record: RetainedWorktreeRefRecord): Promise<void> {
@@ -3202,8 +3244,8 @@ export class SessionManager {
     setImmediate(() => {
       if (this.shuttingDown) return;
       for (const record of records) {
-        void this.reapRetainedRef(record).catch((error) => {
-          this.log(`retained ref cleanup for ${boundedSessionIdForLog(sessionId)} needs retry: ${errText(error)}`);
+        void this.reapRetainedRef(record).catch(() => {
+          this.log(`retained ref cleanup for ${boundedSessionIdForLog(sessionId)} needs retry after durable state update`);
         });
       }
     });
@@ -3214,8 +3256,8 @@ export class SessionManager {
       if (this.shuttingDown) return;
       try {
         await this.reapRetainedRef(record);
-      } catch (error) {
-        this.log(`retained ref cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry: ${errText(error)}`);
+      } catch {
+        this.log(`retained ref cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after durable state update`);
       }
     }
   }

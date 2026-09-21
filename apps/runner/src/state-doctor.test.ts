@@ -55,6 +55,92 @@ test("state doctor inventory is redacted, deterministic in shape, and read-only"
   assert.equal(readFileSync(metaPath, "utf8"), before);
 });
 
+test("state doctor reports bounded retained-ref states and identity diagnostics without sensitive coordinates", async (t) => {
+  const root = fixture(t);
+  const journal = new WorktreeCleanupJournal(root);
+  const secretRepo = "/home/private-user/secret-repository";
+  const base = (suffix: string, reason: RetainedWorktreeRefRecord["identityProof"]): RetainedWorktreeRefRecord => ({
+    sessionId: `s_private_${suffix}`,
+    worktreeId: `worktree-${suffix}`,
+    cleanupId: `cleanup-${suffix}`,
+    repoPath: secretRepo,
+    context: { kind: "native" },
+    branch: `private/customer/${suffix}`,
+    expectedOid: "a".repeat(40),
+    reasons: ["recorded_branch"],
+    state: "pending",
+    identityProof: reason,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+
+  const unarmed = base("disabled", {
+    stage: "capture", status: "unavailable", reason: "reflogs_disabled",
+  });
+  journal.addRetainedRef(unarmed);
+
+  const checkedOut = base("backend", {
+    stage: "capture", status: "unavailable", reason: "unsupported_ref_storage",
+  });
+  journal.addRetainedRef(checkedOut);
+  journal.armRetainedRefs(checkedOut.sessionId, checkedOut.worktreeId, checkedOut.cleanupId);
+  journal.updateRetainedRef({ ...checkedOut, armedAt: 2, pendingReason: "checked_out", updatedAt: 2 });
+
+  const missing = base("missing", {
+    stage: "reclaim", status: "proved", reason: "proof_recorded",
+  });
+  journal.addRetainedRef(missing);
+  journal.finishRetainedRef(missing, "completed", "already_missing");
+
+  const deleted = base("deleted", {
+    stage: "reclaim", status: "proved", reason: "proof_recorded",
+  });
+  journal.addRetainedRef(deleted);
+  journal.finishRetainedRef(deleted, "completed", "deleted");
+
+  const retained = base("rotated", {
+    stage: "reclaim", status: "changed", reason: "identity_rotated",
+  });
+  journal.addRetainedRef(retained);
+  journal.finishRetainedRef(retained, "retained", "ref_changed_or_recreated");
+
+  const metadata = base("metadata", {
+    stage: "capture", status: "unavailable", reason: "metadata_read_failed",
+  });
+  journal.addRetainedRef(metadata);
+  journal.finishRetainedRef(metadata, "retained", "identity_unproved");
+
+  const output = await capture(["runner", "--state-doctor", "inventory", "--data-dir", root]);
+  const report = JSON.parse(output) as {
+    version: number;
+    retainedRefReclamation: {
+      records: Array<Record<string, unknown>>;
+      omitted: number;
+      unreadableRecords: number;
+    };
+  };
+  assert.equal(report.version, 2);
+  assert.equal(report.retainedRefReclamation.omitted, 0);
+  assert.equal(report.retainedRefReclamation.unreadableRecords, 0);
+  assert.deepEqual(
+    [...new Set(report.retainedRefReclamation.records.map((record) => record.state))].sort(),
+    ["already_absent", "deleted", "pending", "retained"],
+  );
+  assert.deepEqual(
+    [...new Set(report.retainedRefReclamation.records.map((record) =>
+      (record.identityProof as { reason: string }).reason))].sort(),
+    ["identity_rotated", "metadata_read_failed", "proof_recorded", "reflogs_disabled", "unsupported_ref_storage"],
+  );
+  for (const record of report.retainedRefReclamation.records) {
+    assert.match(String(record.recordId), /^[a-f0-9]{16}$/u);
+    assert.match(String(record.generationId), /^[a-f0-9]{16}$/u);
+    assert.match(String(record.branchId), /^[a-f0-9]{16}$/u);
+  }
+  for (const sensitive of [secretRepo, "private-user", "private/customer", "s_private", "cleanup-"]) {
+    assert.equal(output.includes(sensitive), false, `inventory leaked ${sensitive}`);
+  }
+});
+
 test("state doctor holds an exclusive runner-compatible maintenance lease through inventory", async (t) => {
   const root = fixture(t);
   const lease = join(root, ".wollipog-runner-active-v1.lock");
