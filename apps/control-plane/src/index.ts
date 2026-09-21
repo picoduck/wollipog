@@ -1002,14 +1002,15 @@ const orchestrator = new BoxOrchestrator({
 // has no top-level await — required to bundle the control plane into a CJS single
 // executable (the Tauri sidecar) without an ESM wrapper.
 app.register(cors, { origin: isLocalOrigin, methods: [...CORS_METHODS] });
-// @fastify/websocket v11 upgrades a route via an onRoute hook that must already be
-// registered when the route is added. A bare top-level `app.register(websocket)` is
-// deferred (avvio), so it isn't loaded when these synchronously-added routes register —
-// the upgrade never happens and the handler runs as a plain HTTP route (the first arg is
-// the request, not a socket → "socket.on is not a function", every connection 500s).
-// Co-locate the plugin + WS routes and await the plugin INSIDE this child plugin: order is
-// guaranteed, and the await is not module-level (keeps the CP bundlable as a CJS single
-// executable for the Tauri sidecar — see the cors note above).
+// @fastify/websocket installs one `upgrade` listener on the underlying HTTP server. Register it
+// exactly once: sibling registrations make both listeners claim every socket and eventually turn
+// an ordinary disconnect into ERR_HTTP_SOCKET_ASSIGNED / ERR_STREAM_WRITE_AFTER_END. The server
+// ceiling must accommodate runner history and image frames; the UI route below retains its much
+// smaller authenticated per-message limit before parsing or retaining any client state.
+//
+// Co-locate the plugin + both WS routes and await the plugin INSIDE this child plugin: its onRoute
+// hook is installed before either route, and the await is not module-level (keeps the control
+// plane bundlable as a CJS single executable for the Tauri sidecar — see the cors note above).
 app.register(async (instance) => {
   await instance.register(websocket, { options: { maxPayload: MAX_RUNNER_CLIENT_MESSAGE_BYTES } });
 
@@ -1571,14 +1572,6 @@ app.register(async (instance) => {
   socket.on("close", onGone);
   socket.on("error", onGone);
 });
-});
-
-// Register the browser channel in a separate encapsulated plugin so ws enforces its much smaller
-// payload cap while assembling fragments. The runner sibling has its own bounded allowance for
-// image and history frames.
-app.register(async (instance) => {
-  await instance.register(websocket, { options: { maxPayload: MAX_UI_CLIENT_MESSAGE_BYTES } });
-
   /* ------------------------------- UI channel ------------------------------ */
   instance.get("/ui", { websocket: true }, (socket, req) => {
   // Browsers cannot set a WebSocket Authorization header, so every UI client presents its local

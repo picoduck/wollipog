@@ -886,6 +886,11 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   const { socket: ui, inbox: uiInbox } = await openSocketWithInbox(authenticatedUiUrl(wsBase, ownerToken));
   sockets.add(ui);
   const snapshot = await uiInbox.take((message) => message.type === "snapshot");
+  assert.doesNotMatch(
+    output,
+    /ServerResponse has an already assigned socket|websocket upgrade failed/u,
+    "runner and UI routes share one HTTP upgrade handler",
+  );
   assert.deepEqual(snapshot.capabilities, {
     sessionSubscriptions: true,
     boundedDelivery: true,
@@ -1870,7 +1875,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     oversized,
     () => oversized.send("x".repeat(MAX_UI_CLIENT_MESSAGE_BYTES + 1)),
   );
-  assert.equal(oversizedClose.code, 1009, "transport-level maxPayload enforcement must close oversized frames");
+  assert.equal(oversizedClose.code, 1009, "the UI route must close oversized frames with the payload-limit code");
 
   // Unarchive and Restart is one server-owned operation behind the ordinary lifecycle and archive
   // authorization: anonymous and session-credential callers are refused before anything changes,
