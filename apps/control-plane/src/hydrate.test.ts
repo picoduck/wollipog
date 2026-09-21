@@ -155,6 +155,36 @@ test("re-hydrating quiescent terminal runner snapshots uses one durable commit f
   }
 });
 
+test("identical quiescent terminal snapshots do not rewrite durable state", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new Hub(db);
+  const svc = new SessionsService(db, hub, NOOP_LOG);
+  const snapshots = Array.from({ length: 12 }, (_, index): SessionSnapshot => ({
+    ...snapshot(),
+    id: `unchanged-${index}`,
+    status: "stopped",
+    seq: 0,
+    historyEpoch: 1,
+  }));
+  svc.hydrateRunnerSessions(RUNNER_ID, snapshots);
+
+  const sqlite = (db as unknown as {
+    db: { prepare(sql: string): { get(): { changes: number } } };
+  }).db;
+  const totalChanges = () => sqlite.prepare("SELECT total_changes() AS changes").get().changes;
+  const before = totalChanges();
+
+  svc.hydrateRunnerSessions(RUNNER_ID, snapshots);
+
+  assert.equal(totalChanges(), before, "an exact reconnect replay must be read-only");
+
+  const changed = snapshots.with(0, { ...snapshots[0]!, preview: "new terminal preview", updatedAt: 3 });
+  svc.hydrateRunnerSessions(RUNNER_ID, changed);
+  assert.ok(totalChanges() > before, "a changed terminal snapshot must still reconcile");
+  assert.equal(db.getSession(changed[0]!.id)?.preview, "new terminal preview");
+});
+
 test("terminal snapshot batching excludes sessions with durable reconciliation work", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);

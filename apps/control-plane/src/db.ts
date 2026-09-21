@@ -593,6 +593,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   event_epoch    INTEGER NOT NULL DEFAULT 0,
   runner_history_epoch INTEGER,
   runner_history_tail_seq INTEGER NOT NULL DEFAULT 0,
+  runner_snapshot_fingerprint TEXT,
   adopted        INTEGER NOT NULL DEFAULT 0,
   acp_session_context TEXT,
   CHECK (policy_resume_status IS NULL OR policy_resume_status='idle'),
@@ -2525,6 +2526,7 @@ interface SessionRow {
   event_epoch: number;
   runner_history_epoch: number | null;
   runner_history_tail_seq: number;
+  runner_snapshot_fingerprint: string | null;
 }
 
 interface SessionStopIntentRow {
@@ -4671,6 +4673,9 @@ export class ControlPlaneDb {
       "runner_history_epoch INTEGER",
       // Last durable runner tail advertised for the current history epoch.
       "runner_history_tail_seq INTEGER NOT NULL DEFAULT 0",
+      // Exact runner snapshot last reconciled into this row. Reconnect hydration uses this only
+      // for quiescent terminal sessions, whose identical snapshots have no service-level work.
+      "runner_snapshot_fingerprint TEXT",
       // adopted-from-CLI marker (gates the reprocess action).
       "adopted INTEGER NOT NULL DEFAULT 0",
       // Phase 7 (cost-budget gating): accumulated-cost ceiling (USD). NULL ⇒ unlimited. CP-only —
@@ -11224,8 +11229,9 @@ export class ControlPlaneDb {
          `INSERT INTO sessions
            (id, runner_id, workspace_id, project_id, project_location_id, agent_id, title, title_source, provider_updated_at, background_work_state, background_work_tracking, history_quarantine, capacity_wait, status, use_worktree, worktree_path, workspace_path, archived,
              driver, model, resolved_model, effort, service_tier, permission_mode, agent_capabilities, preview, pending_approval, input_tokens, output_tokens, context_tokens_used, context_window, cost_usd,
-              acp_session_context, created_at, updated_at, last_event_at, hydrated_seq, runner_history_epoch, runner_history_tail_seq, adopted)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)`,
+              acp_session_context, created_at, updated_at, last_event_at, hydrated_seq, runner_history_epoch, runner_history_tail_seq,
+              runner_snapshot_fingerprint, adopted)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)`,
       )
       .run(
         snap.id,
@@ -11272,6 +11278,7 @@ export class ControlPlaneDb {
         snap.updatedAt,
         snap.historyEpoch ?? null,
         snap.seq,
+        ControlPlaneDb.sessionSnapshotFingerprint(snap),
         snap.adopted ? 1 : 0,
       );
       if (snap.providerAccountId) {
@@ -11358,7 +11365,7 @@ export class ControlPlaneDb {
       throw new Error("updateSessionsFromSnapshots requires an autocommit connection");
     }
     const histories = this.atomic(() => snapshots.map((snap) =>
-      this.updateSessionFromSnapshotInTransaction(snap.id, snap, now)));
+      this.updateSessionFromSnapshotInTransaction(snap.id, snap, now, true)));
     if (histories.some((history) => history?.reset)) this.collectWorkflowArtifactBlobs();
     this.maybeMaintainUsageAggregation();
     return histories;
@@ -11368,7 +11375,45 @@ export class ControlPlaneDb {
     id: string,
     snap: SessionSnapshot,
     now: number,
+    skipIdentical = false,
   ): RunnerHistoryReconciliation | null {
+    const snapshotFingerprint = ControlPlaneDb.sessionSnapshotFingerprint(snap);
+    if (skipIdentical) {
+      const stored = this.stmt(
+        `SELECT runner_snapshot_fingerprint, runner_history_epoch, runner_history_tail_seq,
+                hydrated_seq, event_epoch,
+                EXISTS (
+                  SELECT 1 FROM session_prompt_commands
+                   WHERE session_id=? AND state IN ('pending','sent','accepted','queued','started')
+                ) AS has_open_prompt_command,
+                EXISTS (
+                  SELECT 1 FROM managed_background_deliveries
+                   WHERE session_id=? AND status_settlement_pending_at IS NOT NULL
+                     AND status_settled_at IS NULL
+                ) AS has_pending_status_settlement
+           FROM sessions WHERE id=?`,
+      ).get(id, id, id) as {
+        runner_snapshot_fingerprint: string | null;
+        runner_history_epoch: number | null;
+        runner_history_tail_seq: number;
+        hydrated_seq: number;
+        event_epoch: number;
+        has_open_prompt_command: number;
+        has_pending_status_settlement: number;
+      } | undefined;
+      if (stored?.runner_snapshot_fingerprint === snapshotFingerprint &&
+          stored.has_open_prompt_command === 0 && stored.has_pending_status_settlement === 0) {
+        return {
+          reset: false,
+          historyEpoch: stored.runner_history_epoch,
+          tailSeq: stored.runner_history_tail_seq,
+          hydratedSeq: stored.hydrated_seq,
+          eventEpoch: stored.event_epoch,
+          complete: stored.runner_history_epoch !== null &&
+            stored.hydrated_seq >= stored.runner_history_tail_seq,
+        };
+      }
+    }
     // Reconcile the runner-owned generation before applying its metadata. A migrated unknown epoch
     // adopts the first v54 epoch in place; only a change between two known epochs replaces cache.
     const history = this.reconcileRunnerHistoryInTransaction(id, snap.historyEpoch, snap.seq);
@@ -11479,7 +11524,7 @@ export class ControlPlaneDb {
     this.stmt(
       `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
           model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
-          acp_session_context=COALESCE(?, acp_session_context),
+          acp_session_context=COALESCE(?, acp_session_context), runner_snapshot_fingerprint=?,
           updated_at=? WHERE id=?`,
     )
     .run(
@@ -11526,6 +11571,7 @@ export class ControlPlaneDb {
       snap.costUsd,
       snap.adopted ? 1 : 0,
       snap.acpSessionContext ? JSON.stringify(snap.acpSessionContext) : null,
+      snapshotFingerprint,
       now,
       id,
     );
@@ -11615,6 +11661,10 @@ export class ControlPlaneDb {
       ).run(now, id);
     }
     return history;
+  }
+
+  private static sessionSnapshotFingerprint(snapshot: SessionSnapshot): string {
+    return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
   }
 
   /** Monotonic mirror of projection-safe runner facts. Absence means a pre-v82 runner and leaves
