@@ -118,6 +118,43 @@ test("hydrateHistory pulls the box's event log over the hub and advances the hig
   assert.equal(db.getHydratedSeq("s_box1"), 2);
 });
 
+test("re-hydrating terminal runner snapshots uses one durable commit per session", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new Hub(db);
+  const svc = new SessionsService(db, hub, NOOP_LOG);
+  const snapshots = Array.from({ length: 12 }, (_, index): SessionSnapshot => ({
+    ...snapshot(),
+    id: `stopped-${index}`,
+    status: "stopped",
+    seq: 0,
+    historyEpoch: 1,
+  }));
+  svc.hydrateRunnerSessions(RUNNER_ID, snapshots);
+
+  const sqlite = (db as unknown as { db: { exec(sql: string): void } }).db;
+  const exec = sqlite.exec.bind(sqlite);
+  let commits = 0;
+  sqlite.exec = (sql: string) => {
+    if (sql.trim().toUpperCase() === "COMMIT") commits++;
+    exec(sql);
+  };
+
+  svc.hydrateRunnerSessions(RUNNER_ID, snapshots);
+
+  assert.equal(commits, snapshots.length);
+
+  exec("BEGIN");
+  try {
+    assert.throws(
+      () => db.updateSessionFromSnapshot(snapshots[0]!.id, snapshots[0]!, Date.now()),
+      /requires an autocommit connection/,
+    );
+  } finally {
+    exec("ROLLBACK");
+  }
+});
+
 test("hydrateHistory is incremental — only fetches events past what's already cached", async () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta(), Date.now(), 53);
