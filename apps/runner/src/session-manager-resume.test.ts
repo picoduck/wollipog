@@ -417,7 +417,7 @@ test("runtime authentication recovery stays silent until the shared probe settle
 });
 
 for (const state of ["automatic", "manual", "local-card", "shared-card"] as const) {
-  test(`blocked prompt guidance is actionable during ${state} recovery`, async () => {
+  test(`blocked durable prompt is visibly queued during ${state} recovery`, async () => {
     const probe = deferred<{ status: "unauthenticated" }>();
     const scope = { id: "scope-a", provider: "claude" as const, canStartLogin: false, configuredCredential: false };
     const h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, {
@@ -426,14 +426,14 @@ for (const state of ["automatic", "manual", "local-card", "shared-card"] as cons
       startLogin: async () => "failed",
       cancel: () => false,
     });
-    const failures: Array<[string, string | undefined]> = [];
+    const queued: Array<[string, string | undefined]> = [];
     const lifecycle: DurableCommandLifecycle = {
       commandId: `blocked-${state}`,
-      queued: () => assert.fail("blocked work must not be queued"),
+      queued: (message, code) => queued.push([message, code]),
       started: () => assert.fail("blocked work must not be started"),
       completed: () => assert.fail("blocked work must not be completed"),
       uncertain: () => assert.fail("blocked work has known non-delivery"),
-      failed: (message, code) => failures.push([message, code]),
+      failed: () => assert.fail("known-undelivered blocked work must remain queued"),
     };
     try {
       const manager = h.manager as any;
@@ -447,14 +447,22 @@ for (const state of ["automatic", "manual", "local-card", "shared-card"] as cons
       if (state === "manual") manager.providerAuthOperations.add(scope.id);
       const approvalsBefore = h.store.listSessions().filter((meta) => meta.pendingApproval).length;
       const attentionBefore = h.sent.filter((message) => message.type === "session_status" && message.status === "input_required").length;
-      assert.equal(h.manager.prompt("resume-session", "new blocked prompt", [], undefined, undefined, lifecycle), false);
+      assert.equal(h.manager.prompt("resume-session", "new blocked prompt", [], undefined, undefined, lifecycle), true);
       assert.deepEqual(h.prompts, []);
-      assert.equal(failures.length, 1);
-      assert.equal(failures[0]![1], "PROVIDER_AUTHENTICATION_REQUIRED");
+      assert.equal(queued.length, 1);
+      assert.equal(queued[0]![1], "PROVIDER_AUTHENTICATION_REQUIRED");
+      assert.match(queued[0]![0], /queued.*authentication|authentication.*queued/iu);
+      assert.deepEqual(
+        h.store.readMeta("resume-session")?.providerAuthBlock?.durableRetries?.map((retry) => ({
+          commandId: retry.commandId,
+          text: retry.text,
+        })),
+        [{ commandId: `blocked-${state}`, text: "new blocked prompt" }],
+      );
+      assert.equal(h.manager.prompt("resume-session", "non-durable blocked prompt"), false);
       const stderr = h.store.readEvents("resume-session").map((event) => event.payload)
         .filter((payload) => payload.kind === "stderr").at(-1);
       assert.ok(stderr?.kind === "stderr");
-      assert.equal(failures[0]![0], stderr.text, "durable receipt carries the same actionable guidance");
       assert.match(stderr.text, /This prompt was not submitted/);
       assert.match(stderr.text, /retry this prompt/i);
       if (state === "automatic") {
@@ -2063,24 +2071,34 @@ test("fresh-start authentication failure preserves its worktree and ordinary ini
 
 test("wrong-account revalidation fails closed and uncertain delivery is never retried", async () => {
   let h!: ReturnType<typeof harness>;
+  let authenticationFailures = 0;
+  const retainedReceipts: string[] = [];
+  const retained: DurableCommandLifecycle = {
+    commandId: "blocked-after-account-change",
+    queued: () => retainedReceipts.push("queued"),
+    started: () => retainedReceipts.push("started"),
+    completed: () => retainedReceipts.push("completed"),
+    failed: (error) => assert.fail(error),
+    uncertain: (error) => assert.fail(error),
+  };
   const observations = [
     { status: "authenticated" as const, identityId: "account-a" },
     { status: "authenticated" as const, identityId: "account-b" },
     { status: "authenticated" as const, identityId: "account-b" },
   ];
   const controller: ProviderAuthRecoveryController = {
-    describe: () => ({ id: "scope-a", provider: "claude", canStartLogin: true, configuredCredential: false }),
+    describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: true, configuredCredential: false }),
     revalidate: async () => observations.shift() ?? { status: "authenticated", identityId: "account-b" },
     startLogin: async () => "completed",
     cancel: () => false,
   };
   h = harness({
-    driver: "claude-code",
-    command: "claude",
-    agentId: "claude-native",
+    driver: "codex-app-server",
+    command: "codex",
+    agentId: "codex-native",
     providerCredentialIdentityId: "account-a",
   }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
-    h.callbacks().onAuthenticationFailure?.();
+    if (authenticationFailures++ === 0) h.callbacks().onAuthenticationFailure?.();
   }, controller);
   try {
     h.manager.prompt("resume-session", "possibly delivered");
@@ -2094,22 +2112,190 @@ test("wrong-account revalidation fails closed and uncertain delivery is never re
     assert.equal(mismatch.providerAuthBlock?.identityMismatch, true);
     assert.equal(mismatch.pendingApproval?.options[0]?.name, "Use Current Account");
     assert.deepEqual(h.prompts, ["possibly delivered"]);
+    assert.equal(h.manager.prompt(
+      "resume-session",
+      "queued while account replacement is blocked",
+      [{ mimeType: "image/png", data: "AQID" }],
+      "review",
+      { model: "model-b" },
+      retained,
+    ), true);
+    assert.deepEqual(retainedReceipts, ["queued"]);
+    const blockedRetry = h.store.readMeta("resume-session")?.providerAuthBlock?.durableRetries?.[0];
+    assert.deepEqual({
+      text: blockedRetry?.text,
+      images: blockedRetry?.images,
+      slashCommand: blockedRetry?.slashCommand,
+      model: blockedRetry?.config?.model,
+    }, {
+      text: "queued while account replacement is blocked",
+      images: [{ mimeType: "image/png", data: "AQID" }],
+      slashCommand: "review",
+      model: "model-b",
+    });
 
     h.manager.resolvePermission("resume-session", requestId, "auth:accept-current");
-    for (let index = 0; index < 5; index += 1) await tick();
+    for (let index = 0; index < 40 && retainedReceipts.at(-1) !== "completed"; index += 1) await shortDelay();
+    assert.equal(h.disposals.length, 1, "accepting a changed account retires the stale provider process");
+    assert.equal(h.launches.length, 2, "accepting a changed account relaunches the provider before unblocking");
+    assert.equal(h.launches[1]?.options.resumeId, "thread-persisted", "the replacement resumes the exact conversation");
     assert.equal(h.store.readMeta("resume-session")?.providerCredentialIdentityId, "account-b");
     assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
-    assert.deepEqual(h.prompts, ["possibly delivered"], "uncertain provider delivery is never replayed");
+    assert.deepEqual(h.prompts, ["possibly delivered", "queued while account replacement is blocked"],
+      "the uncertain prompt is not replayed and blocked known-undelivered work is replayed once");
+    assert.deepEqual(retainedReceipts, ["queued", "queued", "started", "completed"]);
+    assert.equal(h.store.readEvents("resume-session").filter((event) =>
+      event.payload.kind === "stderr" && /interrupted prompt was not retried/iu.test(event.payload.text)).length, 1,
+    "uncertain interrupted work stays visible even while newer retained work replays");
     assert.equal(
       h.store.readEvents("resume-session").findLast((event) => event.payload.kind === "permission_resolved")?.payload.optionId,
       "auth:accept-current",
       "the durable audit records the operator's submitted decision",
     );
+    assert.equal(h.manager.prompt("resume-session", "works after account replacement"), true);
+    for (let index = 0; index < 10 && h.prompts.length < 3; index += 1) await shortDelay();
+    assert.deepEqual(h.prompts, [
+      "possibly delivered",
+      "queued while account replacement is blocked",
+      "works after account replacement",
+    ]);
+    assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined,
+      "the accepted account does not create another authentication incident");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
   }
 });
+
+test("changed-account replacement failure keeps one actionable recovery card and never revives the stale process", async () => {
+  let h!: ReturnType<typeof harness>;
+  let authenticationFailures = 0;
+  const observations = [
+    { status: "authenticated" as const, identityId: "account-a" },
+    { status: "authenticated" as const, identityId: "account-b" },
+    { status: "authenticated" as const, identityId: "account-b" },
+    { status: "authenticated" as const, identityId: "account-b" },
+  ];
+  const controller: ProviderAuthRecoveryController = {
+    describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: true, configuredCredential: false }),
+    revalidate: async () => observations.shift() ?? { status: "authenticated", identityId: "account-b" },
+    startLogin: async () => "completed",
+    cancel: () => false,
+  };
+  h = harness({
+    driver: "codex-app-server",
+    command: "codex",
+    agentId: "codex-native",
+    providerCredentialIdentityId: "account-a",
+  }, (launchIndex) => launchIndex === 1
+    ? Promise.reject(new Error("replacement initialize failed"))
+    : Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
+    if (authenticationFailures++ === 0) h.callbacks().onAuthenticationFailure?.();
+  }, controller);
+  try {
+    h.manager.prompt("resume-session", "possibly delivered");
+    for (let index = 0; index < 8 && !h.store.readMeta("resume-session")?.providerAuthBlock; index += 1) await tick();
+    const requestId = h.store.readMeta("resume-session")!.pendingApproval!.requestId;
+    h.manager.resolvePermission("resume-session", requestId, "auth:revalidate");
+    for (let index = 0; index < 8 &&
+      !h.store.readMeta("resume-session")?.providerAuthBlock?.identityMismatch; index += 1) await tick();
+    h.manager.resolvePermission("resume-session", requestId, "auth:accept-current");
+    for (let index = 0; index < 40 && h.launches.length < 2; index += 1) await shortDelay();
+    for (let index = 0; index < 20 &&
+      !/could not resume/iu.test(h.store.readMeta("resume-session")?.pendingApproval?.context?.input ?? ""); index += 1) {
+      await shortDelay();
+    }
+
+    const failed = h.store.readMeta("resume-session")!;
+    assert.equal(h.disposals.length, 2, "both the stale process and failed replacement are retired");
+    assert.equal(h.launches.length, 2);
+    assert.equal((h.manager as any).active.has("resume-session"), false,
+      "the stale process is never restored after replacement failure");
+    assert.equal(failed.providerCredentialIdentityId, "account-a",
+      "the new identity is not committed until its process is ready");
+    assert.equal(failed.providerAuthBlock?.recoveryId, requestId.replace("provider-auth:", ""));
+    assert.equal(failed.pendingApproval?.requestId, requestId);
+    assert.equal(failed.status, "input_required");
+    assert.match(failed.pendingApproval?.context?.input ?? "", /could not resume/iu);
+    assert.equal(new Set(h.store.readEvents("resume-session")
+      .filter((event) => event.payload.kind === "permission_request")
+      .map((event) => event.payload.requestId)).size, 1,
+    "duplicate projections reuse the same recovery-card identity");
+  } finally {
+    h.manager.shutdownAll();
+    h.cleanup();
+  }
+});
+
+for (const scenario of [
+  "identity unavailable",
+  "replacement probe unknown",
+  "identity appears after acceptance",
+] as const) {
+  test(`changed-account replacement is safe when ${scenario}`, async () => {
+    let h!: ReturnType<typeof harness>;
+    let authenticationFailures = 0;
+    const accepted = scenario === "identity unavailable" || scenario === "identity appears after acceptance"
+      ? { status: "authenticated" as const }
+      : { status: "authenticated" as const, identityId: "account-b" };
+    const observations = [
+      { status: "authenticated" as const, identityId: "account-a" },
+      accepted,
+      accepted,
+      accepted,
+      scenario === "replacement probe unknown"
+        ? { status: "unknown" as const }
+        : scenario === "identity appears after acceptance"
+        ? { status: "authenticated" as const, identityId: "account-c" }
+        : accepted,
+    ];
+    const controller: ProviderAuthRecoveryController = {
+      describe: () => ({ id: "scope-a", provider: "codex", canStartLogin: false, configuredCredential: false }),
+      revalidate: async () => observations.shift() ?? accepted,
+      startLogin: async () => "failed",
+      cancel: () => false,
+    };
+    h = harness({
+      driver: "codex-app-server",
+      command: "codex",
+      agentId: "codex-native",
+      providerCredentialIdentityId: "account-a",
+    }, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, async () => {
+      if (authenticationFailures++ === 0) h.callbacks().onAuthenticationFailure?.();
+    }, controller);
+    try {
+      h.manager.prompt("resume-session", "possibly delivered");
+      for (let index = 0; index < 8 && !h.store.readMeta("resume-session")?.providerAuthBlock; index += 1) await tick();
+      const requestId = h.store.readMeta("resume-session")!.pendingApproval!.requestId;
+      h.manager.resolvePermission("resume-session", requestId, "auth:revalidate");
+      for (let index = 0; index < 8 &&
+        !h.store.readMeta("resume-session")?.providerAuthBlock?.identityMismatch; index += 1) await tick();
+      h.manager.resolvePermission("resume-session", requestId, "auth:accept-current");
+      for (let index = 0; index < 40 && h.disposals.length < 1; index += 1) await shortDelay();
+      for (let index = 0; index < 20 &&
+        scenario !== "identity unavailable" &&
+        !/could not resume/iu.test(h.store.readMeta("resume-session")?.pendingApproval?.context?.input ?? ""); index += 1) {
+        await shortDelay();
+      }
+
+      assert.equal(h.disposals.length, 1, "explicit acceptance always retires the stale Codex process");
+      if (scenario === "identity unavailable") {
+        assert.equal(h.launches.length, 2, "an identity-limited provider still gets a fresh accepted process");
+        assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock, undefined);
+      } else {
+        assert.equal(h.launches.length, 1, "a fresh probe that cannot match acceptance cannot construct the replacement");
+        assert.equal((h.manager as any).active.has("resume-session"), false);
+        assert.equal(h.store.readMeta("resume-session")?.providerCredentialIdentityId, "account-a");
+        assert.equal(h.store.readMeta("resume-session")?.providerAuthBlock?.recoveryId,
+          requestId.replace("provider-auth:", ""));
+        assert.equal(h.store.readMeta("resume-session")?.status, "input_required");
+      }
+    } finally {
+      h.manager.shutdownAll();
+      h.cleanup();
+    }
+  });
+}
 
 test("matching account evidence survives a partial observation across relaunch contexts", async () => {
   const expectedEvidence = identityEvidence({

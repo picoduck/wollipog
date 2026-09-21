@@ -246,9 +246,12 @@ test("Stop remains terminal while an account-switch replacement is preparing", a
   const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-stop-"));
   const messages: RunnerToControlPlane[] = [];
   const launches: string[] = [];
-  let releasePreparation = () => {};
+  let releaseRetirement = () => {};
   let manager: SessionManager | undefined;
   try {
+    let retirementStartedResolve!: () => void;
+    const retirementStarted = new Promise<void>((resolve) => { retirementStartedResolve = resolve; });
+    const retirementGate = new Promise<void>((resolve) => { releaseRetirement = resolve; });
     const made = makeManager(root, (_driver: unknown, launch: { env: Record<string, string> }) => {
       launches.push(launch.env.CODEX_HOME!);
       return {
@@ -258,43 +261,39 @@ test("Stop remains terminal while an account-switch replacement is preparing", a
         prompt: async () => "end_turn" as const,
         cancel: () => {},
         dispose: () => {},
+        close: async () => {
+          retirementStartedResolve();
+          await retirementGate;
+          return true;
+        },
         setConfig: async () => {},
         resolvePermission: () => false,
         agentSessionId: () => "codex-thread",
       };
     }, messages);
     manager = made.manager;
-    let preparationStartedResolve!: () => void;
-    const preparationStarted = new Promise<void>((resolve) => { preparationStartedResolve = resolve; });
-    const preparationGate = new Promise<void>((resolve) => { releasePreparation = resolve; });
     const internals = manager as unknown as {
-      prepareLaunch: (meta: { providerAccountProvider?: string; providerCredentialHome?: string;
-        env: Record<string, string> }) => Promise<void>;
       providerAccountSwitches: Map<string, unknown>;
-    };
-    internals.prepareLaunch = async (meta) => {
-      meta.env = { CODEX_HOME: meta.providerCredentialHome! };
-      if (meta.providerCredentialHome === accounts.personal.credentialHome) {
-        preparationStartedResolve();
-        await preparationGate;
-      }
     };
     const spec = launchSpec(root, "codex-app-server", "work");
     assert.equal(await manager.start(spec), true);
     made.store.patchMeta(spec.sessionId, { agentSessionId: "codex-thread" });
 
     const switching = manager.switchProviderAccount(spec.sessionId, "personal");
-    await preparationStarted;
+    await retirementStarted;
     manager.stop(spec.sessionId);
-    releasePreparation();
+    releaseRetirement();
     await switching;
     await waitFor(() => !internals.providerAccountSwitches.has(spec.sessionId), "stopped handoff did not settle");
 
     assert.deepEqual(launches, [accounts.work.credentialHome]);
     assert.equal(made.store.readMeta(spec.sessionId)?.status, "stopped");
-    assert.equal(made.store.readMeta(spec.sessionId)?.providerAccountSwitchFailure, undefined);
+    const stopped = made.store.readMeta(spec.sessionId);
+    assert.equal(stopped?.providerAccountId, "work", "a superseded handoff cannot silently commit its target account");
+    assert.equal(stopped?.pendingProviderAccountId, "personal", "the uncommitted selection stays available after Stop");
+    assert.equal(stopped?.providerAccountSwitchFailure, undefined);
   } finally {
-    releasePreparation();
+    releaseRetirement();
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
