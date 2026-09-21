@@ -192,7 +192,7 @@ export function SnoozeDialog({
   };
 
   const submit = async (schedule = parsed) => {
-    if (!schedule || submittingRef.current || conflict || (returnedReminder && !scheduleTouched)) return;
+    if (!schedule || submittingRef.current || conflict) return;
     submittingRef.current = true;
     setSubmitting(true);
     setError(null);

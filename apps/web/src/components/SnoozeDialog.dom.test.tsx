@@ -80,6 +80,50 @@ test("Snooze Again requires a newly selected future schedule and replaces the ex
   container.remove();
 });
 
+test("Snooze Again submits a keyboard-selected suggestion on the first Enter", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const fired: SessionReminderView = {
+    reminderId: "reminder-activity-fired",
+    sessionId: "session-1",
+    scheduledFor: Date.now() + 7_200_000,
+    timeZone: "UTC",
+    originalExpression: "in 2",
+    wakePolicy: "until_activity",
+    state: "fired",
+    revision: 2,
+    createdAt: 1,
+    updatedAt: 2,
+    firedAt: 2,
+    wakeReason: "agent_response",
+  };
+  const saved: SetSessionReminderRequest[] = [];
+
+  await act(async () => {
+    root.render(<SnoozeDialog
+      reminder={fired}
+      onClose={() => undefined}
+      onSave={async (request) => { saved.push(request); }}
+    />);
+  });
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  await act(async () => { fireDomEvent.keyDown(expression, { key: "ArrowDown" }); });
+  assert.equal(expression.getAttribute("aria-expanded"), "true");
+  await act(async () => {
+    fireDomEvent.keyDown(expression, { key: "Enter" });
+    await Promise.resolve();
+  });
+
+  assert.equal(saved.length, 1);
+  assert.equal(saved[0]?.rescheduleFired, true);
+  assert.equal(saved[0]?.expectedReminderId, fired.reminderId);
+  assert.ok(saved[0] && saved[0].scheduledFor > Date.now());
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
 test("a removed fired reminder's preserved draft still requires a newly selected schedule", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);

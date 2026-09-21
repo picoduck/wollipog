@@ -151,6 +151,40 @@ test("rescheduling atomically replaces the exact fired state with one pending re
   db.close();
 });
 
+test("explicit rescheduling resets an activity-fired reminder at the same instant and rejects pending state", () => {
+  const db = fixture();
+  const futureSchedule = { ...schedule, scheduledFor: 200_000 };
+  assert.equal(db.setSessionReminder({ ...futureSchedule, expectedRevision: 0 }).kind, "updated");
+  const [fired] = db.fireSessionRemindersForActivity("session-1", 1, "agent_response", 20);
+  assert.ok(fired);
+  assert.equal(fired.reminder.state, "fired");
+
+  const replaced = db.setSessionReminder({
+    ...futureSchedule,
+    expectedRevision: fired.reminder.revision,
+    expectedReminderId: fired.reminder.reminderId,
+    rescheduleFired: true,
+    now: 30,
+  });
+  assert.equal(replaced.kind, "updated");
+  if (replaced.kind !== "updated") throw new Error("activity-fired reminder was not replaced");
+  assert.equal(replaced.reminder.state, "pending",
+    "explicit intent must reset fired state even when the selected instant is unchanged");
+
+  const pendingReplacement = db.setSessionReminder({
+    ...futureSchedule,
+    scheduledFor: 300_000,
+    expectedRevision: replaced.reminder.revision,
+    expectedReminderId: replaced.reminder.reminderId,
+    rescheduleFired: true,
+    now: 40,
+  });
+  assert.equal(pendingReplacement.kind, "conflict");
+  assert.deepEqual(db.getSessionReminder("session-1", LOCAL_OWNER_USER_ID), replaced.reminder,
+    "a matching pending reminder is still not a valid Snooze Again target");
+  db.close();
+});
+
 test("archived reminders stay pending until the session is restored", () => {
   const db = fixture();
   assert.equal(db.setSessionReminder({ ...schedule, expectedRevision: 0 }).kind, "updated");
