@@ -241,7 +241,12 @@ function publishRecord(root: string, target: string, record: ProviderHomeLeaseRe
  * so allowing a second control plane between turns would still permit cross-owner mutation.
  */
 export class ProviderHomeLeaseRegistry {
-  private readonly held = new Map<string, { leaseId: string; lockDir: string; root: string }>();
+  private readonly held = new Map<string, {
+    leaseId: string;
+    lockDir: string;
+    root: string;
+    references: number;
+  }>();
   private readonly pid: number;
   private readonly hostname: string;
   private readonly isProcessAlive: (pid: number) => boolean;
@@ -277,7 +282,7 @@ export class ProviderHomeLeaseRegistry {
   }
 
   /** Acquire the whole mutable HOME for a non-launch mutation such as managed skill links. */
-  acquireHome(requestedHome: string, provider = "skills"): void {
+  acquireHome(requestedHome: string, provider = "skills"): boolean {
     if (!PROVIDER_KEY.test(provider)) throw new Error("provider home lease key is invalid");
     if (!isAbsolute(requestedHome)) throw new Error("provider HOME must be absolute");
     let home: string;
@@ -295,7 +300,11 @@ export class ProviderHomeLeaseRegistry {
     // HOME. Lease the whole effective home rather than pretending those mutations are disjoint.
     const lockDir = join(root, "mutable-home.lock");
     const key = home;
-    if (this.held.has(key)) return;
+    const borrowed = this.held.get(key);
+    if (borrowed) {
+      borrowed.references++;
+      return false;
+    }
     mkdirSync(root, { recursive: true, mode: 0o700 });
     const record = this.activeRecord(provider, null, null);
     try {
@@ -315,7 +324,8 @@ export class ProviderHomeLeaseRegistry {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
       this.transitionExistingLease(root, lockDir, record);
     }
-    this.held.set(key, { leaseId: record.leaseId, lockDir, root });
+    this.held.set(key, { leaseId: record.leaseId, lockDir, root, references: 1 });
+    return true;
   }
 
   private activeRecord(
@@ -381,24 +391,47 @@ export class ProviderHomeLeaseRegistry {
   }
 
   releaseAll(): void {
-    for (const { leaseId, lockDir, root } of this.held.values()) {
-      try {
-        const current = readChain(lockDir).tip;
-        if (current.record.version !== 2 || current.record.state !== "active" ||
-            current.record.leaseId !== leaseId) continue;
-        const released: ProviderHomeLeaseRecordV2 = {
-          ...current.record,
-          state: "released",
-          leaseId: randomUUID(),
-          previousLeaseId: current.record.leaseId,
-          previousRecordHash: current.hash,
-          createdAt: new Date().toISOString(),
-        };
-        publishRecord(root, join(lockDir, `next-${current.record.leaseId}.json`), released);
-      } catch {
-        // Never remove or supersede unreadable or replacement ownership evidence.
-      }
-    }
+    for (const held of this.held.values()) this.releaseHeld(held);
     this.held.clear();
+  }
+
+  /** Release one exact home after its supervised process tree is reaped. */
+  releaseHome(requestedHome: string): boolean {
+    let home: string;
+    try {
+      home = realpathSync(requestedHome);
+    } catch {
+      return false;
+    }
+    const held = this.held.get(home);
+    if (!held) return false;
+    if (held.references > 1) {
+      held.references--;
+      return false;
+    }
+    if (!this.releaseHeld(held)) return false;
+    this.held.delete(home);
+    return true;
+  }
+
+  private releaseHeld({ leaseId, lockDir, root }: { leaseId: string; lockDir: string; root: string }): boolean {
+    try {
+      const current = readChain(lockDir).tip;
+      if (current.record.version !== 2 || current.record.state !== "active" ||
+          current.record.leaseId !== leaseId) return false;
+      const released: ProviderHomeLeaseRecordV2 = {
+        ...current.record,
+        state: "released",
+        leaseId: randomUUID(),
+        previousLeaseId: current.record.leaseId,
+        previousRecordHash: current.hash,
+        createdAt: new Date().toISOString(),
+      };
+      publishRecord(root, join(lockDir, `next-${current.record.leaseId}.json`), released);
+      return true;
+    } catch {
+      // Never remove or supersede unreadable or replacement ownership evidence.
+      return false;
+    }
   }
 }

@@ -1775,6 +1775,41 @@ test("provider account inventory is principal-safe, version-gated, and session-d
   assert.equal(db.getSession(session.id)?.providerAccountId, "work", "runner downgrade cannot rewrite session history");
 });
 
+test("provider sign-in projections are validated, version-gated, and replace atomically", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const login = {
+    operationId: "login_12345678-1234-4123-8123-123456789abc",
+    accountId: "work",
+    label: "Work",
+    provider: "claude" as const,
+    status: "awaiting_code" as const,
+    verificationUrl: "https://claude.ai/oauth/authorize",
+    expectsCode: true,
+    startedAt: 500,
+  };
+  db.registerRunner(meta({ providerLogins: [login] }), 500, RUNNER_CAPABILITY_MIN_PROTOCOL.providerLogin);
+  assert.deepEqual(db.getRunner("runner-1")?.providerLogins, [login]);
+  db.updateRunnerProviderLogins("runner-1", [{ ...login, expectsCode: undefined }], 525);
+  assert.equal(db.getRunner("runner-1")?.providerLogins?.[0]?.expectsCode, false,
+    "optional protocol fields receive a compatible false default");
+  db.updateRunnerProviderLogins("runner-1", [{
+    ...login,
+    status: "failed",
+    expectsCode: false,
+    verificationUrl: undefined,
+    error: "The provider did not confirm authentication.",
+  }], 550);
+  assert.equal(db.getRunner("runner-1")?.providerLogins?.[0]?.status, "failed");
+  assert.equal(db.getRunner("runner-1")?.providerLogins?.[0]?.verificationUrl, undefined);
+  assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{
+    ...login,
+    verificationUrl: "http://provider.example/login",
+  }], 575), /provider sign-in inventory/);
+
+  db.registerRunner(meta({ providerLogins: [] }), 600, RUNNER_CAPABILITY_MIN_PROTOCOL.providerLogin - 1);
+  assert.equal(db.getRunner("runner-1")?.providerLogins, undefined);
+});
+
 test("agentsRefreshed: register resets the marker, a discovery push sets it (gap 15 gating)", () => {
   const db = withRunner();
   // Fresh register: discovery hasn't reported yet — an empty agent list means "probing", so the

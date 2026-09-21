@@ -47,9 +47,40 @@ test("Connections distinguish verified, unavailable, and unverified agents", asy
 test("Machine cards show account-scoped login status", async ({ page }) => {
   await page.getByText("Accounts", { exact: true }).click();
   const accounts = page.locator("details.runner-agents").filter({ hasText: "Accounts" });
-  await expect(accounts).toContainText("WorkClaudeLogged In");
-  await expect(accounts).toContainText("PersonalClaudeLogin Required");
+  const work = accounts.locator(".agent-row").filter({ hasText: "Work" });
+  await expect(work).toContainText("Claude");
+  await expect(work).toContainText("Logged In");
+  const personal = accounts.locator(".agent-row").filter({ hasText: "Personal" });
+  await expect(personal).toContainText("Claude");
+  await expect(personal).toContainText("Login Required");
   await page.screenshot({ path: "test-results/provider-accounts/machine-accounts.png", fullPage: true });
+});
+
+test("Machine owners can start both provider sign-in flow shapes", async ({ page }) => {
+  await page.getByText("Accounts", { exact: true }).click();
+  await page.getByRole("button", { name: "Add Account" }).click();
+  const claudeDialog = page.getByRole("dialog", { name: "Add Account" });
+  await claudeDialog.getByLabel("Account Label").fill("Studio Claude");
+  await claudeDialog.getByRole("button", { name: "Start Sign-In" }).click();
+
+  const claude = page.getByRole("article", { name: "Studio Claude Provider Sign-In" });
+  await expect(claude.getByRole("link", { name: "Open Provider Sign-In" })).toBeVisible();
+  await expect(claude.getByLabel("Authorization Code")).toBeVisible();
+  await page.screenshot({ path: "test-results/provider-login/claude-paste-code.png", fullPage: true });
+
+  await claude.getByRole("button", { name: "Cancel" }).click();
+  await page.getByText("Accounts", { exact: true }).click();
+  await page.getByRole("button", { name: "Add Account" }).click();
+  const codexDialog = page.getByRole("dialog", { name: "Add Account" });
+  await codexDialog.getByRole("button", { name: "Provider: Claude" }).click();
+  await codexDialog.getByRole("option", { name: "Codex" }).click();
+  await codexDialog.getByLabel("Account Label").fill("Studio Codex");
+  await codexDialog.getByRole("button", { name: "Start Sign-In" }).click();
+
+  const codex = page.getByRole("article", { name: "Studio Codex Provider Sign-In" });
+  await expect(codex.getByText("WOLL-IPOG", { exact: true })).toBeVisible();
+  await expect(codex.getByLabel("Authorization Code")).toHaveCount(0);
+  await page.screenshot({ path: "test-results/provider-login/codex-device-code.png", fullPage: true });
 });
 
 test("Connections ask protocol v153 runners to update before trusting unverified agents", async ({ page }) => {

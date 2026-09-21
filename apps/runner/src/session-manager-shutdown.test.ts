@@ -8,6 +8,25 @@ import { SessionManager } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 
+test("provider sign-in fails closed when attested provider-home ownership is unavailable", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-login-provider-home-unavailable-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const manager = new SessionManager(
+    () => {},
+    () => {},
+    new SessionStore(join(root, "sessions")),
+    "runner",
+    undefined,
+    undefined,
+    root,
+  );
+  assert.throws(
+    () => manager.acquireProviderLoginHome(join(root, "provider-home"), "claude"),
+    /provider-home ownership is unavailable/,
+  );
+  manager.shutdownAll();
+});
+
 test("provider-home ownership is released only after shutdown process trees are reaped", (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-shutdown-provider-home-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

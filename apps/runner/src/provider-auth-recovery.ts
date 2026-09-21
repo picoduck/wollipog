@@ -25,6 +25,7 @@ import {
   LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
 } from "./drivers/claude-code.js";
 import { killTree, spawnAgent, type AgentProcess } from "./spawn.js";
+import type { ProviderLoginSupervisor } from "./provider-login.js";
 import type {
   ProviderAuthIdentityEvidence,
   ProviderAuthIdentityField,
@@ -255,7 +256,11 @@ function credentialHome(meta: SessionMeta, provider: "claude" | "codex"): string
   return meta.env.HOME ?? "<context-default-home>";
 }
 
-export function describeProviderCredentialScope(meta: SessionMeta, digestKey?: DigestKey): ProviderCredentialScope | null {
+export function describeProviderCredentialScope(
+  meta: SessionMeta,
+  digestKey?: DigestKey,
+  loginAvailable = false,
+): ProviderCredentialScope | null {
   const provider = providerFamily(meta.driver);
   // Container/cloud adapters own their provider process and credential projection, but do not yet
   // expose a provider-native status probe. Persisting a runner-owned block for one would create a
@@ -276,10 +281,7 @@ export function describeProviderCredentialScope(meta: SessionMeta, digestKey?: D
     id,
     provider,
     configuredCredential,
-    // The shared provider-home lease now exists, but login remains revalidation-only until this
-    // path acquires that lease for the exact freshly resolved isolation, supervises a cancellable
-    // provider child, and either leases or rejects credential roots overridden outside HOME.
-    canStartLogin: false,
+    canStartLogin: loginAvailable && !configuredCredential && meta.context.kind === "native",
   };
 }
 
@@ -328,12 +330,15 @@ function codexIdentity(meta: SessionMeta, digestKey?: DigestKey): string | undef
 class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
   private readonly spawn: typeof spawnAgent;
   private readonly kill: typeof killTree;
+  private readonly loginAccounts = new Map<string, { accountId: string; attempt: symbol }>();
 
   constructor(
     private readonly injectedRun?: CommandRunner,
     private readonly digestKey?: DigestKey,
     deps: Partial<{ spawn: typeof spawnAgent; kill: typeof killTree }> = {},
     private readonly evidenceVersion: ProviderAuthIdentityEvidence["version"] = 1,
+    private readonly loginSupervisor?: ProviderLoginSupervisor,
+    private readonly loginAvailable: () => boolean = () => true,
   ) {
     this.spawn = deps.spawn ?? spawnAgent;
     this.kill = deps.kill ?? killTree;
@@ -416,7 +421,11 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
   }
 
   describe(meta: SessionMeta): ProviderCredentialScope | null {
-    return describeProviderCredentialScope(meta, this.digestKey);
+    return describeProviderCredentialScope(
+      meta,
+      this.digestKey,
+      !!this.loginSupervisor && this.loginAvailable(),
+    );
   }
 
   async revalidate(meta: SessionMeta): Promise<ProviderAuthObservation> {
@@ -446,13 +455,39 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
   }
 
   async startLogin(meta: SessionMeta): Promise<"completed" | "cancelled" | "failed"> {
-    void meta;
-    return "failed";
+    const scope = this.describe(meta);
+    if (!scope?.canStartLogin || !this.loginSupervisor) return "failed";
+    const directory = scope.provider === "claude"
+      ? meta.env.CLAUDE_CONFIG_DIR ?? meta.env.HOME ?? homedir()
+      : meta.env.CODEX_HOME ?? meta.env.HOME ?? homedir();
+    const accountId = meta.providerAccountId ?? `default-${scope.provider}-${scope.id.slice(0, 12)}`;
+    let entry: { accountId: string; attempt: symbol } | undefined;
+    try {
+      const operation = this.loginSupervisor.startResolved({
+        accountId,
+        label: meta.providerAccountLabel ?? `Default ${scope.provider === "claude" ? "Claude" : "Codex"} Account`,
+        provider: scope.provider,
+        directory,
+        command: meta.command,
+        args: providerArgs(meta, []),
+        context: meta.context,
+        env: meta.env,
+        persistAccount: false,
+        sessionId: meta.sessionId,
+      });
+      entry = { accountId, attempt: Symbol("provider-login") };
+      this.loginAccounts.set(scope.id, entry);
+      return await operation.completion;
+    } catch {
+      return "failed";
+    } finally {
+      if (entry && this.loginAccounts.get(scope.id) === entry) this.loginAccounts.delete(scope.id);
+    }
   }
 
   cancel(scopeId: string): boolean {
-    void scopeId;
-    return false;
+    const entry = this.loginAccounts.get(scopeId);
+    return entry ? this.loginSupervisor?.cancelAccount(entry.accountId) ?? false : false;
   }
 }
 
@@ -462,12 +497,16 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
 export function createRunnerProviderAuthRecovery(
   config: Pick<RunnerConfig, "dataDir">,
   injectedRun?: CommandRunner,
+  loginSupervisor?: ProviderLoginSupervisor,
+  loginAvailable?: () => boolean,
 ): ProviderAuthRecoveryController {
   return new NativeProviderAuthRecovery(
     injectedRun,
     loadOrCreateProviderAuthEvidenceKey(config.dataDir),
     {},
     2,
+    loginSupervisor,
+    loginAvailable,
   );
 }
 

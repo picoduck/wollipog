@@ -543,6 +543,33 @@ test("an incomplete provider-home lease fails closed with actionable recovery gu
   assert.throws(() => registry.acquire(request(home)), /incomplete.*proving no provider process.*quarantine/);
 });
 
+test("a short-lived login releases an unborrowed lease it acquired itself", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-login-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, { pid: 101, hostname: "host-a" });
+  assert.equal(registry.acquireHome(home, "claude"), true);
+  assert.equal(registry.releaseHome(home), true);
+  assert.equal(registry.releaseHome(home), false, "the exact lease can be released only once");
+});
+
+test("a login cannot release a provider-home lease after another local consumer borrows it", (t) => {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-login-borrowed-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const registry = new ProviderHomeLeaseRegistry(OWNER_A, {
+    pid: 101, hostname: "host-a", isProcessAlive: (pid) => pid === 101,
+  });
+  const contender = new ProviderHomeLeaseRegistry(OWNER_B, {
+    pid: 202, hostname: "host-a", isProcessAlive: (pid) => pid === 101,
+  });
+  assert.equal(registry.acquireHome(home, "claude"), true, "the login owns the initial acquisition");
+  assert.equal(registry.acquireHome(home, "claude"), false, "the provider session borrows the held lease");
+  assert.equal(registry.releaseHome(home), false, "the login cannot release a lease with a live borrower");
+  assert.throws(() => contender.acquireHome(home, "claude"), /already in use by process 101/);
+  registry.releaseAll();
+  assert.equal(contender.acquireHome(home, "claude"), true, "shutdown release permits the next attested owner");
+  contender.releaseAll();
+});
+
 test("an initial publication failure unwinds only the empty lock created by that attempt", (t) => {
   const home = mkdtempSync(join(tmpdir(), "wollipog-provider-home-publish-fail-"));
   t.after(() => rmSync(home, { recursive: true, force: true }));

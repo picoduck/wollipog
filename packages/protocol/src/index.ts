@@ -518,6 +518,9 @@
 // 171: an existing Claude or Codex session can schedule a same-Machine provider-account switch.
 //      The runner applies it only at a safe turn boundary, re-pins provider identity for the new
 //      credential home, resumes the same conversation, and reports an explicit parked failure.
+//      Runner-owned provider login supervisors also expose bounded, secret-minimized progress, accept
+//      one-shot paste-back codes, and persist newly authenticated accounts without sending provider
+//      credentials through the control plane. Older runners retain instruction-only auth cards.
 export const PROTOCOL_VERSION = 171;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
@@ -646,6 +649,7 @@ export interface RunnerControlPlaneAttestation {
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   sessionProviderAccountSwitch: 171,
   providerAccounts: 170,
+  providerLogin: 171,
   piHarness: 155,
   piExternalSessions: 156,
   verifiedAgentAvailability: 154,
@@ -2049,6 +2053,36 @@ export interface ProviderAccountSwitchFailureView {
   detectedAt: number;
 }
 
+export type ProviderLoginStatus =
+  | "starting"
+  | "awaiting_code"
+  | "waiting_for_provider"
+  | "succeeded"
+  | "failed"
+  | "cancelled"
+  | "timed_out";
+
+/** Secret-minimized progress for one runner-owned provider login. Provider output, credential
+ * paths, authorization responses, and tokens never enter this projection. */
+export interface ProviderLoginView {
+  operationId: string;
+  accountId: string;
+  label: string;
+  provider: "claude" | "codex";
+  status: ProviderLoginStatus;
+  /** The provider's HTTPS verification page, including any provider-required query parameters. */
+  verificationUrl?: string;
+  /** Provider-displayed one-time code. Never written to runner/control-plane logs. */
+  userCode?: string;
+  /** Paste-back providers accept one transient authorization response through submit-code. */
+  expectsCode?: boolean;
+  /** Links a repair operation to its Authentication Required card without exposing session data. */
+  sessionId?: string;
+  /** Bounded operator-facing reason from Wollipog's closed failure vocabulary. */
+  error?: string;
+  startedAt: number;
+}
+
 /** Stable ACP capabilities observed from a live initialize handshake. Content-free and safe to
  * retain in runner/session metadata; never inferred from adapter identity. */
 export interface AcpRuntimeCapabilities {
@@ -2223,6 +2257,8 @@ export interface RunnerMetadata {
   agents: AgentDefinition[];
   /** Protocol v170 opaque account inventory. Credential homes never leave the runner. */
   providerAccounts?: ProviderAccountDefinition[];
+  /** Protocol v171 active/recent runner-owned login operations. */
+  providerLogins?: ProviderLoginView[];
   workspaces: WorkspaceInfo[];
   /** Editors found on the host (discovery fills this; absent on pre-v22 runners). */
   editors?: EditorInfo[];
@@ -2341,6 +2377,7 @@ export interface RunnerView {
   status: RunnerStatus;
   agents: AgentDefinition[];
   providerAccounts?: ProviderAccountDefinition[];
+  providerLogins?: ProviderLoginView[];
   workspaces: WorkspaceInfo[];
   /** Editors found on the host (for "Open in …"); absent/empty hides the control. */
   editors?: EditorInfo[];
@@ -6550,6 +6587,22 @@ export interface AgentsUpdatedMessage {
   editors?: EditorInfo[];
 }
 
+/** Authoritative replacement of one runner's active/recent provider-login cards. */
+export interface ProviderLoginsUpdatedMessage {
+  type: "provider_logins_updated";
+  runnerId: string;
+  logins: ProviderLoginView[];
+}
+
+export interface ProviderLoginResultMessage {
+  type: "provider_login_result";
+  requestId: string;
+  action: "start" | "submit_code" | "cancel";
+  ok: boolean;
+  login?: ProviderLoginView;
+  error?: string;
+}
+
 /** Authoritative live capacity/queue accounting after registration and every admission change. */
 export interface RunnerCapacityStatusMessage {
   type: "runner_capacity_status";
@@ -6790,6 +6843,8 @@ export type RunnerToControlPlane =
   | ShellInventoryCompleteMessage
   | ProcessStatusMessage
   | AgentsUpdatedMessage
+  | ProviderLoginsUpdatedMessage
+  | ProviderLoginResultMessage
   | RunnerCapacityStatusMessage
   | SubscriptionUsageUpdatedMessage
   | SubscriptionUsageInventoryMessage
@@ -7440,6 +7495,33 @@ export interface SwitchSessionProviderAccountResultMessage {
   ok: boolean;
   scheduled?: boolean;
   error?: string;
+}
+
+/** Start a new-account login, or repair an existing opaque account id when accountId is present. */
+export interface StartProviderLoginMessage {
+  type: "start_provider_login";
+  requestId: string;
+  runnerId: string;
+  provider?: "claude" | "codex";
+  label?: string;
+  accountId?: string;
+}
+
+/** Transient paste-back input. The runner writes it to the supervised child's stdin and retains
+ * neither the response nor a digest after the write completes. */
+export interface SubmitProviderLoginCodeMessage {
+  type: "submit_provider_login_code";
+  requestId: string;
+  runnerId: string;
+  operationId: string;
+  code: string;
+}
+
+export interface CancelProviderLoginMessage {
+  type: "cancel_provider_login";
+  requestId: string;
+  runnerId: string;
+  operationId: string;
 }
 
 export type AcpRegistryApprovalAction = "approve" | "revoke";
@@ -8343,6 +8425,9 @@ export type ControlPlaneToRunner =
   | TestSessionNamingCustomModelMessage
   | LogoutAgentMessage
   | SwitchSessionProviderAccountMessage
+  | StartProviderLoginMessage
+  | SubmitProviderLoginCodeMessage
+  | CancelProviderLoginMessage
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage
   | SkillSnapshotMessage

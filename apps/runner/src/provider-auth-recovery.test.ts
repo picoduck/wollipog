@@ -16,6 +16,7 @@ import {
 import { writeRunnerCredentialFile } from "./runner-credential-file.js";
 import type { SessionMeta } from "./session-store.js";
 import type { AgentProcess } from "./spawn.js";
+import type { ProviderLoginSupervisor, ResolvedProviderLogin } from "./provider-login.js";
 
 function fakeAgentProcess(): AgentProcess {
   return Object.assign(new EventEmitter(), {
@@ -412,11 +413,16 @@ test("only structured provider denial is unauthenticated while exit and context 
   assert.equal((await unavailable.revalidate(meta())).status, "unknown");
 });
 
-test("in-app login is fail-closed and remote targets do not claim runner-owned recovery", () => {
+test("in-app login requires supervised native availability and remote targets stay fail-closed", () => {
   assert.equal(describeProviderCredentialScope(meta())?.canStartLogin, false,
-    "login still needs exact-isolation lease acquisition and child supervision");
-  assert.equal(describeProviderCredentialScope(meta({ context: { kind: "wsl", distro: "Ubuntu" } }))?.canStartLogin, false);
-  assert.equal(describeProviderCredentialScope(meta({ env: { OPENAI_API_KEY: "secret" } }))?.canStartLogin, false);
+    "the capability is not advertised without the supervised login boundary");
+  assert.equal(describeProviderCredentialScope(meta(), undefined, true)?.canStartLogin, true);
+  assert.equal(describeProviderCredentialScope(
+    meta({ context: { kind: "wsl", distro: "Ubuntu" } }), undefined, true,
+  )?.canStartLogin, false);
+  assert.equal(describeProviderCredentialScope(
+    meta({ env: { OPENAI_API_KEY: "secret" } }), undefined, true,
+  )?.canStartLogin, false);
   assert.equal(describeProviderCredentialScope(meta({
     executionTarget: {
       id: "container",
@@ -427,4 +433,62 @@ test("in-app login is fail-closed and remote targets do not claim runner-owned r
       boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "unknown" },
     },
   })), null);
+});
+
+test("Authentication Required Sign In reuses and can cancel the supervised account login", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "wollipog-auth-login-"));
+  let started: ResolvedProviderLogin | undefined;
+  let cancelledAccount: string | undefined;
+  let active = false;
+  let finish!: (status: "completed" | "cancelled" | "failed") => void;
+  const completion = new Promise<"completed" | "cancelled" | "failed">((resolve) => { finish = resolve; });
+  const supervisor = {
+    startResolved(resolved: ResolvedProviderLogin) {
+      if (active) throw new Error("A sign-in is already running for this account.");
+      active = true;
+      started = resolved;
+      return {
+        view: {
+          operationId: "login_test",
+          accountId: resolved.accountId,
+          label: resolved.label,
+          provider: resolved.provider,
+          status: "starting" as const,
+          expectsCode: false,
+          startedAt: 1,
+        },
+        completion,
+      };
+    },
+    cancelAccount(accountId: string) {
+      cancelledAccount = accountId;
+      active = false;
+      finish("cancelled");
+      return true;
+    },
+  } as unknown as ProviderLoginSupervisor;
+  try {
+    const controller = createRunnerProviderAuthRecovery({ dataDir: dir }, undefined, supervisor);
+    const session = meta({
+      providerAccountId: "personal",
+      providerAccountLabel: "Personal",
+      providerAccountProvider: "codex",
+      providerCredentialHome: join(dir, "personal"),
+      env: { CODEX_HOME: join(dir, "personal") },
+    });
+    const scope = controller.describe(session)!;
+    assert.equal(scope.canStartLogin, true);
+    const result = controller.startLogin(session);
+    await nextTask();
+    assert.equal(started?.accountId, "personal");
+    assert.equal(started?.sessionId, session.sessionId);
+    assert.equal(started?.directory, session.env.CODEX_HOME);
+    assert.equal(started?.persistAccount, false);
+    assert.equal(await controller.startLogin({ ...session, sessionId: "duplicate-session" }), "failed");
+    assert.equal(controller.cancel(scope.id), true);
+    assert.equal(cancelledAccount, "personal");
+    assert.equal(await result, "cancelled");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

@@ -3614,6 +3614,16 @@ export class SessionManager {
     this.providerHomeLeases?.acquireHome(home);
   }
 
+  /** Provider sign-in is a short-lived supervised mutation of one exact credential home. */
+  acquireProviderLoginHome(home: string, provider: "claude" | "codex"): boolean {
+    if (!this.providerHomeLeases) throw new Error("provider-home ownership is unavailable");
+    return this.providerHomeLeases.acquireHome(home, provider);
+  }
+
+  releaseProviderHomeAfterLogin(home: string): boolean {
+    return this.providerHomeLeases?.releaseHome(home) ?? false;
+  }
+
   /** Probe one exact provider-account environment during discovery. The synthetic metadata never
    * enters the session store; it only reuses the same provider-native status contract and
    * credential-scope lease as real sessions. */

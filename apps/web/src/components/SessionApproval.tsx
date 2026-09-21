@@ -7,6 +7,7 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { useOptionalStoreSelector } from "../store.js";
 import {
   clearQuestionDrafts,
   claimQuestionResponseOperation,
@@ -34,6 +35,7 @@ import {
   isRenderableEvidence,
   type EvidenceArtifactStatus,
 } from "./EvidenceArtifactView.js";
+import { ProviderLoginCard } from "./ProviderLoginCard.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -376,6 +378,10 @@ export function SessionApprovalBanner({
   const api = useApi();
   const instanceScope = useInstanceScope();
   const approval = session.pendingApproval!;
+  const runner = useOptionalStoreSelector((state) => state.runners.get(session.runnerId));
+  const providerLogin = runner?.providerLogins?.find(
+    (login) => login.sessionId === session.id && login.status !== "succeeded" && login.status !== "cancelled",
+  );
   const workflowDecision = approval.kind === "workflow_decision" ? approval.workflowDecision : undefined;
   const evidenceSnapshot = workflowDecision?.resourceSnapshot.category === "ui_evidence_approval"
     ? workflowDecision.resourceSnapshot : null;
@@ -540,12 +546,13 @@ export function SessionApprovalBanner({
         <div className="evidence-review-actions">
           {approval.options.map((option) => {
             const blocksApproval = option.optionId === "approve" && !evidenceComplete;
+            const blocksProviderLogin = option.optionId === "auth:login" && runner?.canManage === false;
             return (
               <button
                 key={option.optionId}
                 type="button"
                 className={`btn ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
-                disabled={busy || blocksApproval}
+                disabled={busy || blocksApproval || blocksProviderLogin}
                 onClick={() => void decide(option.optionId)}
               >
                 {busy ? "Submitting…" : option.name}
@@ -582,9 +589,12 @@ export function SessionApprovalBanner({
             <button
               key={option.optionId}
               type="button"
-              title={option.description}
+              title={option.optionId === "auth:login" && runner?.canManage === false
+                ? "Machine owner or organization admin permission is required"
+                : option.description}
               className={`btn ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
-              disabled={busy || (decisionNeedsRunner && !runnerOnline)}
+              disabled={busy || (decisionNeedsRunner && !runnerOnline) ||
+                (option.optionId === "auth:login" && runner?.canManage === false)}
               onClick={() => void decide(option.optionId)}
             >
               {busy ? "Submitting…" : option.name}
@@ -628,13 +638,17 @@ export function SessionApprovalBanner({
           {approval.options.map((option) => {
             const keyHint = showKeyHints ? approvalKeyHintForOption(approval.options, option.optionId) : null;
             const evidenceBlocksApproval = evidence.length > 0 && option.optionId === "approve" && !evidenceComplete;
+            const providerLoginBlocked = option.optionId === "auth:login" && runner?.canManage === false;
             return (
               <button
                 key={option.optionId}
                 type="button"
-                title={option.description}
+                title={providerLoginBlocked
+                  ? "Machine owner or organization admin permission is required"
+                  : option.description}
                 className={`btn sm ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
-                disabled={busy || evidenceBlocksApproval || (decisionNeedsRunner && !runnerOnline)}
+                disabled={busy || evidenceBlocksApproval || providerLoginBlocked ||
+                  (decisionNeedsRunner && !runnerOnline)}
                 onClick={() => void decide(option.optionId)}
               >
                 {option.name}
@@ -644,6 +658,9 @@ export function SessionApprovalBanner({
           })}
         </div>
       </div>
+      {approval.kind === "authentication" && providerLogin && (
+        <ProviderLoginCard runnerId={session.runnerId} login={providerLogin} />
+      )}
       {evidence.length > 0 && (
         <div className="approval-evidence" aria-label="Evidence Review">
           <p>Open and inspect each evidence item, then mark it as reviewed.</p>

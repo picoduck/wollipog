@@ -143,6 +143,7 @@ import {
   type ProjectLocationSource,
   type ProjectLocationView,
   type ProjectView,
+  type ProviderLoginView,
   type PodContextEntry,
   type PodMemberRole,
   type PodOrchestrationPolicy,
@@ -299,6 +300,54 @@ function safeProviderAccounts(value: RunnerView["providerAccounts"]): NonNullabl
       label: account.label.trim(),
       provider: account.provider,
       authStatus: account.authStatus,
+    };
+  });
+}
+
+function safeProviderLogins(value: RunnerView["providerLogins"]): ProviderLoginView[] {
+  if (!Array.isArray(value) || value.length > 32) throw new Error("runner provider sign-in inventory is invalid");
+  const operationIds = new Set<string>();
+  return value.map((login) => {
+    if (!login || typeof login.operationId !== "string" || login.operationId.length > 128 ||
+        !/^login_[A-Za-z0-9-]+$/u.test(login.operationId) || operationIds.has(login.operationId) ||
+        typeof login.accountId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(login.accountId) ||
+        typeof login.label !== "string" || !login.label.trim() || login.label.trim().length > 100 ||
+        /[\u0000-\u001f\u007f]/u.test(login.label) ||
+        (login.provider !== "claude" && login.provider !== "codex") ||
+        !["starting", "awaiting_code", "waiting_for_provider", "succeeded", "failed", "cancelled", "timed_out"].includes(login.status) ||
+        (login.expectsCode !== undefined && typeof login.expectsCode !== "boolean") ||
+        !Number.isSafeInteger(login.startedAt) || login.startedAt < 0 ||
+        (login.sessionId !== undefined && (typeof login.sessionId !== "string" || login.sessionId.length > 128 ||
+          /[\u0000-\u001f\u007f]/u.test(login.sessionId))) ||
+        (login.userCode !== undefined && (typeof login.userCode !== "string" || login.userCode.length > 128 ||
+          /[\u0000-\u001f\u007f]/u.test(login.userCode))) ||
+        (login.error !== undefined && (typeof login.error !== "string" || login.error.length > 500 ||
+          /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(login.error)))) {
+      throw new Error("runner provider sign-in inventory is invalid");
+    }
+    if (login.verificationUrl !== undefined) {
+      try {
+        const url = new URL(login.verificationUrl);
+        if (url.protocol !== "https:" || url.username || url.password || login.verificationUrl.length > 2_048) {
+          throw new Error("unsafe URL");
+        }
+      } catch {
+        throw new Error("runner provider sign-in inventory is invalid");
+      }
+    }
+    operationIds.add(login.operationId);
+    return {
+      operationId: login.operationId,
+      accountId: login.accountId,
+      label: login.label.trim(),
+      provider: login.provider,
+      status: login.status,
+      expectsCode: login.expectsCode === true,
+      startedAt: login.startedAt,
+      ...(login.verificationUrl === undefined ? {} : { verificationUrl: login.verificationUrl }),
+      ...(login.userCode === undefined ? {} : { userCode: login.userCode }),
+      ...(login.sessionId === undefined ? {} : { sessionId: login.sessionId }),
+      ...(login.error === undefined ? {} : { error: login.error }),
     };
   });
 }
@@ -2437,6 +2486,7 @@ interface RunnerRow {
   container_targets: string | null;
   capacity_status: string | null;
   provider_accounts: string | null;
+  provider_logins: string | null;
 }
 
 interface RunnerCredentialRow {
@@ -4623,6 +4673,8 @@ export class ControlPlaneDb {
       "capacity_status TEXT",
       // Protocol v170 secret-free provider account inventory.
       "provider_accounts TEXT",
+      // Protocol v171 secret-free supervised provider sign-in projections.
+      "provider_logins TEXT",
     ]) {
       try {
         db.exec(`ALTER TABLE runners ADD COLUMN ${col}`);
@@ -5204,6 +5256,9 @@ export class ControlPlaneDb {
       const providerAccounts = runnerSupportsProtocol(protocolVersion, "providerAccounts")
         ? JSON.stringify(safeProviderAccounts(meta.providerAccounts ?? []))
         : null;
+      const providerLogins = runnerSupportsProtocol(protocolVersion, "providerLogin")
+        ? JSON.stringify(safeProviderLogins(meta.providerLogins ?? []))
+        : null;
       let containerTargets: string | null = null;
       if (runnerSupportsProtocol(protocolVersion, "containerExecutionTargets")) {
         const advertised = meta.executionTargets ?? [];
@@ -5226,16 +5281,16 @@ export class ControlPlaneDb {
         this.stmt(
             `UPDATE runners SET hostname=?, os=?, version=?, protocol_version=?, status='online',
                 connected_at=?, last_seen=?, updated_at=?, agents_refreshed_at=NULL,
-                editors=COALESCE(?, editors), runtime=?, container_targets=?, provider_accounts=?, capacity_status=NULL WHERE runner_id=?`,
+                editors=COALESCE(?, editors), runtime=?, container_targets=?, provider_accounts=?, provider_logins=?, capacity_status=NULL WHERE runner_id=?`,
           )
-          .run(meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, editors, runtime, containerTargets, providerAccounts, meta.runnerId);
+          .run(meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins, meta.runnerId);
       } else {
         this.stmt(
             `INSERT INTO runners
-               (runner_id, hostname, os, version, protocol_version, status, connected_at, last_seen, created_at, updated_at, editors, runtime, container_targets, provider_accounts)
-             VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?)`,
+               (runner_id, hostname, os, version, protocol_version, status, connected_at, last_seen, created_at, updated_at, editors, runtime, container_targets, provider_accounts, provider_logins)
+             VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
           )
-          .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts);
+          .run(meta.runnerId, meta.hostname, meta.os, meta.version, protocolVersion, now, now, now, now, editors, runtime, containerTargets, providerAccounts, providerLogins);
       }
 
       const ownerKind = scope.owner.kind;
@@ -5364,6 +5419,16 @@ export class ControlPlaneDb {
       this.db.exec("ROLLBACK");
       throw err;
     }
+  }
+
+  updateRunnerProviderLogins(runnerId: string, logins: ProviderLoginView[], now: number): void {
+    const protocol = this.stmt("SELECT protocol_version FROM runners WHERE runner_id=?")
+      .get(runnerId) as { protocol_version: number | null } | undefined;
+    if (!runnerSupportsProtocol(protocol?.protocol_version, "providerLogin")) {
+      throw new Error("runner does not support provider sign-in");
+    }
+    this.stmt("UPDATE runners SET provider_logins=?, updated_at=? WHERE runner_id=?")
+      .run(JSON.stringify(safeProviderLogins(logins)), now, runnerId);
   }
 
   /** Set (or clear, with an empty name) a workspace's display-name override. */
@@ -6454,7 +6519,7 @@ export class ControlPlaneDb {
 
   getRunner(runnerId: string): RunnerView | null {
     const row = this.stmt(
-        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts FROM runners WHERE runner_id=?",
+        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts, provider_logins FROM runners WHERE runner_id=?",
       )
       .get(runnerId) as unknown as RunnerRow | undefined;
     return row ? this.runnerView(row) : null;
@@ -6462,7 +6527,7 @@ export class ControlPlaneDb {
 
   listRunners(): RunnerView[] {
     const rows = this.stmt(
-        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts FROM runners ORDER BY runner_id",
+        "SELECT runner_id, hostname, os, version, status, connected_at, last_seen, protocol_version, agents_refreshed_at, editors, runtime, container_targets, capacity_status, provider_accounts, provider_logins FROM runners ORDER BY runner_id",
       )
       .all() as unknown as RunnerRow[];
     return rows.map((r) => this.runnerView(r));
@@ -8360,25 +8425,31 @@ export class ControlPlaneDb {
     const administers = principal.kind === "human" && (principal.role === "owner" || principal.role === "admin");
     return this.listRunners()
       .filter((runner) => this.canAccessRunner(principal, runner.runnerId))
-      .map((runner) => ({
-        ...runner,
-        canManage: this.canManageRunner(principal, runner.runnerId),
-        ...(() => {
-          const scope = this.runnerScope(runner.runnerId);
-          return scope ? { scope } : {};
-        })(),
-        workspaces: runner.workspaces
-          .filter((workspace) => this.canAccessWorkspace(principal, runner.runnerId, workspace.id))
-          .map((workspace) => {
-            const scope = this.workspaceScope(runner.runnerId, workspace.id);
-            return {
-              ...workspace,
-              ...(scope ? { scope, canManage: this.canManageWorkspace(principal, runner.runnerId, workspace.id) } : {}),
-            };
-          }),
-        agents: administers ? runner.agents : runner.agents.map((agent) => ({ ...agent, env: {} })),
-        runtime: administers ? runner.runtime : undefined,
-      }));
+      .map((runner) => {
+        const canManage = this.canManageRunner(principal, runner.runnerId);
+        const scope = this.runnerScope(runner.runnerId);
+        return {
+          ...runner,
+          canManage,
+          ...(scope ? { scope } : {}),
+          workspaces: runner.workspaces
+            .filter((workspace) => this.canAccessWorkspace(principal, runner.runnerId, workspace.id))
+            .map((workspace) => {
+              const workspaceScope = this.workspaceScope(runner.runnerId, workspace.id);
+              return {
+                ...workspace,
+                ...(workspaceScope
+                  ? { scope: workspaceScope, canManage: this.canManageWorkspace(principal, runner.runnerId, workspace.id) }
+                  : {}),
+              };
+            }),
+          agents: administers ? runner.agents : runner.agents.map((agent) => ({ ...agent, env: {} })),
+          runtime: administers ? runner.runtime : undefined,
+          // Verification URLs and device codes are bearer-like authentication material. Keep the
+          // complete operation projection available only to principals who can mutate this Machine.
+          providerLogins: canManage ? runner.providerLogins : undefined,
+        };
+      });
   }
 
   listSessionsForPrincipal(principal: AuthPrincipal, includeArchived = false): SessionView[] {
@@ -9691,6 +9762,9 @@ export class ControlPlaneDb {
       agents,
       providerAccounts: runnerSupportsProtocol(row.protocol_version, "providerAccounts")
         ? (parseJson<RunnerView["providerAccounts"]>(row.provider_accounts) ?? [])
+        : undefined,
+      providerLogins: runnerSupportsProtocol(row.protocol_version, "providerLogin")
+        ? (parseJson<ProviderLoginView[]>(row.provider_logins) ?? [])
         : undefined,
       workspaces,
       // The editors COLUMN survives re-registers by design (COALESCE), so gate the VIEW on

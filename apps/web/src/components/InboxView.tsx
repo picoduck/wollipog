@@ -59,6 +59,7 @@ import { virtualTargetScrollAdjustment } from "./MeasuredVirtualList.js";
 import type { PreviewNavigationControls } from "./usePreviewNavigationRegistration.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
+import { ProviderLoginCard } from "./ProviderLoginCard.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
@@ -254,6 +255,10 @@ export function InboxView({
   } | null>(null);
   const [snoozeReturnFocusRef, setSnoozeReturnFocusRef] = useState<{ current: HTMLElement | null } | undefined>(undefined);
   const [dragRatio, setDragRatio] = useState<number | null>(null);
+  const machineProviderLogins = useMemo(() => [...runners.values()].flatMap((runner) =>
+    (runner.providerLogins ?? [])
+      .filter((login) => !login.sessionId && login.status !== "succeeded" && login.status !== "cancelled")
+      .map((login) => ({ runnerId: runner.runnerId, login }))), [runners]);
   const [heldOrder, setHeldOrder] = useState<string[] | null>(null);
   const [busySessionIds, setBusySessionIds] = useState<Set<string>>(() => new Set());
   const busySessionIdsRef = useRef(new Set<string>());
@@ -1378,6 +1383,13 @@ export function InboxView({
             </label>
           </div>
         </div>
+        {machineProviderLogins.length > 0 && (
+          <section className="inbox-provider-logins" aria-label="Machine Provider Sign-Ins">
+            {machineProviderLogins.map(({ runnerId, login }) => (
+              <ProviderLoginCard key={login.operationId} runnerId={runnerId} login={login} />
+            ))}
+          </section>
+        )}
         {boardMode ? (
           <Board
             sessions={boardSessions}

@@ -46,6 +46,7 @@ import type {
   PodView,
   ProjectView,
   PolicyHookDecisionRecordedMessage,
+  ProviderLoginResultMessage,
   WorkflowActionAdmissionRecordedMessage,
   WorkflowActionReconciliationResultMessage,
   SessionEvent,
@@ -229,7 +230,8 @@ export type RunnerRequestResult =
   | WorkspaceWorktreeSetupResultMessage
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
-  | WorkflowActionReconciliationResultMessage;
+  | WorkflowActionReconciliationResultMessage
+  | ProviderLoginResultMessage;
 
 interface PendingRequest {
   runnerId: string;
