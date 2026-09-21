@@ -264,6 +264,11 @@ const MAX_BACKOFF_MS = 30_000;
 // terminate once this many consecutive pings go unanswered — at the ~10s heartbeat that surfaces a
 // dead peer in ~30s, dropping us straight into the existing reconnect/backoff/outbox path.
 const MAX_MISSED_HEARTBEAT_PONGS = 2;
+// Registration is acknowledged before the control plane synchronously reconciles the runner's
+// retained sessions. On a large cache that work can span the normal half-open threshold even though
+// the peer is healthy and its pong is merely queued. Allow one wider window until this socket proves
+// it can answer a ping; all later silence uses the normal threshold above.
+const MAX_INITIAL_MISSED_HEARTBEAT_PONGS = 4;
 
 function detectOs(): OS {
   switch (process.platform) {
@@ -1592,6 +1597,7 @@ let shuttingDown = false;
 // Consecutive heartbeat pings sent without a pong reply on the current socket. Reset by the 'pong'
 // handler attached in connect() and by startHeartbeat() when a fresh socket registers.
 let missedHeartbeatPongs = 0;
+let heartbeatPongObserved = false;
 const sessionCommandRecoveryTimer = setInterval(recoverStaleSessionCommands, 10_000);
 sessionCommandRecoveryTimer.unref?.();
 recoverStaleSessionCommands();
@@ -1606,13 +1612,17 @@ function stopHeartbeat(): void {
 function startHeartbeat(socket: WebSocket, intervalMs: number): void {
   stopHeartbeat();
   missedHeartbeatPongs = 0;
+  heartbeatPongObserved = false;
   heartbeatTimer = setInterval(() => {
     if (socket.readyState !== WebSocket.OPEN) return;
     // Half-open detection: the socket still reads OPEN, but if the last several ws-level pings went
     // unanswered the peer is gone. Terminate now — ws emits 'close' immediately, so the close handler
     // enters the reconnect/backoff/outbox path instead of us writing frames into a dead socket until
     // the OS TCP timeout finally errors it (many minutes).
-    if (missedHeartbeatPongs >= MAX_MISSED_HEARTBEAT_PONGS) {
+    const missedPongLimit = heartbeatPongObserved
+      ? MAX_MISSED_HEARTBEAT_PONGS
+      : MAX_INITIAL_MISSED_HEARTBEAT_PONGS;
+    if (missedHeartbeatPongs >= missedPongLimit) {
       log(`control plane heartbeat unanswered (${missedHeartbeatPongs} missed pongs) — terminating socket to reconnect`);
       socket.terminate();
       return;
@@ -3190,6 +3200,7 @@ function connect(): void {
   // clear the missed-ping counter. Silence across MAX_MISSED_HEARTBEAT_PONGS pings terminates the
   // socket in startHeartbeat.
   socket.on("pong", () => {
+    heartbeatPongObserved = true;
     missedHeartbeatPongs = 0;
   });
 }
