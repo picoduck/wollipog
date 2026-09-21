@@ -179,6 +179,12 @@ interface PendingApproval {
   resolve: (response: Json) => void;
 }
 
+interface StagedTurnImages {
+  generation: number;
+  turnId: string | null;
+  images: StagedPromptImages;
+}
+
 /**
  * Build the response shape the app-server expects for an approval method. command/file
  * approvals take `{decision}`; permissions approvals take `{permissions, scope}` (a
@@ -405,10 +411,10 @@ export class CodexAppServerDriver implements Driver {
   private readonly pendingQuestions = new Map<string, PendingQuestion>();
   /** Monotonic fallback correlation sequence for app-server schemas without approval ids. */
   private approvalSeq = 0;
-  private stagedImages: StagedPromptImages | null = null;
+  private stagedImages: StagedTurnImages | null = null;
   /** Steering image paths must remain live until the active turn settles after accepted or
    * uncertain delivery. Keyed independently so one steer cannot overwrite another's cleanup. */
-  private readonly stagedSteerImages = new Map<string, StagedPromptImages>();
+  private readonly stagedSteerImages = new Map<string, StagedTurnImages>();
   /** Codex echoes steered input as userMessage items. SessionManager owns the canonical event. */
   private readonly steerClientIds = new Set<string>();
   /** App-server multiplexes parent and spawned threads over one notification stream. A child
@@ -433,6 +439,9 @@ export class CodexAppServerDriver implements Driver {
   private promptGeneration = 0;
   private serverIdentity = "unknown";
   private completedTurnId: string | null = null;
+  /** A completion can race ahead of both turn/started and the turn/start response. Keep identified
+   * completions inert until the active prompt confirms the same provider turn. */
+  private readonly deferredTurnCompletions = new Map<string, Json>();
   private promptBusy = false;
   /** Provider diagnostics are held until startup succeeds so an expected unsupported-feature
    * retry does not surface a false session error. */
@@ -876,6 +885,48 @@ export class CodexAppServerDriver implements Driver {
     this.cb.onSteeringTurnChanged?.();
   }
 
+  private confirmRootTurn(id: string, generation = this.promptGeneration): boolean {
+    if (
+      generation !== this.promptGeneration || !this.promptBusy || !this.turnResolve ||
+      id === this.completedTurnId || (this.turnId != null && this.turnId !== id)
+    ) return false;
+    this.lastTurnId = id;
+    this.setSteeringTurn(id);
+    if (this.stagedImages?.generation === generation && this.stagedImages.turnId == null) {
+      this.stagedImages = { ...this.stagedImages, turnId: id };
+    }
+    this.declinePendingRequests("provider_resolved", true);
+    const deferred = this.deferredTurnCompletions.get(id);
+    this.deferredTurnCompletions.clear();
+    if (deferred) this.completeRootTurn(deferred, generation, id);
+    return true;
+  }
+
+  private completeRootTurn(payload: Json, generation: number, id: string): void {
+    if (
+      generation !== this.promptGeneration || !this.promptBusy || !this.turnResolve ||
+      this.turnId !== id || payload?.turn?.id !== id
+    ) return;
+    this.completedTurnId = id;
+    this.declinePendingRequests("provider_resolved", true);
+    this.closeTurnUsage();
+    const status = payload?.turn?.status;
+    if (status === "failed") {
+      this.streamedAgentResponse = false;
+      this.emitDriverError(payload?.turn?.error);
+      this.settleTurn("refusal");
+    } else if (status === "interrupted") {
+      this.streamedAgentResponse = false;
+      this.settleTurn("cancelled");
+    } else {
+      if (status === "completed" && this.streamedAgentResponse) {
+        this.streamedAgentResponse = false;
+        this.cb.onEvent({ kind: "agent_response_completed" });
+      }
+      this.settleTurn(this.turnStop);
+    }
+  }
+
   async prompt(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
     if (this.promptBusy) {
       this.cb.onEvent({ kind: "error", message: "codex app-server already has a turn in progress" });
@@ -887,6 +938,7 @@ export class CodexAppServerDriver implements Driver {
     // server accepts turn/start but never emits turn/started, agentTurnId() must fail closed.
     this.lastTurnId = null;
     const generation = ++this.promptGeneration;
+    this.deferredTurnCompletions.clear();
     let staged: StagedPromptImages;
     try {
       staged = await this.imageStager(images ?? [], this.opts.context);
@@ -901,7 +953,7 @@ export class CodexAppServerDriver implements Driver {
       if (!this.cancelled && !this.disposed) this.cb.onEvent({ kind: "error", message: "codex app-server is not running" });
       return this.cancelled || this.disposed ? "cancelled" : "refusal";
     }
-    this.stagedImages = staged;
+    this.stagedImages = { generation, turnId: null, images: staged };
     return new Promise<StopReason>((resolve) => {
       this.seenItems.clear();
       this.emittedErrors.clear();
@@ -933,11 +985,7 @@ export class CodexAppServerDriver implements Driver {
         // Notifications may precede the response, including completion or a later turn.
         if (generation !== this.promptGeneration || !this.turnResolve || !this.promptBusy) return;
         const id = response?.turn?.id;
-        if (!this.turnId && typeof id === "string" && id && id !== this.completedTurnId &&
-            (response?.turn?.status == null || response.turn.status === "inProgress")) {
-          this.lastTurnId = id;
-          this.setSteeringTurn(id);
-        }
+        if (typeof id === "string" && id) this.confirmRootTurn(id, generation);
         if (!this.turnId) {
           this.cb.onStderr(`Codex steering unavailable: turn/start did not confirm an active turn (running server: ${this.serverIdentity}; installed CLI version may differ).`);
         }
@@ -986,7 +1034,7 @@ export class CodexAppServerDriver implements Driver {
 
     const steerInput: Json[] = text || !staged.inputs.length ? [{ type: "text", text }] : [];
     steerInput.push(...staged.inputs);
-    this.stagedSteerImages.set(submissionId, staged);
+    this.stagedSteerImages.set(submissionId, { generation, turnId: expectedTurnId, images: staged });
     this.steerClientIds.add(submissionId);
 
     try {
@@ -1034,12 +1082,11 @@ export class CodexAppServerDriver implements Driver {
     this.steerClientIds.delete(submissionId);
     const staged = this.stagedSteerImages.get(submissionId);
     this.stagedSteerImages.delete(submissionId);
-    if (staged) void this.cleanupOneStagedSteer(submissionId, staged);
+    if (staged) void this.cleanupOneStagedSteer(submissionId, staged.images);
   }
 
   cancel(): void {
     this.cancelled = true;
-    this.promptGeneration++;
     if (this.threadId && this.peer) {
       try {
         this.peer.notify("turn/interrupt", { threadId: this.threadId });
@@ -1077,7 +1124,6 @@ export class CodexAppServerDriver implements Driver {
   dispose(): void {
     this.disposed = true;
     this.cancelled = true;
-    this.promptGeneration++;
     // Shutdown is deliberately non-destructive: interrupt the live turn and unblock every
     // parked server request, but never archive/delete the durable Codex thread.
     if (this.threadId && this.peer) {
@@ -1131,6 +1177,7 @@ export class CodexAppServerDriver implements Driver {
   private settleTurn(r: StopReason): void {
     const resolve = this.turnResolve;
     if (!resolve) return;
+    const owner = { generation: this.promptGeneration, turnId: this.turnId };
     this.turnResolve = null;
     // Close active-turn admission synchronously. In particular, an image stager already awaited by
     // steer() must observe the generation/turn/busy fence before cleanup performs its first await.
@@ -1139,20 +1186,23 @@ export class CodexAppServerDriver implements Driver {
     this.setSteeringTurn(null);
     this.promptBusy = false;
     this.promptGeneration++;
-    void this.cleanupStagedImages().finally(() => {
+    this.deferredTurnCompletions.clear();
+    void this.cleanupStagedImages(owner).finally(() => {
       resolve(r);
     });
   }
 
-  private async cleanupStagedImages(): Promise<void> {
-    const staged = this.stagedImages;
-    this.stagedImages = null;
-    const steers = [...this.stagedSteerImages.entries()];
-    this.stagedSteerImages.clear();
+  private async cleanupStagedImages(owner?: { generation: number; turnId: string | null }): Promise<void> {
+    const matches = (candidate: StagedTurnImages) => !owner ||
+      (candidate.generation === owner.generation && candidate.turnId === owner.turnId);
+    const staged = this.stagedImages && matches(this.stagedImages) ? this.stagedImages : null;
+    if (staged) this.stagedImages = null;
+    const steers = [...this.stagedSteerImages.entries()].filter(([, candidate]) => matches(candidate));
+    for (const [submissionId] of steers) this.stagedSteerImages.delete(submissionId);
     this.steerClientIds.clear();
-    if (staged) await this.cleanupOneStagedSteer("prompt", staged);
+    if (staged) await this.cleanupOneStagedSteer("prompt", staged.images);
     for (const [submissionId, steer] of steers) {
-      await this.cleanupOneStagedSteer(submissionId, steer);
+      await this.cleanupOneStagedSteer(submissionId, steer.images);
     }
   }
 
@@ -1543,12 +1593,8 @@ export class CodexAppServerDriver implements Driver {
         return;
       }
       if (!this.promptBusy || !this.turnResolve || p?.turn?.id === this.completedTurnId) return;
-      this.declinePendingRequests("provider_resolved", true);
       const id = p?.turn?.id;
-      if (typeof id === "string" && id) {
-        this.lastTurnId = id;
-        this.setSteeringTurn(id);
-      }
+      if (typeof id === "string" && id) this.confirmRootTurn(id);
       // prompt() already opened this accounting interval before turn/start. Do not reset it here:
       // App Server notifications are allowed to arrive before the turn/start response.
     });
@@ -1671,26 +1717,20 @@ export class CodexAppServerDriver implements Driver {
         }
         return;
       }
-      if (p?.turn?.id && (p.turn.id === this.completedTurnId ||
-          (this.turnId && p.turn.id !== this.turnId))) return;
-      if (typeof p?.turn?.id === "string" && p.turn.id) this.completedTurnId = p.turn.id;
-      this.declinePendingRequests("provider_resolved", true);
-      this.closeTurnUsage();
-      const status = p?.turn?.status;
-      if (status === "failed") {
-        this.streamedAgentResponse = false;
-        this.emitDriverError(p?.turn?.error);
-        this.settleTurn("refusal");
-      } else if (status === "interrupted") {
-        this.streamedAgentResponse = false;
-        this.settleTurn("cancelled");
-      } else {
-        if (status === "completed" && this.turnResolve && this.streamedAgentResponse) {
-          this.streamedAgentResponse = false;
-          this.cb.onEvent({ kind: "agent_response_completed" });
+      const id = p?.turn?.id;
+      if (typeof id !== "string" || !id || id === this.completedTurnId) return;
+      if (!this.promptBusy || !this.turnResolve) return;
+      if (!this.turnId) {
+        // This may be a replay from the interrupted predecessor. It becomes actionable only if the
+        // current turn/start request or turn/started notification confirms the exact same id.
+        this.deferredTurnCompletions.set(id, p);
+        if (this.deferredTurnCompletions.size > 16) {
+          this.deferredTurnCompletions.delete(this.deferredTurnCompletions.keys().next().value!);
         }
-        this.settleTurn(this.turnStop);
+        return;
       }
+      if (id !== this.turnId) return;
+      this.completeRootTurn(p, this.promptGeneration, id);
     });
     peer.onNotification("turn/failed", (p: Json) => {
       if (p?.threadId && p.threadId !== this.threadId) {

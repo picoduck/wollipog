@@ -1005,9 +1005,13 @@ test("unexpected-exit settlement cleans staged files before resolving the turn",
   const h = makeHarness();
   let cleaned = 0;
   (h.driver as any).stagedImages = {
-    paths: ["/tmp/image.png"],
-    inputs: [{ type: "localImage", path: "/tmp/image.png" }],
-    cleanup: async () => { cleaned++; },
+    generation: 0,
+    turnId: null,
+    images: {
+      paths: ["/tmp/image.png"],
+      inputs: [{ type: "localImage", path: "/tmp/image.png" }],
+      cleanup: async () => { cleaned++; },
+    },
   };
   const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
   (h.driver as any).settleTurn("refusal");
@@ -1179,9 +1183,11 @@ test("failed turn/completed maps to refusal and surfaces one nested error", asyn
     onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
   });
   const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+  (h.driver as any).promptBusy = true;
+  (h.driver as any).turnId = "failed-turn";
   const error = { message: "usage limit reached" };
   notifications.get("error")!({ error });
-  notifications.get("turn/completed")!({ turn: { status: "failed", error } });
+  notifications.get("turn/completed")!({ turn: { id: "failed-turn", status: "failed", error } });
   assert.equal(await reason, "refusal");
   assert.deepEqual(h.events, [{ kind: "error", message: "usage limit reached" }]);
 });
@@ -1194,7 +1200,9 @@ test("failed turn with a bare-string error remains user-readable", async () => {
     onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
   });
   const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
-  notifications.get("turn/completed")!({ turn: { status: "failed", error: "provider failed" } });
+  (h.driver as any).promptBusy = true;
+  (h.driver as any).turnId = "bare-failure";
+  notifications.get("turn/completed")!({ turn: { id: "bare-failure", status: "failed", error: "provider failed" } });
   assert.equal(await reason, "refusal");
   assert.deepEqual(h.events, [{ kind: "error", message: "provider failed" }]);
 });
@@ -1207,8 +1215,10 @@ test("interrupted turn/completed maps to cancelled", async () => {
     onNotification: (method: string, handler: (params: any) => void) => notifications.set(method, handler),
   });
   const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+  (h.driver as any).promptBusy = true;
+  (h.driver as any).turnId = "interrupted-turn";
   notifications.get("item/agentMessage/delta")!({ itemId: "interrupted", delta: "partial" });
-  notifications.get("turn/completed")!({ turn: { status: "interrupted" } });
+  notifications.get("turn/completed")!({ turn: { id: "interrupted-turn", status: "interrupted" } });
   assert.equal(await reason, "cancelled");
   assert.equal(h.events.some((event) => event.kind === "agent_response_completed"), false);
 });
@@ -1217,8 +1227,10 @@ test("unknown Codex terminal status cannot complete a streamed response", async 
   const h = makeHarness();
   const notifications = notificationHandlers(h.driver);
   const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+  (h.driver as any).promptBusy = true;
+  (h.driver as any).turnId = "aborted-turn";
   notifications.get("item/agentMessage/delta")!({ itemId: "unknown-status", delta: "partial" });
-  notifications.get("turn/completed")!({ turn: { status: "aborted" } });
+  notifications.get("turn/completed")!({ turn: { id: "aborted-turn", status: "aborted" } });
 
   assert.equal(await reason, "end_turn", "unknown statuses retain the existing tolerant settlement");
   assert.equal(
@@ -1238,7 +1250,7 @@ test("turn settlement closes the active id but retains the provider turn used by
   (h.driver as any).promptBusy = true;
   (h.driver as any).turnResolve = () => {};
   notifications.get("turn/started")!({ turn: { id: "turn-provider-7" } });
-  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  notifications.get("turn/completed")!({ turn: { id: "turn-provider-7", status: "completed" } });
   assert.equal((h.driver as any).turnId, null);
   assert.equal((h.driver as any).promptBusy, false);
   assert.equal(h.driver.agentTurnId(), "turn-provider-7");
@@ -1250,7 +1262,7 @@ test("a second prompt missing turn/started cannot reuse the first completed turn
   (h.driver as any).promptBusy = true;
   (h.driver as any).turnResolve = () => {};
   notifications.get("turn/started")!({ turn: { id: "first-completed-turn" } });
-  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  notifications.get("turn/completed")!({ turn: { id: "first-completed-turn", status: "completed" } });
   assert.equal(h.driver.agentTurnId(), "first-completed-turn", "the completed checkpoint remains available between turns");
 
   (h.driver as any).threadId = "thread-two-turns";
@@ -1259,7 +1271,10 @@ test("a second prompt missing turn/started cannot reuse the first completed turn
   await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(h.driver.agentTurnId(), null, "missing turn/started fails closed instead of reusing the checkpoint");
   notifications.get("turn/completed")!({ turn: { status: "completed" } });
-  assert.equal(await second, "end_turn");
+  await nextTask();
+  assert.equal((h.driver as any).promptBusy, true, "an unidentified completion cannot settle the new prompt");
+  h.driver.cancel();
+  assert.equal(await second, "cancelled");
   assert.equal(h.driver.agentTurnId(), null);
 });
 
@@ -1297,7 +1312,8 @@ test("late turn/start responses cannot resurrect a completed turn or overwrite a
   const first = h.driver.prompt("first");
   await nextTask();
   const firstRespond = respond;
-  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  notifications.get("turn/started")!({ turn: { id: "old" } });
+  notifications.get("turn/completed")!({ turn: { id: "old", status: "completed" } });
   await first;
   const second = h.driver.prompt("second");
   await nextTask();
@@ -1312,6 +1328,55 @@ test("late turn/start responses cannot resurrect a completed turn or overwrite a
   await second;
 });
 
+test("a late completion from a cancelled pre-id turn cannot settle a new image prompt", async () => {
+  let cleaned = 0;
+  const h = makeHarness({}, async () => ({
+    paths: ["/tmp/private/image-1.png"],
+    inputs: [{ type: "localImage", path: "/tmp/private/image-1.png" }],
+    cleanup: async () => { cleaned++; },
+  }));
+  const notifications = notificationHandlers(h.driver);
+  (h.driver as any).threadId = "thread-auth-recovery";
+  (h.driver as any).peer = {
+    request: async () => new Promise(() => {}),
+    notify: () => {},
+  };
+
+  const interrupted = h.driver.prompt("before authentication recovery");
+  await nextTask();
+  h.driver.cancel();
+  assert.equal(await interrupted, "cancelled");
+  const cleanedAfterInterrupted = cleaned;
+
+  let settled = false;
+  const recovered = h.driver.prompt("inspect", [{ mimeType: "image/png", data: "cHg=" }]);
+  void recovered.then(() => { settled = true; });
+  await nextTask();
+  notifications.get("turn/completed")!({
+    threadId: "thread-auth-recovery",
+    turn: { id: "cancelled-before-id-arrived", status: "interrupted" },
+  });
+  notifications.get("turn/completed")!({
+    threadId: "thread-auth-recovery",
+    turn: { id: "cancelled-before-id-arrived", status: "interrupted" },
+  });
+  await nextTask();
+
+  assert.equal(settled, false, "the old completion does not settle the replacement prompt");
+  assert.equal(cleaned, cleanedAfterInterrupted, "the replacement prompt's staged image remains available");
+
+  notifications.get("turn/started")!({
+    threadId: "thread-auth-recovery",
+    turn: { id: "replacement-turn" },
+  });
+  notifications.get("turn/completed")!({
+    threadId: "thread-auth-recovery",
+    turn: { id: "replacement-turn", status: "completed" },
+  });
+  assert.equal(await recovered, "end_turn");
+  assert.equal(cleaned, cleanedAfterInterrupted + 1);
+});
+
 test("missing coordinates explain the running server identity rather than assuming the installed CLI version", async () => {
   const h = makeHarness();
   const notifications = notificationHandlers(h.driver);
@@ -1323,7 +1388,7 @@ test("missing coordinates explain the running server identity rather than assumi
   assert.match(h.stderr.at(-1)!, /running server: codex\/0.149.1; installed CLI version may differ/);
   notifications.get("turn/started")!({ turn: { id: "recovered" } });
   assert.equal(h.driver.activeSteeringTurnId(), "recovered");
-  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  notifications.get("turn/completed")!({ turn: { id: "recovered", status: "completed" } });
   await pending;
 });
 
@@ -3230,20 +3295,22 @@ test("streamed Codex response emits one content-free completion at successful tu
   const h = makeHarness();
   const notifications = notificationHandlers(h.driver);
   const reason = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
+  (h.driver as any).promptBusy = true;
+  (h.driver as any).turnId = "streamed-turn";
   notifications.get("item/agentMessage/delta")!({ itemId: "m-streamed", delta: "answer" });
   h.onItem({ type: "agentMessage", id: "m-streamed", text: "answer" }, true);
   assert.deepEqual(h.events, [
     { kind: "agent_message", text: "answer", messageId: "m-streamed" },
   ], "chunks remain the only transcript content before turn completion");
 
-  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  notifications.get("turn/completed")!({ turn: { id: "streamed-turn", status: "completed" } });
   assert.equal(await reason, "end_turn");
   assert.deepEqual(h.events, [
     { kind: "agent_message", text: "answer", messageId: "m-streamed" },
     { kind: "agent_response_completed" },
   ]);
 
-  notifications.get("turn/completed")!({ turn: { status: "completed" } });
+  notifications.get("turn/completed")!({ turn: { id: "streamed-turn", status: "completed" } });
   assert.equal(
     h.events.filter((event) => event.kind === "agent_response_completed").length,
     1,
@@ -3438,6 +3505,7 @@ test("failed and interrupted turns emit the complete cumulative usage exactly on
     const h = makeHarness();
     (h.driver as any).threadId = `root-${status}`;
     (h.driver as any).turnId = `turn-${status}`;
+    (h.driver as any).promptBusy = true;
     (h.driver as any).beginRootTurnUsage();
     const notifications = notificationHandlers(h.driver);
     const stopped = new Promise<string>((resolve) => { (h.driver as any).turnResolve = resolve; });
