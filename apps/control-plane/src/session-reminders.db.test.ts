@@ -113,6 +113,44 @@ test("overdue reminders fire exactly once after a delayed sweep", () => {
   db.close();
 });
 
+test("rescheduling atomically replaces the exact fired state with one pending reminder", () => {
+  const db = fixture();
+  const created = db.setSessionReminder({ ...schedule, expectedRevision: 0 });
+  assert.equal(created.kind, "updated");
+  const [fired] = db.fireDueSessionReminders(schedule.scheduledFor + 1);
+  assert.ok(fired);
+
+  const stale = db.setSessionReminder({
+    ...schedule,
+    scheduledFor: 200_000,
+    expectedRevision: fired.reminder.revision - 1,
+    expectedReminderId: fired.reminder.reminderId,
+    rescheduleFired: true,
+    now: schedule.scheduledFor + 2,
+  });
+  assert.equal(stale.kind, "conflict");
+  assert.deepEqual(db.getSessionReminder("session-1", LOCAL_OWNER_USER_ID), fired.reminder,
+    "a failed replacement leaves the fired reminder intact");
+
+  const replaced = db.setSessionReminder({
+    ...schedule,
+    scheduledFor: 200_000,
+    originalExpression: "in one day",
+    expectedRevision: fired.reminder.revision,
+    expectedReminderId: fired.reminder.reminderId,
+    rescheduleFired: true,
+    now: schedule.scheduledFor + 2,
+  });
+  assert.equal(replaced.kind, "updated");
+  if (replaced.kind !== "updated") throw new Error("fired reminder was not replaced");
+  assert.equal(replaced.reminder.state, "pending");
+  assert.equal(replaced.reminder.reminderId, fired.reminder.reminderId);
+  assert.equal(replaced.reminder.firedAt, undefined);
+  assert.equal(replaced.reminder.wakeReason, undefined);
+  assert.equal(db.listSessionReminders(LOCAL_OWNER_USER_ID).length, 1);
+  db.close();
+});
+
 test("archived reminders stay pending until the session is restored", () => {
   const db = fixture();
   assert.equal(db.setSessionReminder({ ...schedule, expectedRevision: 0 }).kind, "updated");

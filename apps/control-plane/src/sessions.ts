@@ -8433,6 +8433,16 @@ export class SessionsService {
       return fail("expectedReminderId must be a bounded string paired with expectedRevision", 400);
     }
     const restoreFired = request.restoreFired;
+    if (request.rescheduleFired !== undefined && request.rescheduleFired !== true) {
+      return fail("rescheduleFired must be true when supplied", 400);
+    }
+    if (request.rescheduleFired && (request.expectedRevision === undefined ||
+        request.expectedReminderId === undefined || restoreFired !== undefined)) {
+      return fail("Snooze Again requires the exact fired reminder and cannot restore fired state", 400);
+    }
+    if (request.rescheduleFired && request.scheduledFor! <= now) {
+      return fail("Snooze Again requires a newly selected future schedule", 400);
+    }
     const validWakeReasons = new Set(["scheduled", "agent_response", "approval", "question", "failure", "background_job"]);
     if (restoreFired !== undefined && (restoreFired === null || typeof restoreFired !== "object" ||
         Array.isArray(restoreFired) || request.expectedRevision === undefined ||
@@ -8449,6 +8459,7 @@ export class SessionsService {
       wakePolicy: request.wakePolicy,
       ...(request.expectedRevision === undefined ? {} : { expectedRevision: request.expectedRevision }),
       ...(request.expectedReminderId === undefined ? {} : { expectedReminderId: request.expectedReminderId }),
+      ...(request.rescheduleFired ? { rescheduleFired: true } : {}),
       ...(restoreFired === undefined ? {} : { restoreFired }),
       now,
     });

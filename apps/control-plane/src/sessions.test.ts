@@ -5745,6 +5745,110 @@ test("fired reminder policy edits and removal Undo can restore their observed pa
   db.close();
 });
 
+test("Snooze Again atomically reschedules the exact fired reminder and keeps Undo race-safe", () => {
+  const { db, hub, svc } = makeHarness();
+  const sessionId = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  const now = Date.now();
+  const scheduledFor = now - 1_000;
+  assert.equal(db.setSessionReminder({
+    sessionId, userId, scheduledFor, timeZone: "UTC", originalExpression: "one second ago",
+    wakePolicy: "until_activity", expectedRevision: 0, now: now - 2_000,
+  }).kind, "updated");
+  assert.equal(db.fireDueSessionReminders(now).length, 1, "the scheduled reminder returns first");
+  const fired = db.getSessionReminder(sessionId, userId)!;
+
+  const unchanged = svc.setReminder(sessionId, userId, {
+    scheduledFor, timeZone: "UTC", originalExpression: "one second ago",
+    wakePolicy: "until_activity", expectedRevision: fired.revision,
+    expectedReminderId: fired.reminderId, rescheduleFired: true,
+  });
+  assert.equal(unchanged.ok, false);
+  assert.equal(unchanged.status, 400);
+  assert.deepEqual(db.getSessionReminder(sessionId, userId), fired,
+    "a rejected reschedule leaves the exact fired reminder intact");
+
+  const replacementSchedule = {
+    scheduledFor: now + 60_000,
+    timeZone: "UTC",
+    originalExpression: "in one minute",
+    wakePolicy: "regardless" as const,
+  };
+  const rescheduled = svc.setReminder(sessionId, userId, {
+    ...replacementSchedule,
+    expectedRevision: fired.revision,
+    expectedReminderId: fired.reminderId,
+    rescheduleFired: true,
+  });
+  assert.equal(rescheduled.ok, true);
+  assert.equal(rescheduled.data?.state, "pending");
+  assert.equal(rescheduled.data?.reminderId, fired.reminderId);
+  assert.equal(db.listSessionReminders(userId).length, 1);
+  assert.deepEqual(
+    hub.calls.filter((call) => call.method === "sessionReminderChanged").at(-1)?.args[1],
+    rescheduled.data,
+    "the pending replacement is broadcast to connected clients",
+  );
+
+  const staleClient = svc.setReminder(sessionId, userId, {
+    ...replacementSchedule,
+    scheduledFor: now + 120_000,
+    expectedRevision: fired.revision,
+    expectedReminderId: fired.reminderId,
+    rescheduleFired: true,
+  });
+  assert.equal(staleClient.ok, false);
+  assert.equal(staleClient.status, 409);
+  assert.deepEqual(db.getSessionReminder(sessionId, userId), rescheduled.data);
+
+  const restored = svc.setReminder(sessionId, userId, {
+    scheduledFor: fired.scheduledFor,
+    timeZone: fired.timeZone,
+    originalExpression: fired.originalExpression,
+    wakePolicy: fired.wakePolicy,
+    expectedRevision: rescheduled.data!.revision,
+    expectedReminderId: rescheduled.data!.reminderId,
+    restoreFired: { firedAt: fired.firedAt!, wakeReason: fired.wakeReason! },
+  });
+  assert.equal(restored.ok, true);
+  assert.equal(restored.data?.state, "fired");
+  assert.equal(restored.data?.firedAt, fired.firedAt);
+
+  const secondReschedule = svc.setReminder(sessionId, userId, {
+    ...replacementSchedule,
+    expectedRevision: restored.data!.revision,
+    expectedReminderId: restored.data!.reminderId,
+    rescheduleFired: true,
+  });
+  assert.equal(secondReschedule.ok, true);
+  assert.equal(svc.removeReminder(
+    sessionId, userId, secondReschedule.data!.revision, secondReschedule.data!.reminderId,
+  ).ok, true);
+  const concurrent = svc.setReminder(sessionId, userId, {
+    ...replacementSchedule,
+    scheduledFor: now + 180_000,
+    originalExpression: "in three minutes",
+    expectedRevision: 0,
+  });
+  assert.equal(concurrent.ok, true);
+  assert.notEqual(concurrent.data?.reminderId, secondReschedule.data?.reminderId);
+
+  const staleUndo = svc.setReminder(sessionId, userId, {
+    scheduledFor: fired.scheduledFor,
+    timeZone: fired.timeZone,
+    originalExpression: fired.originalExpression,
+    wakePolicy: fired.wakePolicy,
+    expectedRevision: secondReschedule.data!.revision,
+    expectedReminderId: secondReschedule.data!.reminderId,
+    restoreFired: { firedAt: fired.firedAt!, wakeReason: fired.wakeReason! },
+  });
+  assert.equal(staleUndo.ok, false);
+  assert.equal(staleUndo.status, 400);
+  assert.deepEqual(db.getSessionReminder(sessionId, userId), concurrent.data,
+    "Undo cannot remove or overwrite a concurrently created reminder");
+  db.close();
+});
+
 test("reminder identity validation is paired and stale-safe at the service boundary", () => {
   const { db, hub, svc } = makeHarness();
   const sessionId = seedSession(svc, hub);

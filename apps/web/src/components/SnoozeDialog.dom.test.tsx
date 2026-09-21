@@ -26,7 +26,7 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
-test("a fired reminder can update policy without changing its stored past instant", async () => {
+test("Snooze Again requires a newly selected future schedule and replaces the exact fired reminder", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -55,15 +55,75 @@ test("a fired reminder can update policy without changing its stored past instan
       onRemove={async () => undefined}
     />);
   });
-  assert.match(container.textContent ?? "", /Approvals, questions, and failures remain available on the session in Snoozed\./);
+  assert.match(container.textContent ?? "", /Choose a new time to snooze it again\./);
+  assert.equal(container.querySelector(".modal-head h2")?.textContent, "Snooze Again");
   const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
   assert.equal(expression.getAttribute("aria-describedby"), "snooze-expression-hint");
+  const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+  assert.equal(submit.textContent, "Snooze Again");
+  assert.equal(submit.disabled, true, "the fired reminder's stored past instant cannot be submitted");
   await act(async () => {
-    container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click();
+    [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find((button) => button.textContent === "In 1 Day")!.click();
   });
-  assert.equal(saved?.scheduledFor, scheduledFor);
+  assert.equal(submit.disabled, false);
+  await act(async () => {
+    submit.click();
+  });
+  assert.ok(saved && saved.scheduledFor > Date.now());
   assert.equal(saved?.expectedRevision, 2);
+  assert.equal(saved?.expectedReminderId, "reminder-1");
+  assert.equal(saved?.rescheduleFired, true);
   assert.equal(container.querySelector(".form-error"), null);
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("a removed fired reminder's preserved draft still requires a newly selected schedule", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const scheduledFor = Date.now() - 60_000;
+  const fired: SessionReminderView = {
+    reminderId: "reminder-fired",
+    sessionId: "session-1",
+    scheduledFor,
+    timeZone: "UTC",
+    originalExpression: "one minute ago",
+    wakePolicy: "until_activity",
+    state: "fired",
+    revision: 2,
+    createdAt: scheduledFor - 1_000,
+    updatedAt: scheduledFor,
+    firedAt: scheduledFor,
+    wakeReason: "scheduled",
+  };
+  let saved: SetSessionReminderRequest | undefined;
+  const props = {
+    onClose: () => undefined,
+    onSave: async (request: SetSessionReminderRequest) => { saved = request; },
+    onRemove: async () => undefined,
+  };
+
+  await act(async () => { root.render(<SnoozeDialog reminder={fired} {...props} />); });
+  await act(async () => { root.render(<SnoozeDialog reminder={undefined} {...props} />); });
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Create New Reminder from Draft")!.click();
+  });
+
+  const submit = container.querySelector<HTMLButtonElement>('button[type="submit"]')!;
+  assert.equal(submit.disabled, true, "the expired preserved draft remains unavailable");
+  await act(async () => {
+    [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+      .find((button) => button.textContent === "In 1 Day")!.click();
+  });
+  await act(async () => { submit.click(); });
+  assert.ok(saved && saved.scheduledFor > Date.now());
+  assert.equal(saved?.expectedRevision, 0);
+  assert.equal(saved && "expectedReminderId" in saved, false);
+  assert.equal(saved && "rescheduleFired" in saved, false);
 
   await act(async () => { root.unmount(); });
   container.remove();
@@ -387,6 +447,11 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
       await act(async () => {
         [...container.querySelectorAll<HTMLButtonElement>("button")]
           .find((button) => button.textContent === "Tomorrow Morning")!.click();
+      });
+    } else if (scenario.authoritative.state === "fired") {
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
+          .find((button) => button.textContent === "In 1 Day")!.click();
       });
     }
     await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });

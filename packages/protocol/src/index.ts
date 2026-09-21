@@ -8744,6 +8744,9 @@ export interface SetSessionReminderRequest extends SnoozeScheduleInput {
   /** Identity paired with expectedRevision so a removed-and-recreated reminder cannot be mistaken
    * for the caller's prior reminder when both happen to have the same revision. */
   expectedReminderId?: string;
+  /** Makes Snooze Again an exact fired-to-pending replacement. The server requires both
+   * optimistic coordinates and a future schedule, and performs the transition atomically. */
+  rescheduleFired?: true;
   /** Fired-state facts copied from the caller's observed reminder only when Undo restores it.
    * The server requires an optimistic revision and validates both bounded fields. */
   restoreFired?: {
