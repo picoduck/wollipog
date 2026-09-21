@@ -974,6 +974,9 @@ export class SessionManager {
   /** Ephemeral approval timers. Only durations leave the runner; request/session ids never do. */
   private readonly approvalStarted = new Map<string, number>();
   private readonly cleanupJournal: WorktreeCleanupJournal;
+  /** Startup replay, periodic maintenance, and post-cleanup scheduling share one attempt for an
+   * exact cleanup generation. Independent branches and generations retain independent lanes. */
+  private readonly retainedRefReclaimLanes = new Map<string, Promise<void>>();
   private readonly worktreeSetupTrust: WorktreeSetupTrustStore;
   private readonly worktreePortAllocator: WorktreePortAllocator;
   private retireWorktreeShells?: (sessionId: string, context: AgentContext, path: string) => Promise<void>;
@@ -3157,10 +3160,17 @@ export class SessionManager {
     }
   }
 
-  private async reapRetainedRef(record: RetainedWorktreeRefRecord): Promise<void> {
-    if (!record.armedAt) return;
+  private reclaimRetainedRef(record: RetainedWorktreeRefRecord) {
+    return reclaimRetainedWorktreeRef(record, { context: record.context });
+  }
+
+  private async reapRetainedRefAttempt(identity: RetainedWorktreeRefRecord): Promise<void> {
+    // A scheduled sweep can outlive the row it captured. Reloading inside the admitted lane keeps
+    // terminal receipts authoritative and picks up the latest durable pending reason after a retry.
+    const record = this.cleanupJournal.currentRetainedRef(identity);
+    if (!record?.armedAt) return;
     if (this.cleanupJournal.resumeRetainedRefCompletion(record)) return;
-    const result = await reclaimRetainedWorktreeRef(record, { context: record.context });
+    const result = await this.reclaimRetainedRef(record);
     if (result.state === "pending") {
       if (record.pendingReason === result.reason) return;
       record.pendingReason = result.reason;
@@ -3169,6 +3179,19 @@ export class SessionManager {
       return;
     }
     this.cleanupJournal.finishRetainedRef(record, result.state, result.reason);
+  }
+
+  private reapRetainedRef(record: RetainedWorktreeRefRecord): Promise<void> {
+    const key = this.cleanupJournal.retainedRefIdentityKey(record);
+    const existing = this.retainedRefReclaimLanes.get(key);
+    if (existing) return existing;
+    const attempt = this.reapRetainedRefAttempt(record).finally(() => {
+      if (this.retainedRefReclaimLanes.get(key) === attempt) {
+        this.retainedRefReclaimLanes.delete(key);
+      }
+    });
+    this.retainedRefReclaimLanes.set(key, attempt);
+    return attempt;
   }
 
   private scheduleRetainedRefReclaims(sessionId: string, worktreeId?: string, cleanupId?: string): void {
