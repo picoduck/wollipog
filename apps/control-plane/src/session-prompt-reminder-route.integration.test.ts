@@ -441,4 +441,38 @@ test("prompt route acknowledges fired reminders only for accepted human principa
   assert.equal(humanDelivery.text, "owner's accepted prompt");
   assert.equal(storedReminder(database, seeded.ownerUserId), null,
     "an accepted human prompt removes that user's fired reminder");
+
+  const somedayWrite = await fetch(`${baseUrl}/api/sessions/${SESSION_ID}/reminder`, {
+    method: "PUT",
+    headers: humanHeaders,
+    body: JSON.stringify({
+      scheduleKind: "someday",
+      originalExpression: "Someday",
+      wakePolicy: "regardless",
+      expectedRevision: 0,
+    }),
+  });
+  assert.equal(somedayWrite.status, 200, await somedayWrite.text());
+
+  const legacyRead = await fetch(
+    `${baseUrl}/api/sessions/${SESSION_ID}/reminder?protocolVersion=172`,
+    { headers: humanHeaders },
+  );
+  const legacyReadBody = await legacyRead.json() as Record<string, unknown>;
+  assert.equal(legacyRead.status, 409);
+  assert.match(String(legacyReadBody.error), /protocol v173.*update/i);
+  assert.equal(legacyReadBody.reminder, undefined,
+    "legacy reconciliation must never receive a Someday payload it cannot parse");
+
+  const currentRead = await fetch(
+    `${baseUrl}/api/sessions/${SESSION_ID}/reminder?protocolVersion=${PROTOCOL_VERSION}`,
+    { headers: humanHeaders },
+  );
+  const currentReadBody = await currentRead.json() as {
+    reminder?: Record<string, unknown> | null;
+  };
+  assert.equal(currentRead.status, 200);
+  assert.equal(currentReadBody.reminder?.scheduleKind, "someday");
+  assert.equal("scheduledFor" in (currentReadBody.reminder ?? {}), false);
+  assert.equal("timeZone" in (currentReadBody.reminder ?? {}), false);
 });

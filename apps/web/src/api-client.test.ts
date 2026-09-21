@@ -86,7 +86,7 @@ test("authoritative reminder reads use the encoded no-cache endpoint", async () 
 
   assert.deepEqual(await client.sessionReminder("session/1"), { reminder: null });
   assert.deepEqual(calls, [{
-    path: "/api/sessions/session%2F1/reminder",
+    path: "/api/sessions/session%2F1/reminder?protocolVersion=173",
     method: "GET",
     cache: "no-store",
   }]);

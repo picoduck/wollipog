@@ -187,7 +187,11 @@ import {
 } from "./git-route.js";
 import { editorAdvertisesLocation, parseSessionHostAction } from "./host-actions.js";
 import { validateForgeReviewSync, validateGitHubReviewSync } from "./review-findings.js";
-import { Hub, isRunnerRequestTimeoutError } from "./hub.js";
+import {
+  Hub,
+  INDEFINITE_SESSION_REMINDER_UI_PROTOCOL,
+  isRunnerRequestTimeoutError,
+} from "./hub.js";
 import {
   buildRunnerWsUrl,
   isAllowedOrigin,
@@ -5004,7 +5008,16 @@ app.get("/api/sessions/:id/reminder", async (req, reply) => {
   // The central authorization gate has already required access to this exact session. The user id
   // remains part of the database key so an organization peer can never observe the owner's row.
   reply.header("cache-control", "no-store");
-  return { reminder: db.getSessionReminder(id, human.userId) };
+  const reminder = db.getSessionReminder(id, human.userId);
+  if (
+    reminder?.scheduleKind === "someday"
+    && (parseUiProtocolVersion(req.query) ?? 0) < INDEFINITE_SESSION_REMINDER_UI_PROTOCOL
+  ) {
+    return reply.code(409).send({
+      error: "This reminder uses Someday and requires Wollipog protocol v173. Update this client and try again.",
+    });
+  }
+  return { reminder };
 });
 
 app.delete("/api/sessions/:id/reminder", async (req, reply) => {

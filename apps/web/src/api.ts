@@ -138,7 +138,12 @@ import type {
   UpdateAutomationRequest,
   DispatchWorkflowNodeResult,
 } from "@wollipog/protocol";
-import { isPromptImageReference, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
+import {
+  isPromptImageReference,
+  PROTOCOL_VERSION,
+  type SkillFile,
+  type SkillInvocationPolicy,
+} from "@wollipog/protocol";
 import type {
   RunnerSkillsResponse,
   ReportedSkillsState,
@@ -1010,9 +1015,12 @@ export function createApiClient(transport: ApiTransport) {
     }),
 
   sessionReminder: (id: string) =>
-    req<SessionReminderReadResponse>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {
-      cache: "no-store",
-    }),
+    req<SessionReminderReadResponse>(
+      `/api/sessions/${encodeURIComponent(id)}/reminder?protocolVersion=${PROTOCOL_VERSION}`,
+      {
+        cache: "no-store",
+      },
+    ),
 
   removeReminder: (id: string, revision?: number, reminderId?: string) => {
     const query = new URLSearchParams();
