@@ -818,13 +818,14 @@ CREATE INDEX IF NOT EXISTS idx_orchestrator_campaign_continuation_campaign
 
 -- A reminder belongs to one human even when the underlying session is shared. The single row per
 -- (session,user) makes replacement atomic, while state+revision make firing and multi-client edits
--- idempotent. Absolute instants drive scheduling; zone/expression retain the user's editing intent.
+-- idempotent. Timed reminders use absolute instants; Someday is an explicit no-timer schedule.
 CREATE TABLE IF NOT EXISTS session_reminders (
   reminder_id         TEXT NOT NULL UNIQUE,
   session_id          TEXT NOT NULL,
   user_id             TEXT NOT NULL,
-  scheduled_for       INTEGER NOT NULL,
-  time_zone           TEXT NOT NULL,
+  schedule_kind       TEXT NOT NULL DEFAULT 'timed' CHECK (schedule_kind IN ('timed','someday')),
+  scheduled_for       INTEGER,
+  time_zone           TEXT,
   original_expression TEXT NOT NULL,
   wake_policy         TEXT NOT NULL CHECK (wake_policy IN ('until_activity','regardless')),
   state               TEXT NOT NULL CHECK (state IN ('pending','fired')),
@@ -834,12 +835,15 @@ CREATE TABLE IF NOT EXISTS session_reminders (
   fired_at            INTEGER,
   created_at          INTEGER NOT NULL,
   updated_at          INTEGER NOT NULL,
+  CHECK ((schedule_kind='timed' AND scheduled_for IS NOT NULL AND time_zone IS NOT NULL) OR
+         (schedule_kind='someday' AND scheduled_for IS NULL AND time_zone IS NULL)),
   PRIMARY KEY (session_id, user_id),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
   FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_session_reminders_due
-  ON session_reminders(state, scheduled_for, session_id, user_id);
+  ON session_reminders(state, scheduled_for, session_id, user_id)
+  WHERE schedule_kind='timed';
 
 CREATE TABLE IF NOT EXISTS worktree_setup_notice_dismissals (
   user_id TEXT NOT NULL,
@@ -2616,8 +2620,9 @@ interface SessionReminderRow {
   reminder_id: string;
   session_id: string;
   user_id: string;
-  scheduled_for: number;
-  time_zone: string;
+  schedule_kind: "timed" | "someday";
+  scheduled_for: number | null;
+  time_zone: string | null;
   original_expression: string;
   wake_policy: SessionReminderWakePolicy;
   state: "pending" | "fired";
@@ -3946,6 +3951,57 @@ export class ControlPlaneDb {
     db.exec("PRAGMA secure_delete = ON;");
     db.exec("PRAGMA foreign_keys = ON;");
     db.exec(SCHEMA);
+    const reminderColumns = db.prepare("PRAGMA table_info(session_reminders)")
+      .all() as unknown as Array<{ name: string }>;
+    if (!reminderColumns.some((column) => column.name === "schedule_kind")) {
+      db.exec("PRAGMA foreign_keys = OFF;");
+      try {
+        db.exec(`
+          BEGIN IMMEDIATE;
+          CREATE TABLE session_reminders_v173 (
+            reminder_id TEXT NOT NULL UNIQUE,
+            session_id TEXT NOT NULL,
+            user_id TEXT NOT NULL,
+            schedule_kind TEXT NOT NULL DEFAULT 'timed' CHECK (schedule_kind IN ('timed','someday')),
+            scheduled_for INTEGER,
+            time_zone TEXT,
+            original_expression TEXT NOT NULL,
+            wake_policy TEXT NOT NULL CHECK (wake_policy IN ('until_activity','regardless')),
+            state TEXT NOT NULL CHECK (state IN ('pending','fired')),
+            revision INTEGER NOT NULL,
+            baseline_event_seq INTEGER NOT NULL DEFAULT 0,
+            wake_reason TEXT,
+            fired_at INTEGER,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            CHECK ((schedule_kind='timed' AND scheduled_for IS NOT NULL AND time_zone IS NOT NULL) OR
+                   (schedule_kind='someday' AND scheduled_for IS NULL AND time_zone IS NULL)),
+            PRIMARY KEY (session_id, user_id),
+            FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+            FOREIGN KEY (user_id) REFERENCES identity_users(user_id) ON DELETE CASCADE
+          );
+          INSERT INTO session_reminders_v173
+            (reminder_id,session_id,user_id,schedule_kind,scheduled_for,time_zone,
+             original_expression,wake_policy,state,revision,baseline_event_seq,wake_reason,
+             fired_at,created_at,updated_at)
+            SELECT reminder_id,session_id,user_id,'timed',scheduled_for,time_zone,
+                   original_expression,wake_policy,state,revision,baseline_event_seq,wake_reason,
+                   fired_at,created_at,updated_at
+            FROM session_reminders;
+          DROP TABLE session_reminders;
+          ALTER TABLE session_reminders_v173 RENAME TO session_reminders;
+          CREATE INDEX idx_session_reminders_due
+            ON session_reminders(state, scheduled_for, session_id, user_id)
+            WHERE schedule_kind='timed';
+          COMMIT;
+        `);
+      } catch (error) {
+        try { db.exec("ROLLBACK;"); } catch { /* no active transaction */ }
+        throw error;
+      } finally {
+        db.exec("PRAGMA foreign_keys = ON;");
+      }
+    }
     const campaignContinuationColumns = db.prepare("PRAGMA table_info(orchestrator_campaign_continuations)")
       .all() as unknown as Array<{ name: string }>;
     if (!campaignContinuationColumns.some((column) => column.name === "observed_through_seq")) {
@@ -12609,11 +12665,9 @@ export class ControlPlaneDb {
   }
 
   private sessionReminderView(row: SessionReminderRow): SessionReminderView {
-    return {
+    const base = {
       reminderId: row.reminder_id,
       sessionId: row.session_id,
-      scheduledFor: row.scheduled_for,
-      timeZone: row.time_zone,
       originalExpression: row.original_expression,
       wakePolicy: row.wake_policy,
       state: row.state,
@@ -12622,6 +12676,13 @@ export class ControlPlaneDb {
       updatedAt: row.updated_at,
       ...(row.fired_at == null ? {} : { firedAt: row.fired_at }),
       ...(row.wake_reason == null ? {} : { wakeReason: row.wake_reason }),
+    };
+    if (row.schedule_kind === "someday") return { ...base, scheduleKind: "someday" };
+    return {
+      ...base,
+      scheduleKind: "timed",
+      scheduledFor: row.scheduled_for!,
+      timeZone: row.time_zone!,
     };
   }
 
@@ -12635,7 +12696,9 @@ export class ControlPlaneDb {
   listSessionReminders(userId: string): SessionReminderView[] {
     const rows = this.stmt(
       `SELECT * FROM session_reminders WHERE user_id=?
-       ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END, scheduled_for, session_id`,
+       ORDER BY CASE state WHEN 'pending' THEN 0 ELSE 1 END,
+                CASE schedule_kind WHEN 'timed' THEN 0 ELSE 1 END,
+                scheduled_for, session_id`,
     ).all(userId) as unknown as SessionReminderRow[];
     return rows.map((row) => this.sessionReminderView(row));
   }
@@ -12643,8 +12706,9 @@ export class ControlPlaneDb {
   setSessionReminder(input: {
     sessionId: string;
     userId: string;
-    scheduledFor: number;
-    timeZone: string;
+    scheduleKind?: "timed" | "someday";
+    scheduledFor?: number;
+    timeZone?: string;
     originalExpression: string;
     wakePolicy: SessionReminderWakePolicy;
     expectedRevision?: number;
@@ -12654,6 +12718,9 @@ export class ControlPlaneDb {
     now: number;
   }): SessionReminderMutationResult {
     return this.atomic(() => {
+      const scheduleKind = input.scheduleKind ?? "timed";
+      const scheduledFor = scheduleKind === "timed" ? input.scheduledFor ?? null : null;
+      const timeZone = scheduleKind === "timed" ? input.timeZone ?? null : null;
       const current = this.stmt(
         "SELECT * FROM session_reminders WHERE session_id=? AND user_id=?",
       ).get(input.sessionId, input.userId) as unknown as SessionReminderRow | undefined;
@@ -12684,30 +12751,31 @@ export class ControlPlaneDb {
 
       if (current) {
         const preservesObservedFiredState = !input.rescheduleFired && input.restoreFired === undefined &&
-          current.state === "fired" && input.scheduledFor === current.scheduled_for;
+          current.state === "fired" && current.schedule_kind === scheduleKind &&
+          (scheduleKind === "someday" || scheduledFor === current.scheduled_for);
         if (preservesObservedFiredState) {
           this.stmt(
             `UPDATE session_reminders SET time_zone=?, original_expression=?, wake_policy=?,
                revision=revision+1, baseline_event_seq=?, updated_at=?
              WHERE session_id=? AND user_id=?`,
-          ).run(input.timeZone, input.originalExpression, input.wakePolicy,
+          ).run(timeZone, input.originalExpression, input.wakePolicy,
             baseline.seq, input.now, input.sessionId, input.userId);
         } else {
           this.stmt(
-            `UPDATE session_reminders SET scheduled_for=?, time_zone=?, original_expression=?,
+            `UPDATE session_reminders SET schedule_kind=?, scheduled_for=?, time_zone=?, original_expression=?,
                wake_policy=?, state='pending', revision=revision+1, baseline_event_seq=?,
                wake_reason=NULL, fired_at=NULL, updated_at=? WHERE session_id=? AND user_id=?`,
-          ).run(input.scheduledFor, input.timeZone, input.originalExpression, input.wakePolicy,
+          ).run(scheduleKind, scheduledFor, timeZone, input.originalExpression, input.wakePolicy,
             baseline.seq, input.now, input.sessionId, input.userId);
         }
       } else {
         this.stmt(
           `INSERT INTO session_reminders
-           (reminder_id,session_id,user_id,scheduled_for,time_zone,original_expression,wake_policy,
-            state,revision,baseline_event_seq,created_at,updated_at)
-           VALUES (?,?,?,?,?,?,?,'pending',1,?,?,?)`,
+           (reminder_id,session_id,user_id,schedule_kind,scheduled_for,time_zone,original_expression,
+            wake_policy,state,revision,baseline_event_seq,created_at,updated_at)
+           VALUES (?,?,?,?,?,?,?,?,'pending',1,?,?,?)`,
         ).run(`rem_${randomUUID().replace(/-/g, "")}`, input.sessionId, input.userId,
-          input.scheduledFor, input.timeZone, input.originalExpression, input.wakePolicy,
+          scheduleKind, scheduledFor, timeZone, input.originalExpression, input.wakePolicy,
           baseline.seq, input.now, input.now);
       }
       if (input.restoreFired) {
@@ -12763,6 +12831,7 @@ export class ControlPlaneDb {
       const rows = this.stmt(
         `SELECT r.* FROM session_reminders r JOIN sessions s ON s.id=r.session_id
          WHERE r.state='pending' AND r.scheduled_for<=? AND s.archived=0
+           AND r.schedule_kind='timed'
          ORDER BY r.scheduled_for,r.session_id,r.user_id`,
       ).all(now) as unknown as SessionReminderRow[];
       return this.fireSessionReminderRows(rows, "scheduled", now);

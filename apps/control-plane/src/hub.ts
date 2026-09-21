@@ -561,6 +561,7 @@ export class Hub {
         stopFailureRecovery: true,
         unarchiveAndRestart: true,
         sessionReminders: true,
+        indefiniteSessionReminders: true,
         worktreeSetupConfig: true,
         orchestratorRole: true,
       },

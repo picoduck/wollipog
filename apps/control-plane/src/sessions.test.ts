@@ -5889,6 +5889,51 @@ test("reminder identity validation is paired and stale-safe at the service bound
   db.close();
 });
 
+test("Someday validates as an explicit no-timer state and reschedules in one write", () => {
+  const { db, hub, svc } = makeHarness();
+  const sessionId = seedSession(svc, hub);
+  const userId = db.localIdentityContext().userId;
+  const created = svc.setReminder(sessionId, userId, {
+    scheduleKind: "someday",
+    originalExpression: "Someday",
+    wakePolicy: "regardless",
+    expectedRevision: 0,
+  });
+  assert.equal(created.ok, true);
+  assert.equal(created.data?.scheduleKind, "someday");
+  assert.equal(created.data && "scheduledFor" in created.data, false);
+
+  for (const malformed of [
+    { scheduleKind: "someday", scheduledFor: Date.now() + 60_000, originalExpression: "Someday" },
+    { scheduleKind: "someday", timeZone: "UTC", originalExpression: "Someday" },
+    { scheduleKind: "someday", originalExpression: "Eventually" },
+  ]) {
+    const result = svc.setReminder(sessionId, userId, {
+      ...malformed,
+      wakePolicy: "regardless",
+      expectedRevision: created.data!.revision,
+      expectedReminderId: created.data!.reminderId,
+    } as Partial<SetSessionReminderRequest>);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 400);
+  }
+  assert.deepEqual(db.getSessionReminder(sessionId, userId), created.data,
+    "invalid compatibility shapes leave the indefinite state untouched");
+
+  const timed = svc.setReminder(sessionId, userId, {
+    scheduledFor: Date.now() + 60_000,
+    timeZone: "UTC",
+    originalExpression: "in one minute",
+    wakePolicy: "until_activity",
+    expectedRevision: created.data!.revision,
+    expectedReminderId: created.data!.reminderId,
+  });
+  assert.equal(timed.ok, true);
+  assert.equal(timed.data?.scheduleKind, "timed");
+  assert.equal(timed.data?.reminderId, created.data?.reminderId);
+  db.close();
+});
+
 test("activity-fired reminder edits and Undo preserve their future fired state", () => {
   const { db, hub, svc } = makeHarness();
   const sessionId = seedSession(svc, hub);

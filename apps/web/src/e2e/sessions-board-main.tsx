@@ -207,6 +207,7 @@ function snapshot(): UiSnapshotMessage {
       paginatedSessionHistory: false,
       projects: false,
       sessionReminders: true,
+      indefiniteSessionReminders: true,
     },
     runners: [structuredClone(runner)],
     boxes: [],
@@ -255,6 +256,7 @@ window.__reminderWriteCalls = 0;
 
 const reconciledReminder: SessionReminderView = {
   ...reminders.find((candidate) => candidate.sessionId === "s-snoozed")!,
+  scheduleKind: "timed",
   scheduledFor: new Date("2099-05-06T12:45:00.000Z").getTime(),
   timeZone: "Asia/Tokyo",
   originalExpression: "2099-05-06T21:45",

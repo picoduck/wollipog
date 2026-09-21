@@ -70,7 +70,7 @@ test("Snooze Again requires a newly selected future schedule and replaces the ex
   await act(async () => {
     submit.click();
   });
-  assert.ok(saved && saved.scheduledFor > Date.now());
+  assert.ok((saved?.scheduledFor ?? 0) > Date.now());
   assert.equal(saved?.expectedRevision, 2);
   assert.equal(saved?.expectedReminderId, "reminder-1");
   assert.equal(saved?.rescheduleFired, true);
@@ -118,7 +118,7 @@ test("Snooze Again submits a keyboard-selected suggestion on the first Enter", a
   assert.equal(saved.length, 1);
   assert.equal(saved[0]?.rescheduleFired, true);
   assert.equal(saved[0]?.expectedReminderId, fired.reminderId);
-  assert.ok(saved[0] && saved[0].scheduledFor > Date.now());
+  assert.ok((saved[0]?.scheduledFor ?? 0) > Date.now());
 
   await act(async () => { root.unmount(); });
   container.remove();
@@ -164,7 +164,7 @@ test("a removed fired reminder's preserved draft still requires a newly selected
       .find((button) => button.textContent === "Next Week")!.click();
   });
   await act(async () => { submit.click(); });
-  assert.ok(saved && saved.scheduledFor > Date.now());
+  assert.ok((saved?.scheduledFor ?? 0) > Date.now());
   assert.equal(saved?.expectedRevision, 0);
   assert.equal(saved && "expectedReminderId" in saved, false);
   assert.equal(saved && "rescheduleFired" in saved, false);
@@ -1007,6 +1007,8 @@ test("presets stay distinct from text input and every invalid schedule gets an a
   assert.match(preview(), /Numeric dates are ambiguous.*Exact Date and Time/);
   await act(async () => { fireDomEvent.change(expression, { target: { value: "whenever is good" } }); });
   assert.match(preview(), /Complete a supported phrase or choose a schedule suggestion/);
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "Someday" } }); });
+  assert.match(preview(), /Someday requires a newer control plane.*Update Wollipog/);
   await act(async () => { fireDomEvent.change(expression, { target: { value: "in 0 hours" } }); });
   assert.match(preview(), /not in the future.*positive interval/);
   await act(async () => { fireDomEvent.change(expression, { target: { value: "today at 25" } }); });
@@ -1016,6 +1018,69 @@ test("presets stay distinct from text input and every invalid schedule gets an a
   assert.match(preview(), /Schedule Source: Exact Date and Time/);
 
   await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("Someday is capability-gated, saves without a timer, and can be edited into a timed reminder", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const saved: SetSessionReminderRequest[] = [];
+  await act(async () => {
+    root.render(<SnoozeDialog
+      supportsSomeday
+      onClose={() => undefined}
+      onSave={async (request) => { saved.push(request); }}
+    />);
+  });
+
+  const someday = [...container.querySelectorAll<HTMLButtonElement>(".snooze-presets button")]
+    .find((button) => button.textContent === "Someday")!;
+  assert.ok(someday);
+  await act(async () => { someday.click(); });
+  const preview = container.querySelector(".snooze-preview")?.textContent ?? "";
+  assert.match(preview, /Someday — no automatic return time/);
+  assert.match(preview, /Time Zone: Not Applicable/);
+  assert.match(container.textContent ?? "", /There is no automatic return time/);
+  await act(async () => { fireDomEvent.submit(container.querySelector("form")!); });
+  assert.deepEqual(saved[0], {
+    scheduleKind: "someday",
+    originalExpression: "someday",
+    wakePolicy: "until_activity",
+    expectedRevision: 0,
+  });
+
+  await act(async () => { root.unmount(); });
+  const existing: SessionReminderView = {
+    reminderId: "rem-someday",
+    sessionId: "session-1",
+    scheduleKind: "someday",
+    originalExpression: "Someday",
+    wakePolicy: "regardless",
+    state: "pending",
+    revision: 2,
+    createdAt: 1,
+    updatedAt: 2,
+  };
+  const secondRoot = createRoot(container);
+  await act(async () => {
+    secondRoot.render(<SnoozeDialog
+      reminder={existing}
+      supportsSomeday
+      onClose={() => undefined}
+      onSave={async (request) => { saved.push(request); }}
+    />);
+  });
+  assert.equal(container.querySelector<HTMLInputElement>("#snooze-expression")?.value, "Someday");
+  assert.match(container.querySelector(".snooze-preview")?.textContent ?? "", /Schedule Source: Stored Reminder/);
+  const expression = container.querySelector<HTMLInputElement>("#snooze-expression")!;
+  await act(async () => { fireDomEvent.change(expression, { target: { value: "in 2 hours" } }); });
+  await act(async () => { fireDomEvent.submit(container.querySelector("form")!); });
+  assert.equal(saved[1]?.scheduleKind, "timed");
+  assert.equal(saved[1]?.expectedReminderId, "rem-someday");
+  assert.equal(saved[1]?.expectedRevision, 2);
+
+  await act(async () => { secondRoot.unmount(); });
   container.remove();
 });
 
@@ -1062,7 +1127,7 @@ test("Enter submits a complete typed schedule even when broader suggestions rema
   await act(async () => { fireDomEvent.submit(container.querySelector("form")!); });
   assert.equal(saved.length, 1);
   assert.equal(saved[0]?.originalExpression, "tomorrow at 3 pm");
-  assert.equal(saved[0]?.scheduledFor, expected?.scheduledFor);
+  assert.equal(saved[0]?.scheduledFor, expected?.scheduleKind === "timed" ? expected.scheduledFor : undefined);
 
   await act(async () => { root.unmount(); });
   container.remove();

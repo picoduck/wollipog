@@ -527,7 +527,10 @@
 // 173: a revisioned, opt-in per-Machine setting lets the runner automatically schedule that same
 //      safe-boundary switch after a provider usage-window rejection. It remains disabled by
 //      default, and exhausted, unauthenticated, or cooling-down accounts are never selected.
-export const PROTOCOL_VERSION = 173;
+// 174: session reminders may explicitly use the `someday` schedule kind, with no scheduled
+//      instant or time zone. The UI capability keeps new clients from sending that shape to an
+//      older control plane; omitted scheduleKind remains the legacy timed representation.
+export const PROTOCOL_VERSION = 174;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -5319,11 +5322,9 @@ export type SessionReminderWakeReason =
   | "failure"
   | "background_job";
 
-export interface SessionReminderView {
+interface SessionReminderBaseView {
   reminderId: string;
   sessionId: string;
-  scheduledFor: number;
-  timeZone: string;
   originalExpression: string;
   wakePolicy: SessionReminderWakePolicy;
   state: SessionReminderState;
@@ -5333,6 +5334,21 @@ export interface SessionReminderView {
   firedAt?: number;
   wakeReason?: SessionReminderWakeReason;
 }
+
+export type SessionReminderView = SessionReminderBaseView & (
+  | {
+    /** Omitted by control planes predating explicit schedule kinds. */
+    scheduleKind?: "timed";
+    scheduledFor: number;
+    timeZone: string;
+  }
+  | {
+    scheduleKind: "someday";
+    /** Indefinite reminders deliberately have no fabricated instant or zone. */
+    scheduledFor?: never;
+    timeZone?: never;
+  }
+);
 
 /** Exact-owner authoritative reminder state for one session. `null` is a positive observation
  * that the caller has no reminder, rather than an omitted or delayed live update. */
@@ -8525,6 +8541,8 @@ export interface UiSnapshotMessage {
     unarchiveAndRestart?: boolean;
     /** Per-user durable session reminders and scoped live reminder events are available. */
     sessionReminders?: boolean;
+    /** Session reminders support the explicit no-timer Someday schedule kind. */
+    indefiniteSessionReminders?: boolean;
     /** Per-user worktree setup notices and runner-owned generation are available. */
     worktreeSetupConfig?: boolean;
     /** Session creation accepts `role` independently of the provider permission mode. */
@@ -8857,7 +8875,9 @@ export interface SetArchivedRequest {
   archived: boolean;
 }
 
-export interface SnoozeScheduleInput {
+export interface TimedSnoozeScheduleInput {
+  /** Omitted for compatibility with clients predating explicit schedule kinds. */
+  scheduleKind?: "timed";
   /** Absolute Unix time in milliseconds. The server never reparses the user's expression. */
   scheduledFor: number;
   /** IANA time-zone identifier used to explain the instant and preserve edit intent. */
@@ -8866,7 +8886,16 @@ export interface SnoozeScheduleInput {
   originalExpression: string;
 }
 
-export interface SetSessionReminderRequest extends SnoozeScheduleInput {
+export interface SomedaySnoozeScheduleInput {
+  scheduleKind: "someday";
+  scheduledFor?: never;
+  timeZone?: never;
+  originalExpression: string;
+}
+
+export type SnoozeScheduleInput = TimedSnoozeScheduleInput | SomedaySnoozeScheduleInput;
+
+interface SetSessionReminderOptions {
   wakePolicy: SessionReminderWakePolicy;
   /** Required when replacing an existing reminder; rejects stale multi-client edits. */
   expectedRevision?: number;
@@ -8883,6 +8912,8 @@ export interface SetSessionReminderRequest extends SnoozeScheduleInput {
     wakeReason: SessionReminderWakeReason;
   };
 }
+
+export type SetSessionReminderRequest = SnoozeScheduleInput & SetSessionReminderOptions;
 
 /** Body for POST /api/sessions/:id/workspace — re-file a session under a workspace ("Move to
  * project"). null ⇒ back to the "Chats" bucket. */

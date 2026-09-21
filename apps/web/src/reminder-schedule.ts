@@ -1,10 +1,8 @@
 import type { SessionReminderView } from "@wollipog/protocol";
 
-export interface ParsedReminderSchedule {
-  scheduledFor: number;
-  timeZone: string;
-  originalExpression: string;
-}
+export type ParsedReminderSchedule =
+  | { scheduleKind: "timed"; scheduledFor: number; timeZone: string; originalExpression: string }
+  | { scheduleKind: "someday"; originalExpression: string };
 
 const REMINDER_SUGGESTION_SEEDS = [
   "Later Today",
@@ -23,6 +21,7 @@ const REMINDER_SUGGESTION_SEEDS = [
   "This Weekend",
   "Next Week",
   "Next Month",
+  "Someday",
 ] as const;
 
 const WEEKDAYS = [
@@ -56,6 +55,7 @@ export function parseReminderExpression(
   const originalExpression = expression.trim();
   const normalized = originalExpression.toLocaleLowerCase().replace(/\s+/g, " ");
   let scheduled: Date | null = null;
+  if (normalized === "someday") return { scheduleKind: "someday", originalExpression };
   const relative = /^in (\d{1,4}) (minute|minutes|hour|hours|day|days)$/.exec(normalized);
   if (relative) {
     const amount = Number(relative[1]);
@@ -103,7 +103,12 @@ export function parseReminderExpression(
     }
   }
   if (!scheduled || !Number.isFinite(scheduled.getTime()) || scheduled.getTime() <= now.getTime()) return null;
-  return { scheduledFor: scheduled.getTime(), timeZone: browserTimeZone(), originalExpression };
+  return {
+    scheduleKind: "timed",
+    scheduledFor: scheduled.getTime(),
+    timeZone: browserTimeZone(),
+    originalExpression,
+  };
 }
 
 /** Complete a partially typed expression using only values accepted by the authoritative parser.
@@ -232,13 +237,22 @@ export function exactReminderSchedule(
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(localDateTime)) return null;
   const instant = new Date(localDateTime);
   if (!Number.isFinite(instant.getTime()) || instant.getTime() <= now) return null;
-  return { scheduledFor: instant.getTime(), timeZone: browserTimeZone(), originalExpression: localDateTime };
+  return {
+    scheduleKind: "timed",
+    scheduledFor: instant.getTime(),
+    timeZone: browserTimeZone(),
+    originalExpression: localDateTime,
+  };
 }
 
 /** Editing starts from the stored absolute instant. In particular, a datetime-local expression
  * must not be reinterpreted in a browser that has moved to a different time zone. */
 export function storedReminderSchedule(reminder: SessionReminderView): ParsedReminderSchedule {
+  if (reminder.scheduleKind === "someday") {
+    return { scheduleKind: "someday", originalExpression: reminder.originalExpression };
+  }
   return {
+    scheduleKind: "timed",
     scheduledFor: reminder.scheduledFor,
     timeZone: reminder.timeZone,
     originalExpression: reminder.originalExpression,

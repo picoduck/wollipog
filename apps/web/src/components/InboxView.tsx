@@ -1,5 +1,5 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
-import { prioritizedPendingRequests, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SourceLocation } from "@wollipog/protocol";
+import { prioritizedPendingRequests, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
   INBOX_COLLAPSED_THREADS_KEY,
@@ -190,6 +190,7 @@ export function InboxView({
   const projects = useStoreSelector((state) => state.projects);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const sessionRemindersSupported = useStoreSelector((state) => state.sessionRemindersSupported);
+  const indefiniteSessionRemindersSupported = useStoreSelector((state) => state.indefiniteSessionRemindersSupported);
   const reminders = useStoreSelector((state) => state.reminders);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
   const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
@@ -991,9 +992,7 @@ export function InboxView({
     showUndo(previous ? "Reminder updated." : "Session snoozed.", async () => {
       if (previous) {
         await api.setReminder(sessionId, {
-          scheduledFor: previous.scheduledFor,
-          timeZone: previous.timeZone,
-          originalExpression: previous.originalExpression,
+          ...scheduleForReminder(previous),
           wakePolicy: previous.wakePolicy,
           expectedRevision: updated.revision,
           expectedReminderId: updated.reminderId,
@@ -1014,9 +1013,7 @@ export function InboxView({
     await api.removeReminder(sessionId, previous.revision, previous.reminderId);
     showUndo("Reminder removed.", async () => {
       await api.setReminder(sessionId, {
-        scheduledFor: previous.scheduledFor,
-        timeZone: previous.timeZone,
-        originalExpression: previous.originalExpression,
+        ...scheduleForReminder(previous),
         wakePolicy: previous.wakePolicy,
         expectedRevision: 0,
         ...(previous.state === "fired" && previous.firedAt !== undefined && previous.wakeReason !== undefined
@@ -1630,6 +1627,7 @@ export function InboxView({
         <SnoozeDialog
           key={snoozeSessionId}
           reminder={reminders.get(snoozeSessionId)}
+          supportsSomeday={indefiniteSessionRemindersSupported}
           {...(snoozeReturnFocusRef ? { returnFocusRef: snoozeReturnFocusRef } : {})}
           onClose={() => {
             setSnoozeSessionId(null);
@@ -1642,4 +1640,16 @@ export function InboxView({
       )}
     </div>
   );
+}
+
+function scheduleForReminder(reminder: SessionReminderView): SnoozeScheduleInput {
+  if (reminder.scheduleKind === "someday") {
+    return { scheduleKind: "someday", originalExpression: reminder.originalExpression };
+  }
+  return {
+    scheduleKind: "timed",
+    scheduledFor: reminder.scheduledFor,
+    timeZone: reminder.timeZone,
+    originalExpression: reminder.originalExpression,
+  };
 }

@@ -120,9 +120,35 @@ test("editing preserves the authoritative stored instant and time zone", () => {
     originalExpression: "2026-11-01T01:30",
   } as SessionReminderView;
   assert.deepEqual(storedReminderSchedule(reminder), {
+    scheduleKind: "timed",
     scheduledFor: reminder.scheduledFor,
     timeZone: "America/New_York",
     originalExpression: "2026-11-01T01:30",
+  });
+});
+
+test("Someday parses and reloads without inventing a scheduled instant", () => {
+  const parsed = parseReminderExpression("  sOmEdAy  ");
+  assert.deepEqual(parsed, {
+    scheduleKind: "someday",
+    originalExpression: "sOmEdAy",
+  });
+  assert.deepEqual(suggestReminderExpressions("some").map((suggestion) => suggestion.originalExpression), ["Someday"]);
+
+  const reminder = {
+    reminderId: "rem-someday",
+    sessionId: "session-someday",
+    scheduleKind: "someday",
+    originalExpression: "Someday",
+    wakePolicy: "regardless",
+    state: "pending",
+    revision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+  } satisfies SessionReminderView;
+  assert.deepEqual(storedReminderSchedule(reminder), {
+    scheduleKind: "someday",
+    originalExpression: "Someday",
   });
 });
 

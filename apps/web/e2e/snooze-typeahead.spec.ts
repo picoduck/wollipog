@@ -109,6 +109,28 @@ test("calendar-relative presets and weekday clocks use the same authoritative pr
   await expect(page.getByRole("button", { name: "Snooze Session", exact: true })).toBeEnabled();
 });
 
+test("Someday clearly has no timer on desktop and mobile", async ({ page }, testInfo) => {
+  const verifySomeday = async (screenshotName: string) => {
+    await openNewSnoozeDialog(page);
+    await page.getByRole("radio", { name: "Someday", exact: true }).click();
+    await expect(page.locator(".snooze-preview")).toContainText("Someday — no automatic return time.");
+    await expect(page.locator(".snooze-preview")).toContainText("Time Zone: Not Applicable");
+    await expect(page.getByRole("radio", { name: /Until Activity/ })).toContainText("There is no automatic return time");
+    await page.getByRole("radio", { name: /Regardless/ }).click();
+    await expect(page.getByRole("radio", { name: /Regardless/ })).toContainText("Stay snoozed until you reschedule or remove the reminder");
+    await expect(page.getByRole("button", { name: "Snooze Session", exact: true })).toBeEnabled();
+    if (EVIDENCE_CAPTURE) await page.screenshot({ path: testInfo.outputPath(screenshotName) });
+    await page.getByRole("button", { name: "Snooze Session", exact: true }).click();
+    await expect(page.getByRole("dialog")).toHaveCount(0);
+    expect(await page.evaluate(() => window.__reminderWriteCalls)).toBe(1);
+  };
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await verifySomeday("desktop-someday.png");
+  await page.setViewportSize({ width: 390, height: 844 });
+  await verifySomeday("mobile-someday.png");
+});
+
 test("a stationary pointer does not choose a suggestion for typed Enter submission", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await openNewSnoozeDialog(page);

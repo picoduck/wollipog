@@ -30,6 +30,21 @@ function reminder(sessionId: string, overrides: Partial<SessionReminderView> = {
   };
 }
 
+function somedayReminder(sessionId: string, overrides: Partial<SessionReminderView> = {}): SessionReminderView {
+  return {
+    reminderId: `rem-${sessionId}`,
+    sessionId,
+    scheduleKind: "someday",
+    originalExpression: "Someday",
+    wakePolicy: "regardless",
+    state: "pending",
+    revision: 1,
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  } as SessionReminderView;
+}
+
 test("pending reminders make Active and Snoozed mutually exclusive across every attention condition", () => {
   const cases: Array<[string, SessionView, string]> = [
     ["running", session("running", "running"), ""],
@@ -155,6 +170,27 @@ test("archived sessions do not appear in either reminder view", () => {
   const archived = session("archived", "idle", { archived: true });
   assert.equal(sessionVisibleForReminderMode(archived, reminder("archived"), "ordinary"), false);
   assert.equal(sessionVisibleForReminderMode(archived, reminder("archived"), "snoozed"), false);
+});
+
+test("Someday stays in Snoozed with a no-timer label and sorts after timed reminders", () => {
+  const timedEarly = session("timed-early");
+  const someday = session("someday", "input_required");
+  const timedLate = session("timed-late");
+  const reminders = new Map<string, SessionReminderView>([
+    [timedEarly.id, reminder(timedEarly.id, { scheduledFor: 1_000 })],
+    [someday.id, somedayReminder(someday.id)],
+    [timedLate.id, reminder(timedLate.id, { scheduledFor: 3_000 })],
+  ]);
+
+  assert.equal(sessionVisibleForReminderMode(someday, reminders.get(someday.id), "ordinary"), false);
+  assert.equal(sessionVisibleForReminderMode(someday, reminders.get(someday.id), "snoozed"), true);
+  assert.equal(reminderBadgeLabel(reminders.get(someday.id)!), "Someday");
+  assert.equal(reminderBadgeDescription(reminders.get(someday.id)!), "Snoozed Someday with no automatic return time.");
+  assert.doesNotMatch(reminderBadgeDescription(reminders.get(someday.id)!), /1970|scheduled for|until/i);
+  assert.deepEqual(
+    sortSessionsForReminders([someday, timedLate, timedEarly], reminders, "snoozed").map(({ id }) => id),
+    ["timed-early", "timed-late", "someday"],
+  );
 });
 
 test("fired reminders return to the top with a text-backed reason until dismissed", () => {

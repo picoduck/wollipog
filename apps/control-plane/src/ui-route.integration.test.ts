@@ -994,6 +994,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     stopBeforeArchive: true,
     unarchiveAndRestart: true,
     sessionReminders: true,
+    indefiniteSessionReminders: true,
     worktreeSetupConfig: true,
     orchestratorRole: true,
   });
