@@ -118,7 +118,7 @@ test("hydrateHistory pulls the box's event log over the hub and advances the hig
   assert.equal(db.getHydratedSeq("s_box1"), 2);
 });
 
-test("re-hydrating terminal runner snapshots uses one durable commit per session", () => {
+test("re-hydrating quiescent terminal runner snapshots uses one durable commit for the batch", () => {
   const db = ControlPlaneDb.open(":memory:");
   db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
   const hub = new Hub(db);
@@ -142,7 +142,7 @@ test("re-hydrating terminal runner snapshots uses one durable commit per session
 
   svc.hydrateRunnerSessions(RUNNER_ID, snapshots);
 
-  assert.equal(commits, snapshots.length);
+  assert.equal(commits, 1);
 
   exec("BEGIN");
   try {
@@ -153,6 +153,31 @@ test("re-hydrating terminal runner snapshots uses one durable commit per session
   } finally {
     exec("ROLLBACK");
   }
+});
+
+test("terminal snapshot batching excludes sessions with durable reconciliation work", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+  const hub = new Hub(db);
+  const svc = new SessionsService(db, hub, NOOP_LOG);
+  const snapshots: SessionSnapshot[] = [
+    { ...snapshot(), id: "quiescent", status: "stopped", seq: 0, historyEpoch: 1 },
+    { ...snapshot(), id: "resume-marker", status: "stopped", seq: 0, historyEpoch: 1 },
+  ];
+  svc.hydrateRunnerSessions(RUNNER_ID, snapshots);
+  db.notePolicyResumeStatus("resume-marker", "idle");
+
+  const updateBatch = db.updateSessionsFromSnapshots.bind(db);
+  const batched: string[] = [];
+  db.updateSessionsFromSnapshots = (batch, now) => {
+    batched.push(...batch.map(({ id }) => id));
+    return updateBatch(batch, now);
+  };
+
+  svc.hydrateRunnerSessions(RUNNER_ID, snapshots);
+
+  assert.deepEqual(batched, ["quiescent"]);
+  assert.equal(db.policyResumeStatus("resume-marker"), null);
 });
 
 test("hydrateHistory is incremental — only fetches events past what's already cached", async () => {

@@ -11346,6 +11346,24 @@ export class ControlPlaneDb {
     return history;
   }
 
+  /** Apply a registration batch of existing snapshots in one durable transaction. The caller
+   * must reserve this for sessions whose service-level reconciliation is read-only; active
+   * sessions and sessions with pending durable work stay on the per-session path. */
+  updateSessionsFromSnapshots(
+    snapshots: readonly SessionSnapshot[],
+    now: number,
+  ): Array<RunnerHistoryReconciliation | null> {
+    if (snapshots.length === 0) return [];
+    if ((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction) {
+      throw new Error("updateSessionsFromSnapshots requires an autocommit connection");
+    }
+    const histories = this.atomic(() => snapshots.map((snap) =>
+      this.updateSessionFromSnapshotInTransaction(snap.id, snap, now)));
+    if (histories.some((history) => history?.reset)) this.collectWorkflowArtifactBlobs();
+    this.maybeMaintainUsageAggregation();
+    return histories;
+  }
+
   private updateSessionFromSnapshotInTransaction(
     id: string,
     snap: SessionSnapshot,
