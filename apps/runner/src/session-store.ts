@@ -92,6 +92,11 @@ export interface SessionMeta {
   pendingProviderAccountLabel?: string;
   pendingProviderAccountProvider?: "claude" | "codex";
   pendingProviderCredentialHome?: string;
+  pendingProviderAccountSwitchAutomatic?: boolean;
+  providerAccountAutomaticallySelected?: boolean;
+  /** Per-session backoff, keyed by opaque provider-account id. */
+  automaticProviderAccountCooldowns?: Record<string, number>;
+  automaticProviderAccountLastSwitchAt?: number;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
   /** Discovered adapter/CLI version; telemetry dimension only, never an auth source. */
   agentVersion?: string;
@@ -2908,6 +2913,10 @@ export function metaToSnapshot(
     agentId: m.agentId,
     providerAccountId: m.providerAccountId,
     providerAccountLabel: m.providerAccountLabel,
+    providerAccountAutomaticallySelected: runnerSupportsProtocol(
+      controlPlaneProtocolVersion,
+      "automaticProviderAccountSwitch",
+    ) ? m.providerAccountAutomaticallySelected : undefined,
     providerAccountSwitchFailure: controlPlaneProtocolVersion != null &&
       controlPlaneProtocolVersion >= RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch
       ? m.providerAccountSwitchFailure ?? null

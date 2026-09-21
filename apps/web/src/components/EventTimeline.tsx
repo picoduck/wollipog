@@ -1760,7 +1760,7 @@ const TimelineRow = memo(function TimelineRow({
       );
     }
     case "provider_account_switched": {
-      const label = `Switched Account to ${item.providerAccountLabel}`;
+      const label = `${item.automatic ? "Automatically Switched" : "Switched"} Account to ${item.providerAccountLabel}`;
       return (
         <div
           className="tl-checkpoint restored"

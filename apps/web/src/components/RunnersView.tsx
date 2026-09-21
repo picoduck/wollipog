@@ -638,6 +638,13 @@ function MachineSettingsDialog({
   const [runnerCapacity, setRunnerCapacity] = useState(configuredCapacity?.toString() ?? "");
   const [capacityRevision, setCapacityRevision] = useState(runner?.capacity?.revision ?? 0);
   const [savingCapacity, setSavingCapacity] = useState(false);
+  const [automaticAccountSwitching, setAutomaticAccountSwitching] = useState(
+    runner?.automaticAccountSwitching?.enabled ?? false,
+  );
+  const [automaticAccountSwitchRevision, setAutomaticAccountSwitchRevision] = useState(
+    runner?.automaticAccountSwitching?.revision ?? 0,
+  );
+  const [savingAutomaticAccountSwitching, setSavingAutomaticAccountSwitching] = useState(false);
   const [addingWorkspace, setAddingWorkspace] = useState(false);
   const [browsing, setBrowsing] = useState(false);
   const [workspacePath, setWorkspacePath] = useState("");
@@ -650,6 +657,8 @@ function MachineSettingsDialog({
     runnerSupportsProtocol(runner.protocolVersion, "directoryListing");
   const onlineNativeRunner = !box && runner?.status === "online";
   const capacitySupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "machineRunnerCapacity");
+  const automaticAccountSwitchSupported = !!runner &&
+    runnerSupportsProtocol(runner.protocolVersion, "automaticProviderAccountSwitch");
   const capacityValue = Number(runnerCapacity);
   const capacityValid = Number.isInteger(capacityValue) && capacityValue >= 1 && capacityValue <= 256;
 
@@ -689,6 +698,34 @@ function MachineSettingsDialog({
       setError(machineSettingsMutationError(cause));
     } finally {
       setSavingCapacity(false);
+    }
+  };
+
+  const setAutomaticAccountSwitch = async (enabled: boolean) => {
+    if (!runner || savingAutomaticAccountSwitching || runner.canManage !== true ||
+        !automaticAccountSwitchSupported) return;
+    if (enabled) {
+      const approved = await confirm({
+        title: "Enable Automatic Account Switching?",
+        message: "Provider terms assume ordinary individual usage and prohibit circumventing rate limits. Automatically rotating between your own subscriptions can be a gray area. You are responsible for ensuring this use complies with each provider's terms.",
+        confirmLabel: "Enable Automatic Switching",
+        tone: "danger",
+      });
+      if (!approved) return;
+    }
+    setSavingAutomaticAccountSwitching(true);
+    setError(null);
+    try {
+      const result = await api.updateMachineAutomaticAccountSwitching(runner.runnerId, {
+        enabled,
+        expectedRevision: automaticAccountSwitchRevision,
+      });
+      setAutomaticAccountSwitching(result.automaticAccountSwitching.enabled);
+      setAutomaticAccountSwitchRevision(result.automaticAccountSwitching.revision);
+    } catch (cause) {
+      setError(machineSettingsMutationError(cause));
+    } finally {
+      setSavingAutomaticAccountSwitching(false);
     }
   };
 
@@ -901,6 +938,42 @@ function MachineSettingsDialog({
               )}
             </>
           )}
+        </section>
+      )}
+
+      {runner && (
+        <section className="machine-settings-section">
+          <div className="machine-settings-heading">
+            <div>
+              <h3>Automatic Account Switching</h3>
+              <p>
+                When an eligible provider usage window is exhausted, move the next turn to the
+                same-provider account with the most available subscription headroom. Switching
+                never occurs during a turn and is disabled by default.
+              </p>
+            </div>
+            <button
+              type="button"
+              className={`btn automatic-account-switch-button ${automaticAccountSwitching ? "danger" : "primary"}`}
+              disabled={!automaticAccountSwitchSupported || runner.canManage !== true ||
+                savingAutomaticAccountSwitching}
+              onClick={() => void setAutomaticAccountSwitch(!automaticAccountSwitching)}
+            >
+              {savingAutomaticAccountSwitching
+                ? "Saving…"
+                : automaticAccountSwitching ? "Disable Automatic Switching" : "Enable Automatic Switching"}
+            </button>
+          </div>
+          <p className="hint">
+            {automaticAccountSwitching
+              ? "Enabled. Exhausted, unauthenticated, and cooling-down accounts remain ineligible."
+              : "Disabled. Provider usage limits continue to park sessions as before."}
+          </p>
+          {!automaticAccountSwitchSupported && <p className="hint">{runnerCapabilityRequirement(
+            runner.protocolVersion,
+            "automaticProviderAccountSwitch",
+            "Automatic Account Switching changes",
+          )}</p>}
         </section>
       )}
 

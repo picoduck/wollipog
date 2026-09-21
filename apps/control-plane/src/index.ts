@@ -1130,6 +1130,9 @@ app.register(async (instance) => {
           ...(runnerSupportsProtocol(msg.protocolVersion, "machineRunnerCapacity")
             ? { runnerCapacity: db.machineRunnerCapacityConfiguration(runnerId) ?? undefined }
             : {}),
+          ...(runnerSupportsProtocol(msg.protocolVersion, "automaticProviderAccountSwitch")
+            ? { automaticAccountSwitching: db.machineAutomaticAccountSwitchConfiguration(runnerId) ?? undefined }
+            : {}),
         });
         // Close/forget requests made while this runner was offline are durable. The registered
         // frame is ordered first, so the runner can safely process these immediately afterward.
@@ -2707,6 +2710,52 @@ app.put("/api/runners/:id/capacity", async (req, reply) => {
   hub.runnerChanged(id);
   if (boxId) hub.boxChanged(boxId);
   return { capacity: changed.configuration };
+});
+
+app.put("/api/runners/:id/automatic-account-switching", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  const body = (req.body ?? {}) as { enabled?: unknown; expectedRevision?: unknown };
+  if (typeof body.enabled !== "boolean") {
+    return reply.code(400).send({ error: "enabled must be a boolean" });
+  }
+  if (!Number.isSafeInteger(body.expectedRevision) || (body.expectedRevision as number) < 0) {
+    return reply.code(400).send({ error: "expectedRevision must be a non-negative integer" });
+  }
+  const runner = db.getRunner(id);
+  const boxId = db.boxIdForRunner(id);
+  if (!runner && !boxId) return reply.code(404).send({ error: "runner not found" });
+  if (runner?.status === "online" &&
+      !runnerSupportsProtocol(runner.protocolVersion, "automaticProviderAccountSwitch")) {
+    return reply.code(409).send({
+      error: runnerCapabilityRequirement(
+        runner.protocolVersion,
+        "automaticProviderAccountSwitch",
+        "Automatic Account Switching changes",
+      ),
+    });
+  }
+  const changed = db.setMachineAutomaticAccountSwitch(
+    id,
+    body.enabled,
+    body.expectedRevision as number,
+    Date.now(),
+  );
+  if (!changed.ok) {
+    return reply.code(409).send({
+      error: "Automatic Account Switching changed in another client",
+      current: changed.configuration,
+    });
+  }
+  if (runner?.status === "online") {
+    hub.sendToRunner(id, { type: "configure_automatic_account_switch", ...changed.configuration });
+  }
+  hub.runnerChanged(id);
+  if (boxId) hub.boxChanged(boxId);
+  return { automaticAccountSwitching: changed.configuration };
 });
 
 app.delete("/api/runners/:id", async (req, reply) => {

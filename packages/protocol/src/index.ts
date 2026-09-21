@@ -524,7 +524,10 @@
 // 172: account-scoped skill inventory, discovery, adoption, and recovery carry the opaque
 //      provider-account id that resolves the credential home on the runner. Older peers retain
 //      legacy default-home skill behavior rather than merging or mutating an ambiguous scope.
-export const PROTOCOL_VERSION = 172;
+// 173: a revisioned, opt-in per-Machine setting lets the runner automatically schedule that same
+//      safe-boundary switch after a provider usage-window rejection. It remains disabled by
+//      default, and exhausted, unauthenticated, or cooling-down accounts are never selected.
+export const PROTOCOL_VERSION = 173;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -650,6 +653,7 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  automaticProviderAccountSwitch: 173,
   sessionProviderAccountSwitch: 171,
   providerAccounts: 170,
   providerLogin: 171,
@@ -1021,6 +1025,11 @@ export function projectSessionEventPayloadForProtocol(
   const policy = SESSION_EVENT_WIRE_POLICIES[payload.kind as keyof typeof SESSION_EVENT_WIRE_POLICIES];
   if (policy && (!Number.isInteger(protocolVersion) || protocolVersion! < policy.minProtocol)) {
     if (policy.legacy === "omit") return null;
+  }
+  if (payload.kind === "provider_account_switched" && payload.automatic &&
+      (!Number.isInteger(protocolVersion) || protocolVersion! < 173)) {
+    const { automatic: _automatic, ...legacy } = payload;
+    return legacy;
   }
   return payload;
 }
@@ -2349,6 +2358,12 @@ export interface RunnerCapacityConfiguration {
   revision: number;
 }
 
+/** Durable control-plane configuration for opt-in provider-account failover on one Machine. */
+export interface RunnerAutomaticAccountSwitchConfiguration {
+  enabled: boolean;
+  revision: number;
+}
+
 export interface RunnerCapacityDimension {
   used: number;
   limit: number | null;
@@ -2400,6 +2415,8 @@ export interface RunnerView {
   runtime?: RunnerRuntimeInfo;
   /** v132 authoritative configuration plus latest runner-authored usage. */
   capacity?: RunnerCapacityState;
+  /** v173 control-plane-authoritative opt-in; absent means disabled. */
+  automaticAccountSwitching?: RunnerAutomaticAccountSwitchConfiguration;
   /** Principal-specific mutation permission; absent on older control planes. */
   canManage?: boolean;
   /** Protocol v60 projection. Placement is separate from the agent definitions above. */
@@ -4244,7 +4261,7 @@ export type SessionEventPayload =
   | { kind: "checkpoint_restored"; turn: number }
   | { kind: "conversation_checkpoint"; turn: number }
   | { kind: "conversation_forked"; sourceSessionId: string; turn: number; handoff?: { sourceAgent: string; destinationAgent: string; disclosure: string } }
-  | { kind: "provider_account_switched"; providerAccountId: string; providerAccountLabel: string }
+  | { kind: "provider_account_switched"; providerAccountId: string; providerAccountLabel: string; automatic?: boolean }
   | {
       kind: "token_usage";
       /** Provider-reported input count. Anthropic reports the uncached portion only; Codex reports
@@ -5163,6 +5180,8 @@ export interface SessionView {
   agentName: string | null;
   providerAccountId?: string;
   providerAccountLabel?: string;
+  /** True when the current binding was chosen by the Machine's opt-in automatic policy. */
+  providerAccountAutomaticallySelected?: boolean;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
   title: string;
   titleSource?: SessionTitleSource;
@@ -5343,6 +5362,7 @@ export interface SessionSnapshot {
   agentId: string | null;
   providerAccountId?: string;
   providerAccountLabel?: string;
+  providerAccountAutomaticallySelected?: boolean;
   /** Three-valued: undefined is an older peer; null explicitly clears an earlier failure. */
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView | null;
   title: string;
@@ -6905,6 +6925,8 @@ export interface RegisteredMessage {
   protocolVersion?: number;
   /** Present once an administrator has made the control plane authoritative for this Machine. */
   runnerCapacity?: RunnerCapacityConfiguration;
+  /** Present once the Machine has a persisted automatic account-switch preference. */
+  automaticAccountSwitching?: RunnerAutomaticAccountSwitchConfiguration;
 }
 
 export interface RegisterRejectedMessage {
@@ -7430,6 +7452,11 @@ export interface RediscoverMessage {
 /** Idempotent monotonic application of the control plane's durable Machine capacity setting. */
 export interface ConfigureRunnerCapacityMessage extends RunnerCapacityConfiguration {
   type: "configure_runner_capacity";
+}
+
+/** Idempotent monotonic application of the Machine's automatic account-switch preference. */
+export interface ConfigureAutomaticAccountSwitchMessage extends RunnerAutomaticAccountSwitchConfiguration {
+  type: "configure_automatic_account_switch";
 }
 
 /** Ask the runner to refresh provider-owned account usage without starting or interrupting a turn. */
@@ -8434,6 +8461,7 @@ export type ControlPlaneToRunner =
   | WorkspaceWorktreeSetupRequestMessage
   | RediscoverMessage
   | ConfigureRunnerCapacityMessage
+  | ConfigureAutomaticAccountSwitchMessage
   | RefreshSubscriptionUsageMessage
   | GenerateSessionTitleMessage
   | ConfigureSessionNamingCustomModelMessage

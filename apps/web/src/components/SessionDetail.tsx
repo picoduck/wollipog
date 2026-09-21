@@ -51,7 +51,11 @@ import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
 import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
-import { type TimelineItem } from "../timeline.js";
+import {
+  advanceAutomaticAccountSwitchNotice,
+  type AutomaticAccountSwitchNoticeState,
+  type TimelineItem,
+} from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
 import {
   BackgroundDeliveryBadge,
@@ -2504,6 +2508,23 @@ function SessionDetailLoaded({
     session.status === "running" || session.status === "starting",
     timelineHistoryKey,
   );
+  const automaticAccountSwitchNotice = useRef<AutomaticAccountSwitchNoticeState>({
+    sessionId: session.id,
+    seenThroughEventId: 0,
+    initialized: false,
+  });
+  useEffect(() => {
+    const update = advanceAutomaticAccountSwitchNotice(automaticAccountSwitchNotice.current, {
+      sessionId: session.id,
+      historyReady: eventHistory?.everComplete === true,
+      loadedEventHighWater: (evs ?? []).reduce((highest, event) => Math.max(highest, event.seq), 0),
+      items: timelineItems,
+    });
+    automaticAccountSwitchNotice.current = update.state;
+    if (update.providerAccountLabel) {
+      showToast(`Moved this session to ${update.providerAccountLabel} after its prior account exhausted a usage window.`);
+    }
+  }, [eventHistory?.everComplete, evs, session.id, showToast, timelineItems]);
   const observedLastEventAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || undefined;
   const activeTurnProgressProjector = useRef<IncrementalActiveTurnProgress | null>(null);
   activeTurnProgressProjector.current ??= new IncrementalActiveTurnProgress();

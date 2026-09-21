@@ -44,6 +44,9 @@ import type {
   RunnerCapacityBlocker,
   RunnerCapacityConfiguration,
   RunnerCapacityState,
+  RunnerAutomaticAccountSwitchConfiguration,
+  ProviderAccountDefinition,
+  SubscriptionUsageSnapshot,
   RunnerToControlPlane,
   SessionConfig,
   SessionCommandInvocationErrorCode,
@@ -135,6 +138,12 @@ export interface GuardStateSandbox {
 }
 import type { SubscriptionUsageProbeAuthorization } from "./subscription-usage.js";
 import { bindSessionProviderAccount, type BoundProviderAccount } from "./provider-accounts.js";
+import {
+  AUTOMATIC_ACCOUNT_SWITCH_COOLDOWN_MS,
+  selectAutomaticProviderAccount,
+  usageWindowRejection,
+  type UsageWindowRejection,
+} from "./automatic-provider-account-switch.js";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
@@ -558,6 +567,8 @@ interface ActiveSession {
   /** A validated provider account selected after this process launched. It is applied only after
    * the current turn settles, before any queued turn can reach a provider. */
   pendingProviderAccountSwitch?: BoundProviderAccount;
+  /** Structured exhausted-window observation from this exact provider turn. */
+  usageWindowRejection?: UsageWindowRejection;
   /** Exact canonical roots rendered into this live process's Seatbelt profile at launch. */
   seatbeltWritableRoots?: readonly string[];
 }
@@ -863,6 +874,8 @@ export class SessionManager {
   /** Process-local idempotency; durable accepted content is reconciled by the control plane. */
   private readonly queueEditReceipts = new Map<string, QueueEditReceipt>();
   private steeringAccessOrdinal = 0;
+  private automaticAccountSwitching = false;
+  private automaticAccountSwitchRevision = 0;
   /** Test seam; production always uses the mandatory whole-submission ten-second deadline. */
   private steeringSubmissionTimeoutMs = STEERING_SUBMISSION_TIMEOUT_MS;
   /** Sessions with a file rewind in flight. The shared store lock is REENTRANT for this
@@ -1129,7 +1142,7 @@ export class SessionManager {
       context: AgentContext,
       update: DriverSubscriptionUsageUpdate,
       providerAccountId?: string,
-    ) => void,
+    ) => SubscriptionUsageSnapshot | null,
     /** Exact operator-configured Project Location roots eligible for existing-worktree attach. */
     private readonly configuredProjectPaths: string[] = [],
     /** Fresh runner-local catalog authorization for the one target-local WSL launcher path. */
@@ -1139,6 +1152,8 @@ export class SessionManager {
     /** Current legacy credential-home override used only for Seatbelt admission grouping. Account
      * sessions use their durable bound home; omission therefore preserves legacy launch behavior. */
     private readonly resolveProviderCredentialHome?: (meta: SessionMeta) => string | undefined,
+    private readonly providerAccounts: () => ProviderAccountDefinition[] = () => [],
+    private readonly subscriptionUsageInventory: () => SubscriptionUsageSnapshot[] = () => [],
   ) {
     this.lockOwner = `${runnerId}#${randomUUID()}`;
     // Every worktree creation, activation, attach, and discard lands as a `worktrees` patch. The
@@ -1220,6 +1235,17 @@ export class SessionManager {
   }
 
   /** Apply only a monotonic control-plane configuration. Existing leases are never released. */
+  configureAutomaticAccountSwitch(configuration: RunnerAutomaticAccountSwitchConfiguration): boolean {
+    if (typeof configuration.enabled !== "boolean" || !Number.isSafeInteger(configuration.revision) ||
+        configuration.revision < 1 || configuration.revision < this.automaticAccountSwitchRevision) return false;
+    if (configuration.revision === this.automaticAccountSwitchRevision) {
+      return configuration.enabled === this.automaticAccountSwitching;
+    }
+    this.automaticAccountSwitchRevision = configuration.revision;
+    this.automaticAccountSwitching = configuration.enabled;
+    return true;
+  }
+
   configureCapacity(configuration: RunnerCapacityConfiguration): boolean {
     if (!Number.isInteger(configuration.configuredUnits) || configuration.configuredUnits < 1 ||
         configuration.configuredUnits > 256 || !Number.isSafeInteger(configuration.revision) ||
@@ -6760,13 +6786,19 @@ export class SessionManager {
         },
         onSubscriptionUsage: (update) => {
           if (meta.agentId) {
-            this.onSubscriptionUsageUpdate?.(
+            const snapshot = this.onSubscriptionUsageUpdate?.(
               meta.agentId,
               meta.driver,
               meta.context,
               update,
               meta.providerAccountId,
             );
+            const live = this.active.get(sessionId);
+            if (live?.client === client && live.launchGeneration === launchGeneration && live.running &&
+                snapshot?.providerAccountId === meta.providerAccountId) {
+              const rejection = usageWindowRejection(snapshot, Date.now());
+              if (rejection) live.usageWindowRejection = rejection;
+            }
           }
         },
         onSteeringTurnChanged: () => {
@@ -9458,10 +9490,12 @@ export class SessionManager {
       return;
     }
     if (switchedAccount) {
+      const switchedMeta = this.store.readMeta(sessionId);
       this.emitEvent(sessionId, {
         kind: "provider_account_switched",
         providerAccountId: switchedAccount.id,
         providerAccountLabel: switchedAccount.label,
+        ...(switchedMeta?.providerAccountAutomaticallySelected ? { automatic: true } : {}),
       });
       const switched = this.store.patchMeta(sessionId, { providerAccountSwitchFailure: undefined });
       if (switched) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(switched) });
@@ -9762,6 +9796,8 @@ export class SessionManager {
     const followUp = selectedWhileSwitching?.id !== target.id
       ? selectedWhileSwitching
       : undefined;
+    const automatic = meta.pendingProviderAccountId === target.id &&
+      meta.pendingProviderAccountSwitchAutomatic === true;
     return {
       providerAccountId: target.id,
       providerAccountLabel: target.label,
@@ -9771,6 +9807,10 @@ export class SessionManager {
       pendingProviderAccountLabel: followUp?.label,
       pendingProviderAccountProvider: followUp?.provider,
       pendingProviderCredentialHome: followUp?.credentialHome,
+      pendingProviderAccountSwitchAutomatic: followUp
+        ? meta.pendingProviderAccountSwitchAutomatic
+        : undefined,
+      providerAccountAutomaticallySelected: automatic,
       providerAccountSwitchFailure: undefined,
       // Provider identity is scoped to the credential home. An intentional account change starts
       // a new pin instead of presenting the previous account as a suspicious identity mismatch.
@@ -9798,6 +9838,7 @@ export class SessionManager {
         pendingProviderAccountLabel: undefined,
         pendingProviderAccountProvider: undefined,
         pendingProviderCredentialHome: undefined,
+        pendingProviderAccountSwitchAutomatic: undefined,
       });
       if (stopped) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(stopped) });
       return;
@@ -9817,6 +9858,7 @@ export class SessionManager {
       pendingProviderAccountLabel: undefined,
       pendingProviderAccountProvider: undefined,
       pendingProviderCredentialHome: undefined,
+      pendingProviderAccountSwitchAutomatic: undefined,
       providerAccountSwitchFailure: failure,
       status: "input_required",
     });
@@ -9854,6 +9896,7 @@ export class SessionManager {
       pendingProviderAccountLabel: target.label,
       pendingProviderAccountProvider: target.provider,
       pendingProviderCredentialHome: target.credentialHome,
+      pendingProviderAccountSwitchAutomatic: false,
       providerAccountSwitchFailure: undefined,
     });
     if (!updated) return { ok: false, error: "session disappeared while scheduling the account switch" };
@@ -9868,6 +9911,62 @@ export class SessionManager {
     }
     await this.rebindSelectedProviderAccount(sessionId, entry);
     return { ok: true, scheduled: false };
+  }
+
+  /** Decide and persist an automatic handoff only after the rejected provider promise settled.
+   * The existing rebind lane performs the actual credential change after drain releases the turn. */
+  private scheduleAutomaticProviderAccountSwitch(sessionId: string, entry: ActiveSession): boolean {
+    const meta = this.store.readMeta(sessionId);
+    const now = Date.now();
+    const currentUsage = meta?.providerAccountId
+      ? this.subscriptionUsageInventory().find((snapshot) =>
+        snapshot.providerAccountId === meta.providerAccountId)
+      : undefined;
+    const rejection = entry.usageWindowRejection ?? usageWindowRejection(currentUsage, now);
+    entry.usageWindowRejection = undefined;
+    if (!this.automaticAccountSwitching || !rejection || entry.governanceTripped ||
+        entry.authenticationBlocked || entry.pendingProviderAccountSwitch) return false;
+    if (!meta?.providerAccountId || !meta.providerAccountProvider || !meta.providerCredentialHome ||
+        (meta.automaticProviderAccountLastSwitchAt ?? 0) + AUTOMATIC_ACCOUNT_SWITCH_COOLDOWN_MS > now) {
+      return false;
+    }
+    const cooldowns = meta.automaticProviderAccountCooldowns ?? {};
+    const selected = selectAutomaticProviderAccount({
+      accounts: this.providerAccounts(),
+      snapshots: this.subscriptionUsageInventory(),
+      provider: meta.providerAccountProvider,
+      currentAccountId: meta.providerAccountId,
+      cooldowns,
+      now,
+    });
+    if (!selected) return false;
+    let target: BoundProviderAccount;
+    try {
+      target = this.providerAccountForSession(meta, selected.id);
+    } catch (error) {
+      this.log(`automatic provider account selection rejected for ${sessionId}: ${errText(error)}`);
+      return false;
+    }
+    if ((!meta.agentSessionId && meta.seq > 0) || (meta.agentSessionId && !canResumeSession(meta))) return false;
+    const currentCooldown = Math.max(
+      now + AUTOMATIC_ACCOUNT_SWITCH_COOLDOWN_MS,
+      rejection.resetsAt ?? 0,
+    );
+    const updated = this.store.patchMeta(sessionId, {
+      pendingProviderAccountId: target.id,
+      pendingProviderAccountLabel: target.label,
+      pendingProviderAccountProvider: target.provider,
+      pendingProviderCredentialHome: target.credentialHome,
+      pendingProviderAccountSwitchAutomatic: true,
+      providerAccountSwitchFailure: undefined,
+      automaticProviderAccountCooldowns: { ...cooldowns, [meta.providerAccountId]: currentCooldown },
+      automaticProviderAccountLastSwitchAt: now,
+    });
+    if (!updated) return false;
+    this.store.flush(sessionId);
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    entry.pendingProviderAccountSwitch = target;
+    return true;
   }
 
   private providerAccountSwitchCanProceed(sessionId: string, entry: ActiveSession): boolean {
@@ -10039,6 +10138,7 @@ export class SessionManager {
         kind: "provider_account_switched",
         providerAccountId: target.id,
         providerAccountLabel: target.label,
+        ...(latestMeta?.providerAccountAutomaticallySelected ? { automatic: true } : {}),
       });
       const latest = this.store.patchMeta(sessionId, { providerAccountSwitchFailure: undefined });
       if (latest) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(latest) });
@@ -10694,6 +10794,7 @@ export class SessionManager {
     }
     try {
       let stop: Awaited<ReturnType<Driver["prompt"]>>;
+      entry.usageWindowRejection = undefined;
       stop = await entry.client.prompt(`${text}${workspaceReferenceText}`, images, slashCommand);
       if (entry.historyIntegrityFailure) return;
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
@@ -10748,6 +10849,11 @@ export class SessionManager {
       if (stop !== "cancelled" && stop !== "refusal") {
         const scopeId = this.store.readMeta(sessionId)?.providerCredentialScopeId;
         if (scopeId) this.providerAuthAutomaticAttempted.delete(scopeId);
+      }
+      if (stop === "refusal" && !interrupted && !entry.governanceTripped) {
+        this.scheduleAutomaticProviderAccountSwitch(sessionId, entry);
+      } else {
+        entry.usageWindowRejection = undefined;
       }
       if (interrupted) {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
