@@ -7,7 +7,7 @@ import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
 import { CheckpointRefOwnershipLedger } from "./checkpoint-ref-ownership.js";
 import { runStateDoctor, stateDoctorFileSyncFlags } from "./state-doctor.js";
-import { WorktreeCleanupJournal } from "./worktree.js";
+import { WorktreeCleanupJournal, type RetainedWorktreeRefRecord } from "./worktree.js";
 
 function fixture(t: Parameters<typeof test>[1] extends (t: infer T) => unknown ? T : never) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-state-doctor-"));
@@ -147,6 +147,132 @@ test("checkpoint adoption preserves a live worktree by retiring its exact stale 
       `refs/${namespace}/owners/${"a".repeat(64)}/s_adopt/turn-1`], { encoding: "utf8" }).trim(), oid);
   }
   assert.equal(JSON.parse(readFileSync(join(sessionDir, "meta.json"), "utf8")).checkpointRefVersion, 2);
+});
+
+test("checkpoint adoption reclaims only exact unarmed retained refs", async (t) => {
+  const root = fixture(t);
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  execFileSync("git", ["init", "-q", repo]);
+  execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+  execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+  execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-qm", "checkpoint"]);
+  const sessionDir = join(root, "sessions", "s_retained");
+  mkdirSync(sessionDir, { recursive: true });
+  const meta = {
+    sessionId: "s_retained", repoPath: repo, context: { kind: "native" as const }, worktreePath: repo,
+  };
+  writeFileSync(join(sessionDir, "meta.json"), `${JSON.stringify(meta)}\n`, { mode: 0o600 });
+  const journal = new WorktreeCleanupJournal(root);
+  journal.add({ ...meta, worktreeId: "wt-target", cleanupId: "cleanup-target" });
+  const retained = (overrides: Partial<RetainedWorktreeRefRecord>): RetainedWorktreeRefRecord => ({
+    sessionId: meta.sessionId,
+    worktreeId: "wt-target",
+    cleanupId: "cleanup-target",
+    repoPath: repo,
+    context: meta.context,
+    branch: "agent/shared",
+    expectedOid: "c".repeat(40),
+    reasons: ["recorded_branch"],
+    state: "pending",
+    createdAt: 1,
+    updatedAt: 1,
+    ...overrides,
+  });
+  journal.addRetainedRef(retained({}));
+  journal.addRetainedRef(retained({ branch: "agent/armed", armedAt: 2 }));
+  journal.addRetainedRef(retained({ cleanupId: "cleanup-newer" }));
+  journal.addRetainedRef(retained({ worktreeId: "wt-other" }));
+
+  await capture([
+    "runner", "--state-doctor", "adopt-checkpoints", "--data-dir", root,
+    "--session-id", meta.sessionId, "--ack-all-legacy-runners-stopped",
+  ]);
+
+  const durable = new WorktreeCleanupJournal(root);
+  assert.deepEqual(durable.list(), []);
+  assert.deepEqual(durable.listRetainedRefs().map((record) =>
+    `${record.worktreeId}:${record.cleanupId}:${record.branch}`).sort(), [
+    "wt-other:cleanup-target:agent/shared",
+    "wt-target:cleanup-newer:agent/shared",
+    "wt-target:cleanup-target:agent/armed",
+  ]);
+});
+
+test("checkpoint adoption keeps cleanup retryable when retained-ref persistence fails", async (t) => {
+  const root = fixture(t);
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  execFileSync("git", ["init", "-q", repo]);
+  const sessionDir = join(root, "sessions", "s_ref_fault");
+  mkdirSync(sessionDir, { recursive: true });
+  const meta = {
+    sessionId: "s_ref_fault", repoPath: repo, context: { kind: "native" as const }, worktreePath: repo,
+  };
+  const metaPath = join(sessionDir, "meta.json");
+  writeFileSync(metaPath, `${JSON.stringify(meta)}\n`, { mode: 0o600 });
+  const journal = new WorktreeCleanupJournal(root);
+  journal.add({ ...meta, worktreeId: "wt-target", cleanupId: "cleanup-target" });
+  journal.addRetainedRef({
+    ...meta,
+    worktreeId: "wt-target",
+    cleanupId: "cleanup-target",
+    branch: "agent/shared",
+    expectedOid: "d".repeat(40),
+    reasons: ["recorded_branch"],
+    state: "pending",
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const args = [
+    "runner", "--state-doctor", "adopt-checkpoints", "--data-dir", root,
+    "--session-id", meta.sessionId, "--ack-all-legacy-runners-stopped",
+  ];
+
+  await assert.rejects(runStateDoctor(args, () => {}, {
+    beforeDurabilityOperationForTest: (operation) => {
+      if (operation === "retained-ref-journal-write") {
+        throw new Error("injected retained-ref journal write failure");
+      }
+    },
+  }), /injected retained-ref journal write failure/);
+
+  const durable = new WorktreeCleanupJournal(root);
+  assert.equal(durable.list().length, 1, "cleanup retirement remains retryable");
+  assert.equal(durable.listRetainedRefs().length, 1, "the unarmed row was not orphaned");
+  assert.equal(JSON.parse(readFileSync(metaPath, "utf8")).checkpointRefVersion, undefined);
+  assert.equal(existsSync(join(root, ".wollipog-runner-active-v1.lock")), false);
+});
+
+test("checkpoint adoption fails closed for an ambiguous retained-ref identity", async (t) => {
+  const root = fixture(t);
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  execFileSync("git", ["init", "-q", repo]);
+  const sessionDir = join(root, "sessions", "s_ambiguous");
+  mkdirSync(sessionDir, { recursive: true });
+  const meta = {
+    sessionId: "s_ambiguous", repoPath: repo, context: { kind: "native" as const }, worktreePath: repo,
+  };
+  writeFileSync(join(sessionDir, "meta.json"), `${JSON.stringify(meta)}\n`, { mode: 0o600 });
+  const journal = new WorktreeCleanupJournal(root);
+  journal.add(meta);
+  journal.addRetainedRef({
+    ...meta,
+    branch: "agent/legacy",
+    expectedOid: "e".repeat(40),
+    reasons: ["recorded_branch"],
+    state: "pending",
+    createdAt: 1,
+    updatedAt: 1,
+  });
+
+  await assert.rejects(runStateDoctor([
+    "runner", "--state-doctor", "adopt-checkpoints", "--data-dir", root,
+    "--session-id", meta.sessionId, "--ack-all-legacy-runners-stopped",
+  ]), /lacks a complete retained-ref identity/);
+  assert.equal(new WorktreeCleanupJournal(root).list().length, 1);
+  assert.equal(new WorktreeCleanupJournal(root).listRetainedRefs().length, 1);
 });
 
 test("checkpoint adoption fails closed for mismatched, owner-scoped, and deleted cleanup state", async (t) => {
