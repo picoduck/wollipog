@@ -20,7 +20,28 @@ const REMINDER_SUGGESTION_SEEDS = [
   "In 2 Hours",
   "In 1 Day",
   "In 7 Days",
+  "This Weekend",
+  "Next Week",
+  "Next Month",
 ] as const;
+
+const WEEKDAYS = [
+  { name: "Sunday", abbreviation: "sun" },
+  { name: "Monday", abbreviation: "mon" },
+  { name: "Tuesday", abbreviation: "tue" },
+  { name: "Wednesday", abbreviation: "wed" },
+  { name: "Thursday", abbreviation: "thu" },
+  { name: "Friday", abbreviation: "fri" },
+  { name: "Saturday", abbreviation: "sat" },
+] as const;
+
+const DAYPART_HOURS = {
+  morning: 9,
+  afternoon: 13,
+  evening: 18,
+} as const;
+
+const WEEKDAY_EXPRESSION = "(sun(?:day)?|mon(?:day)?|tue(?:sday)?|wed(?:nesday)?|thu(?:rsday)?|fri(?:day)?|sat(?:urday)?)";
 
 export function browserTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -54,18 +75,31 @@ export function parseReminderExpression(
     scheduled = new Date(now);
     scheduled.setDate(scheduled.getDate() + 1);
     scheduled.setHours(13, 0, 0, 0);
+  } else if (normalized === "this weekend") {
+    scheduled = resolveWeekday(6, 9, 0, now);
+  } else if (normalized === "next week") {
+    const daysUntilNextMonday = (1 - now.getDay() + 7) % 7 || 7;
+    scheduled = localCalendarInstant(now, daysUntilNextMonday, 9, 0, now);
+  } else if (normalized === "next month") {
+    const target = new Date(now.getFullYear(), now.getMonth() + 1, 1, 12);
+    scheduled = firstLocalInstant(target, 9, 0, now);
   } else {
     const time = /^(?:today|tomorrow)(?: at)? (\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/.exec(normalized);
     if (time) {
-      let hour = Number(time[1]);
-      const minute = Number(time[2] ?? 0);
-      if (hour > 23 || minute > 59 || (time[3] && (hour < 1 || hour > 12))) return null;
-      if (time[3] === "pm" && hour < 12) hour += 12;
-      if (time[3] === "am" && hour === 12) hour = 0;
-      scheduled = new Date(now);
-      if (normalized.startsWith("tomorrow")) scheduled.setDate(scheduled.getDate() + 1);
-      scheduled.setHours(hour, minute, 0, 0);
-      if (normalized.startsWith("today") && scheduled.getTime() <= now.getTime()) return null;
+      const clock = clockTime(time[1]!, time[2], time[3]);
+      if (!clock) return null;
+      scheduled = localCalendarInstant(now, normalized.startsWith("tomorrow") ? 1 : 0, clock.hour, clock.minute, now);
+    } else {
+      const weekday = new RegExp(`^${WEEKDAY_EXPRESSION}(?: (morning|afternoon|evening)|(?: at)? (\\d{1,2})(?::(\\d{2}))?\\s*(am|pm)?)?$`).exec(normalized);
+      if (weekday) {
+        const weekdayIndex = WEEKDAYS.findIndex(({ abbreviation }) => weekday[1]!.startsWith(abbreviation));
+        const daypart = weekday[2] as keyof typeof DAYPART_HOURS | undefined;
+        const clock = weekday[3]
+          ? clockTime(weekday[3], weekday[4], weekday[5])
+          : { hour: daypart ? DAYPART_HOURS[daypart] : 9, minute: 0 };
+        if (!clock || weekdayIndex < 0) return null;
+        scheduled = resolveWeekday(weekdayIndex, clock.hour, clock.minute, now);
+      }
     }
   }
   if (!scheduled || !Number.isFinite(scheduled.getTime()) || scheduled.getTime() <= now.getTime()) return null;
@@ -82,6 +116,14 @@ export function suggestReminderExpressions(
   if (!normalized) return [];
 
   const candidates = new Set<string>(REMINDER_SUGGESTION_SEEDS);
+  for (const { name } of WEEKDAYS) {
+    candidates.add(name);
+    candidates.add(`${name} Morning`);
+    candidates.add(`${name} Afternoon`);
+    candidates.add(`${name} Evening`);
+    candidates.add(`${name} at 9 AM`);
+    candidates.add(`${name} at 3:30 PM`);
+  }
   for (const hoursFromNow of [1, 3]) {
     const future = new Date(now.getTime() + hoursFromNow * 3_600_000);
     if (future.toDateString() !== now.toDateString()) continue;
@@ -97,16 +139,20 @@ export function suggestReminderExpressions(
     candidates.add(`In ${amount} ${amount === 1 ? "Day" : "Days"}`);
   }
 
-  const clock = /^(today|tomorrow)(?:\s+at)?\s+(\d{1,2})(?::(\d{1,2}))?\s*(a|am|p|pm)?$/.exec(normalized);
+  const clock = new RegExp(`^(today|tomorrow|${WEEKDAY_EXPRESSION})(?:\\s+at)?\\s+(\\d{1,2})(?::(\\d{1,2}))?\\s*(a|am|p|pm)?$`).exec(normalized);
   if (clock) {
-    const day = clock[1] === "today" ? "Today" : "Tomorrow";
-    const hour = Number(clock[2]);
-    const minute = clock[3] ? `:${clock[3].padStart(2, "0")}` : "";
-    const typedMeridiem = clock[4];
+    const day = clock[1] === "today"
+      ? "Today"
+      : clock[1] === "tomorrow"
+        ? "Tomorrow"
+        : WEEKDAYS.find(({ abbreviation }) => clock[1]!.startsWith(abbreviation))?.name;
+    const hour = Number(clock[3]);
+    const minute = clock[4] ? `:${clock[4].padStart(2, "0")}` : "";
+    const typedMeridiem = clock[5];
     const meridiems = typedMeridiem
       ? [typedMeridiem.startsWith("a") ? "AM" : "PM"]
       : hour >= 1 && hour <= 12 ? ["AM", "PM"] : [""];
-    for (const meridiem of meridiems) {
+    for (const meridiem of day ? meridiems : []) {
       candidates.add(`${day} at ${hour}${minute}${meridiem ? ` ${meridiem}` : ""}`);
     }
   }
@@ -123,6 +169,58 @@ export function suggestReminderExpressions(
     if (suggestions.length === 6) break;
   }
   return suggestions;
+}
+
+function clockTime(
+  rawHour: string,
+  rawMinute: string | undefined,
+  meridiem: string | undefined,
+): { hour: number; minute: number } | null {
+  let hour = Number(rawHour);
+  const minute = Number(rawMinute ?? 0);
+  if (hour > 23 || minute > 59 || (meridiem && (hour < 1 || hour > 12))) return null;
+  if (meridiem === "pm" && hour < 12) hour += 12;
+  if (meridiem === "am" && hour === 12) hour = 0;
+  return { hour, minute };
+}
+
+function localCalendarInstant(
+  now: Date,
+  daysFromToday: number,
+  hour: number,
+  minute: number,
+  notBefore: Date,
+): Date | null {
+  const target = new Date(now.getFullYear(), now.getMonth(), now.getDate() + daysFromToday, 12);
+  return firstLocalInstant(target, hour, minute, notBefore);
+}
+
+/** Find the first real instant for a local wall time. Checking nearby instants distinguishes a
+ * spring-forward gap from a normalized Date and exposes both fall-back occurrences. */
+function firstLocalInstant(target: Date, hour: number, minute: number, notBefore: Date): Date | null {
+  const year = target.getFullYear();
+  const month = target.getMonth();
+  const day = target.getDate();
+  const normalized = new Date(year, month, day, hour, minute, 0, 0).getTime();
+  const matches = new Set<number>();
+  for (let deltaMinutes = -180; deltaMinutes <= 180; deltaMinutes += 30) {
+    const candidate = new Date(normalized + deltaMinutes * 60_000);
+    if (candidate.getFullYear() === year
+      && candidate.getMonth() === month
+      && candidate.getDate() === day
+      && candidate.getHours() === hour
+      && candidate.getMinutes() === minute) matches.add(candidate.getTime());
+  }
+  const instant = [...matches].sort((left, right) => left - right)
+    .find((candidate) => candidate > notBefore.getTime());
+  return instant === undefined ? null : new Date(instant);
+}
+
+function resolveWeekday(weekday: number, hour: number, minute: number, now: Date): Date | null {
+  const daysAhead = (weekday - now.getDay() + 7) % 7;
+  const currentWeek = localCalendarInstant(now, daysAhead, hour, minute, now);
+  if (currentWeek) return currentWeek;
+  return localCalendarInstant(now, daysAhead + 7, hour, minute, now);
 }
 
 /** A datetime-local control is interpreted by the browser runtime. Persist that runtime's zone

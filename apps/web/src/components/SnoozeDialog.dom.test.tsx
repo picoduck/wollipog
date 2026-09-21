@@ -64,7 +64,7 @@ test("Snooze Again requires a newly selected future schedule and replaces the ex
   assert.equal(submit.disabled, true, "the fired reminder's stored past instant cannot be submitted");
   await act(async () => {
     [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
-      .find((button) => button.textContent === "In 1 Day")!.click();
+      .find((button) => button.textContent === "Next Week")!.click();
   });
   assert.equal(submit.disabled, false);
   await act(async () => {
@@ -161,7 +161,7 @@ test("a removed fired reminder's preserved draft still requires a newly selected
   assert.equal(submit.disabled, true, "the expired preserved draft remains unavailable");
   await act(async () => {
     [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
-      .find((button) => button.textContent === "In 1 Day")!.click();
+      .find((button) => button.textContent === "Next Week")!.click();
   });
   await act(async () => { submit.click(); });
   assert.ok(saved && saved.scheduledFor > Date.now());
@@ -495,7 +495,7 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
     } else if (scenario.authoritative.state === "fired") {
       await act(async () => {
         [...container.querySelectorAll<HTMLButtonElement>('[role="radio"]')]
-          .find((button) => button.textContent === "In 1 Day")!.click();
+          .find((button) => button.textContent === "Next Week")!.click();
       });
     }
     await act(async () => { container.querySelector<HTMLButtonElement>('button[type="submit"]')!.click(); });
@@ -993,6 +993,9 @@ test("presets stay distinct from text input and every invalid schedule gets an a
   const preview = () => container.querySelector(".snooze-preview")?.textContent ?? "";
   const tomorrow = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent === "Tomorrow Morning")!;
+  const presetLabels = [...container.querySelectorAll<HTMLButtonElement>(".snooze-presets button")]
+    .map((button) => button.textContent);
+  assert.deepEqual(presetLabels, ["Later Today", "Tomorrow Morning", "Next Week", "Next Month"]);
   await act(async () => { tomorrow.click(); });
   assert.equal(expression.value, "", "a preset must not masquerade as authored natural language");
   assert.equal(tomorrow.getAttribute("aria-checked"), "true");
