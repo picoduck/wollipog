@@ -192,6 +192,7 @@ import {
   pathWithin,
   removeRequestedWorktreeBoundary,
   removeWorktree,
+  reclaimRetainedWorktreeRef,
   requestedWorktreeBoundary,
   sameWorktreePath,
   worktreeBranch,
@@ -204,6 +205,8 @@ import {
   type WorktreeHandle,
   type DiscoveredMergedPullRequest,
   type MissingUpstreamPullRequestIdentity,
+  type RetainedWorktreeRefCandidate,
+  type RetainedWorktreeRefRecord,
   type SafeWorktreeDiscardResult,
 } from "./worktree.js";
 import {
@@ -3016,6 +3019,30 @@ export class SessionManager {
   }
 
   private async removeRecordedWorktree(record: WorktreeCleanupRecord, meta?: SessionMeta): Promise<SafeWorktreeDiscardResult> {
+    if (!record.cleanupId) {
+      record.cleanupId = randomUUID();
+      this.cleanupJournal.add(record);
+    }
+    const retainRefs = async (candidates: RetainedWorktreeRefCandidate[]) => {
+      const now = Date.now();
+      for (const candidate of candidates) {
+        this.cleanupJournal.addRetainedRef({
+          sessionId: record.sessionId,
+          ...(record.worktreeId ? { worktreeId: record.worktreeId } : {}),
+          cleanupId: record.cleanupId,
+          repoPath: record.repoPath,
+          context: record.context,
+          branch: candidate.branch,
+          expectedOid: candidate.expectedOid,
+          ...(candidate.identityToken ? { identityToken: candidate.identityToken } : {}),
+          reasons: candidate.reasons,
+          ...(candidate.verifiedMergedHead ? { verifiedMergedHead: candidate.verifiedMergedHead } : {}),
+          state: "pending",
+          createdAt: now,
+          updatedAt: now,
+        });
+      }
+    };
     const beforeRemove = async () => {
       if (this.providerTurnUsesPath(record.sessionId, record.context, record.worktreePath) ||
           this.transitioningProviderUsesPath(record.sessionId, record.context, record.worktreePath)) {
@@ -3047,6 +3074,7 @@ export class SessionManager {
           dataDir: this.dataDir,
           ownerHash: this.runnerOwnerHash,
           ...(record.verifiedMergedHead ? { verifiedMergedHead: record.verifiedMergedHead } : {}),
+          retainRefs,
           beforeRemove,
         },
       );
@@ -3081,13 +3109,54 @@ export class SessionManager {
       if (record.worktreeId) {
         this.worktreePortAllocator.release(this.worktreePortOwner(record.sessionId, record.worktreeId));
       }
+      this.cleanupJournal.armRetainedRefs(record.sessionId, record.worktreeId, record.cleanupId);
       record.completedAt = Date.now();
       this.cleanupJournal.complete(record);
       this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
+      this.scheduleRetainedRefReclaims(record.sessionId, record.worktreeId, record.cleanupId);
       return true;
     } catch (error) {
       this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after cleanup journal update or port release: ${errText(error)}`);
       return false;
+    }
+  }
+
+  private async reapRetainedRef(record: RetainedWorktreeRefRecord): Promise<void> {
+    if (!record.armedAt) return;
+    const result = await reclaimRetainedWorktreeRef(record, { context: record.context });
+    if (result.state === "pending") {
+      if (record.pendingReason === result.reason) return;
+      record.pendingReason = result.reason;
+      record.updatedAt = Date.now();
+      this.cleanupJournal.updateRetainedRef(record);
+      return;
+    }
+    this.cleanupJournal.finishRetainedRef(record, result.state, result.reason);
+  }
+
+  private scheduleRetainedRefReclaims(sessionId: string, worktreeId?: string, cleanupId?: string): void {
+    const records = this.cleanupJournal.listRetainedRefs().filter((record) =>
+      record.sessionId === sessionId && (record.worktreeId ?? "legacy") === (worktreeId ?? "legacy") &&
+      (record.cleanupId ?? "legacy-cleanup") === (cleanupId ?? "legacy-cleanup"));
+    if (!records.length) return;
+    setImmediate(() => {
+      if (this.shuttingDown) return;
+      for (const record of records) {
+        void this.reapRetainedRef(record).catch((error) => {
+          this.log(`retained ref cleanup for ${boundedSessionIdForLog(sessionId)} needs retry: ${errText(error)}`);
+        });
+      }
+    });
+  }
+
+  private async replayRetainedRefReclaims(): Promise<void> {
+    for (const record of this.cleanupJournal.listRetainedRefs()) {
+      if (this.shuttingDown) return;
+      try {
+        await this.reapRetainedRef(record);
+      } catch (error) {
+        this.log(`retained ref cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry: ${errText(error)}`);
+      }
     }
   }
 
@@ -3310,7 +3379,7 @@ export class SessionManager {
         // later automatic retry after they merely clean the tree. Once process/teardown work began,
         // retain the journal so startup can finish the interrupted explicit operation.
         if (!cleanup.processTerminationStartedAt) {
-          this.removeWorktreeCleanupRecord(cleanup);
+          this.removeWorktreeCleanupRecord(cleanup, true);
         }
         if (result.reason === "branch_changed") {
           return {
@@ -3596,6 +3665,7 @@ export class SessionManager {
         this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} needs retry after periodic retirement replay: ${errText(error)}`);
       }
     }
+    await this.replayRetainedRefReclaims();
   }
 
   /** A standalone Agent TUI bypasses structured-driver isolation but shares provider HOME. */
@@ -4217,6 +4287,7 @@ export class SessionManager {
     // Otherwise a reaper invoked at the top of this method could capture an empty promise slot,
     // then race a synchronization scheduled later in the same startup pass.
     for (const record of pendingWorktreeCleanup) void this.reapWorktree(record);
+    void this.replayRetainedRefReclaims();
     try {
       for (const ownership of this.checkpointRefOwnership.list()) {
         if (currentCheckpointOwnershipKeys.has(checkpointRefOwnershipKey(ownership))) continue;
@@ -12562,8 +12633,14 @@ export class SessionManager {
     });
   }
 
-  private removeWorktreeCleanupRecord(record: Pick<WorktreeCleanupRecord, "sessionId" | "worktreeId">): boolean {
+  private removeWorktreeCleanupRecord(
+    record: Pick<WorktreeCleanupRecord, "sessionId" | "worktreeId" | "cleanupId">,
+    removeUnarmedRetainedRefs = false,
+  ): boolean {
     try {
+      if (removeUnarmedRetainedRefs) {
+        this.cleanupJournal.removeUnarmedRetainedRefs(record.sessionId, record.worktreeId, record.cleanupId);
+      }
       this.cleanupJournal.remove(record.sessionId, record.worktreeId ?? "legacy");
       this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
       return true;

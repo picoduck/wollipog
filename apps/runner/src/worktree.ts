@@ -116,6 +116,8 @@ export interface WorktreeCleanupRecord {
   sessionId: string;
   /** Stable per-worktree identity. Absent records are the singular legacy session worktree. */
   worktreeId?: string;
+  /** Unique durable cleanup occurrence; added lazily when replaying legacy rows. */
+  cleanupId?: string;
   repoPath: string;
   worktreePath: string;
   context: AgentContext;
@@ -168,18 +170,78 @@ export interface WorktreeCleanupRecord {
   verifiedMergedHead?: string;
 }
 
+export type RetainedWorktreeRefReason =
+  | "recorded_branch"
+  | "shared_checkout"
+  | "default_branch"
+  | "default_unknown";
+
+export type RetainedWorktreeRefPendingReason =
+  | "checked_out"
+  | "default_unknown"
+  | "git_unavailable";
+
+export type RetainedWorktreeRefTerminalReason =
+  | "deleted"
+  | "already_missing"
+  | "default_branch"
+  | "default_unproved_at_handoff"
+  | "ref_changed_or_recreated"
+  | "identity_unproved"
+  | "delivery_unproved";
+
+/** Durable ownership of one local branch deliberately left behind by safe worktree removal. */
+export interface RetainedWorktreeRefRecord {
+  sessionId: string;
+  worktreeId?: string;
+  /** Binds ownership to one cleanup occurrence even when a requested slot is reused later. */
+  cleanupId?: string;
+  repoPath: string;
+  context: AgentContext;
+  branch: string;
+  expectedOid: string;
+  /** Hash of the latest reflog entry and its file identity; distinguishes same-OID recreation. */
+  identityToken?: string;
+  reasons: RetainedWorktreeRefReason[];
+  /** Exact merged-head proof already accepted by worktree cleanup, when one exists. */
+  verifiedMergedHead?: string;
+  state: "pending" | "completed" | "retained";
+  pendingReason?: RetainedWorktreeRefPendingReason;
+  terminalReason?: RetainedWorktreeRefTerminalReason;
+  /** Set only after the associated worktree was successfully removed. */
+  armedAt?: number;
+  createdAt: number;
+  updatedAt: number;
+  completedAt?: number;
+}
+
+/** Captured before the worktree is removed; the caller must persist every candidate durably. */
+export interface RetainedWorktreeRefCandidate {
+  branch: string;
+  expectedOid: string;
+  identityToken?: string;
+  reasons: RetainedWorktreeRefReason[];
+  verifiedMergedHead?: string;
+}
+
 /** Native-host cleanup journal. Session rows can be deleted immediately while failed context
  * cleanup remains durable and is retried on the next runner start. */
 export class WorktreeCleanupJournal {
   private readonly path: string;
   private readonly historyPath: string;
+  private readonly retainedRefPath: string;
+  private readonly retainedRefHistoryPath: string;
   private records = new Map<string, WorktreeCleanupRecord>();
   private completedRecords = new Map<string, WorktreeCleanupRecord>();
+  private retainedRefs = new Map<string, RetainedWorktreeRefRecord>();
+  private completedRetainedRefs = new Map<string, RetainedWorktreeRefRecord>();
 
   constructor(dataDir = join(homedir(), ".agent-manager")) {
     mkdirSync(dataDir, { recursive: true });
     this.path = join(dataDir, "worktree-cleanup.json");
     this.historyPath = join(dataDir, "worktree-cleanup-history.json");
+    this.retainedRefPath = join(dataDir, "worktree-retained-refs.json");
+    this.retainedRefHistoryPath = join(dataDir, "worktree-retained-ref-history.json");
     try {
       const parsed = JSON.parse(readFileSync(this.path, "utf8")) as WorktreeCleanupRecord[];
       if (Array.isArray(parsed)) for (const record of parsed) this.records.set(this.key(record), record);
@@ -196,11 +258,41 @@ export class WorktreeCleanupJournal {
         throw new Error(`could not read worktree cleanup history ${this.historyPath}: ${(error as Error).message}`);
       }
     }
+    try {
+      const parsed = JSON.parse(readFileSync(this.retainedRefPath, "utf8")) as RetainedWorktreeRefRecord[];
+      if (Array.isArray(parsed)) for (const record of parsed) this.retainedRefs.set(this.retainedRefKey(record), record);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(`could not read retained worktree refs ${this.retainedRefPath}: ${(error as Error).message}`);
+      }
+    }
+    try {
+      const parsed = JSON.parse(readFileSync(this.retainedRefHistoryPath, "utf8")) as RetainedWorktreeRefRecord[];
+      if (Array.isArray(parsed)) {
+        for (const record of parsed) this.completedRetainedRefs.set(this.retainedRefKey(record), record);
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw new Error(`could not read retained worktree ref history ${this.retainedRefHistoryPath}: ${(error as Error).message}`);
+      }
+    }
+    // A terminal receipt is written before its pending row is removed. If the runner crashes
+    // between those atomic writes, the receipt wins: replaying the stale row could otherwise
+    // delete a same-name ref recreated after reclamation completed.
+    let removedTerminalPending = false;
+    for (const key of this.completedRetainedRefs.keys()) {
+      removedTerminalPending = this.retainedRefs.delete(key) || removedTerminalPending;
+    }
+    if (removedTerminalPending) this.flushRetainedRefs();
   }
 
   list(): WorktreeCleanupRecord[] { return [...this.records.values()]; }
 
   history(): WorktreeCleanupRecord[] { return [...this.completedRecords.values()]; }
+
+  listRetainedRefs(): RetainedWorktreeRefRecord[] { return [...this.retainedRefs.values()]; }
+
+  retainedRefHistory(): RetainedWorktreeRefRecord[] { return [...this.completedRetainedRefs.values()]; }
 
   add(record: WorktreeCleanupRecord): void {
     this.records.set(this.key(record), record);
@@ -236,15 +328,96 @@ export class WorktreeCleanupJournal {
     this.remove(record.sessionId, record.worktreeId ?? "legacy");
   }
 
+  /** First ownership wins. A retry must never bless a ref that advanced or was recreated under
+   * the same name, and a terminal receipt must never be re-armed by stale cleanup replay. */
+  addRetainedRef(record: RetainedWorktreeRefRecord): RetainedWorktreeRefRecord {
+    const key = this.retainedRefKey(record);
+    const existing = this.retainedRefs.get(key) ?? this.completedRetainedRefs.get(key);
+    if (existing) return existing;
+    this.retainedRefs.set(key, structuredClone(record));
+    this.flushRetainedRefs();
+    return record;
+  }
+
+  updateRetainedRef(record: RetainedWorktreeRefRecord): void {
+    const key = this.retainedRefKey(record);
+    if (!this.retainedRefs.has(key)) return;
+    this.retainedRefs.set(key, structuredClone(record));
+    this.flushRetainedRefs();
+  }
+
+  armRetainedRefs(sessionId: string, worktreeId?: string, cleanupId?: string): void {
+    const now = Date.now();
+    let changed = false;
+    for (const [key, record] of this.retainedRefs) {
+      if (record.sessionId !== sessionId ||
+          (record.worktreeId ?? "legacy") !== (worktreeId ?? "legacy") ||
+          (record.cleanupId ?? "legacy-cleanup") !== (cleanupId ?? "legacy-cleanup") || record.armedAt) continue;
+      this.retainedRefs.set(key, { ...record, armedAt: now, updatedAt: now });
+      changed = true;
+    }
+    if (changed) this.flushRetainedRefs();
+  }
+
+  removeUnarmedRetainedRefs(sessionId: string, worktreeId?: string, cleanupId?: string): void {
+    let changed = false;
+    for (const [key, record] of this.retainedRefs) {
+      if (record.sessionId !== sessionId || record.armedAt ||
+          (record.worktreeId ?? "legacy") !== (worktreeId ?? "legacy") ||
+          (record.cleanupId ?? "legacy-cleanup") !== (cleanupId ?? "legacy-cleanup")) continue;
+      this.retainedRefs.delete(key);
+      changed = true;
+    }
+    if (changed) this.flushRetainedRefs();
+  }
+
+  finishRetainedRef(
+    record: RetainedWorktreeRefRecord,
+    state: "completed" | "retained",
+    terminalReason: RetainedWorktreeRefTerminalReason,
+  ): void {
+    const key = this.retainedRefKey(record);
+    // Concurrent startup/periodic/post-cleanup sweeps can all hold the same pending snapshot.
+    // The first terminal receipt is authoritative: a later stale sweep that observes the ref
+    // already missing must not replace an exact `deleted` receipt with `already_missing`.
+    if (this.completedRetainedRefs.has(key)) return;
+    const completed = {
+      ...structuredClone(record),
+      state,
+      pendingReason: undefined,
+      terminalReason,
+      updatedAt: Date.now(),
+      completedAt: Date.now(),
+    } satisfies RetainedWorktreeRefRecord;
+    this.completedRetainedRefs.set(key, completed);
+    while (this.completedRetainedRefs.size > 256) {
+      const oldest = this.completedRetainedRefs.keys().next().value as string | undefined;
+      if (oldest === undefined) break;
+      this.completedRetainedRefs.delete(oldest);
+    }
+    this.flushFile(this.retainedRefHistoryPath, this.retainedRefHistory());
+    if (this.retainedRefs.delete(key)) this.flushRetainedRefs();
+  }
+
   private key(record: WorktreeCleanupRecord): string {
     return `${record.sessionId}\0${record.worktreeId ?? "legacy"}`;
+  }
+
+  private retainedRefKey(
+    record: Pick<RetainedWorktreeRefRecord, "sessionId" | "worktreeId" | "cleanupId" | "branch">,
+  ): string {
+    return `${record.sessionId}\0${record.worktreeId ?? "legacy"}\0${record.cleanupId ?? "legacy-cleanup"}\0${record.branch}`;
   }
 
   private flush(): void {
     this.flushFile(this.path, this.list());
   }
 
-  private flushFile(path: string, records: WorktreeCleanupRecord[]): void {
+  private flushRetainedRefs(): void {
+    this.flushFile(this.retainedRefPath, this.listRetainedRefs());
+  }
+
+  private flushFile<T>(path: string, records: T[]): void {
     const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
     let fd: number | undefined;
     try {
@@ -1093,6 +1266,192 @@ export type SafeWorktreeDiscardResult =
       reason: "detached_head" | "not_runner_owned" | "dirty" | "no_upstream" | "unpushed" | "unavailable";
     };
 
+export type RetainedWorktreeRefReclaimResult =
+  | { state: "pending"; reason: RetainedWorktreeRefPendingReason }
+  | { state: "completed"; reason: "deleted" | "already_missing" }
+  | {
+      state: "retained";
+      reason: "default_branch" | "default_unproved_at_handoff" | "ref_changed_or_recreated" |
+        "identity_unproved" | "delivery_unproved";
+    };
+
+async function localBranchOid(
+  context: AgentContext,
+  repoPath: string,
+  ref: string,
+): Promise<string | undefined> {
+  const refs = await command(
+    context,
+    repoPath,
+    ["for-each-ref", "--format=%(refname)%09%(objectname)", ref],
+  );
+  const oid = refs.split(/\r?\n/u).map((line) => line.split("\t", 2))
+    .find(([candidate]) => candidate === ref)?.[1]?.trim();
+  if (!oid) return undefined;
+  if (!/^[a-f0-9]{40,64}$/u.test(oid)) throw new Error("local branch has an invalid object id");
+  return oid;
+}
+
+async function localBranchIdentity(
+  context: AgentContext,
+  repoPath: string,
+  ref: string,
+): Promise<{ oid: string; identityToken?: string } | undefined> {
+  const oid = await localBranchOid(context, repoPath, ref);
+  if (!oid) return undefined;
+  let identityToken: string | undefined;
+  try {
+    const reflog = await command(context, repoPath, [
+      "reflog", "show", "--max-count=1", "--date=raw",
+      "--format=%H%x00%gD%x00%gs",
+      ref,
+    ]);
+    const commonDir = (await command(
+      context,
+      repoPath,
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )).trim().replace(/[\\/]+$/u, "");
+    const reflogPath = context.kind === "wsl"
+      ? `${commonDir}/logs/${ref}`
+      : join(commonDir, "logs", ...ref.split("/"));
+    const fileIdentity = context.kind === "wsl"
+      ? (await runContextCommand(
+          context,
+          "stat",
+          ["-c", "%d:%i:%w:%z:%s", "--", reflogPath],
+          { cwd: "/", timeoutMs: 8_000 },
+        )).stdout.trim()
+      : (() => {
+          const stat = statSync(reflogPath);
+          return `${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.ctimeMs}:${stat.size}`;
+        })();
+    if (reflog && fileIdentity) {
+      identityToken = createHash("sha256").update(reflog).update("\0").update(fileIdentity).digest("hex");
+    }
+  } catch {
+    // A missing reflog is not permission to delete. Persist the OID-only ownership record and
+    // let reclamation terminally retain it as identity_unproved.
+  }
+  const confirmedOid = await localBranchOid(context, repoPath, ref);
+  if (confirmedOid !== oid) throw new Error("local branch changed while its identity was captured");
+  return { oid, ...(identityToken ? { identityToken } : {}) };
+}
+
+async function retainedRefDeliveryProven(
+  record: RetainedWorktreeRefRecord,
+  context: AgentContext,
+  ref: string,
+  defaultBranch: string,
+): Promise<boolean> {
+  if (record.verifiedMergedHead === record.expectedOid) return true;
+  try {
+    await command(context, record.repoPath, ["rev-parse", "--verify", `${record.branch}@{upstream}`]);
+    const ahead = (await command(
+      context,
+      record.repoPath,
+      ["rev-list", "--count", `${record.branch}@{upstream}..${ref}`],
+    )).trim();
+    if (/^\d+$/u.test(ahead) && ahead === "0") return true;
+  } catch {
+    // A missing or unreadable upstream may still be replaced by default-branch containment.
+  }
+  try {
+    const validatedDefault = await validateBranch(context, record.repoPath, defaultBranch);
+    const defaultRef = `refs/remotes/origin/${validatedDefault}`;
+    const ahead = (await command(
+      context,
+      record.repoPath,
+      ["rev-list", "--count", `${defaultRef}..${ref}`],
+    )).trim();
+    return /^\d+$/u.test(ahead) && ahead === "0";
+  } catch {
+    return false;
+  }
+}
+
+/** Reclaim one retained local branch only after re-proving every safety property. The final
+ * update-ref is compare-and-delete against the captured object id after a generation check, so an
+ * advance or same-OID recreation is retained. A crash after deletion is idempotent: the next pass
+ * observes an already-missing ref. */
+export async function reclaimRetainedWorktreeRef(
+  record: RetainedWorktreeRefRecord,
+  options: WorktreeOptions & { beforeDelete?: () => Promise<void> } = {},
+): Promise<RetainedWorktreeRefReclaimResult> {
+  const context = options.context ?? record.context;
+  if (JSON.stringify(context) !== JSON.stringify(record.context) ||
+      !/^[a-f0-9]{40,64}$/u.test(record.expectedOid)) {
+    return { state: "pending", reason: "git_unavailable" };
+  }
+  let branch: string;
+  try {
+    branch = await validateBranch(context, record.repoPath, record.branch);
+  } catch {
+    return { state: "pending", reason: "git_unavailable" };
+  }
+  const ref = `refs/heads/${branch}`;
+  try {
+    if (record.reasons.includes("default_branch")) {
+      return { state: "retained", reason: "default_branch" };
+    }
+    if (record.reasons.includes("default_unknown")) {
+      return { state: "retained", reason: "default_unproved_at_handoff" };
+    }
+    const defaultBranch = await readRepositoryDefaultBranch(record.repoPath, { ...options, context });
+    if (!defaultBranch) return { state: "pending", reason: "default_unknown" };
+    if (defaultBranch === branch) return { state: "retained", reason: "default_branch" };
+
+    const checkedOut = parseWorktreePorcelain(
+      await command(context, record.repoPath, ["worktree", "list", "--porcelain", "-z"]),
+    ).some((entry) => entry.branch === branch);
+    if (checkedOut) return { state: "pending", reason: "checked_out" };
+
+    const currentIdentity = await localBranchIdentity(context, record.repoPath, ref);
+    if (!currentIdentity) return { state: "completed", reason: "already_missing" };
+    if (currentIdentity.oid !== record.expectedOid) {
+      return { state: "retained", reason: "ref_changed_or_recreated" };
+    }
+    if (!record.identityToken || !currentIdentity.identityToken) {
+      return { state: "retained", reason: "identity_unproved" };
+    }
+    if (currentIdentity.identityToken !== record.identityToken) {
+      return { state: "retained", reason: "ref_changed_or_recreated" };
+    }
+    if (!await retainedRefDeliveryProven(record, context, ref, defaultBranch)) {
+      return { state: "retained", reason: "delivery_unproved" };
+    }
+
+    await options.beforeDelete?.();
+
+    // Re-read the mutable global facts immediately before the compare-and-delete. A default-branch
+    // change or a newly shared checkout is never treated as permission inherited from an old scan.
+    const finalDefault = await readRepositoryDefaultBranch(record.repoPath, { ...options, context });
+    if (!finalDefault) return { state: "pending", reason: "default_unknown" };
+    if (finalDefault === branch) return { state: "retained", reason: "default_branch" };
+    const finallyCheckedOut = parseWorktreePorcelain(
+      await command(context, record.repoPath, ["worktree", "list", "--porcelain", "-z"]),
+    ).some((entry) => entry.branch === branch);
+    if (finallyCheckedOut) return { state: "pending", reason: "checked_out" };
+    const finalIdentity = await localBranchIdentity(context, record.repoPath, ref);
+    if (!finalIdentity) return { state: "completed", reason: "already_missing" };
+    if (finalIdentity.oid !== record.expectedOid || finalIdentity.identityToken !== record.identityToken) {
+      return { state: "retained", reason: "ref_changed_or_recreated" };
+    }
+    try {
+      await command(context, record.repoPath, ["update-ref", "-d", ref, record.expectedOid]);
+      return { state: "completed", reason: "deleted" };
+    } catch {
+      const after = await localBranchOid(context, record.repoPath, ref);
+      if (!after) return { state: "completed", reason: "already_missing" };
+      if (after !== record.expectedOid) {
+        return { state: "retained", reason: "ref_changed_or_recreated" };
+      }
+      return { state: "pending", reason: "git_unavailable" };
+    }
+  } catch {
+    return { state: "pending", reason: "git_unavailable" };
+  }
+}
+
 /** Remove one inactive runner-owned worktree only after proving it has no local-only state.
  * The worktree removal is intentionally non-force, so a concurrent file write fails closed. The
  * branch delete is compare-and-delete against the exact inspected OID, so a concurrent commit is
@@ -1101,7 +1460,11 @@ export async function discardWorktreeIfSafe(
   repoPath: string,
   sessionId: string,
   handle: WorktreeHandle & { source: "legacy" | "created" },
-  options: WorktreeOptions & { verifiedMergedHead?: string; beforeRemove?: () => Promise<void> } = {},
+  options: WorktreeOptions & {
+    verifiedMergedHead?: string;
+    beforeRemove?: () => Promise<void>;
+    retainRefs?: (refs: RetainedWorktreeRefCandidate[]) => Promise<void>;
+  } = {},
 ): Promise<SafeWorktreeDiscardResult> {
   const context = options.context ?? nativeContext;
   const recordedBranch = await validateBranch(context, repoPath, handle.branch);
@@ -1150,38 +1513,43 @@ export async function discardWorktreeIfSafe(
           return { removed: false, reason: "unavailable" };
         }
       }
+      // Once Git no longer registers the worktree, no current branch identity links an arbitrary
+      // local ref to this cleanup occurrence. Treat removal as complete and let any candidate
+      // durably captured by the original pass flow through the retained-ref reclaimer. Process
+      // retirement and teardown still run: the missing directory does not prove its descendants
+      // exited, and their port allocation must not be released while they remain live.
+      await options.beforeRemove?.();
+      return { removed: true };
     }
 
-    let head: string;
-    if (registered) {
-      if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
-        return { removed: false, reason: "dirty" };
-      }
-      head = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
-    } else {
-      try {
-        head = (await command(context, repoPath, ["rev-parse", "--verify", ref])).trim();
-      } catch {
-        return { removed: true };
-      }
+    if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
+      return { removed: false, reason: "dirty" };
     }
+    const head = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
 
     // Git permits another worktree to deliberately share this branch via
     // --ignore-other-worktrees. Removing this worktree must not detach that sibling from its ref,
     // whether this checkout still uses the recorded branch or switched to a replacement.
     let preserveCheckedOutRef = branchCheckedOutElsewhere;
+    const checkedOutRefReasons: RetainedWorktreeRefReason[] = branchCheckedOutElsewhere
+      ? ["shared_checkout"]
+      : [];
+    let checkedOutVerifiedMergedHead: string | undefined;
     if (branchChanged) {
       // A pushed-but-unmerged replacement is not enough: unlike the recorded branch, its upstream
       // was never part of the ownership record. Require delivery proof or no work beyond default.
       const mergedHead = options.verifiedMergedHead;
       let safeChangedHead = typeof mergedHead === "string" && /^[a-f0-9]{40,64}$/u.test(mergedHead) &&
         mergedHead === head;
+      if (safeChangedHead) checkedOutVerifiedMergedHead = mergedHead;
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       // Removing a runner-owned worktree must not remove the repository's conventional local base
       // ref when an agent temporarily checked it out for inspection. An unknown default cannot
       // prove the checked-out ref is disposable, and another worktree may deliberately share the
       // ref via --ignore-other-worktrees, so retain the ref while still removing this tree.
+      if (!defaultBranch) checkedOutRefReasons.push("default_unknown");
+      else if (defaultBranch === branch) checkedOutRefReasons.push("default_branch");
       preserveCheckedOutRef ||= !defaultBranch || defaultBranch === branch;
       if (!safeChangedHead) {
         if (defaultBranch) {
@@ -1222,23 +1590,50 @@ export async function discardWorktreeIfSafe(
           return { removed: false, reason: "no_upstream" };
         }
         if (mergedHead !== head) return { removed: false, reason: "unpushed" };
+        checkedOutVerifiedMergedHead = mergedHead;
       }
     }
+
+    const retainedRefs: RetainedWorktreeRefCandidate[] = [];
+    if (branchChanged) {
+      const recordedRef = `refs/heads/${recordedBranch}`;
+      const recordedIdentity = await localBranchIdentity(context, repoPath, recordedRef);
+      if (recordedIdentity) {
+        retainedRefs.push({
+          branch: recordedBranch,
+          expectedOid: recordedIdentity.oid,
+          ...(recordedIdentity.identityToken ? { identityToken: recordedIdentity.identityToken } : {}),
+          reasons: ["recorded_branch"],
+        });
+      }
+    }
+    if (preserveCheckedOutRef) {
+      const checkedOutIdentity = await localBranchIdentity(context, repoPath, ref);
+      if (!checkedOutIdentity || checkedOutIdentity.oid !== head) {
+        return { removed: false, reason: "unavailable" };
+      }
+      retainedRefs.push({
+        branch,
+        expectedOid: head,
+        ...(checkedOutIdentity.identityToken ? { identityToken: checkedOutIdentity.identityToken } : {}),
+        reasons: checkedOutRefReasons,
+        ...(checkedOutVerifiedMergedHead ? { verifiedMergedHead: checkedOutVerifiedMergedHead } : {}),
+      });
+    }
+    if (retainedRefs.length) await options.retainRefs?.(retainedRefs);
 
     // Hooks/process retirement are intentionally after the first complete safety proof and before
     // the final race-closing status/head checks. A failure here retains the worktree.
     await options.beforeRemove?.();
 
-    if (registered) {
-      // Close the widest observable race before the non-force removal. Git independently rejects
-      // a dirty tree, and update-ref below rejects a branch that advanced after this comparison.
-      if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
-        return { removed: false, reason: "dirty" };
-      }
-      const finalHead = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
-      if (finalHead !== head) return { removed: false, reason: "unpushed" };
-      await command(context, repoPath, ["worktree", "remove", handle.path], 120_000);
+    // Close the widest observable race before the non-force removal. Git independently rejects
+    // a dirty tree, and update-ref below rejects a branch that advanced after this comparison.
+    if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
+      return { removed: false, reason: "dirty" };
     }
+    const finalHead = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
+    if (finalHead !== head) return { removed: false, reason: "unpushed" };
+    await command(context, repoPath, ["worktree", "remove", handle.path], 120_000);
     // For a changed checkout `ref` is the branch actually removed with the worktree; the recorded
     // branch is deliberately untouched, whether its ref still exists or has already disappeared.
     if (!preserveCheckedOutRef) {

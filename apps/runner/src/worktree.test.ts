@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane, SessionWorktreeView } from "@wollipog/protocol";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type WorktreeCleanupRecord } from "./worktree.js";
+import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForBranch, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -619,6 +619,38 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
       "git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/missing-registered"],
     ));
 
+    const removedBeforeRetry = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/removed-before-retry",
+    }, { dataDir });
+    execFileSync("git", ["-C", removedBeforeRetry.path, "push", "-u", "origin", removedBeforeRetry.branch]);
+    const removedOriginal = execFileSync("git", ["-C", repo, "rev-parse", removedBeforeRetry.branch], {
+      encoding: "utf8",
+    }).trim();
+    execFileSync("git", ["-C", repo, "worktree", "remove", removedBeforeRetry.path]);
+    const removedAdvanced = execFileSync(
+      "git",
+      ["-C", repo, "commit-tree", `${removedOriginal}^{tree}`, "-p", removedOriginal, "-m", "operator advance"],
+      { encoding: "utf8" },
+    ).trim();
+    execFileSync("git", [
+      "-C", repo, "update-ref", `refs/heads/${removedBeforeRetry.branch}`, removedAdvanced, removedOriginal,
+    ]);
+    execFileSync("git", ["-C", repo, "push", "origin", removedBeforeRetry.branch]);
+    let missingRegistrationCleanupRan = false;
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...removedBeforeRetry,
+      source: "created",
+    }, {
+      dataDir,
+      beforeRemove: async () => { missingRegistrationCleanupRan = true; },
+    }), { removed: true });
+    assert.equal(missingRegistrationCleanupRan, true,
+      "missing-registration replay still retires descendants and runs teardown");
+    assert.equal(execFileSync("git", ["-C", repo, "rev-parse", removedBeforeRetry.branch], {
+      encoding: "utf8",
+    }).trim(), removedAdvanced, "missing-registration replay never claims the current branch generation");
+
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
       path: join(root, "operator-owned"),
       branch: "fix/not-owned",
@@ -675,6 +707,242 @@ test("safe discard preserves a shared unchanged branch but deletes an exclusive 
       "git", ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${exclusive.branch}`],
     ));
   } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("changed-branch discard durably hands off every preserved ref before removal", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-handoff-"));
+  const dataDir = join(root, "data");
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const requested = await createRequestedWorktree(repo, "s_handoff", {
+      baseRef: "HEAD",
+      branch: "agent/retained-recorded",
+    }, { dataDir });
+    execFileSync("git", ["-C", requested.path, "switch", "-c", "fix/retained-checked-out"]);
+    const head = execFileSync("git", ["-C", requested.path, "rev-parse", "HEAD"], {
+      encoding: "utf8",
+    }).trim();
+    const sibling = join(root, "sibling");
+    execFileSync("git", ["-C", repo, "worktree", "add", "--detach", sibling, "HEAD"]);
+    execFileSync("git", [
+      "-C", sibling, "switch", "--ignore-other-worktrees", "fix/retained-checked-out",
+    ]);
+    const retained: RetainedWorktreeRefCandidate[] = [];
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_handoff", {
+      ...requested,
+      source: "created",
+    }, {
+      dataDir,
+      retainRefs: async (candidates) => { retained.push(...structuredClone(candidates)); },
+    }), { removed: true });
+    assert.equal(existsSync(requested.path), false);
+    assert.deepEqual(retained.map(({ identityToken: _identityToken, ...candidate }) => candidate), [{
+      branch: "agent/retained-recorded",
+      expectedOid: head,
+      reasons: ["recorded_branch"],
+    }, {
+      branch: "fix/retained-checked-out",
+      expectedOid: head,
+      reasons: ["shared_checkout"],
+    }]);
+    assert.ok(retained.every((candidate) => /^[a-f0-9]{64}$/u.test(candidate.identityToken ?? "")),
+      "each handoff includes a reflog-generation fingerprint");
+
+    const refused = await createRequestedWorktree(repo, "s_handoff", {
+      baseRef: "HEAD",
+      branch: "agent/refused-handoff",
+    }, { dataDir });
+    execFileSync("git", ["-C", refused.path, "switch", "-c", "fix/refused-handoff"]);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_handoff", {
+      ...refused,
+      source: "created",
+    }, {
+      dataDir,
+      retainRefs: async () => { throw new Error("injected journal failure"); },
+    }), { removed: false, reason: "unavailable" });
+    assert.equal(existsSync(refused.path), true,
+      "worktree removal cannot outrun durable retained-ref ownership");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("retained ref reclamation is exact, checkout-aware, default-safe, and idempotent", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-reclaim-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const main = execFileSync("git", ["-C", repo, "rev-parse", "main"], { encoding: "utf8" }).trim();
+    const identityToken = (branch: string): string | undefined => {
+      try {
+        const reflog = execFileSync(
+          "git",
+          ["-C", repo, "reflog", "show", "--max-count=1", "--date=raw", "--format=%H%x00%gD%x00%gs", `refs/heads/${branch}`],
+          { encoding: "utf8" },
+        );
+        const commonDir = execFileSync(
+          "git",
+          ["-C", repo, "rev-parse", "--path-format=absolute", "--git-common-dir"],
+          { encoding: "utf8" },
+        ).trim();
+        const stat = statSync(join(commonDir, "logs", "refs", "heads", ...branch.split("/")));
+        const fileIdentity = `${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.ctimeMs}:${stat.size}`;
+        return reflog
+          ? createHash("sha256").update(reflog).update("\0").update(fileIdentity).digest("hex")
+          : undefined;
+      } catch {
+        return undefined;
+      }
+    };
+    const newCommit = (parent: string, message: string): string => execFileSync(
+      "git",
+      ["-C", repo, "commit-tree", `${parent}^{tree}`, "-p", parent, "-m", message],
+      { encoding: "utf8" },
+    ).trim();
+    const record = (branch: string, expectedOid: string, extra: Partial<RetainedWorktreeRefRecord> = {}) => ({
+      sessionId: "s_reclaim",
+      worktreeId: `wt-${branch}`,
+      repoPath: repo,
+      context: { kind: "native" as const },
+      branch,
+      expectedOid,
+      identityToken: identityToken(branch),
+      reasons: ["recorded_branch" as const],
+      state: "pending" as const,
+      createdAt: 1,
+      updatedAt: 1,
+      ...extra,
+    });
+    const publish = (branch: string) => {
+      execFileSync("git", ["-C", repo, "branch", branch, main]);
+      execFileSync("git", ["-C", repo, "push", "-u", "origin", branch]);
+    };
+
+    publish("fix/shared-retained");
+    const sibling = join(root, "sibling");
+    execFileSync("git", ["-C", repo, "worktree", "add", "--detach", sibling, main]);
+    execFileSync("git", ["-C", sibling, "switch", "fix/shared-retained"]);
+    const shared = record("fix/shared-retained", main, { reasons: ["shared_checkout"] });
+    assert.deepEqual(await reclaimRetainedWorktreeRef(shared), { state: "pending", reason: "checked_out" });
+    execFileSync("git", ["-C", sibling, "switch", "--detach"]);
+    assert.deepEqual(await reclaimRetainedWorktreeRef(shared), { state: "completed", reason: "deleted" });
+    assert.deepEqual(await reclaimRetainedWorktreeRef(shared), { state: "completed", reason: "already_missing" },
+      "a crash after compare-and-delete is idempotently finalized");
+
+    publish("fix/advanced-retained");
+    const advanced = record("fix/advanced-retained", main);
+    execFileSync("git", ["-C", repo, "update-ref", "refs/heads/fix/advanced-retained", newCommit(main, "advance")]);
+    assert.deepEqual(await reclaimRetainedWorktreeRef(advanced), {
+      state: "retained", reason: "ref_changed_or_recreated",
+    });
+
+    publish("fix/recreated-retained");
+    const recreated = record("fix/recreated-retained", main);
+    execFileSync("git", ["-C", repo, "update-ref", "-d", "refs/heads/fix/recreated-retained", main]);
+    execFileSync("git", ["-C", repo, "update-ref", "refs/heads/fix/recreated-retained", newCommit(main, "reuse")]);
+    assert.deepEqual(await reclaimRetainedWorktreeRef(recreated), {
+      state: "retained", reason: "ref_changed_or_recreated",
+    });
+
+    publish("fix/same-oid-recreated-retained");
+    const sameOidRecreated = record("fix/same-oid-recreated-retained", main);
+    execFileSync("git", ["-C", repo, "update-ref", "-d", "refs/heads/fix/same-oid-recreated-retained", main]);
+    execFileSync("git", ["-C", repo, "branch", "fix/same-oid-recreated-retained", main]);
+    assert.deepEqual(await reclaimRetainedWorktreeRef(sameOidRecreated), {
+      state: "retained", reason: "ref_changed_or_recreated",
+    }, "same-name recreation is retained even when it points to the captured commit");
+
+    publish("fix/unproved-identity-retained");
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("fix/unproved-identity-retained", main, {
+      identityToken: undefined,
+    })), { state: "retained", reason: "identity_unproved" },
+    "records without generation proof are never retroactively granted deletion ownership");
+
+    publish("fix/default-at-handoff-retained");
+    execFileSync("git", ["-C", repo, "branch", "develop", main]);
+    execFileSync("git", ["-C", repo, "push", "origin", "develop"]);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "develop"]);
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("fix/default-at-handoff-retained", main, {
+      reasons: ["default_branch"],
+    })), { state: "retained", reason: "default_branch" },
+    "a ref retained as the default is never claimed after the remote default changes");
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("fix/default-at-handoff-retained", main, {
+      reasons: ["default_unknown"],
+    })), { state: "retained", reason: "default_unproved_at_handoff" });
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+
+    execFileSync("git", ["-C", repo, "branch", "fix/prefix-only/child", main]);
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("fix/prefix-only", main)), {
+      state: "completed", reason: "already_missing",
+    }, "a prefix-sharing child ref is not mistaken for the exact retained ref");
+
+    publish("fix/unarmed-retained");
+    const dataDir = join(root, "unarmed-data");
+    const unarmed = record("fix/unarmed-retained", main, {
+      sessionId: "s_unarmed",
+      worktreeId: "wt-unarmed",
+    });
+    new WorktreeCleanupJournal(dataDir).addRetainedRef(unarmed);
+    manager = new SessionManager(
+      () => {},
+      () => {},
+      new SessionStore(join(dataDir, "sessions")),
+      "runner",
+      undefined,
+      undefined,
+      dataDir,
+    );
+    const privateManager = manager as unknown as {
+      cleanupJournal: WorktreeCleanupJournal;
+      replayRetainedRefReclaims(): Promise<void>;
+    };
+    await privateManager.replayRetainedRefReclaims();
+    execFileSync("git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/unarmed-retained"]);
+    privateManager.cleanupJournal.armRetainedRefs("s_unarmed", "wt-unarmed");
+    await privateManager.replayRetainedRefReclaims();
+    assert.throws(() => execFileSync(
+      "git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/fix/unarmed-retained"],
+    ), "reclamation becomes eligible only after worktree cleanup arms the durable row");
+
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("main", main)), {
+      state: "retained", reason: "default_branch",
+    });
+
+    publish("fix/unknown-default-retained");
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "-d"]);
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("fix/unknown-default-retained", main)), {
+      state: "pending", reason: "default_unknown",
+    });
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+
+    const undeliveredOid = newCommit(main, "undelivered");
+    execFileSync("git", ["-C", repo, "update-ref", "refs/heads/fix/undelivered-retained", undeliveredOid]);
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("fix/undelivered-retained", undeliveredOid)), {
+      state: "retained", reason: "delivery_unproved",
+    });
+
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("fix/already-missing", main)), {
+      state: "completed", reason: "already_missing",
+    });
+
+    publish("fix/racing-retained");
+    const racing = record("fix/racing-retained", main);
+    const racingHead = newCommit(main, "racing advance");
+    assert.deepEqual(await reclaimRetainedWorktreeRef(racing, {
+      beforeDelete: async () => {
+        execFileSync("git", ["-C", repo, "update-ref", "refs/heads/fix/racing-retained", racingHead]);
+      },
+    }), { state: "retained", reason: "ref_changed_or_recreated" },
+    "the final object-id compare retains an advance racing deletion");
+    assert.equal(execFileSync("git", ["-C", repo, "rev-parse", "fix/racing-retained"], {
+      encoding: "utf8",
+    }).trim(), racingHead);
+  } finally {
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -777,6 +1045,60 @@ test("managed discard verifies a changed checkout and names an unproved branch",
     execFileSync("git", [
       "-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/agent/s_changed_branch_discovered",
     ]);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("managed retained refs survive runner restart and reclaim after a shared checkout releases", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-restart-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_retained_restart", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const selected = await manager.requestWorktree("s_retained_restart", {
+      baseRef: "HEAD", branch: "agent/retained-after-switch",
+    });
+    execFileSync("git", ["-C", selected.worktree.path, "switch", "-c", "fix/delivered-replacement"]);
+    const sibling = join(root, "sibling");
+    execFileSync("git", ["-C", repo, "worktree", "add", "--detach", sibling, "HEAD"]);
+    execFileSync("git", ["-C", sibling, "switch", "agent/retained-after-switch"]);
+
+    const discarded = await manager.discardWorktree("s_retained_restart", selected.worktree.path);
+    assert.deepEqual(discarded.retirement, { status: "removed" });
+    assert.equal(existsSync(selected.worktree.path), false);
+    await waitForCondition(
+      () => new WorktreeCleanupJournal(dataDir).listRetainedRefs()[0]?.pendingReason === "checked_out",
+      "the shared recorded ref was not durably marked pending",
+    );
+    manager.shutdownAll();
+    manager = undefined;
+
+    execFileSync("git", ["-C", sibling, "switch", "--detach"]);
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    manager.reconcileStore();
+    await waitForCondition(
+      () => new WorktreeCleanupJournal(dataDir).listRetainedRefs().length === 0,
+      "startup replay did not finish retained-ref reclamation",
+    );
+    assert.throws(() => execFileSync(
+      "git", ["-C", repo, "show-ref", "--verify", "--quiet", "refs/heads/agent/retained-after-switch"],
+    ));
+    const receipt = new WorktreeCleanupJournal(dataDir).retainedRefHistory()
+      .find((item) => item.branch === "agent/retained-after-switch");
+    assert.equal(receipt?.state, "completed");
+    assert.equal(receipt?.terminalReason, "deleted");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
@@ -967,6 +1289,68 @@ test("cleanup journal survives restart and removes records atomically", () => {
     assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), [record]);
     new WorktreeCleanupJournal(dataDir).remove("s1");
     assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), []);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("retained ref journal survives restart and never re-arms a completed or replaced identity", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-journal-"));
+  try {
+    const record: RetainedWorktreeRefRecord = {
+      sessionId: "s1",
+      worktreeId: "wt1",
+      cleanupId: "cleanup-1",
+      repoPath: "/repo",
+      context: { kind: "native" },
+      branch: "fix/retained",
+      expectedOid: "a".repeat(40),
+      reasons: ["recorded_branch"],
+      state: "pending",
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const journal = new WorktreeCleanupJournal(dataDir);
+    journal.addRetainedRef(record);
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [record]);
+    journal.armRetainedRefs("s1", "other-worktree", "cleanup-1");
+    assert.equal(new WorktreeCleanupJournal(dataDir).listRetainedRefs()[0]?.armedAt, undefined);
+    journal.armRetainedRefs("s1", "wt1", "cleanup-1");
+    const armedRecord = new WorktreeCleanupJournal(dataDir).listRetainedRefs()[0]!;
+    assert.equal(typeof armedRecord.armedAt, "number");
+    journal.removeUnarmedRetainedRefs("s1", "wt1", "cleanup-1");
+    assert.equal(new WorktreeCleanupJournal(dataDir).listRetainedRefs().length, 1,
+      "an armed ownership row is never removed as an abandoned intent");
+
+    const changed = { ...record, expectedOid: "b".repeat(40), updatedAt: 2 };
+    assert.equal(journal.addRetainedRef(changed).expectedOid, record.expectedOid,
+      "a retry cannot bless an advanced or recreated ref");
+    armedRecord.pendingReason = "checked_out";
+    armedRecord.updatedAt = 3;
+    journal.updateRetainedRef(armedRecord);
+    assert.equal(new WorktreeCleanupJournal(dataDir).listRetainedRefs()[0]?.pendingReason, "checked_out");
+
+    journal.finishRetainedRef(armedRecord, "completed", "deleted");
+    journal.finishRetainedRef(armedRecord, "completed", "already_missing");
+    const restarted = new WorktreeCleanupJournal(dataDir);
+    assert.deepEqual(restarted.listRetainedRefs(), []);
+    assert.equal(restarted.retainedRefHistory()[0]?.state, "completed");
+    assert.equal(restarted.retainedRefHistory()[0]?.terminalReason, "deleted");
+    assert.equal(restarted.retainedRefHistory().length, 1,
+      "a stale concurrent reaper cannot replace the first terminal receipt");
+    writeFileSync(join(dataDir, "worktree-retained-refs.json"), JSON.stringify([record]));
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [],
+      "a terminal receipt wins the crash window before pending-state removal");
+    restarted.addRetainedRef(changed);
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [],
+      "stale cleanup replay cannot re-arm a terminal generation");
+    const laterGeneration = { ...changed, cleanupId: "cleanup-2", updatedAt: 4 };
+    restarted.addRetainedRef(laterGeneration);
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [laterGeneration],
+      "a later cleanup occurrence owns its ref independently of an old terminal receipt");
+    restarted.removeUnarmedRetainedRefs("s1", "wt1", "cleanup-2");
+    assert.deepEqual(new WorktreeCleanupJournal(dataDir).listRetainedRefs(), [],
+      "an abandoned cleanup removes only its own unarmed ownership rows");
   } finally {
     rmSync(dataDir, { recursive: true, force: true });
   }
