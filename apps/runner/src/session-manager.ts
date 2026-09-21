@@ -593,7 +593,7 @@ interface ProviderRetirement {
 
 interface ApprovedProviderAuthentication {
   recoveryId: string;
-  identityId: string;
+  identityId?: string;
 }
 
 type ProviderReplacementResult =
@@ -15020,10 +15020,12 @@ export class SessionManager {
       this.parkProviderAuthentication(current, scope, "launch", "not_delivered");
       return false;
     }
+    if (approvedAuthentication && observation.status !== "authenticated") return false;
     if (observation.status !== "authenticated") return true;
     if (approvedAuthentication &&
         current.providerAuthBlock?.recoveryId === approvedAuthentication.recoveryId &&
-        observation.identityId === approvedAuthentication.identityId) {
+        (approvedAuthentication.identityId === undefined ||
+          observation.identityId === approvedAuthentication.identityId)) {
       // A changed-account recovery must keep its durable admission barrier until the fresh
       // persistent process is ready. This launch-local proof allows only the replacement
       // generation through preflight; it does not clear or resolve the recovery incident.
@@ -15894,13 +15896,10 @@ export class SessionManager {
       const retainedEvidence = targetOnly
         ? observation.identityEvidence
         : mergeProviderAuthIdentityEvidence(block.expectedIdentityEvidence, observation.identityEvidence);
-      const acceptedIdentityChanged = targetOnly && meta.driver === "codex-app-server" &&
-        !!observation.identityId &&
-        !compareProviderAuthIdentity(
-          block.expectedIdentityId,
-          block.expectedIdentityEvidence,
-          observation,
-        ).matches;
+      // Use Current Account is offered only after identity cannot be matched to the recorded
+      // session baseline. Codex keeps credentials in process memory, so even a provider that
+      // cannot expose a stable identity id must cross a fresh-process boundary after acceptance.
+      const acceptedIdentityChanged = targetOnly && meta.driver === "codex-app-server";
       const candidateSessionId = meta.sessionId;
       const staleEntry = acceptedIdentityChanged ? this.active.get(candidateSessionId) : undefined;
       if (staleEntry) {
@@ -15909,12 +15908,14 @@ export class SessionManager {
           queueFailureReason: "provider could not resume after authentication changed",
           approvedAuthentication: {
             recoveryId: block.recoveryId,
-            identityId: observation.identityId!,
+            ...(observation.identityId ? { identityId: observation.identityId } : {}),
           },
         });
         if (replacement.status !== "launched") {
           const current = this.store.readMeta(candidateSessionId);
+          if (replacement.status === "superseded") continue;
           if (current?.providerAuthBlock?.recoveryId === block.recoveryId && current.status !== "stopped") {
+            const preflightReparked = current.providerAuthBlock.reason !== block.reason;
             const detail = replacement.status === "not_resumable"
               ? "The existing Codex conversation has no resumable thread identifier. The stale provider was not reused."
               : replacement.status === "lock_unavailable"
@@ -15922,9 +15923,11 @@ export class SessionManager {
               : replacement.status === "retirement_failed"
               ? "The stale Codex process could not be stopped. It was not reused; retry authentication recovery after it exits."
               : "Codex could not resume the existing conversation with the accepted account. Retry authentication recovery.";
-            const pendingApproval = this.providerAuthenticationProjection(current, current.providerAuthBlock, detail);
+            const pendingApproval = preflightReparked
+              ? current.pendingApproval
+              : this.providerAuthenticationProjection(current, current.providerAuthBlock, detail);
             const updated = this.store.patchMeta(candidateSessionId, {
-              pendingApproval,
+              ...(pendingApproval ? { pendingApproval } : {}),
               status: "input_required",
             });
             this.store.flush(candidateSessionId);
