@@ -179,6 +179,79 @@ test("deploy badges rank offline, conflict, error, digest and link gaps, then de
   ] }), [{ path: "~/.codex/skills/good", reason: "Good." }]);
 });
 
+test("account-scoped deploy badges require every applicable sibling account link", () => {
+  const desired = { versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" as const }] };
+  const agents = [{ id: "claude", driver: "claude-code" as const }];
+  const providerAccounts = [
+    { id: "work", label: "Work", provider: "claude" as const },
+    { id: "personal", label: "Personal", provider: "claude" as const },
+  ];
+  const deployed = [
+    { name: "code-review", digest: "d1", providerAccountId: "work",
+      links: [{ agentId: "claude", status: "linked" as const }] },
+    { name: "code-review", digest: "d1", providerAccountId: "personal", links: [] },
+  ];
+
+  const pending = skillDeployBadge({
+    runnerOnline: true, desired, agents, providerAccounts,
+    reported: { deployed }, skillName: "code-review",
+  });
+  assert.equal(pending.status, "pending");
+  assert.equal(pending.detail, "Personal: Awaiting link for claude.");
+
+  deployed[1]!.links = [{ agentId: "claude", status: "linked" }];
+  assert.equal(skillDeployBadge({
+    runnerOnline: true, desired, agents, providerAccounts,
+    reported: { deployed }, skillName: "code-review",
+  }).status, "deployed");
+});
+
+test("account-scoped deploy badges ignore other providers and use unscoped WSL links", () => {
+  const providerAccounts = [
+    { id: "claude-work", label: "Claude Work", provider: "claude" as const },
+    { id: "codex-work", label: "Codex Work", provider: "codex" as const },
+  ];
+  const mixedProvider = skillDeployBadge({
+    runnerOnline: true,
+    desired: { versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" }] },
+    agents: [{ id: "claude", driver: "claude-code" }, { id: "codex", driver: "codex-app-server" }],
+    providerAccounts,
+    reported: { deployed: [{
+      name: "code-review", digest: "d1", providerAccountId: "claude-work",
+      links: [{ agentId: "claude", status: "linked" }],
+    }] },
+    skillName: "code-review",
+  });
+  assert.equal(mixedProvider.status, "deployed");
+
+  const wsl = skillDeployBadge({
+    runnerOnline: true,
+    desired: { versionDigest: "d1", targets: [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }] },
+    agents: [{ id: "codex-wsl-Ubuntu", driver: "codex", context: { kind: "wsl", distro: "Ubuntu" } }],
+    providerAccounts,
+    reported: { deployed: [
+      { name: "code-review", digest: "d1",
+        links: [{ agentId: "codex-wsl-Ubuntu", status: "linked" }] },
+      { name: "code-review", digest: "d1", providerAccountId: "codex-work",
+        links: [{ agentId: "codex", status: "linked" }] },
+    ] },
+    skillName: "code-review",
+  });
+  assert.equal(wsl.status, "deployed");
+});
+
+test("legacy unscoped deploy badges retain flattened link behavior", () => {
+  const badge = skillDeployBadge({
+    runnerOnline: true,
+    desired: { versionDigest: "d1", targets: [{ agentId: "claude", invocation: "agent" }] },
+    reported: { deployed: [{
+      name: "code-review", digest: "d1", links: [{ agentId: "claude", status: "linked" }],
+    }] },
+    skillName: "code-review",
+  });
+  assert.equal(badge.status, "deployed");
+});
+
 test("folder uploads strip the picked root, sort by path, and split text from binary", () => {
   const text = new TextEncoder().encode("---\nname: code-review\n---\nBody\n");
   const binary = new Uint8Array([0, 159, 146, 150]);

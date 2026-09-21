@@ -301,7 +301,8 @@ export function skillDeployBadge(input: {
   desired: Pick<RunnerDesiredSkill, "versionDigest" | "targets"> | undefined;
   reported: ReportedSkillsState | null | undefined;
   skillName: string;
-  providerAccounts?: ReadonlyArray<{ id: string; label: string }>;
+  agents?: ReadonlyArray<Pick<AgentDefinition, "id" | "driver" | "context">>;
+  providerAccounts?: ReadonlyArray<{ id: string; label: string; provider?: "claude" | "codex" }>;
 }): SkillDeployBadge {
   if (!input.runnerOnline) return badge("offline");
   if (input.loading) return badge("pending", "Skills status has not loaded.");
@@ -330,6 +331,37 @@ export function skillDeployBadge(input: {
   }
   if (deployed.some((row) => row.digest !== input.desired!.versionDigest)) {
     return badge("pending", "An older version is deployed. Sync to update it.");
+  }
+  const agentsById = new Map(input.agents?.map((agent) => [agent.id, agent]));
+  const accountScoped = deployed.some((row) => Boolean(row.providerAccountId));
+  if (accountScoped && input.agents && input.providerAccounts?.some((account) => account.provider)) {
+    const unscoped = deployed.filter((row) => !row.providerAccountId);
+    for (const target of input.desired.targets) {
+      const agent = agentsById.get(target.agentId);
+      const native = (agent?.context?.kind ?? "native") === "native";
+      const provider = native
+        ? agent?.driver === "claude-code"
+          ? "claude"
+          : agent?.driver === "codex" || agent?.driver === "codex-app-server"
+            ? "codex"
+            : undefined
+        : undefined;
+      const applicableAccounts = provider
+        ? input.providerAccounts.filter((account) => account.provider === provider)
+        : [];
+      if (applicableAccounts.length) {
+        for (const account of applicableAccounts) {
+          const linked = deployed.some((row) => row.providerAccountId === account.id &&
+            row.links?.some((link) => link.agentId === target.agentId && link.status === "linked"));
+          if (!linked) return badge("pending", `${account.label}: Awaiting link for ${target.agentId}.`);
+        }
+        continue;
+      }
+      const linked = unscoped.some((row) =>
+        row.links?.some((link) => link.agentId === target.agentId && link.status === "linked"));
+      if (!linked) return badge("pending", `Awaiting links for ${target.agentId}.`);
+    }
+    return badge("deployed");
   }
   const links = deployed.flatMap((row) => row.links ?? []);
   const linked = new Set(links.filter((link) => link.status === "linked").map((link) => link.agentId));

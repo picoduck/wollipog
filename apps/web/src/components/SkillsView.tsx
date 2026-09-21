@@ -538,6 +538,7 @@ export function SkillsView() {
                     desired,
                     reported: machine?.reported,
                     skillName: detail.name,
+                    agents: runner.agents,
                     providerAccounts: runner.providerAccounts,
                   });
                   const unmanaged = reportedUnmanagedSkills(machine?.reported);
