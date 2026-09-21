@@ -1484,6 +1484,200 @@ test("retained ref journal survives restart and never re-arms a completed or rep
   }
 });
 
+test("retained ref reclaims coalesce one cleanup generation without blocking independent identities", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-lanes-"));
+  let manager: SessionManager | undefined;
+  try {
+    manager = new SessionManager(
+      () => {},
+      () => {},
+      new SessionStore(join(dataDir, "sessions")),
+      "runner",
+      undefined,
+      undefined,
+      dataDir,
+    );
+    const internals = manager as unknown as {
+      cleanupJournal: WorktreeCleanupJournal;
+      retainedRefReclaimLanes: Map<string, Promise<void>>;
+      reapRetainedRef(record: RetainedWorktreeRefRecord): Promise<void>;
+      reclaimRetainedRef(record: RetainedWorktreeRefRecord): ReturnType<typeof reclaimRetainedWorktreeRef>;
+    };
+    const record = (
+      cleanupId: string,
+      branch: string,
+    ): RetainedWorktreeRefRecord => ({
+      sessionId: "s_lanes",
+      worktreeId: "wt-lanes",
+      cleanupId,
+      repoPath: "/repo",
+      context: { kind: "native" },
+      branch,
+      expectedOid: "a".repeat(40),
+      identityToken: "b".repeat(64),
+      reasons: ["deletion_intent"],
+      state: "pending",
+      armedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    const exact = record("cleanup-1", "fix/exact");
+    const otherBranch = record("cleanup-1", "fix/other");
+    const laterGeneration = record("cleanup-2", "fix/exact");
+    for (const candidate of [exact, otherBranch, laterGeneration]) {
+      internals.cleanupJournal.addRetainedRef(candidate);
+    }
+
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    const started: string[] = [];
+    internals.reclaimRetainedRef = async (candidate) => {
+      started.push(`${candidate.cleanupId}:${candidate.branch}`);
+      await gate;
+      if (candidate.cleanupId === "cleanup-2") {
+        return { state: "completed", reason: "already_missing" };
+      }
+      if (candidate.branch === "fix/other") {
+        return { state: "retained", reason: "delivery_unproved" };
+      }
+      return { state: "completed", reason: "deleted" };
+    };
+
+    const exactTriggers = Array.from({ length: 64 }, () => internals.reapRetainedRef(structuredClone(exact)));
+    const independentTriggers = [
+      internals.reapRetainedRef(structuredClone(otherBranch)),
+      internals.reapRetainedRef(structuredClone(laterGeneration)),
+    ];
+    await waitForCondition(() => started.length === 3, "independent retained-ref lanes did not start");
+    assert.equal(started.filter((key) => key === "cleanup-1:fix/exact").length, 1,
+      "all concurrent triggers for one exact cleanup generation share one attempt");
+    assert.equal(internals.retainedRefReclaimLanes.size, 3,
+      "different branches and cleanup generations are independently admitted");
+
+    release();
+    await Promise.all([...exactTriggers, ...independentTriggers]);
+    assert.equal(internals.retainedRefReclaimLanes.size, 0, "every successful lane is released");
+    assert.deepEqual(
+      internals.cleanupJournal.retainedRefHistory()
+        .map((receipt) => `${receipt.cleanupId}:${receipt.branch}:${receipt.terminalReason}`)
+        .sort(),
+      [
+        "cleanup-1:fix/exact:deleted",
+        "cleanup-1:fix/other:delivery_unproved",
+        "cleanup-2:fix/exact:already_missing",
+      ],
+      "each exact identity retains the authoritative attempt's deterministic terminal reason",
+    );
+  } finally {
+    manager?.shutdownAll();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("failed retained ref lanes release and later triggers reload the durable row", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-lane-retry-"));
+  let manager: SessionManager | undefined;
+  try {
+    manager = new SessionManager(
+      () => {},
+      () => {},
+      new SessionStore(join(dataDir, "sessions")),
+      "runner",
+      undefined,
+      undefined,
+      dataDir,
+    );
+    const internals = manager as unknown as {
+      cleanupJournal: WorktreeCleanupJournal;
+      retainedRefReclaimLanes: Map<string, Promise<void>>;
+      reapRetainedRef(record: RetainedWorktreeRefRecord): Promise<void>;
+      reclaimRetainedRef(record: RetainedWorktreeRefRecord): ReturnType<typeof reclaimRetainedWorktreeRef>;
+    };
+    const record: RetainedWorktreeRefRecord = {
+      sessionId: "s_retry_lane",
+      worktreeId: "wt-retry-lane",
+      cleanupId: "cleanup-retry-lane",
+      repoPath: "/repo",
+      context: { kind: "native" },
+      branch: "fix/retry-lane",
+      expectedOid: "a".repeat(40),
+      identityToken: "b".repeat(64),
+      reasons: ["deletion_intent"],
+      state: "pending",
+      armedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    internals.cleanupJournal.addRetainedRef(record);
+    const observed: RetainedWorktreeRefRecord[] = [];
+    let attempts = 0;
+    internals.reclaimRetainedRef = async (candidate) => {
+      attempts++;
+      observed.push(structuredClone(candidate));
+      if (attempts === 1) throw new Error("injected reclaim failure");
+      return { state: "completed", reason: "deleted" };
+    };
+
+    const first = internals.reapRetainedRef(structuredClone(record));
+    const coalesced = internals.reapRetainedRef(structuredClone(record));
+    assert.equal(first, coalesced, "concurrent callers receive the exact same in-flight attempt");
+    const failed = await Promise.allSettled([first, coalesced]);
+    assert.ok(failed.every((result) => result.status === "rejected"));
+    assert.equal(attempts, 1);
+    assert.equal(internals.retainedRefReclaimLanes.size, 0, "a rejected attempt releases its lane");
+
+    const latest = internals.cleanupJournal.currentRetainedRef(record)!;
+    latest.pendingReason = "checked_out";
+    latest.updatedAt = 99;
+    internals.cleanupJournal.updateRetainedRef(latest);
+    await internals.reapRetainedRef(structuredClone(record));
+    assert.equal(attempts, 2, "a later trigger retries after failure");
+    assert.equal(observed[1]?.pendingReason, "checked_out");
+    assert.equal(observed[1]?.updatedAt, 99,
+      "the retry uses the latest durable row instead of its stale scheduled snapshot");
+    assert.equal(internals.retainedRefReclaimLanes.size, 0, "the successful retry releases its lane");
+    assert.equal(internals.cleanupJournal.retainedRefHistory()[0]?.terminalReason, "deleted");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("retained ref pending updates roll back in memory when their durable write fails", () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-update-rollback-"));
+  try {
+    const record: RetainedWorktreeRefRecord = {
+      sessionId: "s1",
+      worktreeId: "wt1",
+      cleanupId: "cleanup-1",
+      repoPath: "/repo",
+      context: { kind: "native" },
+      branch: "fix/retained",
+      expectedOid: "a".repeat(40),
+      reasons: ["recorded_branch"],
+      state: "pending",
+      armedAt: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    const journal = new WorktreeCleanupJournal(dataDir);
+    journal.addRetainedRef(record);
+    const internals = journal as unknown as {
+      flushRetainedRefs(): void;
+    };
+    internals.flushRetainedRefs = () => { throw new Error("injected pending update ENOSPC"); };
+    assert.throws(
+      () => journal.updateRetainedRef({ ...record, pendingReason: "checked_out", updatedAt: 2 }),
+      /injected pending update ENOSPC/,
+    );
+    assert.equal(journal.currentRetainedRef(record)?.pendingReason, undefined,
+      "failed persistence cannot make an in-memory state look durable to a later trigger");
+    assert.equal(journal.currentRetainedRef(record)?.updatedAt, 1);
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("retained ref terminal persistence rolls back a failed pending-row write", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-terminal-pending-"));
   try {

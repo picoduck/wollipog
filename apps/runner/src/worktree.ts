@@ -298,6 +298,21 @@ export class WorktreeCleanupJournal {
 
   retainedRefHistory(): RetainedWorktreeRefRecord[] { return [...this.completedRetainedRefs.values()]; }
 
+  retainedRefIdentityKey(
+    record: Pick<RetainedWorktreeRefRecord, "sessionId" | "worktreeId" | "cleanupId" | "branch">,
+  ): string {
+    return this.retainedRefKey(record);
+  }
+
+  /** Reload one exact pending cleanup generation before admitting more Git work. Callers can hold
+   * stale sweep snapshots after another trigger has completed or updated the durable row. */
+  currentRetainedRef(
+    record: Pick<RetainedWorktreeRefRecord, "sessionId" | "worktreeId" | "cleanupId" | "branch">,
+  ): RetainedWorktreeRefRecord | undefined {
+    const current = this.retainedRefs.get(this.retainedRefKey(record));
+    return current ? structuredClone(current) : undefined;
+  }
+
   add(record: WorktreeCleanupRecord): void {
     this.records.set(this.key(record), record);
     this.flush();
@@ -345,9 +360,15 @@ export class WorktreeCleanupJournal {
 
   updateRetainedRef(record: RetainedWorktreeRefRecord): void {
     const key = this.retainedRefKey(record);
-    if (!this.retainedRefs.has(key)) return;
+    const previous = this.retainedRefs.get(key);
+    if (!previous) return;
     this.retainedRefs.set(key, structuredClone(record));
-    this.flushRetainedRefs();
+    try {
+      this.flushRetainedRefs();
+    } catch (error) {
+      this.retainedRefs.set(key, previous);
+      throw error;
+    }
   }
 
   armRetainedRefs(sessionId: string, worktreeId?: string, cleanupId?: string): void {
