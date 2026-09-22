@@ -126,6 +126,7 @@ export function selectProviderAccount(
   agent: Pick<AgentDefinition, "id" | "driver" | "context" | "defaultProviderAccountId"> | undefined,
   driver: AgentDriverKind,
   requestedId?: string,
+  platform: NodeJS.Platform = process.platform,
 ): BoundProviderAccount | undefined {
   const provider = providerForDriver(driver);
   if (!provider) {
@@ -138,18 +139,40 @@ export function selectProviderAccount(
     return undefined;
   }
   // Account directories use runner-host path syntax. A WSL agent may opt in explicitly (or via
-  // its configured default), but must not inherit the first native account implicitly.
-  const selectedId = requestedId ?? agent?.defaultProviderAccountId ??
-    (agent && (agent.context?.kind ?? "native") === "native" ? matching[0]?.id : undefined);
-  if (!selectedId) return undefined;
-  const selected = matching.find((candidate) => candidate.id === selectedId);
-  if (!selected) throw new Error(`provider account '${selectedId}' is not configured for ${provider}`);
+  // its configured default), but must not inherit an account implicitly because a POSIX path does
+  // not identify its owning distribution. Native implicit selection skips any WSL-local account.
+  const selectedId = requestedId ?? agent?.defaultProviderAccountId;
+  const selected = selectedId
+    ? matching.find((candidate) => candidate.id === selectedId)
+    : agent && (agent.context?.kind ?? "native") === "native"
+      ? matching.find((candidate) => providerAccountAgentContextCompatible(candidate, agent, platform))
+      : undefined;
+  if (selectedId && !selected) {
+    throw new Error(`provider account '${selectedId}' is not configured for ${provider}`);
+  }
+  if (!selected) {
+    if (agent && (agent.context?.kind ?? "native") === "native" && matching[0]) {
+      throw providerAccountContextMismatch(matching[0], agent);
+    }
+    return undefined;
+  }
+  if (agent && !providerAccountAgentContextCompatible(selected, agent, platform)) {
+    throw providerAccountContextMismatch(selected, agent);
+  }
   return {
     id: selected.id,
     label: selected.label,
     provider: selected.provider,
     credentialHome: selected.directory,
   };
+}
+
+function providerAccountContextMismatch(
+  account: Pick<RunnerProviderAccount, "id">,
+  agent: Pick<AgentDefinition, "context">,
+): Error {
+  const context = agent.context?.kind === "wsl" ? "WSL" : "native";
+  return new Error(`provider account '${account.id}' is incompatible with the selected ${context} execution context`);
 }
 
 /** Content-free, account-scoped login observation. Live launch/auth recovery performs the

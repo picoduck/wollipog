@@ -59,12 +59,96 @@ test("WSL agents do not inherit a host-path account without an explicit or confi
   };
   assert.equal(selectProviderAccount(accounts, wsl, "claude-code"), undefined);
   assert.equal(selectProviderAccount(accounts, undefined, "claude-code"), undefined);
-  assert.equal(selectProviderAccount(accounts, wsl, "claude-code", "work")?.id, "work");
-  assert.equal(selectProviderAccount(
-    accounts,
-    { ...wsl, defaultProviderAccountId: "work" },
-    "claude-code",
-  )?.id, "work");
+  assert.throws(
+    () => selectProviderAccount(accounts, wsl, "claude-code", "work", "win32"),
+    /provider account 'work' is incompatible with the selected WSL execution context/,
+  );
+  assert.throws(
+    () => selectProviderAccount(
+      accounts,
+      { ...wsl, defaultProviderAccountId: "work" },
+      "claude-code",
+      undefined,
+      "win32",
+    ),
+    /provider account 'work' is incompatible with the selected WSL execution context/,
+  );
+});
+
+test("foreground account selection rejects mixed contexts without exposing credential homes", () => {
+  const accounts = [
+    { id: "host", label: "Host", provider: "codex" as const, directory: "C:\\credentials\\host-secret" },
+    { id: "wsl", label: "WSL", provider: "codex" as const, directory: "/home/operator/secret-codex" },
+  ];
+  const native = { ...codexAgent, defaultProviderAccountId: "wsl" };
+  const wsl = {
+    ...codexAgent,
+    id: "codex-wsl",
+    context: { kind: "wsl" as const, distro: "Ubuntu" },
+    defaultProviderAccountId: "host",
+  };
+
+  for (const select of [
+    () => selectProviderAccount(accounts, native, "codex-app-server", "wsl", "win32"),
+    () => selectProviderAccount(accounts, native, "codex-app-server", undefined, "win32"),
+    () => selectProviderAccount(
+      [accounts[1]!],
+      { ...native, defaultProviderAccountId: undefined },
+      "codex-app-server",
+      undefined,
+      "win32",
+    ),
+  ]) {
+    assert.throws(select, (error: unknown) => {
+      assert.equal(
+        (error as Error).message,
+        "provider account 'wsl' is incompatible with the selected native execution context",
+      );
+      assert.doesNotMatch((error as Error).message, /secret-codex|\/home\/operator/);
+      return true;
+    });
+  }
+  for (const select of [
+    () => selectProviderAccount(accounts, wsl, "codex-app-server", "host", "win32"),
+    () => selectProviderAccount(accounts, wsl, "codex-app-server", undefined, "win32"),
+  ]) {
+    assert.throws(select, (error: unknown) => {
+      assert.equal(
+        (error as Error).message,
+        "provider account 'host' is incompatible with the selected WSL execution context",
+      );
+      assert.doesNotMatch((error as Error).message, /host-secret|credentials/);
+      return true;
+    });
+  }
+});
+
+test("foreground account selection preserves compatible native and WSL environments", () => {
+  const accounts = [
+    { id: "wsl", label: "WSL", provider: "codex" as const, directory: "/home/operator/.codex-work" },
+    { id: "host", label: "Host", provider: "codex" as const, directory: "C:\\credentials\\work" },
+  ];
+  const native = { ...codexAgent, defaultProviderAccountId: "host" };
+  const wsl = {
+    ...codexAgent,
+    id: "codex-wsl",
+    context: { kind: "wsl" as const, distro: "Ubuntu" },
+    defaultProviderAccountId: "wsl",
+  };
+
+  const explicitNative = selectProviderAccount(accounts, native, "codex-app-server", "host", "win32");
+  const defaultNative = selectProviderAccount(accounts, native, "codex-app-server", undefined, "win32");
+  const explicitWsl = selectProviderAccount(accounts, wsl, "codex-app-server", "wsl", "win32");
+  const defaultWsl = selectProviderAccount(accounts, wsl, "codex-app-server", undefined, "win32");
+  assert.deepEqual(providerAccountEnvironment(explicitNative!), { CODEX_HOME: "C:\\credentials\\work" });
+  assert.deepEqual(providerAccountEnvironment(defaultNative!), { CODEX_HOME: "C:\\credentials\\work" });
+  assert.deepEqual(providerAccountEnvironment(explicitWsl!), { CODEX_HOME: "/home/operator/.codex-work" });
+  assert.deepEqual(providerAccountEnvironment(defaultWsl!), { CODEX_HOME: "/home/operator/.codex-work" });
+  assert.equal(
+    selectProviderAccount(accounts, { ...native, defaultProviderAccountId: undefined }, "codex-app-server", undefined, "win32")?.id,
+    "host",
+    "implicit native selection skips the earlier WSL-local account",
+  );
 });
 
 test("partial account configuration preserves the other provider's legacy harness", () => {
