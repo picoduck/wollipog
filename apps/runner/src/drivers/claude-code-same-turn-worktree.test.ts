@@ -112,6 +112,8 @@ function runGuard(
     input: JSON.stringify({ hook_event_name: "PreToolUse", session_id: "s", ...payload }),
     encoding: "utf8",
     cwd: tmpdir(),
+    // Keep captured sidecar streams deterministic without hiding genuine guard diagnostics.
+    env: { ...process.env, FORCE_COLOR: undefined, NO_COLOR: "1" },
     timeout: 30_000,
     windowsHide: true,
   });
