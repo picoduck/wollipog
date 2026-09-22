@@ -86,9 +86,10 @@ resolves the remote default branch. Create, attach, and select return the select
 the already-running provider process keeps its original operating-system cwd, so it must use the
 returned path explicitly during that turn. A later resume or restart launches in the selection.
 Discard is intentionally fail-closed: it removes only a runner-owned tree with a clean status and
-no commits ahead of its configured upstream. If a provider still owns the path, the result reports
-a durable deferred retirement; the runner resumes it automatically after provider exit. If a
-merged pull or merge request's remote
+no commits ahead of its configured upstream. An unchanged recorded branch without an upstream may
+instead prove that its stable HEAD is contained by the current remote-tracking default branch. If a
+provider still owns the path, the result reports a durable deferred retirement; the runner resumes
+it automatically after provider exit. If a merged pull or merge request's remote
 branch has already been deleted, its forge-verified head OID can replace the missing upstream proof
 only when it exactly matches the local branch head. Attached, active, dirty, other upstream-less,
 unpushed, branch-drifted, and Git-unavailable worktrees are retained. The runner applies the same

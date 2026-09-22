@@ -452,19 +452,28 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
     }, { dataDir }), { removed: false, reason: "unpushed" });
     assert.equal(existsSync(unpushed.path), true);
 
-    const noUpstream = await createRequestedWorktree(repo, "s_safe", {
+    const defaultContainedNoUpstream = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
-      branch: "fix/no-upstream",
+      branch: "fix/default-contained-no-upstream",
     }, { dataDir });
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
-      ...noUpstream,
+      ...defaultContainedNoUpstream,
       source: "created",
-    }, { dataDir }), { removed: false, reason: "no_upstream" });
+    }, { dataDir }), { removed: true });
+    assert.equal(existsSync(defaultContainedNoUpstream.path), false,
+      "a clean unchanged branch needs no upstream when its head is contained by the default branch");
+    assert.throws(() => execFileSync(
+      "git",
+      ["-C", repo, "show-ref", "--verify", "--quiet", `refs/heads/${defaultContainedNoUpstream.branch}`],
+    ));
 
     const mismatchedMerged = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
       branch: "fix/mismatched-merged-head",
     }, { dataDir });
+    writeFileSync(join(mismatchedMerged.path, "local-only.txt"), "not delivered\n");
+    execFileSync("git", ["-C", mismatchedMerged.path, "add", "local-only.txt"]);
+    execFileSync("git", ["-C", mismatchedMerged.path, "commit", "-m", "local only"]);
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
       ...mismatchedMerged,
       source: "created",
@@ -491,6 +500,16 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
       "the exact forge-verified merged head replaces only the missing upstream proof");
 
     execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "-d"]);
+    const unknownDefaultUnchanged = await createRequestedWorktree(repo, "s_safe", {
+      baseRef: "HEAD",
+      branch: "agent/unknown-default-unchanged",
+    }, { dataDir });
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
+      ...unknownDefaultUnchanged,
+      source: "created",
+    }, { dataDir }), { removed: false, reason: "no_upstream" },
+    "an unknown default branch cannot replace missing upstream proof");
+
     const unknownDefault = await createRequestedWorktree(repo, "s_safe", {
       baseRef: "HEAD",
       branch: "agent/unknown-default",
@@ -677,7 +696,6 @@ test("safe discard preserves a shared unchanged branch but deletes an exclusive 
       baseRef: "HEAD",
       branch: "fix/shared-unchanged",
     }, { dataDir });
-    execFileSync("git", ["-C", shared.path, "push", "-u", "origin", shared.branch]);
     const sharedHead = execFileSync("git", ["-C", shared.path, "rev-parse", "HEAD"], {
       encoding: "utf8",
     }).trim();
