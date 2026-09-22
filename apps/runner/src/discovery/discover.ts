@@ -631,16 +631,18 @@ export function localAuthFileStatus(path: string, stat: typeof statSync = statSy
 
 /** Probe the native host + every WSL distro for known agent CLIs. */
 export async function discoverAgents(): Promise<AgentDefinition[]> {
-  const found: AgentDefinition[] = [];
+  // Probe in parallel, but publish in resolver order. A bare configured command must always
+  // adopt the PATH-first installation even when its version/update probe finishes last.
+  const nativeSlots: AgentDefinition[][][] = KNOWN.map(() => []);
 
   // Native host.
   await Promise.all(
-    KNOWN.map(async (k) => {
+    KNOWN.map(async (k, knownIndex) => {
       const bins = await resolveNativeCandidates(k.bin);
       if (bins.length === 0) {
-        if (k.bin === "codex") found.push(unavailableCodexAgentDefinition("codex", "Codex", { kind: "native" }));
-        if (k.bin === "claude") found.push(unavailableClaudeAgentDefinition("claude-code", "Claude Code", { kind: "native" }));
-        if (k.bin === "pi") found.push(unavailablePiAgentDefinition("pi", "Pi", { kind: "native" }));
+        if (k.bin === "codex") nativeSlots[knownIndex]![0] = [unavailableCodexAgentDefinition("codex", "Codex", { kind: "native" })];
+        if (k.bin === "claude") nativeSlots[knownIndex]![0] = [unavailableClaudeAgentDefinition("claude-code", "Claude Code", { kind: "native" })];
+        if (k.bin === "pi") nativeSlots[knownIndex]![0] = [unavailablePiAgentDefinition("pi", "Pi", { kind: "native" })];
         return;
       }
       await Promise.all(bins.map(async (bin, index) => {
@@ -690,38 +692,39 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           k.bin === "claude" ? claudeCode?.streamJsonInput === true : codexAppServer?.appServerAvailable === true,
         ) } : {}),
       };
-      found.push(...(codexAppServer ? codexAgentDefinitions(base, codexAppServer, slashCommands) : [base]));
+      nativeSlots[knownIndex]![index] = codexAppServer ? codexAgentDefinitions(base, codexAppServer, slashCommands) : [base];
       }));
     }),
   );
 
   // Each WSL distro (Windows only; empty elsewhere).
   const distros = await listWslDistros();
+  const wslSlots: AgentDefinition[][][][] = distros.map(() => KNOWN.map(() => []));
   await Promise.all(
-    distros.flatMap((distro) =>
-      KNOWN.map(async (k) => {
+    distros.flatMap((distro, distroIndex) =>
+      KNOWN.map(async (k, knownIndex) => {
         const [bins, node] = await Promise.all([resolveInWslCandidates(distro, k.bin), resolveInWsl(distro, "node")]);
         if (bins.length === 0) {
           if (k.bin === "codex") {
-            found.push(unavailableCodexAgentDefinition(
+            wslSlots[distroIndex]![knownIndex]![0] = [unavailableCodexAgentDefinition(
               `codex-wsl-${distro}`,
               `Codex (WSL: ${distro})`,
               { kind: "wsl", distro },
-            ));
+            )];
           }
           if (k.bin === "claude") {
-            found.push(unavailableClaudeAgentDefinition(
+            wslSlots[distroIndex]![knownIndex]![0] = [unavailableClaudeAgentDefinition(
               `claude-code-wsl-${distro}`,
               `Claude Code (WSL: ${distro})`,
               { kind: "wsl", distro },
-            ));
+            )];
           }
           if (k.bin === "pi") {
-            found.push(unavailablePiAgentDefinition(
+            wslSlots[distroIndex]![knownIndex]![0] = [unavailablePiAgentDefinition(
               `pi-wsl-${distro}`,
               `Pi (WSL: ${distro})`,
               { kind: "wsl", distro },
-            ));
+            )];
           }
           return;
         }
@@ -778,12 +781,13 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
             k.bin === "claude" ? claudeCode?.streamJsonInput === true : codexAppServer?.appServerAvailable === true,
           ) } : {}),
         };
-        found.push(...(codexAppServer ? codexAgentDefinitions(base, codexAppServer, slash) : [base]));
+        wslSlots[distroIndex]![knownIndex]![index] = codexAppServer ? codexAgentDefinitions(base, codexAppServer, slash) : [base];
         }));
       }),
     ),
   );
 
+  const found = [...nativeSlots.flat(2), ...wslSlots.flat(3)];
   // Defensive: collapse any duplicate ids (e.g. two distros that resolve identically).
   const byId = new Map<string, AgentDefinition>();
   for (const a of found) if (!byId.has(a.id)) byId.set(a.id, a);
@@ -829,6 +833,18 @@ function launchKeys(a: AgentDefinition): string[] {
   return binKey === shape ? [shape] : [binKey, shape];
 }
 
+/** Candidate zero owns the established agent id; all later PATH hits carry an installation
+ * suffix. Prefer it even if a caller supplies discovery results in completion order. */
+function isDefaultDiscoveredInstallation(agent: AgentDefinition): boolean {
+  if (!agent.installation) return false;
+  const base = agent.driver === "claude-code" ? "claude-code"
+    : agent.driver === "codex-app-server" ? "codex"
+      : agent.driver === "codex" ? "codex-exec"
+        : agent.driver === "pi" ? "pi" : null;
+  if (!base) return false;
+  return agent.id === (agent.context?.kind === "wsl" ? `${base}-wsl-${agent.context.distro}` : base);
+}
+
 /**
  * Merge discovered agents into the configured list. Config entries keep their launch
  * params (command/args/env/driver/context) but are ENRICHED with discovery metadata
@@ -848,7 +864,10 @@ export function mergeAgents(
   // a bare config name and a config entry pinning the exact resolved launch find their match.
   const byKey = new Map<string, AgentDefinition>();
   for (const d of discovered) {
-    for (const k of launchKeys(d)) if (!byKey.has(k)) byKey.set(k, d);
+    for (const k of launchKeys(d)) {
+      const prior = byKey.get(k);
+      if (!prior || (!isDefaultDiscoveredInstallation(prior) && isDefaultDiscoveredInstallation(d))) byKey.set(k, d);
+    }
   }
   // Configured probes are exact evidence for one config identity. They cannot share the
   // launch-shape index: two rows may intentionally use the same command with different arguments

@@ -731,10 +731,13 @@ test("mergeAgents retains a second installation when a configured bare name matc
     cfg({ id: "codex-installation-local", driver: "codex-app-server", command: "/home/u/.local/bin/codex", bin: "codex",
       installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" } }),
   ];
-  const merged = mergeAgents(config, discovered);
-  assert.deepEqual(merged.map((agent) => agent.id), ["chosen-codex", "codex-installation-local"]);
-  assert.equal(merged[0]!.installation?.id, "system");
-  assert.equal(merged[1]!.installation?.id, "local");
+  for (const results of [discovered, [...discovered].reverse()]) {
+    const merged = mergeAgents(config, results);
+    assert.deepEqual(merged.map((agent) => agent.id), ["chosen-codex", "codex-installation-local"]);
+    assert.equal(merged[0]!.installation?.id, "system",
+      "the PATH-first installation stays attached to the configured ID even when its probe finishes last");
+    assert.equal(merged[1]!.installation?.id, "local");
+  }
 });
 
 test("a configured wrapper cannot inherit a different discovered installation identity", () => {
