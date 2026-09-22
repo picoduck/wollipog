@@ -21,6 +21,8 @@ for (const [name, value] of Object.entries({
   Node: domWindow.Node,
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -306,6 +308,13 @@ test("an older plane's implicit Day fallback disables Hour without showing an er
     "usage-week-capability-note",
     "the compact mobile picker is associated with the upgrade explanation",
   );
+  const compactAggregation = container.querySelector('[aria-label="Usage Aggregation: Day"]') as HTMLButtonElement;
+  await act(async () => { compactAggregation.click(); await Promise.resolve(); });
+  const compactWeek = [...container.querySelectorAll('[role="option"]')]
+    .find((node) => node.textContent?.includes("Week"));
+  assert.equal(compactWeek?.querySelectorAll(".ui-select-option-desc").length, 0,
+    "the compact option does not duplicate its disabled explanation as a description");
+  assert.equal(compactWeek?.querySelectorAll(".ui-select-option-reason").length, 1);
 
   await act(async () => { option("Usage Aggregation", "Hour").click(); await settleLoad(); });
   await act(async () => { await settleLoad(); });
@@ -313,6 +322,44 @@ test("an older plane's implicit Day fallback disables Hour without showing an er
   assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
   assert.equal(container.querySelector('[role="alert"]'), null);
   assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("an initial usage failure gives unavailable Week an actionable retry explanation", async () => {
+  let calls = 0;
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async () => {
+      calls += 1;
+      throw new Error("Usage is temporarily unavailable");
+    },
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); await Promise.resolve(); });
+
+  const week = [...container.querySelectorAll('[role="radiogroup"][aria-label="Usage Aggregation"] [role="radio"]')]
+    .find((node) => node.textContent?.trim() === "Week") as HTMLButtonElement;
+  assert.equal(week.getAttribute("aria-disabled"), "true");
+  const descriptionId = week.getAttribute("aria-describedby");
+  assert.ok(descriptionId);
+  assert.match(domWindow.document.getElementById(descriptionId!)?.textContent ?? "", /Retry by choosing a range/);
+  assert.match(container.querySelector("#usage-week-capability-note")?.textContent ?? "", /could not be checked/);
+  assert.equal(
+    container.querySelector('[aria-label="Usage Aggregation: Day"]')?.getAttribute("aria-describedby"),
+    "usage-week-capability-note",
+  );
+  const callCount = calls;
+  await act(async () => { week.click(); await settleLoad(); });
+  assert.equal(calls, callCount, "failed capability discovery still cannot submit a Week request");
 
   await act(async () => root.unmount());
   container.remove();

@@ -39,6 +39,7 @@ import { UsageChart } from "./UsageChart.js";
 const RANGES = [7, 30, 90, 365] as const;
 const LEGACY_USAGE_GRANULARITIES: readonly UsageAggregationGranularity[] = ["hour", "day"];
 const WEEK_CHECKING_REASON = "Checking whether this control plane supports weekly aggregation.";
+const WEEK_CHECK_FAILED_REASON = "Weekly availability could not be checked. Retry by choosing a range.";
 const WEEK_UPGRADE_REASON = "Weekly aggregation requires a newer control plane. Upgrade the control plane to use Week.";
 const GRANULARITY_LABEL: Record<UsageAggregationGranularity, { noun: string; adjective: string }> = {
   hour: { noun: "Hour", adjective: "Hourly" },
@@ -92,6 +93,7 @@ export function UsageView() {
   const [granularity, setGranularity] = useState<UsageAggregationGranularity>("day");
   const [breakdown, setBreakdown] = useState<UsageBreakdownMode>("day");
   const [supportedGranularities, setSupportedGranularities] = useState<readonly UsageAggregationGranularity[] | null>(null);
+  const [capabilityCheckFailed, setCapabilityCheckFailed] = useState(false);
   const granularityRef = useRef(granularity);
   const breakdownRef = useRef(breakdown);
   granularityRef.current = granularity;
@@ -137,6 +139,7 @@ export function UsageView() {
     let handingOffToDay = false;
     setLoading(true);
     setError(null);
+    setCapabilityCheckFailed(false);
     setData((current) => current?.granularity === requestedGranularity ? current : null);
     try {
       const next = await api.usage({ days: range, granularity: requestedGranularity });
@@ -169,6 +172,7 @@ export function UsageView() {
         setBreakdown((current) => current === "hour" ? "day" : current);
         return;
       }
+      setCapabilityCheckFailed(true);
       setError(cause instanceof Error ? cause.message : "Unable to load usage");
     } finally {
       if (generation === requestGeneration.current && !handingOffToDay) setLoading(false);
@@ -344,7 +348,14 @@ export function UsageView() {
       : undefined;
   const weekUnavailable = supportedGranularities !== null && !supportedGranularities.includes("week");
   const weekDisabled = supportedGranularities === null || weekUnavailable;
-  const weekDisabledReason = supportedGranularities === null ? WEEK_CHECKING_REASON : WEEK_UPGRADE_REASON;
+  const weekDisabledReason = supportedGranularities === null
+    ? capabilityCheckFailed ? WEEK_CHECK_FAILED_REASON : WEEK_CHECKING_REASON
+    : WEEK_UPGRADE_REASON;
+  const weekCapabilityNote = weekUnavailable
+    ? WEEK_UPGRADE_REASON
+    : supportedGranularities === null && capabilityCheckFailed
+      ? WEEK_CHECK_FAILED_REASON
+      : undefined;
   const granularityOptions = (["hour", "day", "week"] as const).map((value) => ({
     value,
     label: GRANULARITY_LABEL[value].noun,
@@ -354,7 +365,10 @@ export function UsageView() {
       : value === "week" && weekDisabled
         ? weekDisabledReason
         : undefined,
-    description: value === "week" && weekDisabled ? weekDisabledReason : undefined,
+  }));
+  const desktopGranularityOptions = granularityOptions.map((option) => ({
+    ...option,
+    description: option.value === "week" && weekDisabled ? weekDisabledReason : undefined,
   }));
   const rangeOptions = RANGES
     .filter((range) => !knownRetention || range <= knownRetention.dailyDays)
@@ -542,7 +556,7 @@ export function UsageView() {
           <SegmentedControl
             label="Usage Aggregation"
             value={granularity}
-            options={granularityOptions}
+            options={desktopGranularityOptions}
             onChange={selectGranularity}
           />
         </div>
@@ -574,18 +588,18 @@ export function UsageView() {
               label="Usage Aggregation"
               value={granularity}
               options={granularityOptions}
-              describedBy={weekUnavailable ? "usage-week-capability-note" : undefined}
+              describedBy={weekCapabilityNote ? "usage-week-capability-note" : undefined}
               menuWidth={280}
               onChange={selectGranularity}
             />
           </div>
         </div>
-        {(hourlyUnavailable || weekUnavailable) && (
+        {(hourlyUnavailable || weekCapabilityNote) && (
           <div className="usage-granularity-notes">
             {hourlyUnavailable && <p className="usage-granularity-note" role="note">{hourlyUnavailableReason}</p>}
-            {weekUnavailable && (
+            {weekCapabilityNote && (
               <p id="usage-week-capability-note" className="usage-granularity-note" role="note">
-                {WEEK_UPGRADE_REASON}
+                {weekCapabilityNote}
               </p>
             )}
           </div>
