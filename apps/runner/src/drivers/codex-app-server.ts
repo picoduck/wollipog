@@ -52,8 +52,12 @@ import {
   type CodexPermissionProfileBase,
 } from "../codex-permission-profile.js";
 import { readCodexRolloutCompletedCommand } from "./codex-rollout-proof.js";
-import { commandTargetsManagedWorktree } from "../managed-worktree-protection.js";
+import {
+  commandTargetsManagedWorktree,
+  type ManagedWorktreeProtection,
+} from "../managed-worktree-protection.js";
 import { codexGuardActiveInArgs } from "../codex-managed-worktree-guard.js";
+import { managedWorktreeGitWritableRoots } from "../managed-worktree-sandbox.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -233,7 +237,7 @@ export function buildCodexTurnParams(
   cwd: string,
   input: Json[],
   capabilities?: AgentCapabilities,
-  protectManagedWorktrees = false,
+  managedWorktreeProtections: readonly ManagedWorktreeProtection[] = [],
   /**
    * The permission-profile base the RUNNING app-server was launched with, or null when it carries
    * none (#1336). Codex silently ignores a profile whenever a legacy sandbox policy is also sent,
@@ -251,6 +255,8 @@ export function buildCodexTurnParams(
    */
   managedWorktreeGuardActive = false,
 ): Json {
+  const protectManagedWorktrees = managedWorktreeProtections.length > 0;
+  const gitWritableRoots = managedWorktreeGitWritableRoots(cwd, managedWorktreeProtections);
   const configuredMode = cfg.permissionMode || AUTO_REVIEW_MODE;
   // Full access would let the provider unlink the worktree root or its shared Git registration
   // without crossing an approval boundary. Preserve every restricted mode, but narrow this one
@@ -266,7 +272,7 @@ export function buildCodexTurnParams(
       sandbox_approval: false,
       skill_approval: false,
     } }, approvalsReviewer: "auto_review", sandboxPolicy: {
-      type: "workspaceWrite", writableRoots: [cwd], networkAccess: true,
+      type: "workspaceWrite", writableRoots: [cwd, ...gitWritableRoots], networkAccess: true,
       excludeTmpdirEnvVar: true, excludeSlashTmp: true,
     }, cwd,
       ...(cfg.model && cfg.model !== "default" ? { model: cfg.model } : {}),
@@ -283,13 +289,21 @@ export function buildCodexTurnParams(
   // The profile carries this mode already, and its legacy projection is exactly the policy below,
   // so omitting the policy changes nothing except that the hook state directory stays denied. A
   // mode the running profile does NOT express keeps its policy and is documented as unenforced.
-  const carriedByProfile = activeProfileBase !== null &&
+  const carriedByProfile = gitWritableRoots.length === 0 && activeProfileBase !== null &&
     codexPermissionProfileBase(mode) === activeProfileBase;
+  const sandboxPolicy = {
+    type: sandboxType,
+    ...(sandboxType === "workspaceWrite" && gitWritableRoots.length > 0
+      // An explicit root list is a complete workspace declaration at the App Server boundary.
+      // Keep the selected worktree alongside its narrowly selected Git admin descendants.
+      ? { writableRoots: [cwd, ...gitWritableRoots] }
+      : {}),
+  };
   const params: Json = {
     threadId,
     input,
     approvalPolicy: autoReview ? "on-request" : askMode ?? "never",
-    ...(carriedByProfile ? {} : { sandboxPolicy: { type: sandboxType } }),
+    ...(carriedByProfile ? {} : { sandboxPolicy }),
     cwd,
   };
   // Guardian owns ordinary automatic review, but it cannot know which host paths belong to the
@@ -983,13 +997,14 @@ export class CodexAppServerDriver implements Driver {
       const base = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
       const input: Json[] = base || !staged.inputs.length ? [{ type: "text", text: base }] : [];
       input.push(...staged.inputs);
+      const protections = this.opts.managedWorktreeProtections?.() ?? [];
       const params = buildCodexTurnParams(
         this.config,
         this.threadId,
         this.cwd,
         input,
         this.opts.capabilities,
-        (this.opts.managedWorktreeProtections?.().length ?? 0) > 0,
+        protections,
         this.threadCarriesLegacySandboxPolicy ? null : this.permissionProfileBase,
         this.managedWorktreeGuardActive,
       );

@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import type { SessionConfig, SessionEventPayload } from "@wollipog/protocol";
 import {
   approvalContext,
@@ -2044,6 +2047,20 @@ test("a repeated provider approval id cancels the replaced parked RPC", async ()
 
 const cfg = (permissionMode: string, extra: Partial<SessionConfig> = {}): SessionConfig =>
   ({ permissionMode, ...extra }) as SessionConfig;
+const MANAGED_PROTECTIONS = [{ worktreePath: "/w", repoPath: "/repo" }];
+
+function managedGitFixture(t: TestContext) {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-codex-app-policy-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const repoPath = join(root, "repo");
+  const worktreePath = join(root, "worktree");
+  const commonGitDir = join(repoPath, ".git");
+  const worktreeGitDir = join(commonGitDir, "worktrees", "worktree");
+  const gitRoots = [worktreeGitDir, ...["objects", "refs", "logs"].map((name) => join(commonGitDir, name))];
+  for (const path of [worktreePath, ...gitRoots]) mkdirSync(path, { recursive: true });
+  writeFileSync(join(worktreePath, ".git"), `gitdir: ${worktreeGitDir}\n`);
+  return { repoPath, worktreePath, gitRoots };
+}
 
 test("command approvals expose and deliver every stable provider decision", async () => {
   const h = makeHarness();
@@ -2624,15 +2641,23 @@ test("buildCodexTurnParams: default and 'auto-review' use Guardian with an escap
   assert.deepEqual(d.sandboxPolicy, { type: "workspaceWrite" });
 });
 
-test("buildCodexTurnParams: managed worktrees route escalation through the runner veto", () => {
-  const params = buildCodexTurnParams(cfg("auto-review"), "t1", "/w", [], undefined, true);
+test("buildCodexTurnParams: managed worktrees route escalation through the runner veto", (t) => {
+  const f = managedGitFixture(t);
+  const protections = [{ worktreePath: f.worktreePath, repoPath: f.repoPath }];
+  const params = buildCodexTurnParams(cfg("auto-review"), "t1", f.worktreePath, [], undefined, protections);
   assert.equal(params.approvalPolicy, "on-request");
   assert.equal(params.approvalsReviewer, "user");
-  assert.deepEqual(params.sandboxPolicy, { type: "workspaceWrite" });
+  assert.deepEqual(params.sandboxPolicy, {
+    type: "workspaceWrite", writableRoots: [f.worktreePath, ...f.gitRoots],
+  });
 
-  const narrowed = buildCodexTurnParams(cfg("danger-full-access"), "t1", "/w", [], undefined, true);
+  const narrowed = buildCodexTurnParams(
+    cfg("danger-full-access"), "t1", f.worktreePath, [], undefined, protections,
+  );
   assert.equal(narrowed.approvalPolicy, "on-request");
-  assert.deepEqual(narrowed.sandboxPolicy, { type: "workspaceWrite" });
+  assert.deepEqual(narrowed.sandboxPolicy, {
+    type: "workspaceWrite", writableRoots: [f.worktreePath, ...f.gitRoots],
+  });
 });
 
 test("buildCodexTurnParams: 'untrusted' asks every tool (no auto reviewer)", () => {
@@ -2655,6 +2680,55 @@ test("buildCodexTurnParams: restricted modes can escalate; full access never ask
   });
   assert.equal(buildCodexTurnParams(cfg("danger-full-access"), "t", "/w", []).approvalPolicy, "never");
   assert.equal(buildCodexTurnParams(cfg("danger-full-access"), "t", "/w", []).approvalsReviewer, undefined);
+});
+
+test("buildCodexTurnParams: managed linked worktrees grant only shared Git metadata to workspace sandboxes", (t) => {
+  const { worktreePath, repoPath, gitRoots } = managedGitFixture(t);
+  for (const mode of [
+    "auto-review", "on-request", "untrusted", "on-failure", "workspace-write", "danger-full-access",
+  ]) {
+    const params = buildCodexTurnParams(
+      cfg(mode), "t", worktreePath, [], undefined, [{ worktreePath, repoPath }],
+    );
+    assert.deepEqual(params.sandboxPolicy, {
+      type: "workspaceWrite",
+      writableRoots: [worktreePath, ...gitRoots],
+    }, mode);
+  }
+  assert.deepEqual(
+    buildCodexTurnParams(
+      cfg("read-only"), "t", worktreePath, [], undefined, [{ worktreePath, repoPath }],
+    ).sandboxPolicy,
+    { type: "readOnly" },
+  );
+});
+
+test("prompt keeps the managed Git grant with Integration Isolation enabled and disabled", async (t) => {
+  const { worktreePath, repoPath, gitRoots } = managedGitFixture(t);
+  for (const integrationIsolation of [false, true]) {
+    let turnParams: any = null;
+    const h = makeHarness({
+      cwd: worktreePath,
+      orchestrator: { strictProjectIsolation: false, integrationIsolation },
+      config: cfg("workspace-write"),
+      managedWorktreeProtections: () => [{ worktreePath, repoPath }],
+    });
+    (h.driver as any).threadId = `thread-${String(integrationIsolation)}`;
+    (h.driver as any).peer = {
+      request: async (method: string, params: any) => {
+        if (method === "turn/start") turnParams = params;
+        return { turn: { id: `turn-${String(integrationIsolation)}` } };
+      },
+    };
+    const turn = h.driver.prompt("work");
+    await nextTask();
+    assert.deepEqual(turnParams.sandboxPolicy, {
+      type: "workspaceWrite",
+      writableRoots: [worktreePath, ...gitRoots],
+    });
+    (h.driver as any).settleTurn("end_turn");
+    assert.equal(await turn, "end_turn");
+  }
 });
 
 test("buildCodexTurnParams: passes model, effort, and service tier through, skips the 'default' model sentinel", () => {
