@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CODEX_APP_SERVER_CONTRACT_FINGERPRINT,
+  MIN_VERIFIED_CODEX_DEVICE_LOGIN_VERSION,
   MIN_VERIFIED_CODEX_ORCHESTRATOR_APPROVAL_VERSION,
   MIN_VERIFIED_CODEX_SESSION_NAMING_VERSION,
   interpretCodexAppServerProbe,
+  supportsStructuredCodexDeviceLogin,
   unavailableCodexAppServer,
   versionAtLeast,
   nativeCodexAppServerProbeArgs,
@@ -26,6 +28,14 @@ test("versionAtLeast compares semantic versions and rejects malformed values", (
   assert.equal(versionAtLeast("0.144.0"), false);
   assert.equal(versionAtLeast("0.147.0-rc1"), false);
   assert.equal(versionAtLeast("dev-build"), false);
+});
+
+test("structured device login is enabled only for the schema-verified version window", () => {
+  assert.equal(MIN_VERIFIED_CODEX_DEVICE_LOGIN_VERSION, "0.155.1");
+  assert.equal(supportsStructuredCodexDeviceLogin("0.155.1"), true);
+  assert.equal(supportsStructuredCodexDeviceLogin("0.156.0"), true);
+  assert.equal(supportsStructuredCodexDeviceLogin("0.155.0"), false);
+  assert.equal(supportsStructuredCodexDeviceLogin(undefined), false);
 });
 
 test("compatible verified Codex reports supported stdio and separately gated optional surfaces", () => {

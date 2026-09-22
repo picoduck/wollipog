@@ -6,7 +6,9 @@ import { run, type ResolvedLaunch } from "./resolve.js";
 export const MIN_VERIFIED_CODEX_APP_SERVER_VERSION = "0.147.0";
 export const MIN_VERIFIED_CODEX_SESSION_NAMING_VERSION = "0.149.1";
 export const MIN_VERIFIED_CODEX_ORCHESTRATOR_APPROVAL_VERSION = "0.154.0";
-export const CODEX_APP_SERVER_CONTRACT_FINGERPRINT = "codex-app-server-v2-reconciliation-surface-2026-09-15";
+/** Oldest build whose generated schema has been verified to expose the complete device-code flow. */
+export const MIN_VERIFIED_CODEX_DEVICE_LOGIN_VERSION = "0.155.1";
+export const CODEX_APP_SERVER_CONTRACT_FINGERPRINT = "codex-app-server-v2-device-login-surface-2026-09-22";
 
 export interface ProbeResult {
   code: number | null;
@@ -29,6 +31,10 @@ export function versionAtLeast(version: string, minimum = MIN_VERIFIED_CODEX_APP
   if (numeric !== 0) return numeric > 0;
   // A prerelease of the verified stable floor is semantically older than the release itself.
   return !/^\d+\.\d+\.\d+-/.test(version) || /^\d+\.\d+\.\d+-/.test(minimum);
+}
+
+export function supportsStructuredCodexDeviceLogin(version: string | undefined): boolean {
+  return !!version && versionAtLeast(version, MIN_VERIFIED_CODEX_DEVICE_LOGIN_VERSION);
 }
 
 /** Convert the bounded `codex app-server --help` probe into a stable, secret-safe result. */

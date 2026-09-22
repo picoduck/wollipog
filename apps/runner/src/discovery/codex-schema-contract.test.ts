@@ -7,6 +7,7 @@ import { test } from "node:test";
 import {
   CODEX_APP_SERVER_CONTRACT_FINGERPRINT,
   MIN_VERIFIED_CODEX_APP_SERVER_VERSION,
+  MIN_VERIFIED_CODEX_DEVICE_LOGIN_VERSION,
   MIN_VERIFIED_CODEX_ORCHESTRATOR_APPROVAL_VERSION,
 } from "./codex-app-server.js";
 
@@ -73,11 +74,13 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
   const fixture = JSON.parse(readFileSync(fixturePath, "utf8")) as {
     contractFingerprint: string;
     minimumVerifiedVersion: string;
+    structuredLoginMinimumVersion: string;
     orchestratorApprovalMinimumVersion: string;
     files: Record<string, ExpectedShape & { definitions?: Record<string, ExpectedShape> }>;
   };
   assert.equal(fixture.contractFingerprint, CODEX_APP_SERVER_CONTRACT_FINGERPRINT);
   assert.equal(fixture.minimumVerifiedVersion, MIN_VERIFIED_CODEX_APP_SERVER_VERSION);
+  assert.equal(fixture.structuredLoginMinimumVersion, MIN_VERIFIED_CODEX_DEVICE_LOGIN_VERSION);
   assert.equal(fixture.orchestratorApprovalMinimumVersion, MIN_VERIFIED_CODEX_ORCHESTRATOR_APPROVAL_VERSION);
 
   const dir = mkdtempSync(join(tmpdir(), "wollipog-codex-contract-test-"));
@@ -94,6 +97,20 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
     }
     const ok = spawnSync(process.execPath, [script], { encoding: "utf8", env: { ...process.env, CODEX_SCHEMA_DIR: dir } });
     assert.equal(ok.status, 0, ok.stderr);
+
+    const loginParamsPath = join(dir, "v2", "LoginAccountParams.json");
+    const loginParams = JSON.parse(readFileSync(loginParamsPath, "utf8"));
+    loginParams.oneOf = loginParams.oneOf.filter(
+      (variant: { title?: string }) => variant.title !== "ChatgptDeviceCodev2::LoginAccountParams",
+    );
+    writeFileSync(loginParamsPath, JSON.stringify(loginParams));
+    const loginDrift = spawnSync(process.execPath, [script], {
+      encoding: "utf8",
+      env: { ...process.env, CODEX_SCHEMA_DIR: dir },
+    });
+    assert.notEqual(loginDrift.status, 0);
+    assert.match(loginDrift.stderr, /LoginAccountParams.*variant removed.*ChatgptDeviceCode/);
+    writeFileSync(loginParamsPath, JSON.stringify(synthesizeShape(fixture.files["v2/LoginAccountParams.json"]!)));
 
     // Pin the fields used to recover a steering coordinate, not unrelated response payloads.
     const startResponsePath = join(dir, "v2", "TurnStartResponse.json");

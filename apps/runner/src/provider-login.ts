@@ -5,6 +5,7 @@ import type { AgentContext, AgentDefinition, ProviderLoginView } from "@wollipog
 import type { RunnerProviderAccount } from "./config.js";
 import { writeProviderAccountsConfig } from "./config.js";
 import { runContextCommand } from "./context-command.js";
+import { supportsStructuredCodexDeviceLogin } from "./discovery/codex-app-server.js";
 import { JsonRpcPeer, type RpcError } from "./jsonrpc.js";
 import { agentForProviderAccount, providerAccountEnvironment } from "./provider-accounts.js";
 import { killTreeAndWait, spawnAgent, trackPendingKill, type AgentProcess } from "./spawn.js";
@@ -17,8 +18,8 @@ const RECENT_LOGIN_LIMIT = 32;
 const DEFAULT_LOGIN_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_CEREMONY_TIMEOUT_MS = 15_000;
 const URL_PATTERN = /https:\/\/[^\s<>"'\u0000-\u001f\u007f]+/giu;
-const LABELED_DEVICE_CODE_PATTERN = /one-time code:\s*([A-Z0-9-]+)/giu;
-const HYPHENATED_DEVICE_CODE_PATTERN = /\b[A-Z0-9]+(?:-[A-Z0-9]+)+\b/giu;
+const LABELED_DEVICE_CODE_PATTERN = /one-time code:?\s*([A-Z0-9-]+)/giu;
+const HYPHENATED_DEVICE_CODE_PATTERN = /\b[A-Z0-9]+(?:-[A-Z0-9]+)+\b/gu;
 const ANSI_ESCAPE_PATTERN = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~])|\u009b[0-?]*[ -/]*[@-~]/gu;
 const CODEX_LOGIN_CLIENT_INFO = { name: "wollipog-provider-login", version: "1.0.0" } as const;
 interface ProviderLoginDescriptor {
@@ -167,7 +168,7 @@ function safeDeviceCode(raw: unknown): string | undefined {
 
 function safeFallbackDeviceCode(raw: string): string | undefined {
   return raw.length >= 4 && raw.length <= DEVICE_CODE_LIMIT &&
-      /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/u.test(raw)
+      /^[A-Z0-9]+(?:-[A-Z0-9]+)*$/u.test(raw)
     ? raw
     : undefined;
 }
@@ -292,7 +293,8 @@ export class ProviderLoginSupervisor {
       context: agent.context ?? { kind: "native" },
       env,
       persistAccount,
-      structuredCodex: account.provider === "codex" && agent.codexAppServer?.status === "supported",
+      structuredCodex: account.provider === "codex" && agent.codexAppServer?.status === "supported" &&
+        supportsStructuredCodexDeviceLogin(agent.codexAppServer.installedVersion),
     }).view;
   }
 
@@ -459,11 +461,8 @@ export class ProviderLoginSupervisor {
     for (const operation of this.active.values()) {
       if (operation.settled) continue;
       operation.cancelled = true;
-      if (operation.peer && operation.loginId) void this.cancelStructured(operation);
-      else {
-        operation.peer?.dispose("provider sign-in supervisor stopped");
-        void this.terminate(operation);
-      }
+      operation.peer?.dispose("provider sign-in supervisor stopped");
+      void this.terminate(operation);
     }
   }
 
@@ -507,6 +506,11 @@ export class ProviderLoginSupervisor {
     const deadlineAt = Date.now() + (this.options.ceremonyTimeoutMs ?? DEFAULT_CEREMONY_TIMEOUT_MS);
     try {
       await peer.requestWithDeadline("initialize", { clientInfo: CODEX_LOGIN_CLIENT_INFO }, deadlineAt);
+      if (operation.cancelled || operation.timedOut || operation.settled) {
+        peer.dispose("provider sign-in stopped before login started");
+        void this.terminate(operation);
+        return;
+      }
       peer.notify("initialized", {});
       const response = await peer.requestWithDeadline<unknown>(
         "account/login/start",

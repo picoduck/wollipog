@@ -471,6 +471,7 @@ test("Authentication Required Sign In reuses and can cancel the supervised accou
     const controller = createRunnerProviderAuthRecovery({ dataDir: dir }, undefined, supervisor);
     const session = meta({
       driver: "codex-app-server",
+      agentVersion: "0.155.1",
       providerAccountId: "personal",
       providerAccountLabel: "Personal",
       providerAccountProvider: "codex",

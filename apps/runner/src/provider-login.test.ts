@@ -47,6 +47,7 @@ const agents: AgentDefinition[] = [
     context: { kind: "native" },
     codexAppServer: {
       status: "supported",
+      installedVersion: "0.155.1",
       appServerAvailable: true,
       transport: "stdio",
       verification: "generated-schema",
@@ -58,6 +59,7 @@ const agents: AgentDefinition[] = [
 function fixture(options: {
   timeoutMs?: number;
   ceremonyTimeoutMs?: number;
+  codexVersion?: string;
   writeFails?: boolean;
   kill?: (child: AgentProcess) => Promise<boolean>;
   probe?: ((login: ResolvedProviderLogin) => Promise<boolean>) | null;
@@ -75,7 +77,11 @@ function fixture(options: {
     dataDir: root,
     configPath,
     accounts,
-    agents: () => agents,
+    agents: () => options.codexVersion
+      ? agents.map((agent) => agent.id === "codex"
+          ? { ...agent, codexAppServer: { ...agent.codexAppServer!, installedVersion: options.codexVersion } }
+          : agent)
+      : agents,
     resolveEnv: () => ({ HOME: root }),
     acquireLease: () => true,
     releaseLease: (directory) => { releases.push(directory); return true; },
@@ -213,6 +219,18 @@ test("Codex device sign-in uses the structured ceremony and publishes the accoun
   }
 });
 
+test("Codex versions outside the verified structured-login window use the CLI compatibility path", async () => {
+  const fx = fixture({ codexVersion: "0.155.0" });
+  try {
+    await fx.supervisor.startAccount({ provider: "codex", label: "Compatibility Codex" });
+    assert.deepEqual(fx.spawns[0]?.args, ["login", "--device-auth"]);
+  } finally {
+    fx.supervisor.shutdown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    fx.cleanup();
+  }
+});
+
 test("cancelling structured Codex sign-in cancels the exact provider login id", async () => {
   const fx = fixture();
   try {
@@ -232,6 +250,22 @@ test("cancelling structured Codex sign-in cancels the exact provider login id", 
     assert.deepEqual(cancellation.params, { loginId: "login-to-cancel" });
     respond(fx.children[0]!, cancellation.id, {});
     await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(fx.supervisor.views()[0]?.status, "cancelled");
+    assert.equal(fx.accounts.length, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("cancelling structured Codex sign-in during initialization never starts a provider login", async () => {
+  const fx = fixture();
+  try {
+    const started = await fx.supervisor.startAccount({ provider: "codex", label: "Early Cancel" });
+    const initialize = await nextRequest(fx.children[0]!);
+    fx.supervisor.cancel(started.operationId);
+    respond(fx.children[0]!, initialize.id, { userAgent: "codex-test" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(fx.children[0]!.stdin.read(), null, "account/login/start must not be sent after cancellation");
     assert.equal(fx.supervisor.views()[0]?.status, "cancelled");
     assert.equal(fx.accounts.length, 0);
   } finally {
@@ -331,6 +365,18 @@ test("Codex CLI compatibility parser preserves bounded provider-defined code gro
       userCode,
     });
   }), { numRuns: 200 });
+});
+
+test("Codex CLI compatibility parser does not mistake an incomplete prompt for a device code", () => {
+  assert.deepEqual(parseCodexDeviceLoginOutput(
+    "https://auth.openai.com/device\nEnter this one-time code:\n",
+  ), { verificationUrl: "https://auth.openai.com/device" });
+  assert.deepEqual(parseCodexDeviceLoginOutput(
+    "https://auth.openai.com/device\nEnter this one-time code\nABCD-EFGHJ\n",
+  ), {
+    verificationUrl: "https://auth.openai.com/device",
+    userCode: "ABCD-EFGHJ",
+  });
 });
 
 test("Codex CLI compatibility parser rejects oversized URLs and whole device codes", () => {
@@ -523,6 +569,7 @@ test("shutdown registers provider sign-in reaping with the runner-wide kill drai
   const fx = fixture({ kill: async () => reap });
   try {
     await fx.supervisor.startAccount({ provider: "codex", label: "Shutdown" });
+    await exposeStructuredCeremony(fx.children[0]!, "shutdown-login-id");
     fx.supervisor.shutdown();
     assert.equal(await waitForPendingKills(5), false, "shutdown must observe the still-pending provider child");
     finishReap(true);
