@@ -39,8 +39,13 @@ For anything that fails, classify the mechanism from the failure output — a ti
 dependency, a filesystem or port race, a shared-state or ordering dependency between tests, or a
 genuine bug that surfaces nondeterministically. Name the mechanism; do not guess a fix.
 
-Check history with `git log -1 --format='%h %ad' -- <test-file>` and, when the tests are run in CI,
-`gh run list --limit 20` to see how long the failure has been present.
+Check history with `git log -1 --format='%h %ad' -- <test-file>`, and read CI history across all
+events, not only pushes to `main`: list the last 200 runs of the CI workflow
+(`gh run list --workflow ci.yml --limit 200`) and pull the log of every failed job other than the
+aggregator. In this repository flakes rarely show up as a red push. They surface as merge-queue
+ejections and as browser jobs that failed once and passed on retry, which still fail the run
+because `playwright.config.ts` sets `failOnFlakyTests` under CI. A 20-run window missed the
+2026-09-22 phone-viewport flake and four merge-queue ejections entirely.
 
 ## Gate
 
