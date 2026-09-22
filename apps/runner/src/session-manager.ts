@@ -3279,14 +3279,19 @@ export class SessionManager {
 
   private async runRetainedRefReplay(): Promise<void> {
     if (!this.retainedRefReclaimQueue.length) {
+      const replayStartedAt = Date.now();
       this.retainedRefReclaimQueue = this.cleanupJournal.listRetainedRefs()
         // A ref gains deletion authority only after its worktree was removed. Unarmed rows remain
         // durable ownership evidence, but admitting them would spend the bounded Git-work budget
         // on no-ops and could starve actionable rows after repeated runner restarts.
         .filter((record) => record.armedAt !== undefined)
         .sort((left, right) => {
-          const leftAttempt = Number.isFinite(left.lastAttemptAt) ? left.lastAttemptAt! : 0;
-          const rightAttempt = Number.isFinite(right.lastAttemptAt) ? right.lastAttemptAt! : 0;
+          const attemptedAt = (record: RetainedWorktreeRefRecord) =>
+            Number.isFinite(record.lastAttemptAt) && record.lastAttemptAt! <= replayStartedAt
+              ? record.lastAttemptAt!
+              : 0;
+          const leftAttempt = attemptedAt(left);
+          const rightAttempt = attemptedAt(right);
           if (leftAttempt !== rightAttempt) return leftAttempt - rightAttempt;
           if (left.createdAt !== right.createdAt) return left.createdAt - right.createdAt;
           const leftKey = this.cleanupJournal.retainedRefIdentityKey(left);

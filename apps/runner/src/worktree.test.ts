@@ -1716,7 +1716,6 @@ test("retained-ref periodic replay is bounded and fair across a large mixed-armi
         expectedOid: (index + 100).toString(16).padStart(40, "0"),
         reasons: ["recorded_branch"],
         state: "pending",
-        pendingReason: "worktree_present",
         createdAt: 0,
         updatedAt: 0,
       });
@@ -1734,6 +1733,7 @@ test("retained-ref periodic replay is bounded and fair across a large mixed-armi
         state: "pending",
         pendingReason: "checked_out",
         armedAt: 1,
+        ...(index === 0 ? { lastAttemptAt: Number.MAX_SAFE_INTEGER } : {}),
         createdAt: 1,
         updatedAt: 1,
       };
@@ -1750,28 +1750,31 @@ test("retained-ref periodic replay is bounded and fair across a large mixed-armi
       await internals.replayRetainedRefReclaims();
       return attempts.length - before;
     };
-    const passSizes = [await runPass()];
-    manager.shutdownAll();
-    manager = new SessionManager(
-      () => {},
-      () => {},
-      new SessionStore(join(dataDir, "sessions")),
-      "runner",
-      undefined,
-      undefined,
-      dataDir,
-    );
-    internals = privateManager(manager);
-    internals.reclaimRetainedRef = async (record) => {
-      attempts.push(record.cleanupId!);
-      return { state: "pending", reason: "checked_out" };
-    };
-    passSizes.push(await runPass(), await runPass(), await runPass());
+    const passSizes: number[] = [];
+    for (let pass = 0; pass < 3; pass++) {
+      passSizes.push(await runPass());
+      if (pass === 2) break;
+      manager.shutdownAll();
+      manager = new SessionManager(
+        () => {},
+        () => {},
+        new SessionStore(join(dataDir, "sessions")),
+        "runner",
+        undefined,
+        undefined,
+        dataDir,
+      );
+      internals = privateManager(manager);
+      internals.reclaimRetainedRef = async (record) => {
+        attempts.push(record.cleanupId!);
+        return { state: "pending", reason: "checked_out" };
+      };
+    }
 
-    assert.deepEqual(passSizes, [8, 8, 8, 5],
-      "each trigger admits at most eight rows, including after a restarted cycle");
-    assert.equal(new Set(attempts.slice(0, 16)).size, 16,
-      "durable attempt admission prevents a restart from selecting the same first batch again");
+    assert.deepEqual(passSizes, [8, 8, 8],
+      "each restarted trigger admits at most eight armed rows");
+    assert.equal(new Set(attempts.slice(0, 21)).size, 21,
+      "durable admission reaches every row across repeated restarts and a future attempt timestamp");
     assert.equal(new Set(attempts).size, 21,
       "a complete cycle reaches every row before repeatedly pending records can starve the tail");
     assert.equal(internals.cleanupJournal.listRetainedRefs().length, 29,

@@ -202,7 +202,8 @@ pending ownership record. Periodic passes drain a sorted inventory captured for 
 cycle; new arrivals wait for the next cycle, so a permanently pending head row or a stream of
 arrivals cannot starve the rest of a large backlog. Attempt admission is durable and ordered by
 least-recently attempted armed row, so runner restarts continue the fair cycle instead of starting
-over. Unarmed rows remain durable evidence but do not consume the bounded Git-work budget.
+over. Missing, invalid, or future attempt timestamps are treated as never attempted. Unarmed rows
+remain durable evidence but do not consume the bounded Git-work budget.
 The exact-OID, identity-generation, checkout, default-branch, and delivery proofs remain identical
 for every attempt, including old rows that do not contain newer diagnostic fields.
 
