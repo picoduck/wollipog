@@ -960,7 +960,11 @@ all existing app-server capabilities. Other startup failures are not retried or 
    in a private per-turn native temp directory. WSL files are created inside the selected distro
    with mode 0600 and Linux paths—never through a Windows/UNC translation. Files survive until the
    turn request settles and are removed on completion, failure, cancellation, process exit, and
-   dispose.
+   dispose. The pinned v2 contract reports every terminal status through identified
+   `turn/completed`. As a mixed-version fallback, an identified legacy root `turn/failed` is also
+   accepted, but a terminal notification received before the `turn/start` response remains inert
+   until that response confirms the exact same provider turn id. Unidentified or mismatched legacy
+   failures are ignored.
 4. `turn/interrupt` for `cancel`. Shutdown interrupts an active turn, safely cancels parked requests,
    then closes transport without archiving/deleting the thread. Runner/app-server restarts resume
    through the stored id. An ambiguously delivered in-flight prompt is never replayed; only prompts
@@ -989,6 +993,7 @@ their `supportedReasoningEfforts` come from the `model/list` request (also used 
 | `turn/diff/updated {diff}` | `{kind:"file_edit", path:"worktree", diff}` |
 | `thread/tokenUsage/updated {…}` | derive complete per-turn usage from replay-safe cumulative `total` deltas, retain `last` only for context occupancy, then emit one `{kind:"token_usage",…}` at turn settlement; old servers without `total` use a best-effort compatibility fallback |
 | `turn/completed {turn.status}` | end turn → `StopReason` (`completed`→`end_turn`, `interrupted`→`cancelled`, `failed`→`refusal`); `{kind:"status", status:"idle"}` |
+| legacy `turn/failed {turnId,error}` | end the exact response-confirmed root turn → `refusal`; pre-response failures are deferred by provider turn id, while unidentified or mismatched failures remain inert |
 | `error {error:{message,codexErrorInfo?}}` | `{kind:"error", message}` |
 
 App-server is a multiplexed transport: the root thread and every structured child thread share one

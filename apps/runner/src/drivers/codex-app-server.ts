@@ -439,9 +439,10 @@ export class CodexAppServerDriver implements Driver {
   private promptGeneration = 0;
   private serverIdentity = "unknown";
   private completedTurnId: string | null = null;
-  /** A completion can race ahead of both turn/started and the turn/start response. Keep identified
-   * completions inert until the active prompt confirms the same provider turn. */
-  private readonly deferredTurnCompletions = new Map<string, Json>();
+  /** A terminal notification can race ahead of both turn/started and the turn/start response.
+   * Keep identified v2 completions and legacy failures inert until the active prompt confirms the
+   * same provider turn. */
+  private readonly deferredRootTurnTerminals = new Map<string, Json>();
   /** The request response is the causal boundary between predecessor notifications and this
    * prompt. A turn/started notification before it is provisional and cannot bind ownership. */
   private turnStartResponseGeneration: number | null = null;
@@ -888,6 +889,16 @@ export class CodexAppServerDriver implements Driver {
     this.cb.onSteeringTurnChanged?.();
   }
 
+  private deferRootTurnTerminal(id: string, payload: Json): void {
+    // Settlement is first-wins after a turn is bound, so preserve the same deterministic ordering
+    // when mixed-version servers emit both terminal shapes before the response.
+    if (this.deferredRootTurnTerminals.has(id)) return;
+    this.deferredRootTurnTerminals.set(id, payload);
+    if (this.deferredRootTurnTerminals.size > 16) {
+      this.deferredRootTurnTerminals.delete(this.deferredRootTurnTerminals.keys().next().value!);
+    }
+  }
+
   private confirmRootTurn(id: string, generation = this.promptGeneration): boolean {
     if (
       generation !== this.promptGeneration || !this.promptBusy || !this.turnResolve ||
@@ -898,8 +909,8 @@ export class CodexAppServerDriver implements Driver {
     if (this.stagedImages?.generation === generation && this.stagedImages.turnId == null) {
       this.stagedImages = { ...this.stagedImages, turnId: id };
     }
-    const deferred = this.deferredTurnCompletions.get(id);
-    this.deferredTurnCompletions.clear();
+    const deferred = this.deferredRootTurnTerminals.get(id);
+    this.deferredRootTurnTerminals.clear();
     if (deferred) this.completeRootTurn(deferred, generation, id);
     return true;
   }
@@ -940,7 +951,7 @@ export class CodexAppServerDriver implements Driver {
     // server accepts turn/start but never emits turn/started, agentTurnId() must fail closed.
     this.lastTurnId = null;
     const generation = ++this.promptGeneration;
-    this.deferredTurnCompletions.clear();
+    this.deferredRootTurnTerminals.clear();
     this.turnStartResponseGeneration = null;
     let staged: StagedPromptImages;
     try {
@@ -1196,7 +1207,7 @@ export class CodexAppServerDriver implements Driver {
     this.setSteeringTurn(null);
     this.promptBusy = false;
     this.promptGeneration++;
-    this.deferredTurnCompletions.clear();
+    this.deferredRootTurnTerminals.clear();
     this.turnStartResponseGeneration = null;
     void this.cleanupStagedImages(owner).finally(() => {
       resolve(r);
@@ -1736,10 +1747,7 @@ export class CodexAppServerDriver implements Driver {
       if (!this.turnId) {
         // This may be a replay from the interrupted predecessor. It becomes actionable only if the
         // current turn/start request or turn/started notification confirms the exact same id.
-        this.deferredTurnCompletions.set(id, p);
-        if (this.deferredTurnCompletions.size > 16) {
-          this.deferredTurnCompletions.delete(this.deferredTurnCompletions.keys().next().value!);
-        }
+        this.deferRootTurnTerminal(id, p);
         return;
       }
       if (id !== this.turnId) return;
@@ -1757,8 +1765,20 @@ export class CodexAppServerDriver implements Driver {
         return;
       }
       const id = p?.turn?.id ?? p?.turnId;
-      if (typeof id !== "string" || !id || id !== this.turnId || !this.promptBusy || !this.turnResolve) return;
-      this.completeRootTurn({ ...p, turn: { ...p?.turn, id, status: "failed", error: p?.error } }, this.promptGeneration, id);
+      if (typeof id !== "string" || !id || id === this.completedTurnId) return;
+      if (!this.promptBusy || !this.turnResolve) return;
+      const failure = {
+        ...p,
+        turn: { ...p?.turn, id, status: "failed", error: p?.error ?? p?.turn?.error },
+      };
+      if (!this.turnId) {
+        // Older App Servers can report this legacy terminal shape before turn/start responds. It is
+        // safe only after that response confirms the exact provider turn id for this prompt.
+        this.deferRootTurnTerminal(id, failure);
+        return;
+      }
+      if (id !== this.turnId) return;
+      this.completeRootTurn(failure, this.promptGeneration, id);
     });
     peer.onNotification("error", (p: Json) => {
       this.emitDriverError(p?.error ?? p?.message);
