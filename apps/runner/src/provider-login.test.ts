@@ -9,10 +9,24 @@ import type { AgentDefinition, ProviderLoginView } from "@wollipog/protocol";
 import fc from "fast-check";
 import type { AgentProcess, SpawnAgentOptions } from "./spawn.js";
 import {
+  agentsMatchingHarnessInstallationSelections,
   parseCodexDeviceLoginOutput,
   ProviderLoginSupervisor,
   type ResolvedProviderLogin,
 } from "./provider-login.js";
+
+test("provider sign-in only uses the saved installation in its execution context", () => {
+  const system: AgentDefinition = { id: "codex", name: "Codex", command: "/usr/bin/codex",
+    args: [], env: {}, driver: "codex-app-server", context: { kind: "native" },
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" } };
+  const local: AgentDefinition = { ...system, id: "codex-local", command: "/home/u/.local/bin/codex",
+    installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" } };
+  const selected = [{ context: { kind: "native" } as const, installationId: "local" }];
+  assert.deepEqual(agentsMatchingHarnessInstallationSelections([system, local], selected).map((agent) => agent.id),
+    ["codex-local"]);
+  assert.deepEqual(agentsMatchingHarnessInstallationSelections([system], selected), [],
+    "a missing saved installation cannot fall back to the first PATH result");
+});
 import { waitForPendingKills } from "./spawn.js";
 
 class FakeLoginChild extends EventEmitter {

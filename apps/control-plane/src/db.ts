@@ -91,6 +91,7 @@ import {
   type UnmanagedSkillInfo,
   type AgentContext,
   type AgentDefinition,
+  type HarnessInstallationSelection,
   type AgentDriverKind,
   type EditorInfo,
   type ExecutionHandoffRequest,
@@ -223,6 +224,17 @@ import {
   type UiEvidenceReviewReceipt,
   AGENT_SPAWN_OBSERVATION_CAP,
 } from "@wollipog/protocol";
+
+function harnessInstallationFamily(driver: AgentDriverKind | undefined): HarnessInstallationSelection["family"] | null {
+  if (driver === "codex" || driver === "codex-app-server") return "codex";
+  if (driver === "claude-code") return "claude";
+  if (driver === "pi") return "pi";
+  return null;
+}
+
+function harnessInstallationContext(context: AgentContext | undefined): string {
+  return JSON.stringify(context ?? { kind: "native" });
+}
 
 const OUTBOUND_EVENT_PENDING_LIMIT = 100;
 const OUTBOUND_EVENT_BODY_LIMIT_BYTES = 16 * 1_024;
@@ -576,6 +588,8 @@ CREATE TABLE IF NOT EXISTS runner_agents (
   available    INTEGER,
   unavailable_reason TEXT,
   source       TEXT,
+  installation TEXT,
+  update_assessment TEXT,
   codex_app_server TEXT,
   claude_code TEXT,
   native_tui_accounting TEXT,
@@ -587,6 +601,15 @@ CREATE TABLE IF NOT EXISTS runner_agents (
   PRIMARY KEY (runner_id, agent_id),
   FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE,
   FOREIGN KEY (agent_id) REFERENCES agent_definitions(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS machine_harness_selections (
+  runner_id TEXT NOT NULL REFERENCES runners(runner_id) ON DELETE CASCADE,
+  family TEXT NOT NULL CHECK (family IN ('claude', 'codex', 'pi')),
+  context TEXT NOT NULL,
+  installation_id TEXT NOT NULL,
+  snapshot TEXT NOT NULL,
+  PRIMARY KEY (runner_id, family, context)
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -4680,7 +4703,7 @@ export class ControlPlaneDb {
     );
     db.prepare("DELETE FROM driver_telemetry_hourly WHERE bucket_ts < ?").run(Date.now() - 180 * 86_400_000);
     // Additive migrations for DBs created before discovery columns existed.
-    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "default_provider_account_id TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
+    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "installation TEXT", "update_assessment TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "default_provider_account_id TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
       try {
         db.exec(`ALTER TABLE runner_agents ADD COLUMN ${col}`);
       } catch {
@@ -5436,8 +5459,8 @@ export class ControlPlaneDb {
     );
     const insRa = this.stmt(
       `INSERT INTO runner_agents
-         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, codex_app_server, claude_code, native_tui_accounting, default_provider_account_id, wsl_agent_control, acp, registry, acp_transport)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, installation, update_assessment, codex_app_server, claude_code, native_tui_accounting, default_provider_account_id, wsl_agent_control, acp, registry, acp_transport)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const a of agents) {
       upAgent.run(a.id, a.name, now);
@@ -5455,6 +5478,8 @@ export class ControlPlaneDb {
         a.available == null ? null : a.available ? 1 : 0,
         a.unavailableReason ?? null,
         a.source ?? null,
+        a.installation ? JSON.stringify(a.installation) : null,
+        a.update ? JSON.stringify(a.update) : null,
         a.codexAppServer ? JSON.stringify(a.codexAppServer) : null,
         a.claudeCode ? JSON.stringify(a.claudeCode) : null,
         persistNativeTuiAccounting && a.nativeTuiAccounting ? JSON.stringify(a.nativeTuiAccounting) : null,
@@ -9810,6 +9835,8 @@ export class ControlPlaneDb {
                   ra.driver AS driver, ra.context AS context, ra.capabilities AS capabilities,
                   ra.version AS version, ra.auth_status AS auth_status, ra.available AS available,
                   ra.unavailable_reason AS unavailable_reason, ra.source AS source,
+                  ra.installation AS installation,
+                  ra.update_assessment AS update_assessment,
                   ra.codex_app_server AS codex_app_server, ra.claude_code AS claude_code,
                   ra.native_tui_accounting AS native_tui_accounting,
                   ra.default_provider_account_id AS default_provider_account_id,
@@ -9832,6 +9859,8 @@ export class ControlPlaneDb {
         available: number | null;
         unavailable_reason: string | null;
         source: string | null;
+        installation: string | null;
+        update_assessment: string | null;
         codex_app_server: string | null;
         claude_code: string | null;
         native_tui_accounting: string | null;
@@ -9857,6 +9886,8 @@ export class ControlPlaneDb {
       available: a.available == null ? undefined : a.available === 1,
       unavailableReason: a.unavailable_reason ?? undefined,
       source: (a.source as AgentDefinition["source"] | null) ?? "config",
+      installation: parseJson<AgentDefinition["installation"]>(a.installation) ?? undefined,
+      update: parseJson<AgentDefinition["update"]>(a.update_assessment) ?? undefined,
       codexAppServer: parseJson<AgentDefinition["codexAppServer"]>(a.codex_app_server) ?? undefined,
       claudeCode: parseJson<AgentDefinition["claudeCode"]>(a.claude_code) ?? undefined,
       nativeTuiAccounting: parseJson<AgentDefinition["nativeTuiAccounting"]>(a.native_tui_accounting) ?? undefined,
@@ -9866,6 +9897,16 @@ export class ControlPlaneDb {
       registry: parseJson<AgentDefinition["registry"]>(a.registry) ?? undefined,
       acpTransport: a.acp_transport === "stdio" ? "stdio" : undefined,
     }));
+
+    const harnessSelections = this.getHarnessInstallationSelections(row.runner_id, agents);
+    for (const agent of agents) {
+      if (!agent.installation) continue;
+      const family = harnessInstallationFamily(agent.driver);
+      const selected = harnessSelections.find((item) => item.family === family &&
+        harnessInstallationContext(item.context) === harnessInstallationContext(agent.context));
+      if (selected) agent.installation.selection = selected.installationId === agent.installation.id
+        ? "selected" : "other";
+    }
 
     const runtime = runnerSupportsProtocol(row.protocol_version, "runtimeDiagnostics")
       ? (parseJson<RunnerView["runtime"]>(row.runtime) ?? undefined)
@@ -9882,6 +9923,7 @@ export class ControlPlaneDb {
       protocolVersion: row.protocol_version ?? null,
       agentsRefreshed: row.agents_refreshed_at != null,
       agents,
+      harnessSelections,
       providerAccounts: runnerSupportsProtocol(row.protocol_version, "providerAccounts")
         ? (parseJson<RunnerView["providerAccounts"]>(row.provider_accounts) ?? [])
         : undefined,
@@ -9942,15 +9984,80 @@ export class ControlPlaneDb {
     return view;
   }
 
+  getHarnessInstallationSelections(runnerId: string, agents?: AgentDefinition[]): HarnessInstallationSelection[] {
+    const currentAgents = agents ?? this.getRunner(runnerId)?.agents ?? [];
+    const rows = this.stmt(
+      "SELECT family, context, installation_id, snapshot FROM machine_harness_selections WHERE runner_id=? ORDER BY family, context",
+    ).all(runnerId) as Array<{ family: string; context: string; installation_id: string; snapshot: string }>;
+    return rows.map((row) => {
+      const snapshot = parseJson<{ path: string; via: HarnessInstallationSelection["via"]; version?: string }>(row.snapshot);
+      const context = parseJson<AgentContext>(row.context) ?? { kind: "native" as const };
+      const matches = (candidate: AgentDefinition) => candidate.available === true &&
+        harnessInstallationFamily(candidate.driver) === row.family &&
+        harnessInstallationContext(candidate.context) === row.context &&
+        candidate.installation?.id === row.installation_id;
+      const agent = currentAgents.find((candidate) => matches(candidate) && candidate.driver !== "codex") ??
+        currentAgents.find(matches);
+      return {
+        family: row.family as HarnessInstallationSelection["family"],
+        context,
+        installationId: row.installation_id,
+        path: snapshot?.path ?? "",
+        via: snapshot?.via ?? "path",
+        version: snapshot?.version,
+        agentId: agent?.id ?? null,
+      };
+    });
+  }
+
+  /** Select the exact rediscovered installation for one Machine/context. Returns null if this
+   * runner cannot represent the choice; no preference is written in that case. */
+  selectHarnessInstallation(runnerId: string, agentId: string): HarnessInstallationSelection | null {
+    const runner = this.getRunner(runnerId);
+    if (!runner || !runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations")) return null;
+    const agent = runner.agents.find((candidate) => candidate.id === agentId);
+    const family = harnessInstallationFamily(agent?.driver);
+    if (!agent?.installation || !family) return null;
+    const context = agent.context ?? { kind: "native" as const };
+    const eligible = runner.agents.some((candidate) => candidate.installation?.id === agent.installation!.id &&
+      harnessInstallationFamily(candidate.driver) === family &&
+      harnessInstallationContext(candidate.context) === harnessInstallationContext(context) &&
+      (candidate.available === true || candidate.authStatus === "unauthenticated"));
+    if (!eligible) return null;
+    this.stmt(
+      `INSERT INTO machine_harness_selections (runner_id, family, context, installation_id, snapshot)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(runner_id, family, context) DO UPDATE SET
+         installation_id=excluded.installation_id, snapshot=excluded.snapshot`,
+    ).run(runnerId, family, harnessInstallationContext(context), agent.installation.id,
+      JSON.stringify({ path: agent.installation.path, via: agent.installation.via, version: agent.version }));
+    return this.getHarnessInstallationSelections(runnerId).find((item) => item.family === family &&
+      harnessInstallationContext(item.context) === harnessInstallationContext(context)) ?? null;
+  }
+
   /** Resolve a runner+agent to its launch command/args/env + driver/context. */
   getAgentLaunch(runnerId: string, agentId: string): AgentLaunch | null {
     const row = this.stmt(
-      "SELECT command, args, env, driver, context, version, capabilities, wsl_agent_control FROM runner_agents WHERE runner_id=? AND agent_id=? AND available = 1",
+      "SELECT command, args, env, driver, context, version, capabilities, wsl_agent_control, installation FROM runner_agents WHERE runner_id=? AND agent_id=? AND available = 1",
     )
       .get(runnerId, agentId) as unknown as
-      | { command: string; args: string; env: string; driver: string; context: string | null; version: string | null; capabilities: string | null; wsl_agent_control: string | null }
+      | { command: string; args: string; env: string; driver: string; context: string | null; version: string | null; capabilities: string | null; wsl_agent_control: string | null; installation: string | null }
       | undefined;
     if (!row) return null;
+    const family = harnessInstallationFamily(row.driver as AgentDriverKind);
+    if (family) {
+      const selected = this.stmt(
+        "SELECT installation_id FROM machine_harness_selections WHERE runner_id=? AND family=? AND context=?",
+      ).get(runnerId, family, harnessInstallationContext(parseJson<AgentContext>(row.context) ?? undefined)) as
+        { installation_id: string } | undefined;
+      if (selected) {
+        const installation = parseJson<AgentDefinition["installation"]>(row.installation);
+        const protocol = this.stmt("SELECT protocol_version FROM runners WHERE runner_id=?")
+          .get(runnerId) as { protocol_version: number | null } | undefined;
+        if (!runnerSupportsProtocol(protocol?.protocol_version, "harnessInstallations") ||
+            installation?.id !== selected.installation_id) return null;
+      }
+    }
     return {
       command: row.command,
       args: jsonArray(row.args),

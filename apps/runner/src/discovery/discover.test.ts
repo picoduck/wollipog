@@ -708,6 +708,20 @@ test("mergeAgents keeps a discovered native agent even when its id matches a con
   assert.equal(merged.find((a) => a.id === "codex-native")!.version, "0.1");
 });
 
+test("mergeAgents retains a second installation when a configured bare name matches the default", () => {
+  const config = [cfg({ id: "chosen-codex", driver: "codex-app-server", command: "codex" })];
+  const discovered = [
+    cfg({ id: "codex", driver: "codex-app-server", command: "/usr/bin/codex", bin: "codex",
+      installation: { id: "system", path: "/usr/bin/codex", via: "path" } }),
+    cfg({ id: "codex-installation-local", driver: "codex-app-server", command: "/home/u/.local/bin/codex", bin: "codex",
+      installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" } }),
+  ];
+  const merged = mergeAgents(config, discovered);
+  assert.deepEqual(merged.map((agent) => agent.id), ["chosen-codex", "codex-installation-local"]);
+  assert.equal(merged[0]!.installation?.id, "system");
+  assert.equal(merged[1]!.installation?.id, "local");
+});
+
 test("mergeAgents enriches a config agent that uses a bare command name (P2 basename match)", () => {
   const config = [
     cfg({

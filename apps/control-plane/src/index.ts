@@ -2521,6 +2521,9 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
   if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
   const unsupported = runnerCapabilityError(id, "providerLogin", "Provider Sign-In");
   if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (runner.harnessSelections?.length && !runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations")) {
+    return reply.code(409).send({ error: "This runner cannot enforce the saved Harness Installation choice" });
+  }
   const body = (req.body ?? {}) as { provider?: unknown; label?: unknown; accountId?: unknown };
   const hasAccountId = body.accountId !== undefined;
   if (hasAccountId) {
@@ -2533,12 +2536,19 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
       /[\u0000-\u001f\u007f]/u.test(body.label)) {
     return reply.code(400).send({ error: "provider and a 1 to 100 character label are required" });
   }
+  const loginProvider = hasAccountId
+    ? runner.providerAccounts?.find((account) => account.id === body.accountId)?.provider
+    : body.provider;
   const requestId = `provider_login_${randomUUID()}`;
   try {
     const result = await hub.requestFromRunner(id, requestId, {
       type: "start_provider_login",
       requestId,
       runnerId: id,
+      installationSelections: runner.harnessSelections?.filter((selection) =>
+        selection.family === loginProvider).map((selection) => ({
+        context: selection.context, installationId: selection.installationId,
+      })),
       ...(hasAccountId
         ? { accountId: body.accountId as string }
         : { provider: body.provider as "claude" | "codex", label: (body.label as string).trim() }),
@@ -2684,6 +2694,29 @@ app.patch("/api/runners/:id", async (req, reply) => {
   hub.runnerChanged(id);
   if (boxId) hub.boxChanged(boxId);
   return { ok: true };
+});
+
+app.put("/api/runners/:id/harness-installation", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  const agentId = (req.body as { agentId?: unknown } | undefined)?.agentId;
+  if (typeof agentId !== "string" || !agentId || agentId.length > 256) {
+    return reply.code(400).send({ error: "agentId must identify a discovered installation" });
+  }
+  const runner = db.getRunner(id);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations")) {
+    return reply.code(409).send({
+      error: runnerCapabilityRequirement(runner.protocolVersion, "harnessInstallations", "Harness Installation selection"),
+    });
+  }
+  const selection = db.selectHarnessInstallation(id, agentId);
+  if (!selection) return reply.code(409).send({ error: "This installation is no longer available for selection" });
+  hub.runnerChanged(id);
+  return { selection };
 });
 
 app.put("/api/runners/:id/capacity", async (req, reply) => {

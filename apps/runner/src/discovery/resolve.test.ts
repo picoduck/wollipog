@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
+import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { delimiter, join } from "node:path";
 import { test } from "node:test";
-import { launchForVersionManagerHit, pickWindowsExecutable, run, sortVersionsDesc, wslInspectArgs, wslVersionManagerArgs } from "./resolve.js";
+import { launchForVersionManagerHit, pickWindowsExecutable, resolveNativeCandidates, resolvedLaunchIdentity, run, sortVersionsDesc, wslCandidateScanArgs, wslInspectArgs, wslVersionManagerArgs } from "./resolve.js";
 import { interpretCodexAppServerProbe } from "./codex-app-server.js";
 
 test("run preserves a string execFile error code for retryable spawn diagnostics", async () => {
@@ -31,6 +34,35 @@ test("Windows resolution prefers executable shims over adjacent POSIX scripts", 
   assert.equal(pickWindowsExecutable("C:\\npm\\claude\r\nC:\\npm\\claude.cmd\r\n"), "C:\\npm\\claude.cmd");
   assert.equal(pickWindowsExecutable("C:\\tools\\codex.exe\r\nC:\\tools\\codex.cmd"), "C:\\tools\\codex.exe");
   assert.equal(pickWindowsExecutable(""), null);
+});
+
+test("native discovery keeps system and user installations distinct across PATH reordering and deduplicates aliases", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-harnesses-"));
+  const system = join(root, "system");
+  const user = join(root, "user");
+  const alias = join(root, "alias");
+  const oldPath = process.env.PATH;
+  try {
+    for (const dir of [system, user, alias]) mkdirSync(dir);
+    for (const [dir, version] of [[system, "1"], [user, "2"]] as const) {
+      const file = join(dir, "fakeharness");
+      writeFileSync(file, `#!/bin/sh\necho ${version}\n`);
+      chmodSync(file, 0o755);
+    }
+    symlinkSync(join(user, "fakeharness"), join(alias, "fakeharness"));
+    process.env.PATH = [system, alias, user, oldPath ?? ""].join(delimiter);
+    const first = (await resolveNativeCandidates("fakeharness")).filter((entry) => entry.path.startsWith(root));
+    assert.equal(first.length, 2);
+    assert.equal(first[0]!.path, join(system, "fakeharness"));
+    process.env.PATH = [user, system, alias, oldPath ?? ""].join(delimiter);
+    const reordered = (await resolveNativeCandidates("fakeharness")).filter((entry) => entry.path.startsWith(root));
+    assert.equal(reordered.length, 2);
+    assert.deepEqual(first.map(resolvedLaunchIdentity).sort(), reordered.map(resolvedLaunchIdentity).sort());
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("launchForVersionManagerHit: node scripts wrap, real binaries run direct", () => {
@@ -65,6 +97,30 @@ test("wslVersionManagerArgs: name rides as a positional arg, never inside the sc
   assert.ok(script.includes(".nvm/versions/node") && script.includes("fnm/node-versions"), "scans nvm + fnm");
   assert.equal(args[6], "sh"); // $0 placeholder
   assert.equal(args[7], hostile);
+});
+
+test("WSL scan finds a user-local executable even when non-login PATH finds system first", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-scan-"));
+  const system = join(root, "system");
+  const local = join(root, ".local", "bin");
+  try {
+    mkdirSync(system);
+    mkdirSync(local, { recursive: true });
+    for (const dir of [system, local]) {
+      const file = join(dir, "fakeharness");
+      writeFileSync(file, "#!/bin/sh\nexit 0\n");
+      chmodSync(file, 0o755);
+    }
+    const args = wslCandidateScanArgs("Ubuntu", "fakeharness");
+    const scanned = await run("/bin/sh", args.slice(4), {
+      env: { HOME: root, PATH: [system, "/usr/bin", "/bin"].join(delimiter) },
+    });
+    assert.equal(scanned.code, 0, scanned.stderr);
+    assert.ok(scanned.stdout.includes(`path\t${system}/fakeharness`));
+    assert.ok(scanned.stdout.includes(`common-dir\t${local}/fakeharness`));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("wslInspectArgs: the inspected path rides as a positional arg, never inside the script", () => {

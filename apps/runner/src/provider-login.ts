@@ -22,6 +22,17 @@ const LABELED_DEVICE_CODE_PATTERN = /one-time code:?\s*([A-Z0-9-]+)[ \t]*(?=\r?\
 const HYPHENATED_DEVICE_CODE_LINE_PATTERN = /^[ \t]*([A-Z0-9]+(?:-[A-Z0-9]+)+)[ \t]*(?=\r?\n)/gmu;
 const ANSI_ESCAPE_PATTERN = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~])|\u009b[0-?]*[ -/]*[@-~]/gu;
 const CODEX_LOGIN_CLIENT_INFO = { name: "wollipog-provider-login", version: "1.0.0" } as const;
+
+export function agentsMatchingHarnessInstallationSelections(
+  agents: AgentDefinition[],
+  selections: Array<{ context: AgentContext; installationId: string }>,
+): AgentDefinition[] {
+  return agents.filter((candidate) => {
+    const selected = selections.find((choice) =>
+      JSON.stringify(choice.context) === JSON.stringify(candidate.context ?? { kind: "native" }));
+    return !selected || candidate.installation?.id === selected.installationId;
+  });
+}
 interface ProviderLoginDescriptor {
   loginTail: readonly string[];
   statusTail: readonly string[];
@@ -247,7 +258,10 @@ export class ProviderLoginSupervisor {
       .map((view) => ({ ...view }));
   }
 
-  async startAccount(input: { provider: "claude" | "codex"; label: string } | { accountId: string }): Promise<ProviderLoginView> {
+  async startAccount(
+    input: { provider: "claude" | "codex"; label: string } | { accountId: string },
+    installationSelections: Array<{ context: AgentContext; installationId: string }> = [],
+  ): Promise<ProviderLoginView> {
     let account: RunnerProviderAccount;
     let persistAccount: boolean;
     if ("accountId" in input) {
@@ -272,7 +286,8 @@ export class ProviderLoginSupervisor {
       };
       persistAccount = true;
     }
-    const agent = agentForProviderAccount(this.options.agents(), account, [
+    const eligibleAgents = agentsMatchingHarnessInstallationSelections(this.options.agents(), installationSelections);
+    const agent = agentForProviderAccount(eligibleAgents, account, [
       "claude-code", "codex", "codex-app-server",
     ]);
     if (!agent) throw new Error(`No ${account.provider === "claude" ? "Claude" : "Codex"} agent is available on this Machine.`);

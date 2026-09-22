@@ -32,8 +32,8 @@ test("browser UI connections snapshot a credential into each new socket URL", as
   token = null;
   connection.createSocket();
   assert.deepEqual(urls, [
-    "wss://a.example.test/ui?protocolVersion=174&token=paired+secret",
-    "wss://a.example.test/ui?protocolVersion=174",
+    "wss://a.example.test/ui?protocolVersion=175&token=paired+secret",
+    "wss://a.example.test/ui?protocolVersion=175",
   ]);
   connection.close();
   await assert.rejects(async () => connection.createSocket(), (error: unknown) =>

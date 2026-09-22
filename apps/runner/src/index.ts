@@ -2370,6 +2370,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       runCommandTask("start_provider_login", providerLoginSupervisor.startAccount(
         msg.accountId ? { accountId: msg.accountId } : { provider: msg.provider!, label: msg.label! },
+        msg.installationSelections,
       ).then((login) => sendUp({
         type: "provider_login_result",
         requestId: msg.requestId,

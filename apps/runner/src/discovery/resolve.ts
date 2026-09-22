@@ -10,9 +10,9 @@
  */
 
 import { execFile } from "node:child_process";
-import { closeSync, existsSync, openSync, readdirSync, readSync, realpathSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
 import { windowsCommandSpec } from "../windows-cmd.js";
 
 const isWindows = platform() === "win32";
@@ -33,6 +33,8 @@ export interface ResolvedBinary {
   via: "path" | "common-dir" | "version-manager" | "login-shell";
   /** How to exec it (equals {command: path, args: []} except for version-manager node shims). */
   launch: ResolvedLaunch;
+  /** Canonical effective launch, computed in the execution context when host realpath cannot. */
+  identity?: string;
 }
 
 export interface ExecResult {
@@ -131,7 +133,7 @@ function commonDirs(): string[] {
 
 /** Binary basenames to try for a logical name (Windows adds shim extensions). */
 function candidateNames(name: string): string[] {
-  return isWindows ? [`${name}.cmd`, `${name}.exe`, `${name}.ps1`, name] : [name];
+  return isWindows ? [`${name}.cmd`, `${name}.exe`, `${name}.bat`] : [name];
 }
 
 /** Sort version-dir names newest-first ("v25.2.1" > "v9.0.0" — numeric, not lexicographic).
@@ -203,7 +205,8 @@ function readHead(path: string): string {
 
 /** POSIX-only scan of nvm/fnm bin dirs (invisible to non-login AND `-lc` shells on stock
  * Ubuntu — see the module docstring). */
-function resolveInVersionManagers(name: string): ResolvedBinary | null {
+function resolveInVersionManagers(name: string): ResolvedBinary[] {
+  const found: ResolvedBinary[] = [];
   for (const dir of versionManagerBinDirs()) {
     const p = join(dir, name);
     if (!existsSync(p)) continue;
@@ -217,9 +220,9 @@ function resolveInVersionManagers(name: string): ResolvedBinary | null {
     }
     const node = join(dir, "node");
     const launch = launchForVersionManagerHit(p, real, firstLine, existsSync(node) ? node : null);
-    return { path: p, via: "version-manager", launch };
+    found.push({ path: p, via: "version-manager", launch });
   }
-  return null;
+  return found;
 }
 
 /** {command: path, args: []} — the launch shape for a directly-executable hit. */
@@ -228,56 +231,81 @@ function directLaunch(path: string): ResolvedLaunch {
 }
 
 /** Resolve an agent binary on the NATIVE host. Returns null if not found. */
-export async function resolveNative(name: string): Promise<ResolvedBinary | null> {
-  // 1. PATH lookup — `where.exe` (Windows) / `command -v` (POSIX).
-  if (isWindows) {
-    const r = await run("where.exe", [name], { timeoutMs: 4000 });
-    const hit = pickWindowsExecutable(r.stdout);
-    if (r.code === 0 && hit && existsSync(hit)) return { path: hit, via: "path", launch: directLaunch(hit) };
-  } else {
-    const r = await run("/bin/sh", ["-c", `command -v ${name}`], { timeoutMs: 4000 });
-    const hit = firstLine(r.stdout);
-    // `command -v` can print an alias/function/builtin name (not a path) — require a real path.
-    if (r.code === 0 && hit.startsWith("/")) return { path: hit, via: "path", launch: directLaunch(hit) };
+/** An executable's canonical launch identity. Aliases collapse, while a node shim launched by
+ * different version-manager runtimes remains distinct. */
+export function resolvedLaunchIdentity(binary: ResolvedBinary): string {
+  if (binary.identity) return binary.identity;
+  const canonical = (path: string): string => {
+    try { return realpathSync(path); } catch { return path; }
+  };
+  return JSON.stringify([canonical(binary.launch.command), ...binary.launch.args.map(canonical)]);
+}
+
+/** Enumerate every plausible native installation, including user-local copies hidden by an SSH
+ * runner's non-login PATH. No project-local PATH entry is executed during discovery. */
+export async function resolveNativeCandidates(name: string): Promise<ResolvedBinary[]> {
+  if (!/^[a-z][a-z0-9-]*$/i.test(name)) return [];
+  const hits: ResolvedBinary[] = [];
+  const add = (path: string, via: ResolvedBinary["via"]) => {
+    if (!isAbsolute(path)) return;
+    try {
+      const real = realpathSync(path);
+      const cwd = resolve(process.cwd());
+      if (path === cwd || path.startsWith(`${cwd}${sep}`) || real === cwd || real.startsWith(`${cwd}${sep}`)) return;
+      if (!statSync(real).isFile()) return;
+      accessSync(path, constants.X_OK);
+    } catch { return; }
+    // Launch the inspected target itself so replacing the discovery symlink cannot redirect a
+    // later session to another executable before rediscovery.
+    let launch = directLaunch(realpathSync(path));
+    if (!isWindows && isVersionManagerPath(path)) {
+      const node = join(dirname(path), "node");
+      try {
+        launch = launchForVersionManagerHit(path, realpathSync(path),
+          readHead(realpathSync(path)).split("\n")[0] ?? "", existsSync(node) ? realpathSync(node) : null);
+        if (launch.command === path) launch = directLaunch(realpathSync(path));
+      } catch { /* The executable check above still lets a native binary launch directly. */ }
+    }
+    hits.push({ path, via, launch });
+  };
+
+  // The runner's PATH order determines only the default, never the complete candidate set.
+  for (const dir of (process.env.PATH ?? "").split(delimiter)) {
+    if (!isAbsolute(dir)) continue;
+    for (const candidate of candidateNames(name)) add(join(dir, candidate), "path");
   }
 
-  // 2. Common install dirs.
-  for (const dir of commonDirs()) {
-    for (const cand of candidateNames(name)) {
-      const p = join(dir, cand);
-      if (existsSync(p)) return { path: p, via: "common-dir", launch: directLaunch(p) };
+  // Windows can resolve executables through its own search rules beyond the literal PATH scan.
+  if (isWindows) {
+    const r = await run("where.exe", [name], { timeoutMs: 4000 });
+    if (r.code === 0) for (const path of r.stdout.split(/\r?\n/)) {
+      if (/\.(?:exe|cmd|bat)$/i.test(path.trim())) add(path.trim(), "path");
     }
   }
 
-  // 3. Version-manager dirs (nvm/fnm) — POSIX only; npm-shim hits launch via that version's node.
-  if (!isWindows) {
-    const vm = resolveInVersionManagers(name);
-    if (vm) return vm;
+  // User-local and system installation directories may hold another version even when PATH hits.
+  for (const dir of commonDirs()) {
+    for (const candidate of candidateNames(name)) add(join(dir, candidate), "common-dir");
   }
+  if (!isWindows) for (const binary of resolveInVersionManagers(name)) add(binary.path, binary.via);
 
-  // 4. Login-shell fallback (sources ~/.profile etc.) — POSIX only. A hit that itself lives
-  //    under nvm/fnm (possible when the scan missed an unusual layout) still gets the node
-  //    wrap — exec'ing the shim directly dies on `#!/usr/bin/env node` in the daemon's PATH.
+  // A login shell may reveal a custom install directory absent from the runner's PATH.
   if (!isWindows) {
     const r = await run("/bin/sh", ["-lc", `command -v ${name}`], { timeoutMs: 6000 });
     const hit = firstLine(r.stdout);
-    if (r.code === 0 && hit.startsWith("/")) {
-      if (isVersionManagerPath(hit)) {
-        try {
-          const real = realpathSync(hit);
-          const first = readHead(real).split("\n")[0] ?? "";
-          const node = join(dirname(hit), "node");
-          const launch = launchForVersionManagerHit(hit, real, first, existsSync(node) ? node : null);
-          return { path: hit, via: "login-shell", launch };
-        } catch {
-          /* unreadable — fall through to direct */
-        }
-      }
-      return { path: hit, via: "login-shell", launch: directLaunch(hit) };
-    }
+    if (r.code === 0) add(hit, "login-shell");
   }
+  const unique = new Map<string, ResolvedBinary>();
+  for (const hit of hits) {
+    const identity = resolvedLaunchIdentity(hit);
+    if (!unique.has(identity)) unique.set(identity, hit);
+  }
+  return [...unique.values()];
+}
 
-  return null;
+/** Legacy first-choice resolution used where the caller needs one executable. */
+export async function resolveNative(name: string): Promise<ResolvedBinary | null> {
+  return (await resolveNativeCandidates(name))[0] ?? null;
 }
 
 /** Enumerate installed WSL distros (Windows only). Empty on other OSes / if WSL absent. */
@@ -320,7 +348,7 @@ function isVersionManagerPath(p: string): boolean {
 /** wsl.exe argv for inspecting one specific path (positional $1 — never interpolated): prints
  * its realpath, then the target's first line (for node-shebang detection). Exported for tests. */
 export function wslInspectArgs(distro: string, path: string): string[] {
-  const script = 'rp=$(readlink -f "$1") || exit 3; printf "%s\\n" "$rp"; head -c 128 "$rp" 2>/dev/null | tr -d "\\0" | head -n 1';
+  const script = 'rp=$(readlink -f "$1") || exit 3; printf "%s\\n" "$rp"; head -c 128 "$rp" 2>/dev/null | tr -d "\\0" | head -n 1; printf "\\n"; np=$(readlink -f "$(dirname "$1")/node" 2>/dev/null) || np=; [ -n "$np" ] && printf "NODE:%s\\n" "$np"; true';
   return ["-d", distro, "--exec", "sh", "-c", script, "sh", path];
 }
 
@@ -332,37 +360,54 @@ export function wslInspectArgs(distro: string, path: string): string[] {
  * scan could silently launch a DIFFERENT node version's copy than the shell selected. Null if
  * not found. */
 export async function resolveInWsl(distro: string, name: string): Promise<ResolvedBinary | null> {
-  if (!isWindows) return null;
-  const r = await run("wsl.exe", ["-d", distro, "--exec", "bash", "-lc", `command -v ${name}`], { timeoutMs: 8000 });
-  const hit = firstLine(r.stdout);
-  const loginHit =
-    r.code === 0 && hit.startsWith("/")
-      ? ({ path: hit, via: "login-shell", launch: directLaunch(hit) } as const)
-      : null;
-  if (loginHit) {
-    if (!isVersionManagerPath(loginHit.path)) return loginHit;
-    // Wrap THIS hit (the version the user's shell actually selects), not a scan result.
-    const insp = await run("wsl.exe", wslInspectArgs(distro, loginHit.path), { timeoutMs: 8000 });
-    if (insp.code === 0) {
-      const [realPath, shebang] = insp.stdout.split(/\r?\n/).map((l) => l.trim());
-      if (realPath?.startsWith("/")) {
-        const binDir = loginHit.path.slice(0, loginHit.path.lastIndexOf("/"));
-        const launch = launchForVersionManagerHit(loginHit.path, realPath, shebang ?? "", `${binDir}/node`);
-        return { path: loginHit.path, via: "login-shell", launch };
-      }
-    }
-    return loginHit; // inspection failed — direct launch as best effort
-  }
+  return (await resolveInWslCandidates(distro, name))[0] ?? null;
+}
 
-  const vm = await run("wsl.exe", wslVersionManagerArgs(distro, name), { timeoutMs: 8000 });
-  if (vm.code === 0) {
-    const [binDir, realPath, shebang] = vm.stdout.split(/\r?\n/).map((l) => l.trim());
-    if (binDir?.startsWith("/") && realPath?.startsWith("/")) {
-      const shimPath = `${binDir}/${name}`;
-      // node exists beside every nvm/fnm shim by construction (it IS that version dir's node).
-      const launch = launchForVersionManagerHit(shimPath, realPath, shebang ?? "", `${binDir}/node`);
-      return { path: shimPath, via: "version-manager", launch };
+/** Enumerate a WSL distribution independently of the non-interactive SSH/runner PATH. Each
+ * candidate is inspected inside that distribution before deriving its exact launch shape. */
+export function wslCandidateScanArgs(distro: string, name: string): string[] {
+  const script = [
+    'oldIFS=$IFS; IFS=:; for d in $PATH; do case "$d" in /*) [ -x "$d/$1" ] && printf "path\\t%s\\n" "$d/$1";; esac; done; IFS=$oldIFS',
+    'for d in "$HOME/.local/bin" "$HOME/.bun/bin" /usr/local/bin /usr/bin; do [ -x "$d/$1" ] && printf "common-dir\\t%s\\n" "$d/$1"; done',
+    'for d in "$HOME"/.nvm/versions/node/*/bin "$HOME"/.local/share/fnm/node-versions/*/installation/bin; do [ -x "$d/$1" ] && printf "version-manager\\t%s\\n" "$d/$1"; done',
+  ].join("; ") + "; true";
+  return ["-d", distro, "--exec", "sh", "-c", script, "sh", name];
+}
+
+export async function resolveInWslCandidates(distro: string, name: string): Promise<ResolvedBinary[]> {
+  if (!isWindows || !/^[a-z][a-z0-9-]*$/i.test(name)) return [];
+  const found: Array<{ path: string; via: ResolvedBinary["via"] }> = [];
+  const add = (path: string, via: ResolvedBinary["via"]) => {
+    if (path.startsWith("/") && !/[\0\r\n\t]/.test(path)) found.push({ path, via });
+  };
+  const scan = await run("wsl.exe", wslCandidateScanArgs(distro, name), { timeoutMs: 8000 });
+  if (scan.code === 0) {
+    for (const line of scan.stdout.split(/\r?\n/)) {
+      const tab = line.indexOf("\t");
+      if (tab < 0) continue;
+      const via = line.slice(0, tab);
+      if (via === "path" || via === "common-dir" || via === "version-manager") add(line.slice(tab + 1), via);
     }
   }
-  return null;
+  // A login profile may add another path absent from the runner's direct WSL invocation.
+  const login = await run("wsl.exe", ["-d", distro, "--exec", "bash", "-lc", `command -v ${name}`], { timeoutMs: 8000 });
+  if (login.code === 0) add(firstLine(login.stdout), "login-shell");
+
+  const unique = new Map<string, ResolvedBinary>();
+  for (const hit of found) {
+    const inspected = await run("wsl.exe", wslInspectArgs(distro, hit.path), { timeoutMs: 8000 });
+    if (inspected.code !== 0) continue;
+    const lines = inspected.stdout.split(/\r?\n/).map((line) => line.trim());
+    const [realPath, shebang] = lines;
+    const nodePath = lines.find((line) => line.startsWith("NODE:"))?.slice(5);
+    if (!realPath?.startsWith("/")) continue;
+    const launch = isVersionManagerPath(hit.path)
+      ? launchForVersionManagerHit(hit.path, realPath, shebang ?? "", nodePath?.startsWith("/") ? nodePath : null)
+      : directLaunch(realPath);
+    if (launch.command === hit.path) launch.command = realPath;
+    const identity = JSON.stringify([launch.command, ...launch.args]);
+    const binary = { path: hit.path, via: hit.via, launch, identity };
+    if (!unique.has(identity)) unique.set(identity, binary);
+  }
+  return [...unique.values()];
 }

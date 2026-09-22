@@ -1,5 +1,13 @@
 # Keeping box runners up to date
 
+Agent Harness updates are separate from runner updates. Protocol v175 reports each discovered
+Claude Code, Codex, or Pi installation and its update-check evidence in Machine settings. An npm
+installation whose exact Node and npm runtime can be verified checks registry dist-tags through the
+Machine's npm proxy/registry configuration; a check failure leaves the installed version visible. Other installation
+managers remain authoritative for their own upgrades. Set `WOLLIPOG_HARNESS_UPDATE_CHECKS=off` in
+the runner environment when organization policy disallows registry checks. Wollipog never changes a
+running Agent Harness executable; after an external upgrade, restart idle sessions and rediscover.
+
 Boxes run the runner **binary deployed to them** (a Node SEA executable copied over SSH), not
 this repo's source. Restarting your dev stack updates the *local* runner you launch from source,
 but every box keeps whatever binary was last `scp`'d to `~/.agent-manager/agent-manager-runner`
