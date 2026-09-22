@@ -1683,7 +1683,7 @@ test("retained-ref diagnostics prioritize actionable rows within the bounded inv
   assert.deepEqual(diagnostics.records.slice(0, 2).map((record) => record.state), ["retained", "pending"]);
 });
 
-test("retained-ref periodic replay is bounded and fair across a large permanently pending backlog", async () => {
+test("retained-ref periodic replay is bounded and fair across a large mixed-arming backlog", async () => {
   const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-fairness-"));
   let manager: SessionManager | undefined;
   try {
@@ -1705,6 +1705,22 @@ test("retained-ref periodic replay is bounded and fair across a large permanentl
       replayRetainedRefReclaims(): Promise<void>;
     };
     let internals = privateManager(manager);
+    for (let index = 0; index < 8; index++) {
+      internals.cleanupJournal.addRetainedRef({
+        sessionId: `unarmed-${index}`,
+        worktreeId: `unarmed-wt-${index}`,
+        cleanupId: `unarmed-cleanup-${index}`,
+        repoPath: "/repo",
+        context: { kind: "native" },
+        branch: `fix/unarmed-${index}`,
+        expectedOid: (index + 100).toString(16).padStart(40, "0"),
+        reasons: ["recorded_branch"],
+        state: "pending",
+        pendingReason: "worktree_present",
+        createdAt: 0,
+        updatedAt: 0,
+      });
+    }
     for (let index = 0; index < 21; index++) {
       const record: RetainedWorktreeRefRecord = {
         sessionId: `s-${index.toString().padStart(2, "0")}`,
@@ -1758,7 +1774,7 @@ test("retained-ref periodic replay is bounded and fair across a large permanentl
       "durable attempt admission prevents a restart from selecting the same first batch again");
     assert.equal(new Set(attempts).size, 21,
       "a complete cycle reaches every row before repeatedly pending records can starve the tail");
-    assert.equal(internals.cleanupJournal.listRetainedRefs().length, 21,
+    assert.equal(internals.cleanupJournal.listRetainedRefs().length, 29,
       "capacity and retry policy never retire unresolved ownership evidence");
   } finally {
     manager?.shutdownAll();
