@@ -20,8 +20,12 @@ test("only signing Windows legs enter the release environment, and they may mint
   assert.match(workflow, /workflow_dispatch:\n\s+inputs:\n\s+windows_signing:[\s\S]*?type: boolean\n\s+default: false/u);
 });
 
-test("a tag run refuses to publish unsigned Windows bundles and a partial configuration fails", () => {
-  assert.match(workflow, /if \(\$env:REF_TYPE -eq 'tag'\) \{[\s\S]*?refusing to publish unsigned Windows bundles"\s*\n\s*exit 1/u);
+test("a run that requires signing refuses unsigned Windows bundles and a partial configuration fails", () => {
+  // Signing is required under exactly the condition that selects the release environment, so a
+  // requested signed branch build cannot fall back to unsigned any more than a tag run can.
+  assert.match(workflow, /SIGNING_REQUIRED: \$\{\{ github\.ref_type == 'tag' \|\| inputs\.windows_signing \}\}/u);
+  assert.match(workflow, /environment: \$\{\{[^}]*\(github\.ref_type == 'tag' \|\| inputs\.windows_signing\)/u);
+  assert.match(workflow, /if \(\$env:SIGNING_REQUIRED -eq 'true'\) \{[\s\S]*?refusing to build unsigned Windows bundles"\s*\n\s*exit 1/u);
   assert.match(workflow, /Windows signing is partially configured[\s\S]*?exit 1/u);
   for (const name of ["AZURE_CLIENT_ID", "AZURE_TENANT_ID", "AZURE_SUBSCRIPTION_ID", "ARTIFACT_SIGNING_ENDPOINT", "ARTIFACT_SIGNING_ACCOUNT", "ARTIFACT_SIGNING_PROFILE"]) {
     assert.match(workflow, new RegExp(`${name}: \\$\\{\\{ vars\\.${name} \\}\\}`, "u"), `${name} must come from environment variables`);

@@ -112,8 +112,9 @@ an x64 .NET 8 runtime and signs under emulation. Signing happens in two places, 
 
 A post-build step unpacks the MSI and requires a valid, timestamped signature from a single
 certificate subject on every shipped executable, both installers, and the standalone runner and
-control-plane assets. A tag run without the signing variables fails; a branch test dispatch builds
-unsigned bundles unless its signing option is selected. Artifact Signing issues no EV certificates,
+control-plane assets. A run that requires signing, meaning a tag run or a dispatch with the signing
+option selected, fails without the signing variables. Only a branch test dispatch without that option
+builds unsigned bundles. Artifact Signing issues no EV certificates,
 so SmartScreen can still warn until the certificate's download reputation builds.
 
 ## One-line install

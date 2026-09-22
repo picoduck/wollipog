@@ -255,16 +255,18 @@ jobs:
           echo "macOS signing enabled for identity: $APPLE_SIGNING_IDENTITY; notarizing with Apple ID"
 
       # Windows Authenticode signing through Azure Artifact Signing. The Azure identity lives in
-      # the `release` environment's variables, so a leg outside that environment sees none of them:
-      # a tag run then fails, and a branch test dispatch builds an unsigned throwaway bundle. A
-      # partial configuration fails either way. The signing client is pinned by version and
+      # the `release` environment's variables, so a leg outside that environment sees none of them.
+      # A run that requires signing (a tag, or a dispatch with windows_signing selected) then fails;
+      # only an unrequested branch test dispatch builds an unsigned throwaway bundle. A partial
+      # configuration fails either way. The signing client is pinned by version and
       # SHA-256. It ships only x64 and x86 builds, so the x64 signtool loads it on both Windows
       # legs, and the ARM64 leg adds an x64 .NET 8 runtime for it under emulation.
       - name: Configure Windows Authenticode signing
         if: startsWith(matrix.os, 'windows')
         shell: pwsh
         env:
-          REF_TYPE: ${{ github.ref_type }}
+          # The same condition that places this leg in the `release` environment.
+          SIGNING_REQUIRED: ${{ github.ref_type == 'tag' || inputs.windows_signing }}
           AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
           AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
@@ -279,8 +281,8 @@ jobs:
             'ARTIFACT_SIGNING_ENDPOINT', 'ARTIFACT_SIGNING_ACCOUNT', 'ARTIFACT_SIGNING_PROFILE'
           $missing = @($names | Where-Object { -not [Environment]::GetEnvironmentVariable($_) })
           if ($missing.Count -eq $names.Count) {
-            if ($env:REF_TYPE -eq 'tag') {
-              Write-Output "::error::Windows signing variables are not available on a tag run; refusing to publish unsigned Windows bundles"
+            if ($env:SIGNING_REQUIRED -eq 'true') {
+              Write-Output "::error::Windows signing is required for this run but its variables are not available; refusing to build unsigned Windows bundles"
               exit 1
             }
             Write-Output "::warning::Windows signing is not configured for this run; building unsigned Windows bundles for this test dispatch"
