@@ -37,7 +37,7 @@ const GUARDED = ["-c", GUARD_OVERRIDE, "-c", TRUST_OVERRIDE, BYPASS];
 function reviewerFor(protectManagedWorktrees: boolean, guardActive: boolean): unknown {
   return buildCodexTurnParams(
     { permissionMode: "auto-review" }, "t1", "/repo", [], undefined,
-    protectManagedWorktrees, null, guardActive,
+    protectManagedWorktrees ? [{ worktreePath: "/repo", repoPath: "/primary" }] : [], null, guardActive,
   ).approvalsReviewer;
 }
 
@@ -60,9 +60,11 @@ test("without a proven guard, a managed worktree still routes every escalation t
 
 test("the guard changes only who reviews, never the sandbox or the approval policy", () => {
   const guarded = buildCodexTurnParams(
-    { permissionMode: "auto-review" }, "t1", "/repo", [], undefined, true, null, true);
+    { permissionMode: "auto-review" }, "t1", "/repo", [], undefined,
+    [{ worktreePath: "/repo", repoPath: "/primary" }], null, true);
   const unguarded = buildCodexTurnParams(
-    { permissionMode: "auto-review" }, "t1", "/repo", [], undefined, true, null, false);
+    { permissionMode: "auto-review" }, "t1", "/repo", [], undefined,
+    [{ worktreePath: "/repo", repoPath: "/primary" }], null, false);
   assert.deepEqual(guarded.sandboxPolicy, unguarded.sandboxPolicy);
   assert.equal(guarded.approvalPolicy, unguarded.approvalPolicy);
   const { approvalsReviewer: _a, ...guardedRest } = guarded;
@@ -75,18 +77,23 @@ test("a mode that never routes to Guardian is untouched by the guard", () => {
   // and the Orchestrator preset pins its own reviewer.
   for (const mode of ["on-request", "read-only", "danger-full-access"]) {
     const params = buildCodexTurnParams(
-      { permissionMode: mode }, "t1", "/repo", [], undefined, true, null, true);
+      { permissionMode: mode }, "t1", "/repo", [], undefined,
+      [{ worktreePath: "/repo", repoPath: "/primary" }], null, true);
     assert.equal(params.approvalsReviewer, undefined, mode);
   }
   const orchestrator = buildCodexTurnParams(
-    { permissionMode: "orchestrator" }, "t1", "/repo", [], undefined, true, null, true);
+    { permissionMode: "orchestrator" }, "t1", "/repo", [], undefined,
+    [{ worktreePath: "/repo", repoPath: "/primary" }], null, true);
   assert.equal(orchestrator.approvalsReviewer, "auto_review");
 });
 
 test("the gate defaults to the pre-#1499 routing when no caller supplies it", () => {
   // Every existing caller that has not been taught about the guard must keep today's behaviour.
   assert.equal(
-    buildCodexTurnParams({ permissionMode: "auto-review" }, "t1", "/repo", [], undefined, true).approvalsReviewer,
+    buildCodexTurnParams(
+      { permissionMode: "auto-review" }, "t1", "/repo", [], undefined,
+      [{ worktreePath: "/repo", repoPath: "/primary" }],
+    ).approvalsReviewer,
     "user",
   );
 });

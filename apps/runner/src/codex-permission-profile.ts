@@ -113,9 +113,10 @@ const CODEX_SANDBOX_BYPASS_FLAGS: ReadonlySet<string> = new Set([
  *
  * Everything absent is unchanged and documented as unenforced, never silently downgraded:
  *   - `danger-full-access` has no sandbox, and its built-in cannot be extended.
- *   - `orchestrator` sends `workspaceWrite` with non-default `writableRoots`, `networkAccess`,
- *     and tmp exclusions. `writableRoots` has no projection to read back, so its equivalence
- *     cannot be asserted the way the others can.
+ *   - `orchestrator`, and an ordinary turn in a runner-managed linked worktree, send
+ *     `workspaceWrite` with non-default `writableRoots` (the former also changes network and tmp
+ *     settings). `writableRoots` has no projection to read back, so equivalence cannot be asserted
+ *     the way it can for plain built-ins.
  *   - An unknown mode keeps its legacy policy. The safe direction is "no deny", never "a
  *     different sandbox from the one the user chose".
  */

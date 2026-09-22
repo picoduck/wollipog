@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
@@ -58,8 +58,11 @@ test("a real bwrap launch refuses provider writes to the managed worktree's Git 
 }, async () => {
   const { root, repoPath, worktreePath, home } = managedWorktreeFixture();
   const readOnlyPaths = managedWorktreeReadOnlyPaths([{ worktreePath, repoPath }]);
-  assert.deepEqual(readOnlyPaths, [join(worktreePath, ".git")]);
   const link = readFileSync(join(worktreePath, ".git"), "utf8");
+  const adminDir = realpathSync(resolve(worktreePath, link.trim().replace(/^gitdir: /u, "")));
+  const registrations = [join(adminDir, "gitdir"), join(adminDir, "commondir")];
+  assert.deepEqual(readOnlyPaths, [join(worktreePath, ".git"), ...registrations]);
+  const registrationContents = registrations.map((path) => readFileSync(path, "utf8"));
 
   const isolation = await resolveExecutionIsolation(
     { mode: "bwrap", network: "inherit" },
@@ -98,6 +101,19 @@ test("a real bwrap launch refuses provider writes to the managed worktree's Git 
     const attempt = sandboxed(script);
     assert.notEqual(attempt.status, 0, `${label} must fail at the filesystem boundary: ${attempt.output}`);
     assert.equal(readFileSync(join(worktreePath, ".git"), "utf8"), link, `${label} must leave the link intact`);
+  }
+  for (const [index, path] of registrations.entries()) {
+    for (const [label, script] of [
+      ["truncating", `printf corrupt > ${JSON.stringify(path)}`],
+      ["deleting", `rm -f ${JSON.stringify(path)}`],
+      ["renaming", `mv ${JSON.stringify(path)} ${JSON.stringify(`${path}.stolen`)}`],
+      ["replacing", `printf corrupt > ${JSON.stringify(`${path}.tmp`)} && mv ${JSON.stringify(`${path}.tmp`)} ${JSON.stringify(path)}`],
+    ] as const) {
+      const attempt = sandboxed(script);
+      assert.notEqual(attempt.status, 0, `${label} ${path} must fail at the filesystem boundary: ${attempt.output}`);
+      assert.equal(readFileSync(path, "utf8"), registrationContents[index]);
+      rmSync(`${path}.tmp`, { force: true });
+    }
   }
 
   // Reading it still works, and so does every ordinary provider operation the criteria protect.

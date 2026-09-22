@@ -965,6 +965,19 @@ all existing app-server capabilities. Other startup failures are not retried or 
    accepted, but a terminal notification received before the `turn/start` response remains inert
    until that response confirms the exact same provider turn id. Unidentified or mismatched legacy
    failures are ignored.
+   For a runner-managed linked-worktree cwd, every workspace-write mode also sends explicit
+   `writableRoots` for the exact linked-worktree admin directory and the common Git `objects`,
+   `refs`, and `logs` descendants. This is deliberately narrower than the primary repository or
+   its whole `.git` directory. It overrides Codex's automatic read-only carveout for the resolved
+   admin directory, so staging, commits, status, and branch operations work while the worktree's
+   `.git` pointer remains read-only; primary-checkout files and unrelated host paths remain outside
+   the workspace. When runner-owned filesystem isolation is present it also keeps the admin
+   directory's static `gitdir`, `commondir`, and existing `config.worktree` registration files
+   read-only beneath the writable root. On the normal no-outer-sandbox path, the proven managed
+   `PreToolUse` guard refuses direct command-text attempts to truncate, remove, rename, or replace
+   the worktree registry; as elsewhere, same-user runtime indirection is stronger only with the
+   outer filesystem boundary. Integration Isolation changes integration launch arguments, not this
+   turn policy or either managed-worktree protection.
 4. `turn/interrupt` for `cancel`. Shutdown interrupts an active turn, safely cancels parked requests,
    then closes transport without archiving/deleting the thread. Runner/app-server restarts resume
    through the stored id. An ambiguously delivered in-flight prompt is never replayed; only prompts

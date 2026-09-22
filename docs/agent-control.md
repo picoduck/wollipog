@@ -536,6 +536,19 @@ a policy is also present.
   `codex app-server`, started with that launch's own arguments, environment, and working directory,
   which sandbox the launch resolves (an ephemeral thread, no turn, nothing reaches a model). It
   migrates only when that is exactly the plain built-in; otherwise it keeps its legacy policy.
+- **Managed linked worktrees keep an explicit policy.** An App Server turn whose cwd is the
+  session's runner-created linked worktree adds only the canonical linked-worktree admin directory
+  and the common `objects`, `refs`, and `logs` descendants as writable roots. Codex automatically
+  makes the `.git` pointer and its resolved target read-only; the exact admin-directory root
+  reopens ordinary staging, commits, status, and branch operations beneath that carveout while the
+  pointer stays protected. The common `.git` root, the primary checkout, and unrelated host paths
+  are never granted. Runner-owned filesystem isolation re-applies read-only mounts to the static
+  linked-worktree registration files `gitdir`, `commondir`, and an existing `config.worktree`
+  beneath that writable admin directory. Without the outer filesystem boundary, the managed
+  `PreToolUse` guard refuses direct command-text writes, removals, renames, and replacements under
+  the repository's worktree registry. That has the guard's existing same-user, command-text
+  strength: runtime indirection still requires the runner-owned filesystem layer. Because these are
+  non-default roots, such a turn does not ride on a plain built-in permission profile.
 - **A launch that never sent a legacy mode is compared with Codex's own default.** A native TUI and
   a resumed `codex exec` turn have always passed no `-s`, so they ran under whatever the user's Codex
   configuration selects — not the session's structured mode. They migrate only when that default is
@@ -570,6 +583,7 @@ every row reads **No**, because the escalation gate refuses them all.
 | `auto-review` (the default), `on-request`, `untrusted`, `on-failure`, `workspace-write` | Withheld. Otherwise: through `:workspace`, when the launch's configured sandbox is the plain built-in |
 | `read-only` | Withheld. Otherwise: through `:read-only`, on the same condition |
 | A launch whose own Codex configuration adjusts its sandbox (`[sandbox_workspace_write]`, a selected `default_permissions` profile) | **No.** A profile would drop those settings, so the launch keeps its legacy policy |
+| An App Server turn in a runner-managed linked worktree | **No.** Its operation-specific Git metadata roots require an explicit legacy policy |
 | `danger-full-access` | **No.** It has no sandbox, and `:danger-full-access` cannot be extended. Narrowed to `on-request` while a managed worktree is live, and then it is denied |
 | Orchestrator preset | **No.** Its policy has non-default writable roots that no projection reads back, so equivalence cannot be asserted |
 | Native Codex TUI, and a resumed `codex exec` turn | Withheld: Codex's own default is approval-capable too. Otherwise: through `:workspace`, when that default is the plain `:workspace` built-in. Neither ever passed `-s` |

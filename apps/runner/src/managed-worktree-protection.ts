@@ -1123,6 +1123,23 @@ export function commandTargetsManagedWorktree(
   environment: ProviderEnvironment = {},
 ): string | null {
   if (!protections.length || !command || command.length > MAX_COMMAND_LENGTH || command.includes("\0")) return null;
+  // The linked-worktree admin directory must be writable for Git's own lock-and-rename protocol,
+  // so the provider sandbox cannot preserve its static registration files by itself. Refuse a
+  // command that directly names the repository's worktree registry before syntax classification:
+  // redirection targets are intentionally not destructive operands below, but `> commondir` is a
+  // write all the same. This has the guard's documented command-text strength class; scripts and
+  // runtime-built paths still require a runner-owned filesystem boundary.
+  const foldCase = process.platform === "win32" || process.platform === "darwin";
+  const haystack = foldCase ? command.toLowerCase() : command;
+  for (const protection of protections) {
+    const root = resolve(protection.repoPath, ".git", "worktrees");
+    for (const candidate of new Set([root, canonicalPath(root)])) {
+      const needle = foldCase ? candidate.toLowerCase() : candidate;
+      if (haystack.includes(`${needle}${sep}`) || haystack.includes(`${needle.split(sep).join("/")}/`)) {
+        return MANAGED_WORKTREE_REFUSAL;
+      }
+    }
+  }
   try {
     const verdict = classify(command, cwd, protections, providerEnvironmentMap(environment), 0);
     if (verdict === "protected") return MANAGED_WORKTREE_REFUSAL;
