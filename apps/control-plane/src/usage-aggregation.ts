@@ -4,6 +4,14 @@ import type { UsageAggregationQuery } from "./db.js";
 const DRIVERS = new Set<AgentDriverKind>(["acp", "claude-code", "codex", "codex-app-server", "pi"]);
 const DAY_MS = 86_400_000;
 
+/** Monday 00:00:00 UTC for the week containing `timestamp`. UTC arithmetic keeps daylight-saving
+ * changes out of accounting boundaries and makes the same instant bucket identically everywhere. */
+export function startOfUtcWeek(timestamp: number): number {
+  const day = Math.floor(timestamp / DAY_MS) * DAY_MS;
+  const daysSinceMonday = (new Date(day).getUTCDay() + 6) % 7;
+  return day - daysSinceMonday * DAY_MS;
+}
+
 function boundedFilter(value: unknown, name: string): string | undefined {
   if (value === undefined || value === null || value === "") return undefined;
   if (typeof value !== "string" || value.length > 256) throw new RangeError(`${name} must be at most 256 characters`);
@@ -25,20 +33,23 @@ export function parseUsageAggregationQuery(
   }
   const granularity = (raw.granularity ?? (days <= retention.hourlyDays ? "hour" : "day")) as
     UsageAggregationGranularity;
-  if (granularity !== "hour" && granularity !== "day") {
-    throw new RangeError("granularity must be hour or day");
+  if (granularity !== "hour" && granularity !== "day" && granularity !== "week") {
+    throw new RangeError("granularity must be hour, day, or week");
   }
   if (granularity === "hour" && days > retention.hourlyDays) {
     throw new RangeError(`hour granularity is retained for at most ${retention.hourlyDays} days`);
   }
   const driverRaw = boundedFilter(raw.driver, "driver");
   if (driverRaw && !DRIVERS.has(driverRaw as AgentDriverKind)) throw new RangeError("driver is invalid");
+  // Day and week queries share the same calendar-day window. Weekly grouping happens after the
+  // range predicate, so a partial first or current week never pulls usage from outside the range.
   const bucketMs = granularity === "hour" ? 3_600_000 : DAY_MS;
   const observedSince = Math.max(retention.coverageStartedAt, now - days * DAY_MS);
   return {
     since: Math.floor(observedSince / bucketMs) * bucketMs,
     through: now,
     granularity,
+    ...(raw.granularity === undefined ? { fallbackToDayWhenHourlyUnavailable: true } : {}),
     ...(boundedFilter(raw.runnerId, "runnerId") ? { runnerId: raw.runnerId as string } : {}),
     ...(boundedFilter(raw.workspaceId, "workspaceId") ? { workspaceId: raw.workspaceId as string } : {}),
     ...(boundedFilter(raw.agentId, "agentId") ? { agentId: raw.agentId as string } : {}),

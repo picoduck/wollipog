@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import type {
   AgentDriverKind,
   SubscriptionUsageResponse,
+  UsageAggregationGranularity,
   UsageAggregationResponse,
   UsageAmount,
   UsageDriverTimeBucket,
@@ -92,6 +93,7 @@ const byModel = drivers.map((entry) => ({
 
 const response: UsageAggregationResponse = {
   granularity: "day",
+  hourlyDataAvailable: true,
   since: END - 29 * DAY,
   through: END + DAY,
   retention: { hourlyDays: 30, dailyDays: 365, coverageStartedAt: Date.UTC(2026, 6, 1) },
@@ -111,6 +113,38 @@ const response: UsageAggregationResponse = {
     knownModels: 1287,
   },
 };
+
+function aggregateResponse(granularity: UsageAggregationGranularity): UsageAggregationResponse {
+  const bucketStart = (timestamp: number) => {
+    if (granularity === "hour") return timestamp + 3 * 3_600_000;
+    if (granularity === "week") {
+      const day = new Date(timestamp).getUTCDay();
+      return timestamp - ((day + 6) % 7) * DAY;
+    }
+    return timestamp;
+  };
+  const driverBuckets = new Map<string, UsageDriverTimeBucket>();
+  for (const row of response.seriesByDriver) {
+    const bucketTs = bucketStart(row.bucketTs);
+    const key = `${bucketTs}:${row.driver}`;
+    const current = driverBuckets.get(key);
+    driverBuckets.set(key, {
+      ...(current ? add(current, row) : row),
+      bucketTs,
+      driver: row.driver,
+    });
+  }
+  const nextSeriesByDriver = [...driverBuckets.values()]
+    .sort((a, b) => b.bucketTs - a.bucketTs || a.driver.localeCompare(b.driver));
+  const buckets = new Map<number, UsageAmount>();
+  for (const row of nextSeriesByDriver) buckets.set(row.bucketTs, add(buckets.get(row.bucketTs) ?? amount(0, 0, 0, 0), row));
+  return {
+    ...response,
+    granularity,
+    seriesByDriver: nextSeriesByDriver,
+    series: [...buckets.entries()].map(([bucketTs, total]) => ({ bucketTs, ...total })).sort((a, b) => b.bucketTs - a.bucketTs),
+  };
+}
 
 // Exactly what the runner's Claude normalizer produces from real `rate_limit_event` messages
 // (#224): a current build reporting every window it tracks, a build that reports resets but no
@@ -200,7 +234,7 @@ const client = {
     return { dailyBudget };
   },
   usageUsers: async () => ({ users: users.map((user) => ({ ...user, dailyBudgetUsd: dailyBudget.perUserUsd })) }),
-  usage: async () => response,
+  usage: async (input: { granularity?: UsageAggregationGranularity }) => aggregateResponse(input.granularity ?? "day"),
   subscriptionUsage: async () => subscription,
   refreshSubscriptionUsage: async () => subscription,
 } as unknown as ApiClient;
