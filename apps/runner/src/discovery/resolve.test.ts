@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync }
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
-import { launchForVersionManagerHit, pickWindowsExecutable, resolveNativeCandidates, resolvedLaunchIdentity, run, sortVersionsDesc, wslCandidateScanArgs, wslInspectArgs, wslVersionManagerArgs } from "./resolve.js";
+import { isProjectLocalExecutable, launchForVersionManagerHit, pickWindowsExecutable, resolveNativeCandidates, resolvedLaunchIdentity, run, sortVersionsDesc, wslCandidateScanArgs, wslInspectArgs, wslVersionManagerArgs } from "./resolve.js";
 import { interpretCodexAppServerProbe } from "./codex-app-server.js";
 
 test("run preserves a string execFile error code for retryable spawn diagnostics", async () => {
@@ -34,6 +34,15 @@ test("Windows resolution prefers executable shims over adjacent POSIX scripts", 
   assert.equal(pickWindowsExecutable("C:\\npm\\claude\r\nC:\\npm\\claude.cmd\r\n"), "C:\\npm\\claude.cmd");
   assert.equal(pickWindowsExecutable("C:\\tools\\codex.exe\r\nC:\\tools\\codex.cmd"), "C:\\tools\\codex.exe");
   assert.equal(pickWindowsExecutable(""), null);
+});
+
+test("an SSH runner started in home keeps user-local installations while rejecting project wrappers", () => {
+  assert.equal(isProjectLocalExecutable("/home/user/.local/bin/codex", "/home/user/.local/bin/codex",
+    "/home/user", "/home/user"), false);
+  assert.equal(isProjectLocalExecutable("/home/user/project/node_modules/.bin/codex", "/home/user/project/bin/codex",
+    "/home/user", "/home/user"), true);
+  assert.equal(isProjectLocalExecutable("/home/user/project/node_modules/.bin/codex", "/home/user/project/bin/codex",
+    "/home/user/project", "/home/user"), true);
 });
 
 test("native discovery keeps system and user installations distinct across PATH reordering and deduplicates aliases", async () => {

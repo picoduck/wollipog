@@ -241,6 +241,15 @@ export function resolvedLaunchIdentity(binary: ResolvedBinary): string {
   return JSON.stringify([canonical(binary.launch.command), ...binary.launch.args.map(canonical)]);
 }
 
+/** A runner started by SSH commonly has $HOME as its cwd. Treat that as an installation
+ * root, not as a project whose descendants are all untrusted PATH wrappers. */
+export function isProjectLocalExecutable(path: string, realPath: string, cwd: string, home: string): boolean {
+  const current = resolve(cwd);
+  if (path.includes(`${sep}node_modules${sep}.bin${sep}`)) return true;
+  if (current === resolve(home)) return false;
+  return [path, realPath].some((candidate) => candidate === current || candidate.startsWith(`${current}${sep}`));
+}
+
 /** Enumerate every plausible native installation, including user-local copies hidden by an SSH
  * runner's non-login PATH. No project-local PATH entry is executed during discovery. */
 export async function resolveNativeCandidates(name: string): Promise<ResolvedBinary[]> {
@@ -250,8 +259,7 @@ export async function resolveNativeCandidates(name: string): Promise<ResolvedBin
     if (!isAbsolute(path)) return;
     try {
       const real = realpathSync(path);
-      const cwd = resolve(process.cwd());
-      if (path === cwd || path.startsWith(`${cwd}${sep}`) || real === cwd || real.startsWith(`${cwd}${sep}`)) return;
+      if (isProjectLocalExecutable(path, real, process.cwd(), homedir())) return;
       if (!statSync(real).isFile()) return;
       accessSync(path, constants.X_OK);
     } catch { return; }
