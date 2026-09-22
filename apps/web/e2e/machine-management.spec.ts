@@ -78,7 +78,7 @@ test("Machine owners can start both provider sign-in flow shapes", async ({ page
   await codexDialog.getByRole("button", { name: "Start Sign-In" }).click();
 
   const codex = page.getByRole("article", { name: "Studio Codex Provider Sign-In" });
-  await expect(codex.getByText("WOLL-IPOG", { exact: true })).toBeVisible();
+  await expect(codex.getByText("WOLL-IPOGS", { exact: true })).toBeVisible();
   await expect(codex.getByLabel("Authorization Code")).toHaveCount(0);
   await page.screenshot({ path: "test-results/provider-login/codex-device-code.png", fullPage: true });
 });

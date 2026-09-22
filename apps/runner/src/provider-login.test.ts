@@ -6,8 +6,13 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { AgentDefinition, ProviderLoginView } from "@wollipog/protocol";
+import fc from "fast-check";
 import type { AgentProcess, SpawnAgentOptions } from "./spawn.js";
-import { ProviderLoginSupervisor, type ResolvedProviderLogin } from "./provider-login.js";
+import {
+  parseCodexDeviceLoginOutput,
+  ProviderLoginSupervisor,
+  type ResolvedProviderLogin,
+} from "./provider-login.js";
 import { waitForPendingKills } from "./spawn.js";
 
 class FakeLoginChild extends EventEmitter {
@@ -38,13 +43,23 @@ const agents: AgentDefinition[] = [
     command: "codex",
     args: [],
     env: {},
-    driver: "codex",
+    driver: "codex-app-server",
     context: { kind: "native" },
+    codexAppServer: {
+      status: "supported",
+      installedVersion: "0.155.1",
+      appServerAvailable: true,
+      transport: "stdio",
+      verification: "generated-schema",
+      contractFingerprint: "test-contract",
+    },
   },
 ];
 
 function fixture(options: {
   timeoutMs?: number;
+  ceremonyTimeoutMs?: number;
+  codexVersion?: string;
   writeFails?: boolean;
   kill?: (child: AgentProcess) => Promise<boolean>;
   probe?: ((login: ResolvedProviderLogin) => Promise<boolean>) | null;
@@ -62,13 +77,18 @@ function fixture(options: {
     dataDir: root,
     configPath,
     accounts,
-    agents: () => agents,
+    agents: () => options.codexVersion
+      ? agents.map((agent) => agent.id === "codex"
+          ? { ...agent, codexAppServer: { ...agent.codexAppServer!, installedVersion: options.codexVersion } }
+          : agent)
+      : agents,
     resolveEnv: () => ({ HOME: root }),
     acquireLease: () => true,
     releaseLease: (directory) => { releases.push(directory); return true; },
     onUpdate: (value) => updates.push(value),
     onAccountAdded: (account) => { added.push(account.id); },
     timeoutMs: options.timeoutMs,
+    ceremonyTimeoutMs: options.ceremonyTimeoutMs,
     spawn: ((spawnOptions: SpawnAgentOptions) => {
       spawns.push(spawnOptions);
       const child = new FakeLoginChild();
@@ -95,6 +115,49 @@ function fixture(options: {
     accounts,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
+}
+
+async function nextRequest(child: FakeLoginChild): Promise<{
+  jsonrpc: "2.0";
+  id: number;
+  method: string;
+  params: unknown;
+}> {
+  while (true) {
+    const [chunk] = await once(child.stdin, "data");
+    for (const line of String(chunk).trim().split("\n")) {
+      const message = JSON.parse(line) as { id?: unknown; method?: unknown };
+      if (typeof message.id === "number" && typeof message.method === "string") return message as never;
+    }
+  }
+}
+
+function respond(child: FakeLoginChild, id: number, result: unknown): void {
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", id, result })}\n`);
+}
+
+function notify(child: FakeLoginChild, method: string, params: unknown): void {
+  child.stdout.write(`${JSON.stringify({ jsonrpc: "2.0", method, params })}\n`);
+}
+
+async function exposeStructuredCeremony(
+  child: FakeLoginChild,
+  loginId = "provider-login-id",
+  verificationUrl = "https://auth.openai.com/device",
+): Promise<void> {
+  const initialize = await nextRequest(child);
+  assert.equal(initialize.method, "initialize");
+  respond(child, initialize.id, { userAgent: "codex-test" });
+  const login = await nextRequest(child);
+  assert.equal(login.method, "account/login/start");
+  assert.deepEqual(login.params, { type: "chatgptDeviceCode" });
+  respond(child, login.id, {
+    type: "chatgptDeviceCode",
+    loginId,
+    verificationUrl,
+    userCode: "ABCD-EFGHJ",
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 test("Claude sign-in exposes its HTTPS link, accepts one transient code, and persists the account", async () => {
@@ -126,39 +189,234 @@ test("Claude sign-in exposes its HTTPS link, accepts one transient code, and per
   }
 });
 
-test("Codex device sign-in exposes the provider link and device code while polling", async () => {
+test("Codex device sign-in uses the structured ceremony and publishes the account on completion", async () => {
   const fx = fixture();
   try {
     await fx.supervisor.startAccount({ provider: "codex", label: "Work Codex" });
-    assert.deepEqual(fx.spawns[0]?.args, ["login", "--device-auth"]);
-    fx.children[0]!.stdout.write("Visit https://auth.openai.com/device and enter ABCD-EFGH\n");
+    assert.deepEqual(fx.spawns[0]?.args, ["app-server"]);
+    const exactUrl = "https://auth.openai.com/device?audience=codex%2fdesktop";
+    await exposeStructuredCeremony(fx.children[0]!, "provider-login-id", exactUrl);
     const waiting = fx.supervisor.views()[0]!;
     assert.equal(waiting.status, "waiting_for_provider");
-    assert.equal(waiting.verificationUrl, "https://auth.openai.com/device");
-    assert.equal(waiting.userCode, "ABCD-EFGH");
-    fx.children[0]!.close(0);
+    assert.equal(waiting.verificationUrl, exactUrl);
+    assert.equal(waiting.userCode, "ABCD-EFGHJ");
+    assert.equal(waiting.expectsCode, false);
+    notify(fx.children[0]!, "account/updated", { authMode: "chatgpt", planType: "plus" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(fx.supervisor.views()[0]?.status, "waiting_for_provider");
+    notify(fx.children[0]!, "account/login/completed", {
+      loginId: "provider-login-id",
+      success: true,
+      error: null,
+    });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(fx.supervisor.views()[0]?.status, "succeeded");
     assert.equal(fx.supervisor.views()[0]?.userCode, undefined);
+    assert.equal(fx.accounts.length, 1);
+    assert.equal(fx.added.length, 1);
   } finally {
     fx.cleanup();
   }
 });
 
-test("provider output cannot publish an oversized serialized URL or device code", async () => {
-  const fx = fixture();
+test("Codex versions outside the verified structured-login window use the CLI compatibility path", async () => {
+  const fx = fixture({ codexVersion: "0.155.0" });
   try {
-    await fx.supervisor.startAccount({ provider: "codex", label: "Bounded Output" });
-    const encodedExpansion = `https://auth.openai.com/${"é".repeat(700)}`;
-    const oversizedCode = Array.from({ length: 30 }, () => "ABCD").join("-");
-    fx.children[0]!.stdout.write(`Visit ${encodedExpansion} or https://auth.openai.com/device and enter ${oversizedCode}\n`);
-    const waiting = fx.supervisor.views()[0]!;
-    assert.equal(waiting.status, "waiting_for_provider");
-    assert.equal(waiting.verificationUrl, "https://auth.openai.com/device");
-    assert.equal(waiting.userCode, undefined);
+    await fx.supervisor.startAccount({ provider: "codex", label: "Compatibility Codex" });
+    assert.deepEqual(fx.spawns[0]?.args, ["login", "--device-auth"]);
   } finally {
     fx.supervisor.shutdown();
     await new Promise<void>((resolve) => setImmediate(resolve));
+    fx.cleanup();
+  }
+});
+
+test("cancelling structured Codex sign-in cancels the exact provider login id", async () => {
+  const fx = fixture();
+  try {
+    const started = await fx.supervisor.startAccount({ provider: "codex", label: "Cancelled Codex" });
+    const initialize = await nextRequest(fx.children[0]!);
+    respond(fx.children[0]!, initialize.id, { userAgent: "codex-test" });
+    const login = await nextRequest(fx.children[0]!);
+    fx.supervisor.cancel(started.operationId);
+    respond(fx.children[0]!, login.id, {
+      type: "chatgptDeviceCode",
+      loginId: "login-to-cancel",
+      verificationUrl: "https://auth.openai.com/device",
+      userCode: "ABCD-EFGHJ",
+    });
+    const cancellation = await nextRequest(fx.children[0]!);
+    assert.equal(cancellation.method, "account/login/cancel");
+    assert.deepEqual(cancellation.params, { loginId: "login-to-cancel" });
+    respond(fx.children[0]!, cancellation.id, {});
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(fx.supervisor.views()[0]?.status, "cancelled");
+    assert.equal(fx.accounts.length, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("cancelling structured Codex sign-in during initialization never starts a provider login", async () => {
+  const fx = fixture();
+  try {
+    const started = await fx.supervisor.startAccount({ provider: "codex", label: "Early Cancel" });
+    const initialize = await nextRequest(fx.children[0]!);
+    const laterFrames: string[] = [];
+    fx.children[0]!.stdin.on("data", (chunk) => laterFrames.push(String(chunk)));
+    fx.supervisor.cancel(started.operationId);
+    respond(fx.children[0]!, initialize.id, { userAgent: "codex-test" });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(laterFrames.some((frame) => frame.includes('"method":"account/login/start"')), false,
+      "account/login/start must not be sent after cancellation");
+    assert.equal(fx.supervisor.views()[0]?.status, "cancelled");
+    assert.equal(fx.accounts.length, 0);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("structured Codex rejection and expiration produce distinct actionable failures", async () => {
+  for (const scenario of [
+    { error: "access_denied", expected: /rejected/i },
+    { error: "device authorization expired", expected: /expired/i },
+  ]) {
+    const fx = fixture();
+    try {
+      await fx.supervisor.startAccount({ provider: "codex", label: "Rejected Codex" });
+      await exposeStructuredCeremony(fx.children[0]!);
+      notify(fx.children[0]!, "account/login/completed", {
+        loginId: "provider-login-id",
+        success: false,
+        error: scenario.error,
+      });
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      assert.equal(fx.supervisor.views()[0]?.status, "failed");
+      assert.match(fx.supervisor.views()[0]?.error ?? "", scenario.expected);
+      assert.equal(fx.accounts.length, 0);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test("structured Codex sign-in fails closed when the provider omits ceremony fields", async () => {
+  const fx = fixture();
+  try {
+    await fx.supervisor.startAccount({ provider: "codex", label: "Incomplete Structured" });
+    const initialize = await nextRequest(fx.children[0]!);
+    respond(fx.children[0]!, initialize.id, { userAgent: "codex-test" });
+    const login = await nextRequest(fx.children[0]!);
+    respond(fx.children[0]!, login.id, {
+      type: "chatgptDeviceCode",
+      loginId: "incomplete-login",
+      verificationUrl: "https://auth.openai.com/device",
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(fx.supervisor.views()[0]?.status, "failed");
+    assert.match(fx.supervisor.views()[0]?.error ?? "", /valid structured device-code ceremony/i);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("Codex CLI compatibility output strips ANSI and accepts the current 4-5 code shape", async () => {
+  const fx = fixture();
+  try {
+    fx.supervisor.startResolved({
+      accountId: "fallback",
+      label: "Fallback",
+      provider: "codex",
+      directory: fx.root,
+      command: "codex",
+      args: [],
+      context: { kind: "native" },
+      env: {},
+      persistAccount: false,
+    });
+    assert.deepEqual(fx.spawns[0]?.args, ["login", "--device-auth"]);
+    fx.children[0]!.stdout.write([
+      "Open this link:",
+      "\u001b[36mhttps://auth.openai.com/device\u001b[0m",
+      "Enter this one-time code:",
+      "\u001b[1mABCD-EFGHJ\u001b[0m",
+      "",
+    ].join("\n"));
+    const waiting = fx.supervisor.views()[0]!;
+    assert.equal(waiting.status, "waiting_for_provider");
+    assert.equal(waiting.verificationUrl, "https://auth.openai.com/device");
+    assert.equal(waiting.userCode, "ABCD-EFGHJ");
+  } finally {
+    fx.supervisor.shutdown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    fx.cleanup();
+  }
+});
+
+test("Codex CLI compatibility parser preserves bounded provider-defined code groups", () => {
+  const alphaNumeric = fc.constantFrom(..."ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789");
+  const group = fc.array(alphaNumeric, { minLength: 2, maxLength: 15 }).map((value) => value.join(""));
+  const groupedCode = fc.array(group, { minLength: 2, maxLength: 8 }).map((value) => value.join("-"));
+  const plainCode = fc.array(alphaNumeric, { minLength: 4, maxLength: 128 }).map((value) => value.join(""));
+  const code = fc.oneof(groupedCode, plainCode);
+  fc.assert(fc.property(code, (userCode) => {
+    const parsed = parseCodexDeviceLoginOutput(
+      `\u001b[36mhttps://auth.openai.com/device\u001b[0m\nEnter this one-time code:\n\u001b[1m${userCode}\u001b[0m\n`,
+    );
+    assert.deepEqual(parsed, {
+      verificationUrl: "https://auth.openai.com/device",
+      userCode,
+    });
+  }), { numRuns: 200 });
+});
+
+test("Codex CLI compatibility parser does not mistake an incomplete prompt for a device code", () => {
+  assert.deepEqual(parseCodexDeviceLoginOutput(
+    "https://auth.openai.com/device\nEnter this one-time code:\n",
+  ), { verificationUrl: "https://auth.openai.com/device" });
+  assert.deepEqual(parseCodexDeviceLoginOutput(
+    "https://auth.openai.com/device\nEnter this one-time code\nABCD-EFGHJ\n",
+  ), {
+    verificationUrl: "https://auth.openai.com/device",
+    userCode: "ABCD-EFGHJ",
+  });
+  assert.deepEqual(parseCodexDeviceLoginOutput(
+    "https://auth.openai.com/device\nEnter this one-time code:\nABCD-EF",
+  ), { verificationUrl: "https://auth.openai.com/device" });
+  assert.deepEqual(parseCodexDeviceLoginOutput(
+    "https://auth.openai.com/device\nEnter this one-time code:\nABCD-EFGHJ\n",
+  ), {
+    verificationUrl: "https://auth.openai.com/device",
+    userCode: "ABCD-EFGHJ",
+  });
+});
+
+test("Codex CLI compatibility parser rejects oversized URLs and whole device codes", () => {
+  const encodedExpansion = `https://auth.openai.com/${"é".repeat(700)}`;
+  const oversizedCode = Array.from({ length: 30 }, () => "ABCD").join("-");
+  assert.deepEqual(parseCodexDeviceLoginOutput(
+    `Visit ${encodedExpansion} or https://auth.openai.com/device and enter ${oversizedCode}`,
+  ), { verificationUrl: "https://auth.openai.com/device" });
+});
+
+test("Codex CLI compatibility fails promptly when the ceremony is incomplete", async () => {
+  const fx = fixture({ ceremonyTimeoutMs: 5 });
+  try {
+    const operation = fx.supervisor.startResolved({
+      accountId: "incomplete",
+      label: "Incomplete",
+      provider: "codex",
+      directory: fx.root,
+      command: "codex",
+      args: [],
+      context: { kind: "native" },
+      env: {},
+      persistAccount: false,
+    });
+    fx.children[0]!.stdout.write("Open https://auth.openai.com/device\u001b[0m\n");
+    assert.equal(await operation.completion, "failed");
+    assert.match(fx.supervisor.views()[0]?.error ?? "", /complete verification URL and device code/i);
+  } finally {
     fx.cleanup();
   }
 });
@@ -323,6 +581,7 @@ test("shutdown registers provider sign-in reaping with the runner-wide kill drai
   const fx = fixture({ kill: async () => reap });
   try {
     await fx.supervisor.startAccount({ provider: "codex", label: "Shutdown" });
+    await exposeStructuredCeremony(fx.children[0]!, "shutdown-login-id");
     fx.supervisor.shutdown();
     assert.equal(await waitForPendingKills(5), false, "shutdown must observe the still-pending provider child");
     finishReap(true);

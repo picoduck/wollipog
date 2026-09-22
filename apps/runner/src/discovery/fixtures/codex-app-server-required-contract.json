@@ -1,9 +1,45 @@
 {
-  "contractFingerprint": "codex-app-server-v2-reconciliation-surface-2026-09-15",
-  "generatedWith": "codex-cli 0.154.0",
+  "contractFingerprint": "codex-app-server-v2-device-login-surface-2026-09-22",
+  "generatedWith": "codex-cli 0.155.1",
   "minimumVerifiedVersion": "0.147.0",
+  "structuredLoginMinimumVersion": "0.155.1",
   "orchestratorApprovalMinimumVersion": "0.154.0",
   "files": {
+    "v2/LoginAccountParams.json": {
+      "discriminatedVariants": {
+        "type": {
+          "chatgptDeviceCode": {
+            "required": ["type"],
+            "properties": ["type"]
+          }
+        }
+      },
+      "variantRequiredProperties": {
+        "ChatgptDeviceCodev2::LoginAccountParams": {
+          "required": ["type"],
+          "properties": ["type"]
+        }
+      }
+    },
+    "v2/LoginAccountResponse.json": {
+      "variantRequiredProperties": {
+        "ChatgptDeviceCodev2::LoginAccountResponse": {
+          "required": ["loginId", "type", "userCode", "verificationUrl"],
+          "properties": ["loginId", "type", "userCode", "verificationUrl"]
+        }
+      }
+    },
+    "v2/CancelLoginAccountParams.json": {
+      "required": ["loginId"],
+      "properties": ["loginId"]
+    },
+    "v2/AccountLoginCompletedNotification.json": {
+      "required": ["success"],
+      "properties": ["error", "loginId", "success"]
+    },
+    "v2/AccountUpdatedNotification.json": {
+      "properties": ["authMode"]
+    },
     "v1/InitializeParams.json": {
       "required": [
         "clientInfo"

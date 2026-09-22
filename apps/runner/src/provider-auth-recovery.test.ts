@@ -470,6 +470,8 @@ test("Authentication Required Sign In reuses and can cancel the supervised accou
   try {
     const controller = createRunnerProviderAuthRecovery({ dataDir: dir }, undefined, supervisor);
     const session = meta({
+      driver: "codex-app-server",
+      agentVersion: "0.155.1",
       providerAccountId: "personal",
       providerAccountLabel: "Personal",
       providerAccountProvider: "codex",
@@ -484,6 +486,7 @@ test("Authentication Required Sign In reuses and can cancel the supervised accou
     assert.equal(started?.sessionId, session.sessionId);
     assert.equal(started?.directory, session.env.CODEX_HOME);
     assert.equal(started?.persistAccount, false);
+    assert.equal(started?.structuredCodex, true);
     assert.equal(await controller.startLogin({ ...session, sessionId: "duplicate-session" }), "failed");
     assert.equal(controller.cancel(scope.id), true);
     assert.equal(cancelledAccount, "personal");

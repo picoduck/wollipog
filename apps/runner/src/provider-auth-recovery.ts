@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import type { AgentDriverKind } from "@wollipog/protocol";
 import type { RunnerConfig } from "./config.js";
 import { runContextCommand, type ContextCommandResult } from "./context-command.js";
+import { supportsStructuredCodexDeviceLogin } from "./discovery/codex-app-server.js";
 import {
   CLAUDE_PENDING_MAX_MS,
   CLAUDE_PERSISTENT_FLAG,
@@ -474,6 +475,8 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
         env: meta.env,
         persistAccount: false,
         sessionId: meta.sessionId,
+        structuredCodex: scope.provider === "codex" && meta.driver === "codex-app-server" &&
+          supportsStructuredCodexDeviceLogin(meta.agentVersion),
       });
       entry = { accountId, attempt: Symbol("provider-login") };
       this.loginAccounts.set(scope.id, entry);
