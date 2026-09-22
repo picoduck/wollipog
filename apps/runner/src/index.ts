@@ -2474,11 +2474,23 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           credentialHome: meta.providerCredentialHome,
         }));
       } else if (agent && !meta) {
-        const account = selectProviderAccount(
-          config.providerAccounts,
-          agent,
-          agent.driver ?? "acp",
-        );
+        let account: ReturnType<typeof selectProviderAccount>;
+        try {
+          account = selectProviderAccount(
+            config.providerAccounts,
+            agent,
+            agent.driver ?? "acp",
+          );
+        } catch {
+          sendUp({
+            type: "generate_session_title_result",
+            requestId: msg.requestId,
+            ok: false,
+            code: "account_unavailable",
+            phase: "preflight",
+          });
+          break;
+        }
         if (account) Object.assign(env, providerAccountEnvironment(account));
       }
       runCommandTask("generate_session_title", sessionNaming.execute(
