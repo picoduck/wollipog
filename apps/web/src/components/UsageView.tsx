@@ -88,6 +88,10 @@ export function UsageView() {
   const [metric, setMetric] = useState<UsageMetric>("cost");
   const [granularity, setGranularity] = useState<UsageAggregationGranularity>("day");
   const [breakdown, setBreakdown] = useState<UsageBreakdownMode>("day");
+  const granularityRef = useRef(granularity);
+  const breakdownRef = useRef(breakdown);
+  granularityRef.current = granularity;
+  breakdownRef.current = breakdown;
   const [data, setData] = useState<UsageAggregationResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -123,13 +127,16 @@ export function UsageView() {
 
   const load = useCallback(async (range: number, requestedGranularity: UsageAggregationGranularity) => {
     const generation = ++requestGeneration.current;
+    let handingOffToDay = false;
     setLoading(true);
     setError(null);
     setData((current) => current?.granularity === requestedGranularity ? current : null);
     try {
       const next = await api.usage({ days: range, granularity: requestedGranularity });
       if (generation !== requestGeneration.current) return;
-      if (next.granularity !== requestedGranularity) {
+      const legacyHourlyFallback = requestedGranularity === "hour" &&
+        next.granularity === "day" && next.hourlyDataAvailable === undefined;
+      if (next.granularity !== requestedGranularity && !legacyHourlyFallback) {
         throw new Error(`The control plane returned ${next.granularity} usage instead of the requested ${requestedGranularity} aggregation.`);
       }
       setData(next);
@@ -137,10 +144,16 @@ export function UsageView() {
       setHourlyDataAvailable(next.hourlyDataAvailable);
       setHourlyDays(String(next.retention.hourlyDays));
       setDailyDays(String(next.retention.dailyDays));
+      if (legacyHourlyFallback) {
+        setHourlyDataAvailable(false);
+        setGranularity("day");
+        setBreakdown((current) => current === "model" ? current : "day");
+      }
     } catch (cause) {
       if (generation !== requestGeneration.current) return;
       if (requestedGranularity === "hour" && cause instanceof ApiError &&
           cause.code === "USAGE_HOURLY_DATA_UNAVAILABLE") {
+        handingOffToDay = true;
         setHourlyDataAvailable(false);
         setGranularity("day");
         setBreakdown((current) => current === "model" ? current : "day");
@@ -148,7 +161,7 @@ export function UsageView() {
       }
       setError(cause instanceof Error ? cause.message : "Unable to load usage");
     } finally {
-      if (generation === requestGeneration.current) setLoading(false);
+      if (generation === requestGeneration.current && !handingOffToDay) setLoading(false);
     }
   }, [api]);
 
@@ -258,13 +271,16 @@ export function UsageView() {
       setKnownRetention(result.retention);
       const currentDays = daysRef.current;
       const nextRange = [...RANGES].reverse().find((range) => range <= Math.min(currentDays, result.retention.dailyDays)) ?? RANGES[0];
-      const nextGranularity = granularity === "hour" && nextRange > result.retention.hourlyDays ? "day" : granularity;
+      const currentGranularity = granularityRef.current;
+      const nextGranularity = currentGranularity === "hour" && nextRange > result.retention.hourlyDays
+        ? "day"
+        : currentGranularity;
       daysRef.current = nextRange;
       setDays(nextRange);
       setGranularity(nextGranularity);
-      if (breakdown !== "model") setBreakdown(nextGranularity);
+      if (breakdownRef.current !== "model") setBreakdown(nextGranularity);
       setSaveStatus("Usage aggregate retention saved.");
-      if (nextRange === currentDays && nextGranularity === granularity) {
+      if (nextRange === currentDays && nextGranularity === currentGranularity) {
         // The write is done; what follows is a refresh, and saying otherwise describes finished
         // work as still in progress.
         setSavingPhase("refresh");

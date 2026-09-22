@@ -196,6 +196,7 @@ test("chart and time breakdown share Hour, Day, and Week while retention explain
 test("an Hour request that discovers rolled data switches to Day and disables Hour", async () => {
   const calls: Array<{ days: number; granularity: UsageAggregationGranularity }> = [];
   const at = Date.UTC(2026, 8, 21);
+  let rejectUnavailableHour: ((reason?: unknown) => void) | undefined;
   const client = {
     ...api,
     subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
@@ -206,11 +207,9 @@ test("an Hour request that discovers rolled data switches to Day and disables Ho
       const granularity = query.granularity ?? "day";
       calls.push({ days: query.days, granularity });
       if (query.days === 90 && granularity === "hour") {
-        throw new ApiError(
-          "hour granularity is unavailable because part of this range has been retained as daily buckets; choose day or week",
-          400,
-          "USAGE_HOURLY_DATA_UNAVAILABLE",
-        );
+        return await new Promise<UsageAggregationResponse>((_resolve, reject) => {
+          rejectUnavailableHour = reject;
+        });
       }
       return {
         ...response([bucket(at, 6, 0.06)], granularity),
@@ -230,6 +229,18 @@ test("an Hour request that discovers rolled data switches to Day and disables Ho
     .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
   await act(async () => { option("Usage Aggregation", "Hour").click(); await settleLoad(); });
   await act(async () => { option("Usage Range", "90d").click(); await settleLoad(); });
+  assert.ok(rejectUnavailableHour, "the unavailable Hour request is in flight");
+  await act(async () => {
+    rejectUnavailableHour!(new ApiError(
+      "hour granularity is unavailable because part of this range has been retained as daily buckets; choose day or week",
+      400,
+      "USAGE_HOURLY_DATA_UNAVAILABLE",
+    ));
+    await Promise.resolve();
+  });
+  assert.ok(container.querySelector(".usage-chart-section"), "the prior Hour chart remains visible during the handoff");
+  assert.equal(container.querySelector("[aria-busy]")?.getAttribute("aria-busy"), "true",
+    "the handoff stays busy until Day data arrives");
   await act(async () => { await settleLoad(); });
 
   assert.deepEqual(calls.slice(-2), [
@@ -241,6 +252,78 @@ test("an Hour request that discovers rolled data switches to Day and disables Ho
   assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
   assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
   assert.equal(container.querySelector('[role="alert"]'), null);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("an older plane's implicit Day fallback disables Hour without showing an error", async () => {
+  const at = Date.UTC(2026, 8, 21);
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => response(
+      [bucket(at, 6, 0.06)],
+      query.granularity === "hour" ? "day" : query.granularity ?? "day",
+    ),
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); });
+  const group = (label: string) => container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
+  const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
+    .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
+
+  await act(async () => { option("Usage Aggregation", "Hour").click(); await settleLoad(); });
+  assert.equal(option("Usage Aggregation", "Day").getAttribute("aria-checked"), "true");
+  assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
+  assert.equal(container.querySelector('[role="alert"]'), null);
+  assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("a retention save preserves aggregation changes made while the request is in flight", async () => {
+  const at = Date.UTC(2026, 8, 21);
+  let finishRetention: (() => void) | undefined;
+  const retained = { hourlyDays: 30, dailyDays: 365, coverageStartedAt: 0 };
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => ({
+      ...response([bucket(at, 6, 0.06)], query.granularity ?? "day"),
+      canManageRetention: true,
+    }),
+    updateUsageRetention: async () => await new Promise<{ retention: typeof retained }>((resolve) => {
+      finishRetention = () => resolve({ retention: retained });
+    }),
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); });
+  const group = (label: string) => container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
+  const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
+    .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
+  const save = [...container.querySelectorAll("button")]
+    .find((button) => button.textContent?.trim() === "Save Retention") as HTMLButtonElement;
+
+  await act(async () => { save.click(); await Promise.resolve(); });
+  assert.ok(finishRetention, "the retention write is in flight");
+  await act(async () => { option("Usage Aggregation", "Week").click(); await settleLoad(); });
+  await act(async () => { finishRetention!(); await settleLoad(); });
+  assert.equal(option("Usage Aggregation", "Week").getAttribute("aria-checked"), "true");
+  assert.equal(option("Usage Breakdown", "Week").getAttribute("aria-checked"), "true");
 
   await act(async () => root.unmount());
   container.remove();
