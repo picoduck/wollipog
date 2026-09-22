@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { assertRunnerTargetHost, publishLegacyRunnerAlias, runnerArtifactNames } from "./runner-artifacts.mjs";
+import { removeWindowsSignature, signWindowsBinary } from "./windows-authenticode.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const runner = join(here, ".."); // apps/runner
@@ -87,13 +88,17 @@ const out = join(outDir, names.canonical);
 copyFileSync(process.execPath, out);
 
 // 4) Inject the SEA blob. On macOS, SEA injection requires removing the copied binary's
-// signature first and ad-hoc re-signing after, or Gatekeeper kills the modified binary.
+// signature first and ad-hoc re-signing after, or Gatekeeper kills the modified binary. Release CI
+// on Windows likewise strips node.exe's signature here and Authenticode-signs after injection.
 if (process.platform === "darwin") tryExec("codesign", ["--remove-signature", out]);
+if (process.platform === "win32") removeWindowsSignature(out);
 await inject(out, "NODE_SEA_BLOB", readFileSync(blob), {
   sentinelFuse: "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2",
   machoSegmentName: process.platform === "darwin" ? "NODE_SEA" : undefined,
 });
 if (process.platform === "darwin") execFileSync("codesign", ["--sign", "-", out], { stdio: "inherit" });
+// Sign before the alias copy so both release names carry the same signed bytes.
+if (process.platform === "win32" && signWindowsBinary(out)) console.log("Authenticode signed ->", out);
 
 console.log("runner binary built ->", out);
 const legacyOut = join(outDir, names.legacy);
