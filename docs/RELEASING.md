@@ -87,8 +87,34 @@ notarizes, and staples; a post-build step then requires `codesign --verify --dee
 `spctl --assess`, and a stapled ticket, so a signing or notarization failure fails the release rather
 than publishing an unsigned macOS bundle. The macOS legs run under a 120-minute timeout (other
 platforms 45) because the notary wait is unbounded on Tauri's side and a first submission has taken
-over 40 minutes. Windows bundles are still unsigned (SmartScreen warns on
-first launch); Authenticode is configured separately via `tauri.conf.json` `bundle.windows`.
+over 40 minutes.
+
+Windows bundles are **Authenticode signed** through Azure Artifact Signing. The Azure identity lives
+in the `release` GitHub environment as six variables, not secrets: `AZURE_CLIENT_ID`,
+`AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`, `ARTIFACT_SIGNING_ENDPOINT`, `ARTIFACT_SIGNING_ACCOUNT`,
+and `ARTIFACT_SIGNING_PROFILE`. There is no client secret. The Windows legs run in that environment,
+which admits only `v*` tags, and sign in with a GitHub OIDC token. The Entra app registration trusts
+exactly one federated subject, and the repository emits GitHub's immutable subject format:
+`repo:picoduck@299207909/wollipog@1287394723:environment:release`. The app holds the Artifact
+Signing Certificate Profile Signer role on the signing account.
+
+The workflow downloads the Artifact Signing client pinned by version and SHA-256, and signs with the
+x64 `signtool` and the client's x64 dlib. The client ships no ARM64 build, so the ARM64 leg installs
+an x64 .NET 8 runtime and signs under emulation. Signing happens in two places, both through
+[`windows-authenticode.mjs`](../apps/runner/scripts/windows-authenticode.mjs):
+
+- The runner and control-plane build scripts sign each Node SEA immediately after injection, before
+  the legacy runner alias, the headless control plane, and the Tauri sidecar copies are made. Tauri
+  skips sidecars that already verify as signed, so every copy stays byte-identical.
+- A build-time Tauri config overlay points `bundle.windows.signCommand` at the same script, which
+  signs the app executable, the MSI, the NSIS installer, and its uninstaller. The overlay exists only
+  in CI, so local Windows builds are unsigned and need no Azure access.
+
+A post-build step unpacks the MSI and requires a valid, timestamped signature from a single
+certificate subject on every shipped executable, both installers, and the standalone runner and
+control-plane assets. A tag run without the signing variables fails; a branch test dispatch builds
+unsigned bundles unless its signing option is selected. Artifact Signing issues no EV certificates,
+so SmartScreen can still warn until the certificate's download reputation builds.
 
 ## One-line install
 
@@ -169,6 +195,11 @@ Actions → **Release** → **Run workflow**, and pick the branch (or tag) to bu
 dropdown. A branch run produces a unique throwaway draft tagged `v0.0.0-test.<run-number>` (so
 repeated runs never collide), built from that branch's HEAD — delete it afterward. Nothing is
 published. (Selecting a real tag instead runs the same version-checked path as a tag push.)
+
+A branch run builds unsigned Windows bundles by default. To test Windows signing, select **Sign the
+Windows test build through Azure Artifact Signing** and first add that branch as a temporary branch
+rule on the `release` environment; remove the rule after the run. Without the rule GitHub refuses to
+start the Windows legs.
 
 ## Companion CI
 

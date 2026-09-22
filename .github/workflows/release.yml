@@ -12,7 +12,14 @@ on:
   # Manual runs are throwaway test builds: pick the branch/tag to build from the "Run
   # workflow" ref dropdown. A branch run is labeled with a unique v0.0.0-test.<run> tag
   # (see the preflight job); a tag run is treated like a real release of that tag.
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      windows_signing:
+        # A tag run always signs. A branch test run signs only when asked, and only once that
+        # branch is temporarily allowed by the `release` environment's deployment policy.
+        description: Sign the Windows test build through Azure Artifact Signing
+        type: boolean
+        default: false
 
 permissions:
   contents: write # tauri-action creates the GitHub release + uploads assets
@@ -88,6 +95,13 @@ jobs:
     # first submission from a newly enrolled team has sat in Apple's queue for over 40 minutes;
     # later ones normally clear in minutes. Keep the other platforms on the tighter budget.
     timeout-minutes: ${{ startsWith(matrix.os, 'macos') && 120 || 45 }}
+    # Windows legs that sign run in the `release` environment. It holds the Azure identity
+    # variables and admits only `v*` tags, and Azure trusts a token only from this repository in
+    # this environment. Every other leg, and an unsigned branch test run, uses no environment.
+    environment: ${{ startsWith(matrix.os, 'windows') && (github.ref_type == 'tag' || inputs.windows_signing) && 'release' || '' }}
+    permissions:
+      contents: write # tauri-action creates the GitHub release + uploads assets
+      id-token: write # Windows legs exchange a GitHub OIDC token for Azure Artifact Signing access
     strategy:
       fail-fast: false # one platform failing must not cancel the others
       matrix:
@@ -170,7 +184,7 @@ jobs:
       # method is exported. The key is preferred: the notary service has returned HTTP 500 to
       # app-specific-password submissions from accounts that work with a key, and Apple's own
       # guidance for that failure is to switch to key-based authentication.
-      # Windows Authenticode is configured separately via tauri.conf.json bundle.windows.
+      # Windows Authenticode is configured by the next three steps.
       - name: Export macOS signing credentials
         if: startsWith(matrix.os, 'macos')
         shell: bash
@@ -240,6 +254,122 @@ jobs:
           } >> "$GITHUB_ENV"
           echo "macOS signing enabled for identity: $APPLE_SIGNING_IDENTITY; notarizing with Apple ID"
 
+      # Windows Authenticode signing through Azure Artifact Signing. The Azure identity lives in
+      # the `release` environment's variables, so a leg outside that environment sees none of them:
+      # a tag run then fails, and a branch test dispatch builds an unsigned throwaway bundle. A
+      # partial configuration fails either way. The signing client is pinned by version and
+      # SHA-256. It ships only x64 and x86 builds, so the x64 signtool loads it on both Windows
+      # legs, and the ARM64 leg adds an x64 .NET 8 runtime for it under emulation.
+      - name: Configure Windows Authenticode signing
+        if: startsWith(matrix.os, 'windows')
+        shell: pwsh
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+          ARTIFACT_SIGNING_ENDPOINT: ${{ vars.ARTIFACT_SIGNING_ENDPOINT }}
+          ARTIFACT_SIGNING_ACCOUNT: ${{ vars.ARTIFACT_SIGNING_ACCOUNT }}
+          ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
+          ARTIFACT_SIGNING_CLIENT_VERSION: 1.0.128
+          ARTIFACT_SIGNING_CLIENT_SHA256: 74bd7d27e6ce1051409c38d9b46bc8df0400ecd643d51ffbf2ac00869061e40b
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $names = 'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID',
+            'ARTIFACT_SIGNING_ENDPOINT', 'ARTIFACT_SIGNING_ACCOUNT', 'ARTIFACT_SIGNING_PROFILE'
+          $missing = @($names | Where-Object { -not [Environment]::GetEnvironmentVariable($_) })
+          if ($missing.Count -eq $names.Count) {
+            if ($env:REF_TYPE -eq 'tag') {
+              Write-Output "::error::Windows signing variables are not available on a tag run; refusing to publish unsigned Windows bundles"
+              exit 1
+            }
+            Write-Output "::warning::Windows signing is not configured for this run; building unsigned Windows bundles for this test dispatch"
+            'WINDOWS_SIGNING=0' | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+            exit 0
+          }
+          if ($missing.Count -gt 0) {
+            Write-Output "::error::Windows signing is partially configured; missing: $($missing -join ', ')"
+            exit 1
+          }
+
+          $root = Join-Path $env:RUNNER_TEMP 'artifact-signing'
+          New-Item -ItemType Directory -Force -Path $root | Out-Null
+          $version = $env:ARTIFACT_SIGNING_CLIENT_VERSION
+          $package = Join-Path $root 'client.zip'
+          Invoke-WebRequest -OutFile $package -Uri "https://api.nuget.org/v3-flatcontainer/microsoft.artifactsigning.client/$version/microsoft.artifactsigning.client.$version.nupkg"
+          $digest = (Get-FileHash -Algorithm SHA256 -Path $package).Hash.ToLowerInvariant()
+          if ($digest -ne $env:ARTIFACT_SIGNING_CLIENT_SHA256) {
+            Write-Output "::error::Artifact Signing client $version has SHA-256 $digest, expected $env:ARTIFACT_SIGNING_CLIENT_SHA256"
+            exit 1
+          }
+          Expand-Archive -Path $package -DestinationPath (Join-Path $root 'client') -Force
+          $dlib = Join-Path $root 'client\bin\x64\Azure.CodeSigning.Dlib.dll'
+          if (-not (Test-Path $dlib)) { Write-Output "::error::the Artifact Signing client has no x64 dlib"; exit 1 }
+
+          $kits = Join-Path ${env:ProgramFiles(x86)} 'Windows Kits\10\bin'
+          $signtool = Get-ChildItem -Path $kits -Filter signtool.exe -Recurse |
+            Where-Object { $_.Directory.Name -eq 'x64' -and $_.Directory.Parent.Name -match '^10\.\d+\.\d+\.\d+$' } |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending |
+            Select-Object -First 1
+          if (-not $signtool) { Write-Output "::error::no x64 signtool.exe found under $kits"; exit 1 }
+
+          if ($env:RUNNER_ARCH -eq 'ARM64') {
+            $dotnet = Join-Path $root 'dotnet-x64'
+            $installer = Join-Path $root 'dotnet-install.ps1'
+            Invoke-WebRequest -OutFile $installer -Uri 'https://dot.net/v1/dotnet-install.ps1'
+            & $installer -Channel 8.0 -Runtime dotnet -Architecture x64 -InstallDir $dotnet -NoPath
+            "DOTNET_ROOT_X64=$dotnet" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          }
+
+          # Only the Azure CLI credential applies here, and the managed-identity probe stalls on
+          # hosted runners, so every other credential is excluded.
+          $metadata = Join-Path $root 'metadata.json'
+          [ordered]@{
+            Endpoint = $env:ARTIFACT_SIGNING_ENDPOINT
+            CodeSigningAccountName = $env:ARTIFACT_SIGNING_ACCOUNT
+            CertificateProfileName = $env:ARTIFACT_SIGNING_PROFILE
+            ExcludeCredentials = @(
+              'ManagedIdentityCredential', 'EnvironmentCredential', 'WorkloadIdentityCredential',
+              'SharedTokenCacheCredential', 'VisualStudioCredential', 'VisualStudioCodeCredential',
+              'AzurePowerShellCredential', 'AzureDeveloperCliCredential', 'InteractiveBrowserCredential'
+            )
+          } | ConvertTo-Json | Set-Content -Encoding utf8 -Path $metadata
+
+          # A build-time Tauri config overlay, so local builds never see a sign command.
+          $signer = (Join-Path $env:GITHUB_WORKSPACE 'apps\runner\scripts\windows-authenticode.mjs').Replace('\', '/')
+          $overlay = (Join-Path $root 'tauri-windows-signing.json').Replace('\', '/')
+          @{ bundle = @{ windows = @{ signCommand = @{ cmd = 'node'; args = @($signer, '%1') } } } } |
+            ConvertTo-Json -Depth 5 | Set-Content -Encoding utf8 -Path $overlay
+
+          @(
+            'WINDOWS_SIGNING=1'
+            'WOLLIPOG_WINDOWS_SIGNING=1'
+            "WOLLIPOG_SIGNTOOL=$($signtool.FullName)"
+            "WOLLIPOG_ARTIFACT_SIGNING_DLIB=$dlib"
+            "WOLLIPOG_ARTIFACT_SIGNING_METADATA=$metadata"
+            "TAURI_WINDOWS_SIGNING_CONFIG=$overlay"
+          ) | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          Write-Output "Windows signing enabled: account $env:ARTIFACT_SIGNING_ACCOUNT, profile $env:ARTIFACT_SIGNING_PROFILE, signtool $($signtool.FullName)"
+
+      - name: Sign in to Azure for Windows signing
+        if: startsWith(matrix.os, 'windows') && env.WINDOWS_SIGNING == '1'
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      # The GitHub OIDC assertion behind the login is short-lived, and the Azure CLI cannot renew
+      # it later in the build. Mint the signing token now; the CLI serves it from its cache to every
+      # later signtool call, including the installers signed at the end of the Tauri build.
+      - name: Acquire the Artifact Signing access token
+        if: startsWith(matrix.os, 'windows') && env.WINDOWS_SIGNING == '1'
+        shell: pwsh
+        run: |
+          $expires = az account get-access-token --scope https://codesigning.azure.net/.default --query expiresOn --output tsv
+          if ($LASTEXITCODE -ne 0 -or -not $expires) { Write-Output "::error::could not obtain an Artifact Signing access token"; exit 1 }
+          Write-Output "Artifact Signing access token valid until $expires"
+
       - name: Build & publish desktop bundles
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
@@ -250,7 +380,9 @@ jobs:
           tauriScript: pnpm tauri # use the repo's pinned @tauri-apps/cli, not a global install
           # Passing --target sets TAURI_ENV_TARGET_TRIPLE, which build-sidecar.mjs reads to
           # name the sidecar AND to pass its same-arch guard (arch == host on a native runner).
-          args: --target ${{ matrix.target }}
+          # A signing Windows leg adds the overlay that points bundle.windows.signCommand at the
+          # shared signer, so Tauri signs the app executable, both installers, and the uninstaller.
+          args: --target ${{ matrix.target }}${{ env.WINDOWS_SIGNING == '1' && format(' --config {0}', env.TAURI_WINDOWS_SIGNING_CONFIG) || '' }}
           # Tag/label resolved by preflight: the pushed tag for a real release, or a unique
           # v0.0.0-test.<run> for a branch dispatch. All matrix jobs share one draft release.
           tagName: ${{ needs.preflight.outputs.release_tag }}
@@ -259,9 +391,10 @@ jobs:
             Desktop bundles for Wollipog. Each installer embeds a per-platform
             control-plane sidecar, so the app is self-contained (no separate `pnpm dev`).
 
-            > macOS bundles are Developer ID signed and notarized (a branch test dispatch
-            > without signing secrets is unsigned). **Windows bundles are unsigned** —
-            > SmartScreen may warn on first launch: More info → Run anyway.
+            > macOS bundles are Developer ID signed and notarized, and Windows installers and
+            > executables are Authenticode signed through Azure Artifact Signing (a branch test
+            > dispatch without signing configured is unsigned). SmartScreen may still warn on
+            > the first Windows releases until the certificate builds reputation.
           releaseDraft: true
           prerelease: ${{ needs.preflight.outputs.prerelease }}
 
@@ -293,6 +426,50 @@ jobs:
           # The bundler signs the dmg but notarizes and staples only the .app inside it.
           codesign --verify --strict --verbose=2 "$dmg"
           echo "Signature, Gatekeeper assessment, and stapled ticket verified"
+
+      # Prove the Windows signatures rather than trusting the signer's exit code. The MSI is
+      # unpacked with an administrative install so every executable it ships is checked, not
+      # just the files left in the build directory. The standalone runner and control-plane
+      # assets are checked too, and every file must carry a timestamped signature from one signer.
+      - name: Verify Windows Authenticode signatures
+        if: startsWith(matrix.os, 'windows') && env.WINDOWS_SIGNING == '1'
+        shell: pwsh
+        env:
+          TARGET_TRIPLE: ${{ matrix.target }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $bundle = "apps/desktop/src-tauri/target/$env:TARGET_TRIPLE/release/bundle"
+          $msi = @(Get-ChildItem -Path "$bundle/msi" -Filter *.msi)
+          $nsis = @(Get-ChildItem -Path "$bundle/nsis" -Filter *.exe)
+          if ($msi.Count -ne 1 -or $nsis.Count -ne 1) {
+            Write-Output "::error::expected one MSI and one NSIS installer, found $($msi.Count) and $($nsis.Count)"
+            exit 1
+          }
+          $unpacked = Join-Path $env:RUNNER_TEMP 'msi-contents'
+          $install = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @('/a', "`"$($msi[0].FullName)`"", '/qn', "TARGETDIR=`"$unpacked`"")
+          if ($install.ExitCode -ne 0) { Write-Output "::error::administrative MSI extraction failed with $($install.ExitCode)"; exit 1 }
+          $shipped = @(Get-ChildItem -Path $unpacked -Recurse -Filter *.exe)
+          if ($shipped.Count -lt 3) {
+            Write-Output "::error::expected the app and both sidecars inside the MSI, found $($shipped.Count) executables"
+            exit 1
+          }
+          $files = @($msi[0], $nsis[0]) + $shipped + @(
+            Get-Item "apps/runner/dist-bin/wollipog-runner-$env:TARGET_TRIPLE.exe"
+            Get-Item "apps/runner/dist-bin/agent-manager-runner-$env:TARGET_TRIPLE.exe"
+            Get-Item "apps/control-plane/dist-bin/wollipog-control-plane-$env:TARGET_TRIPLE.exe"
+          )
+          $subjects = @{}
+          foreach ($file in $files) {
+            & $env:WOLLIPOG_SIGNTOOL verify /pa /q $file.FullName
+            if ($LASTEXITCODE -ne 0) { Write-Output "::error::$($file.Name) does not verify under the Windows trust policy"; exit 1 }
+            $signature = Get-AuthenticodeSignature -FilePath $file.FullName
+            if ($signature.Status -ne 'Valid') { Write-Output "::error::$($file.Name) signature status is $($signature.Status)"; exit 1 }
+            if (-not $signature.TimeStamperCertificate) { Write-Output "::error::$($file.Name) signature has no timestamp"; exit 1 }
+            $subjects[$signature.SignerCertificate.Subject] = $true
+            Write-Output "Verified $($file.Name): $($signature.SignerCertificate.Subject)"
+          }
+          if ($subjects.Count -ne 1) { Write-Output "::error::files are signed by more than one certificate subject: $($subjects.Keys -join '; ')"; exit 1 }
+          Write-Output "All $($files.Count) Windows files carry valid, timestamped Authenticode signatures"
 
       # Tauri's beforeBuildCommand already built one canonical runner SEA and its byte-identical
       # legacy alias through build-sidecar.mjs. Verify and upload those exact artifacts instead of

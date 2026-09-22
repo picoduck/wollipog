@@ -16,6 +16,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { readCompatibleEnv } from "../../../scripts/env-compat.mjs";
 import { assertRunnerTargetHost, controlPlaneArtifactName, publishLegacyRunnerAlias } from "../../runner/scripts/runner-artifacts.mjs";
+import { removeWindowsSignature, signWindowsBinary } from "../../runner/scripts/windows-authenticode.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, "..", "..", ".."); // repo root
@@ -76,18 +77,23 @@ copyFileSync(process.execPath, out);
 
 // 4) Inject the SEA blob (postject's programmatic API — no shelling out to npx). On macOS,
 // SEA injection requires removing the copied binary's signature first and ad-hoc re-signing
-// after, or Gatekeeper kills the modified binary.
+// after, or Gatekeeper kills the modified binary. Release CI on Windows likewise strips node.exe's
+// signature here and Authenticode-signs after injection (see windows-authenticode.mjs).
 if (process.platform === "darwin") tryExec("codesign", ["--remove-signature", out]);
+if (process.platform === "win32") removeWindowsSignature(out);
 await inject(out, "NODE_SEA_BLOB", readFileSync(blob), {
   sentinelFuse: "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2",
   machoSegmentName: process.platform === "darwin" ? "NODE_SEA" : undefined,
 });
 if (process.platform === "darwin") execFileSync("codesign", ["--sign", "-", out], { stdio: "inherit" });
+// Signed before the headless copy below, and Tauri skips sidecars that already verify as signed,
+// so the desktop sidecar and the standalone control-plane asset stay byte-identical.
+if (process.platform === "win32" && signWindowsBinary(out)) console.log("Authenticode signed ->", out);
 
 console.log("sidecar built ->", out);
 
 // 4b) Publish the same finished bytes as the standalone headless control-plane release asset.
-// Injection and macOS signing happened once above, so the release asset and the desktop sidecar
+// Injection and signing happened once above, so the release asset and the desktop sidecar
 // are byte-identical; `wollipog service install` runs this executable directly on a server.
 const controlPlaneDistDir = join(root, "apps", "control-plane", "dist-bin");
 mkdirSync(controlPlaneDistDir, { recursive: true });
