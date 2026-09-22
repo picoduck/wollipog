@@ -13143,7 +13143,12 @@ body.shell-dock-dragging * {
 .usage-toolbar p, .usage-coverage, .usage-privacy, .usage-retention p { color: var(--text-dim); }
 .usage-toolbar p { margin: 5px 0 0; }
 .usage-range { display: flex; flex-wrap: wrap; gap: 6px; }
-.usage-granularity-note { margin: -8px 0 16px; color: var(--text-dim); font-size: var(--text-sm); }
+.usage-api-controls { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: start; gap: 12px 18px; margin: 0 0 16px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
+.usage-api-controls-heading h3 { margin: 0; }
+.usage-api-controls-heading p { margin: 5px 0 0; color: var(--text-dim); font-size: var(--text-sm); }
+.usage-mobile-controls { display: none; }
+.usage-granularity-notes { display: grid; grid-column: 1 / -1; gap: 4px; }
+.usage-granularity-note { margin: 0; color: var(--text-dim); font-size: var(--text-sm); }
 .usage-state { padding: 28px; color: var(--text-dim); text-align: center; }
 .usage-state.error { color: var(--red); }
 .subscription-usage { margin: 0 0 24px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
@@ -13310,9 +13315,6 @@ body.shell-dock-dragging * {
   .automation-card-actions .btn { min-height: 44px; flex: 1 1 90px; }
   .usage-view { padding: 14px; }
   .usage-toolbar { flex-direction: column; align-items: stretch; }
-  .usage-range .btn { min-height: 44px; flex: 1; }
-  .usage-toolbar-controls > .ui-seg { width: 100%; }
-  .usage-toolbar-controls > .ui-seg .ui-seg-option { flex: 1; }
   .usage-breakdowns { grid-template-columns: minmax(0, 1fr); }
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .usage-retention .btn { min-height: 44px; }
@@ -13320,6 +13322,20 @@ body.shell-dock-dragging * {
   .subscription-usage-heading { align-items: stretch; flex-direction: column; }
   .subscription-usage-heading .btn { min-height: 44px; }
   .subscription-bucket { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+}
+
+@media (max-width: 760px) {
+  .usage-api-controls { grid-template-columns: minmax(0, 1fr); padding: 12px; }
+  .usage-desktop-controls { display: none; }
+  .usage-mobile-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .usage-compact-field { display: grid; gap: 4px; min-width: 0; }
+  .usage-compact-field > span { color: var(--text-dim); font-size: var(--text-xs); font-weight: 600; }
+  .usage-compact-field .ui-select { width: 100%; min-width: 0; }
+  .usage-compact-field .ui-select-trigger { width: 100%; min-width: 0; padding-inline: 8px; }
+}
+
+@media (max-width: 340px) {
+  .usage-breakdown-heading { align-items: flex-start; flex-direction: column; }
 }
 
 /* ===================== Settings row primitives ==============   Three visually distinct rows. Previously an off switch, an unselected radio, and a plain

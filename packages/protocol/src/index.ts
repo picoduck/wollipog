@@ -4419,6 +4419,9 @@ export interface UsageBreakdown extends UsageAmount {
  * paths, event bodies, tool inputs, and session ids never leave the aggregation boundary. */
 export interface UsageAggregationResponse {
   granularity: UsageAggregationGranularity;
+  /** Aggregations accepted by this control plane. Absent on older planes whose explicit query
+   * contract predates weekly aggregation. */
+  supportedGranularities?: UsageAggregationGranularity[];
   /** False when authorized daily rollups overlap this exact filtered window, so an hourly request
    * would be incomplete even if the configured hourly retention was later expanded. */
   hourlyDataAvailable?: boolean;

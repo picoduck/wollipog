@@ -21,6 +21,8 @@ for (const [name, value] of Object.entries({
   Node: domWindow.Node,
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -35,6 +37,7 @@ const response = (
   granularity: UsageAggregationResponse["granularity"] = "day",
 ): UsageAggregationResponse => ({
   granularity,
+  supportedGranularities: ["hour", "day", "week"],
   since: 0,
   through: Date.UTC(2026, 0, 2),
   retention: { hourlyDays: 30, dailyDays: 365, coverageStartedAt: 0 },
@@ -106,6 +109,11 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
     await settleLoad();
     await Promise.resolve();
   });
+  const subscriptionUsage = container.querySelector(".subscription-usage");
+  const apiControls = container.querySelector(".usage-api-controls");
+  assert.equal(subscriptionUsage?.nextElementSibling, apiControls,
+    "subscription allowances precede the controls for API-equivalent usage");
+  assert.match(apiControls?.textContent ?? "", /Subscription allowances above are unaffected/);
   const rowLabels = () => [...container.querySelectorAll("tbody th")].map((cell) => cell.textContent ?? "");
   assert.deepEqual(rowLabels(), [bucketLabel(newerDay, "day"), bucketLabel(olderDay, "day")]);
 
@@ -259,16 +267,23 @@ test("an Hour request that discovers rolled data switches to Day and disables Ho
 
 test("an older plane's implicit Day fallback disables Hour without showing an error", async () => {
   const at = Date.UTC(2026, 8, 21);
+  const legacyResponse = (granularity: UsageAggregationGranularity) => {
+    const current = response([bucket(at, 6, 0.06)], granularity);
+    delete current.supportedGranularities;
+    return current;
+  };
+  const calls: UsageAggregationGranularity[] = [];
   const client = {
     ...api,
     subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
     refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
     usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
     usageUsers: async () => ({ users: [] }),
-    usage: async (query: { granularity?: UsageAggregationGranularity }) => response(
-      [bucket(at, 6, 0.06)],
-      query.granularity === "hour" ? "day" : query.granularity ?? "day",
-    ),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => {
+      const requested = query.granularity ?? "day";
+      calls.push(requested);
+      return legacyResponse(requested === "hour" ? "day" : requested);
+    },
   } as unknown as ApiClient;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -279,12 +294,72 @@ test("an older plane's implicit Day fallback disables Hour without showing an er
   const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
     .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
 
+  const week = option("Usage Aggregation", "Week");
+  assert.equal(week.getAttribute("aria-disabled"), "true");
+  const weekDescription = week.getAttribute("aria-describedby");
+  assert.ok(weekDescription);
+  assert.match(domWindow.document.getElementById(weekDescription!)?.textContent ?? "", /newer control plane/);
+  const callCount = calls.length;
+  await act(async () => { week.click(); await settleLoad(); });
+  assert.equal(calls.length, callCount, "an older plane never receives an unsupported Week request");
+  assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /newer control plane/);
+  assert.equal(
+    container.querySelector('[aria-label="Usage Aggregation: Day"]')?.getAttribute("aria-describedby"),
+    "usage-week-capability-note",
+    "the compact mobile picker is associated with the upgrade explanation",
+  );
+  const compactAggregation = container.querySelector('[aria-label="Usage Aggregation: Day"]') as HTMLButtonElement;
+  await act(async () => { compactAggregation.click(); await Promise.resolve(); });
+  const compactWeek = [...container.querySelectorAll('[role="option"]')]
+    .find((node) => node.textContent?.includes("Week"));
+  assert.equal(compactWeek?.querySelectorAll(".ui-select-option-desc").length, 0,
+    "the compact option does not duplicate its disabled explanation as a description");
+  assert.equal(compactWeek?.querySelectorAll(".ui-select-option-reason").length, 1);
+
   await act(async () => { option("Usage Aggregation", "Hour").click(); await settleLoad(); });
   await act(async () => { await settleLoad(); });
   assert.equal(option("Usage Aggregation", "Day").getAttribute("aria-checked"), "true");
   assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
   assert.equal(container.querySelector('[role="alert"]'), null);
   assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("an initial usage failure gives unavailable Week an actionable retry explanation", async () => {
+  let calls = 0;
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async () => {
+      calls += 1;
+      throw new Error("Usage is temporarily unavailable");
+    },
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); await Promise.resolve(); });
+
+  const week = [...container.querySelectorAll('[role="radiogroup"][aria-label="Usage Aggregation"] [role="radio"]')]
+    .find((node) => node.textContent?.trim() === "Week") as HTMLButtonElement;
+  assert.equal(week.getAttribute("aria-disabled"), "true");
+  const descriptionId = week.getAttribute("aria-describedby");
+  assert.ok(descriptionId);
+  assert.match(domWindow.document.getElementById(descriptionId!)?.textContent ?? "", /Retry by choosing a range/);
+  assert.match(container.querySelector("#usage-week-capability-note")?.textContent ?? "", /could not be checked/);
+  assert.equal(
+    container.querySelector('[aria-label="Usage Aggregation: Day"]')?.getAttribute("aria-describedby"),
+    "usage-week-capability-note",
+  );
+  const callCount = calls;
+  await act(async () => { week.click(); await settleLoad(); });
+  assert.equal(calls, callCount, "failed capability discovery still cannot submit a Week request");
 
   await act(async () => root.unmount());
   container.remove();

@@ -12,6 +12,8 @@ import {
 import { parseUsageAggregationQuery, parseUsageRetentionInput } from "./usage-aggregation.js";
 import type { UsageRateTableService } from "./usage-rate-table.js";
 
+const SUPPORTED_USAGE_GRANULARITIES = ["hour", "day", "week"] as const;
+
 export function registerUsageRoutes(
   app: FastifyInstance,
   db: ControlPlaneDb,
@@ -28,7 +30,11 @@ export function registerUsageRoutes(
     try {
       const query = parseUsageAggregationQuery((request.query ?? {}) as Record<string, unknown>, retention);
       const aggregation = db.queryUsageAggregation(principal, query);
-      return pricing ? { ...aggregation, pricing: pricing.status() } : aggregation;
+      return {
+        ...aggregation,
+        supportedGranularities: SUPPORTED_USAGE_GRANULARITIES,
+        ...(pricing ? { pricing: pricing.status() } : {}),
+      };
     } catch (error) {
       return reply.code(400).send({
         error: error instanceof Error ? error.message : "invalid usage query",
