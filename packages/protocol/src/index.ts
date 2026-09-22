@@ -4324,7 +4324,7 @@ export interface WorkflowActionAdmissionArmedEvent {
 
 /* ---------------------- Usage and cost aggregation ---------------------- */
 
-export type UsageAggregationGranularity = "hour" | "day";
+export type UsageAggregationGranularity = "hour" | "day" | "week";
 
 /** Why a figure's cost is what it is.
  * - `providerReported`: every record carried an explicit provider cost.
@@ -4419,6 +4419,9 @@ export interface UsageBreakdown extends UsageAmount {
  * paths, event bodies, tool inputs, and session ids never leave the aggregation boundary. */
 export interface UsageAggregationResponse {
   granularity: UsageAggregationGranularity;
+  /** False when authorized daily rollups overlap this exact filtered window, so an hourly request
+   * would be incomplete even if the configured hourly retention was later expanded. */
+  hourlyDataAvailable?: boolean;
   since: number;
   through: number;
   retention: UsageRetentionPolicy;

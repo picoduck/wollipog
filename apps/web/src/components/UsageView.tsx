@@ -3,6 +3,7 @@ import type {
   SubscriptionUsageBucket,
   SubscriptionUsageResponse,
   SubscriptionUsageSourceView,
+  UsageAggregationGranularity,
   UsageAggregationResponse,
   UsageDailyBudgetPolicy,
   UsageRetentionPolicy,
@@ -16,6 +17,7 @@ import {
   seriesClass,
   activeDrivers,
   buildColumns,
+  bucketLabel,
   coverageMessages,
   driverLabel,
   driverRows,
@@ -34,13 +36,11 @@ import { SegmentedControl } from "./ui/ChoiceControls.js";
 import { UsageChart } from "./UsageChart.js";
 
 const RANGES = [7, 30, 90, 365] as const;
-
-export function bucketLabel(timestamp: number, granularity: "hour" | "day"): string {
-  const date = new Date(timestamp);
-  return granularity === "hour"
-    ? date.toLocaleString(undefined, { timeZone: "UTC", month: "short", day: "numeric", hour: "2-digit", minute: "2-digit", timeZoneName: "short" })
-    : date.toLocaleDateString(undefined, { timeZone: "UTC", year: "numeric", month: "short", day: "numeric" });
-}
+const GRANULARITY_LABEL: Record<UsageAggregationGranularity, { noun: string; adjective: string }> = {
+  hour: { noun: "Hour", adjective: "Hourly" },
+  day: { noun: "Day", adjective: "Daily" },
+  week: { noun: "Week", adjective: "Weekly" },
+};
 
 export function subscriptionResetLabel(timestamp: number, now = Date.now()): string {
   const difference = timestamp - now;
@@ -85,7 +85,8 @@ export function UsageView() {
   const hasStore = useHasStore();
   const [days, setDays] = useState(30);
   const [metric, setMetric] = useState<UsageMetric>("cost");
-  const [breakdown, setBreakdown] = useState<UsageBreakdownMode>("time");
+  const [granularity, setGranularity] = useState<UsageAggregationGranularity>("day");
+  const [breakdown, setBreakdown] = useState<UsageBreakdownMode>("day");
   const [data, setData] = useState<UsageAggregationResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -97,6 +98,7 @@ export function UsageView() {
   const requestGeneration = useRef(0);
   const daysRef = useRef(days);
   const [knownRetention, setKnownRetention] = useState<UsageRetentionPolicy | null>(null);
+  const [hourlyDataAvailable, setHourlyDataAvailable] = useState<boolean | undefined>(undefined);
   const [offlineMachines, setOfflineMachines] = useState<string[]>([]);
   const [users, setUsers] = useState<UserCostWindows[] | null>(null);
   const [dailyBudget, setDailyBudget] = useState<UsageDailyBudgetPolicy | null>(null);
@@ -118,15 +120,20 @@ export function UsageView() {
     ? "Unavailable while saving retention"
     : "Unavailable while usage reloads";
 
-  const load = useCallback(async (range: number) => {
+  const load = useCallback(async (range: number, requestedGranularity: UsageAggregationGranularity) => {
     const generation = ++requestGeneration.current;
     setLoading(true);
     setError(null);
+    setData((current) => current?.granularity === requestedGranularity ? current : null);
     try {
-      const next = await api.usage({ days: range });
+      const next = await api.usage({ days: range, granularity: requestedGranularity });
       if (generation !== requestGeneration.current) return;
+      if (next.granularity !== requestedGranularity) {
+        throw new Error(`The control plane returned ${next.granularity} usage instead of the requested ${requestedGranularity} aggregation.`);
+      }
       setData(next);
       setKnownRetention(next.retention);
+      setHourlyDataAvailable(next.hourlyDataAvailable);
       setHourlyDays(String(next.retention.hourlyDays));
       setDailyDays(String(next.retention.dailyDays));
     } catch (cause) {
@@ -141,9 +148,9 @@ export function UsageView() {
   // walks the group, and before this each step queued another aggregation — short enough that a
   // deliberate change still feels instant, long enough that a key repeat coalesces.
   useEffect(() => {
-    const timer = window.setTimeout(() => void load(days), 120);
+    const timer = window.setTimeout(() => void load(days, granularity), 120);
     return () => window.clearTimeout(timer);
-  }, [days, load]);
+  }, [days, granularity, load]);
 
   const loadSubscriptions = useCallback(async () => {
     setSubscriptionLoading(true);
@@ -243,14 +250,17 @@ export function UsageView() {
       setKnownRetention(result.retention);
       const currentDays = daysRef.current;
       const nextRange = [...RANGES].reverse().find((range) => range <= Math.min(currentDays, result.retention.dailyDays)) ?? RANGES[0];
+      const nextGranularity = granularity === "hour" && nextRange > result.retention.hourlyDays ? "day" : granularity;
       daysRef.current = nextRange;
       setDays(nextRange);
+      setGranularity(nextGranularity);
+      if (breakdown !== "model") setBreakdown(nextGranularity);
       setSaveStatus("Usage aggregate retention saved.");
-      if (nextRange === currentDays) {
+      if (nextRange === currentDays && nextGranularity === granularity) {
         // The write is done; what follows is a refresh, and saying otherwise describes finished
         // work as still in progress.
         setSavingPhase("refresh");
-        await load(nextRange);
+        await load(nextRange, nextGranularity);
       }
     } catch (cause) {
       setSaveFailed(true);
@@ -289,7 +299,24 @@ export function UsageView() {
     data.byDriver.some((row) => row.key === "codex-app-server") ||
     (data.seriesByDriver ?? []).some((row) => row.driver === "codex-app-server")
   ));
-  const periodNoun = data?.granularity === "hour" ? "Hour" : "Day";
+  const periodNoun = data ? GRANULARITY_LABEL[data.granularity].noun : GRANULARITY_LABEL[granularity].noun;
+  const hourlyUnavailableByRange = Boolean(knownRetention && days > knownRetention.hourlyDays);
+  const hourlyUnavailable = hourlyUnavailableByRange || hourlyDataAvailable === false;
+  const hourlyUnavailableReason = hourlyUnavailableByRange && knownRetention
+    ? `Hourly aggregation is retained for ${knownRetention.hourlyDays} days. Choose a range of ${knownRetention.hourlyDays} days or less.`
+    : hourlyDataAvailable === false
+      ? "Hourly data for this range has already been retained as daily buckets. Choose Day or Week."
+      : undefined;
+  const granularityOptions = (["hour", "day", "week"] as const).map((value) => ({
+    value,
+    label: GRANULARITY_LABEL[value].noun,
+    disabled: value === "hour" && hourlyUnavailable,
+    disabledReason: value === "hour" && hourlyUnavailable ? hourlyUnavailableReason : undefined,
+  }));
+  const selectGranularity = (next: UsageAggregationGranularity) => {
+    setGranularity(next);
+    setBreakdown((current) => current === "model" ? current : next);
+  };
   const onOfflineNames = useCallback((names: string[]) => setOfflineMachines(names), []);
 
   return (
@@ -300,9 +327,8 @@ export function UsageView() {
           <h2 id="usage-heading">Usage &amp; Cost</h2>
           <p>Scoped, content-free accounting across the sessions you can access.</p>
         </div>
-        {/* One filter row scopes everything beneath it: the metric flips every figure on the page
-            and the range picks the window. Both are radiogroups so a screen reader hears the
-            alternatives, not a row of independent toggles. */}
+        {/* One filter row scopes everything beneath it: metric flips every figure, range picks the
+            window, and aggregation controls the shared chart/table buckets. */}
         <div className="usage-toolbar-controls">
           <SegmentedControl
             label="Usage Metric"
@@ -329,14 +355,28 @@ export function UsageView() {
             onChange={(next) => {
               const range = Number(next);
               daysRef.current = range;
+              const nextGranularity = granularity === "hour" && knownRetention && range > knownRetention.hourlyDays
+                ? "day"
+                : granularity;
               // Re-selecting the current range is a REFRESH, which is why this is not a no-op — and
               // it is deliberate rather than incidental, so it does not wait for the debounce.
-              if (days === range) void load(range);
+              if (nextGranularity !== granularity) {
+                setGranularity(nextGranularity);
+                if (breakdown !== "model") setBreakdown(nextGranularity);
+              }
+              if (days === range && nextGranularity === granularity) void load(range, granularity);
               else setDays(range);
             }}
           />
+          <SegmentedControl
+            label="Usage Aggregation"
+            value={granularity}
+            options={granularityOptions}
+            onChange={selectGranularity}
+          />
         </div>
       </div>
+      {hourlyUnavailable && <p className="usage-granularity-note" role="note">{hourlyUnavailableReason}</p>}
 
       <section className="subscription-usage" aria-labelledby="subscription-usage-heading">
         <div className="subscription-usage-heading">
@@ -506,13 +546,13 @@ export function UsageView() {
               </ul>
             </div>
             <div className="usage-chart-section">
-              <h3>{data.granularity === "hour" ? "Hourly" : "Daily"} {metric === "cost" ? "Cost" : "Processed Tokens"}</h3>
+              <h3>{GRANULARITY_LABEL[data.granularity].adjective} {metric === "cost" ? "Cost" : "Processed Tokens"}</h3>
               <UsageChart
                 columns={columns}
                 drivers={drivers}
                 metric={metric}
                 granularity={data.granularity}
-                tableHint={breakdown === "time"
+                tableHint={breakdown === data.granularity
                   ? `the ${periodNoun} table below lists every value.`
                   : `select ${periodNoun} under Breakdown for a table of every value.`}
               />
@@ -538,9 +578,12 @@ export function UsageView() {
                 value={breakdown}
                 options={[
                   { value: "model", label: "Model" },
-                  { value: "time", label: periodNoun },
+                  ...granularityOptions,
                 ]}
-                onChange={setBreakdown}
+                onChange={(next) => {
+                  setBreakdown(next);
+                  if (next !== "model") setGranularity(next);
+                }}
               />
             </div>
             {breakdown === "model" ? (
@@ -573,7 +616,7 @@ export function UsageView() {
                 aria-labelledby="usage-table-caption"
               >
                 <table className="usage-table">
-                  <caption id="usage-table-caption">{data.granularity === "hour" ? "Hourly" : "Daily"} Usage in UTC</caption>
+                  <caption id="usage-table-caption">{GRANULARITY_LABEL[data.granularity].adjective} Usage in UTC</caption>
                   <thead>
                     <tr>
                       <th scope="col">{periodNoun}</th>

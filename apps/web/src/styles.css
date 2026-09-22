@@ -13143,6 +13143,7 @@ body.shell-dock-dragging * {
 .usage-toolbar p, .usage-coverage, .usage-privacy, .usage-retention p { color: var(--text-dim); }
 .usage-toolbar p { margin: 5px 0 0; }
 .usage-range { display: flex; flex-wrap: wrap; gap: 6px; }
+.usage-granularity-note { margin: -8px 0 16px; color: var(--text-dim); font-size: var(--text-sm); }
 .usage-state { padding: 28px; color: var(--text-dim); text-align: center; }
 .usage-state.error { color: var(--red); }
 .subscription-usage { margin: 0 0 24px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
@@ -13310,6 +13311,8 @@ body.shell-dock-dragging * {
   .usage-view { padding: 14px; }
   .usage-toolbar { flex-direction: column; align-items: stretch; }
   .usage-range .btn { min-height: 44px; flex: 1; }
+  .usage-toolbar-controls > .ui-seg { width: 100%; }
+  .usage-toolbar-controls > .ui-seg .ui-seg-option { flex: 1; }
   .usage-breakdowns { grid-template-columns: minmax(0, 1fr); }
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .usage-retention .btn { min-height: 44px; }

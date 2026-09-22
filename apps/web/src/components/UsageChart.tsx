@@ -1,11 +1,11 @@
 import { useEffect, useId, useMemo, useRef, useState, type RefObject } from "react";
-import type { AgentDriverKind } from "@wollipog/protocol";
-import { bucketLabel } from "./UsageView.js";
+import type { AgentDriverKind, UsageAggregationGranularity } from "@wollipog/protocol";
 import {
   DRIVER_PRESENTATION,
   seriesClass,
   axisLabel,
   axisLabelIndexes,
+  bucketLabel,
   formatMetric,
   niceScale,
   type UsageColumn,
@@ -60,7 +60,7 @@ export function UsageChart({
   columns: readonly UsageColumn[];
   drivers: readonly AgentDriverKind[];
   metric: UsageMetric;
-  granularity: "hour" | "day";
+  granularity: UsageAggregationGranularity;
   /** Where the table twin is right now, for the accessible name: it moves with the breakdown. */
   tableHint: string;
 }) {
@@ -75,10 +75,14 @@ export function UsageChart({
   const step = columns.length > 0 ? plotWidth / columns.length : plotWidth;
   const columnWidth = Math.max(2, Math.min(MAX_COLUMN_WIDTH, step * 0.7));
   const yFor = (value: number) => PLOT_BOTTOM - (value / scale.max) * plotHeight;
-  const labelIndexes = useMemo(() => new Set(axisLabelIndexes(columns.length)), [columns.length]);
+  const labelLimit = Math.max(2, Math.floor(plotWidth / (granularity === "hour" ? 110 : granularity === "week" ? 90 : 70)));
+  const labelIndexes = useMemo(
+    () => new Set(axisLabelIndexes(columns.length, labelLimit)),
+    [columns.length, labelLimit],
+  );
   const readout = hovered === null ? null : columns[hovered] ?? null;
   const metricLabel = metric === "cost" ? "cost" : "processed tokens";
-  const periodLabel = granularity === "hour" ? "Hourly" : "Daily";
+  const periodLabel = granularity === "hour" ? "Hourly" : granularity === "week" ? "Weekly" : "Daily";
   const split = columns.some((column) => column.bands.length > 0);
 
   if (columns.length === 0) {

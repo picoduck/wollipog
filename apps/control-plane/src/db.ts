@@ -10612,17 +10612,25 @@ export class ControlPlaneDb {
     const policy = this.ensureUsageRetentionPolicy(principal.organizationId);
     const isAdministrator = principal.role === "owner" || principal.role === "admin";
     const measureColumns = `input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")}`;
-    const sourceFor = (granularity: UsageAggregationGranularity, whereSql: string) => granularity === "hour"
-      ? `SELECT bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id,
-                driver, model, ${measureColumns}
-           FROM usage_hourly u WHERE ${whereSql}`
-      : `SELECT bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id,
-                driver, model, ${measureColumns}
-           FROM usage_daily u WHERE ${whereSql}
-         UNION ALL
-         SELECT (bucket_ts / 86400000) * 86400000, organization_id, owner_kind, owner_id,
-                 runner_id, workspace_id, agent_id, driver, model, ${measureColumns}
-           FROM usage_hourly u WHERE ${whereSql}`;
+    const sourceFor = (granularity: UsageAggregationGranularity, whereSql: string) => {
+      if (granularity === "hour") {
+        return `SELECT bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id,
+                       driver, model, ${measureColumns}
+                  FROM usage_hourly u WHERE ${whereSql}`;
+      }
+      // Unix day zero was a Thursday, so `(day + 3) % 7` is zero on Monday. Weekly rows retain
+      // the underlying day-range predicate: partial edge weeks contain only usage in the query.
+      const bucket = granularity === "week"
+        ? `((bucket_ts / 86400000) - (((bucket_ts / 86400000) + 3) % 7)) * 86400000`
+        : `(bucket_ts / 86400000) * 86400000`;
+      return `SELECT ${bucket} AS bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id,
+                     driver, model, ${measureColumns}
+                FROM usage_daily u WHERE ${whereSql}
+              UNION ALL
+              SELECT ${bucket} AS bucket_ts, organization_id, owner_kind, owner_id,
+                     runner_id, workspace_id, agent_id, driver, model, ${measureColumns}
+                FROM usage_hourly u WHERE ${whereSql}`;
+    };
     const whereFor = (since: number) => {
       const clauses = ["u.organization_id=?", "u.bucket_ts>=?", "u.bucket_ts<?"];
       const params: Array<string | number> = [principal.organizationId, since, query.through];
@@ -10652,19 +10660,21 @@ export class ControlPlaneDb {
       return { sql: clauses.join(" AND "), params };
     };
 
-    // Once hours have been rolled up, expanding hourly retention cannot recreate them. If any
-    // authorized rolled bucket overlaps the requested window, serve a complete daily result rather
-    // than silently undercounting with the remaining hourly rows.
+    // Once hours have been rolled up, expanding hourly retention cannot recreate them. Refuse the
+    // incomplete request instead of silently changing the requested aggregation or undercounting.
     const daySince = Math.floor(query.since / 86_400_000) * 86_400_000;
     const rolledWhere = whereFor(daySince);
-    const hasRolledRows = query.granularity === "hour" && this.stmt(
+    const hasRolledRows = this.stmt(
       `SELECT 1 FROM usage_daily u WHERE ${rolledWhere.sql} LIMIT 1`,
     ).get(...rolledWhere.params) !== undefined;
-    const granularity: UsageAggregationGranularity = hasRolledRows ? "day" : query.granularity;
-    const since = granularity === "day" ? daySince : query.since;
+    if (query.granularity === "hour" && hasRolledRows) {
+      throw new RangeError("hour granularity is unavailable because part of this range has been retained as daily buckets; choose day or week");
+    }
+    const granularity = query.granularity;
+    const since = granularity === "hour" ? query.since : daySince;
     const where = whereFor(since);
     const source = sourceFor(granularity, where.sql);
-    const sourceParams = granularity === "day" ? [...where.params, ...where.params] : where.params;
+    const sourceParams = granularity === "hour" ? where.params : [...where.params, ...where.params];
     const withSource = `WITH usage_source AS MATERIALIZED (${source})`;
     type AggregateRow = {
       input_tokens: number | null; output_tokens: number | null; cost_microusd: number | null;
@@ -10785,6 +10795,7 @@ export class ControlPlaneDb {
     };
     return {
       granularity,
+      hourlyDataAvailable: !hasRolledRows,
       since,
       through: query.through,
       retention: policy,

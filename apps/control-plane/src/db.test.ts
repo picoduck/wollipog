@@ -2128,6 +2128,33 @@ test("usage aggregation returns newest buckets first across hourly and daily bou
   assert.deepEqual(daily.series.map((bucket) => bucket.bucketTs), [Date.UTC(2026, 0, 1), Date.UTC(2025, 11, 31)]);
 });
 
+test("weekly usage uses Monday UTC boundaries and preserves partial-range totals and driver splits", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  const sunday = Date.UTC(2026, 8, 20, 23);
+  const monday = Date.UTC(2026, 8, 21);
+  const wednesday = Date.UTC(2026, 8, 23);
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 2 }, sunday + 1, { accrueUsage: true });
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 3 }, monday + 1, { accrueUsage: true });
+  db.appendEvent("sess-1", { kind: "token_usage", inputTokens: 5 }, wednesday + 1, { accrueUsage: true });
+
+  const window = { since: Date.UTC(2026, 8, 20), through: wednesday, granularity: "week" as const };
+  const weekly = db.queryUsageAggregation(localOwner(), window);
+  const daily = db.queryUsageAggregation(localOwner(), { ...window, granularity: "day" });
+  assert.deepEqual(
+    weekly.series.map((bucket) => [bucket.bucketTs, bucket.inputTokens]),
+    [[monday, 3], [Date.UTC(2026, 8, 14), 2]],
+    "the partial current week contains only rows before through",
+  );
+  assert.equal(weekly.totals.inputTokens, 5);
+  assert.deepEqual(weekly.totals, daily.totals, "changing aggregation preserves the selected range total");
+  assert.equal(
+    weekly.seriesByDriver.reduce((sum, bucket) => sum + bucket.inputTokens, 0),
+    weekly.series.reduce((sum, bucket) => sum + bucket.inputTokens, 0),
+    "driver-stacked values agree with the exact-value series",
+  );
+});
+
 test("sub-micro event costs accumulate without exceeding an authoritative cumulative snapshot", () => {
   const db = withRunner();
   db.createSession(newSession());
@@ -2277,13 +2304,18 @@ test("retention rolls hourly usage into UTC days before deletion and late rows r
   db.maintainUsageAggregation(now, "org_personal");
   usage = db.queryUsageAggregation(localOwner(), { since: 9 * day, through: 11 * day, granularity: "day" });
   assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 4, costUsd: 0.375002 }), "rerolling a late hour adds it once");
+  const weekly = db.queryUsageAggregation(localOwner(), { since: 9 * day, through: 11 * day, granularity: "week" });
+  assert.deepEqual(weekly.totals, usage.totals, "weekly queries retain daily provenance and totals");
+  assert.equal(weekly.hourlyDataAvailable, false, "the response disables hours that were already rolled up");
   assert.equal(db.listEvents("sess-1").length, 3, "aggregate retention never touches transcripts");
   assert.equal(db.getSession("sess-1")!.costUsd, 0.375002, "aggregate retention never changes session budget totals");
 
   db.setUsageRetentionPolicy("org_personal", { hourlyDays: 30, dailyDays: 30 }, now);
-  usage = db.queryUsageAggregation(localOwner(), { since: 9 * day, through: 11 * day, granularity: "hour" });
-  assert.equal(usage.granularity, "day", "rolled rows force a complete daily response after hourly retention expands");
-  assert.deepEqual(usage.totals, usageAmount({ inputTokens: 5, outputTokens: 4, costUsd: 0.375002 }));
+  assert.throws(
+    () => db.queryUsageAggregation(localOwner(), { since: 9 * day, through: 11 * day, granularity: "hour" }),
+    /choose day or week/,
+    "rolled rows are never silently presented at a different granularity",
+  );
 });
 
 test("runner timestamps cannot trigger retention maintenance for another organization", () => {

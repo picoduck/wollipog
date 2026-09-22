@@ -1,5 +1,6 @@
 import type {
   AgentDriverKind,
+  UsageAggregationGranularity,
   UsageAggregationResponse,
   UsageAmount,
   UsageBreakdown,
@@ -14,7 +15,7 @@ import type {
  */
 
 export type UsageMetric = "cost" | "tokens";
-export type UsageBreakdownMode = "model" | "time";
+export type UsageBreakdownMode = "model" | UsageAggregationGranularity;
 
 /** Fixed categorical slot per driver. Colour follows the entity, never its rank: a driver keeps
  * its slot whether or not the others have usage in the window. Slots map to `--usage-series-N`. */
@@ -202,12 +203,42 @@ export function windowDays(data: Pick<UsageAggregationResponse, "since" | "throu
   return Math.max(1, Math.round((data.through - data.since) / 86_400_000));
 }
 
-/** Short axis label in UTC, matching the table's UTC caption: `Sep 3` for days, `14:00` for hours. */
-export function axisLabel(bucketTs: number, granularity: "hour" | "day"): string {
+const shortUtcDate = (timestamp: number) => new Date(timestamp).toLocaleDateString("en-US", {
+  timeZone: "UTC", month: "short", day: "numeric",
+});
+
+const fullUtcDate = (timestamp: number) => new Date(timestamp).toLocaleDateString("en-US", {
+  timeZone: "UTC", year: "numeric", month: "short", day: "numeric",
+});
+
+const utcHour = (timestamp: number) => String(new Date(timestamp).getUTCHours()).padStart(2, "0");
+
+function shortUtcWeek(bucketTs: number): string {
+  const end = bucketTs + 6 * 86_400_000;
+  const startDate = new Date(bucketTs);
+  const endDate = new Date(end);
+  if (startDate.getUTCFullYear() === endDate.getUTCFullYear() && startDate.getUTCMonth() === endDate.getUTCMonth()) {
+    return `${shortUtcDate(bucketTs)}–${endDate.getUTCDate()}`;
+  }
+  return `${shortUtcDate(bucketTs)}–${shortUtcDate(end)}`;
+}
+
+/** Short labels retain enough UTC calendar context to distinguish repeated hours and weeks. */
+export function axisLabel(bucketTs: number, granularity: UsageAggregationGranularity): string {
   const date = new Date(bucketTs);
-  return granularity === "hour"
-    ? `${String(date.getUTCHours()).padStart(2, "0")}:00`
-    : date.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric" });
+  if (granularity === "hour") return `${shortUtcDate(bucketTs)} · ${utcHour(bucketTs)}:00`;
+  if (granularity === "week") return shortUtcWeek(bucketTs);
+  return date.toLocaleDateString("en-US", { timeZone: "UTC", month: "short", day: "numeric" });
+}
+
+/** Complete UTC bucket labels shared by hover/focus readouts and the exact-value table. */
+export function bucketLabel(bucketTs: number, granularity: UsageAggregationGranularity): string {
+  if (granularity === "hour") return `${fullUtcDate(bucketTs)} · ${utcHour(bucketTs)}:00–${utcHour(bucketTs)}:59 UTC`;
+  if (granularity === "week") {
+    const end = bucketTs + 6 * 86_400_000;
+    return `${fullUtcDate(bucketTs)} 00:00–${fullUtcDate(end)} 23:59 UTC`;
+  }
+  return `${fullUtcDate(bucketTs)} · 00:00–23:59 UTC`;
 }
 
 /** Indexes of the columns that get an axis label: never more than `limit`, always the ends. */

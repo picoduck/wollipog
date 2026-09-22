@@ -6,6 +6,7 @@ import {
   axisLabel,
   axisLabelIndexes,
   buildColumns,
+  bucketLabel,
   coverageMessages,
   driverRows,
   formatCompactTokens,
@@ -111,8 +112,13 @@ test("axis helpers produce clean ticks and bounded, end-anchored labels", () => 
   assert.equal(thirty[0], 0);
   assert.equal(thirty.at(-1), 29);
   assert.ok(thirty.length <= 8);
-  assert.equal(axisLabel(Date.UTC(2026, 8, 3, 14), "hour"), "14:00");
+  assert.equal(axisLabel(Date.UTC(2026, 8, 3, 14), "hour"), "Sep 3 · 14:00");
   assert.equal(axisLabel(Date.UTC(2026, 8, 3), "day"), "Sep 3");
+  assert.equal(axisLabel(Date.UTC(2026, 8, 14), "week"), "Sep 14–20");
+  assert.equal(axisLabel(Date.UTC(2026, 8, 28), "week"), "Sep 28–Oct 4");
+  assert.equal(bucketLabel(Date.UTC(2026, 8, 3, 14), "hour"), "Sep 3, 2026 · 14:00–14:59 UTC");
+  assert.equal(bucketLabel(Date.UTC(2026, 8, 3), "day"), "Sep 3, 2026 · 00:00–23:59 UTC");
+  assert.equal(bucketLabel(Date.UTC(2026, 8, 14), "week"), "Sep 14, 2026 00:00–Sep 20, 2026 23:59 UTC");
 });
 
 test("coverage messages name offline machines, unpriced records, and rate-table state", () => {

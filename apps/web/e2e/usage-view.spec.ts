@@ -2,7 +2,7 @@ import { expect, test } from "@playwright/test";
 
 /**
  * The redesigned Usage & Cost view (#601): metric toggle, driver-stacked chart with a hover and
- * keyboard readout, totals tiles, Model/Day breakdown, and the coverage notice. Screenshots land
+ * keyboard readout, totals tiles, shared time aggregation, and the coverage notice. Screenshots land
  * in `test-results/usage-view/` as the PR's visual evidence.
  */
 
@@ -10,7 +10,7 @@ test.use({ reducedMotion: "reduce" });
 
 const SHOT = "test-results/usage-view";
 
-test("desktop: metric toggle flips every figure, the chart answers hover and focus, and Model/Day swap", async ({ page }) => {
+test("desktop: metric, chart interaction, and shared Hour, Day, and Week controls", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto("/usage-view-e2e.html");
   const headline = page.locator(".usage-headline-value");
@@ -19,6 +19,12 @@ test("desktop: metric toggle flips every figure, the chart answers hover and foc
     "Codex App Server records written by runners before protocol v127 include only the final model response and are incomplete",
   );
   await page.screenshot({ path: `${SHOT}/desktop-dark-cost.png`, fullPage: true });
+  const breakdown = page.getByRole("radiogroup", { name: "Usage Breakdown" });
+  const aggregation = page.getByRole("radiogroup", { name: "Usage Aggregation" });
+  await aggregation.getByRole("radio", { name: "Hour" }).click();
+  await expect(page.locator(".usage-chart-section h3")).toContainText("Hourly Cost");
+  await expect(breakdown.getByRole("radio", { name: "Hour" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.locator(".usage-chart-axis").first()).toContainText("· 03:00");
 
   const cost = await headline.textContent();
   await page.getByRole("radio", { name: "Tokens" }).click();
@@ -37,6 +43,7 @@ test("desktop: metric toggle flips every figure, the chart answers hover and foc
   await expect(readout).toContainText("Claude Code");
   await expect(readout).toContainText("Codex");
   await expect(readout).toContainText("Total");
+  await expect(readout).toContainText("UTC");
   await page.screenshot({ path: `${SHOT}/desktop-dark-hover.png`, clip: { x: 0, y: 0, width: 1280, height: 900 } });
 
   // Keyboard reaches the same readout.
@@ -45,11 +52,18 @@ test("desktop: metric toggle flips every figure, the chart answers hover and foc
   const legend = page.locator(".usage-legend li");
   await expect(legend).toHaveCount(3);
 
-  await page.getByRole("radio", { name: "Model" }).click();
+  await breakdown.getByRole("radio", { name: "Model" }).click();
   await expect(page.locator(".usage-breakdown-section .usage-table caption")).toHaveText("Usage by Model");
   await expect(page.locator(".usage-table tbody th").first()).toContainText("claude-fable-5-1");
   await page.screenshot({ path: `${SHOT}/desktop-dark-model.png`, fullPage: true });
-  await page.getByRole("radio", { name: "Day" }).click();
+  await breakdown.getByRole("radio", { name: "Week" }).click();
+  await expect(page.locator(".usage-chart-section h3")).toContainText("Weekly Cost");
+  await expect(page.locator(".usage-breakdown-section .usage-table caption")).toContainText("Weekly Usage in UTC");
+  await expect(aggregation.getByRole("radio", { name: "Week" })).toHaveAttribute("aria-checked", "true");
+  await page.screenshot({ path: `${SHOT}/desktop-dark-week.png`, fullPage: true });
+
+  await aggregation.getByRole("radio", { name: "Day" }).click();
+  await expect(breakdown.getByRole("radio", { name: "Day" })).toHaveAttribute("aria-checked", "true");
   await expect(page.locator(".usage-breakdown-section .usage-table caption")).toContainText("Daily Usage in UTC");
 });
 
@@ -89,6 +103,8 @@ test("mobile: the overview stacks and every control stays reachable", async ({ p
   await expect(page.locator(".usage-headline-value")).toBeVisible();
   await page.getByRole("radio", { name: "Tokens" }).click();
   await expect(page.locator(".usage-headline-value")).toContainText("M");
+  await page.getByRole("radiogroup", { name: "Usage Aggregation" }).getByRole("radio", { name: "Week" }).click();
+  await expect(page.locator(".usage-chart-section h3")).toContainText("Weekly Processed Tokens");
   await page.screenshot({ path: `${SHOT}/mobile-dark-tokens.png`, fullPage: true });
 });
 

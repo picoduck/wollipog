@@ -84,10 +84,15 @@ test("usage routes enforce human scope, retention roles, strict inputs, and cont
     "/api/usage?days=7.5",
     "/api/usage?days=7&days=8",
     `/api/usage?runnerId=${"x".repeat(257)}`,
-    "/api/usage?granularity=week",
+    "/api/usage?granularity=month",
   ]) {
     assert.equal((await app.inject({ method: "GET", url, headers: { authorization: "Bearer owner" } })).statusCode, 400);
   }
+  const weekly = await app.inject({
+    method: "GET", url: "/api/usage?days=30&granularity=week", headers: { authorization: "Bearer owner" },
+  });
+  assert.equal(weekly.statusCode, 200);
+  assert.equal(weekly.json<{ granularity: string }>().granularity, "week");
   const response = await app.inject({ method: "GET", url: "/api/usage?days=7", headers: { authorization: "Bearer owner" } });
   const body = response.json<Record<string, unknown>>();
   const forbiddenKeys = new Set(["sessionId", "prompt", "path", "toolInput", "eventBody", "environment", "auth"]);
