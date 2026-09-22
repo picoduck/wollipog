@@ -6502,15 +6502,38 @@ test("delete does not wait forever for a disposed replacement whose initializati
       baseRef: "HEAD", branch: "fix/hung-rebind-delete",
     });
     await replacementInitializeStarted;
-    const internals = manager as unknown as { worktreeRebindings: Map<string, unknown> };
-    await Promise.race([
-      manager.delete(spec.sessionId),
-      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("delete remained blocked")), 1_000)),
-    ]);
-    assert.equal(replacementDisposed, true);
-    assert.equal(internals.worktreeRebindings.has(spec.sessionId), false,
-      "deletion must release a rebind whose disposed replacement never settles");
-    assert.equal(store.has(spec.sessionId), false);
+    // Stop at the first destructive cleanup after deletion crosses the rebind barrier. Timing the
+    // whole delete also measures Git/filesystem cleanup and becomes a scheduler-load assertion.
+    let cleanupStarted = false;
+    let releaseCleanup = () => {};
+    const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    const internals = manager as unknown as {
+      worktreeRebindings: Map<string, unknown>;
+      reapWorktree: (
+        cleanup: WorktreeCleanupRecord,
+        reconcile: boolean,
+        meta?: SessionMeta,
+      ) => Promise<void>;
+    };
+    const reapWorktree = internals.reapWorktree.bind(manager);
+    internals.reapWorktree = async (cleanup, reconcile, meta) => {
+      cleanupStarted = true;
+      await cleanupGate;
+      await reapWorktree(cleanup, reconcile, meta);
+    };
+    const deletion = manager.delete(spec.sessionId);
+    try {
+      await waitForCondition(() => cleanupStarted,
+        "deletion never passed the disposed replacement's hung initialization");
+      assert.equal(replacementDisposed, true);
+      assert.equal(internals.worktreeRebindings.has(spec.sessionId), false,
+        "deletion must release a rebind whose disposed replacement never settles");
+      assert.equal(store.has(spec.sessionId), false,
+        "deletion reaches managed worktree cleanup only after removing session metadata");
+    } finally {
+      releaseCleanup();
+    }
+    await deletion;
     assert.equal(existsSync(requested.worktree.path), false);
   } finally {
     manager?.shutdownAll();
