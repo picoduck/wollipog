@@ -119,6 +119,13 @@ test("axis helpers produce clean ticks and bounded, end-anchored labels", () => 
   assert.equal(bucketLabel(Date.UTC(2026, 8, 3, 14), "hour"), "Sep 3, 2026 · 14:00–14:59 UTC");
   assert.equal(bucketLabel(Date.UTC(2026, 8, 3), "day"), "Sep 3, 2026 · 00:00–23:59 UTC");
   assert.equal(bucketLabel(Date.UTC(2026, 8, 14), "week"), "Sep 14, 2026 00:00–Sep 20, 2026 23:59 UTC");
+  assert.equal(
+    bucketLabel(Date.UTC(2026, 8, 14), "week", {
+      since: Date.UTC(2026, 8, 17),
+      through: Date.UTC(2026, 8, 21),
+    }),
+    "Sep 14, 2026 00:00–Sep 20, 2026 23:59 UTC (Partial)",
+  );
 });
 
 test("coverage messages name offline machines, unpriced records, and rate-table state", () => {

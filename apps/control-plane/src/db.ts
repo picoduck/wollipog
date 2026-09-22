@@ -3475,10 +3475,16 @@ export interface UsageAggregationQuery {
   since: number;
   through: number;
   granularity: UsageAggregationGranularity;
+  /** Legacy API requests omitted granularity and expect the server to choose a complete result. */
+  fallbackToDayWhenHourlyUnavailable?: boolean;
   runnerId?: string;
   workspaceId?: string;
   agentId?: string;
   driver?: AgentDriverKind;
+}
+
+export class HourlyUsageUnavailableError extends RangeError {
+  readonly code = "USAGE_HOURLY_DATA_UNAVAILABLE";
 }
 
 export interface NewSessionInput {
@@ -10667,10 +10673,10 @@ export class ControlPlaneDb {
     const hasRolledRows = this.stmt(
       `SELECT 1 FROM usage_daily u WHERE ${rolledWhere.sql} LIMIT 1`,
     ).get(...rolledWhere.params) !== undefined;
-    if (query.granularity === "hour" && hasRolledRows) {
-      throw new RangeError("hour granularity is unavailable because part of this range has been retained as daily buckets; choose day or week");
+    if (query.granularity === "hour" && hasRolledRows && !query.fallbackToDayWhenHourlyUnavailable) {
+      throw new HourlyUsageUnavailableError("hour granularity is unavailable because part of this range has been retained as daily buckets; choose day or week");
     }
-    const granularity = query.granularity;
+    const granularity = query.granularity === "hour" && hasRolledRows ? "day" : query.granularity;
     const since = granularity === "hour" ? query.since : daySince;
     const where = whereFor(since);
     const source = sourceFor(granularity, where.sql);

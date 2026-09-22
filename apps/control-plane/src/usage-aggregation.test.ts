@@ -10,6 +10,7 @@ test("usage query windows choose retained granularity and clamp to explicit cove
     since: 3 * 86_400_000,
     through: 10 * 86_400_000,
     granularity: "hour",
+    fallbackToDayWhenHourlyUnavailable: true,
   });
   assert.equal(parseUsageAggregationQuery({ days: "90" }, retention, 100 * 86_400_000).granularity, "day");
   assert.deepEqual(parseUsageAggregationQuery({ days: "90", granularity: "week" }, retention, 100 * 86_400_000), {
@@ -17,6 +18,12 @@ test("usage query windows choose retained granularity and clamp to explicit cove
     through: 100 * 86_400_000,
     granularity: "week",
   });
+  assert.equal(
+    parseUsageAggregationQuery({ days: "7", granularity: "hour" }, retention, 10 * 86_400_000)
+      .fallbackToDayWhenHourlyUnavailable,
+    undefined,
+    "only omitted granularity preserves the legacy server-selected fallback",
+  );
   assert.equal(parseUsageAggregationQuery({ days: "7" }, { ...retention, coverageStartedAt: 9 * 86_400_000 }, 10 * 86_400_000).since, 9 * 86_400_000);
 });
 

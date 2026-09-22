@@ -55,12 +55,14 @@ export function UsageChart({
   drivers,
   metric,
   granularity,
+  bounds,
   tableHint,
 }: {
   columns: readonly UsageColumn[];
   drivers: readonly AgentDriverKind[];
   metric: UsageMetric;
   granularity: UsageAggregationGranularity;
+  bounds: { since: number; through: number };
   /** Where the table twin is right now, for the accessible name: it moves with the breakdown. */
   tableHint: string;
 }) {
@@ -150,7 +152,7 @@ export function UsageChart({
             width={step}
             height={plotHeight}
             tabIndex={0}
-            aria-label={`${bucketLabel(column.bucketTs, granularity)}: ${formatMetric(column.total, metric)}`}
+            aria-label={`${bucketLabel(column.bucketTs, granularity, bounds)}: ${formatMetric(column.total, metric)}`}
             onPointerEnter={() => setHovered(index)}
             onFocus={() => setHovered(index)}
             onBlur={() => setHovered((current) => (current === index ? null : current))}
@@ -160,7 +162,7 @@ export function UsageChart({
       <div className="usage-chart-readout" role="status" aria-live="polite">
         {readout ? (
           <>
-            <span className="usage-chart-readout-period">{bucketLabel(readout.bucketTs, granularity)}</span>
+            <span className="usage-chart-readout-period">{bucketLabel(readout.bucketTs, granularity, bounds)}</span>
             <dl>
               {readout.bands.length === 0 && <div><dt>By Driver</dt><dd>Not split by this control plane</dd></div>}
               {readout.bands.map((band) => (

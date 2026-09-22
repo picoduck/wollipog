@@ -232,11 +232,17 @@ export function axisLabel(bucketTs: number, granularity: UsageAggregationGranula
 }
 
 /** Complete UTC bucket labels shared by hover/focus readouts and the exact-value table. */
-export function bucketLabel(bucketTs: number, granularity: UsageAggregationGranularity): string {
+export function bucketLabel(
+  bucketTs: number,
+  granularity: UsageAggregationGranularity,
+  bounds?: Pick<UsageAggregationResponse, "since" | "through">,
+): string {
   if (granularity === "hour") return `${fullUtcDate(bucketTs)} · ${utcHour(bucketTs)}:00–${utcHour(bucketTs)}:59 UTC`;
   if (granularity === "week") {
     const end = bucketTs + 6 * 86_400_000;
-    return `${fullUtcDate(bucketTs)} 00:00–${fullUtcDate(end)} 23:59 UTC`;
+    const isPartial = bounds !== undefined &&
+      (bounds.since > bucketTs || bounds.through < bucketTs + 7 * 86_400_000);
+    return `${fullUtcDate(bucketTs)} 00:00–${fullUtcDate(end)} 23:59 UTC${isPartial ? " (Partial)" : ""}`;
   }
   return `${fullUtcDate(bucketTs)} · 00:00–23:59 UTC`;
 }

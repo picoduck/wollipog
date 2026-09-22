@@ -10,6 +10,7 @@ import type {
   UserCostWindows,
 } from "@wollipog/protocol";
 import { CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL } from "@wollipog/protocol";
+import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { useHasStore, useStoreSelector } from "../store.js";
 import {
@@ -138,6 +139,13 @@ export function UsageView() {
       setDailyDays(String(next.retention.dailyDays));
     } catch (cause) {
       if (generation !== requestGeneration.current) return;
+      if (requestedGranularity === "hour" && cause instanceof ApiError &&
+          cause.code === "USAGE_HOURLY_DATA_UNAVAILABLE") {
+        setHourlyDataAvailable(false);
+        setGranularity("day");
+        setBreakdown((current) => current === "model" ? current : "day");
+        return;
+      }
       setError(cause instanceof Error ? cause.message : "Unable to load usage");
     } finally {
       if (generation === requestGeneration.current) setLoading(false);
@@ -552,6 +560,7 @@ export function UsageView() {
                 drivers={drivers}
                 metric={metric}
                 granularity={data.granularity}
+                bounds={{ since: data.since, through: data.through }}
                 tableHint={breakdown === data.granularity
                   ? `the ${periodNoun} table below lists every value.`
                   : `select ${periodNoun} under Breakdown for a table of every value.`}
@@ -630,7 +639,7 @@ export function UsageView() {
                       <tr><td colSpan={drivers.length + 3} className="usage-empty">No usage was observed in this period.</td></tr>
                     ) : data.series.map((bucket) => (
                       <tr key={bucket.bucketTs}>
-                        <th scope="row">{bucketLabel(bucket.bucketTs, data.granularity)}</th>
+                        <th scope="row">{bucketLabel(bucket.bucketTs, data.granularity, data)}</th>
                         {drivers.map((driver) => {
                           const split = perDriverByBucket.get(bucket.bucketTs);
                           const cell = split?.get(driver);

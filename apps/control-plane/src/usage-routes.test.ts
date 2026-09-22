@@ -93,6 +93,22 @@ test("usage routes enforce human scope, retention roles, strict inputs, and cont
   });
   assert.equal(weekly.statusCode, 200);
   assert.equal(weekly.json<{ granularity: string }>().granularity, "week");
+  db.raw().prepare(
+    `INSERT INTO usage_daily
+       (bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver, model,
+        input_tokens, output_tokens, cost_microusd)
+     VALUES (?, 'org_personal', 'organization', 'org_personal', 'rolled-runner', '', '', 'acp', '', 1, 0, 1)`,
+  ).run(Math.floor(Date.now() / 86_400_000) * 86_400_000);
+  const legacyDefault = await app.inject({
+    method: "GET", url: "/api/usage?days=7", headers: { authorization: "Bearer owner" },
+  });
+  assert.equal(legacyDefault.statusCode, 200, "a legacy request without granularity keeps the complete-result fallback");
+  assert.equal(legacyDefault.json<{ granularity: string }>().granularity, "day");
+  const unavailableHour = await app.inject({
+    method: "GET", url: "/api/usage?days=7&granularity=hour", headers: { authorization: "Bearer owner" },
+  });
+  assert.equal(unavailableHour.statusCode, 400);
+  assert.equal(unavailableHour.json<{ code: string }>().code, "USAGE_HOURLY_DATA_UNAVAILABLE");
   const response = await app.inject({ method: "GET", url: "/api/usage?days=7", headers: { authorization: "Bearer owner" } });
   const body = response.json<Record<string, unknown>>();
   const forbiddenKeys = new Set(["sessionId", "prompt", "path", "toolInput", "eventBody", "environment", "auth"]);

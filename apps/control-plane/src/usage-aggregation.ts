@@ -49,6 +49,7 @@ export function parseUsageAggregationQuery(
     since: Math.floor(observedSince / bucketMs) * bucketMs,
     through: now,
     granularity,
+    ...(raw.granularity === undefined ? { fallbackToDayWhenHourlyUnavailable: true } : {}),
     ...(boundedFilter(raw.runnerId, "runnerId") ? { runnerId: raw.runnerId as string } : {}),
     ...(boundedFilter(raw.workspaceId, "workspaceId") ? { workspaceId: raw.workspaceId as string } : {}),
     ...(boundedFilter(raw.agentId, "agentId") ? { agentId: raw.agentId as string } : {}),

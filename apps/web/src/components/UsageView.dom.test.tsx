@@ -4,7 +4,7 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SubscriptionUsageResponse, UsageAggregationGranularity, UsageAggregationResponse } from "@wollipog/protocol";
-import { api, type ApiClient } from "../api.js";
+import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { bucketLabel } from "../usage-view-model.js";
@@ -188,6 +188,59 @@ test("chart and time breakdown share Hour, Day, and Week while retention explain
   assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
   assert.equal(option("Usage Breakdown", "Hour").getAttribute("aria-disabled"), "true");
   assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained for 30 days.*30 days or less/);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("an Hour request that discovers rolled data switches to Day and disables Hour", async () => {
+  const calls: Array<{ days: number; granularity: UsageAggregationGranularity }> = [];
+  const at = Date.UTC(2026, 8, 21);
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async (query: { days: number; granularity?: UsageAggregationGranularity }) => {
+      const granularity = query.granularity ?? "day";
+      calls.push({ days: query.days, granularity });
+      if (query.days === 90 && granularity === "hour") {
+        throw new ApiError(
+          "hour granularity is unavailable because part of this range has been retained as daily buckets; choose day or week",
+          400,
+          "USAGE_HOURLY_DATA_UNAVAILABLE",
+        );
+      }
+      return {
+        ...response([bucket(at, 6, 0.06)], granularity),
+        retention: { hourlyDays: 90, dailyDays: 365, coverageStartedAt: 0 },
+        hourlyDataAvailable: query.days !== 90,
+      };
+    },
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); await Promise.resolve(); });
+
+  const group = (label: string) => container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
+  const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
+    .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
+  await act(async () => { option("Usage Aggregation", "Hour").click(); await settleLoad(); });
+  await act(async () => { option("Usage Range", "90d").click(); await settleLoad(); });
+  await act(async () => { await settleLoad(); });
+
+  assert.deepEqual(calls.slice(-2), [
+    { days: 90, granularity: "hour" },
+    { days: 90, granularity: "day" },
+  ]);
+  assert.equal(option("Usage Aggregation", "Day").getAttribute("aria-checked"), "true");
+  assert.equal(option("Usage Breakdown", "Day").getAttribute("aria-checked"), "true");
+  assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
+  assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
+  assert.equal(container.querySelector('[role="alert"]'), null);
 
   await act(async () => root.unmount());
   container.remove();

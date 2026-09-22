@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
-import type { ControlPlaneDb } from "./db.js";
+import { HourlyUsageUnavailableError, type ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
 import type { AuthPrincipal } from "./identity.js";
 import { canAdministerIdentity } from "./identity.js";
@@ -30,7 +30,10 @@ export function registerUsageRoutes(
       const aggregation = db.queryUsageAggregation(principal, query);
       return pricing ? { ...aggregation, pricing: pricing.status() } : aggregation;
     } catch (error) {
-      return reply.code(400).send({ error: error instanceof Error ? error.message : "invalid usage query" });
+      return reply.code(400).send({
+        error: error instanceof Error ? error.message : "invalid usage query",
+        ...(error instanceof HourlyUsageUnavailableError ? { code: error.code } : {}),
+      });
     }
   });
 
