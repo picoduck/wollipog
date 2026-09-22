@@ -3521,6 +3521,136 @@ test("PR reconciliation defers cleanup until the provider turn leaves the worktr
   }
 });
 
+test("explicit discard refreshes a stale open linked PR before checking a changed branch", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-stale-linked-pr-discard-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_stale_linked_pr", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const requested = await manager.requestWorktree(
+      "s_stale_linked_pr",
+      { baseRef: "HEAD", branch: "agent/s_stale_linked_pr" },
+    );
+    execFileSync("git", ["-C", requested.worktree.path, "switch", "-c", "fix/delivered-change"]);
+    writeFileSync(join(requested.worktree.path, "delivered.txt"), "delivered\n");
+    execFileSync("git", ["-C", requested.worktree.path, "add", "delivered.txt"]);
+    execFileSync("git", ["-C", requested.worktree.path, "commit", "-m", "delivered change"]);
+    execFileSync("git", ["-C", requested.worktree.path, "push", "-u", "origin", "fix/delivered-change"]);
+    await manager.linkWorktreePullRequest(
+      "s_stale_linked_pr",
+      requested.worktree.path,
+      "https://github.com/picoduck/wollipog/pull/1582",
+    );
+    execFileSync("git", ["-C", requested.worktree.path, "push", "origin", "--delete", "fix/delivered-change"]);
+    const deliveredHead = execFileSync(
+      "git", ["-C", requested.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" },
+    ).trim();
+    let forgeCalls = 0;
+    (manager as unknown as {
+      resolveWorktreePullRequestState: (
+        path: string,
+        url: string,
+      ) => Promise<{ state: "merged"; headOid: string }>;
+    }).resolveWorktreePullRequestState = async (path, url) => {
+      forgeCalls += 1;
+      assert.equal(path, requested.worktree.path);
+      assert.equal(url, "https://github.com/picoduck/wollipog/pull/1582");
+      return { state: "merged", headOid: deliveredHead };
+    };
+
+    await manager.discardWorktree("s_stale_linked_pr", requested.worktree.path);
+
+    assert.equal(forgeCalls, 1, "explicit discard revalidates a linked PR whose stored state is stale");
+    assert.equal(existsSync(requested.worktree.path), false,
+      "the exact forge-verified merged head permits managed cleanup of the changed branch");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("stale open linked PR refresh remains fail-closed without exact merge proof", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-stale-linked-pr-proof-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const defaultHead = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_stale_linked_pr_proof", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const cases = ["missing", "open", "closed", "malformed", "mismatched", "replaced"] as const;
+    const worktrees = new Map<(typeof cases)[number], Awaited<ReturnType<SessionManager["requestWorktree"]>>["worktree"]>();
+    const heads = new Map<string, string>();
+    for (const name of cases) {
+      const requested = await manager.requestWorktree(
+        "s_stale_linked_pr_proof",
+        { baseRef: "HEAD", branch: `agent/stale-proof-${name}` },
+      );
+      execFileSync("git", ["-C", requested.worktree.path, "switch", "-c", `fix/stale-proof-${name}`]);
+      writeFileSync(join(requested.worktree.path, `${name}.txt`), `${name}\n`);
+      execFileSync("git", ["-C", requested.worktree.path, "add", `${name}.txt`]);
+      execFileSync("git", ["-C", requested.worktree.path, "commit", "-m", `${name} proof`]);
+      await manager.linkWorktreePullRequest(
+        "s_stale_linked_pr_proof",
+        requested.worktree.path,
+        `https://github.com/picoduck/wollipog/pull/${8000 + worktrees.size}`,
+      );
+      worktrees.set(name, requested.worktree);
+      heads.set(requested.worktree.path, execFileSync(
+        "git", ["-C", requested.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" },
+      ).trim());
+    }
+    (manager as unknown as {
+      resolveWorktreePullRequestState: (
+        path: string,
+      ) => Promise<{ state: "open" | "closed" | "merged"; headOid?: string } | null>;
+    }).resolveWorktreePullRequestState = async (path) => {
+      const name = cases.find((candidate) => worktrees.get(candidate)?.path === path);
+      assert.ok(name);
+      if (name === "missing") return null;
+      if (name === "open") return { state: "open", headOid: heads.get(path)! };
+      if (name === "closed") return { state: "closed", headOid: heads.get(path)! };
+      if (name === "malformed") return { state: "merged", headOid: "not-an-oid" };
+      if (name === "mismatched") return { state: "merged", headOid: defaultHead };
+      const beforeReplacement = store.readMeta("s_stale_linked_pr_proof")!;
+      store.patchMeta("s_stale_linked_pr_proof", {
+        worktrees: beforeReplacement.worktrees?.map((item) => item.path === path
+          ? { ...item, pullRequest: { ...item.pullRequest!, url: "https://github.com/picoduck/wollipog/pull/9999" } }
+          : item),
+      });
+      return { state: "merged", headOid: heads.get(path)! };
+    };
+
+    for (const name of cases) {
+      const worktree = worktrees.get(name)!;
+      await assert.rejects(
+        manager.discardWorktree("s_stale_linked_pr_proof", worktree.path),
+        name === "replaced" ? /worktree linkage changed/ : /neither verified as merged nor known to be contained/,
+      );
+      assert.equal(existsSync(worktree.path), true, `${name} forge evidence cannot retire the worktree`);
+    }
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("merged PR worktrees remain discardable after their remote branches are deleted", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-merged-pr-no-upstream-"));
   const dataDir = join(root, "data");

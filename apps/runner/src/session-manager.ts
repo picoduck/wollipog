@@ -3408,12 +3408,14 @@ export class SessionManager {
       worktree = current;
     }
     const recordedMergedHead = verifiedMergedHeadOid(worktree.pullRequest);
-    if (options.refreshMergedHead !== false && worktree.pullRequest?.state === "merged" && !recordedMergedHead) {
-      const legacyPullRequest = worktree.pullRequest;
+    const stalePullRequest = worktree.pullRequest?.state === "open" ||
+      (worktree.pullRequest?.state === "merged" && !recordedMergedHead)
+      ? worktree.pullRequest
+      : undefined;
+    if (options.refreshMergedHead !== false && stalePullRequest) {
       const verified = await this.resolveWorktreePullRequestState(
-        worktree.path,
-        legacyPullRequest.url,
-        { context: meta.context, provider: legacyPullRequest.provider },
+        worktree.path, stalePullRequest.url,
+        { context: meta.context, provider: stalePullRequest.provider },
       );
       const latest = this.store.readMeta(sessionId);
       if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
@@ -3425,8 +3427,8 @@ export class SessionManager {
       meta = latest;
       worktree = current;
       if (verified?.state === "merged" && verified.headOid) {
-        if (current.pullRequest?.state !== "merged" ||
-            current.pullRequest.url !== legacyPullRequest.url) {
+        if (current.pullRequest?.state !== stalePullRequest.state ||
+            current.pullRequest.url !== stalePullRequest.url) {
           return { removed: false, reason: "worktree linkage changed while checking forge state" };
         }
         const worktrees = this.attributedWorktrees(latest).map((item) => sameWorktreePath(latest.context, item.path, path)
