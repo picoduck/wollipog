@@ -3214,6 +3214,11 @@ export class SessionManager {
       if (completed) this.logRetainedRefState(completed);
       return;
     }
+    // Persist admission before Git work so a process restart continues with the least-recently
+    // attempted rows. This timestamp is scheduling evidence only; updatedAt remains the last
+    // lifecycle state change and therefore still drives operator-attention age.
+    record.lastAttemptAt = Date.now();
+    this.cleanupJournal.updateRetainedRef(record);
     const result = await this.reclaimRetainedRef(record);
     if (result.state === "pending") {
       if (record.pendingReason === result.reason &&
@@ -3276,6 +3281,10 @@ export class SessionManager {
     if (!this.retainedRefReclaimQueue.length) {
       this.retainedRefReclaimQueue = this.cleanupJournal.listRetainedRefs()
         .sort((left, right) => {
+          const leftAttempt = Number.isFinite(left.lastAttemptAt) ? left.lastAttemptAt! : 0;
+          const rightAttempt = Number.isFinite(right.lastAttemptAt) ? right.lastAttemptAt! : 0;
+          if (leftAttempt !== rightAttempt) return leftAttempt - rightAttempt;
+          if (left.createdAt !== right.createdAt) return left.createdAt - right.createdAt;
           const leftKey = this.cleanupJournal.retainedRefIdentityKey(left);
           const rightKey = this.cleanupJournal.retainedRefIdentityKey(right);
           return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;

@@ -231,6 +231,8 @@ export interface RetainedWorktreeRefRecord {
   terminalReason?: RetainedWorktreeRefTerminalReason;
   /** Set only after the associated worktree was successfully removed. */
   armedAt?: number;
+  /** Durable scheduling evidence only. It never changes lifecycle or deletion authority. */
+  lastAttemptAt?: number;
   createdAt: number;
   updatedAt: number;
   completedAt?: number;
@@ -296,10 +298,11 @@ export function retainedWorktreeRefDiagnostics(
     const updatedAt = Number.isFinite(record.updatedAt) ? record.updatedAt : createdAt;
     const ageSeconds = Math.max(0, Math.floor((now - createdAt) / 1_000));
     const unchangedSeconds = Math.max(0, Math.floor((now - updatedAt) / 1_000));
+    const futureStateTimestamp = updatedAt > now;
     const lifecycle = terminal === "operator_retired_ref_intact"
       ? "retired_ref_intact" as const
       : record.state === "pending"
-        ? now - updatedAt >= RETAINED_REF_OPERATOR_ATTENTION_AFTER_MS
+        ? futureStateTimestamp || now - updatedAt >= RETAINED_REF_OPERATOR_ATTENTION_AFTER_MS
           ? "operator_attention" as const
           : "transient_pending" as const
         : state === "retained"

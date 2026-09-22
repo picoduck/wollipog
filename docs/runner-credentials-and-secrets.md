@@ -200,7 +200,8 @@ that it becomes `operator_attention`. This is an alerting boundary only: age, re
 size, and the eight-row periodic processing limit never authorize deletion or removal of the
 pending ownership record. Periodic passes drain a sorted inventory captured for one complete
 cycle; new arrivals wait for the next cycle, so a permanently pending head row or a stream of
-arrivals cannot starve the rest of a large backlog.
+arrivals cannot starve the rest of a large backlog. Attempt admission is durable and ordered by
+least-recently attempted row, so runner restarts continue the fair cycle instead of starting over.
 The exact-OID, identity-generation, checkout, default-branch, and delivery proofs remain identical
 for every attempt, including old rows that do not contain newer diagnostic fields.
 

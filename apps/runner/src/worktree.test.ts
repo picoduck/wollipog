@@ -1696,7 +1696,7 @@ test("retained-ref periodic replay is bounded and fair across a large permanentl
       undefined,
       dataDir,
     );
-    const internals = manager as unknown as {
+    const privateManager = (value: SessionManager) => value as unknown as {
       cleanupJournal: WorktreeCleanupJournal;
       reclaimRetainedRef(record: RetainedWorktreeRefRecord): Promise<{
         state: "pending";
@@ -1704,6 +1704,7 @@ test("retained-ref periodic replay is bounded and fair across a large permanentl
       }>;
       replayRetainedRefReclaims(): Promise<void>;
     };
+    let internals = privateManager(manager);
     for (let index = 0; index < 21; index++) {
       const record: RetainedWorktreeRefRecord = {
         sessionId: `s-${index.toString().padStart(2, "0")}`,
@@ -1728,15 +1729,33 @@ test("retained-ref periodic replay is bounded and fair across a large permanentl
       return { state: "pending", reason: "checked_out" };
     };
 
-    const passSizes: number[] = [];
-    for (let pass = 0; pass < 4; pass++) {
+    const runPass = async () => {
       const before = attempts.length;
       await internals.replayRetainedRefReclaims();
-      passSizes.push(attempts.length - before);
-    }
+      return attempts.length - before;
+    };
+    const passSizes = [await runPass()];
+    manager.shutdownAll();
+    manager = new SessionManager(
+      () => {},
+      () => {},
+      new SessionStore(join(dataDir, "sessions")),
+      "runner",
+      undefined,
+      undefined,
+      dataDir,
+    );
+    internals = privateManager(manager);
+    internals.reclaimRetainedRef = async (record) => {
+      attempts.push(record.cleanupId!);
+      return { state: "pending", reason: "checked_out" };
+    };
+    passSizes.push(await runPass(), await runPass(), await runPass());
 
-    assert.deepEqual(passSizes, [8, 8, 5, 8],
-      "each trigger admits at most eight rows and a new cycle starts only after the prior one drains");
+    assert.deepEqual(passSizes, [8, 8, 8, 5],
+      "each trigger admits at most eight rows, including after a restarted cycle");
+    assert.equal(new Set(attempts.slice(0, 16)).size, 16,
+      "durable attempt admission prevents a restart from selecting the same first batch again");
     assert.equal(new Set(attempts).size, 21,
       "a complete cycle reaches every row before repeatedly pending records can starve the tail");
     assert.equal(internals.cleanupJournal.listRetainedRefs().length, 21,
