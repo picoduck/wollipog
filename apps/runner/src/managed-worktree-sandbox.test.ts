@@ -24,6 +24,9 @@ function gitFixture(t: TestContext) {
     mkdirSync(path, { recursive: true });
   }
   writeFileSync(join(worktreePath, ".git"), `gitdir: ${worktreeGitDir}\n`);
+  writeFileSync(join(worktreeGitDir, "gitdir"), `${join(worktreePath, ".git")}\n`);
+  writeFileSync(join(worktreeGitDir, "commondir"), "../..\n");
+  writeFileSync(join(worktreeGitDir, "config.worktree"), "[core]\n\tfsmonitor = false\n");
   return { repoPath, worktreePath, siblingPath, commonGitDir, worktreeGitDir };
 }
 
@@ -62,6 +65,16 @@ test("an empty protection list asks for no read-only rules at all", () => {
   // Unmanaged and attached worktrees never reach this function; an in-place session has no
   // worktree identity either. All three must leave the sandbox exactly as it is today.
   assert.deepEqual(managedWorktreeReadOnlyPaths([]), []);
+});
+
+test("validated linked-worktree registration files stay read-only beneath the writable admin directory", (t) => {
+  const f = gitFixture(t);
+  assert.deepEqual(managedWorktreeReadOnlyPaths([{ worktreePath: f.worktreePath, repoPath: f.repoPath }]), [
+    join(f.worktreePath, ".git"),
+    join(f.worktreeGitDir, "gitdir"),
+    join(f.worktreeGitDir, "commondir"),
+    join(f.worktreeGitDir, "config.worktree"),
+  ]);
 });
 
 test("the selected linked worktree grants only operation-specific Git administrative descendants", (t) => {
@@ -105,5 +118,14 @@ test("unmanaged, in-place, unrelated, and malformed workspace identities add no 
     managedWorktreeGitWritableRoots(f.worktreePath, [{ worktreePath: f.worktreePath, repoPath: f.repoPath }]),
     [],
     "a pointer outside the repository's registered worktree directory grants nothing",
+  );
+});
+
+test("an incomplete common Git layout fails closed without returning partial roots", (t) => {
+  const f = gitFixture(t);
+  rmSync(join(f.commonGitDir, "logs"), { recursive: true });
+  assert.deepEqual(
+    managedWorktreeGitWritableRoots(f.worktreePath, [{ worktreePath: f.worktreePath, repoPath: f.repoPath }]),
+    [],
   );
 });

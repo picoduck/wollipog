@@ -1,4 +1,4 @@
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, join, normalize, relative, resolve, sep } from "node:path";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
 
@@ -18,6 +18,29 @@ function samePath(left: string, right: string): boolean {
   return normalized(left) === normalized(right);
 }
 
+function childOf(parent: string, child: string): boolean {
+  const suffix = relative(parent, child);
+  return suffix !== "" && suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix);
+}
+
+function linkedWorktreeGitLayout(
+  worktreePath: string,
+  repoPath: string,
+): { commonGitDir: string; worktreeGitDir: string } | null {
+  if (!isAbsolute(worktreePath) || !isAbsolute(repoPath) || samePath(worktreePath, repoPath)) return null;
+  try {
+    const commonGitDir = realpathSync.native(resolve(repoPath, ".git"));
+    const pointer = readFileSync(resolve(worktreePath, ".git"), "utf8");
+    const match = /^gitdir: (.+?)\r?\n?$/u.exec(pointer);
+    if (!match) return null;
+    const worktreeGitDir = realpathSync.native(resolve(worktreePath, match[1]!));
+    const worktreeRegistry = realpathSync.native(join(commonGitDir, "worktrees"));
+    return childOf(worktreeRegistry, worktreeGitDir) ? { commonGitDir, worktreeGitDir } : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Absolute paths a sandbox should present read-only while the rest of each managed worktree stays
  * writable. Attached operator worktrees never reach this list: the caller derives `protections`
@@ -33,6 +56,23 @@ export function managedWorktreeReadOnlyPaths(
     // protection it already has at the command boundary and gains none here.
     if (samePath(worktreePath, repoPath)) continue;
     for (const entry of RUNNER_OWNED_WORKTREE_ENTRIES) paths.add(resolve(worktreePath, entry));
+    const layout = linkedWorktreeGitLayout(worktreePath, repoPath);
+    if (!layout) continue;
+    // The provider needs the admin directory writable for Git's index/HEAD lock-and-rename
+    // protocol, but these registration files are inputs to later unsandboxed runner Git calls and
+    // are never mutated by staging, commits, status, or branch switches. Reopen them read-only
+    // beneath that writable directory. Include per-worktree config when it already exists: Git may
+    // read it during runner-side status, and a provider must not turn that read into code execution.
+    for (const name of ["gitdir", "commondir", "config.worktree"] as const) {
+      const path = join(layout.worktreeGitDir, name);
+      if (!existsSync(path)) continue;
+      try {
+        if (!lstatSync(path).isFile() || !samePath(realpathSync.native(path), path)) continue;
+        paths.add(path);
+      } catch {
+        // A raced or non-regular registration entry gets no new filesystem authority.
+      }
+    }
   }
   return [...paths];
 }
@@ -60,25 +100,19 @@ export function managedWorktreeGitWritableRoots(
     if (!isAbsolute(worktreePath) || !isAbsolute(repoPath) ||
         !samePath(cwd, worktreePath) || samePath(worktreePath, repoPath)) continue;
     try {
-      const commonGitDir = realpathSync.native(resolve(repoPath, ".git"));
-      const pointer = readFileSync(resolve(worktreePath, ".git"), "utf8");
-      const match = /^gitdir: (.+?)\r?\n?$/u.exec(pointer);
-      if (!match) continue;
-      const worktreeGitDir = realpathSync.native(resolve(worktreePath, match[1]!));
-      const worktreeRegistry = realpathSync.native(join(commonGitDir, "worktrees"));
-      const childOf = (parent: string, child: string) => {
-        const suffix = relative(parent, child);
-        return suffix !== "" && suffix !== ".." && !suffix.startsWith(`..${sep}`) && !isAbsolute(suffix);
-      };
+      const layout = linkedWorktreeGitLayout(worktreePath, repoPath);
+      if (!layout) continue;
+      const { commonGitDir, worktreeGitDir } = layout;
       // The pointer is protected but still untrusted path data at this boundary. Only the exact
       // registered worktree admin directory and existing canonical descendants of the common Git
       // directory may reopen beneath Codex's automatic linked-worktree read-only carveout.
-      if (!childOf(worktreeRegistry, worktreeGitDir)) continue;
-      roots.add(worktreeGitDir);
+      const candidateRoots = [worktreeGitDir];
       for (const name of ["objects", "refs", "logs"] as const) {
         const path = realpathSync.native(join(commonGitDir, name));
-        if (childOf(commonGitDir, path)) roots.add(path);
+        if (!childOf(commonGitDir, path)) throw new Error("Git metadata path escapes its common directory");
+        candidateRoots.push(path);
       }
+      for (const path of candidateRoots) roots.add(path);
     } catch {
       // Missing, malformed, or escaping Git metadata is not a reason to broaden sandbox access.
       continue;

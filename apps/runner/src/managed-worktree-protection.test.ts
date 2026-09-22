@@ -84,6 +84,20 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
   }
 });
 
+test("direct writes to linked-worktree registration files are refused before redirection can run", () => {
+  for (const command of [
+    "printf corrupt > /projects/repo/.git/worktrees/managed/gitdir",
+    "printf corrupt >> /projects/repo/.git/worktrees/managed/commondir",
+    "printf corrupt > /projects/repo/.git/worktrees/managed/config.worktree",
+    "printf corrupt > /tmp/new && mv /tmp/new /projects/repo/.git/worktrees/managed/commondir",
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), MANAGED_WORKTREE_REFUSAL, command);
+  }
+  assert.equal(commandTargetsManagedWorktree(
+    "printf harmless > /projects/repo/.git/worktrees-backup/note", protectedPath, protection,
+  ), null, "a sibling path that merely extends the registry name remains unrelated");
+});
+
 test("normal work inside a managed worktree and unmanaged retirement remain available", () => {
   for (const command of [
     "git status --short",

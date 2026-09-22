@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { createServer, type Server } from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { SessionEventPayload } from "@wollipog/protocol";
@@ -115,6 +115,11 @@ async function runManagedTurn(integrationIsolation: boolean): Promise<void> {
   const branch = `agent/codex-sandbox-${String(integrationIsolation)}`;
   git(repoPath, ["worktree", "add", "--quiet", "-b", branch, worktreePath, "main"]);
   const gitLink = readFileSync(join(worktreePath, ".git"), "utf8");
+  const linkedGitDir = realpathSync(resolve(worktreePath, gitLink.trim().replace(/^gitdir: /u, "")));
+  const commonDirFile = join(linkedGitDir, "commondir");
+  const commonDirLink = readFileSync(commonDirFile, "utf8");
+  const gitDirFile = join(linkedGitDir, "gitdir");
+  const gitDirLink = readFileSync(gitDirFile, "utf8");
   const nextBranch = `${branch}-next`;
 
   const commands = [
@@ -128,6 +133,14 @@ async function runManagedTurn(integrationIsolation: boolean): Promise<void> {
     "mv .git .git.stolen",
     "rm -f .git",
     "printf corrupt > .git.tmp && mv .git.tmp .git",
+    `printf corrupt > ${JSON.stringify(gitDirFile)}`,
+    `rm -f ${JSON.stringify(gitDirFile)}`,
+    `mv ${JSON.stringify(gitDirFile)} ${JSON.stringify(`${gitDirFile}.stolen`)}`,
+    `printf corrupt > ${JSON.stringify(`${gitDirFile}.tmp`)} && mv ${JSON.stringify(`${gitDirFile}.tmp`)} ${JSON.stringify(gitDirFile)}`,
+    `printf corrupt > ${JSON.stringify(commonDirFile)}`,
+    `rm -f ${JSON.stringify(commonDirFile)}`,
+    `mv ${JSON.stringify(commonDirFile)} ${JSON.stringify(`${commonDirFile}.stolen`)}`,
+    `printf corrupt > ${JSON.stringify(`${commonDirFile}.tmp`)} && mv ${JSON.stringify(`${commonDirFile}.tmp`)} ${JSON.stringify(commonDirFile)}`,
     `printf corrupt > ${JSON.stringify(join(repoPath, "primary-only.txt"))}`,
     `printf corrupt > ${JSON.stringify(unrelatedHostFile)}`,
   ];
@@ -151,7 +164,10 @@ async function runManagedTurn(integrationIsolation: boolean): Promise<void> {
   const hookHost: ClaudeHookHost = {
     isSea: false,
     execPath: process.execPath,
-    execArgv: process.execArgv,
+    // The test runner's own `--test` flags would make every hook sidecar emit TAP after its JSON
+    // verdict, which Codex correctly treats as malformed hook output. Production development
+    // runners need only their TypeScript loader here; SEA launches carry no Node exec argv.
+    execArgv: ["--import", "tsx"],
     scriptPath: fileURLToPath(new URL("./cli.ts", import.meta.url)),
     configDir: join(root, "hooks"),
   };
@@ -167,6 +183,7 @@ async function runManagedTurn(integrationIsolation: boolean): Promise<void> {
     isolateForeignHooks: integrationIsolation,
   }, (text) => errors.push(text), hookHost);
   assert.equal(guarded.guardActive, true, guarded.reason ?? "managed worktree guard was not active");
+  const protections = [{ worktreePath, repoPath }];
   let driver!: CodexAppServerDriver;
   driver = new CodexAppServerDriver({
     command: CODEX,
@@ -178,7 +195,7 @@ async function runManagedTurn(integrationIsolation: boolean): Promise<void> {
     config: { permissionMode: "on-request" },
     orchestrator: { strictProjectIsolation: false, integrationIsolation },
     context: { kind: "native" },
-    managedWorktreeProtections: () => [{ worktreePath, repoPath }],
+    managedWorktreeProtections: () => protections,
   }, {
     onEvent: (event) => {
       events.push(event);
@@ -202,15 +219,24 @@ async function runManagedTurn(integrationIsolation: boolean): Promise<void> {
   }
 
   const diagnostics = JSON.stringify({ errors, events }, null, 2);
-  assert.equal(git(worktreePath, ["branch", "--show-current"]).trim(), nextBranch, diagnostics);
-  assert.match(git(worktreePath, ["log", "-1", "--pretty=%s"]), /sandboxed/u, diagnostics);
-  assert.equal(readFileSync(join(worktreePath, "tracked.txt"), "utf8"), "edited\n");
   assert.equal(readFileSync(join(worktreePath, ".git"), "utf8"), gitLink);
+  assert.equal(readFileSync(gitDirFile, "utf8"), gitDirLink, diagnostics);
+  assert.equal(existsSync(`${gitDirFile}.stolen`), false);
+  assert.equal(existsSync(`${gitDirFile}.tmp`), false,
+    "the guard rejects the whole registration replacement command before its source is created");
   assert.equal(existsSync(join(worktreePath, ".git.stolen")), false);
   assert.equal(existsSync(join(worktreePath, ".git.tmp")), true,
     "replacement is stopped at the protected destination after creating its harmless source file");
+  assert.equal(readFileSync(commonDirFile, "utf8"), commonDirLink, diagnostics);
+  assert.equal(existsSync(`${commonDirFile}.stolen`), false);
+  assert.equal(existsSync(`${commonDirFile}.tmp`), false,
+    "the guard rejects the whole registration replacement command before its source is created");
+  assert.equal(git(worktreePath, ["branch", "--show-current"]).trim(), nextBranch, diagnostics);
+  assert.match(git(worktreePath, ["log", "-1", "--pretty=%s"]), /sandboxed/u, diagnostics);
+  assert.equal(readFileSync(join(worktreePath, "tracked.txt"), "utf8"), "edited\n");
   rmSync(join(worktreePath, ".git.tmp"));
   assert.equal(git(worktreePath, ["status", "--porcelain"]), "");
+  assert.match(git(repoPath, ["show-ref", "--verify", "refs/heads/main"]), /^[a-f0-9]+ refs\/heads\/main\n$/u);
   assert.equal(readFileSync(join(repoPath, "primary-only.txt"), "utf8"), "primary\n");
   assert.equal(readFileSync(unrelatedHostFile, "utf8"), "host\n");
   assert.equal(

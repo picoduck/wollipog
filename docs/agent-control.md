@@ -542,8 +542,13 @@ a policy is also present.
   makes the `.git` pointer and its resolved target read-only; the exact admin-directory root
   reopens ordinary staging, commits, status, and branch operations beneath that carveout while the
   pointer stays protected. The common `.git` root, the primary checkout, and unrelated host paths
-  are never granted. Because these are non-default roots, such a turn does not ride on a plain
-  built-in permission profile.
+  are never granted. Runner-owned filesystem isolation re-applies read-only mounts to the static
+  linked-worktree registration files `gitdir`, `commondir`, and an existing `config.worktree`
+  beneath that writable admin directory. Without the outer filesystem boundary, the managed
+  `PreToolUse` guard refuses direct command-text writes, removals, renames, and replacements under
+  the repository's worktree registry. That has the guard's existing same-user, command-text
+  strength: runtime indirection still requires the runner-owned filesystem layer. Because these are
+  non-default roots, such a turn does not ride on a plain built-in permission profile.
 - **A launch that never sent a legacy mode is compared with Codex's own default.** A native TUI and
   a resumed `codex exec` turn have always passed no `-s`, so they ran under whatever the user's Codex
   configuration selects — not the session's structured mode. They migrate only when that default is
