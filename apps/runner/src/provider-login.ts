@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
-import type { AgentContext, AgentDefinition, ProviderLoginView } from "@wollipog/protocol";
+import { agentContextKey, type AgentContext, type AgentDefinition, type ProviderLoginView } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
 import { writeProviderAccountsConfig } from "./config.js";
 import { runContextCommand } from "./context-command.js";
@@ -30,7 +30,7 @@ export function agentsMatchingHarnessInstallationSelections(
 ): AgentDefinition[] {
   return agents.filter((candidate) => {
     const selected = selections.find((choice) =>
-      JSON.stringify(choice.context) === JSON.stringify(candidate.context ?? { kind: "native" }));
+      agentContextKey(choice.context) === agentContextKey(candidate.context));
     return !selected || candidate.installation?.id === selected.installationId;
   });
 }

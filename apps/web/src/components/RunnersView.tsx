@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
+  agentContextKey,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type AgentContext,
@@ -697,7 +698,7 @@ function MachineSettingsDialog({
   useEffect(() => { setHarnessSelections(runner?.harnessSelections ?? []); }, [runner?.harnessSelections]);
   const installations = [...new Map((runner?.agents ?? [])
     .filter((agent) => agent.installation && agent.driver !== "codex")
-    .map((agent) => [JSON.stringify([agent.context ?? { kind: "native" }, agent.installation!.id]), agent])).values()];
+    .map((agent) => [JSON.stringify([agentContextKey(agent.context), agent.installation!.id]), agent])).values()];
   const chooseInstallation = async (agentId: string, installationId: string) => {
     if (!runner || selectingHarness || !installationSupported || runner.canManage !== true) return;
     setSelectingHarness(true);
@@ -705,7 +706,7 @@ function MachineSettingsDialog({
     try {
       const { selection } = await api.selectHarnessInstallation(runner.runnerId, agentId, installationId);
       setHarnessSelections((current) => [...current.filter((item) =>
-        !(item.family === selection.family && JSON.stringify(item.context) === JSON.stringify(selection.context))), selection]);
+        !(item.family === selection.family && agentContextKey(item.context) === agentContextKey(selection.context))), selection]);
     } catch (cause) {
       setError(machineSettingsMutationError(cause));
     } finally {
@@ -902,7 +903,7 @@ function MachineSettingsDialog({
             const installation = agent.installation!;
             const family = agent.driver === "claude-code" ? "claude" : agent.driver === "pi" ? "pi" : "codex";
             const selected = harnessSelections.find((item) => item.family === family &&
-              JSON.stringify(item.context) === JSON.stringify(agent.context ?? { kind: "native" }));
+              agentContextKey(item.context) === agentContextKey(agent.context));
             const isSelected = selected?.installationId === installation.id;
             return (
               <div className="machine-harness-installation" key={`${agent.id}:${installation.id}`}>
@@ -923,7 +924,7 @@ function MachineSettingsDialog({
             );
           })}
           {harnessSelections.filter((selection) => selection.agentId === null).map((selection) => (
-            <div className="machine-harness-installation" key={`missing:${selection.family}:${JSON.stringify(selection.context)}`}>
+            <div className="machine-harness-installation" key={`missing:${selection.family}:${agentContextKey(selection.context)}`}>
               <div><strong>{titleCaseLabel(selection.family)}</strong> · {contextLabel(selection.context)} · Unavailable</div>
               <div><code>{selection.path}</code> · {selection.version ? `v${selection.version}` : "Version Unknown"}</div>
               <p>Select another discovered installation to restore new sessions.</p>

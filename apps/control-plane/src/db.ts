@@ -36,6 +36,7 @@ import {
   pendingRequests,
   parentControlRequestEligible,
   normalizeAgentHarnessIdentity,
+  agentContextKey,
   runnerSupportsProtocol,
   scopeAudienceContained,
   validatePromptImageInputs,
@@ -233,7 +234,7 @@ function harnessInstallationFamily(driver: AgentDriverKind | undefined): Harness
 }
 
 function harnessInstallationContext(context: AgentContext | undefined): string {
-  return JSON.stringify(context ?? { kind: "native" });
+  return agentContextKey(context);
 }
 
 const OUTBOUND_EVENT_PENDING_LIMIT = 100;

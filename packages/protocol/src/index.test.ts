@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  agentContextKey,
   CONTROL_PLANE_API_VERSION,
   CONTROL_PLANE_CAPABILITIES,
   CONTROL_PLANE_SERVICE,
@@ -88,6 +89,12 @@ import {
   type ReadQueuedPromptMessage,
   type ReadQueuedPromptResultMessage,
 } from "./index.js";
+
+test("agent context identity ignores JSON property order", () => {
+  assert.equal(agentContextKey({ kind: "wsl", distro: "Ubuntu" }),
+    agentContextKey({ distro: "Ubuntu", kind: "wsl" }));
+  assert.notEqual(agentContextKey({ kind: "native" }), agentContextKey({ kind: "wsl", distro: "Ubuntu" }));
+});
 
 test("Native TUI guardrail detection follows persisted positive-limit semantics", () => {
   assert.equal(nativeTuiHasTrackedGuardrails({}), false);

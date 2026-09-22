@@ -9,6 +9,7 @@ import { readdirSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { agentContextKey } from "@wollipog/protocol";
 import type {
   AcpRuntimeCapabilities,
   AgentCapabilities,
@@ -426,7 +427,7 @@ const KNOWN: KnownAgent[] = [
 /** The logical installation entry point survives upgrades that replace its symlink target.
  * The context keeps a WSL path distinct from the same path on the native host. */
 function installationId(context: AgentContext, bin: ResolvedBinary): string {
-  return createHash("sha256").update(JSON.stringify([context, bin.path])).digest("hex").slice(0, 16);
+  return createHash("sha256").update(JSON.stringify([agentContextKey(context), bin.path])).digest("hex").slice(0, 16);
 }
 
 function codexExecId(primaryId: string): string {
@@ -856,7 +857,7 @@ export function mergeAgents(
   const overrideKeys = new Set<string>();
   const enriched = safeConfigAgents.map((c) => {
     const exactMatch = /[\\/]/.test(c.command) ? discovered.find((d) =>
-      d.driver === c.driver && JSON.stringify(d.context ?? { kind: "native" }) === JSON.stringify(c.context ?? { kind: "native" }) &&
+      d.driver === c.driver && agentContextKey(d.context) === agentContextKey(c.context) &&
       d.command === c.command && JSON.stringify(d.args ?? []) === JSON.stringify(c.args ?? [])) : undefined;
     const shapeMatch = exactMatch ?? launchKeys(c).map((k) => byKey.get(k)).find(Boolean);
     const configuredProbe = configuredProbeById.get(c.id);

@@ -1933,12 +1933,13 @@ test("Machine installation selection survives PATH reorder and fails closed when
     "an older runner cannot claim to enforce the saved choice");
 });
 
-test("a configured wrapper is marked unavailable in the picker when another installation is selected", () => {
+test("a configured WSL wrapper is blocked by a selection regardless of context field order", () => {
   const db = ControlPlaneDb.open(":memory:");
   const selected = { ...acpAgent(), id: "codex", driver: "codex-app-server" as const,
-    command: "/usr/bin/codex", available: true,
+    command: "/usr/bin/codex", available: true, context: { kind: "wsl" as const, distro: "Ubuntu" },
     installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
-  const wrapper = { ...selected, id: "wrapper", command: "/opt/wrap/codex", installation: undefined };
+  const wrapper = { ...selected, id: "wrapper", command: "/opt/wrap/codex",
+    context: { distro: "Ubuntu", kind: "wsl" as const }, installation: undefined };
   db.registerRunner(meta({ agents: [selected, wrapper] }), 500, PROTOCOL_VERSION);
   assert.equal(db.selectHarnessInstallation("runner-1", "codex", "system")?.installationId, "system");
   assert.equal(db.getRunner("runner-1")?.agents.find((agent) => agent.id === "wrapper")?.harnessSelectionBlocked, true);

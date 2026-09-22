@@ -27,6 +27,15 @@ test("provider sign-in only uses the saved installation in its execution context
   assert.deepEqual(agentsMatchingHarnessInstallationSelections([system], selected), [],
     "a missing saved installation cannot fall back to the first PATH result");
 });
+
+test("provider sign-in matches a WSL selection regardless of context field order", () => {
+  const agent: AgentDefinition = { id: "codex-wsl", name: "Codex", command: "/usr/bin/codex",
+    args: [], env: {}, driver: "codex-app-server", context: { distro: "Ubuntu", kind: "wsl" },
+    installation: { id: "selected", path: "/usr/bin/codex", via: "path" } };
+  const choices = [{ context: { kind: "wsl" as const, distro: "Ubuntu" }, installationId: "selected" }];
+  assert.deepEqual(agentsMatchingHarnessInstallationSelections([agent], choices).map((candidate) => candidate.id),
+    ["codex-wsl"]);
+});
 import { waitForPendingKills } from "./spawn.js";
 
 class FakeLoginChild extends EventEmitter {

@@ -1093,6 +1093,14 @@ export type AgentDriverKind = "acp" | "claude-code" | "codex" | "codex-app-serve
 /** Where the agent binary runs relative to the runner host. */
 export type AgentContext = { kind: "native" } | { kind: "wsl"; distro: string };
 
+/** Stable semantic key for Machine-scoped installation choices. JSON field order in a
+ * configured context must never change which executable a saved choice authorizes. */
+export function agentContextKey(context: AgentContext | undefined): string {
+  return context?.kind === "wsl"
+    ? JSON.stringify({ kind: "wsl", distro: context.distro })
+    : JSON.stringify({ kind: "native" });
+}
+
 export interface AgentModel {
   id: string;
   displayName?: string;
