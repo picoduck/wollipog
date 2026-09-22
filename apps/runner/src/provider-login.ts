@@ -18,8 +18,8 @@ const RECENT_LOGIN_LIMIT = 32;
 const DEFAULT_LOGIN_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_CEREMONY_TIMEOUT_MS = 15_000;
 const URL_PATTERN = /https:\/\/[^\s<>"'\u0000-\u001f\u007f]+/giu;
-const LABELED_DEVICE_CODE_PATTERN = /one-time code:?\s*([A-Z0-9-]+)/giu;
-const HYPHENATED_DEVICE_CODE_PATTERN = /\b[A-Z0-9]+(?:-[A-Z0-9]+)+\b/gu;
+const LABELED_DEVICE_CODE_PATTERN = /one-time code:?\s*([A-Z0-9-]+)[ \t]*(?=\r?\n)/giu;
+const HYPHENATED_DEVICE_CODE_LINE_PATTERN = /^[ \t]*([A-Z0-9]+(?:-[A-Z0-9]+)+)[ \t]*(?=\r?\n)/gmu;
 const ANSI_ESCAPE_PATTERN = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~])|\u009b[0-?]*[ -/]*[@-~]/gu;
 const CODEX_LOGIN_CLIENT_INFO = { name: "wollipog-provider-login", version: "1.0.0" } as const;
 interface ProviderLoginDescriptor {
@@ -189,8 +189,8 @@ export function parseCodexDeviceLoginOutput(output: string): { verificationUrl?:
   const labeledCode = [...normalized.matchAll(LABELED_DEVICE_CODE_PATTERN)]
     .map((match) => safeFallbackDeviceCode(match[1] ?? ""))
     .find((candidate): candidate is string => !!candidate);
-  const userCode = labeledCode ?? (normalized.match(HYPHENATED_DEVICE_CODE_PATTERN) ?? [])
-    .map(safeFallbackDeviceCode)
+  const userCode = labeledCode ?? [...normalized.matchAll(HYPHENATED_DEVICE_CODE_LINE_PATTERN)]
+    .map((match) => safeFallbackDeviceCode(match[1] ?? ""))
     .find((candidate): candidate is string => !!candidate);
   return {
     ...(verificationUrl ? { verificationUrl } : {}),

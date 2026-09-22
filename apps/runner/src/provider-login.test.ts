@@ -262,10 +262,13 @@ test("cancelling structured Codex sign-in during initialization never starts a p
   try {
     const started = await fx.supervisor.startAccount({ provider: "codex", label: "Early Cancel" });
     const initialize = await nextRequest(fx.children[0]!);
+    const laterFrames: string[] = [];
+    fx.children[0]!.stdin.on("data", (chunk) => laterFrames.push(String(chunk)));
     fx.supervisor.cancel(started.operationId);
     respond(fx.children[0]!, initialize.id, { userAgent: "codex-test" });
     await new Promise<void>((resolve) => setImmediate(resolve));
-    assert.equal(fx.children[0]!.stdin.read(), null, "account/login/start must not be sent after cancellation");
+    assert.equal(laterFrames.some((frame) => frame.includes('"method":"account/login/start"')), false,
+      "account/login/start must not be sent after cancellation");
     assert.equal(fx.supervisor.views()[0]?.status, "cancelled");
     assert.equal(fx.accounts.length, 0);
   } finally {
@@ -358,7 +361,7 @@ test("Codex CLI compatibility parser preserves bounded provider-defined code gro
   const code = fc.oneof(groupedCode, plainCode);
   fc.assert(fc.property(code, (userCode) => {
     const parsed = parseCodexDeviceLoginOutput(
-      `\u001b[36mhttps://auth.openai.com/device\u001b[0m\nEnter this one-time code:\n\u001b[1m${userCode}\u001b[0m`,
+      `\u001b[36mhttps://auth.openai.com/device\u001b[0m\nEnter this one-time code:\n\u001b[1m${userCode}\u001b[0m\n`,
     );
     assert.deepEqual(parsed, {
       verificationUrl: "https://auth.openai.com/device",
@@ -373,6 +376,15 @@ test("Codex CLI compatibility parser does not mistake an incomplete prompt for a
   ), { verificationUrl: "https://auth.openai.com/device" });
   assert.deepEqual(parseCodexDeviceLoginOutput(
     "https://auth.openai.com/device\nEnter this one-time code\nABCD-EFGHJ\n",
+  ), {
+    verificationUrl: "https://auth.openai.com/device",
+    userCode: "ABCD-EFGHJ",
+  });
+  assert.deepEqual(parseCodexDeviceLoginOutput(
+    "https://auth.openai.com/device\nEnter this one-time code:\nABCD-EF",
+  ), { verificationUrl: "https://auth.openai.com/device" });
+  assert.deepEqual(parseCodexDeviceLoginOutput(
+    "https://auth.openai.com/device\nEnter this one-time code:\nABCD-EFGHJ\n",
   ), {
     verificationUrl: "https://auth.openai.com/device",
     userCode: "ABCD-EFGHJ",

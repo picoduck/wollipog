@@ -112,6 +112,21 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
     assert.match(loginDrift.stderr, /LoginAccountParams.*variant removed.*ChatgptDeviceCode/);
     writeFileSync(loginParamsPath, JSON.stringify(synthesizeShape(fixture.files["v2/LoginAccountParams.json"]!)));
 
+    const renamedLoginType = JSON.parse(readFileSync(loginParamsPath, "utf8"));
+    const deviceCodeVariant = renamedLoginType.oneOf.find(
+      (variant: { properties?: { type?: { enum?: string[] } } }) =>
+        variant.properties?.type?.enum?.includes("chatgptDeviceCode"),
+    );
+    deviceCodeVariant.properties.type.enum = ["deviceCodeV3"];
+    writeFileSync(loginParamsPath, JSON.stringify(renamedLoginType));
+    const loginTypeDrift = spawnSync(process.execPath, [script], {
+      encoding: "utf8",
+      env: { ...process.env, CODEX_SCHEMA_DIR: dir },
+    });
+    assert.notEqual(loginTypeDrift.status, 0);
+    assert.match(loginTypeDrift.stderr, /LoginAccountParams.*variant removed.*type=chatgptDeviceCode/);
+    writeFileSync(loginParamsPath, JSON.stringify(synthesizeShape(fixture.files["v2/LoginAccountParams.json"]!)));
+
     // Pin the fields used to recover a steering coordinate, not unrelated response payloads.
     const startResponsePath = join(dir, "v2", "TurnStartResponse.json");
     const startResponse = JSON.parse(readFileSync(startResponsePath, "utf8"));

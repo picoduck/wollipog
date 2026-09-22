@@ -6,6 +6,14 @@
   "orchestratorApprovalMinimumVersion": "0.154.0",
   "files": {
     "v2/LoginAccountParams.json": {
+      "discriminatedVariants": {
+        "type": {
+          "chatgptDeviceCode": {
+            "required": ["type"],
+            "properties": ["type"]
+          }
+        }
+      },
       "variantRequiredProperties": {
         "ChatgptDeviceCodev2::LoginAccountParams": {
           "required": ["type"],
