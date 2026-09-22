@@ -35,6 +35,7 @@ const response = (
   granularity: UsageAggregationResponse["granularity"] = "day",
 ): UsageAggregationResponse => ({
   granularity,
+  supportedGranularities: ["hour", "day", "week"],
   since: 0,
   through: Date.UTC(2026, 0, 2),
   retention: { hourlyDays: 30, dailyDays: 365, coverageStartedAt: 0 },
@@ -106,6 +107,11 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
     await settleLoad();
     await Promise.resolve();
   });
+  const subscriptionUsage = container.querySelector(".subscription-usage");
+  const apiControls = container.querySelector(".usage-api-controls");
+  assert.equal(subscriptionUsage?.nextElementSibling, apiControls,
+    "subscription allowances precede the controls for API-equivalent usage");
+  assert.match(apiControls?.textContent ?? "", /Subscription allowances above are unaffected/);
   const rowLabels = () => [...container.querySelectorAll("tbody th")].map((cell) => cell.textContent ?? "");
   assert.deepEqual(rowLabels(), [bucketLabel(newerDay, "day"), bucketLabel(olderDay, "day")]);
 
@@ -259,16 +265,23 @@ test("an Hour request that discovers rolled data switches to Day and disables Ho
 
 test("an older plane's implicit Day fallback disables Hour without showing an error", async () => {
   const at = Date.UTC(2026, 8, 21);
+  const legacyResponse = (granularity: UsageAggregationGranularity) => {
+    const current = response([bucket(at, 6, 0.06)], granularity);
+    delete current.supportedGranularities;
+    return current;
+  };
+  const calls: UsageAggregationGranularity[] = [];
   const client = {
     ...api,
     subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
     refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
     usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
     usageUsers: async () => ({ users: [] }),
-    usage: async (query: { granularity?: UsageAggregationGranularity }) => response(
-      [bucket(at, 6, 0.06)],
-      query.granularity === "hour" ? "day" : query.granularity ?? "day",
-    ),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => {
+      const requested = query.granularity ?? "day";
+      calls.push(requested);
+      return legacyResponse(requested === "hour" ? "day" : requested);
+    },
   } as unknown as ApiClient;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -278,6 +291,21 @@ test("an older plane's implicit Day fallback disables Hour without showing an er
   const group = (label: string) => container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
   const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
     .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
+
+  const week = option("Usage Aggregation", "Week");
+  assert.equal(week.getAttribute("aria-disabled"), "true");
+  const weekDescription = week.getAttribute("aria-describedby");
+  assert.ok(weekDescription);
+  assert.match(domWindow.document.getElementById(weekDescription!)?.textContent ?? "", /newer control plane/);
+  const callCount = calls.length;
+  await act(async () => { week.click(); await settleLoad(); });
+  assert.equal(calls.length, callCount, "an older plane never receives an unsupported Week request");
+  assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /newer control plane/);
+  assert.equal(
+    container.querySelector('[aria-label="Usage Aggregation: Day"]')?.getAttribute("aria-describedby"),
+    "usage-week-capability-note",
+    "the compact mobile picker is associated with the upgrade explanation",
+  );
 
   await act(async () => { option("Usage Aggregation", "Hour").click(); await settleLoad(); });
   await act(async () => { await settleLoad(); });

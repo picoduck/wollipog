@@ -93,6 +93,7 @@ const byModel = drivers.map((entry) => ({
 
 const response: UsageAggregationResponse = {
   granularity: "day",
+  supportedGranularities: ["hour", "day", "week"],
   hourlyDataAvailable: true,
   since: END - 29 * DAY,
   through: END + DAY,

@@ -97,14 +97,40 @@ test("light theme and the coverage notice for unpriced records and a cached rate
   await expect(page.locator(".usage-notice")).toHaveCount(0);
 });
 
-test("mobile: the overview stacks and every control stays reachable", async ({ page }) => {
+test("mobile: subscription usage precedes compact API controls and every control stays reachable", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/usage-view-e2e.html");
+  const subscription = page.locator(".subscription-usage");
+  const controls = page.locator(".usage-api-controls");
+  const compact = page.locator(".usage-mobile-controls");
+  await expect(subscription).toBeVisible();
+  await expect(controls).toBeVisible();
+  await expect(compact).toBeVisible();
+  await expect(page.locator(".usage-desktop-controls")).toBeHidden();
+  const positions = await Promise.all([subscription, controls, page.locator(".usage-overview")]
+    .map(async (locator) => (await locator.boundingBox())!.y));
+  expect(positions[0]).toBeLessThan(positions[1]);
+  expect(positions[1]).toBeLessThan(positions[2]);
+  const triggers = compact.locator(".ui-select-trigger");
+  await expect(triggers).toHaveCount(3);
+  for (const box of await triggers.evaluateAll((nodes) => nodes.map((node) => {
+    const { width, height } = node.getBoundingClientRect();
+    return { width, height };
+  }))) {
+    expect(box.height).toBeGreaterThanOrEqual(44);
+    expect(box.width).toBeGreaterThanOrEqual(44);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
   await expect(page.locator(".usage-headline-value")).toBeVisible();
-  await page.getByRole("radio", { name: "Tokens" }).click();
+  await page.getByRole("button", { name: "Usage Metric: Cost" }).click();
+  await page.getByRole("option", { name: "Tokens" }).click();
   await expect(page.locator(".usage-headline-value")).toContainText("M");
-  await page.getByRole("radiogroup", { name: "Usage Aggregation" }).getByRole("radio", { name: "Week" }).click();
+  await page.getByRole("button", { name: "Usage Aggregation: Day" }).click();
+  await page.getByRole("option", { name: "Week" }).click();
   await expect(page.locator(".usage-chart-section h3")).toContainText("Weekly Processed Tokens");
+  await page.setViewportSize({ width: 320, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
+  await page.setViewportSize({ width: 390, height: 844 });
   await page.screenshot({ path: `${SHOT}/mobile-dark-tokens.png`, fullPage: true });
 });
 

@@ -33,10 +33,13 @@ import {
   type UsageBreakdownMode,
   type UsageMetric,
 } from "../usage-view-model.js";
-import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { SegmentedControl, Select } from "./ui/ChoiceControls.js";
 import { UsageChart } from "./UsageChart.js";
 
 const RANGES = [7, 30, 90, 365] as const;
+const LEGACY_USAGE_GRANULARITIES: readonly UsageAggregationGranularity[] = ["hour", "day"];
+const WEEK_CHECKING_REASON = "Checking whether this control plane supports weekly aggregation.";
+const WEEK_UPGRADE_REASON = "Weekly aggregation requires a newer control plane. Upgrade the control plane to use Week.";
 const GRANULARITY_LABEL: Record<UsageAggregationGranularity, { noun: string; adjective: string }> = {
   hour: { noun: "Hour", adjective: "Hourly" },
   day: { noun: "Day", adjective: "Daily" },
@@ -88,6 +91,7 @@ export function UsageView() {
   const [metric, setMetric] = useState<UsageMetric>("cost");
   const [granularity, setGranularity] = useState<UsageAggregationGranularity>("day");
   const [breakdown, setBreakdown] = useState<UsageBreakdownMode>("day");
+  const [supportedGranularities, setSupportedGranularities] = useState<readonly UsageAggregationGranularity[] | null>(null);
   const granularityRef = useRef(granularity);
   const breakdownRef = useRef(breakdown);
   granularityRef.current = granularity;
@@ -144,6 +148,7 @@ export function UsageView() {
       }
       setData(next);
       setKnownRetention(next.retention);
+      setSupportedGranularities(next.supportedGranularities ?? LEGACY_USAGE_GRANULARITIES);
       if (next.hourlyDataAvailable !== undefined) {
         setHourlyAvailability({ range, available: next.hourlyDataAvailable });
       }
@@ -337,15 +342,47 @@ export function UsageView() {
     : hourlyDataAvailable === false
       ? "Hourly data for this range has already been retained as daily buckets. Choose Day or Week."
       : undefined;
+  const weekUnavailable = supportedGranularities !== null && !supportedGranularities.includes("week");
+  const weekDisabled = supportedGranularities === null || weekUnavailable;
+  const weekDisabledReason = supportedGranularities === null ? WEEK_CHECKING_REASON : WEEK_UPGRADE_REASON;
   const granularityOptions = (["hour", "day", "week"] as const).map((value) => ({
     value,
     label: GRANULARITY_LABEL[value].noun,
-    disabled: value === "hour" && hourlyUnavailable,
-    disabledReason: value === "hour" && hourlyUnavailable ? hourlyUnavailableReason : undefined,
+    disabled: (value === "hour" && hourlyUnavailable) || (value === "week" && weekDisabled),
+    disabledReason: value === "hour" && hourlyUnavailable
+      ? hourlyUnavailableReason
+      : value === "week" && weekDisabled
+        ? weekDisabledReason
+        : undefined,
+    description: value === "week" && weekDisabled ? weekDisabledReason : undefined,
   }));
+  const rangeOptions = RANGES
+    .filter((range) => !knownRetention || range <= knownRetention.dailyDays)
+    .map((range) => ({
+      value: String(range),
+      label: `${range}d`,
+      title: `Last ${range} Days`,
+      disabled: saving,
+      disabledReason: saving ? savingReason : undefined,
+    }));
   const selectGranularity = (next: UsageAggregationGranularity) => {
     setGranularity(next);
     setBreakdown((current) => current === "model" ? current : next);
+  };
+  const selectRange = (next: string) => {
+    const range = Number(next);
+    daysRef.current = range;
+    const nextGranularity = granularity === "hour" && knownRetention && range > knownRetention.hourlyDays
+      ? "day"
+      : granularity;
+    // Re-selecting the current range is a REFRESH, which is why this is not a no-op — and
+    // it is deliberate rather than incidental, so it does not wait for the debounce.
+    if (nextGranularity !== granularity) {
+      setGranularity(nextGranularity);
+      if (breakdown !== "model") setBreakdown(nextGranularity);
+    }
+    if (days === range && nextGranularity === granularity) void load(range, granularity);
+    else setDays(range);
   };
   const onOfflineNames = useCallback((names: string[]) => setOfflineMachines(names), []);
 
@@ -357,56 +394,7 @@ export function UsageView() {
           <h2 id="usage-heading">Usage &amp; Cost</h2>
           <p>Scoped, content-free accounting across the sessions you can access.</p>
         </div>
-        {/* One filter row scopes everything beneath it: metric flips every figure, range picks the
-            window, and aggregation controls the shared chart/table buckets. */}
-        <div className="usage-toolbar-controls">
-          <SegmentedControl
-            label="Usage Metric"
-            value={metric}
-            options={[
-              { value: "cost", label: "Cost", title: "Show API-equivalent cost" },
-              { value: "tokens", label: "Tokens", title: "Show processed tokens" },
-            ]}
-            onChange={setMetric}
-          />
-          <SegmentedControl
-            className="usage-range"
-            label="Usage Range"
-            value={String(days)}
-            options={RANGES
-              .filter((range) => !knownRetention || range <= knownRetention.dailyDays)
-              .map((range) => ({
-                value: String(range),
-                label: `${range}d`,
-                title: `Last ${range} Days`,
-                disabled: saving,
-                disabledReason: saving ? savingReason : undefined,
-              }))}
-            onChange={(next) => {
-              const range = Number(next);
-              daysRef.current = range;
-              const nextGranularity = granularity === "hour" && knownRetention && range > knownRetention.hourlyDays
-                ? "day"
-                : granularity;
-              // Re-selecting the current range is a REFRESH, which is why this is not a no-op — and
-              // it is deliberate rather than incidental, so it does not wait for the debounce.
-              if (nextGranularity !== granularity) {
-                setGranularity(nextGranularity);
-                if (breakdown !== "model") setBreakdown(nextGranularity);
-              }
-              if (days === range && nextGranularity === granularity) void load(range, granularity);
-              else setDays(range);
-            }}
-          />
-          <SegmentedControl
-            label="Usage Aggregation"
-            value={granularity}
-            options={granularityOptions}
-            onChange={selectGranularity}
-          />
-        </div>
       </div>
-      {hourlyUnavailable && <p className="usage-granularity-note" role="note">{hourlyUnavailableReason}</p>}
 
       <section className="subscription-usage" aria-labelledby="subscription-usage-heading">
         <div className="subscription-usage-heading">
@@ -523,6 +511,83 @@ export function UsageView() {
                 </footer>
               </article>
             ))}
+          </div>
+        )}
+      </section>
+
+      <section className="usage-api-controls" aria-labelledby="api-usage-heading">
+        <div className="usage-api-controls-heading">
+          <h3 id="api-usage-heading">API Usage</h3>
+          <p>Filter the API-equivalent session usage below. Subscription allowances above are unaffected.</p>
+        </div>
+        {/* These filters deliberately live with the API-equivalent figures they scope. Subscription
+            allowance windows above come from providers and never change with these selections. */}
+        <div className="usage-toolbar-controls usage-desktop-controls">
+          <SegmentedControl<UsageMetric>
+            label="Usage Metric"
+            value={metric}
+            options={[
+              { value: "cost", label: "Cost", title: "Show API-equivalent cost" },
+              { value: "tokens", label: "Tokens", title: "Show processed tokens" },
+            ]}
+            onChange={setMetric}
+          />
+          <SegmentedControl
+            className="usage-range"
+            label="Usage Range"
+            value={String(days)}
+            options={rangeOptions}
+            onChange={selectRange}
+          />
+          <SegmentedControl
+            label="Usage Aggregation"
+            value={granularity}
+            options={granularityOptions}
+            onChange={selectGranularity}
+          />
+        </div>
+        <div className="usage-mobile-controls">
+          <div className="usage-compact-field">
+            <span>Metric</span>
+            <Select<UsageMetric>
+              label="Usage Metric"
+              value={metric}
+              options={[
+                { value: "cost", label: "Cost" },
+                { value: "tokens", label: "Tokens" },
+              ]}
+              onChange={setMetric}
+            />
+          </div>
+          <div className="usage-compact-field">
+            <span>Range</span>
+            <Select
+              label="Usage Range"
+              value={String(days)}
+              options={rangeOptions}
+              onChange={selectRange}
+            />
+          </div>
+          <div className="usage-compact-field">
+            <span>Aggregation</span>
+            <Select
+              label="Usage Aggregation"
+              value={granularity}
+              options={granularityOptions}
+              describedBy={weekUnavailable ? "usage-week-capability-note" : undefined}
+              menuWidth={280}
+              onChange={selectGranularity}
+            />
+          </div>
+        </div>
+        {(hourlyUnavailable || weekUnavailable) && (
+          <div className="usage-granularity-notes">
+            {hourlyUnavailable && <p className="usage-granularity-note" role="note">{hourlyUnavailableReason}</p>}
+            {weekUnavailable && (
+              <p id="usage-week-capability-note" className="usage-granularity-note" role="note">
+                {WEEK_UPGRADE_REASON}
+              </p>
+            )}
           </div>
         )}
       </section>

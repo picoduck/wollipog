@@ -92,7 +92,9 @@ test("usage routes enforce human scope, retention roles, strict inputs, and cont
     method: "GET", url: "/api/usage?days=30&granularity=week", headers: { authorization: "Bearer owner" },
   });
   assert.equal(weekly.statusCode, 200);
-  assert.equal(weekly.json<{ granularity: string }>().granularity, "week");
+  const weeklyBody = weekly.json<{ granularity: string; supportedGranularities: string[] }>();
+  assert.equal(weeklyBody.granularity, "week");
+  assert.deepEqual(weeklyBody.supportedGranularities, ["hour", "day", "week"]);
   db.raw().prepare(
     `INSERT INTO usage_daily
        (bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver, model,
