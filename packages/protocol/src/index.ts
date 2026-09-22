@@ -7378,7 +7378,8 @@ export interface ForkSessionMessage {
   /** Protocol v54+: omit the potentially unbounded inherited event array; the control plane pulls
    * the new session through session_history_page after materializing its snapshot. */
   deferHistory?: boolean;
-  handoff?: { agentId: string; config: SessionConfig };
+  /** The control plane pins a saved Machine choice through discovery races. */
+  handoff?: { agentId: string; config: SessionConfig; expectedInstallationId?: string };
   /** v128: recover a quarantined provider conversation. The runner revalidates the source's
    * durable quarantine and its recovery turn, and only then accepts a same-provider handoff. */
   recovery?: true;

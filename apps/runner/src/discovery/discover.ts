@@ -839,6 +839,7 @@ export function mergeAgents(
   configAgents: AgentDefinition[],
   discovered: AgentDefinition[],
   configuredProbes: AgentDefinition[] = [],
+  policyOverrideAgentIds: ReadonlySet<string> = new Set(),
 ): AgentDefinition[] {
   // Config selects a driver but cannot attest to live provider contracts. Strip stale steering
   // and Native TUI accounting claims first; only matching discovery may restore them.
@@ -891,10 +892,14 @@ export function mergeAgents(
     const sameInstallation = !!shapeMatch && effectiveCommand === shapeMatch.command &&
       JSON.stringify(effectiveArgs) === JSON.stringify(shapeMatch.args ?? []);
     if (sameInstallation && shapeMatch) matchedDiscoveredIds.add(shapeMatch.id);
-    if (!sameInstallation && shapeMatch && (/[\\/]/.test(c.command) || (c.args?.length ?? 0) > 0)) {
-      // A configured wrapper or custom argv may enforce policy. Preserve the pre-existing
-      // precedence rule: a same-name discovered binary must not appear as a bypass option.
+    const policyOverride = Object.keys(c.env ?? {}).length > 0 || c.available === false ||
+      policyOverrideAgentIds.has(c.id);
+    if (shapeMatch && ((!sameInstallation && (/[\\/]/.test(c.command) || (c.args?.length ?? 0) > 0)) ||
+        policyOverride)) {
+      // A configured wrapper, argv, environment, or disable may enforce policy. Preserve the
+      // pre-existing precedence rule across every same-name discovered installation.
       for (const key of launchKeys(c)) overrideKeys.add(key);
+      if (policyOverride) for (const key of launchKeys(shapeMatch)) overrideKeys.add(key);
     }
     return applyCodexAgentEnvironment(applyClaudeAgentEnvironment({
       ...c,

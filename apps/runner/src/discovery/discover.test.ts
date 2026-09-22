@@ -601,6 +601,21 @@ test("mergeAgents appends discovered agents not present in config", () => {
   );
 });
 
+test("configured environment and disable policies hide alternate same-name binaries", () => {
+  const config = cfg({ id: "claude-code", command: "claude", env: {}, source: "config" });
+  const discovered = [
+    cfg({ id: "claude-code", command: "/usr/bin/claude", bin: "claude", source: "discovered" }),
+    cfg({ id: "claude-code-installation-local", command: "/home/u/.local/bin/claude",
+      bin: "claude", source: "discovered" }),
+  ];
+  assert.equal(mergeAgents([config], discovered).length, 2,
+    "an ordinary config still exposes distinct installations");
+  assert.equal(mergeAgents([config], discovered, [], new Set([config.id])).length, 1,
+    "a private configured environment policy survives redaction and hides the bypass");
+  assert.equal(mergeAgents([{ ...config, available: false }], discovered).length, 1,
+    "an explicit disable hides every same-name installation");
+});
+
 test("mergeAgents keeps a configured same-name wrapper ahead of the discovered binary", () => {
   const config = [cfg({ id: "claude-code", command: "/custom/claude" })];
   const discovered = [cfg({ id: "claude-code", command: "/usr/bin/claude", source: "discovered" })];

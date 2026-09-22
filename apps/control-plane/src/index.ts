@@ -2539,6 +2539,9 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
   const loginProvider = hasAccountId
     ? runner.providerAccounts?.find((account) => account.id === body.accountId)?.provider
     : body.provider;
+  if (hasAccountId && !loginProvider) {
+    return reply.code(409).send({ error: "The provider account is not available on this Machine." });
+  }
   const requestId = `provider_login_${randomUUID()}`;
   try {
     const result = await hub.requestFromRunner(id, requestId, {
@@ -4553,6 +4556,9 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
     if (!handoff.config || typeof handoff.config !== "object" || Array.isArray(handoff.config)) return reply.code(400).send({ error: "handoff config is required" });
     const error = handoffDestinationError(destination, source.driver, handoff.config, { allowSameProvider: recovery });
     if (error) return reply.code(409).send({ error });
+    if (!db.getAgentLaunch(source.runnerId, handoff.agentId)) {
+      return reply.code(409).send({ error: "The destination harness installation is unavailable or not selected." });
+    }
     const unsupported = runnerCapabilityError(source.runnerId, "conversationHandoff", "Checkpoint handoffs");
     if (unsupported) return reply.code(409).send({ error: unsupported });
   }
@@ -4583,7 +4589,12 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
         targetSessionId,
         turn,
         title: `${source.title} (${recovery ? "recovered" : handoff ? "handoff" : "fork"})`.slice(0, 120),
-        ...(handoff ? { handoff } : {}),
+        ...(handoff ? { handoff: {
+          agentId: handoff.agentId,
+          config: handoff.config,
+          ...(destination?.installation?.selection === "selected"
+            ? { expectedInstallationId: destination.installation.id } : {}),
+        } } : {}),
         ...(recovery ? { recovery: true as const } : {}),
         ...(deferHistory ? { deferHistory: true } : {}),
       },

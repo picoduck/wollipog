@@ -1578,7 +1578,8 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     // labeled cache fallback, codex-exec cache, or Claude aliases), replacing the catalog list.
     metadata.agents = applyClaudeHookCapability(
       await enrichAgentModels(
-        mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents]), {
+        mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents],
+          new Set(config.agents.filter((agent) => Object.keys(agent.env ?? {}).length > 0).map((agent) => agent.id))), {
         refresh: refreshModels,
       }),
       claudeHookFeatureEnabled,
@@ -2206,6 +2207,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       const destination = msg.handoff ? metadata.agents.find((agent) => agent.id === msg.handoff!.agentId) : undefined;
       if (msg.handoff && !destination) {
         sendUp({ type: "fork_result", requestId: msg.requestId, ok: false, error: "destination agent is not installed on this runner" });
+        break;
+      }
+      if (msg.handoff?.expectedInstallationId &&
+          destination?.installation?.id !== msg.handoff.expectedInstallationId) {
+        sendUp({ type: "fork_result", requestId: msg.requestId, ok: false,
+          error: "The selected destination harness installation changed; retry after Machine rediscovery." });
         break;
       }
       void sessions
