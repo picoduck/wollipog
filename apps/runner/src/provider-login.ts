@@ -5,6 +5,7 @@ import type { AgentContext, AgentDefinition, ProviderLoginView } from "@wollipog
 import type { RunnerProviderAccount } from "./config.js";
 import { writeProviderAccountsConfig } from "./config.js";
 import { runContextCommand } from "./context-command.js";
+import { JsonRpcPeer, type RpcError } from "./jsonrpc.js";
 import { agentForProviderAccount, providerAccountEnvironment } from "./provider-accounts.js";
 import { killTreeAndWait, spawnAgent, trackPendingKill, type AgentProcess } from "./spawn.js";
 
@@ -14,8 +15,12 @@ const VERIFICATION_URL_LIMIT = 2_048;
 const DEVICE_CODE_LIMIT = 128;
 const RECENT_LOGIN_LIMIT = 32;
 const DEFAULT_LOGIN_TIMEOUT_MS = 10 * 60_000;
-const URL_PATTERN = /https:\/\/[^\s<>"']+/giu;
-const DEVICE_CODE_PATTERN = /\b[A-Z0-9]{4}(?:-[A-Z0-9]{4})+\b/gu;
+const DEFAULT_CEREMONY_TIMEOUT_MS = 15_000;
+const URL_PATTERN = /https:\/\/[^\s<>"'\u0000-\u001f\u007f]+/giu;
+const LABELED_DEVICE_CODE_PATTERN = /one-time code:\s*([A-Z0-9-]+)/giu;
+const HYPHENATED_DEVICE_CODE_PATTERN = /\b[A-Z0-9]+(?:-[A-Z0-9]+)+\b/giu;
+const ANSI_ESCAPE_PATTERN = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~])|\u009b[0-?]*[ -/]*[@-~]/gu;
+const CODEX_LOGIN_CLIENT_INFO = { name: "wollipog-provider-login", version: "1.0.0" } as const;
 interface ProviderLoginDescriptor {
   loginTail: readonly string[];
   statusTail: readonly string[];
@@ -33,7 +38,7 @@ const PROVIDER_LOGIN_DESCRIPTORS: Record<"claude" | "codex", ProviderLoginDescri
     expectsPasteCode: true,
     progress(output) {
       const verificationUrl = (output.match(URL_PATTERN) ?? [])
-        .map(safeVerificationUrl)
+        .map((candidate) => safeVerificationUrl(candidate))
         .find((candidate): candidate is string => !!candidate);
       return verificationUrl
         ? { status: "awaiting_code", expectsCode: true, verificationUrl }
@@ -50,17 +55,13 @@ const PROVIDER_LOGIN_DESCRIPTORS: Record<"claude" | "codex", ProviderLoginDescri
     scrubEnv: ["OPENAI_API_KEY"],
     expectsPasteCode: false,
     progress(output) {
-      const verificationUrl = (output.match(URL_PATTERN) ?? [])
-        .map(safeVerificationUrl)
-        .find((candidate): candidate is string => !!candidate);
-      const userCode = (output.match(DEVICE_CODE_PATTERN) ?? [])
-        .find((candidate) => candidate.length <= DEVICE_CODE_LIMIT);
-      return verificationUrl || userCode
+      const { verificationUrl, userCode } = parseCodexDeviceLoginOutput(output);
+      return verificationUrl && userCode
         ? {
             status: "waiting_for_provider",
             expectsCode: false,
-            ...(verificationUrl ? { verificationUrl } : {}),
-            ...(userCode ? { userCode } : {}),
+            verificationUrl,
+            userCode,
           }
         : null;
     },
@@ -79,6 +80,8 @@ export interface ResolvedProviderLogin {
   env: Record<string, string>;
   persistAccount: boolean;
   sessionId?: string;
+  /** Discovery-verified support for the structured Codex App Server contract. */
+  structuredCodex?: boolean;
 }
 
 interface ActiveLogin {
@@ -92,6 +95,12 @@ interface ActiveLogin {
   settled: boolean;
   codeSubmitted: boolean;
   stdinFailed: boolean;
+  ceremonyTimer?: ReturnType<typeof setTimeout>;
+  peer?: JsonRpcPeer;
+  loginId?: string;
+  structuredSucceeded: boolean;
+  structuredFailure?: string;
+  structuredAccountUpdated: boolean;
   reap?: Promise<boolean>;
   resolve: (status: "completed" | "cancelled" | "failed") => void;
   completion: Promise<"completed" | "cancelled" | "failed">;
@@ -108,6 +117,7 @@ export interface ProviderLoginSupervisorOptions {
   onUpdate: (logins: ProviderLoginView[]) => void;
   onAccountAdded: (account: RunnerProviderAccount) => void | Promise<void>;
   timeoutMs?: number;
+  ceremonyTimeoutMs?: number;
   spawn?: typeof spawnAgent;
   kill?: typeof killTreeAndWait;
   writeAccounts?: typeof writeProviderAccountsConfig;
@@ -125,21 +135,85 @@ function loginArgs(login: ResolvedProviderLogin): string[] {
   return [...login.args, ...PROVIDER_LOGIN_DESCRIPTORS[login.provider].loginTail];
 }
 
+function appServerArgs(login: ResolvedProviderLogin): string[] {
+  return [...login.args, "app-server"];
+}
+
 function statusArgs(login: ResolvedProviderLogin): string[] {
   return [...login.args, ...PROVIDER_LOGIN_DESCRIPTORS[login.provider].statusTail];
 }
 
-function safeVerificationUrl(raw: string): string | undefined {
-  const trimmed = raw.replace(/[),.;]+$/u, "");
-  if (trimmed.length > VERIFICATION_URL_LIMIT) return undefined;
+function safeVerificationUrl(raw: string, trimPresentationPunctuation = true): string | undefined {
+  const trimmed = trimPresentationPunctuation ? raw.replace(/[),.;]+$/u, "") : raw;
+  if (trimmed.length > VERIFICATION_URL_LIMIT || /[\u0000-\u001f\u007f]/u.test(trimmed)) return undefined;
   try {
     const parsed = new URL(trimmed);
     if (parsed.protocol !== "https:" || parsed.username || parsed.password) return undefined;
     const serialized = parsed.toString();
-    return serialized.length <= VERIFICATION_URL_LIMIT ? serialized : undefined;
+    return serialized.length <= VERIFICATION_URL_LIMIT ? trimmed : undefined;
   } catch {
     return undefined;
   }
+}
+
+function stripAnsi(value: string): string {
+  return value.replace(ANSI_ESCAPE_PATTERN, "");
+}
+
+function safeDeviceCode(raw: unknown): string | undefined {
+  if (typeof raw !== "string" || raw.length === 0 || raw.length > DEVICE_CODE_LIMIT) return undefined;
+  return /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/u.test(raw) ? raw : undefined;
+}
+
+function safeFallbackDeviceCode(raw: string): string | undefined {
+  return raw.length >= 4 && raw.length <= DEVICE_CODE_LIMIT &&
+      /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/u.test(raw)
+    ? raw
+    : undefined;
+}
+
+function safeLoginId(raw: unknown): string | undefined {
+  return typeof raw === "string" && raw.length > 0 && raw.length <= 256 &&
+      !/[\u0000-\u001f\u007f]/u.test(raw)
+    ? raw
+    : undefined;
+}
+
+/** Parse only the bounded, presentation-free ceremony values used by the CLI compatibility path. */
+export function parseCodexDeviceLoginOutput(output: string): { verificationUrl?: string; userCode?: string } {
+  const normalized = stripAnsi(output);
+  const verificationUrl = (normalized.match(URL_PATTERN) ?? [])
+    .map((candidate) => safeVerificationUrl(candidate))
+    .find((candidate): candidate is string => !!candidate);
+  const labeledCode = [...normalized.matchAll(LABELED_DEVICE_CODE_PATTERN)]
+    .map((match) => safeFallbackDeviceCode(match[1] ?? ""))
+    .find((candidate): candidate is string => !!candidate);
+  const userCode = labeledCode ?? (normalized.match(HYPHENATED_DEVICE_CODE_PATTERN) ?? [])
+    .map(safeFallbackDeviceCode)
+    .find((candidate): candidate is string => !!candidate);
+  return {
+    ...(verificationUrl ? { verificationUrl } : {}),
+    ...(userCode ? { userCode } : {}),
+  };
+}
+
+function codexFailureMessage(error: unknown): string {
+  const text = typeof error === "string"
+    ? error
+    : error && typeof error === "object" && "message" in error
+      ? String((error as { message?: unknown }).message ?? "")
+      : "";
+  if (/expir(?:e|ed|ation)/iu.test(text)) {
+    return "The provider device code expired. Start sign-in again.";
+  }
+  if (/access[_ -]?denied|denied|reject(?:ed|ion)|declined/iu.test(text)) {
+    return "The provider rejected the sign-in request. Start sign-in again if this was unexpected.";
+  }
+  return "The provider could not complete device-code authentication. Start sign-in again.";
+}
+
+function isMethodNotFound(error: unknown): boolean {
+  return !!error && typeof error === "object" && (error as RpcError).code === -32601;
 }
 
 function accountSlug(label: string): string {
@@ -218,6 +292,7 @@ export class ProviderLoginSupervisor {
       context: agent.context ?? { kind: "native" },
       env,
       persistAccount,
+      structuredCodex: account.provider === "codex" && agent.codexAppServer?.status === "supported",
     }).view;
   }
 
@@ -246,11 +321,12 @@ export class ProviderLoginSupervisor {
     const completion = new Promise<"completed" | "cancelled" | "failed">((resolve) => {
       resolveCompletion = resolve;
     });
+    const structuredCodex = resolved.provider === "codex" && resolved.structuredCodex === true;
     let child: AgentProcess;
     try {
       child = this.spawn({
         command: resolved.command,
-        args: loginArgs(resolved),
+        args: structuredCodex ? appServerArgs(resolved) : loginArgs(resolved),
         cwd: resolved.directory,
         env: resolved.env,
         context: resolved.context,
@@ -266,6 +342,7 @@ export class ProviderLoginSupervisor {
       const current = this.active.get(operationId);
       if (!current || current.settled || current.cancelled || current.stdinFailed) return;
       current.timedOut = true;
+      this.clearCeremonyTimer(current);
       this.update(current, {
         status: "timed_out",
         error: "Sign-in timed out before the provider confirmed authentication.",
@@ -273,7 +350,11 @@ export class ProviderLoginSupervisor {
         verificationUrl: undefined,
         userCode: undefined,
       });
-      void this.terminate(current);
+      if (current.peer && current.loginId) void this.cancelStructured(current);
+      else {
+        current.peer?.dispose("provider sign-in timed out");
+        void this.terminate(current);
+      }
     }, this.options.timeoutMs ?? DEFAULT_LOGIN_TIMEOUT_MS);
     timer.unref?.();
     const active: ActiveLogin = {
@@ -287,18 +368,36 @@ export class ProviderLoginSupervisor {
       settled: false,
       codeSubmitted: false,
       stdinFailed: false,
+      structuredSucceeded: false,
+      structuredAccountUpdated: false,
       resolve: resolveCompletion,
       completion,
     };
     this.active.set(operationId, active);
     this.recent.set(operationId, view);
     this.publish();
-    child.stdin.on("error", () => this.failInput(active));
-    const capture = (chunk: Buffer) => this.capture(active, chunk);
-    child.stdout.on("data", capture);
-    child.stderr.on("data", capture);
-    child.once("error", () => void this.finish(active, 1));
-    child.once("close", (code) => void this.finish(active, code ?? 1));
+    if (structuredCodex) {
+      const peer = new JsonRpcPeer(child.stdin, child.stdout);
+      active.peer = peer;
+      child.stderr.resume();
+      peer.onNotification("account/updated", (params) => this.handleStructuredAccountUpdated(active, params));
+      peer.onNotification("account/login/completed", (params) => this.handleStructuredCompletion(active, params));
+      void this.startStructuredCodex(active);
+    } else {
+      child.stdin.on("error", () => this.failInput(active));
+      const capture = (chunk: Buffer) => this.capture(active, chunk);
+      child.stdout.on("data", capture);
+      child.stderr.on("data", capture);
+      if (resolved.provider === "codex") this.armCeremonyTimer(active);
+    }
+    child.once("error", () => {
+      active.peer?.dispose("provider sign-in process failed");
+      void this.finish(active, 1);
+    });
+    child.once("close", (code) => {
+      active.peer?.dispose("provider sign-in process exited");
+      void this.finish(active, code ?? 1);
+    });
     return { view: { ...view }, completion };
   }
 
@@ -338,7 +437,13 @@ export class ProviderLoginSupervisor {
       verificationUrl: undefined,
       userCode: undefined,
     });
-    void this.terminate(operation);
+    if (operation.peer) {
+      if (operation.loginId) void this.cancelStructured(operation);
+      // Before account/login/start returns there is no provider-issued id to cancel. The in-flight
+      // request has a short deadline; startStructuredCodex cancels the exact id as soon as it arrives.
+    } else {
+      void this.terminate(operation);
+    }
     return { ...operation.view };
   }
 
@@ -354,7 +459,11 @@ export class ProviderLoginSupervisor {
     for (const operation of this.active.values()) {
       if (operation.settled) continue;
       operation.cancelled = true;
-      void this.terminate(operation);
+      if (operation.peer && operation.loginId) void this.cancelStructured(operation);
+      else {
+        operation.peer?.dispose("provider sign-in supervisor stopped");
+        void this.terminate(operation);
+      }
     }
   }
 
@@ -364,7 +473,134 @@ export class ProviderLoginSupervisor {
     const progress = operation.codeSubmitted && operation.resolved.provider === "claude"
       ? null
       : PROVIDER_LOGIN_DESCRIPTORS[operation.resolved.provider].progress(operation.output);
-    if (progress) this.update(operation, progress);
+    if (progress) {
+      this.clearCeremonyTimer(operation);
+      this.update(operation, progress);
+    }
+  }
+
+  private armCeremonyTimer(operation: ActiveLogin): void {
+    operation.ceremonyTimer = setTimeout(() => {
+      if (operation.settled || operation.cancelled || operation.timedOut || operation.structuredFailure) return;
+      operation.structuredFailure = "Codex did not provide a complete verification URL and device code. Upgrade Codex or try again.";
+      this.update(operation, {
+        status: "failed",
+        expectsCode: false,
+        error: operation.structuredFailure,
+        verificationUrl: undefined,
+        userCode: undefined,
+      });
+      void this.terminate(operation);
+    }, this.options.ceremonyTimeoutMs ?? DEFAULT_CEREMONY_TIMEOUT_MS);
+    operation.ceremonyTimer.unref?.();
+  }
+
+  private clearCeremonyTimer(operation: ActiveLogin): void {
+    if (operation.ceremonyTimer) clearTimeout(operation.ceremonyTimer);
+    operation.ceremonyTimer = undefined;
+  }
+
+  private async startStructuredCodex(operation: ActiveLogin): Promise<void> {
+    const peer = operation.peer;
+    if (!peer) return;
+    this.armCeremonyTimer(operation);
+    const deadlineAt = Date.now() + (this.options.ceremonyTimeoutMs ?? DEFAULT_CEREMONY_TIMEOUT_MS);
+    try {
+      await peer.requestWithDeadline("initialize", { clientInfo: CODEX_LOGIN_CLIENT_INFO }, deadlineAt);
+      peer.notify("initialized", {});
+      const response = await peer.requestWithDeadline<unknown>(
+        "account/login/start",
+        { type: "chatgptDeviceCode" },
+        deadlineAt,
+      );
+      if (!response || typeof response !== "object") throw new Error("invalid structured login response");
+      const result = response as Record<string, unknown>;
+      const loginId = safeLoginId(result.loginId);
+      const verificationUrl = typeof result.verificationUrl === "string"
+        ? safeVerificationUrl(result.verificationUrl, false)
+        : undefined;
+      const userCode = safeDeviceCode(result.userCode);
+      if (result.type !== "chatgptDeviceCode" || !loginId || !verificationUrl || !userCode) {
+        throw new Error("invalid structured login response");
+      }
+      operation.loginId = loginId;
+      this.clearCeremonyTimer(operation);
+      if (operation.cancelled) {
+        await this.cancelStructured(operation);
+        return;
+      }
+      if (operation.settled || operation.timedOut) return;
+      this.update(operation, {
+        status: "waiting_for_provider",
+        expectsCode: false,
+        verificationUrl,
+        userCode,
+      });
+    } catch (error) {
+      this.clearCeremonyTimer(operation);
+      if (operation.cancelled || operation.timedOut || operation.settled) {
+        void this.terminate(operation);
+        return;
+      }
+      operation.structuredFailure = isMethodNotFound(error)
+        ? "This Codex installation does not support structured device-code sign-in. Upgrade Codex and try again."
+        : "Codex did not provide a valid structured device-code ceremony. Upgrade Codex or try again.";
+      this.update(operation, {
+        status: "failed",
+        expectsCode: false,
+        error: operation.structuredFailure,
+        verificationUrl: undefined,
+        userCode: undefined,
+      });
+      void this.terminate(operation);
+    }
+  }
+
+  private handleStructuredAccountUpdated(operation: ActiveLogin, params: unknown): void {
+    if (operation.settled || operation.cancelled || operation.timedOut ||
+        !params || typeof params !== "object") return;
+    operation.structuredAccountUpdated = (params as Record<string, unknown>).authMode === "chatgpt";
+  }
+
+  private handleStructuredCompletion(operation: ActiveLogin, params: unknown): void {
+    if (operation.settled || operation.cancelled || operation.timedOut ||
+        !params || typeof params !== "object") return;
+    const result = params as Record<string, unknown>;
+    if (!operation.loginId || result.loginId !== operation.loginId || typeof result.success !== "boolean") return;
+    this.clearCeremonyTimer(operation);
+    if (result.success) {
+      operation.structuredSucceeded = true;
+    } else {
+      operation.structuredFailure = codexFailureMessage(result.error);
+      this.update(operation, {
+        status: "failed",
+        expectsCode: false,
+        error: operation.structuredFailure,
+        verificationUrl: undefined,
+        userCode: undefined,
+      });
+    }
+    void this.terminate(operation);
+  }
+
+  private async cancelStructured(operation: ActiveLogin): Promise<void> {
+    const peer = operation.peer;
+    const loginId = operation.loginId;
+    if (!peer || !loginId) {
+      await this.terminate(operation);
+      return;
+    }
+    try {
+      await peer.requestWithDeadline(
+        "account/login/cancel",
+        { loginId },
+        Date.now() + Math.min(5_000, this.options.ceremonyTimeoutMs ?? DEFAULT_CEREMONY_TIMEOUT_MS),
+      );
+    } catch {
+      // Cancellation is already visible locally. Reaping the owned process is the fail-closed path.
+    } finally {
+      await this.terminate(operation);
+    }
   }
 
   private update(operation: ActiveLogin, patch: Partial<ProviderLoginView>): void {
@@ -377,6 +613,7 @@ export class ProviderLoginSupervisor {
     if (operation.settled) return;
     operation.settled = true;
     clearTimeout(operation.timer);
+    this.clearCeremonyTimer(operation);
     const reaped = await this.terminate(operation);
     let result: "completed" | "cancelled" | "failed" = "failed";
     if (operation.cancelled) {
@@ -404,7 +641,15 @@ export class ProviderLoginSupervisor {
         verificationUrl: undefined,
         userCode: undefined,
       });
-    } else if (exitCode === 0 && await this.probe(operation.resolved)) {
+    } else if (operation.structuredFailure) {
+      this.update(operation, {
+        status: "failed",
+        expectsCode: false,
+        error: operation.structuredFailure,
+        verificationUrl: undefined,
+        userCode: undefined,
+      });
+    } else if (await this.authenticationConfirmed(operation, exitCode)) {
       try {
         if (operation.resolved.persistAccount) {
           const account: RunnerProviderAccount = {
@@ -458,6 +703,12 @@ export class ProviderLoginSupervisor {
       this.cleanupUnusedDirectory(operation.resolved.directory);
     }
     operation.resolve(result);
+  }
+
+  private async authenticationConfirmed(operation: ActiveLogin, exitCode: number): Promise<boolean> {
+    if (!operation.peer) return exitCode === 0 && await this.probe(operation.resolved);
+    return operation.structuredSucceeded &&
+      (operation.structuredAccountUpdated || await this.probe(operation.resolved));
   }
 
   private pruneRecent(): void {

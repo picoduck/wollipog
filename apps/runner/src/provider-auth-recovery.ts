@@ -474,6 +474,7 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
         env: meta.env,
         persistAccount: false,
         sessionId: meta.sessionId,
+        structuredCodex: scope.provider === "codex" && meta.driver === "codex-app-server",
       });
       entry = { accountId, attempt: Symbol("provider-login") };
       this.loginAccounts.set(scope.id, entry);

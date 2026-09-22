@@ -296,7 +296,7 @@ const client = {
       verificationUrl: provider === "claude"
         ? "https://claude.ai/oauth/authorize?fixture=machine"
         : "https://auth.openai.com/device",
-      ...(provider === "codex" ? { userCode: "WOLL-IPOG" } : {}),
+      ...(provider === "codex" ? { userCode: "WOLL-IPOGS" } : {}),
       startedAt: Date.now(),
     };
     runner.providerLogins = [login];
