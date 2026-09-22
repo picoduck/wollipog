@@ -280,10 +280,57 @@ test("an older plane's implicit Day fallback disables Hour without showing an er
     .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
 
   await act(async () => { option("Usage Aggregation", "Hour").click(); await settleLoad(); });
+  await act(async () => { await settleLoad(); });
   assert.equal(option("Usage Aggregation", "Day").getAttribute("aria-checked"), "true");
   assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
   assert.equal(container.querySelector('[role="alert"]'), null);
   assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("an unavailable Hour response cannot replace a newer Week selection during debounce", async () => {
+  const at = Date.UTC(2026, 8, 21);
+  let rejectHour: ((reason?: unknown) => void) | undefined;
+  const calls: UsageAggregationGranularity[] = [];
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => {
+      const granularity = query.granularity ?? "day";
+      calls.push(granularity);
+      if (granularity === "hour") {
+        return await new Promise<UsageAggregationResponse>((_resolve, reject) => { rejectHour = reject; });
+      }
+      return { ...response([bucket(at, 6, 0.06)], granularity), hourlyDataAvailable: true };
+    },
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); });
+  const group = (label: string) => container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
+  const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
+    .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
+
+  await act(async () => { option("Usage Aggregation", "Hour").click(); await settleLoad(); });
+  assert.ok(rejectHour, "the Hour request is in flight");
+  await act(async () => {
+    option("Usage Aggregation", "Week").click();
+    rejectHour!(new ApiError("rolled", 400, "USAGE_HOURLY_DATA_UNAVAILABLE"));
+    await Promise.resolve();
+  });
+  await act(async () => { await settleLoad(); });
+
+  assert.equal(option("Usage Aggregation", "Week").getAttribute("aria-checked"), "true");
+  assert.equal(option("Usage Breakdown", "Week").getAttribute("aria-checked"), "true");
+  assert.equal(calls.at(-1), "week");
+  assert.equal(container.querySelector('[role="alert"]'), null);
 
   await act(async () => root.unmount());
   container.remove();

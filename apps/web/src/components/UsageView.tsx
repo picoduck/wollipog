@@ -103,7 +103,10 @@ export function UsageView() {
   const requestGeneration = useRef(0);
   const daysRef = useRef(days);
   const [knownRetention, setKnownRetention] = useState<UsageRetentionPolicy | null>(null);
-  const [hourlyDataAvailable, setHourlyDataAvailable] = useState<boolean | undefined>(undefined);
+  const [hourlyAvailability, setHourlyAvailability] = useState<{
+    range: number;
+    available: boolean;
+  } | undefined>(undefined);
   const [offlineMachines, setOfflineMachines] = useState<string[]>([]);
   const [users, setUsers] = useState<UserCostWindows[] | null>(null);
   const [dailyBudget, setDailyBudget] = useState<UsageDailyBudgetPolicy | null>(null);
@@ -141,22 +144,24 @@ export function UsageView() {
       }
       setData(next);
       setKnownRetention(next.retention);
-      setHourlyDataAvailable(next.hourlyDataAvailable);
+      if (next.hourlyDataAvailable !== undefined) {
+        setHourlyAvailability({ range, available: next.hourlyDataAvailable });
+      }
       setHourlyDays(String(next.retention.hourlyDays));
       setDailyDays(String(next.retention.dailyDays));
       if (legacyHourlyFallback) {
-        setHourlyDataAvailable(false);
-        setGranularity("day");
-        setBreakdown((current) => current === "model" ? current : "day");
+        setHourlyAvailability({ range, available: false });
+        setGranularity((current) => current === "hour" ? "day" : current);
+        setBreakdown((current) => current === "hour" ? "day" : current);
       }
     } catch (cause) {
       if (generation !== requestGeneration.current) return;
       if (requestedGranularity === "hour" && cause instanceof ApiError &&
           cause.code === "USAGE_HOURLY_DATA_UNAVAILABLE") {
         handingOffToDay = true;
-        setHourlyDataAvailable(false);
-        setGranularity("day");
-        setBreakdown((current) => current === "model" ? current : "day");
+        setHourlyAvailability({ range, available: false });
+        setGranularity((current) => current === "hour" ? "day" : current);
+        setBreakdown((current) => current === "hour" ? "day" : current);
         return;
       }
       setError(cause instanceof Error ? cause.message : "Unable to load usage");
@@ -325,6 +330,7 @@ export function UsageView() {
   ));
   const periodNoun = data ? GRANULARITY_LABEL[data.granularity].noun : GRANULARITY_LABEL[granularity].noun;
   const hourlyUnavailableByRange = Boolean(knownRetention && days > knownRetention.hourlyDays);
+  const hourlyDataAvailable = hourlyAvailability?.range === days ? hourlyAvailability.available : undefined;
   const hourlyUnavailable = hourlyUnavailableByRange || hourlyDataAvailable === false;
   const hourlyUnavailableReason = hourlyUnavailableByRange && knownRetention
     ? `Hourly aggregation is retained for ${knownRetention.hourlyDays} days. Choose a range of ${knownRetention.hourlyDays} days or less.`
