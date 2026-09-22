@@ -1225,6 +1225,92 @@ test("identified turn/failed settles only its matching active root turn", async 
   assert.deepEqual(h.events, [{ kind: "error", message: "provider failed" }]);
 });
 
+test("identified turn/failed stays inert until the matching turn/start response", async () => {
+  let cleaned = 0;
+  const h = makeHarness({}, async () => ({
+    paths: ["/tmp/private/legacy-failure.png"],
+    inputs: [{ type: "localImage", path: "/tmp/private/legacy-failure.png" }],
+    cleanup: async () => { cleaned++; },
+  }));
+  const notifications = notificationHandlers(h.driver);
+  (h.driver as any).threadId = "legacy-root";
+  let respond!: (value: unknown) => void;
+  (h.driver as any).peer = {
+    request: () => new Promise((resolve) => { respond = resolve; }),
+    notify: () => {},
+  };
+
+  const pending = h.driver.prompt("work", [{ mimeType: "image/png", data: "cHg=" }]);
+  await nextTask();
+  let approvalResponse: unknown;
+  const approvals: Map<string, any> = (h.driver as any).pendingApprovals;
+  approvals.set("legacy-approval", {
+    method: "item/commandExecution/requestApproval",
+    params: { command: "pnpm test" },
+    resolve: (response: unknown) => { approvalResponse = response; },
+  });
+
+  const failure = {
+    threadId: "legacy-root",
+    turnId: "legacy-failed-turn",
+    error: { message: "legacy provider failed" },
+  };
+  notifications.get("turn/failed")!(failure);
+  notifications.get("turn/failed")!(failure);
+  await nextTask();
+  assert.equal((h.driver as any).promptBusy, true, "a pre-response failure remains inert");
+  assert.equal(approvals.has("legacy-approval"), true, "the unconfirmed failure cannot decline approvals");
+  assert.equal(approvalResponse, undefined);
+  assert.equal(cleaned, 0, "the unconfirmed failure cannot clean staged images");
+  assert.deepEqual(h.events, []);
+
+  respond({ turn: { id: "legacy-failed-turn", status: "inProgress" } });
+  const outcome = await Promise.race([
+    pending,
+    new Promise<"timeout">((resolve) => setTimeout(() => resolve("timeout"), 100)),
+  ]);
+  if (outcome === "timeout") h.driver.cancel();
+  assert.equal(outcome, "refusal");
+  assert.deepEqual(approvalResponse, { decision: "cancel" });
+  assert.equal(cleaned, 1);
+  const expectedEvents: SessionEventPayload[] = [
+    {
+      kind: "permission_resolved",
+      requestId: "legacy-approval",
+      optionId: null,
+      resolutionReason: "provider_resolved",
+    },
+    { kind: "error", message: "legacy provider failed" },
+  ];
+  assert.deepEqual(h.events, expectedEvents);
+
+  notifications.get("turn/failed")!(failure);
+  await nextTask();
+  assert.equal(cleaned, 1, "a duplicate terminal failure cannot clean the prompt twice");
+  assert.deepEqual(h.events, expectedEvents);
+});
+
+test("the first pre-response terminal notification wins for one provider turn", async () => {
+  const h = makeHarness();
+  const notifications = notificationHandlers(h.driver);
+  let respond!: (value: unknown) => void;
+  (h.driver as any).peer = {
+    request: () => new Promise((resolve) => { respond = resolve; }),
+    notify: () => {},
+  };
+
+  const pending = h.driver.prompt("work");
+  await nextTask();
+  notifications.get("turn/completed")!({ turn: { id: "mixed-turn", status: "completed" } });
+  notifications.get("turn/failed")!({
+    turn: { id: "mixed-turn", error: { message: "late legacy duplicate" } },
+  });
+  respond({ turn: { id: "mixed-turn", status: "inProgress" } });
+
+  assert.equal(await pending, "end_turn");
+  assert.deepEqual(h.events, []);
+});
+
 test("interrupted turn/completed maps to cancelled", async () => {
   const h = makeHarness();
   const notifications = new Map<string, (params: any) => void>();
