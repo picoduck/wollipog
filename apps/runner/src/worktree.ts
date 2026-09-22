@@ -12,6 +12,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  readdirSync,
   realpathSync,
   renameSync,
   rmSync,
@@ -860,7 +861,7 @@ export async function createRequestedWorktree(
   )).trim();
   if (existingBranch === branchRef) throw new Error("requested worktree branch already exists");
   options.onProgress?.("materializing");
-  await removeExternalDirectory(context, path, options);
+  await removeExternalDirectory(context, repoPath, path, options);
   await command(context, repoPath, ["worktree", "add", "-b", branch, path, baseCommit], 120_000);
   return { path, branch, baseRef, baseCommit, attached: false, created: true };
 }
@@ -1059,6 +1060,153 @@ export async function registeredSessionWorktree(
   };
 }
 
+type WorktreeRemovalIdentity = {
+  worktree: ListedWorktree;
+};
+
+type RemovalPathIdentity = { dev: string; ino: string };
+
+function nativeRemovalPathIdentity(path: string): RemovalPathIdentity | null {
+  try {
+    const current = lstatSync(path);
+    if (current.isSymbolicLink() || !current.isDirectory()) {
+      throw new Error("worktree cleanup path is no longer a directory with its recorded identity");
+    }
+    return { dev: String(current.dev), ino: String(current.ino) };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+}
+
+async function removalPathIdentity(context: AgentContext, path: string): Promise<RemovalPathIdentity | null> {
+  if (context.kind === "native") return nativeRemovalPathIdentity(path);
+  const result = (await runContextCommand(
+    context,
+    "sh",
+    [
+      "-c",
+      'if [ -L "$1" ]; then printf invalid; elif [ -d "$1" ]; then ' +
+        'stat -c "present:%d:%i" -- "$1" 2>/dev/null || printf invalid; ' +
+        'elif [ -e "$1" ]; then printf invalid; else printf absent; fi',
+      "sh",
+      path,
+    ],
+    { cwd: "/", timeoutMs: 8_000 },
+  )).stdout.trim();
+  if (result === "absent") return null;
+  const match = /^present:(\d+):(\d+)$/u.exec(result);
+  if (!match) throw new Error("worktree cleanup path is no longer a directory with its recorded identity");
+  return { dev: match[1]!, ino: match[2]! };
+}
+
+function nativeRegisteredWorktreeGitDir(commonDir: string, worktreePath: string): string | null {
+  const adminRoot = join(commonDir, "worktrees");
+  const expectedMarker = join(worktreePath, ".git");
+  let entries;
+  try {
+    entries = readdirSync(adminRoot, { withFileTypes: true });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw error;
+  }
+  const matches = entries.flatMap((entry) => {
+    if (!entry.isDirectory()) return [];
+    const gitDir = join(adminRoot, entry.name);
+    try {
+      const pointer = readFileSync(join(gitDir, "gitdir"), "utf8").trim();
+      const marker = resolve(gitDir, pointer);
+      return sameWorktreePath(nativeContext, marker, expectedMarker) ? [gitDir] : [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+  });
+  if (matches.length !== 1) return null;
+  return matches[0]!;
+}
+
+async function registeredWorktreeGitDir(
+  context: AgentContext,
+  commonDir: string,
+  worktreePath: string,
+): Promise<string | null> {
+  if (context.kind === "native") return nativeRegisteredWorktreeGitDir(commonDir, worktreePath);
+  const result = await runContextCommand(
+    context,
+    "sh",
+    [
+      "-c",
+      'target="$1/.git"; root="$2/worktrees"; count=0; found=""; ' +
+        'for marker in "$root"/*/gitdir; do [ -f "$marker" ] || continue; ' +
+        'pointer=$(cat -- "$marker") || continue; case "$pointer" in /*) ;; ' +
+        '*) pointer=$(dirname -- "$marker")/"$pointer" ;; esac; ' +
+        'if [ "$pointer" = "$target" ]; then count=$((count + 1)); found=$(dirname -- "$marker"); fi; done; ' +
+        'if [ "$count" -eq 1 ]; then printf "%s" "$found"; fi',
+      "sh",
+      worktreePath,
+      commonDir.replace(/\/$/u, ""),
+    ],
+    { cwd: "/", timeoutMs: 8_000 },
+  );
+  return result.stdout.trim() || null;
+}
+
+async function registeredWorktreeForRemoval(
+  repoPath: string,
+  requestedPath: string,
+  options: WorktreeOptions,
+): Promise<ListedWorktree> {
+  const context = options.context ?? nativeContext;
+  const path = safeGitArgument(requestedPath, "worktree path");
+  const listed = parseWorktreePorcelain(
+    await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
+  );
+  const repository = listed.find((entry) => entry.primary)?.path ?? repoPath;
+  const match = listed.find((entry) => sameWorktreePath(context, entry.path, path));
+  if (!match) {
+    throw new Error(`worktree path is not registered by the repository it was matched against (${repository})`);
+  }
+  if (match.primary) throw new Error("the repository's primary workspace cannot be removed as a session worktree");
+  const [currentGitDir, attachedRepository, sessionRepository] = await Promise.all([
+    command(context, match.path, ["rev-parse", "--path-format=absolute", "--git-dir"]),
+    command(context, match.path, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+    command(context, repoPath, ["rev-parse", "--path-format=absolute", "--git-common-dir"]),
+  ]);
+  const commonDir = sessionRepository.trim();
+  if (!sameWorktreePath(context, attachedRepository.trim(), commonDir)) {
+    throw new Error(`registered worktree belongs to a different repository than the session (${repository})`);
+  }
+  const registeredGitDir = await registeredWorktreeGitDir(context, commonDir, match.path);
+  if (!registeredGitDir || !sameWorktreePath(context, currentGitDir.trim(), registeredGitDir)) {
+    throw new Error("worktree path no longer resolves to its registered linked-worktree identity");
+  }
+  return match;
+}
+
+/** Re-prove the destructive target from current Git and filesystem state. Persisted coordinates
+ * locate the candidate only; they never authorize removal after the path has been replaced. */
+async function revalidateWorktreeRemovalIdentity(
+  repoPath: string,
+  requestedPath: string,
+  options: WorktreeOptions,
+  expectedPathIdentity?: RemovalPathIdentity,
+): Promise<WorktreeRemovalIdentity | null> {
+  const context = options.context ?? nativeContext;
+  const before = await removalPathIdentity(context, requestedPath);
+  if (before === null) return null;
+  if (expectedPathIdentity &&
+    (before.dev !== expectedPathIdentity.dev || before.ino !== expectedPathIdentity.ino)) {
+    throw new Error("worktree cleanup path changed after its initial safety proof");
+  }
+  const worktree = await registeredWorktreeForRemoval(repoPath, requestedPath, options);
+  const after = await removalPathIdentity(context, requestedPath);
+  if (!after || after.dev !== before!.dev || after.ino !== before!.ino) {
+    throw new Error("worktree cleanup path changed while its Git identity was being revalidated");
+  }
+  return { worktree };
+}
+
 /** True if `repoPath` is inside a git work tree in the requested context. */
 export async function isGitRepo(repoPath: string, options: WorktreeOptions = {}): Promise<boolean> {
   try {
@@ -1170,7 +1318,7 @@ export async function createWorktree(repoPath: string, sessionId: string, option
   } else {
     // A crash can leave an unregistered directory at the deterministic path. It is owned by this
     // exact session root, so clear it before `git worktree add` rather than failing every restart.
-    await removeExternalDirectory(context, path, options);
+    await removeExternalDirectory(context, repoPath, path, options);
   }
   await command(context, repoPath, ["worktree", "add", "-B", branch, path, "HEAD"], 120_000);
   return { path, branch, created: true };
@@ -1800,6 +1948,9 @@ export async function discardWorktreeIfSafe(
       return { removed: true };
     }
 
+    const initialPathIdentity = await removalPathIdentity(context, handle.path);
+    if (!initialPathIdentity) return { removed: false, reason: "unavailable" };
+
     if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
       return { removed: false, reason: "dirty" };
     }
@@ -1936,6 +2087,28 @@ export async function discardWorktreeIfSafe(
     }
     const finalHead = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
     if (finalHead !== head) return { removed: false, reason: "unpushed" };
+    // Process retirement and teardown can await arbitrary provider-owned work. Re-prove the exact
+    // repository and directory identity after those awaits and make this the final probe before
+    // asking Git to remove anything at the persisted path.
+    const removalIdentity = await revalidateWorktreeRemovalIdentity(
+      repoPath,
+      handle.path,
+      options,
+      initialPathIdentity,
+    );
+    if (!removalIdentity) return { removed: false, reason: "unavailable" };
+    const removalBranch = removalIdentity.worktree.branch;
+    if (!removalBranch) return { removed: false, reason: "unavailable" };
+    if (removalBranch !== branch) {
+      return {
+        removed: false,
+        reason: "branch_changed",
+        checkedOutBranch: removalBranch,
+      };
+    }
+    if (removalIdentity.worktree.head !== finalHead) {
+      return { removed: false, reason: "unpushed" };
+    }
     await command(context, repoPath, ["worktree", "remove", handle.path], 120_000);
     await options.afterRemove?.();
     // Production supplies retainRefs, so branch cleanup is replayed only after the caller durably
@@ -1973,30 +2146,62 @@ export async function removeWorktree(repoPath: string, handle: WorktreeHandle, o
   const context = options.context ?? nativeContext;
   const failures: string[] = [];
   let repositoryUnavailable = false;
+  let removalConfirmed = false;
+  let removalIdentity: WorktreeRemovalIdentity | null;
   try {
-    await command(context, repoPath, ["worktree", "remove", "--force", handle.path], 120_000);
+    removalIdentity = await revalidateWorktreeRemovalIdentity(repoPath, handle.path, options);
   } catch (error) {
-    repositoryUnavailable = nativeRepositoryPathIsUnavailable(context, repoPath) ||
-      isMissingGitRepositoryError(error);
-    // A crash can remove the directory before metadata/admin cleanup. Prune, then accept the
-    // desired end state when git no longer lists the path; cleanup must be safely retryable.
-    if (repositoryUnavailable) {
-      try { await removeExternalDirectory(context, handle.path, options); }
-      catch (removeError) { failures.push(`external remove: ${(removeError as Error).message}`); }
-    } else {
-      await command(context, repoPath, ["worktree", "prune"]).catch(() => {});
-      try {
-        const listed = await command(context, repoPath, ["worktree", "list", "--porcelain"]);
-        const paths = listed.split("\n").filter((line) => line.startsWith("worktree ")).map((line) => line.slice(9).trim());
-        if (paths.includes(handle.path)) failures.push(`remove: ${(error as Error).message}`);
-        else await removeExternalDirectory(context, handle.path, options);
-      } catch (verifyError) {
-        try { await removeExternalDirectory(context, handle.path, options); }
-        catch { failures.push(`remove verification: ${(verifyError as Error).message}`); }
+    throw new Error(`worktree cleanup identity could not be revalidated: ${(error as Error).message}`);
+  }
+  if (removalIdentity) {
+    try {
+      await command(context, repoPath, ["worktree", "remove", "--force", handle.path], 120_000);
+      removalConfirmed = true;
+    } catch (error) {
+      repositoryUnavailable = nativeRepositoryPathIsUnavailable(context, repoPath) ||
+        isMissingGitRepositoryError(error);
+      if (repositoryUnavailable) {
+        failures.push(`remove: ${(error as Error).message}`);
+      } else {
+        // Git can fail after removing either the directory or its registration. Accept only a
+        // genuinely absent path; a present unregistered path has lost the identity just proved and
+        // must be retained for a later retry or operator inspection.
+        await command(context, repoPath, ["worktree", "prune"]).catch(() => {});
+        try {
+          const listed = parseWorktreePorcelain(
+            await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
+          );
+          const stillRegistered = listed.some((entry) => sameWorktreePath(context, entry.path, handle.path));
+          const currentPath = context.kind === "native" ? nativeRemovalPathIdentity(handle.path) : undefined;
+          if (!stillRegistered && currentPath === null) removalConfirmed = true;
+          else failures.push(`remove: ${(error as Error).message}`);
+        } catch (verifyError) {
+          failures.push(`remove verification: ${(verifyError as Error).message}`);
+        }
       }
     }
+  } else {
+    // An already-absent native path needs only administrative convergence. Never call `worktree
+    // remove` with a missing pathname: another process could recreate it between this proof and
+    // Git's recursive removal.
+    try {
+      await command(context, repoPath, ["worktree", "prune"]);
+      const listed = parseWorktreePorcelain(
+        await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]),
+      );
+      if (listed.some((entry) => sameWorktreePath(context, entry.path, handle.path))) {
+        failures.push("remove: absent worktree path remains registered");
+      } else {
+        removalConfirmed = true;
+      }
+    } catch (error) {
+      repositoryUnavailable = nativeRepositoryPathIsUnavailable(context, repoPath) ||
+        isMissingGitRepositoryError(error);
+      if (!repositoryUnavailable) failures.push(`remove verification: ${(error as Error).message}`);
+      else removalConfirmed = true;
+    }
   }
-  if (!repositoryUnavailable) {
+  if (removalConfirmed && !repositoryUnavailable) {
     try { await command(context, repoPath, ["branch", "-D", handle.branch]); }
     catch { /* branch may already be absent */ }
     try { await command(context, repoPath, ["worktree", "prune"]); }
@@ -2005,29 +2210,49 @@ export async function removeWorktree(repoPath: string, handle: WorktreeHandle, o
   if (failures.length) throw new Error(`worktree cleanup incomplete (${failures.join("; ")})`);
 }
 
-async function removeExternalDirectory(context: AgentContext, path: string, options: WorktreeOptions): Promise<void> {
+async function removeExternalDirectory(
+  context: AgentContext,
+  repoPath: string,
+  path: string,
+  options: WorktreeOptions,
+): Promise<void> {
   const root = await worktreeRootPath(options);
   if (context.kind === "wsl") {
     const prefix = root.replace(/\/$/, "") + "/";
     if (!path.startsWith(prefix) || path === root) throw new Error("refusing to remove a path outside the WSL worktree root");
+    const commonDir = (await command(
+      context,
+      repoPath,
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )).trim().replace(/\/$/u, "");
     const marker = await runContextCommand(
       context,
       "sh",
       [
         "-c",
-        'marker="$1/.git"; if [ -d "$marker" ] || [ -L "$marker" ]; then printf registered; ' +
+        'marker="$1/.git"; if [ ! -e "$1" ] && [ ! -L "$1" ]; then printf absent; ' +
+          'elif [ -d "$marker" ] || [ -L "$marker" ]; then printf registered; ' +
           'elif [ -f "$marker" ]; then gitdir=$(sed -n "s/^gitdir: //p" "$marker"); ' +
           'if [ -z "$gitdir" ]; then printf registered; else case "$gitdir" in /*) ;; *) gitdir="$1/$gitdir" ;; esac; ' +
-          'if [ -e "$gitdir" ] || [ -L "$gitdir" ]; then printf registered; fi; fi; fi',
+          'if [ -e "$gitdir" ] || [ -L "$gitdir" ]; then printf registered; ' +
+          'else case "$gitdir" in "$2"/worktrees/*) printf stale ;; *) printf registered ;; esac; fi; fi; fi',
         "sh",
         path,
+        commonDir,
       ],
       { cwd: "/", timeoutMs: 8_000 },
     );
     if (marker.stdout === "registered") {
       throw new Error("refusing to recursively remove a path that may still be a registered worktree");
     }
-    await runContextCommand(context, "rm", ["-rf", "--", path], { cwd: "/", timeoutMs: 120_000 });
+    if (marker.stdout === "absent") return;
+    if (marker.stdout === "stale") {
+      await runContextCommand(context, "rm", ["-rf", "--", path], { cwd: "/", timeoutMs: 120_000 });
+    } else {
+      // With no stale Git marker there is no evidence that arbitrary contents belong to a failed
+      // materialization. Remove only an empty runner-owned slot.
+      await runContextCommand(context, "rmdir", ["--", path], { cwd: "/", timeoutMs: 8_000 });
+    }
     return;
   }
   const absoluteRoot = canonicalNativePath(root);
@@ -2036,6 +2261,7 @@ async function removeExternalDirectory(context: AgentContext, path: string, opti
     throw new Error("refusing to remove a path outside the native worktree root");
   }
   const markerPath = join(absolutePath, ".git");
+  let staleMarker = false;
   try {
     const marker = lstatSync(markerPath);
     if (!marker.isFile() || marker.isSymbolicLink()) {
@@ -2050,10 +2276,31 @@ async function removeExternalDirectory(context: AgentContext, path: string, opti
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
+    const commonDir = (await command(
+      context,
+      repoPath,
+      ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )).trim();
+    if (!pathWithin(context, gitDir, join(commonDir, "worktrees"))) {
+      throw new Error("refusing to recursively remove a path with a foreign stale Git marker");
+    }
+    staleMarker = true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
-  await rm(absolutePath, { recursive: true, force: true });
+  if (staleMarker) {
+    await rm(absolutePath, { recursive: true, force: true });
+    return;
+  }
+  try {
+    await rmdir(absolutePath);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+      throw new Error(
+        `refusing to recursively remove an unproved runner-owned path: ${(error as Error).message}`,
+      );
+    }
+  }
 }
 
 export async function worktreeDiff(worktreePath: string, options: WorktreeOptions = {}): Promise<string> {

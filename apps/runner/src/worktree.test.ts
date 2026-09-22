@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane, SessionWorktreeView } from "@wollipog/protocol";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
@@ -276,6 +276,98 @@ test("native worktrees live under the external runner data root and clean up", {
   }
 });
 
+test("forced cleanup refuses a replacement at a persisted worktree path", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wt-cleanup-identity-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "runner-data");
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const handle = await createRequestedWorktree(repo, "s_cleanup_identity", {
+      baseRef: "HEAD",
+      branch: "fix/cleanup-identity",
+    }, { dataDir });
+    renameSync(handle.path, `${handle.path}.original`);
+    mkdirSync(handle.path);
+    const sentinel = join(handle.path, "operator-data.txt");
+    writeFileSync(sentinel, "retain replacement contents\n");
+
+    await assert.rejects(
+      removeWorktree(repo, handle, { dataDir }),
+      /worktree cleanup identity could not be revalidated/,
+    );
+    assert.equal(existsSync(sentinel), true, "cleanup must retain contents whose identity was never proved");
+    assert.match(
+      execFileSync("git", ["-C", repo, "worktree", "list", "--porcelain"], { encoding: "utf8" }),
+      /fix\/cleanup-identity/,
+      "a refused cleanup retains the stale registration for operator recovery",
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("forced cleanup removes a detached worktree whose registered identity is intact", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wt-cleanup-detached-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "runner-data");
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const handle = await createRequestedWorktree(repo, "s_cleanup_detached", {
+      baseRef: "HEAD",
+      branch: "fix/cleanup-detached",
+    }, { dataDir });
+    execFileSync("git", ["-C", handle.path, "checkout", "--detach"]);
+
+    await removeWorktree(repo, handle, { dataDir });
+
+    assert.equal(existsSync(handle.path), false);
+    assert.equal(
+      execFileSync("git", ["-C", repo, "worktree", "list", "--porcelain"], { encoding: "utf8" })
+        .includes(handle.path),
+      false,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("forced cleanup refuses a different linked worktree from the same repository", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wt-cleanup-linked-identity-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "runner-data");
+  const replacement = join(root, "replacement");
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const handle = await createRequestedWorktree(repo, "s_cleanup_linked_identity", {
+      baseRef: "HEAD",
+      branch: "fix/cleanup-linked-identity",
+    }, { dataDir });
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "operator/replacement", replacement, "HEAD"]);
+    writeFileSync(join(repo, ".git", "info", "exclude"), "replacement-sentinel\n", { flag: "a" });
+    const sentinel = join(handle.path, "replacement-sentinel");
+    renameSync(handle.path, `${handle.path}.original`);
+    renameSync(replacement, handle.path);
+    writeFileSync(sentinel, "retain different linked worktree\n");
+
+    await assert.rejects(
+      removeWorktree(repo, handle, { dataDir }),
+      /worktree cleanup identity could not be revalidated/,
+    );
+    assert.equal(existsSync(sentinel), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("requested worktree uses the explicit base and branch instead of primary checkout HEAD", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-requested-wt-"));
   const repo = join(root, "repo");
@@ -375,6 +467,65 @@ test("requested worktree creation never recursively removes a path registered by
     assert.equal(existsSync(sentinel), true);
     assert.equal(execFileSync("git", ["-C", target, "branch", "--show-current"], { encoding: "utf8" }).trim(),
       "foreign/live");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("requested worktree creation retains an unproved nonempty slot", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-requested-unproved-slot-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  const branch = "fix/unproved-slot";
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const boundary = await requestedWorktreeBoundary(repo, "s_unproved_slot", { dataDir });
+    const slot = createHash("sha256").update(branch).digest("hex").slice(0, 16);
+    const target = join(boundary, slot);
+    mkdirSync(target);
+    const sentinel = join(target, "operator-data.txt");
+    writeFileSync(sentinel, "retain unproved contents\n");
+
+    await assert.rejects(createRequestedWorktree(repo, "s_unproved_slot", {
+      baseRef: "HEAD",
+      branch,
+    }, { dataDir }), /refusing to recursively remove an unproved runner-owned path/);
+    assert.equal(existsSync(sentinel), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("safe discard revalidates identity after process retirement", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-safe-discard-revalidate-"));
+  const dataDir = join(root, "data");
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const handle = await createRequestedWorktree(repo, "s_safe_revalidate", {
+      baseRef: "HEAD",
+      branch: "fix/safe-revalidate",
+    }, { dataDir });
+    execFileSync("git", ["-C", handle.path, "push", "-u", "origin", handle.branch]);
+    writeFileSync(join(repo, ".git", "info", "exclude"), "replacement-sentinel\n", { flag: "a" });
+    const sentinel = join(handle.path, "replacement-sentinel");
+
+    const result = await discardWorktreeIfSafe(repo, "s_safe_revalidate", {
+      ...handle,
+      source: "created",
+    }, {
+      dataDir,
+      beforeRemove: async () => {
+        const original = `${handle.path}.original`;
+        renameSync(handle.path, original);
+        cpSync(original, handle.path, { recursive: true });
+        writeFileSync(sentinel, "retain replacement directory\n");
+      },
+    });
+    assert.deepEqual(result, { removed: false, reason: "unavailable" });
+    assert.equal(existsSync(sentinel), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -3988,7 +4139,7 @@ test("deletion includes an active legacy worktree missing from a populated inven
   }
 });
 
-test("repository-gone deletion terminally reclaims the external worktree", { skip: !haveGit() }, async () => {
+test("repository-gone deletion retains an unproved external worktree for retry", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-delete-gone-repo-"));
   const repo = join(root, "repo");
   const dataDir = join(root, "data");
@@ -4014,9 +4165,10 @@ test("repository-gone deletion terminally reclaims the external worktree", { ski
     await manager.delete("s_repo_gone");
 
     assert.equal(store.has("s_repo_gone"), false);
-    assert.equal(existsSync(handle.path), false, "disk reclamation continues after ref enumeration fails");
-    assert.deepEqual(new WorktreeCleanupJournal(dataDir).list(), []);
-    assert.equal(logs.some((line) => line.includes("worktree cleanup") && line.includes("needs retry")), false);
+    assert.equal(existsSync(handle.path), true, "cleanup retains a path whose repository identity is unavailable");
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 1,
+      "the durable cleanup proof remains available for a later retry");
+    assert.equal(logs.some((line) => line.includes("worktree cleanup") && line.includes("needs retry")), true);
     assert.equal(logs.some((line) => line.includes(repo) || line.includes(handle.path)), false,
       "cleanup diagnostics do not expose repository or worktree values");
     assert.ok(logs.every((line) => line.length <= 160), "cleanup diagnostics remain bounded");
@@ -6363,6 +6515,7 @@ test("WSL worktrees are created, used, and removed inside the selected distro", 
     assert.equal((await runContextCommand(context, "git", ["rev-parse", "--is-inside-work-tree"], { cwd: handle.path })).stdout.trim(), "true");
     await removeWorktree(repo, handle, { context, ownerHash });
     await assert.rejects(runContextCommand(context, "git", ["status"], { cwd: handle.path }));
+    await removeWorktree(repo, handle, { context, ownerHash });
 
     const legacy = await createWorktree(repo, "s_legacy", { context, legacyWslRoot: true });
     await runContextCommand(context, "sh", ["-c", "printf preserved > sentinel.txt"], { cwd: legacy.path });
