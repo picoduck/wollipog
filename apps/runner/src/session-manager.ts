@@ -12761,10 +12761,10 @@ export class SessionManager {
    * with `no_upstream`. Re-derive the proof here, through the same forge helpers the initiating
    * request would have used, so replay converges instead of waiting for a second discard.
    *
-   * Nothing is relaxed: only a terminal merged linkage carrying a forge-verified head is accepted,
-   * the linkage is re-read after every await so a replaced pull request cannot be blessed, and a
-   * forge that cannot answer simply leaves the record as it was. Callers hold the session's
-   * worktree lane; the helpers below stay inside it. */
+   * Nothing is relaxed: an open or incomplete merged linkage must resolve to a terminal merged
+   * forge response carrying a head, the linkage is re-read after every await so a replaced pull
+   * request cannot be blessed, and a forge that cannot answer simply leaves the record as it was.
+   * Callers hold the session's worktree lane; the helpers below stay inside it. */
   private async refreshDeferredMergedHead(record: WorktreeCleanupRecord): Promise<void> {
     if (record.verifiedMergedHead) return;
     const backoffKey = this.deferredMergedHeadKey(record);
@@ -12791,8 +12791,8 @@ export class SessionManager {
       if (!meta || !worktree || worktree.source === "attached") return;
     }
     const linked = worktree.pullRequest;
-    if (linked?.state !== "merged") return backOff();
-    if (!verifiedMergedHeadOid(linked)) {
+    if (!linked || (linked.state !== "open" && linked.state !== "merged")) return backOff();
+    if (linked.state === "open" || !verifiedMergedHeadOid(linked)) {
       const verified = await this.resolveWorktreePullRequestState(
         worktree.path,
         linked.url,
@@ -12802,7 +12802,7 @@ export class SessionManager {
       const latest = this.store.readMeta(record.sessionId);
       const current = locate(latest);
       if (!latest || !current || current.source === "attached" ||
-          current.pullRequest?.state !== "merged" || current.pullRequest.url !== linked.url) return;
+          current.pullRequest?.state !== linked.state || current.pullRequest.url !== linked.url) return;
       const worktrees = this.attributedWorktrees(latest).map((item) =>
         sameWorktreePath(latest.context, item.path, record.worktreePath)
           ? { ...item, pullRequest: { ...current.pullRequest!, state: "merged" as const, headOid: verified.headOid } }

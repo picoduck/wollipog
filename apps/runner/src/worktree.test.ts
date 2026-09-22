@@ -4832,6 +4832,131 @@ test("replay refreshes a merged-head proof the launching deferral was journaled 
   }
 });
 
+test("deferred replay refreshes a stale open linked PR and otherwise stays fail-closed", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-deferred-stale-linked-pr-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_deferred_stale_link", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const cases = ["merged", "missing", "open", "closed", "malformed", "mismatched", "replaced"] as const;
+    type Case = (typeof cases)[number];
+    const worktrees = new Map<Case, Awaited<ReturnType<SessionManager["requestWorktree"]>>["worktree"]>();
+    const heads = new Map<string, string>();
+    for (const name of cases) {
+      const requested = await manager.requestWorktree("s_deferred_stale_link", {
+        baseRef: "HEAD", branch: `agent/deferred-stale-${name}`,
+      });
+      execFileSync("git", ["-C", requested.worktree.path, "switch", "-c", `fix/deferred-stale-${name}`]);
+      writeFileSync(join(requested.worktree.path, `${name}.txt`), `${name}\n`);
+      execFileSync("git", ["-C", requested.worktree.path, "add", `${name}.txt`]);
+      execFileSync("git", ["-C", requested.worktree.path, "commit", "-m", `${name} change`]);
+      execFileSync("git", ["-C", requested.worktree.path, "push", "-u", "origin", `fix/deferred-stale-${name}`]);
+      await manager.linkWorktreePullRequest(
+        "s_deferred_stale_link",
+        requested.worktree.path,
+        `https://github.com/picoduck/wollipog/pull/${8200 + worktrees.size}`,
+      );
+      execFileSync("git", ["-C", requested.worktree.path, "push", "origin", "--delete", `fix/deferred-stale-${name}`]);
+      worktrees.set(name, requested.worktree);
+      heads.set(requested.worktree.path, execFileSync(
+        "git", ["-C", requested.worktree.path, "rev-parse", "HEAD"], { encoding: "utf8" },
+      ).trim());
+    }
+    const forgeCalls = new Map<string, number>();
+    (manager as unknown as {
+      resolveWorktreePullRequestState: (
+        path: string,
+      ) => Promise<{ state: "open" | "closed" | "merged"; headOid?: string } | null>;
+    }).resolveWorktreePullRequestState = async (path) => {
+      forgeCalls.set(path, (forgeCalls.get(path) ?? 0) + 1);
+      const name = cases.find((candidate) => worktrees.get(candidate)?.path === path);
+      assert.ok(name);
+      if (name === "missing") return null;
+      if (name === "open") return { state: "open", headOid: heads.get(path)! };
+      if (name === "closed") return { state: "closed", headOid: heads.get(path)! };
+      if (name === "malformed") return { state: "merged", headOid: "not-an-oid" };
+      if (name === "mismatched") return { state: "merged", headOid: "b".repeat(40) };
+      if (name === "replaced") {
+        const beforeReplacement = store.readMeta("s_deferred_stale_link")!;
+        store.patchMeta("s_deferred_stale_link", {
+          worktrees: beforeReplacement.worktrees?.map((item) => item.path === path
+            ? { ...item, pullRequest: { ...item.pullRequest!, url: "https://github.com/picoduck/wollipog/pull/9999" } }
+            : item),
+        });
+      }
+      return { state: "merged", headOid: heads.get(path)! };
+    };
+
+    const internals = manager as unknown as {
+      launchGenerations: Map<string, number>;
+      cleanupJournal: { list: () => WorktreeCleanupRecord[] };
+      reapWorktree: (record: WorktreeCleanupRecord) => Promise<void>;
+    };
+    for (const name of cases) {
+      const worktree = worktrees.get(name)!;
+      internals.launchGenerations.set("s_deferred_stale_link", 17);
+      store.patchMeta("s_deferred_stale_link", {
+        status: "starting", worktreePath: worktree.path,
+        worktreeBranch: worktree.branch, worktreePending: true,
+      });
+      assert.deepEqual(
+        (await manager.discardWorktree("s_deferred_stale_link", worktree.path)).retirement,
+        { status: "deferred", reason: "provider_launching" },
+      );
+    }
+    assert.equal(forgeCalls.size, 0,
+      "the launching boundary journals every retirement before consulting the linked PR");
+    assert.equal(internals.cleanupJournal.list().length, cases.length);
+
+    internals.launchGenerations.delete("s_deferred_stale_link");
+    store.patchMeta("s_deferred_stale_link", {
+      status: "idle", worktreePath: null, worktreeBranch: undefined, worktreePending: false,
+    });
+    for (const record of internals.cleanupJournal.list()) await internals.reapWorktree(record);
+
+    assert.equal(existsSync(worktrees.get("merged")!.path), false,
+      "an exact forge-verified merged head retires the deferred changed-branch worktree");
+    assert.equal(store.readMeta("s_deferred_stale_link")?.worktrees
+      ?.some((item) => item.path === worktrees.get("merged")!.path), false,
+      "successful replay clears the retired worktree inventory row");
+    assert.equal(forgeCalls.get(worktrees.get("merged")!.path), 1,
+      "replay revalidates the exact stale open linkage once");
+    for (const name of cases.filter((candidate) => candidate !== "merged")) {
+      assert.equal(existsSync(worktrees.get(name)!.path), true,
+        `${name} forge evidence cannot retire the deferred worktree`);
+      assert.equal(forgeCalls.get(worktrees.get(name)!.path), 1,
+        `${name} evidence is checked exactly once on the first replay`);
+    }
+    assert.equal(internals.cleanupJournal.list().length, cases.length - 1,
+      "only the exact proven retirement completes");
+    assert.equal(store.readMeta("s_deferred_stale_link")?.worktrees
+      ?.find((item) => item.path === worktrees.get("replaced")!.path)?.pullRequest?.url,
+      "https://github.com/picoduck/wollipog/pull/9999",
+      "a concurrently replaced linkage is never overwritten by stale forge evidence");
+
+    const callsBeforeBackoffReplay = new Map(forgeCalls);
+    const backedOff = new Set<Case>(["missing", "open", "closed", "malformed", "mismatched"]);
+    for (const record of internals.cleanupJournal.list()) {
+      const name = cases.find((candidate) => worktrees.get(candidate)?.id === record.worktreeId);
+      if (name && backedOff.has(name)) await internals.reapWorktree(record);
+    }
+    assert.deepEqual(forgeCalls, callsBeforeBackoffReplay,
+      "negative or already-recorded evidence observes the existing replay backoff");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("replay never retires the worktree a launch generation is preparing to use", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-replay-launch-fence-"));
   const dataDir = join(root, "data");
