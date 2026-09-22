@@ -40,6 +40,20 @@ test("the signing client is pinned by version and digest, and actions are pinned
   assert.match(workflow, /uses: azure\/login@[0-9a-f]{40} # v\d/u);
 });
 
+test("the ARM64 signing runtime is a pinned archive verified before extraction", () => {
+  assert.match(workflow, /DOTNET_RUNTIME_X64_VERSION: \d+\.\d+\.\d+\n/u);
+  assert.match(workflow, /DOTNET_RUNTIME_X64_SHA512: [0-9a-f]{128}\n/u);
+  assert.doesNotMatch(workflow, /dotnet-install\.ps1|https:\/\/dot\.net\/v1\//u);
+  assert.match(
+    workflow,
+    /if \(\$env:RUNNER_ARCH -eq 'ARM64'\) \{[\s\S]*?builds\.dotnet\.microsoft\.com\/dotnet\/Runtime\/\$runtimeVersion\/dotnet-runtime-\$runtimeVersion-win-x64\.zip/u,
+  );
+  assert.match(
+    workflow,
+    /Get-FileHash -Algorithm SHA512 -Path \$runtimeArchive[\s\S]*?\$runtimeDigest -ne \$env:DOTNET_RUNTIME_X64_SHA512[\s\S]*?exit 1[\s\S]*?Expand-Archive -Path \$runtimeArchive/u,
+  );
+});
+
 test("signing is wired before the build and verified before any standalone asset is uploaded", () => {
   const configure = stepIndex("Configure Windows Authenticode signing");
   const login = stepIndex("Sign in to Azure for Windows signing");

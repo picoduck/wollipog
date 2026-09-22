@@ -258,9 +258,9 @@ jobs:
       # the `release` environment's variables, so a leg outside that environment sees none of them.
       # A run that requires signing (a tag, or a dispatch with windows_signing selected) then fails;
       # only an unrequested branch test dispatch builds an unsigned throwaway bundle. A partial
-      # configuration fails either way. The signing client is pinned by version and
-      # SHA-256. It ships only x64 and x86 builds, so the x64 signtool loads it on both Windows
-      # legs, and the ARM64 leg adds an x64 .NET 8 runtime for it under emulation.
+      # configuration fails either way. The signing client is pinned by version and SHA-256. It
+      # ships only x64 and x86 builds, so the x64 signtool loads it on both Windows legs, and the
+      # ARM64 leg adds an x64 .NET 8 runtime pinned by version and SHA-512 for emulation.
       - name: Configure Windows Authenticode signing
         if: startsWith(matrix.os, 'windows')
         shell: pwsh
@@ -275,6 +275,8 @@ jobs:
           ARTIFACT_SIGNING_PROFILE: ${{ vars.ARTIFACT_SIGNING_PROFILE }}
           ARTIFACT_SIGNING_CLIENT_VERSION: 1.0.128
           ARTIFACT_SIGNING_CLIENT_SHA256: 74bd7d27e6ce1051409c38d9b46bc8df0400ecd643d51ffbf2ac00869061e40b
+          DOTNET_RUNTIME_X64_VERSION: 8.0.31
+          DOTNET_RUNTIME_X64_SHA512: 9c55c58694676ee64b0eed2cd6d8cbf58b9aa8288420acc66841e15ca0099c75d4af0182d23a641c2342e5a151a325df4a12fa0bde2e47c0fb7e9a33e7b09896
         run: |
           $ErrorActionPreference = 'Stop'
           $names = 'AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID',
@@ -317,9 +319,15 @@ jobs:
 
           if ($env:RUNNER_ARCH -eq 'ARM64') {
             $dotnet = Join-Path $root 'dotnet-x64'
-            $installer = Join-Path $root 'dotnet-install.ps1'
-            Invoke-WebRequest -OutFile $installer -Uri 'https://dot.net/v1/dotnet-install.ps1'
-            & $installer -Channel 8.0 -Runtime dotnet -Architecture x64 -InstallDir $dotnet -NoPath
+            $runtimeVersion = $env:DOTNET_RUNTIME_X64_VERSION
+            $runtimeArchive = Join-Path $root 'dotnet-runtime-x64.zip'
+            Invoke-WebRequest -OutFile $runtimeArchive -Uri "https://builds.dotnet.microsoft.com/dotnet/Runtime/$runtimeVersion/dotnet-runtime-$runtimeVersion-win-x64.zip"
+            $runtimeDigest = (Get-FileHash -Algorithm SHA512 -Path $runtimeArchive).Hash.ToLowerInvariant()
+            if ($runtimeDigest -ne $env:DOTNET_RUNTIME_X64_SHA512) {
+              Write-Output "::error::.NET runtime $runtimeVersion has SHA-512 $runtimeDigest, expected $env:DOTNET_RUNTIME_X64_SHA512"
+              exit 1
+            }
+            Expand-Archive -Path $runtimeArchive -DestinationPath $dotnet -Force
             "DOTNET_ROOT_X64=$dotnet" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
           }
 
