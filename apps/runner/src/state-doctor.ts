@@ -36,13 +36,19 @@ const MAX_JSON_BYTES = 256 * 1024;
 const MAX_RETAINED_REF_JSON_BYTES = 2 * 1024 * 1024;
 const SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u;
 
-type DoctorCommand = "inventory" | "adopt-checkpoints" | "adopt-provider-state" | "quarantine-wsl";
+type DoctorCommand =
+  | "inventory"
+  | "adopt-checkpoints"
+  | "adopt-provider-state"
+  | "quarantine-wsl"
+  | "retire-retained-ref";
 
 interface DoctorArgs {
   command: DoctorCommand;
   dataDir: string;
   sessionId?: string;
   distro?: string;
+  recordId?: string;
   acknowledged: boolean;
 }
 
@@ -74,12 +80,15 @@ interface MaintenanceLeaseRecord {
 function parseDoctorArgs(argv: string[]): DoctorArgs {
   const marker = argv.indexOf("--state-doctor");
   const command = argv[marker + 1] as DoctorCommand | undefined;
-  if (!command || !["inventory", "adopt-checkpoints", "adopt-provider-state", "quarantine-wsl"].includes(command)) {
-    throw new Error("usage: --state-doctor <inventory|adopt-checkpoints|adopt-provider-state|quarantine-wsl> --data-dir <path> [--session-id <id>] [--wsl-distro <name>] [--ack-all-legacy-runners-stopped]");
+  if (!command || ![
+    "inventory", "adopt-checkpoints", "adopt-provider-state", "quarantine-wsl", "retire-retained-ref",
+  ].includes(command)) {
+    throw new Error("usage: --state-doctor <inventory|adopt-checkpoints|adopt-provider-state|quarantine-wsl|retire-retained-ref> --data-dir <path> [--session-id <id>] [--wsl-distro <name>] [--record-id <opaque-id>] [--ack-all-legacy-runners-stopped]");
   }
   let dataDir: string | undefined;
   let sessionId: string | undefined;
   let distro: string | undefined;
+  let recordId: string | undefined;
   let acknowledged = false;
   const seen = new Set<string>();
   for (let i = marker + 2; i < argv.length; i++) {
@@ -88,19 +97,21 @@ function parseDoctorArgs(argv: string[]): DoctorArgs {
     if (seen.has(arg)) throw new Error(`duplicate state-doctor argument: ${arg}`);
     seen.add(arg);
     if (arg === "--ack-all-legacy-runners-stopped") acknowledged = true;
-    else if (arg === "--data-dir" || arg === "--session-id" || arg === "--wsl-distro") {
+    else if (arg === "--data-dir" || arg === "--session-id" || arg === "--wsl-distro" || arg === "--record-id") {
       const value = argv[i + 1];
       if (value === undefined || value.startsWith("--")) throw new Error(`${arg} requires a value`);
       i++;
       if (arg === "--data-dir") dataDir = value;
       else if (arg === "--session-id") sessionId = value;
-      else distro = value;
+      else if (arg === "--wsl-distro") distro = value;
+      else recordId = value;
     } else throw new Error(`unknown state-doctor argument: ${arg}`);
   }
   if (!dataDir) throw new Error("--data-dir is required");
   if (sessionId && !SESSION_ID.test(sessionId)) throw new Error("--session-id is invalid");
   if (distro && (distro.trim() !== distro || !distro || distro.includes("\0"))) throw new Error("--wsl-distro is invalid");
-  return { command, dataDir: resolve(dataDir), sessionId, distro, acknowledged };
+  if (recordId && !/^[a-f0-9]{16}$/u.test(recordId)) throw new Error("--record-id is invalid");
+  return { command, dataDir: resolve(dataDir), sessionId, distro, recordId, acknowledged };
 }
 
 function protectedJson<T>(path: string, maxBytes = MAX_JSON_BYTES): T {
@@ -335,7 +346,7 @@ const RETAINED_REF_STATES = new Set(["pending", "completed", "retained"]);
 const RETAINED_REF_PENDING_REASONS = new Set(["checked_out", "default_unknown", "git_unavailable"]);
 const RETAINED_REF_TERMINAL_REASONS = new Set([
   "deleted", "already_missing", "default_branch", "default_unproved_at_handoff",
-  "ref_changed_or_recreated", "identity_unproved", "delivery_unproved",
+  "ref_changed_or_recreated", "identity_unproved", "delivery_unproved", "operator_retired_ref_intact",
 ]);
 const IDENTITY_PROOF_STAGES = new Set(["capture", "reclaim"]);
 const IDENTITY_PROOF_STATUSES = new Set(["proved", "unavailable", "changed"]);
@@ -442,6 +453,31 @@ export async function runStateDoctor(
         "state-doctor", quarantineId,
       ], { cwd: "/", timeoutMs: 30_000, maxBuffer: 1024 });
       writeOutput(`${JSON.stringify({ quarantinedRoots: Number.parseInt(result.stdout.trim(), 10) || 0, quarantineId })}\n`);
+      return;
+    }
+    if (args.command === "retire-retained-ref") {
+      if (!args.recordId) throw new Error("retire-retained-ref requires --record-id");
+      const journal = new WorktreeCleanupJournal(dataDir);
+      beforeDurabilityOperation(
+        options,
+        "retained-ref-journal-write",
+        join(dataDir, "worktree-retained-ref-history.json"),
+      );
+      journal.retireRetainedRefIntact(args.recordId, ownerHash);
+      const durable = new WorktreeCleanupJournal(dataDir);
+      if (durable.listRetainedRefs().some((record) =>
+        retainedWorktreeRefDiagnostics([record], [], ownerHash, 1).records[0]?.recordId === args.recordId)) {
+        throw new Error("retained-ref row remained pending after durable retirement");
+      }
+      const receipt = durable.retainedRefHistory().find((record) =>
+        retainedWorktreeRefDiagnostics([], [record], ownerHash, 1).records[0]?.recordId === args.recordId);
+      if (receipt?.terminalReason !== "operator_retired_ref_intact") {
+        throw new Error("retained-ref retirement receipt was not durably published");
+      }
+      writeOutput(`${JSON.stringify({
+        retiredRetainedRef: args.recordId,
+        localRef: "preserved",
+      })}\n`);
       return;
     }
     if (!args.sessionId) throw new Error(`${args.command} requires --session-id`);

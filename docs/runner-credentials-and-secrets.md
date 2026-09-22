@@ -186,15 +186,34 @@ homes are independent.
 
 After stopping every runner for the account, use `--state-doctor inventory` to review legacy state
 and retained-ref reclamation. Each retained-ref row reports an opaque record and cleanup-generation
-identifier; `pending`, `deleted`, `already_absent`, or `retained` state; a fixed reason;
-and the identity-proof stage, status, and fixed reason. Repository paths, branch names, session
+identifier; `pending`, `deleted`, `already_absent`, or `retained` state; a fixed reason; record age
+and time since its last state change; a lifecycle; and the identity-proof stage, status, and fixed
+reason. Repository paths, branch names, session
 identifiers, usernames, identity tokens, and raw Git or filesystem output are never printed. The
 inventory is capped at 256 deterministic rows and reports the omitted or unreadable count. Its
 bounded view prioritizes terminally retained and pending rows ahead of old successful receipts.
 Current owner-attested runners emit the same fixed diagnostic fields with owner-scoped identifiers;
 legacy managers without that salt suppress those log rows rather than emit linkable coordinates.
-The
-`adopt-checkpoints` and `adopt-provider-state` actions copy legacy state into the attested namespace
+
+An unresolved pending row is `transient_pending` for its first 24 hours without a state change. After
+that it becomes `operator_attention`. This is an alerting boundary only: age, retry count, backlog
+size, and the eight-row periodic processing limit never authorize deletion or removal of the
+pending ownership record. Periodic passes drain a sorted inventory captured for one complete
+cycle; new arrivals wait for the next cycle, so a permanently pending head row or a stream of
+arrivals cannot starve the rest of a large backlog.
+The exact-OID, identity-generation, checkout, default-branch, and delivery proofs remain identical
+for every attempt, including old rows that do not contain newer diagnostic fields.
+
+If an operator has independently decided to stop automatic reclamation, the only supported
+retirement is the offline, exact-record action
+`--state-doctor retire-retained-ref --data-dir <path> --record-id <opaque-id> --ack-all-legacy-runners-stopped`.
+It accepts only an armed row, performs no Git command, leaves the local ref intact, and durably
+writes an `operator_retired_ref_intact` receipt before removing the pending retry authority. The
+all-runners-stopped acknowledgment is required because legacy runners do not honor the offline
+maintenance lease. A later inventory reports lifecycle `retired_ref_intact`; deleting the branch,
+if ever desired, is a separate manual Git operation outside Wollipog's ownership authority.
+
+The `adopt-checkpoints` and `adopt-provider-state` actions copy legacy state into the attested namespace
 without deleting sources; `quarantine-wsl` atomically moves the ambiguous shared provider/worktree
 roots aside. Mutations require `--ack-all-legacy-runners-stopped` and refuse an active data lease.
 Quarantining those whole roots also makes any stored legacy WSL session that names one of their

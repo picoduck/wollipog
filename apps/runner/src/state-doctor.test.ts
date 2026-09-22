@@ -145,6 +145,100 @@ test("state doctor reports bounded retained-ref states and identity diagnostics 
   }
 });
 
+test("state doctor marks an old legacy pending row for attention and retires it with the ref intact", async (t) => {
+  const root = fixture(t);
+  const repo = join(root, "repo");
+  mkdirSync(repo);
+  execFileSync("git", ["-C", repo, "init", "-b", "main"]);
+  execFileSync("git", ["-C", repo, "config", "user.name", "Test User"]);
+  execFileSync("git", ["-C", repo, "config", "user.email", "test@example.invalid"]);
+  execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "initial"]);
+  const oid = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const branch = "fix/permanently-pending";
+  execFileSync("git", ["-C", repo, "branch", branch, oid]);
+  const old = Date.now() - 30 * 24 * 60 * 60 * 1_000;
+  const journal = new WorktreeCleanupJournal(root);
+  journal.addRetainedRef({
+    sessionId: "s_legacy_pending",
+    worktreeId: "wt-legacy",
+    cleanupId: "cleanup-legacy",
+    repoPath: repo,
+    context: { kind: "native" },
+    branch,
+    expectedOid: oid,
+    reasons: ["recorded_branch"],
+    state: "pending",
+    pendingReason: "default_unknown",
+    armedAt: old,
+    createdAt: old,
+    updatedAt: old,
+  });
+
+  const before = JSON.parse(await capture([
+    "runner", "--state-doctor", "inventory", "--data-dir", root,
+  ])) as {
+    retainedRefReclamation: { records: Array<Record<string, unknown>> };
+  };
+  const diagnostic = before.retainedRefReclamation.records[0]!;
+  assert.equal(diagnostic.lifecycle, "operator_attention");
+  assert.ok(Number(diagnostic.ageSeconds) >= 29 * 24 * 60 * 60);
+  assert.ok(Number(diagnostic.unchangedSeconds) >= 29 * 24 * 60 * 60);
+  assert.equal((diagnostic.identityProof as { reason: string }).reason, "legacy_unclassified",
+    "old rows without new diagnostic fields remain fail-closed and inspectable");
+
+  const result = JSON.parse(await capture([
+    "runner", "--state-doctor", "retire-retained-ref", "--data-dir", root,
+    "--record-id", String(diagnostic.recordId), "--ack-all-legacy-runners-stopped",
+  ])) as Record<string, unknown>;
+  assert.deepEqual(result, { retiredRetainedRef: diagnostic.recordId, localRef: "preserved" });
+  assert.deepEqual(JSON.parse(await capture([
+    "runner", "--state-doctor", "retire-retained-ref", "--data-dir", root,
+    "--record-id", String(diagnostic.recordId), "--ack-all-legacy-runners-stopped",
+  ])), result, "a retry reads the durable retirement receipt instead of requiring pending evidence");
+  assert.equal(execFileSync("git", ["-C", repo, "rev-parse", branch], { encoding: "utf8" }).trim(), oid,
+    "offline retirement never invokes ref deletion");
+
+  const durable = new WorktreeCleanupJournal(root);
+  assert.equal(durable.listRetainedRefs().length, 0);
+  assert.equal(durable.retainedRefHistory()[0]?.terminalReason, "operator_retired_ref_intact");
+  const after = JSON.parse(await capture([
+    "runner", "--state-doctor", "inventory", "--data-dir", root,
+  ])) as {
+    retainedRefReclamation: { records: Array<Record<string, unknown>> };
+  };
+  assert.equal(after.retainedRefReclamation.records[0]?.lifecycle, "retired_ref_intact");
+  assert.equal(after.retainedRefReclamation.records[0]?.state, "retained");
+});
+
+test("state doctor refuses to retire an unarmed retained-ref row", async (t) => {
+  const root = fixture(t);
+  const journal = new WorktreeCleanupJournal(root);
+  journal.addRetainedRef({
+    sessionId: "s_unarmed",
+    worktreeId: "wt-unarmed",
+    cleanupId: "cleanup-unarmed",
+    repoPath: "/repo",
+    context: { kind: "native" },
+    branch: "fix/unarmed",
+    expectedOid: "a".repeat(40),
+    reasons: ["recorded_branch"],
+    state: "pending",
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const inventory = JSON.parse(await capture([
+    "runner", "--state-doctor", "inventory", "--data-dir", root,
+  ])) as { retainedRefReclamation: { records: Array<{ recordId: string }> } };
+
+  await assert.rejects(runStateDoctor([
+    "runner", "--state-doctor", "retire-retained-ref", "--data-dir", root,
+    "--record-id", inventory.retainedRefReclamation.records[0]!.recordId,
+    "--ack-all-legacy-runners-stopped",
+  ]), /not armed/u);
+  assert.equal(new WorktreeCleanupJournal(root).listRetainedRefs().length, 1,
+    "pre-removal ownership evidence remains authoritative");
+});
+
 test("state doctor rejects inconsistent retained-ref state and reason tuples", async (t) => {
   const root = fixture(t);
   writeFileSync(join(root, "worktree-retained-ref-history.json"), `${JSON.stringify([{

@@ -721,6 +721,8 @@ const RECOVERED_ANSWER_REPLAY_REFUSED_GUIDANCE =
   "resolve the blocking session state, then submit the answer again.";
 const HISTORY_MAINTENANCE_MS = 5 * 60 * 1_000;
 const WORKTREE_PR_RECONCILIATION_MS = 5 * 60 * 1_000;
+/** Eight worst-case 30-second Git attempts fit within one five-minute maintenance cadence. */
+const RETAINED_REF_RECLAIM_BATCH_SIZE = 8;
 /** Periodic missing-upstream discovery is deliberately smaller than the historical backlog. The
  * rotating cursor makes every candidate eligible eventually while the fixed worker pool limits
  * forge pressure to two waves per pass. The helper caps each forge command at 30 seconds and each
@@ -978,6 +980,12 @@ export class SessionManager {
   /** Startup replay, periodic maintenance, and post-cleanup scheduling share one attempt for an
    * exact cleanup generation. Independent branches and generations retain independent lanes. */
   private readonly retainedRefReclaimLanes = new Map<string, Promise<void>>();
+  /** One sorted cycle captured before admitting periodic/startup replay. New rows wait for the
+   * next cycle, so arrivals cannot starve identities already present in a large backlog. */
+  private retainedRefReclaimQueue: RetainedWorktreeRefRecord[] = [];
+  /** Startup and periodic triggers coalesce at the sweep boundary. Per-record lanes still protect
+   * post-cleanup attempts, while one sweep never partitions its queue into concurrent Git work. */
+  private retainedRefReplay: Promise<void> | undefined;
   private readonly worktreeSetupTrust: WorktreeSetupTrustStore;
   private readonly worktreePortAllocator: WorktreePortAllocator;
   private retireWorktreeShells?: (sessionId: string, context: AgentContext, path: string) => Promise<void>;
@@ -3255,9 +3263,29 @@ export class SessionManager {
     });
   }
 
-  private async replayRetainedRefReclaims(): Promise<void> {
-    for (const record of this.cleanupJournal.listRetainedRefs()) {
+  private replayRetainedRefReclaims(): Promise<void> {
+    if (this.retainedRefReplay) return this.retainedRefReplay;
+    const replay = this.runRetainedRefReplay().finally(() => {
+      if (this.retainedRefReplay === replay) this.retainedRefReplay = undefined;
+    });
+    this.retainedRefReplay = replay;
+    return replay;
+  }
+
+  private async runRetainedRefReplay(): Promise<void> {
+    if (!this.retainedRefReclaimQueue.length) {
+      this.retainedRefReclaimQueue = this.cleanupJournal.listRetainedRefs()
+        .sort((left, right) => {
+          const leftKey = this.cleanupJournal.retainedRefIdentityKey(left);
+          const rightKey = this.cleanupJournal.retainedRefIdentityKey(right);
+          return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0;
+        });
+    }
+    let admitted = 0;
+    while (admitted < RETAINED_REF_RECLAIM_BATCH_SIZE && this.retainedRefReclaimQueue.length) {
       if (this.shuttingDown) return;
+      const record = this.retainedRefReclaimQueue.shift()!;
+      admitted++;
       try {
         await this.reapRetainedRef(record);
       } catch {

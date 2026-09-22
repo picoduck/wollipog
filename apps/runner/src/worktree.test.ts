@@ -1683,6 +1683,70 @@ test("retained-ref diagnostics prioritize actionable rows within the bounded inv
   assert.deepEqual(diagnostics.records.slice(0, 2).map((record) => record.state), ["retained", "pending"]);
 });
 
+test("retained-ref periodic replay is bounded and fair across a large permanently pending backlog", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-fairness-"));
+  let manager: SessionManager | undefined;
+  try {
+    manager = new SessionManager(
+      () => {},
+      () => {},
+      new SessionStore(join(dataDir, "sessions")),
+      "runner",
+      undefined,
+      undefined,
+      dataDir,
+    );
+    const internals = manager as unknown as {
+      cleanupJournal: WorktreeCleanupJournal;
+      reclaimRetainedRef(record: RetainedWorktreeRefRecord): Promise<{
+        state: "pending";
+        reason: "checked_out";
+      }>;
+      replayRetainedRefReclaims(): Promise<void>;
+    };
+    for (let index = 0; index < 21; index++) {
+      const record: RetainedWorktreeRefRecord = {
+        sessionId: `s-${index.toString().padStart(2, "0")}`,
+        worktreeId: `wt-${index}`,
+        cleanupId: `cleanup-${index}`,
+        repoPath: "/repo",
+        context: { kind: "native" },
+        branch: `fix/pending-${index}`,
+        expectedOid: index.toString(16).padStart(40, "0"),
+        reasons: ["recorded_branch"],
+        state: "pending",
+        pendingReason: "checked_out",
+        armedAt: 1,
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      internals.cleanupJournal.addRetainedRef(record);
+    }
+    const attempts: string[] = [];
+    internals.reclaimRetainedRef = async (record) => {
+      attempts.push(record.cleanupId!);
+      return { state: "pending", reason: "checked_out" };
+    };
+
+    const passSizes: number[] = [];
+    for (let pass = 0; pass < 4; pass++) {
+      const before = attempts.length;
+      await internals.replayRetainedRefReclaims();
+      passSizes.push(attempts.length - before);
+    }
+
+    assert.deepEqual(passSizes, [8, 8, 5, 8],
+      "each trigger admits at most eight rows and a new cycle starts only after the prior one drains");
+    assert.equal(new Set(attempts).size, 21,
+      "a complete cycle reaches every row before repeatedly pending records can starve the tail");
+    assert.equal(internals.cleanupJournal.listRetainedRefs().length, 21,
+      "capacity and retry policy never retire unresolved ownership evidence");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("retained-ref logs are suppressed without an owner-scoped salt", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-no-log-salt-"));
   let manager: SessionManager | undefined;
