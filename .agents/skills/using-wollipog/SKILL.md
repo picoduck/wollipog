@@ -89,8 +89,10 @@ Creation without `--base` fetches the repository's remote default branch. Use th
 for file and Git commands in the current turn; a later provider launch resumes in the selection.
 Discard permanently removes only a runner-owned worktree that is not used by a live provider, is
 clean, and has no commits ahead of its upstream. A forge-verified merged head may replace an
-upstream deleted with the remote branch, but only when it exactly matches the local head. Discard
-refuses attached, dirty, arbitrary upstream-less, or unpushed trees.
+upstream deleted with the remote branch, but only when it exactly matches the local head. An
+unchanged recorded branch may instead prove its stable head is contained by the current
+remote-tracking default branch. Discard refuses attached, dirty, other upstream-less, or unpushed
+trees.
 
 Child creation may select a supported model and reasoning effort in the same request. Explicit
 values apply before the initial prompt and override saved harness defaults; read the effective pair

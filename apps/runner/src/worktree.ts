@@ -1864,11 +1864,35 @@ export async function discardWorktreeIfSafe(
         if (ahead !== "0") return { removed: false, reason: "unpushed" };
       } else {
         const mergedHead = options.verifiedMergedHead;
-        if (typeof mergedHead !== "string" || !/^[a-f0-9]{40,64}$/u.test(mergedHead)) {
-          return { removed: false, reason: "no_upstream" };
+        const validMergedHead = typeof mergedHead === "string" && /^[a-f0-9]{40,64}$/u.test(mergedHead);
+        let safeUntrackedHead = validMergedHead && mergedHead === head;
+        if (safeUntrackedHead) checkedOutVerifiedMergedHead = mergedHead;
+        let defaultBranch: string | undefined;
+        if (!safeUntrackedHead) {
+          defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
         }
-        if (mergedHead !== head) return { removed: false, reason: "unpushed" };
-        checkedOutVerifiedMergedHead = mergedHead;
+        if (defaultBranch) {
+          try {
+            const defaultRef = `refs/remotes/origin/${await validateBranch(context, repoPath, defaultBranch)}`;
+            const ahead = (await command(
+              context,
+              repoPath,
+              ["rev-list", "--count", `${defaultRef}..${ref}`],
+            )).trim();
+            safeUntrackedHead = ahead === "0";
+          } catch {
+            // Missing or unreadable default-branch state cannot replace upstream or merge proof.
+          }
+        }
+        if (!safeUntrackedHead) {
+          return { removed: false, reason: validMergedHead ? "unpushed" : "no_upstream" };
+        }
+        // A legacy runner-owned record should not normally name the default branch, but if it does,
+        // removal may retire the worktree while the repository's conventional local base ref stays.
+        if (defaultBranch === branch) {
+          preserveCheckedOutRef = true;
+          checkedOutRefReasons.push("default_branch");
+        }
       }
     }
 
