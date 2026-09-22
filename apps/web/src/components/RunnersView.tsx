@@ -698,12 +698,12 @@ function MachineSettingsDialog({
   const installations = [...new Map((runner?.agents ?? [])
     .filter((agent) => agent.installation && agent.driver !== "codex")
     .map((agent) => [JSON.stringify([agent.context ?? { kind: "native" }, agent.installation!.id]), agent])).values()];
-  const chooseInstallation = async (agentId: string) => {
+  const chooseInstallation = async (agentId: string, installationId: string) => {
     if (!runner || selectingHarness || !installationSupported || runner.canManage !== true) return;
     setSelectingHarness(true);
     setError(null);
     try {
-      const { selection } = await api.selectHarnessInstallation(runner.runnerId, agentId);
+      const { selection } = await api.selectHarnessInstallation(runner.runnerId, agentId, installationId);
       setHarnessSelections((current) => [...current.filter((item) =>
         !(item.family === selection.family && JSON.stringify(item.context) === JSON.stringify(selection.context))), selection]);
     } catch (cause) {
@@ -916,7 +916,7 @@ function MachineSettingsDialog({
                 {agent.update && <p>{agent.update.guidance}</p>}
                 <button type="button" className="btn sm" disabled={isSelected || !installationSupported ||
                   runner.canManage !== true || selectingHarness}
-                  onClick={() => void chooseInstallation(agent.id)}>
+                  onClick={() => void chooseInstallation(agent.id, installation.id)}>
                   {isSelected ? "Selected" : "Use This Installation"}
                 </button>
               </div>

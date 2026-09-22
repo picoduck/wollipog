@@ -6,6 +6,7 @@ import type { RunnerProviderAccount } from "./config.js";
 import { writeProviderAccountsConfig } from "./config.js";
 import { runContextCommand } from "./context-command.js";
 import { supportsStructuredCodexDeviceLogin } from "./discovery/codex-app-server.js";
+import { launchTargetStillMatches } from "./discovery/resolve.js";
 import { JsonRpcPeer, type RpcError } from "./jsonrpc.js";
 import { agentForProviderAccount, providerAccountEnvironment } from "./provider-accounts.js";
 import { killTreeAndWait, spawnAgent, trackPendingKill, type AgentProcess } from "./spawn.js";
@@ -291,6 +292,10 @@ export class ProviderLoginSupervisor {
       "claude-code", "codex", "codex-app-server",
     ]);
     if (!agent) throw new Error(`No ${account.provider === "claude" ? "Claude" : "Codex"} agent is available on this Machine.`);
+    if (agent.installation?.targetIdentity && !launchTargetStillMatches(
+      { command: agent.command, args: agent.args ?? [] }, agent.context ?? { kind: "native" },
+      agent.installation.targetIdentity,
+    )) throw new Error("The selected installation changed. Rediscover this Machine before signing in.");
     const env = {
       ...this.options.resolveEnv(agent),
       ...providerAccountEnvironment({ provider: account.provider, credentialHome: account.directory }),

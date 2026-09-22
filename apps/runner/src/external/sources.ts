@@ -30,7 +30,7 @@ import type {
   ExternalSessionDescriptor,
   SessionEventPayload,
 } from "@wollipog/protocol";
-import { listWslDistros, run } from "../discovery/resolve.js";
+import { launchTargetStillMatches, listWslDistros, run } from "../discovery/resolve.js";
 import { runContextCommand } from "../context-command.js";
 import { providerStateKey } from "../execution-isolation.js";
 import {
@@ -275,6 +275,9 @@ export function resolveLaunchForAgent(
     }
     return driver === "codex" && candidate.authStatus === "unauthenticated";
   });
+  if (agent?.installation?.targetIdentity && !launchTargetStillMatches(
+    { command: agent.command, args: agent.args ?? [] }, context, agent.installation.targetIdentity,
+  )) return null;
   return agent
     ? { command: agent.command, args: [...(agent.args ?? [])], env: { ...(agent.env ?? {}) } }
     : null;

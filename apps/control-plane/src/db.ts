@@ -10012,12 +10012,12 @@ export class ControlPlaneDb {
 
   /** Select the exact rediscovered installation for one Machine/context. Returns null if this
    * runner cannot represent the choice; no preference is written in that case. */
-  selectHarnessInstallation(runnerId: string, agentId: string): HarnessInstallationSelection | null {
+  selectHarnessInstallation(runnerId: string, agentId: string, expectedInstallationId: string): HarnessInstallationSelection | null {
     const runner = this.getRunner(runnerId);
     if (!runner || !runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations")) return null;
     const agent = runner.agents.find((candidate) => candidate.id === agentId);
     const family = harnessInstallationFamily(agent?.driver);
-    if (!agent?.installation || !family) return null;
+    if (!agent?.installation || !family || agent.installation.id !== expectedInstallationId) return null;
     const context = agent.context ?? { kind: "native" as const };
     const eligible = runner.agents.some((candidate) => candidate.installation?.id === agent.installation!.id &&
       harnessInstallationFamily(candidate.driver) === family &&

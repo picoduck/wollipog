@@ -601,12 +601,14 @@ test("mergeAgents appends discovered agents not present in config", () => {
   );
 });
 
-test("mergeAgents drops a discovered agent that shares an id with config", () => {
+test("mergeAgents preserves a different discovered launch when its id matches config", () => {
   const config = [cfg({ id: "claude-code", command: "/custom/claude" })];
   const discovered = [cfg({ id: "claude-code", command: "/usr/bin/claude", source: "discovered" })];
   const merged = mergeAgents(config, discovered);
-  assert.equal(merged.length, 1);
+  assert.equal(merged.length, 2);
   assert.equal(merged[0]!.command, "/custom/claude", "config command wins");
+  assert.equal(merged[1]!.command, "/usr/bin/claude");
+  assert.equal(merged[1]!.id, "claude-code-native");
 });
 
 test("mergeAgents drops a discovered agent with the same launch target (driver/context/command)", () => {
@@ -720,6 +722,19 @@ test("mergeAgents retains a second installation when a configured bare name matc
   assert.deepEqual(merged.map((agent) => agent.id), ["chosen-codex", "codex-installation-local"]);
   assert.equal(merged[0]!.installation?.id, "system");
   assert.equal(merged[1]!.installation?.id, "local");
+});
+
+test("a configured wrapper cannot inherit a different discovered installation identity", () => {
+  const discovered = [cfg({ id: "codex", driver: "codex-app-server", command: "/usr/bin/codex", bin: "codex",
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" } })];
+  for (const configured of [
+    cfg({ id: "wrapper", driver: "codex-app-server", command: "/opt/wrap/codex" }),
+    cfg({ id: "custom-args", driver: "codex-app-server", command: "codex", args: ["--custom"] }),
+  ]) {
+    const merged = mergeAgents([configured], discovered);
+    assert.equal(merged.find((agent) => agent.id === configured.id)?.installation, undefined);
+    assert.equal(merged.find((agent) => agent.installation?.id === "system")?.command, "/usr/bin/codex");
+  }
 });
 
 test("mergeAgents enriches a config agent that uses a bare command name (P2 basename match)", () => {

@@ -2057,6 +2057,8 @@ export interface AgentDefinition {
     id: string;
     path: string;
     via: "path" | "common-dir" | "version-manager" | "login-shell";
+    /** Canonical launch observed during discovery; the runner rechecks it before spawning. */
+    targetIdentity?: string;
     /** Control-plane projection of a Machine selection; runners do not author this field. */
     selection?: "selected" | "other";
   };

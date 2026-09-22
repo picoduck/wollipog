@@ -2702,9 +2702,14 @@ app.put("/api/runners/:id/harness-installation", async (req, reply) => {
   if (!principal || !db.canManageRunner(principal, id)) {
     return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
   }
-  const agentId = (req.body as { agentId?: unknown } | undefined)?.agentId;
+  const body = req.body as { agentId?: unknown; installationId?: unknown } | undefined;
+  const agentId = body?.agentId;
+  const installationId = body?.installationId;
   if (typeof agentId !== "string" || !agentId || agentId.length > 256) {
     return reply.code(400).send({ error: "agentId must identify a discovered installation" });
+  }
+  if (typeof installationId !== "string" || !installationId || installationId.length > 256) {
+    return reply.code(400).send({ error: "installationId must match the installation shown" });
   }
   const runner = db.getRunner(id);
   if (!runner) return reply.code(404).send({ error: "runner not found" });
@@ -2713,7 +2718,7 @@ app.put("/api/runners/:id/harness-installation", async (req, reply) => {
       error: runnerCapabilityRequirement(runner.protocolVersion, "harnessInstallations", "Harness Installation selection"),
     });
   }
-  const selection = db.selectHarnessInstallation(id, agentId);
+  const selection = db.selectHarnessInstallation(id, agentId, installationId);
   if (!selection) return reply.code(409).send({ error: "This installation is no longer available for selection" });
   hub.runnerChanged(id);
   return { selection };

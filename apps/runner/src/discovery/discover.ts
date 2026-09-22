@@ -423,10 +423,10 @@ const KNOWN: KnownAgent[] = [
   { id: "pi", name: "Pi", bin: "pi", driver: "pi" },
 ];
 
-/** Path-based identity survives PATH reordering. The context is part of the agent id so a WSL
- * executable never aliases a native one. */
+/** The logical installation entry point survives upgrades that replace its symlink target.
+ * The context keeps a WSL path distinct from the same path on the native host. */
 function installationId(context: AgentContext, bin: ResolvedBinary): string {
-  return createHash("sha256").update(JSON.stringify([context, resolvedLaunchIdentity(bin)])).digest("hex").slice(0, 16);
+  return createHash("sha256").update(JSON.stringify([context, bin.path, bin.launch])).digest("hex").slice(0, 16);
 }
 
 function codexExecId(primaryId: string): string {
@@ -680,7 +680,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           : catalogCapabilities),
         ...(piRpc?.piAgentControl ? { piAgentControl: piRpc.piAgentControl } : {}),
         source: "discovered",
-        installation: { id: suffix, path: bin.path, via: bin.via },
+        installation: { id: suffix, path: bin.path, via: bin.via, targetIdentity: resolvedLaunchIdentity(bin) },
         ...(codexAppServer ? { codexAppServer } : {}),
         ...(claudeCode ? { claudeCode } : {}),
         ...(k.bin !== "pi" ? { nativeTuiAccounting: unavailableNativeTuiAccounting(
@@ -763,7 +763,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
             ? claudeCapabilitiesFromProbe(catalogCapabilities, claudeCode)
             : catalogCapabilities),
           source: "discovered",
-          installation: { id: suffix, path: bin.path, via: bin.via },
+          installation: { id: suffix, path: bin.path, via: bin.via, targetIdentity: resolvedLaunchIdentity(bin) },
           ...(agentControlRuntime
             ? { wslAgentControl: { protocolVersion: 1 as const, nodeRuntime: agentControlRuntime,
                 ...(safeLauncher ? { safeLauncherProtocolVersion: 1 as const,
@@ -858,7 +858,6 @@ export function mergeAgents(
       d.driver === c.driver && JSON.stringify(d.context ?? { kind: "native" }) === JSON.stringify(c.context ?? { kind: "native" }) &&
       d.command === c.command && JSON.stringify(d.args ?? []) === JSON.stringify(c.args ?? [])) : undefined;
     const shapeMatch = exactMatch ?? launchKeys(c).map((k) => byKey.get(k)).find(Boolean);
-    if (shapeMatch) matchedDiscoveredIds.add(shapeMatch.id);
     const configuredProbe = configuredProbeById.get(c.id);
     const d = configuredProbe
       ? {
@@ -885,6 +884,11 @@ export function mergeAgents(
     // resolved launch only when it has no custom arguments.
     const adoptLaunch = configuredProbe != null ||
       (!/[\\/]/.test(c.command) && (c.args?.length ?? 0) === 0 && /[\\/]/.test(d.command));
+    const effectiveCommand = adoptLaunch ? d.command : c.command;
+    const effectiveArgs = adoptLaunch ? d.args ?? [] : c.args ?? [];
+    const sameInstallation = !!shapeMatch && effectiveCommand === shapeMatch.command &&
+      JSON.stringify(effectiveArgs) === JSON.stringify(shapeMatch.args ?? []);
+    if (sameInstallation && shapeMatch) matchedDiscoveredIds.add(shapeMatch.id);
     return applyCodexAgentEnvironment(applyClaudeAgentEnvironment({
       ...c,
       ...(adoptLaunch ? { command: d.command, args: [...(d.args ?? [])] } : {}),
@@ -903,7 +907,9 @@ export function mergeAgents(
       // Fresh discovery is the only authority. Config and old-runner values never attest support.
       nativeTuiAccounting: d.nativeTuiAccounting,
       registry: d.registry ?? c.registry,
-      installation: d.installation,
+      // A basename match can enrich diagnostics for a custom wrapper, but cannot attest that
+      // the wrapper launches the discovered installation chosen by the Machine owner.
+      installation: sameInstallation ? shapeMatch?.installation : undefined,
       acp: d.acp ?? c.acp,
       wslAgentControl: d.wslAgentControl,
       piAgentControl: d.piAgentControl,

@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { platform, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
-import { isProjectLocalExecutable, launchForVersionManagerHit, pickWindowsExecutable, resolveNativeCandidates, resolvedLaunchIdentity, run, sortVersionsDesc, wslCandidateScanArgs, wslInspectArgs, wslVersionManagerArgs } from "./resolve.js";
+import { isProjectLocalExecutable, launchForVersionManagerHit, launchTargetStillMatches, pickWindowsExecutable, resolveNativeCandidates, resolvedLaunchIdentity, run, sortVersionsDesc, wslCandidateScanArgs, wslInspectArgs, wslVersionManagerArgs } from "./resolve.js";
 import { interpretCodexAppServerProbe } from "./codex-app-server.js";
 
 test("run preserves a string execFile error code for retryable spawn diagnostics", async () => {
@@ -37,12 +37,14 @@ test("Windows resolution prefers executable shims over adjacent POSIX scripts", 
 });
 
 test("an SSH runner started in home keeps user-local installations while rejecting project wrappers", () => {
-  assert.equal(isProjectLocalExecutable("/home/user/.local/bin/codex", "/home/user/.local/bin/codex",
-    "/home/user", "/home/user"), false);
-  assert.equal(isProjectLocalExecutable("/home/user/project/node_modules/.bin/codex", "/home/user/project/bin/codex",
-    "/home/user", "/home/user"), true);
-  assert.equal(isProjectLocalExecutable("/home/user/project/node_modules/.bin/codex", "/home/user/project/bin/codex",
-    "/home/user/project", "/home/user"), true);
+  const home = join(tmpdir(), "wollipog-home");
+  const project = join(home, "project");
+  assert.equal(isProjectLocalExecutable(join(home, ".local", "bin", "codex"),
+    join(home, ".local", "bin", "codex"), home, home), false);
+  assert.equal(isProjectLocalExecutable(join(project, "node_modules", ".bin", "codex"),
+    join(project, "bin", "codex"), home, home), true);
+  assert.equal(isProjectLocalExecutable(join(project, "node_modules", ".bin", "codex"),
+    join(project, "bin", "codex"), project, home), true);
 });
 
 test("native discovery keeps system and user installations distinct across PATH reordering and deduplicates aliases", async () => {
@@ -51,22 +53,58 @@ test("native discovery keeps system and user installations distinct across PATH 
   const user = join(root, "user");
   const alias = join(root, "alias");
   const oldPath = process.env.PATH;
+  const fileName = platform() === "win32" ? "fakeharness.cmd" : "fakeharness";
   try {
     for (const dir of [system, user, alias]) mkdirSync(dir);
     for (const [dir, version] of [[system, "1"], [user, "2"]] as const) {
-      const file = join(dir, "fakeharness");
-      writeFileSync(file, `#!/bin/sh\necho ${version}\n`);
+      const file = join(dir, fileName);
+      writeFileSync(file, platform() === "win32" ? `@echo off\r\necho ${version}\r\n` : `#!/bin/sh\necho ${version}\n`);
       chmodSync(file, 0o755);
     }
-    symlinkSync(join(user, "fakeharness"), join(alias, "fakeharness"));
+    symlinkSync(join(user, fileName), join(alias, fileName));
     process.env.PATH = [system, alias, user, oldPath ?? ""].join(delimiter);
     const first = (await resolveNativeCandidates("fakeharness")).filter((entry) => entry.path.startsWith(root));
     assert.equal(first.length, 2);
-    assert.equal(first[0]!.path, join(system, "fakeharness"));
+    assert.equal(first[0]!.path, join(system, fileName));
     process.env.PATH = [user, system, alias, oldPath ?? ""].join(delimiter);
     const reordered = (await resolveNativeCandidates("fakeharness")).filter((entry) => entry.path.startsWith(root));
     assert.equal(reordered.length, 2);
     assert.deepEqual(first.map(resolvedLaunchIdentity).sort(), reordered.map(resolvedLaunchIdentity).sort());
+  } finally {
+    if (oldPath === undefined) delete process.env.PATH;
+    else process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an upgraded symlink keeps its installation entry point but needs rediscovery before launch", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-harness-upgrade-"));
+  const bin = join(root, "bin");
+  const v1 = join(root, "v1");
+  const v2 = join(root, "v2");
+  const name = platform() === "win32" ? "fakeharness.cmd" : "fakeharness";
+  const oldPath = process.env.PATH;
+  try {
+    for (const dir of [bin, v1, v2]) mkdirSync(dir);
+    for (const dir of [v1, v2]) {
+      const file = join(dir, name);
+      writeFileSync(file, platform() === "win32" ? "@echo off\r\n" : "#!/bin/sh\nexit 0\n");
+      chmodSync(file, 0o755);
+    }
+    const entry = join(bin, name);
+    symlinkSync(join(v1, name), entry);
+    process.env.PATH = [bin, oldPath ?? ""].join(delimiter);
+    const before = (await resolveNativeCandidates("fakeharness")).find((candidate) => candidate.path === entry)!;
+    assert.equal(before.launch.command, entry);
+    const originalTarget = resolvedLaunchIdentity(before);
+    assert.equal(launchTargetStillMatches(before.launch, { kind: "native" }, originalTarget), true);
+    rmSync(entry);
+    symlinkSync(join(v2, name), entry);
+    assert.equal(launchTargetStillMatches(before.launch, { kind: "native" }, originalTarget), false);
+    const after = (await resolveNativeCandidates("fakeharness")).find((candidate) => candidate.path === entry)!;
+    assert.deepEqual(after.launch, before.launch);
+    assert.notEqual(resolvedLaunchIdentity(after), originalTarget);
+    assert.equal(launchTargetStillMatches(after.launch, { kind: "native" }, resolvedLaunchIdentity(after)), true);
   } finally {
     if (oldPath === undefined) delete process.env.PATH;
     else process.env.PATH = oldPath;
@@ -80,7 +118,7 @@ test("launchForVersionManagerHit: node scripts wrap, real binaries run direct", 
 
   // npm shim: symlink resolves to a .js entry — wrap with the sibling node.
   const js = launchForVersionManagerHit(shim, "/h/.nvm/.../codex/bin/codex.js", "#!/usr/bin/env node", node);
-  assert.deepEqual(js, { command: node, args: ["/h/.nvm/.../codex/bin/codex.js"] });
+  assert.deepEqual(js, { command: node, args: [shim] });
 
   // extension-less script with a node shebang still wraps.
   const shebang = launchForVersionManagerHit(shim, "/h/lib/codex-entry", "#!/usr/bin/env node", node);
@@ -108,7 +146,8 @@ test("wslVersionManagerArgs: name rides as a positional arg, never inside the sc
   assert.equal(args[7], hostile);
 });
 
-test("WSL scan finds a user-local executable even when non-login PATH finds system first", async () => {
+test("WSL scan finds a user-local executable even when non-login PATH finds system first",
+  { skip: platform() === "win32" }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-scan-"));
   const system = join(root, "system");
   const local = join(root, ".local", "bin");
@@ -121,6 +160,7 @@ test("WSL scan finds a user-local executable even when non-login PATH finds syst
       chmodSync(file, 0o755);
     }
     const args = wslCandidateScanArgs("Ubuntu", "fakeharness");
+    assert.match(args[5]!, /sort -rV/, "version-manager candidates remain newest-first");
     const scanned = await run("/bin/sh", args.slice(4), {
       env: { HOME: root, PATH: [system, "/usr/bin", "/bin"].join(delimiter) },
     });

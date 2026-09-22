@@ -1232,10 +1232,10 @@ export function createApiClient(transport: ApiTransport) {
       method: "PATCH",
       body: JSON.stringify(body),
     }),
-  selectHarnessInstallation: (runnerId: string, agentId: string) =>
+  selectHarnessInstallation: (runnerId: string, agentId: string, installationId: string) =>
     req<{ selection: import("@wollipog/protocol").HarnessInstallationSelection }>(
       `/api/runners/${encodeURIComponent(runnerId)}/harness-installation`,
-      { method: "PUT", body: JSON.stringify({ agentId }) },
+      { method: "PUT", body: JSON.stringify({ agentId, installationId }) },
     ),
   updateMachineCapacity: (runnerId: string, body: { configuredUnits: number; expectedRevision: number }) =>
     req<{ capacity: import("@wollipog/protocol").RunnerCapacityConfiguration }>(

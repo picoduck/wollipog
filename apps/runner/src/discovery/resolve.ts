@@ -9,10 +9,11 @@
  * lookup can't stall discovery.
  */
 
-import { execFile } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { accessSync, closeSync, constants, existsSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
+import type { AgentContext } from "@wollipog/protocol";
 import { windowsCommandSpec } from "../windows-cmd.js";
 
 const isWindows = platform() === "win32";
@@ -187,7 +188,7 @@ export function launchForVersionManagerHit(
   nodePath: string | null,
 ): ResolvedLaunch {
   const isNodeScript = /\.(c|m)?js$/i.test(realPath) || /^#!.*\bnode\b/.test(firstLine);
-  if (isNodeScript && nodePath) return { command: nodePath, args: [realPath] };
+  if (isNodeScript && nodePath) return { command: nodePath, args: [shimPath] };
   return { command: shimPath, args: [] };
 }
 
@@ -241,6 +242,30 @@ export function resolvedLaunchIdentity(binary: ResolvedBinary): string {
   return JSON.stringify([canonical(binary.launch.command), ...binary.launch.args.map(canonical)]);
 }
 
+/** Recheck the entry point immediately before a session spawn. A package manager may replace a
+ * symlink between discovery and launch; that needs rediscovery, not an implicit target change. */
+export function launchTargetStillMatches(
+  launch: ResolvedLaunch,
+  context: AgentContext,
+  expectedIdentity: string,
+): boolean {
+  try {
+    if (context.kind === "wsl") {
+      const paths = [launch.command, ...launch.args.filter((arg) => arg.startsWith("/"))];
+      const output = execFileSync("wsl.exe", ["-d", context.distro, "--exec", "sh", "-c",
+        'for p do readlink -e -- "$p" || exit 3; done', "sh", ...paths],
+      { encoding: "utf8", timeout: 3000, windowsHide: true, maxBuffer: 8192 });
+      const resolved = output.trimEnd().split(/\r?\n/);
+      if (resolved.length !== paths.length || resolved.some((path) => !path.startsWith("/"))) return false;
+      let index = 0;
+      return JSON.stringify([resolved[index++], ...launch.args.map((arg) => arg.startsWith("/")
+        ? resolved[index++] : arg)]) === expectedIdentity;
+    }
+    const canonical = (path: string) => isAbsolute(path) ? realpathSync(path) : path;
+    return JSON.stringify([canonical(launch.command), ...launch.args.map(canonical)]) === expectedIdentity;
+  } catch { return false; }
+}
+
 /** A runner started by SSH commonly has $HOME as its cwd. Treat that as an installation
  * root, not as a project whose descendants are all untrusted PATH wrappers. */
 export function isProjectLocalExecutable(path: string, realPath: string, cwd: string, home: string): boolean {
@@ -263,15 +288,15 @@ export async function resolveNativeCandidates(name: string): Promise<ResolvedBin
       if (!statSync(real).isFile()) return;
       accessSync(path, constants.X_OK);
     } catch { return; }
-    // Launch the inspected target itself so replacing the discovery symlink cannot redirect a
-    // later session to another executable before rediscovery.
-    let launch = directLaunch(realpathSync(path));
+    // Keep the stable installation entry point. Launch authorization revalidates its resolved
+    // target before spawn, so an upgrade can retain the selection after rediscovery.
+    let launch = directLaunch(path);
     if (!isWindows && isVersionManagerPath(path)) {
       const node = join(dirname(path), "node");
       try {
         launch = launchForVersionManagerHit(path, realpathSync(path),
           readHead(realpathSync(path)).split("\n")[0] ?? "", existsSync(node) ? realpathSync(node) : null);
-        if (launch.command === path) launch = directLaunch(realpathSync(path));
+        if (launch.command === path) launch = directLaunch(path);
       } catch { /* The executable check above still lets a native binary launch directly. */ }
     }
     hits.push({ path, via, launch });
@@ -306,7 +331,10 @@ export async function resolveNativeCandidates(name: string): Promise<ResolvedBin
   const unique = new Map<string, ResolvedBinary>();
   for (const hit of hits) {
     const identity = resolvedLaunchIdentity(hit);
-    if (!unique.has(identity)) unique.set(identity, hit);
+    const prior = unique.get(identity);
+    // Alias selection must not change when PATH order changes. Map insertion order still keeps
+    // the first distinct installation as the default.
+    if (!prior || hit.path.localeCompare(prior.path) < 0) unique.set(identity, hit);
   }
   return [...unique.values()];
 }
@@ -377,7 +405,7 @@ export function wslCandidateScanArgs(distro: string, name: string): string[] {
   const script = [
     'oldIFS=$IFS; IFS=:; for d in $PATH; do case "$d" in /*) [ -x "$d/$1" ] && printf "path\\t%s\\n" "$d/$1";; esac; done; IFS=$oldIFS',
     'for d in "$HOME/.local/bin" "$HOME/.bun/bin" /usr/local/bin /usr/bin; do [ -x "$d/$1" ] && printf "common-dir\\t%s\\n" "$d/$1"; done',
-    'for d in "$HOME"/.nvm/versions/node/*/bin "$HOME"/.local/share/fnm/node-versions/*/installation/bin; do [ -x "$d/$1" ] && printf "version-manager\\t%s\\n" "$d/$1"; done',
+    'for base in "$HOME/.nvm/versions/node" "$HOME/.local/share/fnm/node-versions"; do [ -d "$base" ] || continue; for v in $(ls -1 "$base" 2>/dev/null | sort -rV); do for sub in bin installation/bin; do d="$base/$v/$sub"; [ -x "$d/$1" ] && printf "version-manager\\t%s\\n" "$d/$1"; done; done; done',
   ].join("; ") + "; true";
   return ["-d", distro, "--exec", "sh", "-c", script, "sh", name];
 }
@@ -388,6 +416,10 @@ export async function resolveInWslCandidates(distro: string, name: string): Prom
   const add = (path: string, via: ResolvedBinary["via"]) => {
     if (path.startsWith("/") && !/[\0\r\n\t]/.test(path)) found.push({ path, via });
   };
+  // Preserve the legacy login-shell default. A plain WSL PATH may expose an older /usr/bin
+  // executable while the user's profile intentionally selects a newer manager installation.
+  const login = await run("wsl.exe", ["-d", distro, "--exec", "bash", "-lc", `command -v ${name}`], { timeoutMs: 8000 });
+  if (login.code === 0) add(firstLine(login.stdout), "login-shell");
   const scan = await run("wsl.exe", wslCandidateScanArgs(distro, name), { timeoutMs: 8000 });
   if (scan.code === 0) {
     for (const line of scan.stdout.split(/\r?\n/)) {
@@ -397,9 +429,9 @@ export async function resolveInWslCandidates(distro: string, name: string): Prom
       if (via === "path" || via === "common-dir" || via === "version-manager") add(line.slice(tab + 1), via);
     }
   }
-  // A login profile may add another path absent from the runner's direct WSL invocation.
-  const login = await run("wsl.exe", ["-d", distro, "--exec", "bash", "-lc", `command -v ${name}`], { timeoutMs: 8000 });
-  if (login.code === 0) add(firstLine(login.stdout), "login-shell");
+  // The old fallback tried version-manager releases newest-first before the system PATH.
+  const rank = (via: ResolvedBinary["via"]) => via === "login-shell" ? 0 : via === "version-manager" ? 1 : via === "path" ? 2 : 3;
+  found.sort((a, b) => rank(a.via) - rank(b.via));
 
   const unique = new Map<string, ResolvedBinary>();
   for (const hit of found) {
@@ -411,11 +443,12 @@ export async function resolveInWslCandidates(distro: string, name: string): Prom
     if (!realPath?.startsWith("/")) continue;
     const launch = isVersionManagerPath(hit.path)
       ? launchForVersionManagerHit(hit.path, realPath, shebang ?? "", nodePath?.startsWith("/") ? nodePath : null)
-      : directLaunch(realPath);
-    if (launch.command === hit.path) launch.command = realPath;
-    const identity = JSON.stringify([launch.command, ...launch.args]);
+      : directLaunch(hit.path);
+    const identity = JSON.stringify([launch.command === hit.path ? realPath : launch.command,
+      ...launch.args.map((arg) => arg === hit.path ? realPath : arg)]);
     const binary = { path: hit.path, via: hit.via, launch, identity };
-    if (!unique.has(identity)) unique.set(identity, binary);
+    const prior = unique.get(identity);
+    if (!prior || hit.path.localeCompare(prior.path) < 0) unique.set(identity, binary);
   }
   return [...unique.values()];
 }

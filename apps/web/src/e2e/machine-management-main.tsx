@@ -219,10 +219,10 @@ const client = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { ok: true as const };
   },
-  selectHarnessInstallation: async (_runnerId: string, agentId: string) => {
+  selectHarnessInstallation: async (_runnerId: string, agentId: string, installationId: string) => {
     if (!runner) throw new Error("runner not found");
     const agent = runner.agents.find((candidate) => candidate.id === agentId);
-    if (!agent?.installation) throw new Error("installation not found");
+    if (!agent?.installation || agent.installation.id !== installationId) throw new Error("installation not found");
     const selection = {
       family: "codex" as const,
       context: agent.context ?? { kind: "native" as const },

@@ -1910,7 +1910,8 @@ test("Machine installation selection survives PATH reorder and fails closed when
   const local = { ...system, id: "codex-installation-local", command: "/home/u/.local/bin/codex",
     installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" as const } };
   db.registerRunner(meta({ agents: [system, local] }), 500, PROTOCOL_VERSION);
-  assert.equal(db.selectHarnessInstallation("runner-1", "codex")?.installationId, "system");
+  assert.equal(db.selectHarnessInstallation("runner-1", "codex", "wrong"), null);
+  assert.equal(db.selectHarnessInstallation("runner-1", "codex", "system")?.installationId, "system");
   assert.equal(db.getAgentLaunch("runner-1", "codex")?.command, "/usr/bin/codex");
   assert.equal(db.getAgentLaunch("runner-1", "codex-installation-local"), null);
 
