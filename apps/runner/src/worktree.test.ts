@@ -1683,6 +1683,108 @@ test("retained-ref diagnostics prioritize actionable rows within the bounded inv
   assert.deepEqual(diagnostics.records.slice(0, 2).map((record) => record.state), ["retained", "pending"]);
 });
 
+test("retained-ref periodic replay is bounded and fair across a large mixed-arming backlog", async () => {
+  const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-fairness-"));
+  let manager: SessionManager | undefined;
+  try {
+    manager = new SessionManager(
+      () => {},
+      () => {},
+      new SessionStore(join(dataDir, "sessions")),
+      "runner",
+      undefined,
+      undefined,
+      dataDir,
+    );
+    const privateManager = (value: SessionManager) => value as unknown as {
+      cleanupJournal: WorktreeCleanupJournal;
+      reclaimRetainedRef(record: RetainedWorktreeRefRecord): Promise<{
+        state: "pending";
+        reason: "checked_out";
+      }>;
+      replayRetainedRefReclaims(): Promise<void>;
+    };
+    let internals = privateManager(manager);
+    for (let index = 0; index < 8; index++) {
+      internals.cleanupJournal.addRetainedRef({
+        sessionId: `unarmed-${index}`,
+        worktreeId: `unarmed-wt-${index}`,
+        cleanupId: `unarmed-cleanup-${index}`,
+        repoPath: "/repo",
+        context: { kind: "native" },
+        branch: `fix/unarmed-${index}`,
+        expectedOid: (index + 100).toString(16).padStart(40, "0"),
+        reasons: ["recorded_branch"],
+        state: "pending",
+        createdAt: 0,
+        updatedAt: 0,
+      });
+    }
+    for (let index = 0; index < 21; index++) {
+      const record: RetainedWorktreeRefRecord = {
+        sessionId: `s-${index.toString().padStart(2, "0")}`,
+        worktreeId: `wt-${index}`,
+        cleanupId: `cleanup-${index}`,
+        repoPath: "/repo",
+        context: { kind: "native" },
+        branch: `fix/pending-${index}`,
+        expectedOid: index.toString(16).padStart(40, "0"),
+        reasons: ["recorded_branch"],
+        state: "pending",
+        pendingReason: "checked_out",
+        armedAt: 1,
+        ...(index === 0 ? { lastAttemptAt: Number.MAX_SAFE_INTEGER } : {}),
+        createdAt: 1,
+        updatedAt: 1,
+      };
+      internals.cleanupJournal.addRetainedRef(record);
+    }
+    const attempts: string[] = [];
+    internals.reclaimRetainedRef = async (record) => {
+      attempts.push(record.cleanupId!);
+      return { state: "pending", reason: "checked_out" };
+    };
+
+    const runPass = async () => {
+      const before = attempts.length;
+      await internals.replayRetainedRefReclaims();
+      return attempts.length - before;
+    };
+    const passSizes: number[] = [];
+    for (let pass = 0; pass < 3; pass++) {
+      passSizes.push(await runPass());
+      if (pass === 2) break;
+      manager.shutdownAll();
+      manager = new SessionManager(
+        () => {},
+        () => {},
+        new SessionStore(join(dataDir, "sessions")),
+        "runner",
+        undefined,
+        undefined,
+        dataDir,
+      );
+      internals = privateManager(manager);
+      internals.reclaimRetainedRef = async (record) => {
+        attempts.push(record.cleanupId!);
+        return { state: "pending", reason: "checked_out" };
+      };
+    }
+
+    assert.deepEqual(passSizes, [8, 8, 8],
+      "each restarted trigger admits at most eight armed rows");
+    assert.equal(new Set(attempts.slice(0, 21)).size, 21,
+      "durable admission reaches every row across repeated restarts and a future attempt timestamp");
+    assert.equal(new Set(attempts).size, 21,
+      "a complete cycle reaches every row before repeatedly pending records can starve the tail");
+    assert.equal(internals.cleanupJournal.listRetainedRefs().length, 29,
+      "capacity and retry policy never retire unresolved ownership evidence");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(dataDir, { recursive: true, force: true });
+  }
+});
+
 test("retained-ref logs are suppressed without an owner-scoped salt", () => {
   const dataDir = mkdtempSync(join(tmpdir(), "wollipog-retained-ref-no-log-salt-"));
   let manager: SessionManager | undefined;

@@ -189,7 +189,12 @@ export type RetainedWorktreeRefTerminalReason =
   | "default_unproved_at_handoff"
   | "ref_changed_or_recreated"
   | "identity_unproved"
-  | "delivery_unproved";
+  | "delivery_unproved"
+  | "operator_retired_ref_intact";
+
+/** An unchanged pending row becomes an operator task after one day. This changes visibility only:
+ * it never grants ref-deletion authority or removes the durable ownership record. */
+export const RETAINED_REF_OPERATOR_ATTENTION_AFTER_MS = 24 * 60 * 60 * 1_000;
 
 export type RetainedWorktreeRefIdentityProof = {
   stage: "capture" | "reclaim";
@@ -226,6 +231,8 @@ export interface RetainedWorktreeRefRecord {
   terminalReason?: RetainedWorktreeRefTerminalReason;
   /** Set only after the associated worktree was successfully removed. */
   armedAt?: number;
+  /** Durable scheduling evidence only. It never changes lifecycle or deletion authority. */
+  lastAttemptAt?: number;
   createdAt: number;
   updatedAt: number;
   completedAt?: number;
@@ -249,6 +256,9 @@ export interface RetainedWorktreeRefDiagnostic {
   reason: RetainedWorktreeRefPendingReason | RetainedWorktreeRefTerminalReason |
     "not_armed" | "awaiting_reclamation";
   identityProof: RetainedWorktreeRefIdentityProof;
+  lifecycle: "transient_pending" | "operator_attention" | "resolved" | "retired_ref_intact";
+  ageSeconds: number;
+  unchangedSeconds: number;
 }
 
 function retainedRefOpaqueId(salt: string, ...values: Array<string | undefined>): string {
@@ -262,6 +272,7 @@ export function retainedWorktreeRefDiagnostics(
   history: RetainedWorktreeRefRecord[],
   salt: string,
   limit = 256,
+  now = Date.now(),
 ): { records: RetainedWorktreeRefDiagnostic[]; omitted: number } {
   const authoritative = new Map<string, RetainedWorktreeRefRecord>();
   const key = (record: RetainedWorktreeRefRecord) =>
@@ -283,6 +294,20 @@ export function retainedWorktreeRefDiagnostics(
     const identityProof = record.identityProof ?? (record.identityToken
       ? { stage: "capture", status: "proved", reason: "proof_recorded" } as const
       : { stage: "capture", status: "unavailable", reason: "legacy_unclassified" } as const);
+    const createdAt = Number.isFinite(record.createdAt) ? record.createdAt : now;
+    const updatedAt = Number.isFinite(record.updatedAt) ? record.updatedAt : createdAt;
+    const ageSeconds = Math.max(0, Math.floor((now - createdAt) / 1_000));
+    const unchangedSeconds = Math.max(0, Math.floor((now - updatedAt) / 1_000));
+    const futureStateTimestamp = updatedAt > now;
+    const lifecycle = terminal === "operator_retired_ref_intact"
+      ? "retired_ref_intact" as const
+      : record.state === "pending"
+        ? futureStateTimestamp || now - updatedAt >= RETAINED_REF_OPERATOR_ATTENTION_AFTER_MS
+          ? "operator_attention" as const
+          : "transient_pending" as const
+        : state === "retained"
+          ? "operator_attention" as const
+          : "resolved" as const;
     return {
       recordId: retainedRefOpaqueId(
         salt,
@@ -295,11 +320,19 @@ export function retainedWorktreeRefDiagnostics(
       state,
       reason,
       identityProof,
+      lifecycle,
+      ageSeconds,
+      unchangedSeconds,
     };
   }).sort((left, right) => {
+    const lifecyclePriority = (lifecycle: RetainedWorktreeRefDiagnostic["lifecycle"]): number =>
+      lifecycle === "operator_attention" ? 0
+        : lifecycle === "transient_pending" ? 1
+          : lifecycle === "retired_ref_intact" ? 2 : 3;
     const priority = (state: RetainedWorktreeRefDiagnostic["state"]): number =>
       state === "retained" ? 0 : state === "pending" ? 1 : 2;
-    return priority(left.state) - priority(right.state) ||
+    return lifecyclePriority(left.lifecycle) - lifecyclePriority(right.lifecycle) ||
+      priority(left.state) - priority(right.state) ||
       (left.recordId < right.recordId ? -1 : left.recordId > right.recordId ? 1 : 0);
   });
   const boundedLimit = Math.max(0, Math.min(256, Math.trunc(limit)));
@@ -450,6 +483,32 @@ export class WorktreeCleanupJournal {
       this.retainedRefs.set(key, previous);
       throw error;
     }
+  }
+
+  /** Retire one exact armed row without touching Git. The terminal receipt is persisted before
+   * the pending authority is removed, so current and rollback runners can only retain the ref. */
+  retireRetainedRefIntact(recordId: string, ownerHash: string): RetainedWorktreeRefRecord {
+    const matches = this.listRetainedRefs().filter((record) =>
+      retainedWorktreeRefDiagnostics([record], [], ownerHash, 1).records[0]?.recordId === recordId);
+    if (!matches.length) {
+      const completed = this.retainedRefHistory().filter((record) =>
+        retainedWorktreeRefDiagnostics([], [record], ownerHash, 1).records[0]?.recordId === recordId);
+      if (completed.length === 1 && completed[0]!.terminalReason === "operator_retired_ref_intact") {
+        return structuredClone(completed[0]!);
+      }
+    }
+    if (matches.length !== 1) throw new Error("retained-ref record id does not name one pending row");
+    const record = matches[0]!;
+    if (!record.armedAt) {
+      throw new Error("retained-ref row is not armed; finish or recover its worktree cleanup instead");
+    }
+    this.finishRetainedRef(record, "retained", "operator_retired_ref_intact");
+    return {
+      ...structuredClone(record),
+      state: "retained",
+      pendingReason: undefined,
+      terminalReason: "operator_retired_ref_intact",
+    };
   }
 
   armRetainedRefs(sessionId: string, worktreeId?: string, cleanupId?: string): void {
