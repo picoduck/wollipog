@@ -34,6 +34,11 @@ Anything exported for tests in another package will look local-only to a naive g
 
 Two classes the first sweeps re-derived independently, now named so no run derives them again:
 
+- knip does not see inline type-import expressions. A type used only as
+  `import("./skills.js").MachineSkillAdoptionResult` in another file reads as an unused exported
+  type, and an own-file reference count of one looks like dead code. Confirm every declaration-only
+  candidate with a whole-repository `git grep -w <symbol>` before drafting (two types in
+  `apps/web/src/skills.ts`, used from `apps/web/src/api.ts`, on 2026-09-21).
 - `apps/web/src/e2e/*-main.tsx` files are Vite entry points referenced from sibling
   `apps/web/<name>-e2e.html` files. They are never unused, and neither is anything whose only
   importer is one of them. This was 15 of 17 knip "unused files" in one run.

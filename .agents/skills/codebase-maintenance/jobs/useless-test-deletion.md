@@ -24,6 +24,10 @@ these it is:
 - **Asserts only on its own fixture.** The assertions check values the test itself constructed and
   never pass through the code under test.
 - **Tautological.** Asserts a language or library guarantee rather than repository behavior.
+  `assert.fail(...)` (or `throw`) inside a callback, handler, or branch that must never run is not
+  a tautology: it is the test's failure path, and the test is proving that path stays cold. It
+  was about 50 of 53 fixed-value-assertion hits on 2026-09-22. Only an assertion that runs and
+  cannot fail, such as a bare `assert.ok(true)`, belongs in this category.
 - **Duplicate.** Another test exercises the same function through the same path with the same
   inputs; the second adds no distinct failure mode.
 
