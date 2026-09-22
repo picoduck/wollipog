@@ -9,7 +9,7 @@
  * lookup can't stall discovery.
  */
 
-import { execFile, execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { accessSync, closeSync, constants, existsSync, openSync, readdirSync, readSync, realpathSync, statSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { delimiter, dirname, isAbsolute, join, resolve, sep } from "node:path";
@@ -242,8 +242,8 @@ export function resolvedLaunchIdentity(binary: ResolvedBinary): string {
   return JSON.stringify([canonical(binary.launch.command), ...binary.launch.args.map(canonical)]);
 }
 
-/** Recheck the entry point immediately before a session spawn. A package manager may replace a
- * symlink between discovery and launch; that needs rediscovery, not an implicit target change. */
+/** Recheck native entry points immediately before spawn; WSL launches the pinned canonical path.
+ * A changed symlink needs rediscovery, not an implicit target change. */
 export function launchTargetStillMatches(
   launch: ResolvedLaunch,
   context: AgentContext,
@@ -251,15 +251,9 @@ export function launchTargetStillMatches(
 ): boolean {
   try {
     if (context.kind === "wsl") {
-      const paths = [launch.command, ...launch.args.filter((arg) => arg.startsWith("/"))];
-      const output = execFileSync("wsl.exe", ["-d", context.distro, "--exec", "sh", "-c",
-        'for p do readlink -e -- "$p" || exit 3; done', "sh", ...paths],
-      { encoding: "utf8", timeout: 3000, windowsHide: true, maxBuffer: 8192 });
-      const resolved = output.trimEnd().split(/\r?\n/);
-      if (resolved.length !== paths.length || resolved.some((path) => !path.startsWith("/"))) return false;
-      let index = 0;
-      return JSON.stringify([resolved[index++], ...launch.args.map((arg) => arg.startsWith("/")
-        ? resolved[index++] : arg)]) === expectedIdentity;
+      // WSL launches the canonical target captured at discovery, not its mutable symlink.
+      // Avoid a synchronous wsl.exe startup on the runner's event loop for every session.
+      return JSON.stringify([launch.command, ...launch.args]) === expectedIdentity;
     }
     const canonical = (path: string) => isAbsolute(path) ? realpathSync(path) : path;
     return JSON.stringify([canonical(launch.command), ...launch.args.map(canonical)]) === expectedIdentity;
@@ -441,11 +435,11 @@ export async function resolveInWslCandidates(distro: string, name: string): Prom
     const [realPath, shebang] = lines;
     const nodePath = lines.find((line) => line.startsWith("NODE:"))?.slice(5);
     if (!realPath?.startsWith("/")) continue;
-    const launch = isVersionManagerPath(hit.path)
+    const planned = isVersionManagerPath(hit.path)
       ? launchForVersionManagerHit(hit.path, realPath, shebang ?? "", nodePath?.startsWith("/") ? nodePath : null)
-      : directLaunch(hit.path);
-    const identity = JSON.stringify([launch.command === hit.path ? realPath : launch.command,
-      ...launch.args.map((arg) => arg === hit.path ? realPath : arg)]);
+      : directLaunch(realPath);
+    const launch = planned.args.length > 0 ? { command: planned.command, args: [realPath] } : directLaunch(realPath);
+    const identity = JSON.stringify([launch.command, ...launch.args]);
     const binary = { path: hit.path, via: hit.via, launch, identity };
     const prior = unique.get(identity);
     if (!prior || hit.path.localeCompare(prior.path) < 0) unique.set(identity, binary);

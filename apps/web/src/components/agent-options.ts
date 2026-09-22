@@ -108,7 +108,8 @@ export function agentOptions(
         label: a.driver === "codex-app-server" || a.driver === "pi"
           ? `${f} ${v}${location}`
           : `${!v || (!multi && a.driver !== "codex") ? f : `${f} — ${v}`}${location}`,
-        ...(a.available !== true || a.installation?.selection === "other" ? { disabled: true } : {}),
+        ...(a.available !== true || a.installation?.selection === "other" || a.harnessSelectionBlocked
+          ? { disabled: true } : {}),
         ...(a.driver === "codex" ? { advanced: true } : {}),
       });
     }
@@ -225,6 +226,7 @@ export function agentMeta(a: AgentDefinition): string {
       : [`Runs on ${where}`];
   if (a.version) bits.push(/^\d/.test(a.version) ? `v${a.version}` : a.version);
   if (a.installation?.selection === "other") bits.push("select this installation in Machine Settings to use it");
+  if (a.harnessSelectionBlocked) bits.push("another installation is selected in Machine Settings");
   if (a.authStatus === "unauthenticated" && !codexFamily) bits.push("not signed in");
   if (!a.registry && a.acpTransport) bits.push(`ACP ${a.acpTransport}`);
   if (a.registry) {

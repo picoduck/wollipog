@@ -2062,6 +2062,8 @@ export interface AgentDefinition {
     /** Control-plane projection of a Machine selection; runners do not author this field. */
     selection?: "selected" | "other";
   };
+  /** Control-plane projection: an explicit Machine choice excludes this configured agent. */
+  harnessSelectionBlocked?: boolean;
   /** Stabilized Registry launch/install metadata. Does not imply trust to execute or capability. */
   registry?: AcpRegistryMetadata;
   /** ACP transport owned by this runner. Direct remote transports are intentionally unsupported. */

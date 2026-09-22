@@ -601,14 +601,12 @@ test("mergeAgents appends discovered agents not present in config", () => {
   );
 });
 
-test("mergeAgents preserves a different discovered launch when its id matches config", () => {
+test("mergeAgents keeps a configured same-name wrapper ahead of the discovered binary", () => {
   const config = [cfg({ id: "claude-code", command: "/custom/claude" })];
   const discovered = [cfg({ id: "claude-code", command: "/usr/bin/claude", source: "discovered" })];
   const merged = mergeAgents(config, discovered);
-  assert.equal(merged.length, 2);
+  assert.equal(merged.length, 1);
   assert.equal(merged[0]!.command, "/custom/claude", "config command wins");
-  assert.equal(merged[1]!.command, "/usr/bin/claude");
-  assert.equal(merged[1]!.id, "claude-code-native");
 });
 
 test("mergeAgents drops a discovered agent with the same launch target (driver/context/command)", () => {
@@ -733,7 +731,8 @@ test("a configured wrapper cannot inherit a different discovered installation id
   ]) {
     const merged = mergeAgents([configured], discovered);
     assert.equal(merged.find((agent) => agent.id === configured.id)?.installation, undefined);
-    assert.equal(merged.find((agent) => agent.installation?.id === "system")?.command, "/usr/bin/codex");
+    assert.equal(merged.find((agent) => agent.installation?.id === "system"), undefined,
+      "the unwrapped binary cannot bypass the configured launch policy");
   }
 });
 

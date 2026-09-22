@@ -260,6 +260,7 @@ export function resolveLaunchForAgent(
   agentId: string | null | undefined,
   driver: AgentDriverKind,
   context: AgentContext,
+  onTargetChanged?: () => void,
 ): { command: string; args: string[]; env: Record<string, string> } | null {
   if (!agentId) return null;
   const agent = agents.find((candidate) => {
@@ -277,7 +278,10 @@ export function resolveLaunchForAgent(
   });
   if (agent?.installation?.targetIdentity && !launchTargetStillMatches(
     { command: agent.command, args: agent.args ?? [] }, context, agent.installation.targetIdentity,
-  )) return null;
+  )) {
+    onTargetChanged?.();
+    return null;
+  }
   return agent
     ? { command: agent.command, args: [...(agent.args ?? [])], env: { ...(agent.env ?? {}) } }
     : null;

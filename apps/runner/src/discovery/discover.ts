@@ -426,7 +426,7 @@ const KNOWN: KnownAgent[] = [
 /** The logical installation entry point survives upgrades that replace its symlink target.
  * The context keeps a WSL path distinct from the same path on the native host. */
 function installationId(context: AgentContext, bin: ResolvedBinary): string {
-  return createHash("sha256").update(JSON.stringify([context, bin.path, bin.launch])).digest("hex").slice(0, 16);
+  return createHash("sha256").update(JSON.stringify([context, bin.path])).digest("hex").slice(0, 16);
 }
 
 function codexExecId(primaryId: string): string {
@@ -853,6 +853,7 @@ export function mergeAgents(
   // or environment references, and each probe result must stay attached to its own id.
   const configuredProbeById = new Map(configuredProbes.map((probe) => [probe.id, probe]));
   const matchedDiscoveredIds = new Set<string>();
+  const overrideKeys = new Set<string>();
   const enriched = safeConfigAgents.map((c) => {
     const exactMatch = /[\\/]/.test(c.command) ? discovered.find((d) =>
       d.driver === c.driver && JSON.stringify(d.context ?? { kind: "native" }) === JSON.stringify(c.context ?? { kind: "native" }) &&
@@ -889,6 +890,11 @@ export function mergeAgents(
     const sameInstallation = !!shapeMatch && effectiveCommand === shapeMatch.command &&
       JSON.stringify(effectiveArgs) === JSON.stringify(shapeMatch.args ?? []);
     if (sameInstallation && shapeMatch) matchedDiscoveredIds.add(shapeMatch.id);
+    if (!sameInstallation && shapeMatch && (/[\\/]/.test(c.command) || (c.args?.length ?? 0) > 0)) {
+      // A configured wrapper or custom argv may enforce policy. Preserve the pre-existing
+      // precedence rule: a same-name discovered binary must not appear as a bypass option.
+      for (const key of launchKeys(c)) overrideKeys.add(key);
+    }
     return applyCodexAgentEnvironment(applyClaudeAgentEnvironment({
       ...c,
       ...(adoptLaunch ? { command: d.command, args: [...(d.args ?? [])] } : {}),
@@ -951,6 +957,7 @@ export function mergeAgents(
   const extras: AgentDefinition[] = [];
   for (const d of discovered) {
     if (matchedDiscoveredIds.has(d.id)) continue;
+    if (launchKeys(d).some((key) => overrideKeys.has(key))) continue;
     let id = d.id;
     if (usedIds.has(id)) {
       const suffix = d.driver === "codex-app-server"

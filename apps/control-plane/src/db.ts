@@ -9900,12 +9900,16 @@ export class ControlPlaneDb {
 
     const harnessSelections = this.getHarnessInstallationSelections(row.runner_id, agents);
     for (const agent of agents) {
-      if (!agent.installation) continue;
       const family = harnessInstallationFamily(agent.driver);
       const selected = harnessSelections.find((item) => item.family === family &&
         harnessInstallationContext(item.context) === harnessInstallationContext(agent.context));
-      if (selected) agent.installation.selection = selected.installationId === agent.installation.id
-        ? "selected" : "other";
+      if (!selected) continue;
+      if (agent.installation) {
+        agent.installation.selection = selected.installationId === agent.installation.id
+          ? "selected" : "other";
+      } else {
+        agent.harnessSelectionBlocked = true;
+      }
     }
 
     const runtime = runnerSupportsProtocol(row.protocol_version, "runtimeDiagnostics")

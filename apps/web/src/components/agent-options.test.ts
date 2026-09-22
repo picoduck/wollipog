@@ -57,8 +57,10 @@ test("competing installations remain separate choices and only the Machine selec
     installation: { id: "system", path: "/usr/bin/codex", via: "path", selection: "other" } });
   const local = agent({ id: "codex-installation-local", name: "Codex", driver: "codex-app-server",
     installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir", selection: "selected" } });
-  const options = agentOptions([system, local]);
-  assert.equal(options.length, 2);
+  const wrapper = agent({ id: "configured-wrapper", name: "Codex", driver: "codex-app-server",
+    harnessSelectionBlocked: true });
+  const options = agentOptions([system, local, wrapper]);
+  assert.equal(options.length, 3);
   assert.ok(options.some((option) => option.label.includes("/usr/bin/codex")));
   assert.ok(options.some((option) => option.label.includes("/home/u/.local/bin/codex")));
   assert.deepEqual(options.filter((option) => !option.disabled).map((option) => option.agent.id), [local.id]);

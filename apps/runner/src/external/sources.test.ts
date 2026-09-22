@@ -310,3 +310,14 @@ test("exact launch authorization preserves signed-out provider recovery but reje
     "a generic explicit disable is not mistaken for authentication recovery",
   );
 });
+
+test("a changed installation target fails closed and schedules rediscovery", () => {
+  const missing = join(tmpdir(), "wollipog-replaced-harness-entry");
+  let rediscoveries = 0;
+  const selected = agent({ command: missing, args: [], installation: {
+    id: "selected", path: missing, via: "path", targetIdentity: JSON.stringify([missing]),
+  } });
+  assert.equal(resolveLaunchForAgent([selected], "claude", "claude-code", { kind: "native" },
+    () => { rediscoveries++; }), null);
+  assert.equal(rediscoveries, 1);
+});

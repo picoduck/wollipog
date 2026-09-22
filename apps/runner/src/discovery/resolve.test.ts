@@ -112,6 +112,13 @@ test("an upgraded symlink keeps its installation entry point but needs rediscove
   }
 });
 
+test("a WSL launch checks its pinned target without starting the distribution synchronously", () => {
+  const launch = { command: "/opt/codex/v1/bin/codex", args: [] };
+  const context = { kind: "wsl" as const, distro: "Ubuntu" };
+  assert.equal(launchTargetStillMatches(launch, context, JSON.stringify([launch.command])), true);
+  assert.equal(launchTargetStillMatches(launch, context, JSON.stringify(["/opt/codex/v2/bin/codex"])), false);
+});
+
 test("launchForVersionManagerHit: node scripts wrap, real binaries run direct", () => {
   const node = "/h/.nvm/versions/node/v25.2.1/bin/node";
   const shim = "/h/.nvm/versions/node/v25.2.1/bin/codex";

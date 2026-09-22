@@ -743,7 +743,9 @@ const sessionNaming = new SessionNamingExecutor({
 // a matching agent (discovery finished after the adopt, or the user installed the CLI later).
 const sessions: SessionManager = new SessionManager(() => {}, log, store, config.runnerId, (driver, context, agentId) =>
   agentId
-    ? resolveLaunchForAgent(metadata.agents, agentId, driver, context)
+    ? resolveLaunchForAgent(metadata.agents, agentId, driver, context, () => {
+        void runDiscovery(false, false).catch((error) => log(`harness rediscovery after target change failed: ${errText(error)}`));
+      })
     : resolveLaunchForDriver(metadata.agents, driver, context),
   undefined,
   config.dataDir,
