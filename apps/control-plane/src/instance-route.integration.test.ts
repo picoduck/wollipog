@@ -247,6 +247,26 @@ function sharedRows(
   }
 }
 
+function insertRunningShellFixture(database: string): void {
+  const raw = new DatabaseSync(database);
+  try {
+    // The live control plane keeps writing after registration. Give this one fixture write the
+    // same bounded contention window as other integration fixtures instead of failing immediately.
+    raw.exec("PRAGMA busy_timeout=5000");
+    raw.prepare(
+      `INSERT INTO session_shells (shell_id, session_id, runner_id, name, created_at, updated_at)
+       VALUES ('shell_shared', ?, ?, 'Shell 1', 1, 1)`,
+    ).run(SHARED_SESSION_ID, SHARED_RUNNER_ID);
+  } catch (error) {
+    throw new Error(
+      "duplicate-start fixture failed to INSERT session_shells during live-state setup",
+      { cause: error },
+    );
+  } finally {
+    raw.close();
+  }
+}
+
 async function waitForLiveSharedRows(database: string): Promise<void> {
   for (let attempt = 0; attempt < 200; attempt++) {
     const state = sharedRows(database);
@@ -593,15 +613,7 @@ test(`a duplicate start with ${failureMode} leaves the live control plane's runn
 
   // A running shell is connection-owned state too: the duplicate's startup shell reconciliation
   // must not flip it to `reconnecting`.
-  const rawDb = new DatabaseSync(database);
-  try {
-    rawDb.prepare(
-      `INSERT INTO session_shells (shell_id, session_id, runner_id, name, created_at, updated_at)
-       VALUES ('shell_shared', ?, ?, 'Shell 1', 1, 1)`,
-    ).run(SHARED_SESSION_ID, SHARED_RUNNER_ID);
-  } finally {
-    rawDb.close();
-  }
+  insertRunningShellFixture(database);
 
   const beforeDuplicate = sharedRows(database);
   assert.equal(beforeDuplicate.session_shells[0]?.status, "running");
