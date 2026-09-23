@@ -81,6 +81,10 @@ test("handoff rejects oversized or misordered input before returning a portable 
 
 test("handoff destination settings fail closed for unsupported or unauthenticated peers", () => {
   assert.equal(handoffDestinationError(agent, "codex-app-server", { model: "model", effort: "high", permissionMode: "default" }), null);
+  assert.match(handoffDestinationError({ ...agent, installation: { id: "local", path: "/local/claude", via: "path", selection: "other" } },
+    "codex-app-server", { model: "model" })!, /Another harness installation is selected/);
+  assert.match(handoffDestinationError({ ...agent, harnessSelectionBlocked: true },
+    "codex-app-server", { model: "model" })!, /Another harness installation is selected/);
   assert.match(handoffDestinationError(agent, "claude-code", { model: "model" })!, /different agent/);
   assert.match(handoffDestinationError({ ...agent, authStatus: "unknown" }, "codex-app-server", { model: "model" })!, /authenticate/);
   assert.match(handoffDestinationError(agent, "codex-app-server", { model: "missing" })!, /supported destination model/);

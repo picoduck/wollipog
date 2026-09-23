@@ -1883,6 +1883,69 @@ test("getAgentLaunch returns command/args/env/driver/context/version", () => {
   assert.equal(db.getAgentLaunch("nope", "acp-agent"), null);
 });
 
+test("discovered installation provenance survives runner registration and rediscovery", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const system = { ...acpAgent(), id: "codex-system", name: "Codex System",
+    command: "/usr/bin/codex", driver: "codex" as const,
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" as const },
+    update: { status: "managed_externally" as const, checkedAt: 500, channel: "stable" as const,
+      evidenceSource: "Executable installation provenance", managedExternally: true as const,
+      guidance: "Use the original manager." } };
+  const local = { ...acpAgent(), id: "codex-local", name: "Codex Local",
+    command: "/home/u/.local/bin/codex", driver: "codex" as const,
+    installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" as const } };
+  db.registerRunner(meta({ agents: [system, local] }), 500, PROTOCOL_VERSION);
+  assert.deepEqual(db.getRunner("runner-1")?.agents.map((agent) => agent.installation?.id), ["local", "system"]);
+  assert.equal(db.getRunner("runner-1")?.agents.find((agent) => agent.id === system.id)?.update?.checkedAt, 500);
+  db.updateRunnerAgents("runner-1", [local, system], 600);
+  assert.equal(db.getRunner("runner-1")?.agents.find((agent) => agent.id === local.id)?.installation?.path,
+    "/home/u/.local/bin/codex");
+});
+
+test("Machine installation selection survives PATH reorder and fails closed when the target disappears", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const system = { ...acpAgent(), id: "codex", name: "Codex", driver: "codex" as const,
+    command: "/usr/bin/codex", available: true,
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
+  const local = { ...system, id: "codex-installation-local", command: "/home/u/.local/bin/codex",
+    installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" as const } };
+  db.registerRunner(meta({ agents: [system, local] }), 500, PROTOCOL_VERSION);
+  assert.equal(db.selectHarnessInstallation("runner-1", "codex", "wrong"), null);
+  assert.equal(db.selectHarnessInstallation("runner-1", "codex", "system")?.installationId, "system");
+  assert.equal(db.getAgentLaunch("runner-1", "codex")?.command, "/usr/bin/codex");
+  assert.equal(db.getAgentLaunch("runner-1", "codex-installation-local"), null);
+
+  const reordered = [
+    { ...local, id: "codex" },
+    { ...system, id: "codex-installation-system" },
+  ];
+  db.updateRunnerAgents("runner-1", reordered, 600);
+  assert.equal(db.getAgentLaunch("runner-1", "codex"), null);
+  assert.equal(db.getAgentLaunch("runner-1", "codex-installation-system")?.command, "/usr/bin/codex");
+  assert.equal(db.getRunner("runner-1")?.harnessSelections?.[0]?.agentId, "codex-installation-system");
+
+  db.updateRunnerAgents("runner-1", [reordered[0]!], 700);
+  assert.equal(db.getRunner("runner-1")?.harnessSelections?.[0]?.agentId, null);
+  assert.equal(db.getRunner("runner-1")?.harnessSelections?.[0]?.path, "/usr/bin/codex");
+  assert.equal(db.getAgentLaunch("runner-1", "codex"), null);
+  db.registerRunner(meta({ agents: reordered }), 800, PROTOCOL_VERSION - 1);
+  assert.equal(db.getAgentLaunch("runner-1", "codex-installation-system"), null,
+    "an older runner cannot claim to enforce the saved choice");
+});
+
+test("a configured WSL wrapper is blocked by a selection regardless of context field order", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const selected = { ...acpAgent(), id: "codex", driver: "codex-app-server" as const,
+    command: "/usr/bin/codex", available: true, context: { kind: "wsl" as const, distro: "Ubuntu" },
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
+  const wrapper = { ...selected, id: "wrapper", command: "/opt/wrap/codex",
+    context: { distro: "Ubuntu", kind: "wsl" as const }, installation: undefined };
+  db.registerRunner(meta({ agents: [selected, wrapper] }), 500, PROTOCOL_VERSION);
+  assert.equal(db.selectHarnessInstallation("runner-1", "codex", "system")?.installationId, "system");
+  assert.equal(db.getRunner("runner-1")?.agents.find((agent) => agent.id === "wrapper")?.harnessSelectionBlocked, true);
+  assert.equal(db.getAgentLaunch("runner-1", "wrapper"), null);
+});
+
 test("getAgentLaunch fails closed for unavailable and legacy unverified agents", () => {
   const db = ControlPlaneDb.open(":memory:");
   const unavailable = {

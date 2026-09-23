@@ -743,7 +743,9 @@ const sessionNaming = new SessionNamingExecutor({
 // a matching agent (discovery finished after the adopt, or the user installed the CLI later).
 const sessions: SessionManager = new SessionManager(() => {}, log, store, config.runnerId, (driver, context, agentId) =>
   agentId
-    ? resolveLaunchForAgent(metadata.agents, agentId, driver, context)
+    ? resolveLaunchForAgent(metadata.agents, agentId, driver, context, () => {
+        void runDiscovery(false, false).catch((error) => log(`harness rediscovery after target change failed: ${errText(error)}`));
+      })
     : resolveLaunchForDriver(metadata.agents, driver, context),
   undefined,
   config.dataDir,
@@ -1576,7 +1578,8 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     // labeled cache fallback, codex-exec cache, or Claude aliases), replacing the catalog list.
     metadata.agents = applyClaudeHookCapability(
       await enrichAgentModels(
-        mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents]), {
+        mergeAgents(configAgents, discovered, [...configuredAcpAgents, ...configuredPiAgents],
+          new Set(config.agents.filter((agent) => Object.keys(agent.env ?? {}).length > 0).map((agent) => agent.id))), {
         refresh: refreshModels,
       }),
       claudeHookFeatureEnabled,
@@ -2206,6 +2209,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         sendUp({ type: "fork_result", requestId: msg.requestId, ok: false, error: "destination agent is not installed on this runner" });
         break;
       }
+      if (msg.handoff?.expectedInstallationId &&
+          destination?.installation?.id !== msg.handoff.expectedInstallationId) {
+        sendUp({ type: "fork_result", requestId: msg.requestId, ok: false,
+          error: "The selected destination harness installation changed; retry after Machine rediscovery." });
+        break;
+      }
       void sessions
         .forkConversation(msg.sourceSessionId, msg.targetSessionId, msg.turn, msg.title, msg.deferHistory === true,
           msg.handoff && destination ? { agent: destination, config: msg.handoff.config } : undefined,
@@ -2370,6 +2379,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       runCommandTask("start_provider_login", providerLoginSupervisor.startAccount(
         msg.accountId ? { accountId: msg.accountId } : { provider: msg.provider!, label: msg.label! },
+        msg.installationSelections,
       ).then((login) => sendUp({
         type: "provider_login_result",
         requestId: msg.requestId,

@@ -52,6 +52,20 @@ test("single-variant family drops the redundant 'Native' suffix", () => {
   assert.deepEqual(out, ["Claude Code"]);
 });
 
+test("competing installations remain separate choices and only the Machine selection is runnable", () => {
+  const system = agent({ id: "codex", name: "Codex", driver: "codex-app-server",
+    installation: { id: "system", path: "/usr/bin/codex", via: "path", selection: "other" } });
+  const local = agent({ id: "codex-installation-local", name: "Codex", driver: "codex-app-server",
+    installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir", selection: "selected" } });
+  const wrapper = agent({ id: "configured-wrapper", name: "Codex", driver: "codex-app-server",
+    harnessSelectionBlocked: true });
+  const options = agentOptions([system, local, wrapper]);
+  assert.equal(options.length, 3);
+  assert.ok(options.some((option) => option.label.includes("/usr/bin/codex")));
+  assert.ok(options.some((option) => option.label.includes("/home/u/.local/bin/codex")));
+  assert.deepEqual(options.filter((option) => !option.disabled).map((option) => option.agent.id), [local.id]);
+});
+
 test("Codex variants keep app-server and exec distinct per context, with app-server first", () => {
   const out = labels([
     agent({ id: "codex-wsl", name: "Codex (WSL: Ubuntu-24.04)", driver: "codex", context: { kind: "wsl", distro: "Ubuntu-24.04" } }),

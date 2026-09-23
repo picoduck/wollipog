@@ -18,7 +18,9 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceT
   agents: AgentDefinition[]; sourceDriver: string; sourceServiceTier?: string; turn: number; onClose: () => void;
   onCreate: (agentId: string, config: SessionConfig) => Promise<void>;
 }) {
-  const choices = agents.filter((agent) => agent.driver !== sourceDriver && ["claude-code", "codex-app-server"].includes(agent.driver ?? ""));
+  const choices = agents.filter((agent) => agent.driver !== sourceDriver &&
+    ["claude-code", "codex-app-server"].includes(agent.driver ?? "") &&
+    agent.installation?.selection !== "other" && !agent.harnessSelectionBlocked);
   const [agentId, setAgentId] = useState(choices[0]?.id ?? "");
   const agent = choices.find((item) => item.id === agentId);
   const [config, setConfig] = useState<SessionConfig>(() => seedConfig(agent, sourceServiceTier));

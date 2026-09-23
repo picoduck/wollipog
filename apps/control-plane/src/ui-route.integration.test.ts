@@ -628,6 +628,14 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     body: JSON.stringify({ provider: "claude", label: "Work" }),
   });
   assert.equal(ordinaryProviderLogin.status, 403, "an ordinary member cannot mutate Machine credentials");
+  const unknownAccountLogin = await fetchWithBearer(
+    `${httpBase}/api/runners/runner-ui-route/provider-logins`,
+    ownerToken,
+    { method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ accountId: "account-not-advertised" }) },
+  );
+  assert.equal(unknownAccountLogin.status, 409,
+    "an account absent from the Machine snapshot cannot bypass a saved installation choice");
   const providerLoginResponse = fetchWithBearer(
     `${httpBase}/api/runners/runner-ui-route/provider-logins`,
     ownerToken,

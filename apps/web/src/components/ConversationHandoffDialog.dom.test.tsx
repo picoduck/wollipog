@@ -130,3 +130,18 @@ test("no carried tier and no catalog leaves the dialog exactly as it was", async
     await fixture.unmount();
   }
 });
+
+test("handoff choices exclude installations blocked by the Machine selection", async () => {
+  for (const blocked of [
+    { ...claude(), installation: { id: "local", path: "/local/claude", via: "path" as const, selection: "other" as const } },
+    { ...claude(), harnessSelectionBlocked: true },
+  ]) {
+    const fixture = await mount(blocked);
+    try {
+      assert.equal(fixture.create().disabled, true);
+      assert.doesNotMatch(fixture.text(), /Claude Code/);
+    } finally {
+      await fixture.unmount();
+    }
+  }
+});

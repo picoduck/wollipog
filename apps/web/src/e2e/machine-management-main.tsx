@@ -219,6 +219,27 @@ const client = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { ok: true as const };
   },
+  selectHarnessInstallation: async (_runnerId: string, agentId: string, installationId: string) => {
+    if (!runner) throw new Error("runner not found");
+    const agent = runner.agents.find((candidate) => candidate.id === agentId);
+    if (!agent?.installation || agent.installation.id !== installationId) throw new Error("installation not found");
+    const selection = {
+      family: "codex" as const,
+      context: agent.context ?? { kind: "native" as const },
+      installationId: agent.installation.id,
+      path: agent.installation.path,
+      via: agent.installation.via,
+      version: agent.version,
+      agentId,
+    };
+    runner.harnessSelections = [selection];
+    runner.agents = runner.agents.map((candidate) => ({ ...candidate,
+      installation: candidate.installation ? { ...candidate.installation,
+        selection: candidate.installation.id === selection.installationId ? "selected" as const : "other" as const } : undefined,
+    }));
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { selection };
+  },
   updateMachineCapacity: async (_runnerId: string, body: { configuredUnits: number; expectedRevision: number }) => {
     if (!runner?.capacity) throw new Error("runner not found");
     if (body.expectedRevision !== runner.capacity.revision) throw new Error("Runner Capacity changed in another client");
@@ -334,7 +355,7 @@ declare global {
     __WOLLIPOG_MACHINE_E2E__: {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
       lastAddBoxRequest(): AddBoxRequest | null;
-      setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable"): void;
+      setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" | "multiple-installations"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
     };
   }
@@ -357,6 +378,37 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
         context: { kind: "native" },
         source: "config",
       }];
+    } else if (scenario === "multiple-installations") {
+      runner.protocolVersion = PROTOCOL_VERSION;
+      runner.agents = [
+        {
+          id: "codex",
+          name: "Codex",
+          command: "/usr/bin/codex",
+          args: [], env: {}, driver: "codex-app-server", context: { kind: "native" },
+          source: "discovered", available: true, authStatus: "authenticated", version: "0.199.0",
+          installation: { id: "system", path: "/usr/bin/codex", via: "path", selection: "selected" },
+          update: { status: "update_available", installedVersion: "0.199.0",
+            latestKnownCompatibleVersion: "0.199.0", latestPublishedVersion: "0.210.0",
+            checkedAt: Date.UTC(2026, 8, 22), channel: "stable",
+            evidenceSource: "npm dist-tags for @openai/codex", managedExternally: true,
+            guidance: "Use the installation's original package or version manager, then rediscover." },
+        },
+        {
+          id: "codex-installation-local", name: "Codex",
+          command: "/home/misko/.local/bin/codex",
+          args: [], env: {}, driver: "codex-app-server", context: { kind: "native" },
+          source: "discovered", available: true, authStatus: "authenticated", version: "0.210.0",
+          installation: { id: "local", path: "/home/misko/.local/bin/codex", via: "common-dir", selection: "other" },
+          update: { status: "up_to_date", installedVersion: "0.210.0",
+            latestKnownCompatibleVersion: "0.210.0", latestPublishedVersion: "0.210.0",
+            checkedAt: Date.UTC(2026, 8, 22), channel: "stable",
+            evidenceSource: "npm dist-tags for @openai/codex", managedExternally: true,
+            guidance: "Use the installation's original package or version manager, then rediscover." },
+        },
+      ];
+      runner.harnessSelections = [{ family: "codex", context: { kind: "native" },
+        installationId: "system", path: "/usr/bin/codex", via: "path", version: "0.199.0", agentId: "codex" }];
     } else {
       runner.protocolVersion = 154;
       runner.agents = [{
