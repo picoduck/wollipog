@@ -22,6 +22,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { AutomationsView } from "./AutomationsView.js";
+import { agentOptions } from "./agent-options.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -633,12 +634,14 @@ test("editing a pinned automation shows its rediscovered installation instead of
 });
 
 test("a workflow role named orchestrator keeps a role binding separate from its orchestrator", async () => {
+  const manual = { ...runners[0]!.agents[0]!, id: "manual", driver: "acp" as const,
+    installation: undefined };
   const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
     ...runners[0]!.agents[0]!, id: "orchestrator", installation: {
       id: "system", path: "/usr/bin/claude", via: "path" as const,
       selection: "selected" as const,
     },
-  }] };
+  }, manual] };
   const stored = schedule("role-orchestrator", "Workflow Sweep");
   stored.action = { kind: "workflow_run", request: {
     runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
@@ -661,6 +664,16 @@ test("a workflow role named orchestrator keeps a role binding separate from its 
     assert.equal(action?.kind === "workflow_run" && action.request.orchestratorAgentId, undefined);
     assert.equal(action?.kind === "workflow_run" &&
       action.installationBindings?.["role:orchestrator"]?.installationId, "system");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await choose(fixture.container, "Orchestrator Agent",
+      agentOptions(machine.agents).find((option) => option.agent.id === "manual")!.label);
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    const configAction = fixture.updates[1]?.spec.action;
+    assert.equal(configAction?.kind === "workflow_run" &&
+      configAction.request.agentBindings?.orchestrator, "manual");
+    assert.equal(configAction?.kind === "workflow_run" &&
+      configAction.installationBindings?.["role:orchestrator"], undefined);
   } finally {
     await unmountFixture(fixture);
   }

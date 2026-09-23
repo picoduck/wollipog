@@ -358,16 +358,20 @@ export function AutomationsView() {
       const installations = { ...spec.action.installationBindings };
       for (const [key, agentId] of Object.entries(workflowBindingEdits)) {
         const installation = installationFor(selectedRunner, agentId);
-        if (!installation) throw new Error(`Select an available Agent Harness installation for ${
+        const configAgent = bindableAgents(selectedRunner).some((option) =>
+          option.agent.id === agentId && !option.agent.installation);
+        if (!installation && !configAgent) throw new Error(`Select an available Agent Harness installation for ${
           key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length))}.`);
         if (key === "orchestrator") {
           request.orchestratorAgentId = agentId;
-          installations.orchestrator = installation;
+          if (installation) installations.orchestrator = installation;
+          else delete installations.orchestrator;
           continue;
         }
         const role = key.slice("role:".length);
         bindings[role] = agentId;
-        installations[key] = installation;
+        if (installation) installations[key] = installation;
+        else delete installations[key];
       }
       request.agentBindings = bindings;
       spec.action.installationBindings = installations;
@@ -379,16 +383,20 @@ export function AutomationsView() {
       const installations = { ...target.installationBindings };
       for (const [key, agentId] of Object.entries(alternateWorkflowBindingEdits)) {
         const installation = installationFor(selectedFallback, agentId);
-        if (!installation) throw new Error(`Select an available alternate Agent Harness installation for ${
+        const configAgent = bindableAgents(selectedFallback).some((option) =>
+          option.agent.id === agentId && !option.agent.installation);
+        if (!installation && !configAgent) throw new Error(`Select an available alternate Agent Harness installation for ${
           key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length))}.`);
         if (key === "orchestrator") {
           target.orchestratorAgentId = agentId;
-          installations.orchestrator = installation;
+          if (installation) installations.orchestrator = installation;
+          else delete installations.orchestrator;
           continue;
         }
         const role = key.slice("role:".length);
         bindings[role] = agentId;
-        installations[key] = installation;
+        if (installation) installations[key] = installation;
+        else delete installations[key];
       }
       target.agentBindings = bindings;
       target.installationBindings = installations;
