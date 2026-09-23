@@ -115,6 +115,32 @@ for (const { label, viewport } of [
   { label: "mobile", viewport: { width: 375, height: 812 } },
 ]) {
   for (const theme of ["dark", "light"] as const) {
+    test.describe(`${label} ${theme} inherited alternate workflow pins`, () => {
+      test.use({ viewport });
+      test("shows the edited primary identity in inherited alternate selectors", async ({ page }) => {
+        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-bound&inherited-alternate-pins`);
+        await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
+        await page.getByRole("button", { name: "Edit", exact: true }).click();
+        await expect(page.getByRole("button", { name: "Alternate Agent-1 Agent: Claude Code" })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Alternate Orchestrator Agent: Claude Code" })).toBeVisible();
+        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-inherited-pins-before-${label}-${theme}.png`), fullPage: true,
+        });
+
+        await page.getByRole("button", { name: "Agent-1 Agent: Claude Code", exact: true }).click();
+        await page.getByRole("option", { name: "Codex App Server" }).click();
+        await page.getByRole("button", { name: "Orchestrator Agent: Claude Code", exact: true }).click();
+        await page.getByRole("option", { name: "Codex App Server" }).click();
+        await expect(page.getByRole("button", { name: "Alternate Agent-1 Agent: Codex App Server" })).toBeVisible();
+        await expect(page.getByRole("button", { name: "Alternate Orchestrator Agent: Codex App Server" })).toBeVisible();
+        await expect(page.getByText(/This saved alternate (role|orchestrator) installation is unavailable or unbound/)).toHaveCount(0);
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-inherited-pins-after-${label}-${theme}.png`), fullPage: true,
+        });
+      });
+    });
+
     test.describe(`${label} ${theme} workflow orchestrator installation`, () => {
       test.use({ viewport });
       test("shows a card warning when the saved orchestrator has no installation binding", async ({ page }) => {

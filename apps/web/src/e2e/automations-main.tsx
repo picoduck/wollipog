@@ -157,6 +157,21 @@ if (workflowSwitchRunner) {
   } } : {}) } };
 }
 
+if (params.has("inherited-alternate-pins") && workflowSwitchRunner) {
+  const oldAgent = runner.agents[0]!;
+  const newAgent = { ...oldAgent, id: "new-agent", name: "New Agent", driver: "codex-app-server" as const,
+    installation: { id: "new", path: "/usr/bin/codex", via: "path" as const, selection: "selected" as const } };
+  runner.agents.push(newAgent);
+  workflowSwitchRunner.agents = [oldAgent, newAgent];
+  items[0]!.runnerPolicy = { kind: "alternate", targets: [{
+    runnerId: "runner-2", workspaceId: "workspace-2",
+    installationBindings: {
+      "role:agent-1": { driver: "claude-code", context: { kind: "native" }, installationId: "system" },
+      orchestrator: { driver: "claude-code", context: { kind: "native" }, installationId: "system" },
+    },
+  }] };
+}
+
 const triggerItems: AutomationTriggerView[] = [{
   triggerId: "atr_issue_intake",
   automationId: "automation-nightly-sweep",

@@ -844,6 +844,81 @@ test("alternate workflow selectors follow the effective primary choice after a M
   }
 });
 
+test("inherited alternate installation pins display edited primary workflow identities", async () => {
+  const installedAgents = runners[0]!.agents.slice(0, 2).map((agent, index) => ({
+    ...agent,
+    installation: {
+      id: index === 0 ? "claude-system" : "codex-system",
+      path: index === 0 ? "/usr/bin/claude" : "/usr/bin/codex",
+      via: "path" as const,
+      selection: "selected" as const,
+    },
+  }));
+  const primary = { ...runners[0]!, protocolVersion: 175, agents: installedAgents };
+  const alternate = { ...runners[1]!, protocolVersion: 175, agents: installedAgents };
+  const oldPin = { driver: "claude-code" as const, context: { kind: "native" as const }, installationId: "claude-system" };
+  const stored = schedule("inherited-alternate-pins", "Inherited Alternate Pins");
+  stored.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
+    agentBindings: { "rich-agent": "rich-agent" }, orchestratorAgentId: "rich-agent",
+  }, installationBindings: { "role:rich-agent": oldPin, orchestrator: oldPin } };
+  stored.runnerPolicy = { kind: "alternate", targets: [{
+    runnerId: "runner-2", workspaceId: "runner-2-workspace",
+    installationBindings: { "role:rich-agent": oldPin, orchestrator: oldPin },
+  }] };
+  const workflow: WorkflowDefinition = {
+    workflowId: "graph-1", version: 1, name: "Graph", source: "custom", maxTransitions: 1,
+    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
+    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
+      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
+  };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [primary, alternate], [workflow]);
+  try {
+    await expandCard(fixture, "Inherited Alternate Pins");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    const alternateRole = () => choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "";
+    const alternateOrchestrator = () => choiceTrigger(fixture.container, "Alternate Orchestrator Agent")?.getAttribute("aria-label") ?? "";
+    assert.match(alternateRole(), /Claude Code/);
+    assert.match(alternateOrchestrator(), /Claude Code/);
+
+    await choose(fixture.container, "Rich-Agent Agent", "Codex App Server");
+    await choose(fixture.container, "Orchestrator Agent", "Codex App Server");
+    assert.match(alternateRole(), /Codex App Server/, "inherited role must display the identity that saving will pin");
+    assert.match(alternateOrchestrator(), /Codex App Server/, "inherited Orchestrator must follow the primary edit");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /This saved alternate (role|orchestrator) installation is unavailable or unbound/);
+
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    const saved = fixture.updates[0]?.spec;
+    assert.equal(saved?.action.kind, "workflow_run");
+    assert.equal(saved.action.request.agentBindings?.["rich-agent"], "other-agent");
+    assert.equal(saved.action.request.orchestratorAgentId, "other-agent");
+    assert.equal(saved.runnerPolicy.kind, "alternate");
+    assert.equal(saved.runnerPolicy.targets[0]?.agentBindings?.["rich-agent"], undefined);
+    assert.equal(saved.runnerPolicy.targets[0]?.orchestratorAgentId, undefined);
+  } finally {
+    await unmountFixture(fixture);
+  }
+
+  const missingAlternate = { ...alternate, agents: [installedAgents[0]!] };
+  const unavailableFixture = await mountFixture([stored], {}, {}, [], {}, [primary, missingAlternate], [workflow]);
+  try {
+    await expandCard(unavailableFixture, "Inherited Alternate Pins");
+    await act(async () => { button(unavailableFixture.container, "Edit").click(); });
+    await choose(unavailableFixture.container, "Rich-Agent Agent", "Codex App Server");
+    await choose(unavailableFixture.container, "Orchestrator Agent", "Codex App Server");
+    assert.match(choiceTrigger(unavailableFixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
+      /other-agent \(Unavailable\)/);
+    assert.match(choiceTrigger(unavailableFixture.container, "Alternate Orchestrator Agent")?.getAttribute("aria-label") ?? "",
+      /other-agent \(Unavailable\)/);
+    assert.equal([...unavailableFixture.container.querySelectorAll('[role="alert"]')]
+      .filter((alert) => /saved alternate (role|orchestrator) installation is unavailable or unbound/.test(alert.textContent ?? ""))
+      .length, 2, "both inherited identities remain fail closed when the edited choice is missing");
+  } finally {
+    await unmountFixture(unavailableFixture);
+  }
+});
+
 test("the automation card flags an unbound primary workflow orchestrator", async () => {
   const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
     ...runners[0]!.agents[0]!, installation: {
