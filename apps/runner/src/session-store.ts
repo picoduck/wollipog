@@ -196,6 +196,8 @@ export interface SessionMeta {
       images: PromptImageInput[];
       slashCommand?: string;
       config?: SessionConfig;
+      /** Authenticated provenance of a retained automatic campaign prompt. */
+      campaignContinuation?: true;
       /** Complete recovered-question continuation state. Authentication temporarily replaces the
        * visible question card, so replay cannot reconstruct this correlation from pendingApproval. */
       recoveredQuestion?: {

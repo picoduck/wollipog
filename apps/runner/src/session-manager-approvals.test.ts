@@ -843,6 +843,76 @@ test("campaign continuation replaces a question that cannot resume for a late an
   }
 });
 
+test("a campaign continuation retained for authentication keeps its async question on replay", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    const prompts: string[] = [];
+    entry.running = false;
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "codex-thread";
+    entry.client.prompt = async (text: string) => { prompts.push(text); return "end_turn" as const; };
+    (sm as any).providerAuthRecovery = {};
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex", agentSessionId: "codex-thread" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:auth-campaign",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+    const occurrence = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:auth-campaign-second",
+      questions: [{ id: "0", question: "Which follow-up?", options: [{ label: "Review" }] }],
+    });
+    const secondOccurrence = pendingRequests(store.readMeta("s_perm")?.pendingApproval)[1]!.recoveryId!;
+    const block = {
+      version: 1 as const, recoveryId: "auth-campaign", credentialScopeId: "scope-auth-campaign",
+      detectedAt: Date.now(), phase: "turn" as const, delivery: "not_delivered" as const,
+      canStartLogin: false, configuredCredential: false,
+    };
+    store.patchMeta("s_perm", { providerAuthBlock: block });
+    (sm as any).emitEvent("s_perm", {
+      kind: "permission_request", requestId: "provider-auth:auth-campaign", purpose: "authentication",
+      title: "Authentication Required", options: [],
+    });
+    assert.deepEqual(pendingRequests(store.readMeta("s_perm")?.pendingApproval).map((request) => request.kind),
+      ["authentication", "question", "question"]);
+    const transitions: string[] = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "retained_campaign_turn",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    };
+    assert.equal(sm.prompt("s_perm", "Campaign after authentication", [], undefined, undefined,
+      lifecycle, false, undefined, false, undefined, undefined, undefined, true), true);
+    const retained = store.readMeta("s_perm")!.providerAuthBlock!.durableRetries![0]!;
+    assert.equal(retained.campaignContinuation, true);
+    assert.equal(eventsOf(sent, "user_message").length, 0);
+    store.patchMeta("s_perm", {
+      providerAuthBlock: { ...store.readMeta("s_perm")!.providerAuthBlock!, resolution: "approved" },
+    });
+    (sm as any).settleResolvedProviderAuthentication("s_perm");
+    for (let attempt = 0; attempt < 40 && !transitions.includes("completed"); attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.ok(transitions.includes("completed"), transitions.join(", "));
+    assert.deepEqual(prompts, ["Campaign after authentication"]);
+    assert.equal((eventsOf(sent, "user_message")[0] as { payload: { campaignContinuation?: boolean } })
+      .payload.campaignContinuation, true);
+    assert.deepEqual(pendingRequests(store.readMeta("s_perm")?.pendingApproval)
+      .map((request) => request.recoveryId), [occurrence, secondOccurrence]);
+    assert.equal(eventsOf(sent, "question_resolved").length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
 test("restart reconstructs an async question across a synthetic campaign message", () => {
   const { sm, store, cleanup } = makeHarness("none");
   try {

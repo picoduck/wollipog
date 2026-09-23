@@ -623,6 +623,13 @@ function canResumeSession(meta: SessionMeta): boolean {
     meta.driver === "pi";
 }
 
+/** Keep nonblocking questions while authentication owns the visible approval barrier. */
+function pendingAsyncQuestions(pending: PendingApproval | null | undefined): PendingApproval | null {
+  return pendingRequests(pending)
+    .filter((request) => request.kind === "question" && request.async)
+    .reduce<PendingApproval | null>((current, request) => addPendingRequest(current, request), null);
+}
+
 function canResumeRecoveredQuestion(
   meta: SessionMeta,
   question: NonNullable<SessionMeta["pendingApproval"]>,
@@ -7929,6 +7936,7 @@ export class SessionManager {
           durable,
           reservedOrdinal,
           recoveredQuestion,
+          campaignContinuation,
         );
       }
       this.emitEvent(sessionId, {
@@ -9724,6 +9732,7 @@ export class SessionManager {
           durable,
           reservedOrdinal,
           recoveredQuestion,
+          campaignContinuation,
         );
       } else if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
           blocked.providerAuthRetryAttemptedRecoveryId !== blocked.providerAuthBlock.recoveryId &&
@@ -15682,6 +15691,7 @@ export class SessionManager {
     durable: DurableCommandLifecycle,
     reservedOrdinal: number | undefined,
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
+    campaignContinuation = false,
   ): boolean {
     const block = meta.providerAuthBlock;
     if (!block) return false;
@@ -15713,6 +15723,7 @@ export class SessionManager {
         images,
         ...(slashCommand ? { slashCommand } : {}),
         ...(config ? { config } : {}),
+        ...(campaignContinuation ? { campaignContinuation: true as const } : {}),
         ...(recoveredQuestion ? { recoveredQuestion } : {}),
       };
       this.ensureQueueOrdinal(meta.sessionId, retry);
@@ -15747,6 +15758,9 @@ export class SessionManager {
     const durableRetries = block.durableRetries ?? [];
     if (durableRetries.some((retry) => !this.providerAuthDurables.has(retry.commandId))) {
       const projection = this.providerAuthenticationRecoveryProjection(meta, block);
+      const projectedApproval = durableRetries.some((retry) => retry.campaignContinuation)
+        ? addPendingRequest(pendingAsyncQuestions(meta.pendingApproval), projection)
+        : projection;
       if (meta.pendingApproval?.requestId !== projection.requestId) {
         this.emitEvent(meta.sessionId, {
           kind: "permission_request",
@@ -15759,7 +15773,7 @@ export class SessionManager {
       } else {
         // The request identity is stable across the wait, but newly retained durable work changes
         // its count. Refresh the live projection without appending a duplicate transcript event.
-        this.store.patchMeta(meta.sessionId, { pendingApproval: projection });
+        this.store.patchMeta(meta.sessionId, { pendingApproval: projectedApproval });
       }
       this.emitStatus(
         sessionId,
@@ -15789,7 +15803,8 @@ export class SessionManager {
     }
     this.store.patchMeta(sessionId, {
       providerAuthBlock: undefined,
-      pendingApproval: null,
+      pendingApproval: durableRetries.some((retry) => retry.campaignContinuation)
+        ? pendingAsyncQuestions(meta.pendingApproval) : null,
       status: "idle",
       ...(block.retry ? { providerAuthRetryAttemptedRecoveryId: block.recoveryId } : {}),
     });
@@ -15805,6 +15820,18 @@ export class SessionManager {
     for (const retry of retries) {
       if ("commandId" in retry) this.providerAuthDurables.delete(retry.commandId);
       try {
+        if ("campaignContinuation" in retry && retry.campaignContinuation === true) {
+          const recovered = this.unresolvedQuestionFromHistory(sessionId);
+          const question = recovered.question;
+          if (question?.async) {
+            // Authentication temporarily hid the async card. Restore the exact occurrence before
+            // this automatic turn, so the normal resumability gate can retain or replace it.
+            this.store.patchMeta(sessionId, {
+              pendingApproval: addPendingRequest(this.store.readMeta(sessionId)?.pendingApproval, question),
+            });
+            this.store.flush(sessionId);
+          }
+        }
         if ("recoveredQuestion" in retry && retry.recoveredQuestion) {
           // The authentication card displaced this recovered question while provider launch was
           // blocked. Restore the exact validated occurrence so runPrompt can clear it only after
@@ -15827,6 +15854,8 @@ export class SessionManager {
           true,
           undefined,
           "recoveredQuestion" in retry ? retry.recoveredQuestion : undefined,
+          undefined,
+          "campaignContinuation" in retry && retry.campaignContinuation === true,
         );
         if (!accepted && "commandId" in retry && retry.recoveredQuestion) {
           refusedRecoveredQuestion = { commandId: retry.commandId, question: retry.recoveredQuestion };
@@ -16468,7 +16497,8 @@ export class SessionManager {
         providerCredentialIdentityId: observation.identityId,
         providerCredentialIdentityEvidence: retainedEvidence,
         providerAuthBlock: durableRetries.length ? { ...block, resolution: "approved" } : undefined,
-        pendingApproval: null,
+        pendingApproval: durableRetries.some((entry) => entry.campaignContinuation)
+          ? pendingAsyncQuestions(meta.pendingApproval) : null,
         status: "idle",
         ...(retry && !durableRetries.length
           ? { providerAuthRetryAttemptedRecoveryId: block.recoveryId }
