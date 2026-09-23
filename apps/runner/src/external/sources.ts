@@ -30,7 +30,7 @@ import type {
   ExternalSessionDescriptor,
   SessionEventPayload,
 } from "@wollipog/protocol";
-import { listWslDistros, run } from "../discovery/resolve.js";
+import { launchTargetStillMatches, listWslDistros, run } from "../discovery/resolve.js";
 import { runContextCommand } from "../context-command.js";
 import { providerStateKey } from "../execution-isolation.js";
 import {
@@ -260,6 +260,7 @@ export function resolveLaunchForAgent(
   agentId: string | null | undefined,
   driver: AgentDriverKind,
   context: AgentContext,
+  onTargetChanged?: () => void,
 ): { command: string; args: string[]; env: Record<string, string> } | null {
   if (!agentId) return null;
   const agent = agents.find((candidate) => {
@@ -275,6 +276,12 @@ export function resolveLaunchForAgent(
     }
     return driver === "codex" && candidate.authStatus === "unauthenticated";
   });
+  if (agent?.installation?.targetIdentity && !launchTargetStillMatches(
+    { command: agent.command, args: agent.args ?? [] }, context, agent.installation.targetIdentity,
+  )) {
+    onTargetChanged?.();
+    return null;
+  }
   return agent
     ? { command: agent.command, args: [...(agent.args ?? [])], env: { ...(agent.env ?? {}) } }
     : null;

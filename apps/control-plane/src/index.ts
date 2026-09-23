@@ -2521,6 +2521,9 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
   if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
   const unsupported = runnerCapabilityError(id, "providerLogin", "Provider Sign-In");
   if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (runner.harnessSelections?.length && !runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations")) {
+    return reply.code(409).send({ error: "This runner cannot enforce the saved Harness Installation choice" });
+  }
   const body = (req.body ?? {}) as { provider?: unknown; label?: unknown; accountId?: unknown };
   const hasAccountId = body.accountId !== undefined;
   if (hasAccountId) {
@@ -2533,12 +2536,22 @@ app.post("/api/runners/:id/provider-logins", async (req, reply) => {
       /[\u0000-\u001f\u007f]/u.test(body.label)) {
     return reply.code(400).send({ error: "provider and a 1 to 100 character label are required" });
   }
+  const loginProvider = hasAccountId
+    ? runner.providerAccounts?.find((account) => account.id === body.accountId)?.provider
+    : body.provider;
+  if (hasAccountId && !loginProvider) {
+    return reply.code(409).send({ error: "The provider account is not available on this Machine." });
+  }
   const requestId = `provider_login_${randomUUID()}`;
   try {
     const result = await hub.requestFromRunner(id, requestId, {
       type: "start_provider_login",
       requestId,
       runnerId: id,
+      installationSelections: runner.harnessSelections?.filter((selection) =>
+        selection.family === loginProvider).map((selection) => ({
+        context: selection.context, installationId: selection.installationId,
+      })),
       ...(hasAccountId
         ? { accountId: body.accountId as string }
         : { provider: body.provider as "claude" | "codex", label: (body.label as string).trim() }),
@@ -2684,6 +2697,34 @@ app.patch("/api/runners/:id", async (req, reply) => {
   hub.runnerChanged(id);
   if (boxId) hub.boxChanged(boxId);
   return { ok: true };
+});
+
+app.put("/api/runners/:id/harness-installation", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  const body = req.body as { agentId?: unknown; installationId?: unknown } | undefined;
+  const agentId = body?.agentId;
+  const installationId = body?.installationId;
+  if (typeof agentId !== "string" || !agentId || agentId.length > 256) {
+    return reply.code(400).send({ error: "agentId must identify a discovered installation" });
+  }
+  if (typeof installationId !== "string" || !installationId || installationId.length > 256) {
+    return reply.code(400).send({ error: "installationId must match the installation shown" });
+  }
+  const runner = db.getRunner(id);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations")) {
+    return reply.code(409).send({
+      error: runnerCapabilityRequirement(runner.protocolVersion, "harnessInstallations", "Harness Installation selection"),
+    });
+  }
+  const selection = db.selectHarnessInstallation(id, agentId, installationId);
+  if (!selection) return reply.code(409).send({ error: "This installation is no longer available for selection" });
+  hub.runnerChanged(id);
+  return { selection };
 });
 
 app.put("/api/runners/:id/capacity", async (req, reply) => {
@@ -4515,6 +4556,9 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
     if (!handoff.config || typeof handoff.config !== "object" || Array.isArray(handoff.config)) return reply.code(400).send({ error: "handoff config is required" });
     const error = handoffDestinationError(destination, source.driver, handoff.config, { allowSameProvider: recovery });
     if (error) return reply.code(409).send({ error });
+    if (!db.getAgentLaunch(source.runnerId, handoff.agentId)) {
+      return reply.code(409).send({ error: "The destination harness installation is unavailable or not selected." });
+    }
     const unsupported = runnerCapabilityError(source.runnerId, "conversationHandoff", "Checkpoint handoffs");
     if (unsupported) return reply.code(409).send({ error: unsupported });
   }
@@ -4545,7 +4589,12 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
         targetSessionId,
         turn,
         title: `${source.title} (${recovery ? "recovered" : handoff ? "handoff" : "fork"})`.slice(0, 120),
-        ...(handoff ? { handoff } : {}),
+        ...(handoff ? { handoff: {
+          agentId: handoff.agentId,
+          config: handoff.config,
+          ...(destination?.installation?.selection === "selected"
+            ? { expectedInstallationId: destination.installation.id } : {}),
+        } } : {}),
         ...(recovery ? { recovery: true as const } : {}),
         ...(deferHistory ? { deferHistory: true } : {}),
       },

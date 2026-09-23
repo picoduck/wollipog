@@ -127,6 +127,23 @@ test("pinned schema fixture matches discovery metadata and reports a useful drif
     assert.match(loginTypeDrift.stderr, /LoginAccountParams.*variant removed.*type=chatgptDeviceCode/);
     writeFileSync(loginParamsPath, JSON.stringify(synthesizeShape(fixture.files["v2/LoginAccountParams.json"]!)));
 
+    const loginResponsePath = join(dir, "v2", "LoginAccountResponse.json");
+    const loginResponse = JSON.parse(readFileSync(loginResponsePath, "utf8"));
+    const responseDeviceCodeVariant = loginResponse.oneOf.find(
+      (variant: { properties?: { type?: { enum?: string[] } } }) =>
+        variant.properties?.type?.enum?.includes("chatgptDeviceCode"),
+    );
+    assert.ok(responseDeviceCodeVariant);
+    responseDeviceCodeVariant.properties.type.enum = ["deviceCodeV3"];
+    writeFileSync(loginResponsePath, JSON.stringify(loginResponse));
+    const responseTypeDrift = spawnSync(process.execPath, [script], {
+      encoding: "utf8",
+      env: { ...process.env, CODEX_SCHEMA_DIR: dir },
+    });
+    assert.notEqual(responseTypeDrift.status, 0);
+    assert.match(responseTypeDrift.stderr, /LoginAccountResponse.*variant removed.*type=chatgptDeviceCode/);
+    writeFileSync(loginResponsePath, JSON.stringify(synthesizeShape(fixture.files["v2/LoginAccountResponse.json"]!)));
+
     // Pin the fields used to recover a steering coordinate, not unrelated response payloads.
     const startResponsePath = join(dir, "v2", "TurnStartResponse.json");
     const startResponse = JSON.parse(readFileSync(startResponsePath, "utf8"));

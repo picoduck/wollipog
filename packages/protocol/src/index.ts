@@ -530,7 +530,10 @@
 // 174: session reminders may explicitly use the `someday` schedule kind, with no scheduled
 //      instant or time zone. The UI capability keeps new clients from sending that shape to an
 //      older control plane; omitted scheduleKind remains the legacy timed representation.
-export const PROTOCOL_VERSION = 174;
+// 175: runners advertise independently probed harness installations with stable identities.
+//      The control plane can pin one installation per Machine and execution context, and rejects
+//      launch requests that do not resolve to that exact candidate while a pin exists.
+export const PROTOCOL_VERSION = 175;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -656,6 +659,7 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  harnessInstallations: 175,
   automaticProviderAccountSwitch: 173,
   sessionProviderAccountSwitch: 171,
   providerAccounts: 170,
@@ -1088,6 +1092,14 @@ export type AgentDriverKind = "acp" | "claude-code" | "codex" | "codex-app-serve
 
 /** Where the agent binary runs relative to the runner host. */
 export type AgentContext = { kind: "native" } | { kind: "wsl"; distro: string };
+
+/** Stable semantic key for Machine-scoped installation choices. JSON field order in a
+ * configured context must never change which executable a saved choice authorizes. */
+export function agentContextKey(context: AgentContext | undefined): string {
+  return context?.kind === "wsl"
+    ? JSON.stringify({ kind: "wsl", distro: context.distro })
+    : JSON.stringify({ kind: "native" });
+}
 
 export interface AgentModel {
   id: string;
@@ -2009,6 +2021,19 @@ export interface AcpSessionContextConfig {
 }
 
 /** A coding agent a runner can launch (advertised in runner metadata). */
+export interface HarnessUpdateAssessment {
+  status: "update_available" | "up_to_date" | "check_failed" | "version_unknown" | "preview_channel" | "managed_externally";
+  installedVersion?: string;
+  latestKnownCompatibleVersion?: string;
+  latestPublishedVersion?: string;
+  checkedAt: number;
+  channel: "stable" | "preview" | "unknown";
+  evidenceSource: string;
+  /** Wollipog only discovers these installations; their owning manager must perform upgrades. */
+  managedExternally: true;
+  guidance: string;
+}
+
 export interface AgentDefinition {
   id: string;
   name: string;
@@ -2020,6 +2045,7 @@ export interface AgentDefinition {
   /** Native vs WSL execution context. Absent ⇒ native. */
   context?: AgentContext;
   version?: string;
+  update?: HarnessUpdateAssessment;
   available?: boolean;
   /** Content-free result of runner-local launch discovery. Never contains command output, paths,
    * environment names, environment values, or provider diagnostics. */
@@ -2033,6 +2059,19 @@ export interface AgentDefinition {
   acp?: AcpRuntimeCapabilities;
   capabilities?: AgentCapabilities;
   source?: "config" | "discovered" | "registry";
+  /** Stable, secret-free identity and location of one discovered harness installation. A runner
+   * must launch this exact target when its agent id is selected. */
+  installation?: {
+    id: string;
+    path: string;
+    via: "path" | "common-dir" | "version-manager" | "login-shell";
+    /** Canonical launch observed during discovery; the runner rechecks it before spawning. */
+    targetIdentity?: string;
+    /** Control-plane projection of a Machine selection; runners do not author this field. */
+    selection?: "selected" | "other";
+  };
+  /** Control-plane projection: an explicit Machine choice excludes this configured agent. */
+  harnessSelectionBlocked?: boolean;
   /** Stabilized Registry launch/install metadata. Does not imply trust to execute or capability. */
   registry?: AcpRegistryMetadata;
   /** ACP transport owned by this runner. Direct remote transports are intentionally unsupported. */
@@ -2398,6 +2437,18 @@ export interface RunnerCapacityState extends RunnerCapacityConfiguration {
 
 export type RunnerStatus = "online" | "offline";
 
+/** Durable Machine choice. The saved snapshot remains visible when rediscovery loses the target. */
+export interface HarnessInstallationSelection {
+  family: "claude" | "codex" | "pi";
+  context: AgentContext;
+  installationId: string;
+  path: string;
+  version?: string;
+  via: NonNullable<AgentDefinition["installation"]>["via"];
+  /** Current matching row, or null when the selected installation is unavailable. */
+  agentId: string | null;
+}
+
 /** Denormalised runner record as the UI consumes it (REST + WS). */
 export interface RunnerView {
   runnerId: string;
@@ -2410,6 +2461,7 @@ export interface RunnerView {
   version: string;
   status: RunnerStatus;
   agents: AgentDefinition[];
+  harnessSelections?: HarnessInstallationSelection[];
   providerAccounts?: ProviderAccountDefinition[];
   providerLogins?: ProviderLoginView[];
   workspaces: WorkspaceInfo[];
@@ -7336,7 +7388,8 @@ export interface ForkSessionMessage {
   /** Protocol v54+: omit the potentially unbounded inherited event array; the control plane pulls
    * the new session through session_history_page after materializing its snapshot. */
   deferHistory?: boolean;
-  handoff?: { agentId: string; config: SessionConfig };
+  /** The control plane pins a saved Machine choice through discovery races. */
+  handoff?: { agentId: string; config: SessionConfig; expectedInstallationId?: string };
   /** v128: recover a quarantined provider conversation. The runner revalidates the source's
    * durable quarantine and its recovery turn, and only then accepts a same-provider handoff. */
   recovery?: true;
@@ -7580,6 +7633,8 @@ export interface StartProviderLoginMessage {
   provider?: "claude" | "codex";
   label?: string;
   accountId?: string;
+  /** Exact Machine choices from the control plane. Missing chosen targets fail closed on runner. */
+  installationSelections?: Array<{ context: AgentContext; installationId: string }>;
 }
 
 /** Transient paste-back input. The runner writes it to the supervised child's stdin and retains

@@ -7579,6 +7579,23 @@ button.file-head.source-path-link {
 .machine-settings-section p {
   margin: 0;
 }
+.machine-harness-installation {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 6px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--bg-elev-2);
+}
+.machine-harness-installation code {
+  overflow-wrap: anywhere;
+}
+.machine-harness-installation p {
+  color: var(--text-dim);
+}
 .machine-name-row {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;

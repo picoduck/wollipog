@@ -13,6 +13,7 @@ const FAMILY_ORDER = ["Claude Code", "Codex"];
 export function agentFamily(a: AgentDefinition): string {
   if (a.driver === "claude-code") return "Claude Code";
   if (a.driver === "codex" || a.driver === "codex-app-server") return "Codex";
+  if (a.driver === "pi") return "Pi";
   return a.name; // Generic ACP agents (Gemini, OpenClaw, …) identify by their own name.
 }
 
@@ -89,20 +90,26 @@ export function agentOptions(
     const byVariant = new Map<string, AgentDefinition>();
     for (const a of families.get(f)!) {
       const v = agentVariant(a);
-      const cur = byVariant.get(v);
-      if (!cur || (a.available && !cur.available)) byVariant.set(v, a);
+      const key = `${v}\0${a.installation?.id ?? "legacy"}`;
+      const cur = byVariant.get(key);
+      if (!cur || (a.available && !cur.available)) byVariant.set(key, a);
     }
-    const variants = [...byVariant.entries()].sort(
-      (a, b) => variantRank(a[0]) - variantRank(b[0]) || a[0].localeCompare(b[0]),
+    const variants = [...byVariant.values()].sort(
+      (a, b) => variantRank(agentVariant(a)) - variantRank(agentVariant(b)) ||
+        agentVariant(a).localeCompare(agentVariant(b)) || a.name.localeCompare(b.name),
     );
     const multi = variants.length > 1;
-    for (const [v, a] of variants) {
+    for (const a of variants) {
+      const v = agentVariant(a);
+      const repeated = variants.filter((candidate) => agentVariant(candidate) === v).length > 1;
+      const location = repeated && a.installation ? ` · ${a.installation.path}` : "";
       out.push({
         agent: a,
         label: a.driver === "codex-app-server" || a.driver === "pi"
-          ? `${f} ${v}`
-          : !v || (!multi && a.driver !== "codex") ? f : `${f} — ${v}`,
-        ...(a.available !== true ? { disabled: true } : {}),
+          ? `${f} ${v}${location}`
+          : `${!v || (!multi && a.driver !== "codex") ? f : `${f} — ${v}`}${location}`,
+        ...(a.available !== true || a.installation?.selection === "other" || a.harnessSelectionBlocked
+          ? { disabled: true } : {}),
         ...(a.driver === "codex" ? { advanced: true } : {}),
       });
     }
@@ -218,6 +225,8 @@ export function agentMeta(a: AgentDefinition): string {
       ? ["Non-interactive via codex exec", "approval settings are fixed before each turn", `runs on ${where}`]
       : [`Runs on ${where}`];
   if (a.version) bits.push(/^\d/.test(a.version) ? `v${a.version}` : a.version);
+  if (a.installation?.selection === "other") bits.push("select this installation in Machine Settings to use it");
+  if (a.harnessSelectionBlocked) bits.push("another installation is selected in Machine Settings");
   if (a.authStatus === "unauthenticated" && !codexFamily) bits.push("not signed in");
   if (!a.registry && a.acpTransport) bits.push(`ACP ${a.acpTransport}`);
   if (a.registry) {

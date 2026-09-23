@@ -4481,6 +4481,11 @@ export class SessionManager {
           this.store.patchMeta(m.sessionId, { indexReset: true });
         });
       }
+      if (m.status === "failed" && (m.worktreePath || m.worktrees?.length)) {
+        void this.reconcileFailedWorktreeRecovery(m.sessionId).catch((error) => {
+          this.log(`failed worktree recovery reconciliation failed for ${boundedSessionIdForLog(m.sessionId)}: ${errText(error)}`);
+        });
+      }
     }
     // Register every known-session namespace synchronization before replaying cleanup records.
     // Otherwise a reaper invoked at the top of this method could capture an empty promise slot,
@@ -5192,6 +5197,7 @@ export class SessionManager {
       repoPath,
       worktreePath: null,
       worktreeBranch: priorMatchesWorkspace ? prior?.worktreeBranch : undefined,
+      worktreeRecovery: priorMatchesWorkspace ? prior?.worktreeRecovery : undefined,
       worktrees: priorMatchesWorkspace ? prior?.worktrees : undefined,
       worktreeHooks: priorMatchesWorkspace ? prior?.worktreeHooks : undefined,
       worktreeProcessMarkers: priorMatchesWorkspace ? prior?.worktreeProcessMarkers : undefined,
@@ -5276,6 +5282,7 @@ export class SessionManager {
         shouldUseWorktree = spec.useWorktree || latestMatchesWorkspace && !!latest.worktreePath &&
           !!latest.worktrees?.some((item) => sameWorktreePath(latest.context, item.path, latest.worktreePath!));
         meta.worktreeBranch = latestMatchesWorkspace ? latest.worktreeBranch : undefined;
+        meta.worktreeRecovery = latestMatchesWorkspace ? latest.worktreeRecovery : undefined;
         meta.worktrees = latestMatchesWorkspace ? latest.worktrees : undefined;
         meta.worktreeHooks = latestMatchesWorkspace ? latest.worktreeHooks : undefined;
         meta.worktreeProcessMarkers = latestMatchesWorkspace ? latest.worktreeProcessMarkers : undefined;
@@ -5559,6 +5566,28 @@ export class SessionManager {
         }
       } catch (err) {
         if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
+        const selected = prior?.repoPath === repoPath &&
+          agentContextKey(prior.context) === agentContextKey(context) && prior.worktreePath
+          ? prior.worktreePath : null;
+        if (selected) {
+          const failure = await this.persistedWorktreeFailure(prior!, selected, prior!.worktreeBranch);
+          if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
+          if (failure) {
+            const latest = this.store.readMeta(spec.sessionId);
+            if (latest && !latest.worktreePath && latest.worktreeBranch === prior!.worktreeBranch) {
+              const retained = this.store.patchMeta(spec.sessionId, {
+                worktreePath: selected,
+                worktreeBranch: prior!.worktreeBranch,
+                worktreePending: false,
+              });
+              if (retained) this.recordWorktreeRecovery(retained, selected, failure, "during restart preparation");
+              if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
+              this.releaseAdmissionIfInactive(spec.sessionId);
+              durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
+              return false;
+            }
+          }
+        }
         this.emitEvent(spec.sessionId, {
           kind: "error",
           message: `worktree isolation failed: ${errText(err)}`,
@@ -6606,6 +6635,66 @@ export class SessionManager {
     }
   }
 
+  /** Upgrade rows that failed on an older runner before it knew how to publish recovery. A
+   * failed status alone is insufficient evidence; Git must prove the retained selection invalid. */
+  private async reconcileFailedWorktreeRecovery(sessionId: string): Promise<void> {
+    const original = this.store.readMeta(sessionId);
+    if (!original || original.status !== "failed" || this.active.has(sessionId)) return;
+    // Older restart preparation cleared worktreePath before trying to reattach. Recover its
+    // selection only when the retained inventory and branch identify exactly one candidate.
+    const candidates = original.worktreePath ? [] : (original.worktrees ?? []).filter((item) =>
+      !original.worktreeBranch || item.branch === original.worktreeBranch);
+    const path = original.worktreePath ?? (candidates.length === 1 ? candidates[0]!.path : null);
+    if (!path) return;
+    const branch = original.worktreeBranch ?? candidates[0]?.branch;
+    const failure = await this.persistedWorktreeFailure(original, path, branch);
+    if (!failure) return;
+    const latest = this.store.readMeta(sessionId);
+    if (!latest || latest.status !== "failed" || this.active.has(sessionId) ||
+        latest.worktreePath !== original.worktreePath ||
+        (!original.worktreePath && !(latest.worktrees ?? []).some((item) =>
+          sameWorktreePath(latest.context, item.path, path))) ||
+        latest.worktreeBranch !== original.worktreeBranch) return;
+    const retained = latest.worktreePath ? latest : this.store.patchMeta(sessionId, {
+      worktreePath: path, worktreeBranch: branch,
+    });
+    if (retained) this.recordWorktreeRecovery(retained, path, failure, "after runner restart");
+  }
+
+  /** Publish one durable incident for a verified-invalid selection, regardless of which boundary
+   * discovered it. The path and branch guard prevents a slow Git proof from parking a replacement. */
+  private recordWorktreeRecovery(
+    meta: SessionMeta,
+    path: string,
+    detail: string,
+    phase: string,
+  ): boolean {
+    const latest = this.store.readMeta(meta.sessionId);
+    if (!latest || latest.status === "stopped" || !latest.worktreePath ||
+        !sameWorktreePath(latest.context, latest.worktreePath, path) ||
+        latest.worktreeBranch !== meta.worktreeBranch || !this.sessionCanOpen(meta.sessionId)) return false;
+    const branch = this.expectedWorktreeBranch(latest, path, latest.worktreeBranch);
+    const message = `the selected worktree could not be verified ${phase}: ${detail}` +
+      ` — restore ${path} or select another worktree for this session`;
+    const existing = latest.worktreeRecovery;
+    const sameIncident = existing !== undefined &&
+      sameWorktreePath(latest.context, existing.selectedPath, path) && existing.expectedBranch === branch;
+    const recovery = sameIncident
+      ? { ...existing, detail: message.slice(0, 4_096) }
+      : {
+          recoveryId: `worktree-recovery:${randomUUID()}`,
+          detectedAt: Date.now(),
+          selectedPath: path,
+          expectedBranch: branch,
+          detail: message.slice(0, 4_096),
+        };
+    const updated = this.store.patchMeta(meta.sessionId, { worktreeRecovery: recovery });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    if (!sameIncident) this.emitEvent(meta.sessionId, { kind: "error", message });
+    this.emitStatus(meta.sessionId, "input_required", message);
+    return true;
+  }
+
   /** The identity a session recorded for the worktree at `path`, or the one its layout implies when
    * the row predates `worktreeBranch`. Shared so every caller refuses the same drift. */
   private expectedWorktreeBranch(meta: SessionMeta, path: string, branch: string | undefined): string {
@@ -6718,33 +6807,7 @@ export class SessionManager {
     // still the live one, exactly as the rest of the launch path does after every await.
     if (!this.launchIsCurrent(meta.sessionId, launchGeneration) ||
         this.store.readMeta(meta.sessionId)?.status === "stopped") return false;
-    const message = `the selected worktree could not be verified before provider launch: ${detail}` +
-      ` — restore ${worktree.path} or select another worktree for this session`;
-    // The status and transcript keep their independently bounded actionable text, but the durable
-    // recovery projection has a 4 KiB validation limit. A near-PATH_MAX coordinate must not make
-    // the control plane discard the whole recovery record and accidentally re-enable Retry.
-    const recoveryDetail = message.slice(0, 4_096);
-    const latest = this.store.readMeta(meta.sessionId);
-    if (!latest || latest.status === "stopped") return false;
-    const existingRecovery = latest.worktreeRecovery;
-    const sameIncident = existingRecovery !== undefined &&
-      sameWorktreePath(latest.context, existingRecovery.selectedPath, worktree.path) &&
-      existingRecovery.expectedBranch === worktree.branch;
-    const recovery = sameIncident
-      ? { ...existingRecovery, detail: recoveryDetail }
-      : {
-          recoveryId: `worktree-recovery:${randomUUID()}`,
-          detectedAt: Date.now(),
-          selectedPath: worktree.path,
-          expectedBranch: worktree.branch,
-          detail: recoveryDetail,
-        };
-    const updated = this.store.patchMeta(meta.sessionId, { worktreeRecovery: recovery });
-    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
-    // One durable runner event owns the transcript card. Reconnects and duplicate launch attempts
-    // reuse the same incident without appending another event, while the status remains actionable.
-    if (!sameIncident) this.emitEvent(meta.sessionId, { kind: "error", message });
-    this.emitStatus(meta.sessionId, "input_required", message);
+    this.recordWorktreeRecovery(meta, worktree.path, detail, "before provider launch");
     return false;
   }
 
@@ -10814,6 +10877,20 @@ export class SessionManager {
       backgroundJobIds,
       recoveredQuestion,
     } = queued;
+    const rearmUnsubmittedRecovery = (delay = 0) => {
+      if (!syntheticRecovery || this.active.get(sessionId) !== entry) return;
+      // No provider acceptance or continuationSubmittedAt exists yet. A selection or failed
+      // proof may consume this in-memory synthetic prompt; wake its durable scheduler again.
+      if (backgroundJobIds?.length) {
+        this.cancelBackgroundContinuationTimer(sessionId);
+        this.scheduleBackgroundContinuation(sessionId, delay);
+      } else if (this.store.readMeta(sessionId)?.orphanedWork) {
+        const timer = this.orphanRecoveryTimers.get(sessionId);
+        if (timer) clearTimeout(timer);
+        this.orphanRecoveryTimers.delete(sessionId);
+        this.scheduleOrphanRecovery(sessionId, delay);
+      }
+    };
     if (recoveredQuestion) {
       const currentApproval = this.store.readMeta(sessionId)?.pendingApproval;
       const pending = currentApproval?.requestId === recoveredQuestion.requestId &&
@@ -10868,10 +10945,40 @@ export class SessionManager {
       durable?.failed("session stopped while prompt images were materialized", "SESSION_NOT_FOUND");
       return;
     }
+    if (entry.worktree) {
+      const path = entry.worktree.path;
+      const selected = this.store.readMeta(sessionId);
+      if (!selected) {
+        durable?.failed("session disappeared before provider submission", "SESSION_NOT_FOUND");
+        return;
+      }
+      const failure = await this.persistedWorktreeFailure(
+        selected, path, entry.worktree.branch,
+      );
+      if (this.active.get(sessionId) !== entry) {
+        durable?.failed("session stopped before provider submission", "COMMAND_CANCELLED");
+        return;
+      }
+      if (!entry.worktree || !sameWorktreePath(entry.context, entry.worktree.path, path)) {
+        rearmUnsubmittedRecovery();
+        durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
+        return;
+      }
+      if (failure) {
+        if (this.recordWorktreeRecovery(selected, path, failure, "before a live turn")) {
+          rearmUnsubmittedRecovery(ORPHAN_RECOVERY_RETRY_MS);
+          durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
+        } else {
+          rearmUnsubmittedRecovery();
+          durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
+        }
+        return;
+      }
+    }
     // The runner (the box) is the source of truth for ALL events including the user's prompt, so it
     // lands in the store + every dashboard's timeline. The control plane no longer appends it.
     const displayText = slashCommand ? `/${slashCommand}${text ? ` ${text}` : ""}`.trim() : text;
-    const userEvent = recoveredQuestion
+    const publishUserEvent = () => recoveredQuestion
       ? this.emitEvent(sessionId, {
           kind: "question_resolved",
           requestId: recoveredQuestion.requestId,
@@ -10899,56 +11006,53 @@ export class SessionManager {
           ...(durable ? { commandId: durable.commandId } : {}),
           turnId: queued.id,
         }, durable);
-    if (!userEvent) return;
-    // This event is the durable no-replay boundary for an automated prompt. Force the session log
-    // to disk before the command journal says `started`, so sudden power loss cannot retain the
-    // receipt while losing the correlated turn marker.
-    if (durable) {
-      this.store.flush(sessionId);
-      durable.started(userEvent?.seq);
-    }
-    entry.status = "running";
-    this.emitStatus(sessionId, "running");
+    let snapshotWarning: string | undefined;
+    let preparedCheckpoint: {
+      path: string; snap: string | null; turn: number; worktreeId: string;
+      ownerHash: string | undefined; anchored: boolean;
+    } | undefined;
+    const discardPreparedCheckpoint = async () => {
+      if (!preparedCheckpoint?.anchored || this.active.get(sessionId) !== entry) return;
+      try {
+        // A removed worktree cannot run Git, but its repository can still release the ref.
+        const repoPath = this.store.readMeta(sessionId)?.repoPath;
+        if (repoPath) await withGitExecutionContext(entry.context, () => deleteTurnRef(
+          repoPath, sessionId, preparedCheckpoint!.turn,
+          preparedCheckpoint!.ownerHash, preparedCheckpoint!.worktreeId,
+        ));
+      } catch (error) {
+        this.log(`pre-turn checkpoint cleanup failed for ${sessionId}: ${errText(error)}`);
+      }
+    };
     // Snapshot the worktree BEFORE the agent can write — the last_turn diff base. Awaited (a
     // fire-and-forget would race the agent's first edits into the snapshot) but best-effort:
     // a failure stores null (overwriting any stale prior sha so multi-turn changes are never
     // mislabeled as one turn) and must never fail the prompt turn. A mid-turn diff read against
     // this snapshot shows "changes so far this turn" — intended.
     if (entry.worktree && (!recoveredQuestion || recoveredQuestion.pendingQuestion.async)) {
+      const path = entry.worktree.path;
       let snap: string | null = null;
       try {
-        snap = await withGitExecutionContext(entry.context, () => captureWorktreeTree(entry.worktree!.path));
+        snap = await withGitExecutionContext(entry.context, () => captureWorktreeTree(path));
       } catch (err) {
         this.log(`turn snapshot failed for ${sessionId}: ${errText(err)} — last_turn diff unavailable for this turn`);
-        // Surface it on the timeline too — otherwise the user only learns when the Last-turn
-        // tab errors, with no hint why.
-        this.emitEvent(sessionId, {
-          kind: "stderr",
-          text: `turn snapshot failed (${errText(err)}) — the Last turn diff won't be available for this turn`,
-        });
+        snapshotWarning = `turn snapshot failed (${errText(err)}) — the Last turn diff won't be available for this turn`;
       }
       // Deleted/replaced mid-snapshot? Anchoring now would mint an ORPHAN ref after delete()
       // already ran its ref cleanup, pinning objects forever — bail before touching anything.
       if (this.active.get(sessionId) !== entry || !this.store.has(sessionId)) {
-        durable?.uncertain("session disappeared after the durable user event was recorded");
+        durable?.failed("session disappeared before provider submission", "COMMAND_CANCELLED");
         return;
       }
       const checkpointMeta = this.store.readMeta(sessionId);
       if (!checkpointMeta) {
-        durable?.uncertain("session disappeared after the durable user event was recorded");
+        durable?.failed("session disappeared before provider submission", "COMMAND_CANCELLED");
         return;
       }
       const checkpointOwnerHash = this.checkpointOwnerHash(checkpointMeta);
       const turn = (checkpointMeta.turnCount ?? 0) + 1;
-      const worktreeId = this.checkpointWorktreeId(checkpointMeta, entry.worktree.path);
-      this.store.patchMeta(sessionId, {
-        lastTurnBaseTree: snap,
-        turnCount: turn,
-        checkpointWorktreeIds: {
-          ...(checkpointMeta.checkpointWorktreeIds ?? {}),
-          [String(turn)]: worktreeId,
-        },
-      });
+      const worktreeId = this.checkpointWorktreeId(checkpointMeta, path);
+      preparedCheckpoint = { path, snap, turn, worktreeId, ownerHash: checkpointOwnerHash, anchored: false };
       // Per-turn CHECKPOINT (T3-style rewind target): anchor the pre-turn tree under a real
       // ref (gc can't prune it, unlike the dangling lastTurnBaseTree) and record it on the
       // timeline so the UI can offer "rewind files to before this turn". Best-effort: a
@@ -10956,9 +11060,9 @@ export class SessionManager {
       if (snap) {
         try {
           await withGitExecutionContext(entry.context, () => anchorTurnRef(
-            entry.worktree!.path, sessionId, turn, snap!, checkpointOwnerHash, worktreeId,
+            path, sessionId, turn, snap!, checkpointOwnerHash, worktreeId,
           ));
-          this.emitEvent(sessionId, { kind: "checkpoint", turn, tree: snap });
+          preparedCheckpoint.anchored = true;
         } catch (err) {
           this.log(`checkpoint anchor failed for ${sessionId} turn ${turn}: ${errText(err)}`);
         }
@@ -10969,9 +11073,79 @@ export class SessionManager {
     // disposed driver would happily spawn a fresh process, running a full invisible turn that
     // mutates the worktree after the user saw the session stop.
     if (this.active.get(sessionId) !== entry) {
-      durable?.uncertain("session stopped after the durable user event was recorded");
+      await discardPreparedCheckpoint();
+      durable?.failed("session stopped before provider submission", "COMMAND_CANCELLED");
       return;
     }
+    if (preparedCheckpoint && (!entry.worktree ||
+        !sameWorktreePath(entry.context, entry.worktree.path, preparedCheckpoint.path))) {
+      await discardPreparedCheckpoint();
+      rearmUnsubmittedRecovery();
+      durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
+      return;
+    }
+    // Snapshot and checkpoint work above can take time. Re-prove the path at the last awaited
+    // boundary before provider submission so a tree removed during that work is still Not Sent.
+    if (entry.worktree) {
+      const path = entry.worktree.path;
+      const selected = this.store.readMeta(sessionId);
+      const failure = selected ? await this.persistedWorktreeFailure(
+        selected, path, entry.worktree.branch,
+      ) : "session disappeared";
+      if (this.active.get(sessionId) !== entry) {
+        await discardPreparedCheckpoint();
+        durable?.failed("session stopped before provider submission", "COMMAND_CANCELLED");
+        return;
+      }
+      if (!entry.worktree || !sameWorktreePath(entry.context, entry.worktree.path, path)) {
+        await discardPreparedCheckpoint();
+        rearmUnsubmittedRecovery();
+        durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
+        return;
+      }
+      if (failure && !entry.cancelRequested && !entry.interruptRequested &&
+          !entry.historyIntegrityFailure) {
+        await discardPreparedCheckpoint();
+        if (selected && this.recordWorktreeRecovery(selected, path, failure, "before provider submission")) {
+          rearmUnsubmittedRecovery(ORPHAN_RECOVERY_RETRY_MS);
+          durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
+        } else {
+          rearmUnsubmittedRecovery();
+          durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
+        }
+        return;
+      }
+    }
+    const userEvent = publishUserEvent();
+    if (!userEvent) {
+      await discardPreparedCheckpoint();
+      return;
+    }
+    // The transcript event is the durable no-replay boundary. All awaited pre-turn Git work and
+    // its final identity proof have finished, so a failure before this point remains retryable.
+    if (durable) {
+      this.store.flush(sessionId);
+      durable.started(userEvent.seq);
+    }
+    entry.status = "running";
+    this.emitStatus(sessionId, "running");
+    if (preparedCheckpoint) {
+      const checkpointMeta = this.store.readMeta(sessionId);
+      if (checkpointMeta) this.store.patchMeta(sessionId, {
+        lastTurnBaseTree: preparedCheckpoint.snap,
+        turnCount: preparedCheckpoint.turn,
+        checkpointWorktreeIds: {
+          ...(checkpointMeta.checkpointWorktreeIds ?? {}),
+          [String(preparedCheckpoint.turn)]: preparedCheckpoint.worktreeId,
+        },
+      });
+      if (preparedCheckpoint.anchored && preparedCheckpoint.snap) {
+        this.emitEvent(sessionId, {
+          kind: "checkpoint", turn: preparedCheckpoint.turn, tree: preparedCheckpoint.snap,
+        });
+      }
+    }
+    if (snapshotWarning) this.emitEvent(sessionId, { kind: "stderr", text: snapshotWarning });
     if (entry.historyIntegrityFailure) return;
     if (entry.cancelRequested) {
       entry.cancelRequested = false;

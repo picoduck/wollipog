@@ -9,10 +9,33 @@ import type { AgentDefinition, ProviderLoginView } from "@wollipog/protocol";
 import fc from "fast-check";
 import type { AgentProcess, SpawnAgentOptions } from "./spawn.js";
 import {
+  agentsMatchingHarnessInstallationSelections,
   parseCodexDeviceLoginOutput,
   ProviderLoginSupervisor,
   type ResolvedProviderLogin,
 } from "./provider-login.js";
+
+test("provider sign-in only uses the saved installation in its execution context", () => {
+  const system: AgentDefinition = { id: "codex", name: "Codex", command: "/usr/bin/codex",
+    args: [], env: {}, driver: "codex-app-server", context: { kind: "native" },
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" } };
+  const local: AgentDefinition = { ...system, id: "codex-local", command: "/home/u/.local/bin/codex",
+    installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" } };
+  const selected = [{ context: { kind: "native" } as const, installationId: "local" }];
+  assert.deepEqual(agentsMatchingHarnessInstallationSelections([system, local], selected).map((agent) => agent.id),
+    ["codex-local"]);
+  assert.deepEqual(agentsMatchingHarnessInstallationSelections([system], selected), [],
+    "a missing saved installation cannot fall back to the first PATH result");
+});
+
+test("provider sign-in matches a WSL selection regardless of context field order", () => {
+  const agent: AgentDefinition = { id: "codex-wsl", name: "Codex", command: "/usr/bin/codex",
+    args: [], env: {}, driver: "codex-app-server", context: { distro: "Ubuntu", kind: "wsl" },
+    installation: { id: "selected", path: "/usr/bin/codex", via: "path" } };
+  const choices = [{ context: { kind: "wsl" as const, distro: "Ubuntu" }, installationId: "selected" }];
+  assert.deepEqual(agentsMatchingHarnessInstallationSelections([agent], choices).map((candidate) => candidate.id),
+    ["codex-wsl"]);
+});
 import { waitForPendingKills } from "./spawn.js";
 
 class FakeLoginChild extends EventEmitter {
@@ -368,6 +391,32 @@ test("Codex CLI compatibility parser preserves bounded provider-defined code gro
       userCode,
     });
   }), { numRuns: 200 });
+});
+
+test("Codex CLI compatibility parser preserves OSC-8 visible text across terminators and adjacent sequences", () => {
+  fc.assert(fc.property(fc.constantFrom("\u0007", "\u001b\\"), fc.constantFrom("\u0007", "\u001b\\"),
+    (openingTerminator, closingTerminator) => {
+      const output = [
+        `\u001b]8;;https://links.example/hidden${openingTerminator}`,
+        "\u001b[36mhttps://auth.openai.com/device\u001b[0m",
+        `\u001b]8;;${closingTerminator}`,
+        `\u001b]0;Device Login\u001b\\`,
+        "\nEnter this one-time code:\nABCD-EFGHJ\n",
+      ].join("");
+      assert.deepEqual(parseCodexDeviceLoginOutput(output), {
+        verificationUrl: "https://auth.openai.com/device",
+        userCode: "ABCD-EFGHJ",
+      });
+    }), { numRuns: 20 });
+});
+
+test("Codex CLI compatibility parser ignores incomplete or malformed OSC payloads", () => {
+  for (const output of [
+    "\u001b]8;;https://links.example/hidden",
+    "\u001b]8;;https://links.example/hidden\u001b[36mhttps://auth.openai.com/device\nABCD-EFGHJ\n",
+  ]) {
+    assert.deepEqual(parseCodexDeviceLoginOutput(output), {});
+  }
 });
 
 test("Codex CLI compatibility parser does not mistake an incomplete prompt for a device code", () => {

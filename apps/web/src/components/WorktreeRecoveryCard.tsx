@@ -96,8 +96,8 @@ export function WorktreeRecoveryCard({
         <span className="quarantine-title">Worktree Recovery Required</span>
         <p id={detailId}>{recovery.detail}</p>
         <p id={retainedId}>
-          The provider was not launched. Your submitted message is retained as <strong>Not Sent</strong>
-          {" "}and can be retried after this session has a verified worktree.
+          This worktree cannot start another turn. Messages marked <strong>Not Sent</strong>
+          {" "}can be retried after this session has a verified worktree.
         </p>
         {!runnerOnline && <p id={offlineId} className="worktree-recovery-error">The runner is offline.</p>}
         {error && <p className="worktree-recovery-error" role="alert">{error}</p>}

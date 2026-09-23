@@ -27,11 +27,11 @@ test("desktop recovery selects a verified session-linked worktree before Retry i
   await openRecovery(page, 1100, 900);
   const card = page.getByRole("region", { name: "Worktree Recovery Required" });
   const retry = page.getByRole("button", { name: "Retry Message" });
-  await expect(card).toContainText("The provider was not launched");
+  await expect(card).toContainText("This worktree cannot start another turn");
   await expect(retry).toBeDisabled();
   await expect(retry).toHaveAccessibleDescription(/Recover the selected worktree before retrying this message\./u);
   await expect(card.getByRole("button", { name: "Create Replacement" }))
-    .toHaveAccessibleDescription(/no longer registered.*retained as Not Sent/u);
+    .toHaveAccessibleDescription(/no longer registered.*Messages marked Not Sent/u);
   await expect(page.locator(".composer-input")).toBeDisabled();
   await saveEvidence(page, testInfo, "desktop-recovery-required");
 

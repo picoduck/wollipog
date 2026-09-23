@@ -180,7 +180,7 @@ test("recovery actions are described by the incident and the disabled-submission
         "the accessible name stays the visible Title Case label");
       assert.deepEqual(describedText(online.container, button), [
         "The selected worktree is no longer registered.",
-        "The provider was not launched. Your submitted message is retained as Not Sent and can be retried after this session has a verified worktree.",
+        "This worktree cannot start another turn. Messages marked Not Sent can be retried after this session has a verified worktree.",
       ]);
     }
   } finally {

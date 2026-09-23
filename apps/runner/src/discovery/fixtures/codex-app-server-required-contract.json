@@ -22,6 +22,14 @@
       }
     },
     "v2/LoginAccountResponse.json": {
+      "discriminatedVariants": {
+        "type": {
+          "chatgptDeviceCode": {
+            "required": ["loginId", "type", "userCode", "verificationUrl"],
+            "properties": ["loginId", "type", "userCode", "verificationUrl"]
+          }
+        }
+      },
       "variantRequiredProperties": {
         "ChatgptDeviceCodev2::LoginAccountResponse": {
           "required": ["loginId", "type", "userCode", "verificationUrl"],

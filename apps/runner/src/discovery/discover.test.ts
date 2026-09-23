@@ -601,7 +601,22 @@ test("mergeAgents appends discovered agents not present in config", () => {
   );
 });
 
-test("mergeAgents drops a discovered agent that shares an id with config", () => {
+test("configured environment and disable policies hide alternate same-name binaries", () => {
+  const config = cfg({ id: "claude-code", command: "claude", env: {}, source: "config" });
+  const discovered = [
+    cfg({ id: "claude-code", command: "/usr/bin/claude", bin: "claude", source: "discovered" }),
+    cfg({ id: "claude-code-installation-local", command: "/home/u/.local/bin/claude",
+      bin: "claude", source: "discovered" }),
+  ];
+  assert.equal(mergeAgents([config], discovered).length, 2,
+    "an ordinary config still exposes distinct installations");
+  assert.equal(mergeAgents([config], discovered, [], new Set([config.id])).length, 1,
+    "a private configured environment policy survives redaction and hides the bypass");
+  assert.equal(mergeAgents([{ ...config, available: false }], discovered).length, 1,
+    "an explicit disable hides every same-name installation");
+});
+
+test("mergeAgents keeps a configured same-name wrapper ahead of the discovered binary", () => {
   const config = [cfg({ id: "claude-code", command: "/custom/claude" })];
   const discovered = [cfg({ id: "claude-code", command: "/usr/bin/claude", source: "discovered" })];
   const merged = mergeAgents(config, discovered);
@@ -706,6 +721,37 @@ test("mergeAgents keeps a discovered native agent even when its id matches a con
   assert.ok(ids.includes("codex-native"), "discovered native renamed to avoid the id collision");
   assert.equal(merged.find((a) => a.id === "codex")!.driver, "acp");
   assert.equal(merged.find((a) => a.id === "codex-native")!.version, "0.1");
+});
+
+test("mergeAgents retains a second installation when a configured bare name matches the default", () => {
+  const config = [cfg({ id: "chosen-codex", driver: "codex-app-server", command: "codex" })];
+  const discovered = [
+    cfg({ id: "codex", driver: "codex-app-server", command: "/usr/bin/codex", bin: "codex",
+      installation: { id: "system", path: "/usr/bin/codex", via: "path" } }),
+    cfg({ id: "codex-installation-local", driver: "codex-app-server", command: "/home/u/.local/bin/codex", bin: "codex",
+      installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" } }),
+  ];
+  for (const results of [discovered, [...discovered].reverse()]) {
+    const merged = mergeAgents(config, results);
+    assert.deepEqual(merged.map((agent) => agent.id), ["chosen-codex", "codex-installation-local"]);
+    assert.equal(merged[0]!.installation?.id, "system",
+      "the PATH-first installation stays attached to the configured ID even when its probe finishes last");
+    assert.equal(merged[1]!.installation?.id, "local");
+  }
+});
+
+test("a configured wrapper cannot inherit a different discovered installation identity", () => {
+  const discovered = [cfg({ id: "codex", driver: "codex-app-server", command: "/usr/bin/codex", bin: "codex",
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" } })];
+  for (const configured of [
+    cfg({ id: "wrapper", driver: "codex-app-server", command: "/opt/wrap/codex" }),
+    cfg({ id: "custom-args", driver: "codex-app-server", command: "codex", args: ["--custom"] }),
+  ]) {
+    const merged = mergeAgents([configured], discovered);
+    assert.equal(merged.find((agent) => agent.id === configured.id)?.installation, undefined);
+    assert.equal(merged.find((agent) => agent.installation?.id === "system"), undefined,
+      "the unwrapped binary cannot bypass the configured launch policy");
+  }
 });
 
 test("mergeAgents enriches a config agent that uses a bare command name (P2 basename match)", () => {

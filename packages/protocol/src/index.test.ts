@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  agentContextKey,
   CONTROL_PLANE_API_VERSION,
   CONTROL_PLANE_CAPABILITIES,
   CONTROL_PLANE_SERVICE,
@@ -88,6 +89,12 @@ import {
   type ReadQueuedPromptMessage,
   type ReadQueuedPromptResultMessage,
 } from "./index.js";
+
+test("agent context identity ignores JSON property order", () => {
+  assert.equal(agentContextKey({ kind: "wsl", distro: "Ubuntu" }),
+    agentContextKey({ distro: "Ubuntu", kind: "wsl" }));
+  assert.notEqual(agentContextKey({ kind: "native" }), agentContextKey({ kind: "wsl", distro: "Ubuntu" }));
+});
 
 test("Native TUI guardrail detection follows persisted positive-limit semantics", () => {
   assert.equal(nativeTuiHasTrackedGuardrails({}), false);
@@ -186,8 +193,10 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 174", () => {
-  assert.equal(PROTOCOL_VERSION, 174);
+test("PROTOCOL_VERSION is 175", () => {
+  assert.equal(PROTOCOL_VERSION, 175);
+  assert.equal(runnerSupportsProtocol(174, "harnessInstallations"), false);
+  assert.equal(runnerSupportsProtocol(175, "harnessInstallations"), true);
   assert.equal(runnerSupportsProtocol(170, "sessionProviderAccountSwitch"), false);
   assert.equal(runnerSupportsProtocol(171, "sessionProviderAccountSwitch"), true);
   assert.equal(runnerSupportsProtocol(171, "accountScopedAgentSkills"), false);
