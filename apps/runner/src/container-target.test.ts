@@ -291,14 +291,23 @@ test("Podman keeps a configured local storage file without loading general conta
   process.env.XDG_CONFIG_HOME = config;
   try {
     let checkEnv: Record<string, string> | undefined;
+    let inspectedLocalMode = false;
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
+        if (args[0] === "info") {
+          inspectedLocalMode = true;
+          assert.equal(opts.replaceEnv, true);
+          assert.equal(opts.env?.XDG_CONFIG_HOME, config);
+          assert.equal(opts.env?.CONTAINERS_CONF, undefined);
+          return { code: 0, stdout: "false\n", stderr: "" };
+        }
         if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
         return { code: 0, stdout: "", stderr: "" };
       },
     });
     await registry.initialize();
+    assert.equal(inspectedLocalMode, true);
     assert.equal(registry.definitions()[0]!.available, true);
     assert.equal(checkEnv?.CONTAINERS_STORAGE_CONF, storage);
     assert.equal(checkEnv?.CONTAINERS_CONF?.startsWith(checkEnv?.XDG_CONFIG_HOME ?? ""), true);
@@ -339,6 +348,31 @@ test("Podman config-selected remote mode cannot certify a local setup check", {
       "setup check 'git' could not launch isolated runtime");
   } finally {
     rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Podman setup checks fail closed when local mode cannot be confirmed", {
+  skip: process.platform !== "linux",
+}, async () => {
+  for (const info of [
+    { code: 1, stdout: "fixture-private-output", stderr: "" },
+    { code: 0, stdout: "unexpected", stderr: "" },
+    { code: 1, stdout: "", stderr: "", timedOut: true },
+  ]) {
+    let setupRan = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        if (args[0] === "info") return info;
+        if (args[0] === "run" && args.includes("git")) setupRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(setupRan, false);
+    assert.equal(registry.definitions()[0]!.unavailableReason,
+      "setup check 'git' could not launch isolated runtime");
+    assert.doesNotMatch(JSON.stringify(registry.definitions()), /fixture-private-output|unexpected/u);
   }
 });
 
@@ -666,6 +700,7 @@ test("Docker and Podman discover both generations and produce exact dual-label W
       }),
       run: async (file, args) => {
         calls.push({ file, args });
+        if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
         if (args[0] === "ps") {
           const canonical = args[3] === `label=${CANONICAL_CONTAINER_LABELS.runner}=${expectedRunnerKey}`;
           return { code: 0, stdout: canonical ? "aaaaaaaaaaaa\nbbbbbbbbbbbb\n" : "bbbbbbbbbbbb\ncccccccccccc\n", stderr: "" };
@@ -695,7 +730,10 @@ test("Docker and Podman discover both generations and produce exact dual-label W
       .update(`${template.id}\0${template.setupChecks[0]!.name}`)
       .digest("hex")
       .slice(0, 16);
-    assert.deepEqual(calls[4], {
+    if (runtimeName === "podman") {
+      assert.deepEqual(calls[4]?.args, ["info", "--format", "{{json .Host.ServiceIsRemote}}"]);
+    }
+    assert.deepEqual(calls[runtimeName === "podman" ? 5 : 4], {
       file: `/usr/bin/${runtimeName}`,
       args: [
         "run", "--rm", "--pull=never", "--name", `wollipog-check-${expectedRunnerKey}-${expectedCheckKey}`,
@@ -741,6 +779,7 @@ test("legacy-only container discovery emits one value-free warning across Docker
       launch: { command: `/usr/bin/${runtimeName}`, args: [] },
     }),
     run: async (file, args) => {
+      if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
       if (args[0] !== "ps") return { code: 0, stdout: "", stderr: "" };
       const canonical = args[3]?.includes(CANONICAL_CONTAINER_LABELS.runner) ?? false;
       const legacyOnlyId = file.endsWith("podman") ? "cccccccccccc" : "bbbbbbbbbbbb";

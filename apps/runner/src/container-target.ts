@@ -197,17 +197,9 @@ export class ContainerTargetRegistry {
       if (process.env.CONTAINERS_CONF === "" || process.env.CONTAINERS_CONF_OVERRIDE === "") {
         throw new Error("Podman config path is invalid");
       }
-      const configPaths = [
-        process.env.CONTAINERS_CONF,
-        process.env.CONTAINERS_CONF_OVERRIDE,
-        join(hostConfig, "containers", "containers.conf"),
-        join(hostConfig, "containers", "containers.conf.d"),
-        "/etc/containers/containers.conf", "/etc/containers/containers.conf.d",
-        "/usr/share/containers/containers.conf", "/usr/share/containers/containers.conf.d",
-      ].filter((path): path is string => Boolean(path));
-      if (!process.env.CONTAINER_HOST && (process.env.CONTAINERS_CONF !== undefined ||
-          process.env.CONTAINERS_CONF_OVERRIDE !== undefined ||
-          configPaths.some((path) => existsSync(localRuntimePath(path))))) {
+      // Config drop-ins can select remote mode even when no top-level file exists. Always
+      // ask the operator's Podman client before replacing its config with our private one.
+      if (!process.env.CONTAINER_HOST) {
         const inspected = await this.deps.run(runtime.launch.command, [
           ...runtime.launch.args, "info", "--format", "{{json .Host.ServiceIsRemote}}",
         ], { timeoutMs: 5_000, maxBuffer: 4_096, replaceEnv: true, env: {
