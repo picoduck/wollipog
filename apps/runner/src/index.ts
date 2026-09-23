@@ -200,7 +200,7 @@ import {
   probeConfiguredPiAgents,
 } from "./discovery/discover.js";
 import { claudeCodeCapabilitiesForControlPlane } from "./discovery/claude-code.js";
-import { invalidateStaleNativeInstallation, nativeInstallationChanged } from "./discovery/stale-installation.js";
+import { invalidateStaleNativeInstallation, staleNativeInstallationKey } from "./discovery/stale-installation.js";
 import {
   prepareClaudeSlashCommandCatalog,
 } from "./discovery/claude-commands.js";
@@ -1709,7 +1709,7 @@ let shuttingDown = false;
 // handler attached in connect() and by startHeartbeat() when a fresh socket registers.
 let missedHeartbeatPongs = 0;
 let heartbeatPongObserved = false;
-let reportedStaleInstallationIds = "";
+let reportedStaleInstallationKey = "[]";
 const sessionCommandRecoveryTimer = setInterval(recoverStaleSessionCommands, 10_000);
 sessionCommandRecoveryTimer.unref?.();
 recoverStaleSessionCommands();
@@ -1740,11 +1740,15 @@ function startHeartbeat(socket: WebSocket, intervalMs: number): void {
       return;
     }
     missedHeartbeatPongs++;
-    const staleIds = metadata.agents.filter(nativeInstallationChanged).map((agent) => agent.id).sort().join(",");
-    if (staleIds !== reportedStaleInstallationIds) {
-      reportedStaleInstallationIds = staleIds;
-      if (staleIds) sendUp({ type: "agents_updated", runnerId: config.runnerId,
-        agents: agentsForControlPlane(), providerAccounts: providerAccountsForControlPlane(), editors: metadata.editors });
+    const staleKey = staleNativeInstallationKey(metadata.agents);
+    if (staleKey !== reportedStaleInstallationKey) {
+      reportedStaleInstallationKey = staleKey;
+      if (staleKey !== "[]") {
+        sendUp({ type: "agents_updated", runnerId: config.runnerId,
+          agents: agentsForControlPlane(), providerAccounts: providerAccountsForControlPlane(), editors: metadata.editors });
+        void runDiscovery(false, false).catch((error) =>
+          log(`harness rediscovery after native target change failed: ${errText(error)}`));
+      }
     }
     const beat: HeartbeatMessage = { type: "heartbeat", runnerId: config.runnerId, ts: Date.now() };
     socket.send(JSON.stringify(beat));

@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
 import { capabilitiesFor } from "../catalog.js";
@@ -6,6 +9,7 @@ import {
   applyAgentModelDiscovery,
   commandDirectoriesForDriver,
   codexAgentDefinitions,
+  nativeDiscoveredDefinitions,
   mergeAgents,
   localAuthFileStatus,
   probedAuthFileStatus,
@@ -17,6 +21,7 @@ import {
   unavailableCodexAgentDefinition,
   unavailableClaudeAgentDefinition,
 } from "./discover.js";
+import { resolvedLaunchIdentity } from "./resolve.js";
 
 const ACP_INITIALIZE_FIXTURE = [
   'let input="";',
@@ -277,6 +282,27 @@ test("supported Codex discovery emits app-server primary then stable exec compat
     [],
   );
   assert.deepEqual(wsl.map((agent) => agent.id), ["codex-wsl-Ubuntu", "codex-exec-wsl-Ubuntu"]);
+});
+
+test("a Codex replacement during discovery keeps the primary driver and rediscovery guidance", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-codex-discovery-replacement-"));
+  const command = join(root, "codex");
+  try {
+    writeFileSync(command, "old executable");
+    const identity = resolvedLaunchIdentity({ path: command, via: "path", launch: { command, args: [] } });
+    const base = cfg({ id: "codex", name: "Codex", driver: "codex", command, args: [],
+      source: "discovered", available: true, version: "0.155.1",
+      installation: { id: "selected", path: command, via: "path", targetIdentity: identity } });
+    writeFileSync(command, "new executable with different content");
+    const stale = nativeDiscoveredDefinitions(base, SUPPORTED_APP_SERVER, []);
+    assert.deepEqual(stale.map((agent) => [agent.id, agent.driver, agent.available]),
+      [["codex", "codex-app-server", false]]);
+    assert.match(stale[0]!.unavailableReason ?? "", /Rediscover this Machine/);
+    const merged = mergeAgents([cfg({ id: "codex", driver: "codex-app-server", command, args: [] })], stale);
+    assert.match(merged[0]!.unavailableReason ?? "", /Rediscover this Machine/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("a signed-out Codex is discovered but not ready, and signing in restores both rows", () => {

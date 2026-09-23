@@ -469,6 +469,17 @@ export function codexAgentDefinitions(
   return [primary, exec];
 }
 
+/** A replacement during native probes cannot inherit their version or a different driver row. */
+export function nativeDiscoveredDefinitions(
+  base: AgentDefinition,
+  codexAppServer: AgentDefinition["codexAppServer"],
+  slashCommands: AgentSlashCommand[],
+): AgentDefinition[] {
+  const candidates = codexAppServer ? codexAgentDefinitions(base, codexAppServer, slashCommands) : [base];
+  const checked = invalidateStaleNativeInstallation(candidates[0]!);
+  return checked !== candidates[0] ? [checked] : candidates;
+}
+
 /** An explicit agent-config `OPENAI_API_KEY` is a deliberate API-billing Codex setup: the drivers
  * honor it (they scrub only the daemon-inherited key), so a missing `~/.codex/auth.json` must not
  * gate that entry. Mirrors the Claude config-auth carve-out applied in the same merge.
@@ -712,10 +723,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           k.bin === "claude" ? claudeCode?.streamJsonInput === true : codexAppServer?.appServerAvailable === true,
         ) } : {}),
       };
-      const checked = invalidateStaleNativeInstallation(base);
-      nativeSlots[knownIndex]![index] = checked !== base
-        ? [checked]
-        : codexAppServer ? codexAgentDefinitions(base, codexAppServer, slashCommands) : [base];
+      nativeSlots[knownIndex]![index] = nativeDiscoveredDefinitions(base, codexAppServer, slashCommands);
       }));
     }),
   );

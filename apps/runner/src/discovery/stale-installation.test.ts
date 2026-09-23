@@ -6,7 +6,7 @@ import { test } from "node:test";
 import type { AgentDefinition } from "@wollipog/protocol";
 import { resolveLaunchForAgent } from "../external/sources.js";
 import { resolvedLaunchIdentity } from "./resolve.js";
-import { invalidateStaleNativeInstallation, nativeInstallationChanged } from "./stale-installation.js";
+import { invalidateStaleNativeInstallation, nativeInstallationChanged, staleNativeInstallationKey } from "./stale-installation.js";
 
 test("a replaced native executable invalidates status, update guidance, and launch", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-stale-native-"));
@@ -29,6 +29,8 @@ test("a replaced native executable invalidates status, update guidance, and laun
     writeFileSync(next, "replacement executable");
     renameSync(next, command);
     assert.equal(nativeInstallationChanged(agent), true);
+    const firstStaleKey = staleNativeInstallationKey([agent]);
+    assert.notEqual(firstStaleKey, "[]");
     const stale = invalidateStaleNativeInstallation(agent, 2);
     assert.equal(stale.available, false);
     assert.equal(stale.version, undefined);
@@ -46,7 +48,12 @@ test("a replaced native executable invalidates status, update guidance, and laun
       ...agent.installation!, targetIdentity: resolvedLaunchIdentity(binary),
     } };
     assert.equal(nativeInstallationChanged(rediscovered), false);
+    assert.equal(staleNativeInstallationKey([rediscovered]), "[]");
     assert.ok(resolveLaunchForAgent([rediscovered], "codex", "codex-app-server", { kind: "native" }));
+    writeFileSync(command, "third executable generation");
+    assert.equal(nativeInstallationChanged(rediscovered), true);
+    assert.notEqual(staleNativeInstallationKey([rediscovered]), firstStaleKey,
+      "the same agent id must report a second replacement after rediscovery");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

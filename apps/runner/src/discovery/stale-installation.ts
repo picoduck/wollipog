@@ -13,6 +13,13 @@ export function nativeInstallationChanged(agent: AgentDefinition): boolean {
   );
 }
 
+/** Include the saved identity so a second replacement cannot hide behind the same agent id. */
+export function staleNativeInstallationKey(agents: readonly AgentDefinition[]): string {
+  return JSON.stringify(agents.filter(nativeInstallationChanged)
+    .map((agent) => [agent.id, agent.installation!.targetIdentity!] as const)
+    .sort((a, b) => a[0].localeCompare(b[0])));
+}
+
 /** An old version or release assessment cannot describe a replacement executable. */
 export function invalidateStaleNativeInstallation(agent: AgentDefinition, checkedAt = Date.now()): AgentDefinition {
   if (!nativeInstallationChanged(agent)) return agent;
