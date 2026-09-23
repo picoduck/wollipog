@@ -13174,8 +13174,13 @@ body.shell-dock-dragging * {
 .subscription-usage-heading p { margin: 5px 0 0; color: var(--text-dim); font-size: var(--text-sm); }
 .subscription-usage-status { margin-top: 10px; color: var(--text-dim); font-size: var(--text-sm); }
 .subscription-source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
-.subscription-source { padding: 14px; min-width: 0; }
+.subscription-source { padding: 14px; min-width: 0; container: subscription-source / inline-size; }
 .subscription-source > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+@container subscription-source (max-width: 360px) {
+  .subscription-source > header { flex-wrap: wrap; }
+  .subscription-source > header > div { flex: 1 1 100%; min-width: 0; }
+  .subscription-source > header > .btn { min-height: 44px; white-space: nowrap; }
+}
 .subscription-source h4 { margin: 0; }
 .subscription-source header p, .subscription-source footer { margin: 4px 0 0; color: var(--text-dim); font-size: var(--text-xs); }
 .subscription-source .subscription-account { overflow-wrap: anywhere; }
@@ -13336,9 +13341,6 @@ body.shell-dock-dragging * {
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .usage-retention .btn { min-height: 44px; }
   .subscription-source-grid { grid-template-columns: minmax(0, 1fr); }
-  .subscription-source > header { flex-wrap: wrap; }
-  .subscription-source > header > div { flex: 1 1 100%; min-width: 0; }
-  .subscription-source > header > .btn { min-height: 44px; white-space: nowrap; }
   .subscription-usage-heading { align-items: stretch; flex-direction: column; }
   .subscription-usage-heading .btn { min-height: 44px; }
   .subscription-bucket { grid-template-columns: minmax(0, 1fr); gap: 4px; }

@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 test("account labels and controls remain readable on narrow usage cards", async ({ page }) => {
   const longLabel = "a-very-long-account-label-without-natural-breaks@example.com";
 
-  for (const width of [320, 390, 1280]) {
+  for (const width of [320, 390, 701, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/usage-view-e2e.html?subscriptions=1");
 
@@ -17,13 +17,13 @@ test("account labels and controls remain readable on narrow usage cards", async 
     const emailLines = await account.evaluate((element) => {
       const label = element.lastChild!;
       const range = document.createRange();
-      range.setStart(label, 1);
+      range.setStart(label, 0);
       range.setEnd(label, label.textContent!.length);
       return range.getClientRects().length;
     });
     expect(emailLines, `email should fit on one line at ${width}px`).toBe(1);
 
-    if (width < 700) {
+    if (width <= 701) {
       const refreshSize = await refresh.evaluate((element) => ({
         height: element.getBoundingClientRect().height,
         textLines: (() => {
