@@ -49,14 +49,14 @@ test("Machine settings show competing installations and switch the saved target"
   await page.getByRole("button", { name: "New Harness Release · View Settings" }).click();
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   const system = dialog.locator(".machine-harness-installation").filter({ hasText: "/usr/bin/codex" });
-  const local = dialog.locator(".machine-harness-installation").filter({ hasText: "/home/misko/.local/bin/codex" });
+  const local = dialog.locator(".machine-harness-installation").filter({ hasText: "/home/example/.local/bin/codex" });
   await expect(system.getByRole("button", { name: "Selected" })).toBeVisible();
   await expect(local.getByRole("button", { name: "Use This Installation" })).toBeVisible();
   await expect(system).toContainText("New Release Published");
   await expect(system).toContainText("compatibility with this Machine has not been verified");
   await expect(local).toContainText("`codex update`");
   await expect(local.locator("p")).not.toContainText("selected Codex installation");
-  await expect(local.locator("p")).toContainText("exact Launch Command");
+  await expect(local.locator("p")).toContainText("'/home/example/.local/bin/codex' 'update'");
   await page.screenshot({ path: "test-results/harness-installations-before-desktop.png", fullPage: true });
   await local.getByRole("button", { name: "Use This Installation" }).click();
   await expect(local.getByRole("button", { name: "Selected" })).toBeVisible();
@@ -64,6 +64,47 @@ test("Machine settings show competing installations and switch the saved target"
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(dialog).toBeVisible();
   await page.screenshot({ path: "test-results/harness-installations-after-mobile.png", fullPage: true });
+});
+
+test("Machine and Connections explain pinned, suppressed, failed, and unavailable harness states", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("harness-states"));
+  await expect(page.getByRole("button", { name: "New Harness Release · View Settings" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
+  const installation = (path: string) => dialog.locator(".machine-harness-installation").filter({ hasText: path });
+  await expect(installation("Codex Tools")).toContainText("Pinned by Machine Policy");
+  await expect(installation("Codex Tools")).toContainText("change the pin before planning an upgrade");
+  await expect(installation("Claude\\claude.exe")).toContainText("Checks Disabled by Machine Policy");
+  await expect(installation("Claude\\claude.exe")).toContainText("whether manual upgrades are permitted");
+  await expect(installation("Pi\\pi.exe")).toContainText("Check Failed");
+  await expect(installation("Pi\\pi.exe")).toContainText("no current release status was established");
+  await expect(installation("Missing\\codex.exe")).toContainText("Harness Unavailable");
+  await expect(installation("Missing\\codex.exe")).toContainText("could not be started");
+  await expect(installation("Missing\\codex.exe")).not.toContainText("Run an update now");
+  await expect(installation("Missing\\codex.exe").getByRole("button", { name: "Use This Installation" })).toBeDisabled();
+  await page.screenshot({ path: "test-results/harness-states-desktop.png", fullPage: true });
+  await installation("Missing\\codex.exe").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "test-results/harness-states-desktop-bottom.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installation("Codex Tools").scrollIntoViewIfNeeded();
+  await expect(installation("Codex Tools")).toBeVisible();
+  await page.screenshot({ path: "test-results/harness-states-mobile.png", fullPage: true });
+  await installation("Claude\\claude.exe").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "test-results/harness-states-mobile-policy.png", fullPage: true });
+  await installation("Missing\\codex.exe").scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "test-results/harness-states-mobile-bottom.png", fullPage: true });
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+  await page.getByText("Agents", { exact: true }).click();
+  await page.getByRole("button", { name: "View Codex App Server Details" }).first().click();
+  const details = page.getByRole("dialog", { name: "Codex App Server Details" });
+  await expect(details.getByText("PowerShell on this Machine", { exact: false })).toBeVisible();
+  await expect(details.locator(".agent-details-command code")).toHaveText(
+    "& 'C:\\Program Files\\Codex Tools\\codex.exe' '--profile' 'Team''s Profile'",
+  );
+  await expect(details.getByText("Pinned by Machine Policy", { exact: true })).toBeVisible();
+  await page.screenshot({ path: "test-results/harness-command-mobile.png", fullPage: true });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await page.screenshot({ path: "test-results/harness-command-desktop.png", fullPage: true });
 });
 
 test("offline Machines retain last-reported harness status without a fresh release notice", async ({ page }) => {

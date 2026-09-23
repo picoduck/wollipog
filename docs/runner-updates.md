@@ -16,6 +16,11 @@ registry checks. Set `WOLLIPOG_HARNESS_UPDATE_PINNED=claude,codex` (or another c
 of `claude`, `codex`, and `pi`) to mark installed versions as pinned and suppress release checks and
 notifications for those harnesses. Wollipog never changes a running Agent Harness executable; after an external upgrade,
 restart idle sessions and rediscover.
+Machine settings labels a pinned installation and a policy-suppressed release check separately. A
+failed check establishes no current release status; an unavailable installation must be recovered or
+reselected before its prior update guidance is used. Agent Details quotes the launch command for the
+stated Machine PowerShell or POSIX shell, or for a POSIX shell inside the named WSL distribution.
+Any displayed Codex self-update command uses the discovered launch target and the same shell context.
 
 Boxes run the runner **binary deployed to them** (a Node SEA executable copied over SSH), not
 this repo's source. Restarting your dev stack updates the *local* runner you launch from source,

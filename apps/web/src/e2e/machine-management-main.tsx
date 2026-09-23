@@ -355,7 +355,7 @@ declare global {
     __WOLLIPOG_MACHINE_E2E__: {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
       lastAddBoxRequest(): AddBoxRequest | null;
-      setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" | "multiple-installations"): void;
+      setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" | "multiple-installations" | "harness-states"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
     };
   }
@@ -396,19 +396,60 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
         },
         {
           id: "codex-installation-local", name: "Codex",
-          command: "/home/misko/.local/bin/codex",
+          command: "/home/example/.local/bin/codex",
           args: [], env: {}, driver: "codex-app-server", context: { kind: "native" },
           source: "discovered", available: true, authStatus: "authenticated", version: "0.210.0",
-          installation: { id: "local", path: "/home/misko/.local/bin/codex", via: "common-dir", selection: "other" },
+          installation: { id: "local", path: "/home/example/.local/bin/codex", via: "common-dir", selection: "other" },
           update: { status: "managed_externally", installedVersion: "0.210.0",
             latestKnownCompatibleVersion: "0.210.0",
             checkedAt: Date.UTC(2026, 8, 22), channel: "stable",
             evidenceSource: "Executable installation provenance", managedExternally: true,
-            guidance: "This installation advertises its built-in `codex update` command. Invoke `update` through this installation's exact Launch Command in Agent Details, in the Machine's execution context. A bare `codex` on PATH may be another installation. Stop sessions using this executable before upgrading. Restart and Rediscover before treating the new version as ready." },
+            guidance: "This installation advertises its built-in `codex update` command. Run `'/home/example/.local/bin/codex' 'update'` in a POSIX shell on this Machine after stopping sessions using this executable. A bare `codex` on PATH may be another installation. Restart and Rediscover before treating the new version as ready." },
         },
       ];
       runner.harnessSelections = [{ family: "codex", context: { kind: "native" },
         installationId: "system", path: "/usr/bin/codex", via: "path", version: "0.199.0", agentId: "codex" }];
+    } else if (scenario === "harness-states") {
+      runner.protocolVersion = PROTOCOL_VERSION;
+      runner.hostname = "demo-workstation";
+      runner.workspaces = [{ id: "demo", name: "Demo", path: "C:\\Users\\example" }];
+      runner.agents = [
+        {
+          id: "pinned-codex", name: "Pinned Codex", command: "C:\\Program Files\\Codex Tools\\codex.exe",
+          args: ["--profile", "Team's Profile"], env: {}, driver: "codex-app-server",
+          context: { kind: "native" }, source: "discovered", available: true, version: "0.155.1",
+          installation: { id: "pinned", path: "C:\\Program Files\\Codex Tools\\codex.exe", via: "path" },
+          update: { status: "managed_externally", installedVersion: "0.155.1", latestKnownCompatibleVersion: "0.155.1",
+            checkedAt: Date.UTC(2026, 8, 22), channel: "stable", evidenceSource: "Machine pinned-version policy",
+            managedExternally: true, guidance: "This harness installation is pinned by Machine policy. Release checks are suppressed, so no current release status was established. Ask the Machine operator to change the pin before planning an upgrade." },
+        },
+        {
+          id: "policy-claude", name: "Policy Claude", command: "C:\\Tools\\Claude\\claude.exe",
+          args: [], env: {}, driver: "claude-code", context: { kind: "native" }, source: "discovered",
+          available: true, version: "1.2.3", installation: { id: "policy", path: "C:\\Tools\\Claude\\claude.exe", via: "path" },
+          update: { status: "managed_externally", installedVersion: "1.2.3", checkedAt: Date.UTC(2026, 8, 22),
+            channel: "stable", evidenceSource: "Machine update-check policy", managedExternally: true,
+            guidance: "Release checks are disabled by this Machine's policy. Ask the Machine operator whether manual upgrades are permitted." },
+        },
+        {
+          id: "failed-pi", name: "Failed Pi", command: "C:\\Tools\\Pi\\pi.exe",
+          args: [], env: {}, driver: "pi", context: { kind: "native" }, source: "discovered",
+          available: true, version: "0.8.0", installation: { id: "failed", path: "C:\\Tools\\Pi\\pi.exe", via: "path" },
+          update: { status: "check_failed", installedVersion: "0.8.0", checkedAt: Date.UTC(2026, 8, 22),
+            channel: "stable", evidenceSource: "npm dist-tags for @earendil-works/pi-coding-agent", managedExternally: true,
+            guidance: "The release check could not complete, so no current release status was established. The Machine may be offline, behind a proxy, or rate limited; retry the check after connectivity returns." },
+        },
+        {
+          id: "missing-codex", name: "Missing Codex", command: "C:\\Missing\\codex.exe",
+          args: [], env: {}, driver: "codex-app-server", context: { kind: "native" }, source: "discovered",
+          available: false, unavailableReason: "The selected installation could not be started. Rediscover or choose another installation.",
+          installation: { id: "missing", path: "C:\\Missing\\codex.exe", via: "path" },
+          update: { status: "update_available", installedVersion: "0.155.1", latestPublishedVersion: "0.210.0",
+            checkedAt: Date.UTC(2026, 8, 22), channel: "stable", evidenceSource: "npm dist-tags for @openai/codex",
+            managedExternally: true, guidance: "A newer release is published. Run an update now." },
+        },
+      ];
+      runner.harnessSelections = [];
     } else {
       runner.protocolVersion = 154;
       runner.agents = [{
