@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { isAbsolute, join } from "node:path";
 import type { AgentContext, ExecutionTargetDefinition, ExecutionTargetRef, TargetHarnessInstallation } from "@wollipog/protocol";
 import type { RunnerContainerTarget } from "./config.js";
 import {
@@ -85,15 +85,39 @@ function unavailableReason(text: string): string {
   return (normalized || "container environment check failed").slice(0, 300);
 }
 
-/** The runtime client may read credential files through HOME or its config directory. */
-function setupCheckRuntimeEnvironment(home: string): Record<string, string> {
-  return {
+function localRuntimePath(value: string): string {
+  if (!isAbsolute(value) || value.length > 4096 || /[\r\n\0]/u.test(value)) {
+    throw new Error("container runtime path is not safe to forward");
+  }
+  return value;
+}
+
+/** Keep client config and credentials isolated while retaining only local, non-secret runtime
+ * locations needed to find a rootless image store or Unix daemon socket. */
+function setupCheckRuntimeEnvironment(home: string, runtime: RunnerContainerTarget["runtime"]): Record<string, string> {
+  const env: Record<string, string> = {
     PATH: process.platform === "win32" ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32` : "/usr/local/bin:/usr/bin:/bin",
     HOME: home,
     DOCKER_CONFIG: home,
     XDG_CONFIG_HOME: home,
     ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot ?? "C:\\Windows" } : {}),
   };
+  if (runtime === "podman" && process.platform === "linux") {
+    env.XDG_DATA_HOME = localRuntimePath(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"));
+    if (process.env.XDG_RUNTIME_DIR !== undefined) {
+      env.XDG_RUNTIME_DIR = localRuntimePath(process.env.XDG_RUNTIME_DIR);
+    }
+  }
+  const socket = runtime === "docker" ? process.env.DOCKER_HOST : process.env.CONTAINER_HOST;
+  if (runtime === "docker" && process.env.DOCKER_CONTEXT && process.env.DOCKER_CONTEXT !== "default") {
+    throw new Error("nonlocal container context is unsupported for setup checks");
+  }
+  if (socket) {
+    if (!socket.startsWith("unix://")) throw new Error("nonlocal container endpoint is unsupported for setup checks");
+    const path = localRuntimePath(socket.slice("unix://".length));
+    env[runtime === "docker" ? "DOCKER_HOST" : "CONTAINER_HOST"] = `unix://${path}`;
+  }
+  return env;
 }
 
 function setupCheckArgs(
@@ -103,7 +127,7 @@ function setupCheckArgs(
 ): string[] {
   const containerName = setupCheckContainerName(template, check, runnerKey);
   return [
-    "run", "--rm",
+    "run", "--rm", "--pull=never",
     "--name", containerName,
     ...containerLabelArgs(runnerKey, template.id),
     "--network", "none",
@@ -311,9 +335,15 @@ export class ContainerTargetRegistry {
       }
       let failed: string | null = null;
       for (const check of template.setupChecks) {
-        const home = await mkdtemp(join(tmpdir(), "wollipog-container-check-"));
+        let home: string;
         try {
-          const opts = { env: setupCheckRuntimeEnvironment(home), replaceEnv: true };
+          home = await mkdtemp(join(tmpdir(), "wollipog-container-check-"));
+        } catch {
+          failed = `setup check '${check.name}' could not prepare isolated runtime`;
+          break;
+        }
+        try {
+          const opts = { env: setupCheckRuntimeEnvironment(home, template.runtime), replaceEnv: true };
           const result = await this.deps.run(runtime.launch.command,
             [...prefix, ...setupCheckArgs(template, check, this.runnerKey)], { ...opts, timeoutMs: 30_000 });
           if (result.code !== 0 || result.timedOut || result.errorCode) {
@@ -323,12 +353,19 @@ export class ContainerTargetRegistry {
               ...prefix, "rm", "-f", setupCheckContainerName(template, check, this.runnerKey),
             ], { ...opts, timeoutMs: 15_000 });
             // Command output may contain values from the image. It is never a safe diagnostic.
-            failed = `setup check '${check.name}' failed`;
-            break;
+            const category = result.timedOut ? "timed out" : result.errorCode ? "runtime client failed" : "exited unsuccessfully";
+            failed = `setup check '${check.name}' ${category}`;
           }
+        } catch {
+          failed = `setup check '${check.name}' could not launch isolated runtime`;
         } finally {
-          await rm(home, { recursive: true, force: true });
+          try {
+            await rm(home, { recursive: true, force: true });
+          } catch {
+            failed = `setup check '${check.name}' could not clean isolated runtime`;
+          }
         }
+        if (failed) break;
       }
       const installations = failed ? new Map() : await this.discoverInstallations(template, runtime, id);
       this.prepared.set(id, {

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import type { ExecutionTargetRef } from "@wollipog/protocol";
 import type { RunnerContainerTarget } from "./config.js";
@@ -43,9 +45,9 @@ test("digest-pinned templates pass argv-native checks and produce an exact immut
   assert.deepEqual(calls[1], ["ps", "-aq", "--filter", `label=${LEGACY_CONTAINER_LABELS.runner}=${expectedRunnerKey}`]);
   assert.deepEqual(calls[2], ["image", "inspect", image]);
   const checkCall = calls[3]!;
-  assert.match(checkCall[3]!, /^wollipog-check-[a-f0-9]{20}-[a-f0-9]{16}$/);
-  assert.deepEqual(checkCall.slice(0, 3), ["run", "--rm", "--name"]);
-  assert.deepEqual(checkCall.slice(4), [
+  assert.match(checkCall[4]!, /^wollipog-check-[a-f0-9]{20}-[a-f0-9]{16}$/);
+  assert.deepEqual(checkCall.slice(0, 4), ["run", "--rm", "--pull=never", "--name"]);
+  assert.deepEqual(checkCall.slice(5), [
     "--label", `com.wollipog.runner=${expectedRunnerKey}`,
     "--label", "com.wollipog.template=offline-tools",
     "--label", `com.misko-agent-manager.runner=${expectedRunnerKey}`,
@@ -120,6 +122,102 @@ test("setup checks launch the runtime without inherited host values or credentia
     else process.env[marker] = previousMarker;
     if (previousInnocuous === undefined) delete process.env[innocuous];
     else process.env[innocuous] = previousInnocuous;
+  }
+});
+
+test("rootless Podman checks retain local storage and runtime paths without host credentials", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const previousData = process.env.XDG_DATA_HOME;
+  const previousRuntime = process.env.XDG_RUNTIME_DIR;
+  const previousHost = process.env.CONTAINER_HOST;
+  process.env.XDG_DATA_HOME = "/tmp/wollipog-fixture-podman-data";
+  process.env.XDG_RUNTIME_DIR = "/run/user/1000";
+  process.env.CONTAINER_HOST = "unix:///run/user/1000/podman/podman.sock";
+  try {
+    let checkEnv: Record<string, string> | undefined;
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(checkEnv?.XDG_DATA_HOME, "/tmp/wollipog-fixture-podman-data");
+    assert.equal(checkEnv?.XDG_RUNTIME_DIR, "/run/user/1000");
+    assert.equal(checkEnv?.CONTAINER_HOST, "unix:///run/user/1000/podman/podman.sock");
+    assert.equal(checkEnv?.HOME, checkEnv?.XDG_CONFIG_HOME);
+    assert.equal(checkEnv?.DOCKER_CONFIG, checkEnv?.HOME);
+    assert.equal(Object.keys(checkEnv ?? {}).some((name) => /TOKEN|SECRET|CREDENTIAL/iu.test(name)), false);
+  } finally {
+    if (previousData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousData;
+    if (previousRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = previousRuntime;
+    if (previousHost === undefined) delete process.env.CONTAINER_HOST;
+    else process.env.CONTAINER_HOST = previousHost;
+  }
+});
+
+test("unsupported remote container endpoint fails closed before running a setup check", async () => {
+  const previous = process.env.DOCKER_HOST;
+  process.env.DOCKER_HOST = "tcp://example.invalid:2375";
+  try {
+    let setupRan = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        if (args[0] === "run" && args.includes("git")) setupRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.equal(setupRan, false);
+    assert.match(registry.definitions()[0]!.unavailableReason!, /could not launch isolated runtime/);
+  } finally {
+    if (previous === undefined) delete process.env.DOCKER_HOST;
+    else process.env.DOCKER_HOST = previous;
+  }
+});
+
+test("an unavailable private runtime directory leaves only its target unavailable", async () => {
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = join(tmpdir(), `wollipog-missing-${randomUUID()}`);
+  try {
+    let setupRan = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        if (args[0] === "run" && args.includes("git")) setupRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.equal(setupRan, false);
+    assert.equal(registry.definitions()[0]!.unavailableReason,
+      "setup check 'git' could not prepare isolated runtime");
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+  }
+});
+
+test("setup-check timeout and client errors expose only value-free failure categories", async () => {
+  for (const [result, expected] of [
+    [{ code: 1, stdout: "fixture-private-output", stderr: "", timedOut: true }, "timed out"],
+    [{ code: 1, stdout: "", stderr: "fixture-private-output", errorCode: "ENOENT" }, "runtime client failed"],
+  ] as const) {
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => args[0] === "run" ? result : { code: 0, stdout: "", stderr: "" },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.unavailableReason, `setup check 'git' ${expected}`);
+    assert.doesNotMatch(JSON.stringify(registry.definitions()), /fixture-private-output|ENOENT/);
   }
 });
 
@@ -332,7 +430,7 @@ test("missing runtimes and failed checks stay visible but unavailable without fa
   });
   await failed.initialize();
   assert.equal(failed.definitions()[0]!.available, false);
-  assert.equal(failed.definitions()[0]!.unavailableReason, "setup check 'git' failed");
+  assert.equal(failed.definitions()[0]!.unavailableReason, "setup check 'git' exited unsuccessfully");
   assert.doesNotMatch(JSON.stringify(failed.definitions()), /fixture-sensitive-check-output/);
   assert.equal(existsSync(setupHome), false);
   assert.equal(call, 5);
@@ -417,7 +515,7 @@ test("Docker and Podman discover both generations and produce exact dual-label W
     assert.deepEqual(calls[4], {
       file: `/usr/bin/${runtimeName}`,
       args: [
-        "run", "--rm", "--name", `wollipog-check-${expectedRunnerKey}-${expectedCheckKey}`,
+        "run", "--rm", "--pull=never", "--name", `wollipog-check-${expectedRunnerKey}-${expectedCheckKey}`,
         "--label", `com.wollipog.runner=${expectedRunnerKey}`,
         "--label", `com.wollipog.template=${template.id}`,
         "--label", `com.misko-agent-manager.runner=${expectedRunnerKey}`,
