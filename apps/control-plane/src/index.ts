@@ -13,6 +13,7 @@ import websocket from "@fastify/websocket";
 import cors from "@fastify/cors";
 import fastifyStatic from "@fastify/static";
 import { canMutateQuestionPolicy } from "./question-policy.js";
+import { automaticAccountSwitchForRunner } from "./automatic-account-switch-compatibility.js";
 import {
   archiveSessionPage,
   parseArchiveSessionPageQuery,
@@ -1146,9 +1147,11 @@ app.register(async (instance) => {
           ...(runnerSupportsProtocol(msg.protocolVersion, "machineRunnerCapacity")
             ? { runnerCapacity: db.machineRunnerCapacityConfiguration(runnerId) ?? undefined }
             : {}),
-          ...(runnerSupportsProtocol(msg.protocolVersion, "automaticProviderAccountSwitch")
-            ? { automaticAccountSwitching: db.machineAutomaticAccountSwitchConfiguration(runnerId) ?? undefined }
-            : {}),
+          automaticAccountSwitching: automaticAccountSwitchForRunner(
+            db.machineAutomaticAccountSwitchConfiguration(runnerId),
+            msg.protocolVersion,
+            db.getRunner(runnerId)?.harnessSelections,
+          ),
           ...(runnerSupportsProtocol(msg.protocolVersion, "harnessSelectionBackgroundConsumers")
             ? { harnessInstallationChoices: db.getRunner(runnerId)?.harnessSelections?.map((selection) => ({
                 family: selection.family,
@@ -2739,6 +2742,14 @@ app.put("/api/runners/:id/harness-installation", async (req, reply) => {
   const selection = db.selectHarnessInstallation(id, agentId, installationId);
   if (!selection) return reply.code(409).send({ error: "This installation is no longer available for selection" });
   db.replaceSubscriptionUsageSnapshots(id, []);
+  const effectiveSwitching = automaticAccountSwitchForRunner(
+    db.machineAutomaticAccountSwitchConfiguration(id),
+    runner.protocolVersion,
+    db.getRunner(id)?.harnessSelections,
+  );
+  if (runner.status === "online" && effectiveSwitching && !effectiveSwitching.enabled) {
+    hub.sendToRunner(id, { type: "configure_automatic_account_switch", ...effectiveSwitching });
+  }
   if (runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers")) {
     hub.sendToRunner(id, {
       type: "configure_harness_installation_choices",
@@ -2854,7 +2865,12 @@ app.put("/api/runners/:id/automatic-account-switching", async (req, reply) => {
     });
   }
   if (runner?.status === "online") {
-    hub.sendToRunner(id, { type: "configure_automatic_account_switch", ...changed.configuration });
+    const effective = automaticAccountSwitchForRunner(
+      changed.configuration,
+      runner.protocolVersion,
+      db.getRunner(id)?.harnessSelections,
+    );
+    if (effective) hub.sendToRunner(id, { type: "configure_automatic_account_switch", ...effective });
   }
   hub.runnerChanged(id);
   if (boxId) hub.boxChanged(boxId);

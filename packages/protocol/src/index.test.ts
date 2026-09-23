@@ -193,13 +193,15 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 177", () => {
-  assert.equal(PROTOCOL_VERSION, 177);
+test("PROTOCOL_VERSION is 178", () => {
+  assert.equal(PROTOCOL_VERSION, 178);
   assert.equal(runnerSupportsProtocol(174, "harnessInstallations"), false);
   assert.equal(runnerSupportsProtocol(175, "harnessInstallations"), true);
   assert.equal(runnerSupportsProtocol(175, "harnessSelectionBackgroundConsumers"), false);
   assert.equal(runnerSupportsProtocol(176, "harnessSelectionBackgroundConsumers"), false);
   assert.equal(runnerSupportsProtocol(177, "harnessSelectionBackgroundConsumers"), true);
+  assert.equal(runnerSupportsProtocol(177, "automaticAccountSwitchHarnessSelection"), false);
+  assert.equal(runnerSupportsProtocol(178, "automaticAccountSwitchHarnessSelection"), true);
   assert.equal(runnerSupportsProtocol(170, "sessionProviderAccountSwitch"), false);
   assert.equal(runnerSupportsProtocol(171, "sessionProviderAccountSwitch"), true);
   assert.equal(runnerSupportsProtocol(171, "accountScopedAgentSkills"), false);

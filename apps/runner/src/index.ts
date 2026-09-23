@@ -1774,6 +1774,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
       harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
+      sessions.setAutomaticAccountSwitchSelectionReady(harnessInstallationChoices !== null);
       harnessSelectionGeneration++;
       subscriptionUsage.selectionChanged();
       if (msg.runnerCapacity && runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) {
@@ -3389,6 +3390,7 @@ function connect(): void {
   log(`connecting to ${config.controlPlaneUrl}`);
   registered = false;
   controlPlaneProtocolVersion = null;
+  sessions.setAutomaticAccountSwitchSelectionReady(false);
   chunkedSkillsSync.reset();
   const socket = new WebSocket(validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport));
   ws = socket;
@@ -3429,6 +3431,7 @@ function connect(): void {
     stopHeartbeat();
     registered = false;
     controlPlaneProtocolVersion = null;
+    sessions.setAutomaticAccountSwitchSelectionReady(false);
     // Shell processes are runner-owned, not transport-owned. Their bounded snapshots reconcile
     // after registration; only explicit close, session deletion, or runner shutdown kills them.
     log("disconnected");

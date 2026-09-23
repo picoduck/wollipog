@@ -538,7 +538,9 @@
 //      runner; older peers cannot persist or launch a target-specific choice.
 // 177: the control plane synchronizes saved harness choices to the runner before background usage
 //      inventory, and updates them when changed. Usage probes and external adoption enforce them.
-export const PROTOCOL_VERSION = 177;
+// 178: automatic provider-account switching pauses when harness choices cannot be synchronized.
+//      A newer control plane also suppresses it for older runners with a saved selection.
+export const PROTOCOL_VERSION = 178;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -667,6 +669,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   targetHarnessInstallations: 176,
   harnessInstallations: 175,
   harnessSelectionBackgroundConsumers: 177,
+  automaticAccountSwitchHarnessSelection: 178,
   automaticProviderAccountSwitch: 173,
   sessionProviderAccountSwitch: 171,
   providerAccounts: 170,
