@@ -34,7 +34,8 @@ import { discoverAgentModels, type AgentModelDiscovery } from "./models.js";
 import { checkHarnessUpdate } from "./harness-updates.js";
 import { unavailableNativeTuiAccounting } from "./native-tui-accounting.js";
 import { probePiRpc, unavailablePiCapabilities } from "./pi-rpc.js";
-import { listWslDistros, resolveInWsl, resolveInWslCandidates, resolveNativeCandidates, resolvedLaunchIdentity, run, type ResolvedBinary, type ResolvedLaunch } from "./resolve.js";
+import { launchTargetStillMatches, listWslDistros, resolveInWsl, resolveInWslCandidates, resolveNativeCandidates, resolvedLaunchIdentity, run, type ResolvedBinary, type ResolvedLaunch } from "./resolve.js";
+import { invalidateStaleNativeInstallation } from "./stale-installation.js";
 
 const CONFIGURED_ACP_PROBE_TIMEOUT_MS = 20_000;
 const MAX_CONCURRENT_CONFIGURED_ACP_PROBES = 4;
@@ -647,6 +648,23 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
       }
       await Promise.all(bins.map(async (bin, index) => {
       const suffix = installationId({ kind: "native" }, bin);
+      const installation = { id: suffix, path: bin.path, via: bin.via, targetIdentity: resolvedLaunchIdentity(bin) };
+      if (!launchTargetStillMatches(bin.launch, { kind: "native" }, installation.targetIdentity)) {
+        const unavailable = k.bin === "codex"
+          ? unavailableCodexAgentDefinition(k.id, k.name, { kind: "native" })
+          : k.bin === "claude"
+            ? unavailableClaudeAgentDefinition(k.id, k.name, { kind: "native" })
+            : unavailablePiAgentDefinition(k.id, k.name, { kind: "native" });
+        nativeSlots[knownIndex]![index] = [invalidateStaleNativeInstallation({
+          ...unavailable,
+          id: index === 0 ? k.id : `${k.id}-installation-${suffix}`,
+          name: index === 0 ? k.name : `${k.name} (${bin.path})`,
+          command: bin.launch.command,
+          args: bin.launch.args,
+          installation,
+        })];
+        return;
+      }
       const gitBashPath = k.bin === "claude" ? await resolveNativeClaudeGitBash() : undefined;
       const claudeCode = k.bin === "claude"
         ? applyNativeClaudeGitBashReadiness(await probeNativeClaudeCode(bin.launch, bin.via), gitBashPath)
@@ -656,8 +674,10 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
         : await nativeProbe(k, bin.launch);
       const codexAppServer = k.bin === "codex" ? await probeNativeCodexAppServer(bin.launch, version) : undefined;
       const piRpc = k.bin === "pi" ? await probePiRpc(bin.launch, { kind: "native" }) : undefined;
-      const update = await checkHarnessUpdate(k.bin as "claude" | "codex" | "pi", bin, { kind: "native" }, version,
-        k.bin === "codex" ? codexAppServer?.status === "supported" : k.bin === "claude" ? claudeCode?.status === "ready" : piRpc?.available === true);
+      const update = launchTargetStillMatches(bin.launch, { kind: "native" }, installation.targetIdentity)
+        ? await checkHarnessUpdate(k.bin as "claude" | "codex" | "pi", bin, { kind: "native" }, version,
+          k.bin === "codex" ? codexAppServer?.status === "supported" : k.bin === "claude" ? claudeCode?.status === "ready" : piRpc?.available === true)
+        : undefined;
       const slashCommands = nativeSlashCommands(k.driver);
       const catalogCapabilities = withSlashCommands(k.driver, slashCommands);
       const base: AgentDefinition = {
@@ -683,7 +703,7 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           : catalogCapabilities),
         ...(piRpc?.piAgentControl ? { piAgentControl: piRpc.piAgentControl } : {}),
         source: "discovered",
-        installation: { id: suffix, path: bin.path, via: bin.via, targetIdentity: resolvedLaunchIdentity(bin) },
+        installation,
         ...(codexAppServer ? { codexAppServer } : {}),
         ...(claudeCode ? { claudeCode } : {}),
         ...(k.bin !== "pi" ? { nativeTuiAccounting: unavailableNativeTuiAccounting(
@@ -692,7 +712,10 @@ export async function discoverAgents(): Promise<AgentDefinition[]> {
           k.bin === "claude" ? claudeCode?.streamJsonInput === true : codexAppServer?.appServerAvailable === true,
         ) } : {}),
       };
-      nativeSlots[knownIndex]![index] = codexAppServer ? codexAgentDefinitions(base, codexAppServer, slashCommands) : [base];
+      const checked = invalidateStaleNativeInstallation(base);
+      nativeSlots[knownIndex]![index] = checked !== base
+        ? [checked]
+        : codexAppServer ? codexAgentDefinitions(base, codexAppServer, slashCommands) : [base];
       }));
     }),
   );
