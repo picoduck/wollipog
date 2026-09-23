@@ -3,6 +3,7 @@ import type {
   AgentContext,
   AgentDefinition,
   AgentDriverKind,
+  HarnessInstallationChoice,
   ProviderAccountDefinition,
   SubscriptionUsageBucket,
   SubscriptionUsageProvider,
@@ -14,6 +15,8 @@ import { JsonRpcPeer } from "./jsonrpc.js";
 import { killTree, spawnAgent, type AgentProcess, type SpawnIsolation } from "./spawn.js";
 import type { DriverSubscriptionUsageUpdate } from "./drivers/driver.js";
 import { agentForProviderAccount, providerForDriver } from "./provider-accounts.js";
+import { harnessChoiceFor, selectedHarnessAgent } from "./harness-selection.js";
+import { launchTargetStillMatches } from "./discovery/resolve.js";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -588,12 +591,16 @@ interface SubscriptionSource {
 export interface SubscriptionUsageManagerOptions {
   runnerId: string;
   agents: () => AgentDefinition[];
+  /** A pre-v176 control plane cannot supply authoritative choices, so background sources wait. */
+  selectionReady?: () => boolean;
+  installationChoices?: () => readonly HarnessInstallationChoice[];
   providerAccounts?: () => ProviderAccountDefinition[];
   /** Production resolves the runner-local credential home against agent execution contexts. The
    * secret-free account passed here never exposes that path to snapshots or the control plane. */
   resolveProviderAccountAgent?: (
     account: ProviderAccountDefinition,
     supportedDrivers: AgentDriverKind[],
+    agents: AgentDefinition[],
   ) => AgentDefinition | undefined;
   resolveEnv: (agentId: string, driver: AgentDefinition["driver"], context: AgentContext, providerAccountId?: string) => Record<string, string>;
   /** Discovery probes the context-default Claude credential scope. Configured sources that select
@@ -609,6 +616,7 @@ export interface SubscriptionUsageManagerOptions {
   now?: () => number;
   probeCodex?: typeof probeCodexSubscriptionUsage;
   killProbe?: typeof killTree;
+  onTargetChanged?: () => void;
 }
 
 export class SubscriptionUsageManager {
@@ -621,6 +629,7 @@ export class SubscriptionUsageManager {
   private readonly activeProbeChildren = new Set<AgentProcess>();
   private refreshPromise: Promise<SubscriptionUsageSnapshot[]> | null = null;
   private shuttingDown = false;
+  private selectionGeneration = 0;
 
   constructor(private readonly options: SubscriptionUsageManagerOptions) {}
 
@@ -628,51 +637,91 @@ export class SubscriptionUsageManager {
     return (this.options.now ?? Date.now)();
   }
 
+  /** Selection updates invalidate in-flight results and stop probes of the old executable. */
+  selectionChanged(): SubscriptionUsageSnapshot[] {
+    this.selectionGeneration++;
+    for (const child of this.activeProbeChildren) (this.options.killProbe ?? killTree)(child);
+    this.lastProbeAt.clear();
+    this.lastEvent.clear();
+    this.responded.clear();
+    return this.syncSources();
+  }
+
+  private isCurrentSource(source: SubscriptionSource): boolean {
+    return this.sources().some((current) => current.sourceId === source.sourceId &&
+      current.agent.id === source.agent.id && !current.unsupportedDetail);
+  }
+
   private sources(): SubscriptionSource[] {
+    if (this.options.selectionReady && !this.options.selectionReady()) return [];
     const result: SubscriptionSource[] = [];
     const seen = new Set<string>();
+    const missingContexts = new Set<string>();
     const accountContexts = new Set<string>();
+    const agents = this.options.agents();
+    const choices = this.options.installationChoices?.() ?? [];
     const accounts = this.options.providerAccounts?.() ?? [];
     for (const account of accounts) {
-        const supportedDrivers: AgentDriverKind[] = account.provider === "codex"
-          ? ["codex-app-server"] : ["claude-code"];
-        const agents = this.options.agents();
-        const resolved = this.options.resolveProviderAccountAgent
-          ? this.options.resolveProviderAccountAgent(account, supportedDrivers)
-          : agentForProviderAccount(agents, account, supportedDrivers);
-        const providerAgents = agents.filter((candidate) =>
-          providerForDriver(candidate.driver ?? "acp") === account.provider &&
-          supportedDrivers.includes(candidate.driver ?? "acp"));
-        const agent = resolved ??
-          providerAgents.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
-          providerAgents.find((candidate) => (candidate.context?.kind ?? "native") === "native") ??
-          providerAgents[0];
-        if (!agent) continue;
-        if (resolved) accountContexts.add(`${account.provider}\0${contextKey(agent.context)}`);
-        const sourceId = subscriptionUsageSourceId(
-          this.options.runnerId,
-          agent.id,
-          account.provider,
-          agent.context,
-          account.id,
-        );
-        result.push({
-          agent,
-          provider: account.provider,
-          sourceId,
-          providerAccountId: account.id,
-          accountLabel: account.label,
-          authStatus: account.authStatus,
-          ...(!resolved && this.options.resolveProviderAccountAgent
+      const supportedDrivers: AgentDriverKind[] = account.provider === "codex"
+        ? ["codex-app-server"] : ["claude-code"];
+      const resolved = this.options.resolveProviderAccountAgent
+        ? this.options.resolveProviderAccountAgent(account, supportedDrivers, agents)
+        : agentForProviderAccount(agents, account, supportedDrivers);
+      const providerAgents = agents.filter((candidate) =>
+        providerForDriver(candidate.driver ?? "acp") === account.provider &&
+        supportedDrivers.includes(candidate.driver ?? "acp"));
+      const fallback = resolved ??
+        providerAgents.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
+        providerAgents.find((candidate) => (candidate.context?.kind ?? "native") === "native") ??
+        providerAgents[0];
+      const choice = fallback && harnessChoiceFor(choices, account.provider, fallback.context);
+      const accountCompatibleAgents = [
+        ...providerAgents.filter((candidate) => candidate.defaultProviderAccountId === account.id),
+        ...providerAgents.filter((candidate) => !candidate.defaultProviderAccountId),
+      ];
+      const selected = fallback && choice
+        ? accountCompatibleAgents.includes(fallback) && fallback.installation?.id === choice.installationId
+          ? fallback
+          : selectedHarnessAgent(accountCompatibleAgents, fallback.driver ?? "acp", fallback.context ?? { kind: "native" }, choices)
+        : fallback;
+      const agent = selected ?? fallback;
+      if (!agent) continue;
+      if (resolved) accountContexts.add(`${account.provider}\0${contextKey(agent.context)}`);
+      const sourceId = subscriptionUsageSourceId(
+        this.options.runnerId,
+        agent.id,
+        account.provider,
+        agent.context,
+        account.id,
+      );
+      result.push({
+        agent,
+        provider: account.provider,
+        sourceId,
+        providerAccountId: account.id,
+        accountLabel: account.label,
+        authStatus: account.authStatus,
+        ...(choice && !selected
+          ? { unsupportedDetail: "The selected harness installation is unavailable in this provider account's execution context." }
+          : !resolved && this.options.resolveProviderAccountAgent
             ? { unsupportedDetail: "This provider account's credential home is not available in a compatible provider execution context on this runner." }
             : {}),
-        });
+      });
     }
-    for (const agent of this.options.agents()) {
+    for (const agent of agents) {
       const provider = providerForDriver(agent.driver ?? "acp");
       if (!provider || agent.driver === "codex") continue;
-      const mappedToAccount = accountContexts.has(`${provider}\0${contextKey(agent.context)}`);
+      const sourceContext = `${provider}\0${contextKey(agent.context)}`;
+      const mappedToAccount = accountContexts.has(sourceContext);
       if (mappedToAccount) continue;
+      const choice = harnessChoiceFor(choices, provider, agent.context);
+      const missingSelection = Boolean(choice && agent.installation?.id !== choice.installationId);
+      if (missingSelection) {
+        // Keep one explicit unsupported card only when rediscovery lost the chosen executable.
+        if (selectedHarnessAgent(agents, agent.driver ?? "acp", agent.context ?? { kind: "native" }, choices) ||
+            missingContexts.has(sourceContext)) continue;
+        missingContexts.add(sourceContext);
+      }
       const sourceId = subscriptionUsageSourceId(
         this.options.runnerId,
         agent.id,
@@ -691,6 +740,9 @@ export class SubscriptionUsageManager {
         provider,
         sourceId,
         ...(claudeAccountLabel ? { accountLabel: claudeAccountLabel } : {}),
+        ...(missingSelection
+          ? { unsupportedDetail: "The selected harness installation is unavailable in this execution context." }
+          : {}),
       });
     }
     return result;
@@ -776,9 +828,11 @@ export class SubscriptionUsageManager {
       // refresh, so comparing them here would mistake every populated Codex snapshot for a switch.
       const accountChanged = source.provider === "claude" && Boolean(prior) &&
         source.accountLabel !== prior?.accountLabel;
-      const forced = initial.state === "unsupported" ||
+      const forced = source.unsupportedDetail != null || prior?.agentId !== source.agent.id ||
+        initial.state === "unsupported" ||
         initial.state === "unauthenticated" ||
         initial.state === "not_applicable";
+      if (forced) this.lastProbeAt.delete(source.sourceId);
       this.snapshots.set(source.sourceId, forced || !prior || accountChanged ? initial : {
         ...prior,
         agentId: source.agent.id,
@@ -803,21 +857,25 @@ export class SubscriptionUsageManager {
     const provider = driver === "codex-app-server" ? "codex" : driver === "claude-code" ? "claude" : null;
     if (!provider || provider !== update.provider) return null;
     const sourceId = subscriptionUsageSourceId(this.options.runnerId, agentId, provider, context, providerAccountId);
-    if (update.kind === "response_observed") return this.observeProviderResponse(sourceId);
-    const source = this.sources().find((candidate) => candidate.sourceId === sourceId);
-    // Remote targets intentionally have no runner-local account source. Ignore their provider
-    // events instead of publishing snapshots the control plane must reject.
+    const source = this.sources().find((candidate) => candidate.sourceId === sourceId &&
+      (providerAccountId !== undefined || (!candidate.unsupportedDetail && candidate.agent.id === agentId)));
     if (!source) return null;
+    if (update.kind === "response_observed") return source.unsupportedDetail
+      ? null : this.observeProviderResponse(sourceId);
+    // Account events come from live sessions, including sessions started before a choice changed.
+    // Keep the canonical source agent for persistence, but return an event from an unsupported
+    // source to its session so automatic account switching can still use the rate-limit window.
     const base = {
       sourceId,
       runnerId: this.options.runnerId,
-      agentId,
+      agentId: source.agent.id,
       ...(source.providerAccountId ? { providerAccountId: source.providerAccountId } : {}),
     };
     const normalized = provider === "codex"
       ? normalizeCodexRateLimits(update.payload, base, this.now())
       : normalizeClaudeRateLimits(update.payload, base, this.now());
     if (!normalized) return null;
+    if (source.unsupportedDetail) return normalized;
     const prior = this.snapshots.get(sourceId);
     if (prior && normalized.fetchedAt < prior.fetchedAt) return prior;
     const { fetchedAt: _fetchedAt, ...eventShape } = normalized;
@@ -876,26 +934,30 @@ export class SubscriptionUsageManager {
   async refreshAccount(providerAccountId: string): Promise<SubscriptionUsageSnapshot[]> {
     if (this.shuttingDown) throw new Error("subscription usage manager is shutting down");
     this.syncSources();
+    const selectionGeneration = this.selectionGeneration;
     const sources = this.sources().filter((source) => source.providerAccountId === providerAccountId);
     if (sources.length === 0) throw new Error("provider account is not configured");
     for (const source of sources) {
-      if (source.provider === "codex") await this.refreshCodex(source);
+      if (source.provider === "codex") await this.refreshCodex(source, selectionGeneration);
     }
     return this.inventory();
   }
 
   private async refreshAllNow(): Promise<SubscriptionUsageSnapshot[]> {
     this.syncSources();
+    const selectionGeneration = this.selectionGeneration;
     const codexSources = this.sources().filter((source) => source.provider === "codex");
     // A runner may advertise several contexts. Probe sequentially to avoid concurrent mutation of
     // one provider HOME; the control plane derives a bounded deadline from this source count.
     // Duplicate manual requests share refreshPromise and each source has its own minimum interval.
-    for (const source of codexSources) await this.refreshCodex(source);
+    for (const source of codexSources) await this.refreshCodex(source, selectionGeneration);
     return this.inventory();
   }
 
-  private async refreshCodex(source: SubscriptionSource): Promise<void> {
-    if (this.shuttingDown) return;
+  private async refreshCodex(source: SubscriptionSource, selectionGeneration: number): Promise<void> {
+    if (this.shuttingDown || selectionGeneration !== this.selectionGeneration ||
+        !this.sources().some((current) => current.sourceId === source.sourceId &&
+          current.agent.id === source.agent.id)) return;
     const initial = this.initialSnapshot(source);
     if (initial.state === "unsupported" ||
         initial.state === "unauthenticated" ||
@@ -929,7 +991,24 @@ export class SubscriptionUsageManager {
       }
       const authorization = await this.options.authorizeProbe?.(source.agent, env, source.sourceId);
       if (!authorization) throw new Error("subscription usage probe authorization is unavailable");
-      if (this.shuttingDown) return;
+      if (this.shuttingDown || selectionGeneration !== this.selectionGeneration || !this.isCurrentSource(source)) return;
+      const target = source.agent.installation?.targetIdentity;
+      if (target && !launchTargetStillMatches(
+        { command: source.agent.command, args: source.agent.args ?? [] },
+        source.agent.context ?? { kind: "native" },
+        target,
+      )) {
+        this.options.onTargetChanged?.();
+        const unavailable: SubscriptionUsageSnapshot = {
+          ...initial,
+          state: "unavailable",
+          detail: "The harness installation changed; retry after Machine rediscovery.",
+          fetchedAt: this.now(),
+        };
+        this.snapshots.set(source.sourceId, unavailable);
+        this.options.publish(unavailable);
+        return;
+      }
       const result = await (this.options.probeCodex ?? probeCodexSubscriptionUsage)(
         source.agent,
         env,
@@ -944,7 +1023,7 @@ export class SubscriptionUsageManager {
         },
         authorization,
       );
-      if (this.shuttingDown) return;
+      if (this.shuttingDown || selectionGeneration !== this.selectionGeneration || !this.isCurrentSource(source)) return;
       if (result.state === "available") {
         const normalized = normalizeCodexRateLimits(
           result.rateLimits,
@@ -986,7 +1065,7 @@ export class SubscriptionUsageManager {
       this.snapshots.set(source.sourceId, unavailable);
       this.options.publish(unavailable);
     } catch (error) {
-      if (this.shuttingDown) return;
+      if (this.shuttingDown || selectionGeneration !== this.selectionGeneration || !this.isCurrentSource(source)) return;
       this.options.log?.(`subscription usage probe failed for ${source.agent.id}: ${errorText(error)}`);
       const prior = this.snapshots.get(source.sourceId);
       const failed: SubscriptionUsageSnapshot = prior?.buckets.length

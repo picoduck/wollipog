@@ -536,7 +536,9 @@
 // 176: runner-probed container and opt-in cloud-adapter harness installations are target-bound.
 //      Exact installation ids travel with the immutable execution target and are enforced by the
 //      runner; older peers cannot persist or launch a target-specific choice.
-export const PROTOCOL_VERSION = 176;
+// 177: the control plane synchronizes saved harness choices to the runner before background usage
+//      inventory, and updates them when changed. Usage probes and external adoption enforce them.
+export const PROTOCOL_VERSION = 177;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -664,6 +666,7 @@ export interface RunnerControlPlaneAttestation {
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   targetHarnessInstallations: 176,
   harnessInstallations: 175,
+  harnessSelectionBackgroundConsumers: 177,
   automaticProviderAccountSwitch: 173,
   sessionProviderAccountSwitch: 171,
   providerAccounts: 170,
@@ -2478,6 +2481,9 @@ export interface TargetHarnessInstallationSelection {
   version?: string;
   available: boolean;
 }
+/** The runner needs only the selected identity, never the control plane's display snapshot. */
+export type HarnessInstallationChoice = Pick<HarnessInstallationSelection,
+  "family" | "context" | "installationId">;
 
 /** Denormalised runner record as the UI consumes it (REST + WS). */
 export interface RunnerView {
@@ -7043,6 +7049,14 @@ export interface RegisteredMessage {
   runnerCapacity?: RunnerCapacityConfiguration;
   /** Present once the Machine has a persisted automatic account-switch preference. */
   automaticAccountSwitching?: RunnerAutomaticAccountSwitchConfiguration;
+  /** Complete Machine choices, including unavailable installations. Protocol v177+. */
+  harnessInstallationChoices?: HarnessInstallationChoice[];
+}
+
+export interface ConfigureHarnessInstallationChoicesMessage {
+  type: "configure_harness_installation_choices";
+  /** Complete replacement; an empty array removes all choices. Protocol v177+. */
+  choices: HarnessInstallationChoice[];
 }
 
 export interface RegisterRejectedMessage {
@@ -8555,6 +8569,7 @@ export interface GitActionResultMessage {
 
 export type ControlPlaneToRunner =
   | RegisteredMessage
+  | ConfigureHarnessInstallationChoicesMessage
   | RegisterRejectedMessage
   | PolicyHookCredentialRegisteredMessage
   | RecordPolicyHookDecisionMessage

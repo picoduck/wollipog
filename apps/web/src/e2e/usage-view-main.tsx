@@ -220,6 +220,15 @@ const subscription: SubscriptionUsageResponse = {
   staleAfterMs: 600_000,
   generatedAt: END,
 };
+if (params.get("selectedUnavailable") === "1" && subscription.sources[0]) {
+  const { credits: _credits, plan: _plan, ...source } = subscription.sources[0];
+  subscription.sources[0] = {
+    ...source,
+    state: "unsupported",
+    detail: "The selected harness installation is unavailable in this execution context.",
+    buckets: [],
+  };
+}
 
 let dailyBudget: { perUserUsd: number | null; updatedAt: number | null } = { perUserUsd: 25, updatedAt: END };
 const users = [

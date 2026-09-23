@@ -11691,8 +11691,11 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(runnerId)) return fail("runner is offline", 409);
     const unsupported = this.capabilityFailure(runnerId, "externalSessions", "Finding agent sessions");
     if (unsupported) return unsupported;
+    const runner = this.db.getRunner(runnerId);
+    const selectionCannotBeEnforced = Boolean(runner?.harnessSelections?.length) &&
+      !runnerSupportsProtocol(runner?.protocolVersion, "harnessSelectionBackgroundConsumers");
     const selectedAgent = agentId
-      ? this.db.getRunner(runnerId)?.agents.find((agent) => agent.id === agentId && agent.available === true)
+      ? runner?.agents.find((agent) => agent.id === agentId && agent.available === true)
       : undefined;
     if (agentId && !selectedAgent) return fail("the selected agent is not available on this runner", 404);
     if (selectedAgent?.driver === "codex-app-server") {
@@ -11721,7 +11724,9 @@ export class SessionsService {
       );
       if (res.type !== "list_external_sessions_result") return fail("unexpected runner reply", 502);
       if (!res.ok) return fail(res.error ?? "external session enumeration failed", 502);
-      const sessions = res.sessions ?? [];
+      const sessions = selectionCannotBeEnforced
+        ? (res.sessions ?? []).map((session) => session.agentId ? session : { ...session, resumable: false })
+        : res.sessions ?? [];
       if (!selectedAgent) return ok(sessions);
       const driver = selectedAgent.driver ?? "acp";
       const context = selectedAgent.context ?? { kind: "native" as const };
@@ -11874,6 +11879,11 @@ export class SessionsService {
     if (!descriptor.agentSessionId) return fail("descriptor is missing an agent session id", 400);
     const unsupported = this.capabilityFailure(runnerId, "externalSessions", "Adopting agent sessions");
     if (unsupported) return unsupported;
+    const runner = this.db.getRunner(runnerId);
+    if (!descriptor.agentId && runner?.harnessSelections?.length &&
+        !runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers")) {
+      return fail("This runner cannot enforce the saved harness installation choice for adoption", 409);
+    }
     if (descriptor.driver === "pi") {
       const piUnsupported = this.capabilityFailure(runnerId, "piExternalSessions", "Pi session adoption");
       if (piUnsupported) return piUnsupported;

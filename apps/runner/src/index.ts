@@ -11,6 +11,7 @@ import { resolve } from "node:path";
 import WebSocket from "ws";
 import {
   parseMessage,
+  agentContextKey,
   PROTOCOL_VERSION,
   projectRunnerMessageForProtocol,
   projectSessionEventPayloadForProtocol,
@@ -29,6 +30,7 @@ import {
   type GitAction,
   type GitActionRequestMessage,
   type HeartbeatMessage,
+  type HarnessInstallationChoice,
   type HostActionMessage,
   type CreateWorkspaceReferenceRequestMessage,
   type ListDirectoryRequestMessage,
@@ -62,6 +64,7 @@ import {
   type RunnerConfig,
 } from "./config.js";
 import { stageRunnerCredentialFile } from "./runner-credential-file.js";
+import { harnessChoiceFor, harnessFamily, synchronizedHarnessChoices } from "./harness-selection.js";
 import {
   applyClaudeHookCapability,
   claudeHookCircuitLockPath,
@@ -518,6 +521,8 @@ const metadata: RunnerMetadata = {
 
 // Configured agents are the baseline; discovery augments them (config wins on conflict).
 const configAgents = metadata.agents;
+let harnessInstallationChoices: HarnessInstallationChoice[] | null = null;
+let harnessSelectionGeneration = 0;
 const acpAuthStatus = new Map<string, AcpAuthRuntime>();
 const freshSafeWslLaunches = new Set<string>();
 
@@ -578,7 +583,26 @@ function runnerLocalAgentEnv(agentId: string | null, driver: AgentDriverKind, co
   const exact = agentId ? metadata.agents.find((agent) => agent.id === agentId) : undefined;
   const configured = agentId ? config.agents.find((agent) => agent.id === agentId) : undefined;
   if (configured) return resolveRunnerLocalAgentEnvironment(configured, exact?.env);
-  return { ...(exact?.env ?? resolveLaunchForDriver(metadata.agents, driver, context)?.env ?? {}) };
+  return { ...(exact?.env ?? resolveAdoptionLaunch(driver, context)?.env ?? {}) };
+}
+
+/** Native adopted rows retain the recorded launch command across later selection changes. */
+function adoptedLaunchEnvironment(meta: Pick<SessionMeta, "command" | "args" | "driver" | "context">): Record<string, string> {
+  const exact = metadata.agents.find((agent) =>
+    (agent.driver ?? "acp") === meta.driver &&
+    agentContextKey(agent.context) === agentContextKey(meta.context) &&
+    agent.command === meta.command &&
+    JSON.stringify(agent.args ?? []) === JSON.stringify(meta.args));
+  return { ...(exact?.env ?? {}) };
+}
+
+function resolveAdoptionLaunch(driver: AgentDriverKind, context: AgentContext) {
+  return harnessInstallationChoices === null
+    ? null
+    : resolveLaunchForDriver(metadata.agents, driver, context, harnessInstallationChoices, () => {
+        void runDiscovery(false, false).catch((error) =>
+          log(`harness rediscovery after adoption target change failed: ${errText(error)}`));
+      });
 }
 
 let authorizeSubscriptionUsageProbe: SubscriptionUsageManagerOptions["authorizeProbe"];
@@ -586,11 +610,13 @@ let authorizeSubscriptionUsageProbe: SubscriptionUsageManagerOptions["authorizeP
 const subscriptionUsage = new SubscriptionUsageManager({
   runnerId: config.runnerId,
   agents: () => metadata.agents,
+  selectionReady: () => harnessInstallationChoices !== null,
+  installationChoices: () => harnessInstallationChoices ?? [],
   providerAccounts: providerAccountsForControlPlane,
-  resolveProviderAccountAgent: (account, supportedDrivers) => {
+  resolveProviderAccountAgent: (account, supportedDrivers, agents) => {
     const configured = config.providerAccounts.find((candidate) => candidate.id === account.id);
     return configured
-      ? agentForProviderAccount(metadata.agents, configured, supportedDrivers)
+      ? agentForProviderAccount(agents, configured, supportedDrivers)
       : undefined;
   },
   resolveEnv: (agentId, driver, context, providerAccountId) => {
@@ -625,6 +651,10 @@ const subscriptionUsage = new SubscriptionUsageManager({
       throw new Error("subscription usage probe authorization is not initialized");
     }
     return authorizeSubscriptionUsageProbe(agent, env, sourceId);
+  },
+  onTargetChanged: () => {
+    void runDiscovery(false, false).catch((error) =>
+      log(`harness rediscovery after usage target change failed: ${errText(error)}`));
   },
   publish: (snapshot) => {
     if (runnerSupportsProtocol(controlPlaneProtocolVersion, "subscriptionUsage")) {
@@ -746,7 +776,7 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     ? resolveLaunchForAgent(metadata.agents, agentId, driver, context, () => {
         void runDiscovery(false, false).catch((error) => log(`harness rediscovery after target change failed: ${errText(error)}`));
       })
-    : resolveLaunchForDriver(metadata.agents, driver, context),
+    : resolveAdoptionLaunch(driver, context),
   undefined,
   config.dataDir,
   config.maxConcurrentSessions,
@@ -773,7 +803,9 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   undefined,
   config.agents.map((agent) => agent.context ?? { kind: "native" as const }),
   async (meta) => {
-    meta.env = runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
+    meta.env = meta.adopted && !meta.agentId
+      ? adoptedLaunchEnvironment(meta)
+      : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
     if (meta.providerCredentialHome && meta.providerAccountProvider) {
       Object.assign(meta.env, providerAccountEnvironment({
         provider: meta.providerAccountProvider,
@@ -1741,6 +1773,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
+      harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
+      harnessSelectionGeneration++;
+      subscriptionUsage.selectionChanged();
       if (msg.runnerCapacity && runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) {
         if (sessions.configureCapacity(msg.runnerCapacity)) {
           metadata.runtime!.maxConcurrentSessions = msg.runnerCapacity.configuredUnits;
@@ -1786,6 +1821,16 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // successful registration with the same pending token; discarding here would make promote()
       // a no-op and leave runner credential consumers on the revoked prior credential after cutover.
       ws?.close();
+      break;
+    case "configure_harness_installation_choices":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "harnessSelectionBackgroundConsumers")) break;
+      harnessInstallationChoices = msg.choices;
+      harnessSelectionGeneration++;
+      subscriptionUsage.selectionChanged();
+      publishSubscriptionUsageInventory(true);
+      void subscriptionUsage.refreshAll()
+        .then(() => subscriptionUsage.refreshAll())
+        .catch((error) => log(`subscription usage refresh after harness installation selection failed: ${errText(error)}`));
       break;
     case "policy_hook_credential_registered":
       try {
@@ -3100,7 +3145,7 @@ async function handleListExternal(requestId: string, agentId?: string): Promise<
             runnerSupportsProtocol(controlPlaneProtocolVersion, "piExternalSessions"))
           .map((d) => ({
             ...d,
-            resumable: resolveLaunchForDriver(metadata.agents, d.driver, d.context) != null,
+            resumable: resolveAdoptionLaunch(d.driver, d.context) != null,
           }))),
       selectedDriver && selectedDriver !== "acp"
         ? Promise.resolve([])
@@ -3126,6 +3171,7 @@ async function handleListExternal(requestId: string, agentId?: string): Promise<
 /** Phase 3: adopt an external session into the box store (optionally backfilling its transcript). */
 async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
   const { requestId, sessionId, descriptor: claimed, backfill } = msg;
+  const adoptionSelectionGeneration = harnessSelectionGeneration;
   const fail = (detail: string) => requestId
     ? sendUp({ type: "adopt_session_result", requestId, ok: false, error: detail })
     : sendUp({ type: "session_status", sessionId, status: "failed", detail });
@@ -3160,8 +3206,16 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
     });
     if (!found) return fail("that external session was not found on this box (it may already be adopted)");
     descriptor = retargetExternalSession(found.descriptor, claimed);
-    launch = resolveLaunchForDriver(metadata.agents, descriptor.driver, descriptor.context) ??
+    const family = harnessFamily(descriptor.driver);
+    if (family && harnessInstallationChoices === null) {
+      return fail("This control plane cannot synchronize harness installation choices for adoption.");
+    }
+    launch = resolveAdoptionLaunch(descriptor.driver, descriptor.context) ??
       { command: "", args: [], env: {} };
+    if (family && harnessInstallationChoices &&
+        harnessChoiceFor(harnessInstallationChoices, family, descriptor.context) && !launch.command) {
+      return fail("The selected harness installation is unavailable in this execution context; select an available installation before adopting.");
+    }
     if (descriptor.driver === "pi") {
       try {
         const materialized = await materializePiExternalSession(found, sessionId, store.sessionPath(sessionId));
@@ -3190,6 +3244,12 @@ async function handleAdopt(msg: AdoptSessionMessage): Promise<void> {
 
   // Create the store row BEFORE the (possibly slow) transcript read, so a prompt sent the moment the
   // UI shows the session isn't lost to a missing row.
+  if (!claimedAcpAgentId && adoptionSelectionGeneration !== harnessSelectionGeneration) {
+    if (adoptedProviderState) {
+      await cleanupPiExternalSession(descriptor.context, adoptedProviderState.sessionDir, sessionId).catch(() => {});
+    }
+    return fail("The selected harness installation changed during adoption; retry with the current selection.");
+  }
   let adopted = false;
   try {
     adopted = sessions.adopt(sessionId, descriptor, launch, acpCapabilities, adoptedProviderState);
