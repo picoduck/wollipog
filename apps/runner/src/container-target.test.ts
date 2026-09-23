@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
-import test from "node:test";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { afterEach, beforeEach } from "node:test";
 import type { ExecutionTargetRef } from "@wollipog/protocol";
 import type { RunnerContainerTarget } from "./config.js";
 import { CANONICAL_CONTAINER_LABELS, LEGACY_CONTAINER_LABELS } from "./container-identity.js";
@@ -12,6 +15,24 @@ const template: RunnerContainerTarget = {
   agentCommands: { codex: { command: "codex", args: ["app-server"] } },
   setupChecks: [{ name: "git", command: "git", args: ["--version"] }],
 };
+
+const HOST_RUNTIME_ENV = ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "CONTAINER_HOST",
+  "CONTAINER_CONNECTION", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "CONTAINERS_STORAGE_CONF",
+  "CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE"] as const;
+const emptyDockerConfig = join(tmpdir(), `wollipog-empty-docker-config-${randomUUID()}`);
+let savedHostRuntimeEnv: Record<string, string | undefined> = {};
+beforeEach(() => {
+  savedHostRuntimeEnv = Object.fromEntries(HOST_RUNTIME_ENV.map((name) => [name, process.env[name]]));
+  for (const name of HOST_RUNTIME_ENV) delete process.env[name];
+  process.env.DOCKER_CONFIG = emptyDockerConfig;
+});
+afterEach(() => {
+  for (const name of HOST_RUNTIME_ENV) {
+    const value = savedHostRuntimeEnv[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
 
 function runtime() {
   return { path: "/usr/bin/docker", via: "path" as const, launch: { command: "/usr/bin/docker", args: [] } };
@@ -42,9 +63,9 @@ test("digest-pinned templates pass argv-native checks and produce an exact immut
   assert.deepEqual(calls[1], ["ps", "-aq", "--filter", `label=${LEGACY_CONTAINER_LABELS.runner}=${expectedRunnerKey}`]);
   assert.deepEqual(calls[2], ["image", "inspect", image]);
   const checkCall = calls[3]!;
-  assert.match(checkCall[3]!, /^wollipog-check-[a-f0-9]{20}-[a-f0-9]{16}$/);
-  assert.deepEqual(checkCall.slice(0, 3), ["run", "--rm", "--name"]);
-  assert.deepEqual(checkCall.slice(4), [
+  assert.match(checkCall[4]!, /^wollipog-check-[a-f0-9]{20}-[a-f0-9]{16}$/);
+  assert.deepEqual(checkCall.slice(0, 4), ["run", "--rm", "--pull=never", "--name"]);
+  assert.deepEqual(checkCall.slice(5), [
     "--label", `com.wollipog.runner=${expectedRunnerKey}`,
     "--label", "com.wollipog.template=offline-tools",
     "--label", `com.misko-agent-manager.runner=${expectedRunnerKey}`,
@@ -71,6 +92,350 @@ test("digest-pinned templates pass argv-native checks and produce an exact immut
   assert.deepEqual(isolation.hostAgentArgs, ["--host-only"]);
   assert.match(isolation.runnerKey, /^[a-f0-9]{20}$/);
   assert.match(isolation.containerName, /^wollipog-[a-f0-9]{24}$/);
+});
+
+test("setup checks launch the runtime without inherited host values or credential configuration", {
+  skip: process.platform === "win32",
+}, async () => {
+  const marker = "WOLLIPOG_SETUP_CHECK_TEST_CREDENTIAL";
+  const innocuous = "WOLLIPOG_SETUP_CHECK_TEST_VALUE";
+  const previousMarker = process.env[marker];
+  const previousInnocuous = process.env[innocuous];
+  process.env[marker] = "synthetic-fixture-only";
+  process.env[innocuous] = "also-synthetic";
+  const script = `
+    if [ "$1" = run ]; then
+      shift
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = --entrypoint ] && [ "$2" = git ]; then
+          [ -z "\${WOLLIPOG_SETUP_CHECK_TEST_CREDENTIAL+x}" ] || exit 7
+          [ -z "\${WOLLIPOG_SETUP_CHECK_TEST_VALUE+x}" ] || exit 7
+          [ "$HOME" = "$DOCKER_CONFIG" ] && [ "$HOME" = "$XDG_CONFIG_HOME" ] || exit 8
+          printf CHECK_OK
+          exit 0
+        fi
+        shift
+      done
+      exit 1
+    fi
+  `;
+  try {
+    let checkOutput = "";
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => ({ path: "/bin/sh", via: "path", launch: {
+        command: "/bin/sh", args: ["-c", script, "runtime"],
+      } }),
+      run: async (file, args, opts) => {
+        const { run } = await import("./discovery/resolve.js");
+        const result = await run(file, args, opts);
+        if (args.includes("git")) checkOutput = result.stdout;
+        return result;
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(checkOutput, "CHECK_OK");
+  } finally {
+    if (previousMarker === undefined) delete process.env[marker];
+    else process.env[marker] = previousMarker;
+    if (previousInnocuous === undefined) delete process.env[innocuous];
+    else process.env[innocuous] = previousInnocuous;
+  }
+});
+
+test("rootless Podman checks retain local storage and runtime paths without host credentials", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const previousData = process.env.XDG_DATA_HOME;
+  const previousRuntime = process.env.XDG_RUNTIME_DIR;
+  const previousHost = process.env.CONTAINER_HOST;
+  process.env.XDG_DATA_HOME = "/tmp/wollipog-fixture-podman-data";
+  process.env.XDG_RUNTIME_DIR = "/run/user/1000";
+  process.env.CONTAINER_HOST = "unix:///run/user/1000/podman/podman.sock";
+  try {
+    let checkEnv: Record<string, string> | undefined;
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "run" && args.includes("git")) {
+          checkEnv = opts.env;
+          assert.equal(existsSync(opts.env?.CONTAINERS_CONF ?? ""), true);
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(checkEnv?.XDG_DATA_HOME, "/tmp/wollipog-fixture-podman-data");
+    assert.equal(checkEnv?.XDG_RUNTIME_DIR, "/run/user/1000");
+    assert.equal(checkEnv?.CONTAINER_HOST, "unix:///run/user/1000/podman/podman.sock");
+    assert.equal(existsSync(checkEnv?.CONTAINERS_CONF ?? ""), false, "private config is removed after the check");
+    assert.notEqual(checkEnv?.HOME, checkEnv?.XDG_CONFIG_HOME);
+    assert.equal(checkEnv?.DOCKER_CONFIG, checkEnv?.XDG_CONFIG_HOME);
+    assert.equal(Object.keys(checkEnv ?? {}).some((name) => /TOKEN|SECRET|CREDENTIAL/iu.test(name)), false);
+  } finally {
+    if (previousData === undefined) delete process.env.XDG_DATA_HOME;
+    else process.env.XDG_DATA_HOME = previousData;
+    if (previousRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
+    else process.env.XDG_RUNTIME_DIR = previousRuntime;
+    if (previousHost === undefined) delete process.env.CONTAINER_HOST;
+    else process.env.CONTAINER_HOST = previousHost;
+  }
+});
+
+test("a saved local Docker context supplies its Unix socket without exposing client config to the check", async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-docker-context-test-"));
+  writeFileSync(join(config, "config.json"), '{"currentContext":"local-fixture"}');
+  process.env.DOCKER_CONFIG = config;
+  try {
+    let checkEnv: Record<string, string> | undefined;
+    let contextEnv: Record<string, string> | undefined;
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "context") {
+          contextEnv = opts.env;
+          return { code: 0, stdout: '"unix:///run/user/1000/docker.sock"\n', stderr: "" };
+        }
+        if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(contextEnv?.DOCKER_CONFIG, config);
+    assert.deepEqual(Object.keys(contextEnv ?? {}).sort(),
+      (process.platform === "win32" ? ["PATH", "HOME", "DOCKER_CONFIG", "SystemRoot"] :
+        ["PATH", "HOME", "DOCKER_CONFIG"]).sort());
+    assert.equal(contextEnv?.HOME === config, false);
+    assert.equal(checkEnv?.DOCKER_HOST, "unix:///run/user/1000/docker.sock");
+    assert.notEqual(checkEnv?.DOCKER_CONFIG, config);
+    assert.equal(checkEnv?.DOCKER_CONFIG, checkEnv?.HOME);
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Windows Docker checks retain a local named-pipe endpoint", {
+  skip: process.platform !== "win32",
+}, async () => {
+  process.env.DOCKER_HOST = "npipe:////./pipe/docker_engine";
+  let checkEnv: Record<string, string> | undefined;
+  const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    resolveRuntime: async () => runtime(),
+    run: async (_file, args, opts) => {
+      if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  await registry.initialize();
+  assert.equal(registry.definitions()[0]!.available, true);
+  assert.equal(checkEnv?.DOCKER_HOST, "npipe:////./pipe/docker_engine");
+});
+
+test("a remote saved Docker context fails closed without running a setup check", async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-docker-remote-test-"));
+  writeFileSync(join(config, "config.json"), '{"currentContext":"remote-fixture"}');
+  process.env.DOCKER_CONFIG = config;
+  try {
+    let checkRan = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        if (args[0] === "context") return { code: 0, stdout: '"tcp://example.invalid:2376"\n', stderr: "" };
+        if (args[0] === "run" && args.includes("git")) checkRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.equal(checkRan, false);
+    assert.equal(registry.definitions()[0]!.unavailableReason,
+      "setup check 'git' could not launch isolated runtime");
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("DOCKER_HOST wins over a stale or remote Docker context", async () => {
+  for (const [host, available] of [
+    ["unix:///run/user/1000/docker.sock", true],
+    ["tcp://example.invalid:2376", false],
+  ] as const) {
+    process.env.DOCKER_HOST = host;
+    process.env.DOCKER_CONTEXT = available ? "missing-context" : "local-context";
+    let contextInspected = false;
+    let checkEnv: Record<string, string> | undefined;
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "context") contextInspected = true;
+        if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(contextInspected, false);
+    assert.equal(registry.definitions()[0]!.available, available);
+    assert.equal(checkEnv?.DOCKER_HOST, available ? host : undefined);
+  }
+});
+
+test("Podman keeps a configured local storage file without loading general container config", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-podman-storage-test-"));
+  const storage = join(config, "containers", "storage.conf");
+  mkdirSync(join(config, "containers"));
+  writeFileSync(storage, '[storage]\ngraphroot = "/tmp/wollipog-fixture-store"\n');
+  process.env.XDG_CONFIG_HOME = config;
+  try {
+    let checkEnv: Record<string, string> | undefined;
+    let inspectedLocalMode = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "info") {
+          inspectedLocalMode = true;
+          assert.equal(opts.replaceEnv, true);
+          assert.equal(opts.env?.XDG_CONFIG_HOME, config);
+          assert.equal(opts.env?.CONTAINERS_CONF, undefined);
+          return { code: 0, stdout: "false\n", stderr: "" };
+        }
+        if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(inspectedLocalMode, true);
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(checkEnv?.CONTAINERS_STORAGE_CONF, storage);
+    assert.equal(checkEnv?.CONTAINERS_CONF?.startsWith(checkEnv?.XDG_CONFIG_HOME ?? ""), true);
+    assert.notEqual(checkEnv?.XDG_CONFIG_HOME, config);
+    assert.notEqual(checkEnv?.XDG_CONFIG_HOME, checkEnv?.HOME);
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Podman config-selected remote mode cannot certify a local setup check", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-podman-remote-test-"));
+  const file = join(config, "containers", "containers.conf");
+  mkdirSync(join(config, "containers"));
+  writeFileSync(file, "[engine]\nremote = true\n");
+  process.env.XDG_CONFIG_HOME = config;
+  try {
+    let setupRan = false;
+    let infoEnv: Record<string, string> | undefined;
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "info") {
+          infoEnv = opts.env;
+          return { code: 0, stdout: "true\n", stderr: "" };
+        }
+        if (args[0] === "run" && args.includes("git")) setupRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(infoEnv?.XDG_CONFIG_HOME, config);
+    assert.equal(infoEnv?.CONTAINERS_CONF, undefined);
+    assert.equal(setupRan, false);
+    assert.equal(registry.definitions()[0]!.unavailableReason,
+      "setup check 'git' could not launch isolated runtime");
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Podman setup checks fail closed when local mode cannot be confirmed", {
+  skip: process.platform !== "linux",
+}, async () => {
+  for (const info of [
+    { code: 1, stdout: "fixture-private-output", stderr: "" },
+    { code: 0, stdout: "unexpected", stderr: "" },
+    { code: 1, stdout: "", stderr: "", timedOut: true },
+  ]) {
+    let setupRan = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        if (args[0] === "info") return info;
+        if (args[0] === "run" && args.includes("git")) setupRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(setupRan, false);
+    assert.equal(registry.definitions()[0]!.unavailableReason,
+      "setup check 'git' could not launch isolated runtime");
+    assert.doesNotMatch(JSON.stringify(registry.definitions()), /fixture-private-output|unexpected/u);
+  }
+});
+
+test("unsupported remote container endpoint fails closed before running a setup check", async () => {
+  const previous = process.env.DOCKER_HOST;
+  process.env.DOCKER_HOST = "tcp://example.invalid:2375";
+  try {
+    let setupRan = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        if (args[0] === "run" && args.includes("git")) setupRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.equal(setupRan, false);
+    assert.match(registry.definitions()[0]!.unavailableReason!, /could not launch isolated runtime/);
+  } finally {
+    if (previous === undefined) delete process.env.DOCKER_HOST;
+    else process.env.DOCKER_HOST = previous;
+  }
+});
+
+test("an unavailable private runtime directory leaves only its target unavailable", {
+  skip: process.platform === "win32",
+}, async () => {
+  const previous = process.env.TMPDIR;
+  process.env.TMPDIR = join(tmpdir(), `wollipog-missing-${randomUUID()}`);
+  try {
+    let setupRan = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        if (args[0] === "run" && args.includes("git")) setupRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.equal(setupRan, false);
+    assert.equal(registry.definitions()[0]!.unavailableReason,
+      "setup check 'git' could not prepare isolated runtime");
+  } finally {
+    if (previous === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previous;
+  }
+});
+
+test("setup-check timeout and client errors expose only value-free failure categories", async () => {
+  for (const [result, expected] of [
+    [{ code: 1, stdout: "fixture-private-output", stderr: "", timedOut: true }, "timed out"],
+    [{ code: 1, stdout: "", stderr: "fixture-private-output", errorCode: "ENOENT" }, "runtime client failed"],
+  ] as const) {
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => args[0] === "run" ? result : { code: 0, stdout: "", stderr: "" },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.unavailableReason, `setup check 'git' ${expected}`);
+    assert.doesNotMatch(JSON.stringify(registry.definitions()), /fixture-private-output|ENOENT/);
+  }
 });
 
 test("container installations stay target-bound, deduplicate aliases, and fail closed after rediscovery", async () => {
@@ -261,19 +626,30 @@ test("missing runtimes and failed checks stay visible but unavailable without fa
 
   let call = 0;
   const failedCalls: string[][] = [];
+  let setupHome = "";
   const failed = new ContainerTargetRegistry("r", "host", [template], {
     resolveRuntime: async () => runtime(),
-    run: async (_file, args) => {
+    run: async (_file, args, opts) => {
       failedCalls.push(args);
       call += 1;
+      if (args[0] === "run" || args[0] === "rm") {
+        assert.equal(opts.replaceEnv, true);
+        assert.deepEqual(Object.keys(opts.env ?? {}).sort(),
+          process.platform === "win32"
+            ? ["DOCKER_CONFIG", "HOME", "PATH", "SystemRoot", "XDG_CONFIG_HOME"].sort()
+            : ["DOCKER_CONFIG", "HOME", "PATH", "XDG_CONFIG_HOME"].sort());
+        setupHome = opts.env!.HOME!;
+      }
       return args[0] === "run"
-        ? { code: 1, stdout: "", stderr: "missing git" }
+        ? { code: 1, stdout: "", stderr: "fixture-sensitive-check-output" }
         : { code: 0, stdout: "", stderr: "" };
     },
   });
   await failed.initialize();
   assert.equal(failed.definitions()[0]!.available, false);
-  assert.match(failed.definitions()[0]!.unavailableReason!, /setup check 'git'.*missing git/);
+  assert.equal(failed.definitions()[0]!.unavailableReason, "setup check 'git' exited unsuccessfully");
+  assert.doesNotMatch(JSON.stringify(failed.definitions()), /fixture-sensitive-check-output/);
+  assert.equal(existsSync(setupHome), false);
   assert.equal(call, 5);
   assert.deepEqual(failedCalls[4]?.slice(0, 2), ["rm", "-f"]);
   assert.match(failedCalls[4]?.[2] ?? "", /^wollipog-check-[a-f0-9]{20}-[a-f0-9]{16}$/);
@@ -324,6 +700,7 @@ test("Docker and Podman discover both generations and produce exact dual-label W
       }),
       run: async (file, args) => {
         calls.push({ file, args });
+        if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
         if (args[0] === "ps") {
           const canonical = args[3] === `label=${CANONICAL_CONTAINER_LABELS.runner}=${expectedRunnerKey}`;
           return { code: 0, stdout: canonical ? "aaaaaaaaaaaa\nbbbbbbbbbbbb\n" : "bbbbbbbbbbbb\ncccccccccccc\n", stderr: "" };
@@ -353,10 +730,13 @@ test("Docker and Podman discover both generations and produce exact dual-label W
       .update(`${template.id}\0${template.setupChecks[0]!.name}`)
       .digest("hex")
       .slice(0, 16);
-    assert.deepEqual(calls[4], {
+    if (runtimeName === "podman") {
+      assert.deepEqual(calls[4]?.args, ["info", "--format", "{{json .Host.ServiceIsRemote}}"]);
+    }
+    assert.deepEqual(calls[runtimeName === "podman" ? 5 : 4], {
       file: `/usr/bin/${runtimeName}`,
       args: [
-        "run", "--rm", "--name", `wollipog-check-${expectedRunnerKey}-${expectedCheckKey}`,
+        "run", "--rm", "--pull=never", "--name", `wollipog-check-${expectedRunnerKey}-${expectedCheckKey}`,
         "--label", `com.wollipog.runner=${expectedRunnerKey}`,
         "--label", `com.wollipog.template=${template.id}`,
         "--label", `com.misko-agent-manager.runner=${expectedRunnerKey}`,
@@ -399,6 +779,7 @@ test("legacy-only container discovery emits one value-free warning across Docker
       launch: { command: `/usr/bin/${runtimeName}`, args: [] },
     }),
     run: async (file, args) => {
+      if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
       if (args[0] !== "ps") return { code: 0, stdout: "", stderr: "" };
       const canonical = args[3]?.includes(CANONICAL_CONTAINER_LABELS.runner) ?? false;
       const legacyOnlyId = file.endsWith("podman") ? "cccccccccccc" : "bbbbbbbbbbbb";

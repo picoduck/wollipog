@@ -73,8 +73,17 @@ Before its first control-plane registration, the runner:
 2. removes bounded, validated container ids carrying that runner's ownership label from a previous
    crashed process;
 3. runs `image inspect` on the exact digest without pulling;
-4. runs every setup check in the pinned image with no network, a read-only root, all capabilities
-   dropped, `no-new-privileges`, a PID limit, and private `/tmp` tmpfs.
+4. runs every setup check in the pinned image with no network, no implicit image pull, a read-only
+   root, all capabilities dropped, `no-new-privileges`, a PID limit, and private `/tmp` tmpfs.
+
+Setup checks launch the runtime client with an explicit minimal environment and a temporary client
+config directory. Local Docker contexts are reduced to Unix socket or Windows named-pipe endpoints.
+Rootless Podman keeps its home, local image/runtime directories, and storage configuration file so
+its existing image store remains usable. The runner verifies that the configured Podman client is local
+before isolating general Podman container config. Docker client config is isolated. Other
+host variables and credentials are not inherited by the setup-check client or container.
+Check output is never included in an unavailable reason. A runtime that needs a credential or a
+remote client configuration for these checks fails closed.
 
 The environment reference contains the template id/revision, image digest, and a SHA-256 digest over
 the revision, image, sorted agent-command map, and ordered checks. Check output is not provenance and
