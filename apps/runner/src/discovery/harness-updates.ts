@@ -20,7 +20,7 @@ export function harnessVersionPinned(harness: Harness, value: string | undefined
 const REDISCOVER = "Stop sessions using this executable before upgrading. Restart and Rediscover before treating the new version as ready.";
 
 const posixWord = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
-const powerShellWord = (value: string): string => `'${value.replaceAll("'", "''")}'`;
+const powerShellWord = (value: string): string => `'${value.replace(/['\u2018-\u201B]/gu, "$&$&")}'`;
 
 /** Manual instructions name the shell explicitly. WSL launch paths belong inside the distro,
  * while a native Windows launch is copied into PowerShell on the Machine. */
@@ -36,7 +36,7 @@ export function manualCodexUpdateCommand(
   };
   if (platform === "win32") return {
     command: `& ${words.map(powerShellWord).join(" ")}`,
-    shell: "PowerShell on this Machine",
+    shell: "PowerShell 7.3 or later on this Machine",
   };
   return { command: words.map(posixWord).join(" "), shell: "a POSIX shell on this Machine" };
 }

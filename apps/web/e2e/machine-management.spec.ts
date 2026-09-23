@@ -68,8 +68,7 @@ test("Machine settings show competing installations and switch the saved target"
 
 test("Machine and Connections explain pinned, suppressed, failed, and unavailable harness states", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("harness-states"));
-  await expect(page.getByRole("button", { name: "New Harness Release · View Settings" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  await page.getByRole("button", { name: "New Harness Release · View Settings" }).click();
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   const installation = (path: string) => dialog.locator(".machine-harness-installation").filter({ hasText: path });
   await expect(installation("Codex Tools")).toContainText("Pinned by Machine Policy");
@@ -78,12 +77,13 @@ test("Machine and Connections explain pinned, suppressed, failed, and unavailabl
   await expect(installation("Claude\\claude.exe")).toContainText("whether manual upgrades are permitted");
   await expect(installation("Pi\\pi.exe")).toContainText("Check Failed");
   await expect(installation("Pi\\pi.exe")).toContainText("no current release status was established");
-  await expect(installation("Missing\\codex.exe")).toContainText("Harness Unavailable");
-  await expect(installation("Missing\\codex.exe")).toContainText("could not be started");
-  await expect(installation("Missing\\codex.exe")).not.toContainText("Run an update now");
-  await expect(installation("Missing\\codex.exe").getByRole("button", { name: "Use This Installation" })).toBeDisabled();
+  await expect(installation("Legacy Tools")).toContainText("Unavailable");
+  await expect(installation("Legacy Tools")).toContainText("older than the verified app-server floor");
+  await expect(installation("Legacy Tools")).toContainText("New Release Published");
+  await expect(installation("Legacy Tools")).toContainText("Use the package or version manager that installed this exact copy");
+  await expect(installation("Legacy Tools").getByRole("button", { name: "Use This Installation" })).toBeEnabled();
   await page.screenshot({ path: "test-results/harness-states-desktop.png", fullPage: true });
-  await installation("Missing\\codex.exe").scrollIntoViewIfNeeded();
+  await installation("Legacy Tools").scrollIntoViewIfNeeded();
   await page.screenshot({ path: "test-results/harness-states-desktop-bottom.png", fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   await installation("Codex Tools").scrollIntoViewIfNeeded();
@@ -91,13 +91,13 @@ test("Machine and Connections explain pinned, suppressed, failed, and unavailabl
   await page.screenshot({ path: "test-results/harness-states-mobile.png", fullPage: true });
   await installation("Claude\\claude.exe").scrollIntoViewIfNeeded();
   await page.screenshot({ path: "test-results/harness-states-mobile-policy.png", fullPage: true });
-  await installation("Missing\\codex.exe").scrollIntoViewIfNeeded();
+  await installation("Legacy Tools").scrollIntoViewIfNeeded();
   await page.screenshot({ path: "test-results/harness-states-mobile-bottom.png", fullPage: true });
   await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
   await page.getByText("Agents", { exact: true }).click();
   await page.getByRole("button", { name: "View Codex App Server Details" }).first().click();
   const details = page.getByRole("dialog", { name: "Codex App Server Details" });
-  await expect(details.getByText("PowerShell on this Machine", { exact: false })).toBeVisible();
+  await expect(details.getByText("PowerShell 7.3 or later on this Machine", { exact: false })).toBeVisible();
   await expect(details.locator(".agent-details-command code")).toHaveText(
     "& 'C:\\Program Files\\Codex Tools\\codex.exe' '--profile' 'Team''s Profile'",
   );

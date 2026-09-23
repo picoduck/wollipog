@@ -70,10 +70,10 @@ test("manual update guidance quotes the selected launch in its stated shell", ()
     shell: "a POSIX shell inside WSL: Team Ubuntu",
   });
   assert.deepEqual(manualCodexUpdateCommand({ path: "C:\\Program Files\\Codex\\codex.exe", via: "path",
-    launch: { command: "C:\\Program Files\\Codex\\codex.exe", args: ["O'Brien"] } },
+    launch: { command: "C:\\Program Files\\Codex\\codex.exe", args: ["O'Brien", "Team’s Profile"] } },
   { kind: "native" }, "win32"), {
-    command: "& 'C:\\Program Files\\Codex\\codex.exe' 'O''Brien' 'update'",
-    shell: "PowerShell on this Machine",
+    command: "& 'C:\\Program Files\\Codex\\codex.exe' 'O''Brien' 'Team’’s Profile' 'update'",
+    shell: "PowerShell 7.3 or later on this Machine",
   });
 });
 

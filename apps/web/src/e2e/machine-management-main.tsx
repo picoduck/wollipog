@@ -413,6 +413,18 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
       runner.protocolVersion = PROTOCOL_VERSION;
       runner.hostname = "demo-workstation";
       runner.workspaces = [{ id: "demo", name: "Demo", path: "C:\\Users\\example" }];
+      const legacyCodex: RunnerView["agents"][number] = {
+        id: "legacy-codex", name: "Legacy Codex", command: "C:\\Legacy Tools\\codex.exe",
+        args: [], env: {}, driver: "codex-app-server", context: { kind: "native" }, source: "discovered",
+        available: false, authStatus: "authenticated", version: "0.140.0",
+        installation: { id: "legacy", path: "C:\\Legacy Tools\\codex.exe", via: "path" },
+        codexAppServer: { status: "unsupported", installedVersion: "0.140.0", appServerAvailable: true,
+          failure: { code: "version_unverified", message: "Codex 0.140.0 is older than the verified app-server floor 0.147.0.", retryable: false } },
+        update: { status: "update_available", installedVersion: "0.140.0", latestPublishedVersion: "0.210.0",
+          checkedAt: Date.UTC(2026, 8, 22), channel: "stable", evidenceSource: "npm dist-tags for @openai/codex",
+          managedExternally: true,
+          guidance: "A newer release is published, but compatibility with this Machine has not been verified. Use the package or version manager that installed this exact copy in the same execution context. Stop sessions using this executable before upgrading. Restart and Rediscover before treating the new version as ready." },
+      };
       runner.agents = [
         {
           id: "pinned-codex", name: "Pinned Codex", command: "C:\\Program Files\\Codex Tools\\codex.exe",
@@ -439,15 +451,8 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
             channel: "stable", evidenceSource: "npm dist-tags for @earendil-works/pi-coding-agent", managedExternally: true,
             guidance: "The release check could not complete, so no current release status was established. The Machine may be offline, behind a proxy, or rate limited; retry the check after connectivity returns." },
         },
-        {
-          id: "missing-codex", name: "Missing Codex", command: "C:\\Missing\\codex.exe",
-          args: [], env: {}, driver: "codex-app-server", context: { kind: "native" }, source: "discovered",
-          available: false, unavailableReason: "The selected installation could not be started. Rediscover or choose another installation.",
-          installation: { id: "missing", path: "C:\\Missing\\codex.exe", via: "path" },
-          update: { status: "update_available", installedVersion: "0.155.1", latestPublishedVersion: "0.210.0",
-            checkedAt: Date.UTC(2026, 8, 22), channel: "stable", evidenceSource: "npm dist-tags for @openai/codex",
-            managedExternally: true, guidance: "A newer release is published. Run an update now." },
-        },
+        legacyCodex,
+        { ...legacyCodex, id: "legacy-codex-exec", name: "Legacy Codex (Non-Interactive)", driver: "codex", available: true },
       ];
       runner.harnessSelections = [];
     } else {
