@@ -130,7 +130,7 @@ const navigation: ViewNavigation = {
   listen: () => () => {},
 };
 
-function snapshot(): UiSnapshotMessage {
+function snapshot(runnerViews = runners): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: {
@@ -139,7 +139,7 @@ function snapshot(): UiSnapshotMessage {
       paginatedSessionHistory: false,
       projects: false,
     },
-    runners,
+    runners: runnerViews,
     boxes: [],
     sessions: [],
     runs: [],
@@ -173,6 +173,7 @@ async function mountFixture(
   triggerViews: Record<string, AutomationTriggerView[]> = {},
   outboundSubscriptions: OutboundEventSubscriptionView[] = [],
   outboundDeliveries: Record<string, OutboundEventDeliveryView[]> = {},
+  runnerViews: RunnerView[] = runners,
 ): Promise<Fixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -246,7 +247,7 @@ async function mountFixture(
       </ApiProvider>,
     );
   });
-  await act(async () => { socket.push(snapshot()); });
+  await act(async () => { socket.push(snapshot(runnerViews)); });
   await act(settle);
   return { container, root, updates, triggerCreates, outboundCreates };
 }
@@ -541,6 +542,42 @@ test("editing and saving without changes sends the exact stored multi-alternate 
     const { automationId: _id, revision: _revision, createdBy: _createdBy,
       createdAt: _createdAt, updatedAt: _updatedAt, ...storedSpec } = stored;
     assert.deepEqual(fixture.updates[0], { id: stored.automationId, spec: storedSpec });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an unavailable automation installation stays visible until explicitly rebound", async () => {
+  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
+    ...runners[0]!.agents[0]!, id: "rich-agent", installation: {
+      id: "local", path: "/home/u/.local/bin/claude", via: "common-dir" as const,
+      selection: "selected" as const,
+    },
+  }] };
+  const stored: AutomationSchedule = {
+    automationId: "saved-installation", revision: 1, name: "Pinned Sweep",
+    cron: "0 2 * * *", timezone: "UTC", enabled: true,
+    action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "runner-1-workspace", agentId: "rich-agent", prompt: "Sweep",
+    }, installationBindings: { agent: {
+      driver: "claude-code", context: { kind: "native" }, installationId: "system",
+    } } },
+    runnerPolicy: { kind: "wait" }, misfirePolicy: { kind: "skip" },
+    concurrencyPolicy: "wait", limits: { maxCostUsd: 5, maxToolCalls: 50 },
+    notifications: { pushEvents: [] }, createdBy: { kind: "human", id: "test" },
+    createdAt: 1, updatedAt: 1,
+  };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
+  try {
+    await expandCard(fixture, "Pinned Sweep");
+    assert.match(fixture.container.textContent ?? "", /Saved Agent Harness installation unavailable/);
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await act(async () => { button(fixture.container, "Use Current Installation").click(); });
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    const action = fixture.updates[0]?.spec.action;
+    assert.equal(action?.kind === "create_session" &&
+      action.installationBindings?.agent?.installationId, "local");
   } finally {
     await unmountFixture(fixture);
   }

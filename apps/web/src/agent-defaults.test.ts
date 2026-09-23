@@ -39,6 +39,18 @@ test("saveAgentDefault preserves other runners and persists the explicit choice"
   assert.deepEqual(JSON.parse(scoped[1]), next);
 });
 
+test("saved installation choice keeps the exact target when the agent id changes", () => {
+  const next = saveAgentDefault({}, "runner-1", "codex", "local", {
+    id: "codex", name: "Codex", command: "/usr/bin/codex", args: [], env: {},
+    driver: "codex-app-server", context: { kind: "native" },
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" },
+  });
+  assert.deepEqual(loadAgentDefaults("local"), next);
+  assert.deepEqual(next["runner-1"], {
+    agentId: "codex", driver: "codex-app-server", context: { kind: "native" }, installationId: "system",
+  });
+});
+
 test("blocked localStorage remains a best-effort preference", () => {
   (globalThis as { localStorage?: unknown }).localStorage = {
     getItem: () => { throw new Error("blocked"); },

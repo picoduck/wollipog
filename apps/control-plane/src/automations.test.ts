@@ -1087,6 +1087,85 @@ test("a due create-session occurrence claims once, applies ceilings, and reconci
   assert.equal(notifications.at(-1)?.endsWith(":succeeded"), true);
 });
 
+test("scheduled sessions follow the saved installation through rediscovery and refuse a reused id", () => {
+  const system = { ...runner("runner-1").agents[0]!, driver: "codex-app-server" as const,
+    command: "/usr/bin/codex", installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
+  const local = { ...system, id: "local", command: "/home/u/.local/bin/codex",
+    installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" as const } };
+  const { db, service, created } = harness(175, [{ ...runner("runner-1"), agents: [system, local] }]);
+  assert.equal(db.selectHarnessInstallation("runner-1", "agent-1", "system")?.installationId, "system");
+  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  assert.equal(automation.action.kind === "create_session" &&
+    automation.action.installationBindings?.agent?.installationId, "system");
+
+  db.updateRunnerAgents("runner-1", [
+    { ...local, id: "agent-1" }, { ...system, id: "system-new" },
+  ], 1_000);
+  service.tick(60_000);
+  assert.equal(created[0]?.agentId, "system-new");
+
+  db.updateRunnerAgents("runner-1", [{ ...local, id: "agent-1" }], 61_000);
+  service.tick(120_000);
+  assert.equal(created.length, 1, "the old id now belongs to a different installation");
+  assert.equal(db.getAutomation(automation.automationId)?.action.kind, "create_session");
+});
+
+test("an old plain-id automation requires an explicit installation migration", () => {
+  const { db, service, created } = harness(175);
+  const actor = { kind: "human" as const, id: "device" };
+  const legacy = service.create(baseSpec(), actor, 0).data!;
+  assert.equal(legacy.action.kind === "create_session" && legacy.action.installationBindings, undefined);
+  const selected = { ...runner("runner-1").agents[0]!, driver: "codex-app-server" as const,
+    command: "/usr/bin/codex", installation: {
+      id: "system", path: "/usr/bin/codex", via: "path" as const,
+    } };
+  db.updateRunnerAgents("runner-1", [selected], 1_000);
+  db.selectHarnessInstallation("runner-1", "agent-1", "system");
+  const unchanged = service.update(legacy.automationId, baseSpec(), actor, 2_000).data!;
+  assert.equal(unchanged.action.kind === "create_session" && unchanged.action.installationBindings, undefined,
+    "an unrelated edit must not silently bind a legacy plain id");
+  service.tick(60_000);
+  assert.equal(created.length, 0);
+
+  const action = baseSpec().action;
+  assert.equal(action.kind, "create_session");
+  if (action.kind !== "create_session") throw new Error("expected create-session action");
+  const migrated = service.update(legacy.automationId, baseSpec({ action: {
+    kind: "create_session", request: action.request,
+    installationBindings: { agent: {
+      driver: "codex-app-server", context: { kind: "native" }, installationId: "system",
+    } },
+  } }), actor, 61_000).data!;
+  assert.equal(migrated.action.kind === "create_session" &&
+    migrated.action.installationBindings?.agent?.installationId, "system");
+  service.tick(120_000);
+  assert.equal(created.at(-1)?.agentId, "agent-1");
+});
+
+test("scheduled workflow role bindings keep their selected installation after agent ids move", () => {
+  const base = runnerWithAgents("runner-1", [{ id: "worker", driver: "codex-app-server" },
+    { id: "reviewer", driver: "claude-code" }]);
+  const worker = { ...base.agents[0]!, installation: {
+    id: "system", path: "/usr/bin/codex", via: "path" as const,
+  } };
+  const local = { ...worker, id: "local", installation: {
+    id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" as const,
+  } };
+  const { db, service, workflows } = harness(175, [{ ...base, agents: [worker, local, base.agents[1]!] }]);
+  installCapabilityWorkflow(db);
+  db.selectHarnessInstallation("runner-1", "worker", "system");
+  const automation = service.create(baseSpec({ action: { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "ws-1", workflowId: "workflow-capabilities", task: "Build",
+  } } }), { kind: "human", id: "device" }, 0).data!;
+  assert.equal(automation.action.kind === "workflow_run" &&
+    automation.action.installationBindings?.["role:worker"]?.installationId, "system");
+
+  db.updateRunnerAgents("runner-1", [{ ...local, id: "worker" },
+    { ...worker, id: "worker-new" }, base.agents[1]!], 1_000);
+  service.tick(60_000);
+  assert.equal(workflows[0]?.agentBindings?.worker, "worker-new");
+});
+
 test("runner wait, bounded expiry, and explicit alternate target policies are durable", () => {
   const { db, online, service, created, notifications } = harness();
   online.clear();

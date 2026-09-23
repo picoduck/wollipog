@@ -91,6 +91,17 @@ const items: AutomationSchedule[] = [
   },
 ];
 
+if (params.has("saved-installation")) {
+  runner.protocolVersion = 175;
+  runner.agents[0]!.installation = {
+    id: "local", path: "/home/misko/.local/bin/agent", via: "common-dir", selection: "selected",
+  };
+  const first = items[0]!.action;
+  if (first.kind === "create_session") first.installationBindings = { agent: {
+    driver: "claude-code", context: { kind: "native" }, installationId: "system",
+  } };
+}
+
 const triggerItems: AutomationTriggerView[] = [{
   triggerId: "atr_issue_intake",
   automationId: "automation-nightly-sweep",

@@ -12934,6 +12934,7 @@ body.shell-dock-dragging * {
   border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
   border-radius: 8px; padding: 10px 12px; overflow-wrap: anywhere;
 }
+.automation-error > .btn { display: block; margin-top: 8px; }
 .automation-editor, .automation-card {
   border: 1px solid var(--border); background: var(--bg-elev); border-radius: 12px; box-shadow: var(--shadow);
 }

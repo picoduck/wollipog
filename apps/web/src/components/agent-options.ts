@@ -1,5 +1,6 @@
 import type { AgentDefinition } from "@wollipog/protocol";
 import { agentProvider } from "./AgentIcon.js";
+import type { SavedAgentChoice } from "../agent-defaults.js";
 
 /**
  * The runner advertises a union of config-authored and machine-discovered agents, with two naming
@@ -135,7 +136,7 @@ export function isAdvancedAgentId(options: AgentOption[], agentId: string): bool
   return options.some((option) => option.agent.id === agentId && option.advanced);
 }
 
-export type SavedAgentDefaultIssue = "legacy" | "unavailable" | "missing";
+export type SavedAgentDefaultIssue = "legacy" | "unavailable" | "missing" | "unbound";
 
 function sameContext(a: AgentDefinition, b: AgentDefinition): boolean {
   const aKind = a.context?.kind ?? "native";
@@ -149,12 +150,25 @@ function sameContext(a: AgentDefinition, b: AgentDefinition): boolean {
  * remain visible so the dialog can explain them and offer an explicit one-click migration. */
 export function savedAgentSelection(
   options: AgentOption[],
-  savedId: string | undefined,
+  choice: string | SavedAgentChoice | undefined,
 ): { agentId: string; issue?: SavedAgentDefaultIssue; recommendedId: string } {
   const recommendedId = firstEnabledAgentId(options);
-  if (!savedId) return { agentId: recommendedId, recommendedId };
+  if (!choice) return { agentId: recommendedId, recommendedId };
+  if (typeof choice !== "string") {
+    const matching = options.find(({ agent }) =>
+      agent.installation?.id === choice.installationId && agent.driver === choice.driver &&
+      sameContext(agent, { context: choice.context } as AgentDefinition));
+    // A stable choice must never fall back to a reused plain agent id.
+    return matching
+      ? { agentId: matching.agent.id, ...(matching.disabled ? { issue: "unavailable" as const } : {}), recommendedId }
+      : { agentId: "", issue: "missing", recommendedId };
+  }
+  const savedId = choice;
   const saved = options.find((option) => option.agent.id === savedId);
-  if (!saved) return { agentId: recommendedId, issue: "missing", recommendedId };
+  if (!saved) return { agentId: "", issue: "missing", recommendedId };
+  if (saved.agent.installation) return {
+    agentId: "", issue: "unbound", recommendedId: saved.disabled ? recommendedId : savedId,
+  };
   if (saved.disabled) return { agentId: savedId, issue: "unavailable", recommendedId };
   if (saved.advanced) {
     const interactiveSibling = options.find(
@@ -173,10 +187,10 @@ export function savedAgentSelection(
 export function currentAgentSelectionIssue(
   options: AgentOption[],
   selectedId: string,
-  savedId: string | undefined,
+  choice: string | SavedAgentChoice | undefined,
 ): SavedAgentDefaultIssue | undefined {
   if (options.find((option) => option.agent.id === selectedId)?.disabled) return "unavailable";
-  return savedAgentSelection(options, savedId).issue;
+  return savedAgentSelection(options, choice).issue;
 }
 
 /** Multi-agent runs must never preselect or render a discovery row known to be unavailable. */

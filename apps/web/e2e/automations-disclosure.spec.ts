@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { join } from "node:path";
 
 /**
  * The automation card disclosure (#793), across the two widths the acceptance criteria call out.
@@ -139,3 +140,28 @@ test("outbound subscription state, privacy defaults, pause reason, and journal a
   await expect(outbound.getByText("HTTP 503", { exact: true })).toHaveCount(2);
   await expect(outbound.getByText(/Next Retry/)).toBeVisible();
 });
+
+for (const { label, viewport } of [
+  { label: "desktop", viewport: { width: 1280, height: 900 } },
+  { label: "mobile", viewport: { width: 375, height: 812 } },
+]) {
+  for (const theme of ["dark", "light"] as const) {
+    test.describe(`${label} ${theme} saved installation`, () => {
+      test.use({ viewport });
+      test("shows an actionable unavailable choice", async ({ page }) => {
+        const openEditor = async (saved: boolean) => {
+          await page.goto(`/automations-e2e.html?theme=${theme}${saved ? "&saved-installation" : ""}`);
+          await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
+          await page.getByRole("button", { name: "Edit", exact: true }).click();
+        };
+        await openEditor(false);
+        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+        if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `automation-before-${label}-${theme}.png`), fullPage: true });
+        await openEditor(true);
+        await expect(page.getByText(/saved Agent Harness installation is unavailable or unbound/i)).toBeVisible();
+        await expect(page.getByRole("button", { name: "Use Current Installation" })).toBeEnabled();
+        if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `automation-after-${label}-${theme}.png`), fullPage: true });
+      });
+    });
+  }
+}
