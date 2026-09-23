@@ -64,7 +64,12 @@ import {
   type RunnerConfig,
 } from "./config.js";
 import { stageRunnerCredentialFile } from "./runner-credential-file.js";
-import { harnessChoiceFor, harnessFamily, synchronizedHarnessChoices } from "./harness-selection.js";
+import {
+  automaticAccountSwitchAuthorityReady,
+  harnessChoiceFor,
+  harnessFamily,
+  synchronizedHarnessChoices,
+} from "./harness-selection.js";
 import {
   applyClaudeHookCapability,
   claudeHookCircuitLockPath,
@@ -522,6 +527,7 @@ const metadata: RunnerMetadata = {
 // Configured agents are the baseline; discovery augments them (config wins on conflict).
 const configAgents = metadata.agents;
 let harnessInstallationChoices: HarnessInstallationChoice[] | null = null;
+let automaticAccountSwitchConfigurationSynchronized = false;
 let harnessSelectionGeneration = 0;
 const acpAuthStatus = new Map<string, AcpAuthRuntime>();
 const freshSafeWslLaunches = new Set<string>();
@@ -1774,7 +1780,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
       harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
-      sessions.setAutomaticAccountSwitchSelectionReady(harnessInstallationChoices !== null);
+      automaticAccountSwitchConfigurationSynchronized = false;
       harnessSelectionGeneration++;
       subscriptionUsage.selectionChanged();
       if (msg.runnerCapacity && runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) {
@@ -1784,8 +1790,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       if (msg.automaticAccountSwitching &&
           runnerSupportsProtocol(controlPlaneProtocolVersion, "automaticProviderAccountSwitch")) {
-        sessions.configureAutomaticAccountSwitch(msg.automaticAccountSwitching);
+        automaticAccountSwitchConfigurationSynchronized =
+          sessions.configureAutomaticAccountSwitch(msg.automaticAccountSwitching);
       }
+      sessions.setAutomaticAccountSwitchAuthorityReady(automaticAccountSwitchAuthorityReady(
+        controlPlaneProtocolVersion, harnessInstallationChoices, automaticAccountSwitchConfigurationSynchronized));
       log(`registered (heartbeat every ${msg.heartbeatIntervalMs}ms)`);
       if (ws) startHeartbeat(ws, msg.heartbeatIntervalMs);
       flushOutbox();
@@ -1826,6 +1835,8 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "configure_harness_installation_choices":
       if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "harnessSelectionBackgroundConsumers")) break;
       harnessInstallationChoices = msg.choices;
+      sessions.setAutomaticAccountSwitchAuthorityReady(automaticAccountSwitchAuthorityReady(
+        controlPlaneProtocolVersion, harnessInstallationChoices, automaticAccountSwitchConfigurationSynchronized));
       harnessSelectionGeneration++;
       subscriptionUsage.selectionChanged();
       publishSubscriptionUsageInventory(true);
@@ -2395,6 +2406,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
     case "configure_automatic_account_switch":
       if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "automaticProviderAccountSwitch")) break;
       if (sessions.configureAutomaticAccountSwitch(msg)) {
+        automaticAccountSwitchConfigurationSynchronized = true;
+        sessions.setAutomaticAccountSwitchAuthorityReady(automaticAccountSwitchAuthorityReady(
+          controlPlaneProtocolVersion, harnessInstallationChoices, automaticAccountSwitchConfigurationSynchronized));
         log(`Automatic Account Switching ${msg.enabled ? "enabled" : "disabled"} (revision ${msg.revision})`);
       }
       break;
@@ -3390,7 +3404,8 @@ function connect(): void {
   log(`connecting to ${config.controlPlaneUrl}`);
   registered = false;
   controlPlaneProtocolVersion = null;
-  sessions.setAutomaticAccountSwitchSelectionReady(false);
+  automaticAccountSwitchConfigurationSynchronized = false;
+  sessions.setAutomaticAccountSwitchAuthorityReady(false);
   chunkedSkillsSync.reset();
   const socket = new WebSocket(validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport));
   ws = socket;
@@ -3431,7 +3446,8 @@ function connect(): void {
     stopHeartbeat();
     registered = false;
     controlPlaneProtocolVersion = null;
-    sessions.setAutomaticAccountSwitchSelectionReady(false);
+    automaticAccountSwitchConfigurationSynchronized = false;
+    sessions.setAutomaticAccountSwitchAuthorityReady(false);
     // Shell processes are runner-owned, not transport-owned. Their bounded snapshots reconcile
     // after registration; only explicit close, session deletion, or runner shutdown kills them.
     log("disconnected");

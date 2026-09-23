@@ -18,6 +18,16 @@ export function synchronizedHarnessChoices(
   return runnerSupportsProtocol(controlPlaneProtocolVersion, "harnessInstallations") ? null : [];
 }
 
+/** A reconnect must establish both authorities before automatic switching can resume. */
+export function automaticAccountSwitchAuthorityReady(
+  controlPlaneProtocolVersion: number | null,
+  choices: readonly HarnessInstallationChoice[] | null,
+  configurationSynchronized: boolean,
+): boolean {
+  return runnerSupportsProtocol(controlPlaneProtocolVersion, "automaticProviderAccountSwitch") &&
+    choices !== null && configurationSynchronized;
+}
+
 export function harnessFamily(driver: AgentDriverKind | undefined): HarnessInstallationChoice["family"] | null {
   if (driver === "claude-code") return "claude";
   if (driver === "codex" || driver === "codex-app-server") return "codex";

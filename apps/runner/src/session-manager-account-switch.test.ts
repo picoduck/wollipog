@@ -623,7 +623,7 @@ test("an exhausted structured window schedules an automatic switch only after th
     assert.deepEqual(launches, [accounts.work.credentialHome]);
     assert.equal(made.store.readMeta(spec.sessionId)?.providerAccountId, "work");
 
-    manager.setAutomaticAccountSwitchSelectionReady(true);
+    manager.setAutomaticAccountSwitchAuthorityReady(true);
     assert.equal(manager.prompt(spec.sessionId, "retry after choices synchronize"), true);
     await waitFor(() => launches.length === 2, "automatic account switch did not resume the conversation");
 
