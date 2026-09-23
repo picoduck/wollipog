@@ -19,6 +19,28 @@ export function harnessVersionPinned(harness: Harness, value: string | undefined
 
 const REDISCOVER = "Stop sessions using this executable before upgrading. Restart and Rediscover before treating the new version as ready.";
 
+const posixWord = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
+const powerShellWord = (value: string): string => `'${value.replace(/['\u2018-\u201B]/gu, "$&$&")}'`;
+
+/** Manual instructions name the shell explicitly. WSL launch paths belong inside the distro,
+ * while a native Windows launch is copied into PowerShell on the Machine. */
+export function manualCodexUpdateCommand(
+  binary: ResolvedBinary,
+  context: AgentContext,
+  platform: NodeJS.Platform = process.platform,
+): { command: string; shell: string } {
+  const words = [binary.launch.command, ...binary.launch.args, "update"];
+  if (context.kind === "wsl") return {
+    command: words.map(posixWord).join(" "),
+    shell: `a POSIX shell inside WSL: ${context.distro}`,
+  };
+  if (platform === "win32") return {
+    command: `& ${words.map(powerShellWord).join(" ")}`,
+    shell: "PowerShell 7.3 or later on this Machine",
+  };
+  return { command: words.map(posixWord).join(" "), shell: "a POSIX shell on this Machine" };
+}
+
 /** Only the discovered launch is probed. A same-name CLI later on PATH cannot establish support
  * for this installation's built-in updater. Help output is deliberately discarded. */
 export async function codexOffersSelfUpdate(
@@ -35,8 +57,16 @@ export async function codexOffersSelfUpdate(
     /^\s*update\s+Update Codex to the latest version\b/im.test(`${result.stdout}\n${result.stderr}`);
 }
 
-function originalManagerGuidance(packageName: string | null, codexSelfUpdate: boolean): string {
-  if (codexSelfUpdate) return "This installation advertises its built-in `codex update` command. Invoke `update` through this installation's exact Launch Command in Agent Details, in the Machine's execution context. A bare `codex` on PATH may be another installation. " + REDISCOVER;
+function originalManagerGuidance(
+  packageName: string | null,
+  codexSelfUpdate: boolean,
+  binary?: ResolvedBinary,
+  context?: AgentContext,
+): string {
+  if (codexSelfUpdate && binary && context) {
+    const manual = manualCodexUpdateCommand(binary, context);
+    return `This installation advertises its built-in \`codex update\` command. Run \`${manual.command}\` in ${manual.shell} after stopping sessions using this executable. A bare \`codex\` on PATH may be another installation. Restart and Rediscover before treating the new version as ready.`;
+  }
   if (packageName) return `This launch target is inside the ${packageName} package tree. Use the package or version manager that installed this exact copy in the same execution context. ${REDISCOVER}`;
   return "Use this installation's original package or version manager. If its manager is unknown, inspect this installation in Machine settings before upgrading. " + REDISCOVER;
 }
@@ -79,7 +109,7 @@ export function classifyNpmHarnessUpdate(
     managedExternally: true as const,
     guidance: `${managerGuidance} Published releases are not automatically known compatible with this Machine.`,
   };
-  const checkFailure = "The release check could not complete. The Machine may be offline, behind a proxy, or rate limited; retry after connectivity returns. " + managerGuidance;
+  const checkFailure = "The release check could not complete, so no current release status was established. The Machine may be offline, behind a proxy, or rate limited; retry the check after connectivity returns.";
   if (result.code !== 0 || result.timedOut) return { ...base, status: "check_failed", guidance: checkFailure };
   let tags: Record<string, unknown>;
   try { tags = JSON.parse(result.stdout) as Record<string, unknown>; }
@@ -121,7 +151,7 @@ export async function checkHarnessUpdate(
     channel: installedVersion?.includes("-") ? "preview" : installedVersion ? "stable" : "unknown",
     evidenceSource: "Machine pinned-version policy",
     managedExternally: true,
-    guidance: `This harness installation is pinned by Machine policy. Keep the selected version until the operator changes that policy. ${originalManagerGuidance(packageName, false)}`,
+    guidance: "This harness installation is pinned by Machine policy. Release checks are suppressed, so no current release status was established. Ask the Machine operator to change the pin before planning an upgrade. " + REDISCOVER,
   };
   if (process.env.WOLLIPOG_HARNESS_UPDATE_CHECKS === "off") return {
     status: !installedVersion ? "version_unknown" : "managed_externally",
@@ -131,10 +161,10 @@ export async function checkHarnessUpdate(
     channel: installedVersion?.includes("-") ? "preview" : installedVersion ? "stable" : "unknown",
     evidenceSource: "Machine update-check policy",
     managedExternally: true,
-    guidance: `Version checks are disabled by this Machine's policy. ${originalManagerGuidance(packageName, false)}`,
+    guidance: "Release checks are disabled by this Machine's policy, so no current release status was established. Ask the Machine operator whether manual upgrades are permitted. " + REDISCOVER,
   };
   const selfUpdate = harness === "codex" && await codexOffersSelfUpdate(binary, context);
-  const managerGuidance = originalManagerGuidance(packageName, selfUpdate);
+  const managerGuidance = originalManagerGuidance(packageName, selfUpdate, binary, context);
   if (!packageName) return {
     status: !installedVersion ? "version_unknown" : installedVersion.includes("-")
       ? "preview_channel" : "managed_externally",
