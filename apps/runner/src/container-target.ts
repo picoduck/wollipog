@@ -193,6 +193,38 @@ export class ContainerTargetRegistry {
   private async setupEnvironment(template: RunnerContainerTarget, runtime: ResolvedBinary, home: string): Promise<Record<string, string>> {
     const env = setupCheckRuntimeEnvironment(home, template.runtime);
     if (template.runtime === "podman") {
+      const hostConfig = localRuntimePath(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"));
+      if (process.env.CONTAINERS_CONF === "" || process.env.CONTAINERS_CONF_OVERRIDE === "") {
+        throw new Error("Podman config path is invalid");
+      }
+      const configPaths = [
+        process.env.CONTAINERS_CONF,
+        process.env.CONTAINERS_CONF_OVERRIDE,
+        join(hostConfig, "containers", "containers.conf"),
+        join(hostConfig, "containers", "containers.conf.d"),
+        "/etc/containers/containers.conf", "/etc/containers/containers.conf.d",
+        "/usr/share/containers/containers.conf", "/usr/share/containers/containers.conf.d",
+      ].filter((path): path is string => Boolean(path));
+      if (!process.env.CONTAINER_HOST && (process.env.CONTAINERS_CONF !== undefined ||
+          process.env.CONTAINERS_CONF_OVERRIDE !== undefined ||
+          configPaths.some((path) => existsSync(localRuntimePath(path))))) {
+        const inspected = await this.deps.run(runtime.launch.command, [
+          ...runtime.launch.args, "info", "--format", "{{json .Host.ServiceIsRemote}}",
+        ], { timeoutMs: 5_000, maxBuffer: 4_096, replaceEnv: true, env: {
+          PATH: env.PATH!, HOME: env.HOME!, XDG_CONFIG_HOME: hostConfig,
+          ...(env.XDG_DATA_HOME ? { XDG_DATA_HOME: env.XDG_DATA_HOME } : {}),
+          ...(env.XDG_RUNTIME_DIR ? { XDG_RUNTIME_DIR: env.XDG_RUNTIME_DIR } : {}),
+          ...(env.CONTAINERS_STORAGE_CONF ? { CONTAINERS_STORAGE_CONF: env.CONTAINERS_STORAGE_CONF } : {}),
+          ...(process.env.CONTAINERS_CONF ? { CONTAINERS_CONF: localRuntimePath(process.env.CONTAINERS_CONF) } : {}),
+          ...(process.env.CONTAINERS_CONF_OVERRIDE ? {
+            CONTAINERS_CONF_OVERRIDE: localRuntimePath(process.env.CONTAINERS_CONF_OVERRIDE),
+          } : {}),
+        } });
+        if (inspected.code !== 0 || inspected.timedOut || inspected.errorCode ||
+            inspected.stdout.trim() !== "false") {
+          throw new Error("Podman is not a verified local runtime");
+        }
+      }
       const config = join(home, "containers.conf");
       // CONTAINERS_CONF bypasses system and user containers.conf, either of which can set
       // implicit container environment values. Storage-only configuration remains separate.

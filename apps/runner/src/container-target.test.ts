@@ -17,7 +17,8 @@ const template: RunnerContainerTarget = {
 };
 
 const HOST_RUNTIME_ENV = ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "CONTAINER_HOST",
-  "CONTAINER_CONNECTION", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "CONTAINERS_STORAGE_CONF"] as const;
+  "CONTAINER_CONNECTION", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "CONTAINERS_STORAGE_CONF",
+  "CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE"] as const;
 const emptyDockerConfig = join(tmpdir(), `wollipog-empty-docker-config-${randomUUID()}`);
 let savedHostRuntimeEnv: Record<string, string | undefined> = {};
 beforeEach(() => {
@@ -303,6 +304,39 @@ test("Podman keeps a configured local storage file without loading general conta
     assert.equal(checkEnv?.CONTAINERS_CONF?.startsWith(checkEnv?.XDG_CONFIG_HOME ?? ""), true);
     assert.notEqual(checkEnv?.XDG_CONFIG_HOME, config);
     assert.notEqual(checkEnv?.XDG_CONFIG_HOME, checkEnv?.HOME);
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Podman config-selected remote mode cannot certify a local setup check", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-podman-remote-test-"));
+  const file = join(config, "containers", "containers.conf");
+  mkdirSync(join(config, "containers"));
+  writeFileSync(file, "[engine]\nremote = true\n");
+  process.env.XDG_CONFIG_HOME = config;
+  try {
+    let setupRan = false;
+    let infoEnv: Record<string, string> | undefined;
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "info") {
+          infoEnv = opts.env;
+          return { code: 0, stdout: "true\n", stderr: "" };
+        }
+        if (args[0] === "run" && args.includes("git")) setupRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(infoEnv?.XDG_CONFIG_HOME, config);
+    assert.equal(infoEnv?.CONTAINERS_CONF, undefined);
+    assert.equal(setupRan, false);
+    assert.equal(registry.definitions()[0]!.unavailableReason,
+      "setup check 'git' could not launch isolated runtime");
   } finally {
     rmSync(config, { recursive: true, force: true });
   }
