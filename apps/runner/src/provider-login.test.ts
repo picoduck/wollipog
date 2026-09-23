@@ -393,6 +393,32 @@ test("Codex CLI compatibility parser preserves bounded provider-defined code gro
   }), { numRuns: 200 });
 });
 
+test("Codex CLI compatibility parser preserves OSC-8 visible text across terminators and adjacent sequences", () => {
+  fc.assert(fc.property(fc.constantFrom("\u0007", "\u001b\\"), fc.constantFrom("\u0007", "\u001b\\"),
+    (openingTerminator, closingTerminator) => {
+      const output = [
+        `\u001b]8;;https://links.example/hidden${openingTerminator}`,
+        "\u001b[36mhttps://auth.openai.com/device\u001b[0m",
+        `\u001b]8;;${closingTerminator}`,
+        `\u001b]0;Device Login\u001b\\`,
+        "\nEnter this one-time code:\nABCD-EFGHJ\n",
+      ].join("");
+      assert.deepEqual(parseCodexDeviceLoginOutput(output), {
+        verificationUrl: "https://auth.openai.com/device",
+        userCode: "ABCD-EFGHJ",
+      });
+    }), { numRuns: 20 });
+});
+
+test("Codex CLI compatibility parser ignores incomplete or malformed OSC payloads", () => {
+  for (const output of [
+    "\u001b]8;;https://links.example/hidden",
+    "\u001b]8;;https://links.example/hidden\u001b[36mhttps://auth.openai.com/device\nABCD-EFGHJ\n",
+  ]) {
+    assert.deepEqual(parseCodexDeviceLoginOutput(output), {});
+  }
+});
+
 test("Codex CLI compatibility parser does not mistake an incomplete prompt for a device code", () => {
   assert.deepEqual(parseCodexDeviceLoginOutput(
     "https://auth.openai.com/device\nEnter this one-time code:\n",
