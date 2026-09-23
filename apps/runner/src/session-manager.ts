@@ -900,6 +900,7 @@ export class SessionManager {
   private steeringAccessOrdinal = 0;
   private automaticAccountSwitching = false;
   private automaticAccountSwitchRevision = 0;
+  private automaticAccountSwitchAuthorityReady = false;
   /** Test seam; production always uses the mandatory whole-submission ten-second deadline. */
   private steeringSubmissionTimeoutMs = STEERING_SUBMISSION_TIMEOUT_MS;
   /** Sessions with a file rewind in flight. The shared store lock is REENTRANT for this
@@ -1279,6 +1280,11 @@ export class SessionManager {
     this.automaticAccountSwitchRevision = configuration.revision;
     this.automaticAccountSwitching = configuration.enabled;
     return true;
+  }
+
+  /** Keep the preference while a peer cannot prove both its setting and selected binary. */
+  setAutomaticAccountSwitchAuthorityReady(ready: boolean): void {
+    this.automaticAccountSwitchAuthorityReady = ready;
   }
 
   configureCapacity(configuration: RunnerCapacityConfiguration): boolean {
@@ -10218,7 +10224,8 @@ export class SessionManager {
       : undefined;
     const rejection = entry.usageWindowRejection ?? usageWindowRejection(currentUsage, now);
     entry.usageWindowRejection = undefined;
-    if (!this.automaticAccountSwitching || !rejection || entry.governanceTripped ||
+    if (!this.automaticAccountSwitching || !this.automaticAccountSwitchAuthorityReady ||
+        !rejection || entry.governanceTripped ||
         entry.authenticationBlocked || entry.pendingProviderAccountSwitch) return false;
     if (!meta?.providerAccountId || !meta.providerAccountProvider || !meta.providerCredentialHome ||
         (meta.automaticProviderAccountLastSwitchAt ?? 0) + AUTOMATIC_ACCOUNT_SWITCH_COOLDOWN_MS > now) {

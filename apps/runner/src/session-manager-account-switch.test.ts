@@ -614,7 +614,17 @@ test("an exhausted structured window schedules an automatic switch only after th
     assert.equal(await manager.start(spec), true);
     made.store.patchMeta(spec.sessionId, { agentSessionId: "codex-thread" });
 
+    const idleBefore = messages.filter((message) => message.type === "session_status" &&
+      message.sessionId === spec.sessionId && message.status === "idle").length;
     assert.equal(manager.prompt(spec.sessionId, "continue"), true);
+    await waitFor(() => messages.filter((message) => message.type === "session_status" &&
+      message.sessionId === spec.sessionId && message.status === "idle").length > idleBefore,
+    "the rejected turn did not settle while installation selection was unknown");
+    assert.deepEqual(launches, [accounts.work.credentialHome]);
+    assert.equal(made.store.readMeta(spec.sessionId)?.providerAccountId, "work");
+
+    manager.setAutomaticAccountSwitchAuthorityReady(true);
+    assert.equal(manager.prompt(spec.sessionId, "retry after choices synchronize"), true);
     await waitFor(() => launches.length === 2, "automatic account switch did not resume the conversation");
 
     assert.deepEqual(launches, [accounts.work.credentialHome, accounts.backup.credentialHome]);
