@@ -11126,13 +11126,26 @@ export class ControlPlaneDb {
     const sources: SubscriptionUsageResponse["sources"] = [];
     for (const runner of runners) {
       const providerAccounts = runner.providerAccounts ?? [];
+      const selectionFor = (agent: AgentDefinition, provider: "codex" | "claude") =>
+        runner.harnessSelections?.find((choice) => choice.family === provider &&
+          harnessInstallationContext(choice.context) === harnessInstallationContext(agent.context));
+      const sourceAgentFor = (agents: AgentDefinition[], preferred: AgentDefinition | undefined,
+        provider: "codex" | "claude") => {
+        const choice = preferred && selectionFor(preferred, provider);
+        return choice
+          ? agents.find((candidate) =>
+              harnessInstallationContext(candidate.context) === harnessInstallationContext(preferred.context) &&
+              candidate.installation?.id === choice.installationId) ?? preferred
+          : preferred;
+      };
       const sourceCoordinates = [
         ...providerAccounts.flatMap((account) => {
           const compatible = runner.agents.filter((candidate) => account.provider === "codex"
             ? candidate.driver === "codex-app-server"
             : candidate.driver === "claude-code");
-          const agent = compatible.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
+          const preferred = compatible.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
             compatible.find((candidate) => (candidate.context?.kind ?? "native") === "native") ?? compatible[0];
+          const agent = sourceAgentFor(compatible, preferred, account.provider);
           return agent ? [{ agent, provider: account.provider, account }] : [];
         }),
         ...runner.agents.flatMap((agent) => {
@@ -11144,12 +11157,26 @@ export class ControlPlaneDb {
             const mappedToAccount = provider && providerAccounts.some((account) =>
               account.provider === provider &&
               ((agent.context?.kind ?? "native") === "native" || agent.defaultProviderAccountId === account.id));
-            return provider && !mappedToAccount
+            const choice = provider && selectionFor(agent, provider);
+            const matchingChoice = choice && runner.agents.some((candidate) =>
+              candidate.driver === agent.driver &&
+              harnessInstallationContext(candidate.context) === harnessInstallationContext(agent.context) &&
+              candidate.installation?.id === choice.installationId);
+            const firstInContext = provider && runner.agents.find((candidate) =>
+              candidate.driver === agent.driver &&
+              harnessInstallationContext(candidate.context) === harnessInstallationContext(agent.context));
+            const visible = !choice || agent.installation?.id === choice.installationId ||
+              (!matchingChoice && firstInContext?.id === agent.id);
+            return provider && !mappedToAccount && visible
               ? [{ agent, provider, account: undefined }]
               : [];
           }),
       ];
       for (const { agent, provider, account } of sourceCoordinates) {
+        const selection = selectionFor(agent, provider);
+        const unsupportedSelection = Boolean(selection &&
+          (!runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers") ||
+            agent.installation?.id !== selection.installationId));
         const context = agent.context?.kind === "wsl" ? `wsl:${agent.context.distro}` : "native";
         const sourceId = createHash("sha256")
           .update(JSON.stringify(account
@@ -11157,19 +11184,28 @@ export class ControlPlaneDb {
             : { runnerId: runner.runnerId, agentId: agent.id, provider, context }))
           .digest("hex")
           .slice(0, 32);
-        const persisted = stored.get(`${runner.runnerId}:${sourceId}`);
+        const recorded = stored.get(`${runner.runnerId}:${sourceId}`);
+        const persisted = recorded?.agentId === agent.id &&
+          (!unsupportedSelection || recorded.state === "unsupported")
+          ? recorded : undefined;
         const fetchedAt = persisted?.fetchedAt ?? runner.lastSeen ?? now;
         const snapshot: SubscriptionUsageSnapshot = persisted ?? {
           sourceId,
           runnerId: runner.runnerId,
           agentId: agent.id,
           provider,
-          state: account?.authStatus === "unauthenticated"
-            ? "unauthenticated"
+          state: unsupportedSelection
+            ? "unsupported"
+            : account?.authStatus === "unauthenticated"
+              ? "unauthenticated"
             : runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage")
               ? "unavailable"
               : "unsupported",
-          detail: account?.authStatus === "unauthenticated"
+          detail: unsupportedSelection
+            ? !runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers")
+              ? "Update this runner to enforce the selected harness installation for subscription usage."
+              : "The selected harness installation is unavailable in this execution context."
+            : account?.authStatus === "unauthenticated"
             ? `${account.label} is not signed in.`
             : runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage")
               ? "This provider has not reported subscription usage yet."

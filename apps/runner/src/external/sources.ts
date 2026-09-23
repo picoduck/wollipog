@@ -28,8 +28,10 @@ import type {
   AgentDefinition,
   AgentDriverKind,
   ExternalSessionDescriptor,
+  HarnessInstallationChoice,
   SessionEventPayload,
 } from "@wollipog/protocol";
+import { selectedHarnessAgent } from "../harness-selection.js";
 import { launchTargetStillMatches, listWslDistros, run } from "../discovery/resolve.js";
 import { runContextCommand } from "../context-command.js";
 import { providerStateKey } from "../execution-isolation.js";
@@ -233,8 +235,10 @@ export function resolveLaunchForDriver(
   agents: AgentDefinition[],
   driver: AgentDriverKind,
   context: AgentContext,
+  choices: readonly HarnessInstallationChoice[] = [],
+  onTargetChanged?: () => void,
 ): { command: string; args: string[]; env: Record<string, string> } | null {
-  const agent = agents.find((a) => {
+  const eligible = agents.filter((a) => {
     const aDriver = a.driver ?? "acp";
     const aCtx = a.context ?? { kind: "native" as const };
     if (aDriver !== driver || aCtx.kind !== context.kind) return false;
@@ -249,7 +253,8 @@ export function resolveLaunchForDriver(
     }
     return driver === "codex" && a.authStatus === "unauthenticated" && a.codexAppServer != null;
   });
-  return agent ? { command: agent.command, args: agent.args ?? [], env: agent.env ?? {} } : null;
+  const agent = selectedHarnessAgent(eligible, driver, context, choices);
+  return agent ? resolveLaunchForAgent(agents, agent.id, driver, context, onTargetChanged) : null;
 }
 
 /** Resolve one exact runner catalog identity for host launch authorization. A confirmed signed-out

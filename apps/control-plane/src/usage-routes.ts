@@ -89,6 +89,8 @@ export function registerUsageRoutes(
       runner.status === "online" &&
       (!targeted || runner.runnerId === body!.runnerId) &&
       runnerSupportsProtocol(runner.protocolVersion, "subscriptionUsage") &&
+      (!runner.harnessSelections?.length ||
+        runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers")) &&
       runner.agents.some((agent) => agent.driver === "codex-app-server" || agent.driver === "claude-code"));
     const results = await Promise.allSettled(runners.map(async (runner) => {
       const codexAccounts = runner.providerAccounts

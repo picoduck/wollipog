@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { agentContextKey } from "@wollipog/protocol";
 import type {
   AgentDefinition,
   SubscriptionUsageBucket,
@@ -123,6 +124,11 @@ export function validateSubscriptionUsageSnapshot(
   const agentId = text(input.agentId, "agentId", 128)!;
   const provider = input.provider;
   if (provider !== "codex" && provider !== "claude") throw new Error("subscription usage provider is invalid");
+  const state = input.state;
+  if (state !== "available" && state !== "unavailable" && state !== "unsupported" &&
+      state !== "unauthenticated" && state !== "not_applicable") {
+    throw new Error("subscription usage state is invalid");
+  }
   const runner = db.getRunner(runnerId);
   const agent = runner?.agents.find((candidate) => candidate.id === agentId);
   const expectedDriver = provider === "codex" ? "codex-app-server" : "claude-code";
@@ -143,10 +149,10 @@ export function validateSubscriptionUsageSnapshot(
       sourceId !== expectedSourceId(runnerId, agent, provider, providerAccountId)) {
     throw new Error("subscription usage source is not advertised by this runner");
   }
-  const state = input.state;
-  if (state !== "available" && state !== "unavailable" && state !== "unsupported" &&
-      state !== "unauthenticated" && state !== "not_applicable") {
-    throw new Error("subscription usage state is invalid");
+  const selection = runner?.harnessSelections?.find((choice) => choice.family === provider &&
+    agentContextKey(choice.context) === agentContextKey(agent.context));
+  if (selection && agent.installation?.id !== selection.installationId && state !== "unsupported") {
+    throw new Error("subscription usage source does not use the selected harness installation");
   }
   const fetchedAt = number(input.fetchedAt, "fetchedAt", 1, now + 5 * 60_000)!;
   if (!Array.isArray(input.buckets) || input.buckets.length > MAX_BUCKETS) {

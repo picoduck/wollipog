@@ -52,6 +52,20 @@ test("Codex App Server discovers the shared Codex rollout store", () => {
   assert.equal(externalSessionStoreDriver("pi"), "pi");
 });
 
+test("external adoption resolves the selected installation and fails closed after rediscovery", () => {
+  const system = agent({ id: "system", driver: "codex-app-server", command: "/usr/bin/codex",
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" } });
+  const local = agent({ id: "local", driver: "codex-app-server", command: "/home/user/.local/bin/codex",
+    installation: { id: "local", path: "/home/user/.local/bin/codex", via: "common-dir" } });
+  const choices = [{ family: "codex" as const, context: { kind: "native" as const }, installationId: "local" }];
+  assert.equal(resolveLaunchForDriver([system, local], "codex-app-server", { kind: "native" }, choices)?.command,
+    local.command);
+  assert.equal(resolveLaunchForDriver([system], "codex-app-server", { kind: "native" }, choices), null);
+  assert.equal(resolveLaunchForDriver([system], "codex-app-server", { kind: "native" },
+    [{ family: "claude", context: { kind: "native" }, installationId: "other" }])?.command, system.command);
+  assert.equal(resolveLaunchForDriver([system, local], "codex-app-server", { kind: "wsl", distro: "Ubuntu" }, choices), null);
+});
+
 test("native Pi adoption copies a validated snapshot without changing the external JSONL", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-pi-adopt-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));

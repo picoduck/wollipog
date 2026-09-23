@@ -1126,6 +1126,10 @@ app.register(async (instance) => {
         }
         connectionAdmission.authenticated();
         hub.attachRunner(runnerId, runnerClient);
+        if (!runnerSupportsProtocol(msg.protocolVersion, "harnessSelectionBackgroundConsumers") &&
+            db.getRunner(runnerId)?.harnessSelections?.length) {
+          db.replaceSubscriptionUsageSnapshots(runnerId, []);
+        }
         sessionNamingSettings.reconcileRunnerCustomModelStatus(
           runnerId,
           runnerSupportsProtocol(msg.protocolVersion, "sessionCustomModelNaming")
@@ -1144,6 +1148,13 @@ app.register(async (instance) => {
             : {}),
           ...(runnerSupportsProtocol(msg.protocolVersion, "automaticProviderAccountSwitch")
             ? { automaticAccountSwitching: db.machineAutomaticAccountSwitchConfiguration(runnerId) ?? undefined }
+            : {}),
+          ...(runnerSupportsProtocol(msg.protocolVersion, "harnessSelectionBackgroundConsumers")
+            ? { harnessInstallationChoices: db.getRunner(runnerId)?.harnessSelections?.map((selection) => ({
+                family: selection.family,
+                context: selection.context,
+                installationId: selection.installationId,
+              })) ?? [] }
             : {}),
         });
         // Close/forget requests made while this runner was offline are durable. The registered
@@ -1317,6 +1328,8 @@ app.register(async (instance) => {
         hub.runnerChanged(runnerId!);
         break;
       case "subscription_usage_updated":
+        if (db.getRunner(runnerId!)?.harnessSelections?.length &&
+            !runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "harnessSelectionBackgroundConsumers")) break;
         if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "subscriptionUsage")) {
           app.log.warn(`runner ${runnerId} sent subscription usage without negotiated support`);
           break;
@@ -1332,6 +1345,8 @@ app.register(async (instance) => {
         }
         break;
       case "subscription_usage_inventory":
+        if (db.getRunner(runnerId!)?.harnessSelections?.length &&
+            !runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "harnessSelectionBackgroundConsumers")) break;
         if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "subscriptionUsage")) {
           app.log.warn(`runner ${runnerId} sent a subscription usage inventory without negotiated support`);
           break;
@@ -2723,6 +2738,15 @@ app.put("/api/runners/:id/harness-installation", async (req, reply) => {
   }
   const selection = db.selectHarnessInstallation(id, agentId, installationId);
   if (!selection) return reply.code(409).send({ error: "This installation is no longer available for selection" });
+  db.replaceSubscriptionUsageSnapshots(id, []);
+  if (runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers")) {
+    hub.sendToRunner(id, {
+      type: "configure_harness_installation_choices",
+      choices: db.getRunner(id)?.harnessSelections?.map((item) => ({
+        family: item.family, context: item.context, installationId: item.installationId,
+      })) ?? [],
+    });
+  }
   hub.runnerChanged(id);
   return { selection };
 });

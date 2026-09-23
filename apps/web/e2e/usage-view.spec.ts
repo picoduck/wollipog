@@ -216,3 +216,16 @@ test("subscription cards show provider allowances in presentation order (#223, #
   await expect(mobileCurrent).toBeVisible();
   await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-mobile.png` });
 });
+
+test("a missing selected installation appears as one unsupported usage source", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/usage-view-e2e.html?subscriptions=1&selectedUnavailable=1");
+  const codex = page.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" });
+  await expect(codex).toHaveCount(1);
+  await expect(codex).toContainText("The selected harness installation is unavailable");
+  await codex.screenshot({ path: `${SHOT}/selected-installation-unavailable-desktop.png` });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(codex).toBeVisible();
+  await codex.screenshot({ path: `${SHOT}/selected-installation-unavailable-mobile.png` });
+});

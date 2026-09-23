@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
-import type { AgentDefinition, SubscriptionUsageSnapshot } from "@wollipog/protocol";
+import type { AgentDefinition, HarnessInstallationChoice, SubscriptionUsageSnapshot } from "@wollipog/protocol";
 import {
   hasSubscriptionUtilization,
   normalizeClaudeRateLimits,
@@ -13,6 +13,7 @@ import {
   subscriptionUsageSourceId,
 } from "./subscription-usage.js";
 import type { AgentProcess, SpawnAgentOptions } from "./spawn.js";
+import { agentForProviderAccount } from "./provider-accounts.js";
 
 const base = { sourceId: "a".repeat(32), runnerId: "runner-1", agentId: "agent-1" };
 
@@ -1406,4 +1407,184 @@ test("configuring one provider keeps the other provider's legacy usage source", 
     ["claude", undefined, "claude"],
     ["codex", "work", "codex"],
   ]);
+});
+
+test("usage probes only the selected installation in each context and survives rediscovery", async () => {
+  const system = agent({ id: "system", command: "/usr/bin/codex",
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" } });
+  const local = agent({ id: "local", command: "/home/user/.local/bin/codex",
+    installation: { id: "local", path: "/home/user/.local/bin/codex", via: "common-dir" } });
+  const wsl = agent({ id: "wsl", context: { kind: "wsl", distro: "Ubuntu" }, command: "/usr/bin/codex",
+    installation: { id: "ubuntu", path: "/usr/bin/codex", via: "path" } });
+  let discovered = [system, local, wsl];
+  const choices: HarnessInstallationChoice[] = [
+    { family: "codex", context: { kind: "native" }, installationId: "local" },
+    { family: "codex", context: { kind: "wsl", distro: "Ubuntu" }, installationId: "ubuntu" },
+  ];
+  let now = 20_000;
+  const probed: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => discovered,
+    installationChoices: () => choices,
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/probe" }),
+    publish: () => {},
+    now: () => now,
+    probeCodex: async (candidate) => {
+      probed.push(candidate.id);
+      return { state: "available", rateLimits: { rateLimits: {
+        limitId: "codex", primary: { usedPercent: 10 },
+      } } };
+    },
+  });
+  await manager.refreshAll();
+  assert.deepEqual(probed, ["local", "wsl"]);
+  assert.deepEqual(manager.inventory().map((snapshot) => snapshot.agentId), ["local", "wsl"]);
+
+  discovered = [system, wsl];
+  manager.selectionChanged();
+  now += 20_000;
+  await manager.refreshAll();
+  assert.deepEqual(probed, ["local", "wsl", "wsl"]);
+  assert.deepEqual(manager.inventory().map((snapshot) => [snapshot.agentId, snapshot.state]), [
+    ["system", "unsupported"], ["wsl", "available"],
+  ]);
+
+  discovered = [system, local, wsl];
+  manager.selectionChanged();
+  now += 20_000;
+  await manager.refreshAll();
+  assert.deepEqual(probed, ["local", "wsl", "wsl", "local", "wsl"]);
+  assert.deepEqual(manager.inventory().map((snapshot) => snapshot.agentId), ["local", "wsl"]);
+});
+
+test("account probes keep credential-home compatibility before applying the selected installation", async () => {
+  const system = agent({ id: "system", installation: { id: "system", path: "/usr/bin/codex", via: "path" } });
+  const local = agent({ id: "local", installation: { id: "local", path: "/home/user/.local/bin/codex", via: "common-dir" } });
+  const wsl = agent({ id: "wsl", context: { kind: "wsl", distro: "Ubuntu" },
+    installation: { id: "wsl", path: "/usr/bin/codex", via: "path" } });
+  let discovered = [system, local, wsl];
+  const choices: HarnessInstallationChoice[] = [
+    { family: "codex", context: { kind: "native" }, installationId: "local" },
+    { family: "codex", context: { kind: "wsl", distro: "Ubuntu" }, installationId: "wsl" },
+  ];
+  const probed: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => discovered,
+    installationChoices: () => choices,
+    providerAccounts: () => [{ id: "work", label: "Work", provider: "codex", authStatus: "authenticated" }],
+    resolveProviderAccountAgent: (_account, drivers, candidates) =>
+      agentForProviderAccount(candidates, { id: "work", provider: "codex", directory: "/accounts/work" }, drivers, "linux"),
+    resolveEnv: () => ({ CODEX_HOME: "/accounts/work" }),
+    authorizeProbe: () => ({ cwd: "/safe/probe" }),
+    publish: () => {},
+    now: () => 20_000,
+    probeCodex: async (candidate) => {
+      probed.push(candidate.id);
+      return { state: "unavailable" };
+    },
+  });
+  await manager.refreshAccount("work");
+  assert.deepEqual(probed, ["local"]);
+  assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "work")?.agentId, "local");
+
+  discovered = [system, wsl];
+  manager.selectionChanged();
+  await manager.refreshAccount("work");
+  assert.deepEqual(probed, ["local"], "neither the unselected native binary nor WSL may use this home");
+  assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "work")?.state, "unsupported");
+});
+
+test("a runner without synchronized choices does not advertise selection-bound usage", async () => {
+  let ready = false;
+  let probes = 0;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [agent()],
+    selectionReady: () => ready,
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/probe" }),
+    publish: () => {},
+    now: () => 20_000,
+    probeCodex: async () => { probes++; return { state: "unavailable" }; },
+  });
+  await manager.refreshAll();
+  assert.deepEqual(manager.inventory(), []);
+  ready = true;
+  manager.selectionChanged();
+  await manager.refreshAll();
+  assert.equal(probes, 1);
+});
+
+test("a selection change discards an in-flight probe from the former installation", async () => {
+  const system = agent({ id: "system", installation: { id: "system", path: "/usr/bin/codex", via: "path" } });
+  const local = agent({ id: "local", installation: { id: "local", path: "/home/user/.local/bin/codex", via: "common-dir" } });
+  const choices: HarnessInstallationChoice[] = [
+    { family: "codex", context: { kind: "native" }, installationId: "system" },
+  ];
+  let finishOld!: () => void;
+  const oldProbe = new Promise<void>((resolve) => { finishOld = resolve; });
+  const published: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [system, local],
+    installationChoices: () => choices,
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/probe" }),
+    publish: (snapshot) => { published.push(snapshot.agentId); },
+    now: () => 20_000,
+    probeCodex: async (candidate) => {
+      if (candidate.id === "system") await oldProbe;
+      return { state: "available", rateLimits: { rateLimits: {
+        limitId: "codex", primary: { usedPercent: 10 },
+      } } };
+    },
+  });
+  const firstRefresh = manager.refreshAll();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  choices[0] = { ...choices[0]!, installationId: "local" };
+  manager.selectionChanged();
+  finishOld();
+  await firstRefresh;
+  await manager.refreshAll();
+  assert.deepEqual(published, ["local"]);
+  assert.deepEqual(manager.inventory().map((snapshot) => snapshot.agentId), ["local"]);
+});
+
+test("an in-flight probe stays invalid after selection changes away and back", async () => {
+  const system = agent({ id: "system", installation: { id: "system", path: "/usr/bin/codex", via: "path" } });
+  const local = agent({ id: "local", installation: { id: "local", path: "/home/user/.local/bin/codex", via: "common-dir" } });
+  const choices: HarnessInstallationChoice[] = [
+    { family: "codex", context: { kind: "native" }, installationId: "system" },
+  ];
+  let finishOld!: () => void;
+  const oldProbe = new Promise<void>((resolve) => { finishOld = resolve; });
+  const published: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [system, local],
+    installationChoices: () => choices,
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/probe" }),
+    publish: (snapshot) => { published.push(snapshot.agentId); },
+    now: () => 20_000,
+    probeCodex: async () => {
+      await oldProbe;
+      return { state: "available", rateLimits: { rateLimits: {
+        limitId: "codex", primary: { usedPercent: 10 },
+      } } };
+    },
+  });
+  const refresh = manager.refreshAll();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  choices[0] = { ...choices[0]!, installationId: "local" };
+  manager.selectionChanged();
+  choices[0] = { ...choices[0]!, installationId: "system" };
+  manager.selectionChanged();
+  finishOld();
+  await refresh;
+  assert.deepEqual(published, []);
+  assert.equal(manager.inventory()[0]?.state, "unavailable");
 });

@@ -112,6 +112,71 @@ test("snapshot validation binds runner, advertised source, bounded display label
   db.close();
 });
 
+test("a stale unselected usage result cannot repopulate a cleared selected source", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const system = { ...codexAgent("system"), available: true,
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
+  const local = { ...codexAgent("local"), available: true,
+    installation: { id: "local", path: "/home/user/.local/bin/codex", via: "common-dir" as const } };
+  db.registerRunner(meta("runner-1", [system, local]), 1_000_000, PROTOCOL_VERSION);
+  assert.ok(db.selectHarnessInstallation("runner-1", "local", "local"));
+  const stale = { ...snapshot("runner-1", 1_000_000), agentId: "system",
+    sourceId: sourceId("runner-1", "system") };
+  assert.throws(() => validateSubscriptionUsageSnapshot(stale, "runner-1", db, 1_000_000),
+    /selected harness installation/);
+  assert.equal(validateSubscriptionUsageSnapshot({ ...stale, state: "unsupported" },
+    "runner-1", db, 1_000_000).state, "unsupported");
+  assert.equal(validateSubscriptionUsageSnapshot({ ...stale, agentId: "local",
+    sourceId: sourceId("runner-1", "local") }, "runner-1", db, 1_000_000).agentId, "local");
+  db.close();
+});
+
+test("usage projection shows one selected installation and an explicit unsupported fallback", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const system = { ...codexAgent("system"), available: true,
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
+  const local = { ...codexAgent("local"), available: true,
+    installation: { id: "local", path: "/home/user/.local/bin/codex", via: "common-dir" as const } };
+  const owner = { organizationId: "org_personal", owner: { kind: "user" as const, userId: "alice" } };
+  db.registerRunner(meta("runner-1", [system, local]), 1_000_000, PROTOCOL_VERSION, owner);
+  assert.ok(db.selectHarnessInstallation("runner-1", "local", "local"));
+  assert.deepEqual(db.subscriptionUsageForPrincipal(human(), 1_000_000).sources.map((source) =>
+    [source.agentId, source.state]), [["local", "unavailable"]]);
+
+  db.registerRunner(meta("runner-1", [system, local]), 1_000_001, 175, owner);
+  assert.deepEqual(db.subscriptionUsageForPrincipal(human(), 1_000_001).sources.map((source) =>
+    [source.agentId, source.state]), [["local", "unsupported"]]);
+
+  db.registerRunner(meta("runner-1", [system]), 1_000_002, PROTOCOL_VERSION, owner);
+  const missing = db.subscriptionUsageForPrincipal(human(), 1_000_002).sources;
+  assert.deepEqual(missing.map((source) => [source.agentId, source.state]), [["system", "unsupported"]]);
+  assert.match(missing[0]!.detail!, /selected harness installation is unavailable/);
+  db.close();
+});
+
+test("a missing account installation does not retain its previous available snapshot", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const system = { ...codexAgent("system"), available: true,
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
+  const local = { ...codexAgent("local"), available: true,
+    installation: { id: "local", path: "/home/user/.local/bin/codex", via: "common-dir" as const } };
+  const owner = { organizationId: "org_personal", owner: { kind: "user" as const, userId: "alice" } };
+  const withAccount = (agents: AgentDefinition[]) => ({ ...meta("runner-1", agents),
+    providerAccounts: [{ id: "work", label: "Work", provider: "codex" as const, authStatus: "authenticated" as const }] });
+  db.registerRunner(withAccount([system, local]), 1_000_000, PROTOCOL_VERSION, owner);
+  assert.ok(db.selectHarnessInstallation("runner-1", "local", "local"));
+  const available = validateSubscriptionUsageSnapshot({ ...snapshot("runner-1", 1_000_000),
+    agentId: "local", providerAccountId: "work", sourceId: sourceId("runner-1", "local", "work"),
+  }, "runner-1", db, 1_000_000);
+  db.upsertSubscriptionUsageSnapshot(available);
+  assert.equal(db.subscriptionUsageForPrincipal(human(), 1_000_000).sources[0]?.state, "available");
+
+  db.registerRunner(withAccount([system]), 1_000_001, PROTOCOL_VERSION, owner);
+  const source = db.subscriptionUsageForPrincipal(human(), 1_000_001).sources[0];
+  assert.deepEqual([source?.agentId, source?.state], ["system", "unsupported"]);
+  db.close();
+});
+
 test("account labels remain isolated by runner and switch atomically with available usage", () => {
   const db = ControlPlaneDb.open(":memory:");
   const now = 1_000_000;
