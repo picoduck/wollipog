@@ -3,7 +3,7 @@ import { expect, test } from "@playwright/test";
 test("account labels and controls remain readable on narrow usage cards", async ({ page }) => {
   const longLabel = "a-very-long-account-label-without-natural-breaks@example.com";
 
-  for (const width of [320, 390, 701, 1280]) {
+  for (const width of [320, 390, 600, 701, 875, 1280]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/usage-view-e2e.html?subscriptions=1");
 
@@ -23,17 +23,27 @@ test("account labels and controls remain readable on narrow usage cards", async 
     });
     expect(emailLines, `email should fit on one line at ${width}px`).toBe(1);
 
-    if (width <= 701) {
-      const refreshSize = await refresh.evaluate((element) => ({
-        height: element.getBoundingClientRect().height,
-        textLines: (() => {
-          const range = document.createRange();
-          range.selectNodeContents(element);
-          return range.getClientRects().length;
-        })(),
-      }));
-      expect(refreshSize.height).toBeGreaterThanOrEqual(44);
-      expect(refreshSize.textLines).toBe(1);
+    const refreshSize = await refresh.evaluate((element) => ({
+      height: element.getBoundingClientRect().height,
+      textLines: (() => {
+        const range = document.createRange();
+        range.selectNodeContents(element);
+        return range.getClientRects().length;
+      })(),
+    }));
+    expect(refreshSize.height).toBeGreaterThanOrEqual(44);
+    expect(refreshSize.textLines).toBe(1);
+
+    if (width === 875) {
+      await card.locator(".subscription-state").evaluate((element) => {
+        element.textContent = "Temporarily Unavailable";
+      });
+      const linesWithLongStatus = await account.evaluate((element) => {
+        const range = document.createRange();
+        range.selectNodeContents(element.lastChild!);
+        return range.getClientRects().length;
+      });
+      expect(linesWithLongStatus).toBe(1);
     }
 
     await account.evaluate((element, label) => {
@@ -49,10 +59,16 @@ test("account labels and controls remain readable on narrow usage cards", async 
       return {
         linesInsideCard: [...range.getClientRects()].every((line) =>
           line.left >= card.left && line.right <= card.right),
+        controlsInsideCard: [...element.closest(".subscription-source")!.querySelectorAll(".subscription-state, header > .btn")]
+          .every((control) => {
+            const bounds = control.getBoundingClientRect();
+            return bounds.left >= card.left && bounds.right <= card.right;
+          }),
         documentWidth: document.documentElement.scrollWidth,
       };
     });
     expect(geometry.linesInsideCard).toBe(true);
+    expect(geometry.controlsInsideCard).toBe(true);
     expect(geometry.documentWidth).toBeLessThanOrEqual(width);
   }
 });
