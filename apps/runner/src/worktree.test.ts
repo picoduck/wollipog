@@ -5914,6 +5914,168 @@ for (const [startInWorktree, switchDuringContinuation] of [
   }
 });
 
+test("repair wakes a delayed managed continuation and then releases the worktree rebind", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-repaired-background-worktree-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(root, "sessions"));
+    const launchedCwds: string[] = [];
+    const prompts: Array<{ cwd: string; text: string }> = [];
+    const factory = (_driver: unknown, launch: { cwd: string }, callbacks: {
+      onPromptAccepted?: () => void;
+      onEvent: (event: { kind: "agent_message"; text: string }) => void;
+    }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: launchedCwds.length, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async (text: string) => {
+          prompts.push({ cwd: launch.cwd, text });
+          callbacks.onPromptAccepted?.();
+          callbacks.onEvent({ kind: "agent_message", text: "Continuation recorded." });
+          return "end_turn" as const;
+        },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, root, 1);
+    const sessionId = "s_repaired_background";
+    assert.equal(await manager.start({
+      sessionId, workspaceId: "repo", workspacePath: repo, agentId: "claude", command: "claude",
+      args: [], env: {}, useWorktree: true, driver: "claude-code", context: { kind: "native" },
+    }), true);
+    const original = store.readMeta(sessionId)!;
+    store.patchMeta(sessionId, {
+      status: "input_required",
+      worktreeRecovery: {
+        recoveryId: "missing-selection", detectedAt: Date.now(), selectedPath: original.worktreePath!,
+        expectedBranch: original.worktreeBranch!, detail: "selected worktree unavailable",
+      },
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [{
+        id: "task-1", parentTurnId: "turn-1", runnerId: "runner", workspaceId: "repo",
+        context: { kind: "native" }, launchType: "agent", registeredAt: 1,
+        terminalStatus: "completed", terminalObservedAt: 2, continuationRequired: true,
+        continuationQueuedAt: 3, continuationId: "bgcont-repair",
+      }],
+    });
+    const internals = manager as unknown as {
+      scheduleBackgroundContinuation(sessionId: string, delay: number): void;
+      runBackgroundContinuation(sessionId: string): Promise<void>;
+      backgroundContinuationTimers: Map<string, NodeJS.Timeout>;
+    };
+    internals.scheduleBackgroundContinuation(sessionId, 30_000);
+    assert.equal(internals.backgroundContinuationTimers.has(sessionId), true);
+    const replacement = await manager.requestWorktree(sessionId, {
+      baseRef: "HEAD", branch: "fix/repaired-background",
+    });
+    await waitForCondition(() => prompts.length === 1 && launchedCwds.length === 2,
+      "repair did not resume the continuation and rebind before the delayed retry", 300);
+    assert.match(prompts[0]!.text, /Managed background jobs reached their terminal barrier/);
+    assert.equal(prompts[0]!.cwd, original.worktreePath,
+      "the task-owning provider records the continuation before its worktree rebind");
+    assert.deepEqual(launchedCwds, [original.worktreePath, replacement.worktree.path]);
+    await manager.selectWorktree(sessionId, replacement.worktree.path);
+    await internals.runBackgroundContinuation(sessionId);
+    assert.equal(prompts.length, 1, "repeated repair cannot replay an accepted continuation");
+
+    // Repair can also land while a retry is already awaiting provider launch. Its first
+    // zero-delay timer will observe that launch in progress; completion must re-arm it now.
+    store.patchMeta(sessionId, {
+      status: "input_required",
+      worktreeRecovery: {
+        recoveryId: "in-flight-repair", detectedAt: Date.now(), selectedPath: replacement.worktree.path,
+        expectedBranch: replacement.worktree.branch, detail: "selected worktree unavailable",
+      },
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [{
+        id: "task-2", parentTurnId: "turn-2", runnerId: "runner", workspaceId: "repo",
+        context: { kind: "native" }, launchType: "agent", registeredAt: 4,
+        terminalStatus: "completed", terminalObservedAt: 5, continuationRequired: true,
+        continuationQueuedAt: 6, continuationId: "bgcont-in-flight",
+      }],
+    });
+    const racing = manager as unknown as {
+      active: Map<string, unknown>;
+      resumeAndPrompt: (...args: unknown[]) => Promise<void>;
+      runBackgroundContinuation(sessionId: string): Promise<void>;
+    };
+    racing.active.delete(sessionId);
+    let releaseLaunch!: () => void;
+    const launchGate = new Promise<void>((resolve) => { releaseLaunch = resolve; });
+    let launchStarted!: () => void;
+    const started = new Promise<void>((resolve) => { launchStarted = resolve; });
+    let attempts = 0;
+    racing.resumeAndPrompt = async () => {
+      attempts += 1;
+      if (attempts === 1) {
+        launchStarted();
+        await launchGate;
+      }
+    };
+    const inFlight = racing.runBackgroundContinuation(sessionId);
+    await started;
+    await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/repaired-in-flight" });
+    await waitForCondition(() => !internals.backgroundContinuationTimers.has(sessionId),
+      "the immediate wakeup did not race the in-flight launch");
+    releaseLaunch();
+    await inFlight;
+    await waitForCondition(() => attempts === 2,
+      "repair wakeup was lost while an earlier continuation launch was in flight", 300);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("worktree repair wakes a delayed unsubmitted orphan recovery", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-repaired-orphan-worktree-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(root, "sessions"));
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      ((_driver: unknown, _launch: unknown) => ({
+        pid: 1, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      })) as never, root, 1);
+    const sessionId = "s_repaired_orphan";
+    assert.equal(await manager.start({
+      sessionId, workspaceId: "repo", workspacePath: repo, agentId: "claude", command: "claude",
+      args: [], env: {}, useWorktree: true, driver: "claude-code", context: { kind: "native" },
+    }), true);
+    const original = store.readMeta(sessionId)!;
+    store.patchMeta(sessionId, {
+      status: "input_required",
+      worktreeRecovery: {
+        recoveryId: "orphan-repair", detectedAt: Date.now(), selectedPath: original.worktreePath!,
+        expectedBranch: original.worktreeBranch!, detail: "selected worktree unavailable",
+      },
+      backgroundWorkState: "orphaned",
+      pendingBackgroundTaskIds: ["task-1"],
+      orphanedWork: { pendingTaskIds: ["task-1"], markedAt: Date.now(), reason: "process_exit" },
+    });
+    const internals = manager as unknown as {
+      scheduleOrphanRecovery(sessionId: string, delay: number): void;
+      runOrphanRecovery(sessionId: string): Promise<void>;
+      orphanRecoveryTimers: Map<string, NodeJS.Timeout>;
+    };
+    let attempts = 0;
+    internals.runOrphanRecovery = async () => { attempts += 1; };
+    internals.scheduleOrphanRecovery(sessionId, 30_000);
+    await manager.requestWorktree(sessionId, { baseRef: "HEAD", branch: "fix/repaired-orphan" });
+    await waitForCondition(() => attempts === 1, "repair did not wake the delayed orphan recovery", 300);
+    assert.equal(store.readMeta(sessionId)?.worktreeRecovery, undefined);
+    assert.equal(internals.orphanRecoveryTimers.has(sessionId), false);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a spent one-shot orphan recovery does not hold a worktree rebind forever", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-spent-orphan-worktree-rebind-"));
   const repo = join(root, "repo");
