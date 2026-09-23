@@ -13336,6 +13336,9 @@ body.shell-dock-dragging * {
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .usage-retention .btn { min-height: 44px; }
   .subscription-source-grid { grid-template-columns: minmax(0, 1fr); }
+  .subscription-source > header { flex-wrap: wrap; }
+  .subscription-source > header > div { flex: 1 1 100%; min-width: 0; }
+  .subscription-source > header > .btn { min-height: 44px; white-space: nowrap; }
   .subscription-usage-heading { align-items: stretch; flex-direction: column; }
   .subscription-usage-heading .btn { min-height: 44px; }
   .subscription-bucket { grid-template-columns: minmax(0, 1fr); gap: 4px; }
