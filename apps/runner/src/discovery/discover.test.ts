@@ -35,7 +35,7 @@ test("configured ACP discovery verifies a valid custom command and arguments", a
     source: "config",
     available: undefined,
   });
-  const probed = await probeConfiguredAcpAgent(configured, { FIXTURE_SECRET: "not-published" }, { timeoutMs: 1_000 });
+  const probed = await probeConfiguredAcpAgent(configured, { FIXTURE_SECRET: "not-published" });
   assert.equal(probed.available, true, probed.unavailableReason);
   assert.deepEqual(probed.env, {});
   assert.ok(probed.acp);
@@ -67,20 +67,22 @@ test("configured ACP probe results stay attached to their exact config ids", () 
   );
 });
 
-test("configured ACP discovery fails closed for missing commands and invalid arguments", async () => {
+test("configured ACP discovery fails closed for a missing command", async () => {
   const missing = await probeConfiguredAcpAgent(cfg({
     id: "missing-acp", driver: "acp", command: `/definitely-missing-wollipog-${process.pid}`, args: [],
-  }), {}, { timeoutMs: 1_000 });
+  }), {});
   assert.equal(missing.available, false);
   assert.match(missing.unavailableReason!, /not found or could not be started|exited before completing/u);
   assert.doesNotMatch(missing.unavailableReason!, /definitely-missing-wollipog/u);
+});
 
+test("configured ACP discovery fails closed for invalid arguments", async () => {
   const invalid = await probeConfiguredAcpAgent(cfg({
     id: "invalid-acp",
     driver: "acp",
     command: process.execPath,
     args: ["-e", 'process.stderr.write("credential=TOP_SECRET");process.exit(2)'],
-  }), { API_TOKEN: "TOP_SECRET" }, { timeoutMs: 1_000 });
+  }), { API_TOKEN: "TOP_SECRET" });
   assert.equal(invalid.available, false);
   assert.match(invalid.unavailableReason!, /command and arguments/u);
   assert.doesNotMatch(invalid.unavailableReason!, /TOP_SECRET|API_TOKEN|credential/u);
