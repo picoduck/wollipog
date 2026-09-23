@@ -11,9 +11,16 @@ type ProbeStatus = Pick<TargetHarnessInstallation,
 export async function probeTargetHarness(
   agentId: string,
   version: string,
+  configuredArgs: string[],
   run: (args: string[]) => Promise<ExecResult>,
 ): Promise<ProbeStatus> {
   if (agentId !== "claude-code" && agentId !== "codex" && agentId !== "codex-exec") {
+    return { authentication: "unknown", capability: "unknown" };
+  }
+  // Configured launch arguments can select a different profile, settings file, or credential
+  // source. Only Codex's fixed app-server subcommand leaves the bare CLI status applicable.
+  if (configuredArgs.length && !(agentId === "codex" &&
+      configuredArgs.length === 1 && configuredArgs[0] === "app-server")) {
     return { authentication: "unknown", capability: "unknown" };
   }
 

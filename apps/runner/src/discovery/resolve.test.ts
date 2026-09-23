@@ -23,6 +23,23 @@ test("run distinguishes actual timeouts from max-buffer termination", async () =
   assert.equal(interpretCodexAppServerProbe("0.147.0", overflow).failure?.code, "probe_failed");
 });
 
+test("run can replace the client environment instead of reintroducing inherited credentials", async () => {
+  const name = "WOLLIPOG_REPLACEMENT_SENTINEL";
+  const previous = process.env[name];
+  process.env[name] = "host-secret";
+  try {
+    const env = Object.fromEntries(Object.entries(process.env).filter(([key, value]) =>
+      key !== name && value !== undefined)) as Record<string, string>;
+    const result = await run(process.execPath, ["-e", `process.stdout.write(process.env.${name} ?? 'absent')`],
+      { env, replaceEnv: true });
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, "absent");
+  } finally {
+    if (previous === undefined) delete process.env[name];
+    else process.env[name] = previous;
+  }
+});
+
 test("sortVersionsDesc: numeric semver order, not lexicographic", () => {
   assert.deepEqual(sortVersionsDesc(["v9.0.0", "v25.2.1", "v10.1.0"]), ["v25.2.1", "v10.1.0", "v9.0.0"]);
   assert.deepEqual(sortVersionsDesc(["20.11.1", "20.9.0"]), ["20.11.1", "20.9.0"]); // no leading v

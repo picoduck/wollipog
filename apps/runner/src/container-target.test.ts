@@ -4,7 +4,7 @@ import test from "node:test";
 import type { ExecutionTargetRef } from "@wollipog/protocol";
 import type { RunnerContainerTarget } from "./config.js";
 import { CANONICAL_CONTAINER_LABELS, LEGACY_CONTAINER_LABELS } from "./container-identity.js";
-import { ContainerTargetRegistry, containerSetupCheckDigest, containerTargetId } from "./container-target.js";
+import { ContainerTargetRegistry, containerSetupCheckDigest, containerTargetId, targetProbeEnvironment } from "./container-target.js";
 
 const image = `example/agent@sha256:${"a".repeat(64)}`;
 const template: RunnerContainerTarget = {
@@ -123,7 +123,8 @@ test("container installations stay target-bound, deduplicate aliases, and fail c
 });
 
 test("target-local probes use the selected image executable without mounts, host credentials, or interaction", async () => {
-  const calls: Array<{ args: string[]; timeoutMs?: number; maxBuffer?: number }> = [];
+  const calls: Array<{ args: string[]; timeoutMs?: number; maxBuffer?: number;
+    env?: Record<string, string>; replaceEnv?: boolean }> = [];
   const configured: RunnerContainerTarget = {
     ...template, agentCommands: { "claude-code": { command: "claude" } },
   };
@@ -148,7 +149,7 @@ test("target-local probes use the selected image executable without mounts, host
   const probes = calls.filter(({ args }) => args.includes("--entrypoint") &&
     args[args.indexOf("--entrypoint") + 1] === "/usr/local/bin/claude");
   assert.equal(probes.length, 3);
-  for (const { args, timeoutMs, maxBuffer } of probes) {
+  for (const { args, timeoutMs, maxBuffer, env, replaceEnv } of probes) {
     assert.equal(args[args.indexOf("--workdir") + 1], "/tmp");
     assert.equal(args[args.indexOf("--entrypoint") + 1], candidate.path);
     assert.ok(args.includes("--network") && args.includes("none"));
@@ -157,7 +158,18 @@ test("target-local probes use the selected image executable without mounts, host
     assert.equal(args.includes("--interactive"), false);
     assert.equal(timeoutMs, 5_000);
     assert.equal(maxBuffer, 64 * 1024);
+    assert.equal(replaceEnv, true);
+    assert.equal(env?.WOLLIPOG_SESSION_ID, undefined);
+    assert.equal(Object.keys(env ?? {}).some((name) => /token|secret|api_key|credential/iu.test(name)), false);
   }
+});
+
+test("probe client environment strips sensitive host names even when a runtime forwards client env", () => {
+  assert.deepEqual(targetProbeEnvironment({
+    PATH: "/usr/bin", HOME: "/home/runner", ANTHROPIC_API_KEY: "host-secret",
+    OpenAI_Api_Key: "host-secret", WOLLIPOG_SESSION_ID: "host-session",
+    RUNNER_TOKEN_FILE: "/secret/path", PODMAN_AUTHORIZATION: "host-secret",
+  }), { PATH: "/usr/bin", HOME: "/home/runner" });
 });
 
 test("a timed-out authentication probe is removed and never becomes readiness evidence", async () => {
@@ -183,6 +195,26 @@ test("a timed-out authentication probe is removed and never becomes readiness ev
   const auth = calls.find((args) => args.at(-1) === "status")!;
   const name = auth[auth.indexOf("--name") + 1]!;
   assert.deepEqual(calls.find((args) => args[0] === "rm"), ["rm", "-f", name]);
+});
+
+test("an output-limit error removes its probe container before returning unknown", async () => {
+  const calls: string[][] = [];
+  const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    resolveRuntime: async () => runtime(),
+    run: async (_file, args) => {
+      calls.push(args);
+      if (args.includes("/bin/sh")) return { code: 0, stdout: "/usr/bin/codex\n", stderr: "" };
+      if (args.at(-1) === "--version") return { code: 0, stdout: "codex 0.154.0\n", stderr: "" };
+      if (args.at(-1) === "--help") return { code: 0, stdout: "Usage: codex app-server [OPTIONS] [COMMAND]\nCommands:\n  generate-json-schema\nOptions:\n  --listen <URL> (default: stdio://)\n", stderr: "" };
+      if (args.at(-1) === "status") return { code: 1, stdout: "Logged in using ChatGPT", stderr: "",
+        errorCode: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER" };
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  await registry.initialize();
+  assert.equal(registry.definitions()[0]!.harnessInstallations![0]!.authentication, "unknown");
+  const auth = calls.find((args) => args.at(-1) === "status")!;
+  assert.deepEqual(calls.find((args) => args[0] === "rm"), ["rm", "-f", auth[auth.indexOf("--name") + 1]]);
 });
 
 test("a timed-out container version probe is named, labelled, and forcibly removed", async () => {

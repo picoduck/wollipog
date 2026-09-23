@@ -53,10 +53,11 @@ non-interactive status and help commands through that same absolute executable i
 The probes have no workspace mount, network, injected host environment, or interactive stdin; each
 has a five-second deadline and 64 KiB output limit. Provider-native results can establish local
 authentication readiness or a specific help contract, and Machine settings show the probe method.
-An unsupported, ambiguous, timed-out, or generic agent probe stays `unknown`; a local status check
-does not guarantee that credentials will remain valid when a later session contacts the provider.
-Machine settings retain an explicit selection if rediscovery
-loses it; new launches fail until another candidate is selected. Probe containers carry runner labels
+An unsupported, ambiguous, timed-out, or generic agent probe stays `unknown`. Configured arguments
+that can change provider settings also suppress the status claim. A local status check does not
+guarantee that credentials will remain valid when a later session contacts the provider. Machine
+settings retain an explicit selection if rediscovery loses it; new launches fail until another
+candidate is selected. Probe containers carry runner labels
 and deterministic names so a timed-out probe can be forcibly removed and startup reconciliation can
 find any survivor.
 
