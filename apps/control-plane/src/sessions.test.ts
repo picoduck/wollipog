@@ -13289,6 +13289,27 @@ test("reused provider request ids receive distinct durable identities per recove
   assert.deepEqual(second.command.answers, { target: "Staging" });
 });
 
+test("Codex async question keeps a running session active and rejects stale answers", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "codex-async:message-1",
+    occurrenceId: "request_async_occurrence",
+    questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }], allowOther: true }],
+  });
+  assert.equal(db.getSession(id)?.status, "running");
+  assert.equal(db.getSession(id)?.pendingApproval?.async, true);
+  assert.equal(svc.answerQuestion(id, "codex-async:wrong", { "0": "Patch" }).ok, false);
+  assert.equal(svc.answerQuestion(id, "codex-async:message-1", { "0": "Patch" }).ok, true);
+  assert.equal(db.getSession(id)?.status, "running");
+  assert.equal(db.getSession(id)?.pendingApproval, null);
+  assert.ok(hub.sentToRunner.some(({ msg }) => msg.type === "durable_session_command" &&
+    msg.command.type === "answer_recovered_question" &&
+    msg.command.requestId === "codex-async:message-1" &&
+    msg.command.recoveryId === "request_async_occurrence"));
+});
+
 test("recovered answers reapply the same post-resolution policy gate as live answers", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });

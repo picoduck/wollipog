@@ -500,6 +500,84 @@ test("explicit question dismissal records cancelled telemetry and a dismissed li
   }
 });
 
+test("Codex async question stays actionable while running and queues its answer as user input", () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    store.patchMeta("s_perm", { status: "running" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:message-1",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }], allowOther: true }],
+    });
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.async, true);
+    (sm as any).emitStatus("s_perm", "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.async, true);
+    sm.answerQuestion("s_perm", "codex-async:message-1", { "0": "Patch" }, "submit");
+    assert.match((sm as any).active.get("s_perm").queue[0].text, /Which path\?\nAnswer: Patch/);
+    assert.equal(store.readMeta("s_perm")?.status, "running");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(eventsOf(sent, "question_resolved").length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("Codex async question remains an idle actionable card after runner restart", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:message-2",
+      questions: [{ id: "0", question: "Which path?", options: [], allowOther: true }],
+    });
+    sm.reconcileStore();
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "codex-async:message-2");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryReason, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("restart reconstructs an async question from history after later agent work", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:history-ask",
+      questions: [{ id: "0", question: "Which path?", options: [] }],
+    });
+    (sm as any).emitEvent("s_perm", {
+      kind: "tool_call", toolCallId: "continued", title: "Inspect", toolKind: "execute", status: "completed",
+    });
+    store.patchMeta("s_perm", { status: "running", pendingApproval: null });
+    sm.reconcileStore();
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "codex-async:history-ask");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.async, true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("terminal session status expires an unanswered async question once", () => {
+  const { sm, sent, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:expires",
+      questions: [{ id: "0", question: "Which path?", options: [] }],
+    });
+    (sm as any).emitStatus("s_perm", "stopped");
+    (sm as any).emitStatus("s_perm", "stopped");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.deepEqual(eventsOf(sent, "question_resolved").map((event) =>
+      (event as { payload: unknown }).payload), [{
+      kind: "question_resolved", requestId: "codex-async:expires",
+      answered: false, resolutionReason: "expired",
+    }]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("startup preserves a stranded question as a dismissible recovery and resolves it exactly once", () => {
   const { sm, sent, store, cleanup } = makeHarness("none");
   try {

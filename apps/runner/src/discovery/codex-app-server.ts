@@ -8,7 +8,7 @@ export const MIN_VERIFIED_CODEX_SESSION_NAMING_VERSION = "0.149.1";
 export const MIN_VERIFIED_CODEX_ORCHESTRATOR_APPROVAL_VERSION = "0.154.0";
 /** Oldest build whose generated schema has been verified to expose the complete device-code flow. */
 export const MIN_VERIFIED_CODEX_DEVICE_LOGIN_VERSION = "0.155.1";
-export const CODEX_APP_SERVER_CONTRACT_FINGERPRINT = "codex-app-server-v2-device-login-surface-2026-09-22";
+export const CODEX_APP_SERVER_CONTRACT_FINGERPRINT = "codex-app-server-v2-async-questions-2026-09-22";
 
 export interface ProbeResult {
   code: number | null;

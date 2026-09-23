@@ -1,5 +1,5 @@
 {
-  "contractFingerprint": "codex-app-server-v2-device-login-surface-2026-09-22",
+  "contractFingerprint": "codex-app-server-v2-async-questions-2026-09-22",
   "generatedWith": "codex-cli 0.155.1",
   "minimumVerifiedVersion": "0.147.0",
   "structuredLoginMinimumVersion": "0.155.1",
@@ -373,6 +373,14 @@
       "definitions": {
         "ThreadItem": {
           "variantRequiredProperties": {
+            "AgentMessageThreadItem": {
+              "required": ["id", "text", "type"],
+              "properties": ["delivery", "id", "questions", "text", "type"],
+              "propertyRefs": {
+                "delivery": "AgentMessageDelivery",
+                "questions": "AsyncUserInputQuestion"
+              }
+            },
             "CollabAgentToolCallThreadItem": {
               "required": [
                 "agentsStates",
@@ -395,6 +403,13 @@
               ]
             }
           }
+        },
+        "AgentMessageDelivery": {
+          "enumValues": ["async"]
+        },
+        "AsyncUserInputQuestion": {
+          "required": ["title"],
+          "properties": ["options", "title"]
         },
         "CollabAgentState": {
           "required": [
@@ -448,6 +463,14 @@
       "definitions": {
         "ThreadItem": {
           "variantRequiredProperties": {
+            "AgentMessageThreadItem": {
+              "required": ["id", "text", "type"],
+              "properties": ["delivery", "id", "questions", "text", "type"],
+              "propertyRefs": {
+                "delivery": "AgentMessageDelivery",
+                "questions": "AsyncUserInputQuestion"
+              }
+            },
             "CollabAgentToolCallThreadItem": {
               "required": [
                 "agentsStates",
@@ -470,6 +493,13 @@
               ]
             }
           }
+        },
+        "AgentMessageDelivery": {
+          "enumValues": ["async"]
+        },
+        "AsyncUserInputQuestion": {
+          "required": ["title"],
+          "properties": ["options", "title"]
         },
         "CollabAgentState": {
           "required": [

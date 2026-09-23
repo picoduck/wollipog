@@ -175,6 +175,7 @@ export function SessionApprovalRegion({
             sessionId={session.id}
             requestId={approval.requestId}
             questions={approval.questions ?? []}
+            isAsync={approval.async}
             recoveryReason={approval.recoveryReason}
             recoveryAction={approval.recoveryAction}
             runnerOnline={runnerOnline}
@@ -210,6 +211,7 @@ export function SessionTimelineQuestionRegion({
   pendingQuestion: {
     requestId: string;
     questions: AgentQuestion[];
+    async?: boolean;
     recoveryReason?: "provider_restart";
     recoveryAction?: "resume_answer";
   } | null;
@@ -231,6 +233,7 @@ export function SessionTimelineQuestionRegion({
           sessionId={sessionId}
           requestId={approval.requestId}
           questions={approval.questions.length > 0 ? approval.questions : eventQuestions}
+          isAsync={approval.async}
           recoveryReason={approval.recoveryReason}
           recoveryAction={approval.recoveryAction}
           runnerOnline={runnerOnline}
@@ -478,6 +481,7 @@ export function SessionApprovalBanner({
         sessionId={session.id}
         requestId={approval.requestId}
         questions={approval.questions ?? []}
+        isAsync={approval.async}
         recoveryReason={approval.recoveryReason}
         recoveryAction={approval.recoveryAction}
         runnerOnline={runnerOnline}
@@ -701,6 +705,7 @@ export function SessionQuestionBanner({
   sessionId,
   requestId,
   questions,
+  isAsync,
   recoveryReason,
   recoveryAction,
   runnerOnline,
@@ -710,6 +715,7 @@ export function SessionQuestionBanner({
   sessionId: string;
   requestId: string;
   questions: AgentQuestion[];
+  isAsync?: boolean;
   recoveryReason?: "provider_restart";
   recoveryAction?: "resume_answer";
   runnerOnline: boolean;
@@ -880,7 +886,7 @@ export function SessionQuestionBanner({
       <div className="approval-main">
         <span className="approval-icon" aria-hidden="true">❓</span>
         <span className="approval-text">
-          {recoveryRequired
+          {isAsync ? "Async Agent Question" : recoveryRequired
             ? "Agent Question Recovery Required"
             : `The agent has ${questions.length === 1 ? "a question" : `${questions.length} questions`}`}
           {!runnerOnline && <span className="muted"> · Runner Offline</span>}

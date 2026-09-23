@@ -16,6 +16,7 @@ const origin = params.get("origin") ?? "";
 const token = params.get("token") ?? "";
 const sessionId = params.get("sessionId") ?? "";
 const showQueuedPrompts = params.get("queued") === "1";
+const showActualAsyncMessage = params.get("actualAsyncMessage") === "1";
 
 function LiveQuestionFixture() {
   const responseStyle = useQuestionResponseStyle();
@@ -25,6 +26,7 @@ function LiveQuestionFixture() {
     token: () => token,
   })), []);
   const [session, setSession] = useState<SessionView | null>(null);
+  const [actualAsyncMessage, setActualAsyncMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [inlineQuestionRequestId, setInlineQuestionRequestId] = useState<string | null>(null);
   const fallbackFocusRef = useRef<HTMLTextAreaElement>(null);
@@ -51,6 +53,20 @@ function LiveQuestionFixture() {
     });
     return () => { active = false; };
   }, [client]);
+  useEffect(() => {
+    if (!showActualAsyncMessage) return;
+    let active = true;
+    void fetch(`${origin}/api/sessions/${sessionId}/events`, {
+      headers: { authorization: `Bearer ${token}` },
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(`Transcript request failed: ${response.status}`);
+      return response.json() as Promise<{ events: Array<{ payload: { kind: string; text?: string } }> }>;
+    }).then(({ events }) => {
+      const text = events.find((event) => event.payload.kind === "agent_message")?.payload.text;
+      if (active && text) setActualAsyncMessage(text);
+    }).catch((cause) => { if (active) setError((cause as Error).message); });
+    return () => { active = false; };
+  }, []);
 
   const pendingQuestion = session?.pendingApproval?.kind === "question" ? session.pendingApproval : null;
   useEffect(() => {
@@ -71,9 +87,12 @@ function LiveQuestionFixture() {
     };
   }
   const questionEvent = questionEventRef.current;
-  const timelineItems: TimelineItem[] = questionEvent
-    ? [...transcriptContext, { ...questionEvent, answered: pendingQuestion ? undefined : true }]
+  const context: TimelineItem[] = showActualAsyncMessage
+    ? actualAsyncMessage ? [{ kind: "agent_message", id: 1, text: actualAsyncMessage }] : []
     : transcriptContext;
+  const timelineItems: TimelineItem[] = questionEvent
+    ? [...context, { ...questionEvent, answered: pendingQuestion ? undefined : true }]
+    : context;
   const questionInTimeline = pendingQuestion != null && inlineQuestionRequestId === pendingQuestion.requestId;
 
   return (
@@ -108,6 +127,7 @@ function LiveQuestionFixture() {
                           pendingQuestion: pendingQuestion ? {
                             requestId: pendingQuestion.requestId,
                             questions: pendingQuestion.questions ?? [],
+                            async: pendingQuestion.async,
                             recoveryReason: pendingQuestion.recoveryReason,
                             recoveryAction: pendingQuestion.recoveryAction,
                           } : null,

@@ -17,7 +17,7 @@ const configuredScenario = process.env.WOLLIPOG_FAKE_CODEX_SCENARIO;
 const scenario = configuredScenario ?? argv[0] ?? "resume";
 const threadId = scenario === "fresh"
   ? "fixture-fresh"
-  : scenario === "question" || scenario === "dogfood-question"
+  : scenario === "question" || scenario === "dogfood-question" || scenario === "async-question"
     ? "fixture-question"
     : scenario === "subagents"
       ? "fixture-subagents"
@@ -28,6 +28,7 @@ const questionRequestId = scenario === "dogfood-question"
 const recoveryStatePath = process.env.WOLLIPOG_FAKE_QUESTION_STATE;
 const recovering = Boolean(recoveryStatePath && existsSync(recoveryStatePath));
 let dogfoodTurnCount = 0;
+let asyncTurnCount = 0;
 const expectedQueuedDogfoodPrompts = [
   "Keep this long message queued until both structured questions are answered.",
   "The complete two-question form must remain visible and reachable above the composer.",
@@ -79,25 +80,53 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     send({ id: message.id, result: { userAgent: "fake" } });
     return;
   }
-  if (message.method === "thread/read" && (scenario === "resume" || recovering)) {
+  if (message.method === "thread/read" && (scenario === "resume" || scenario === "async-question" || recovering)) {
     send({ id: message.id, result: { thread: { id: threadId, status: { type: "idle" }, turns: [{ id: "historical" }] } } });
     return;
   }
-  if (message.method === "thread/resume" && (scenario === "resume" || recovering)) {
+  if (message.method === "thread/resume" && (scenario === "resume" || scenario === "async-question" || recovering)) {
     send({ id: message.id, result: { thread: { id: threadId, turns: [{ id: "historical" }] } } });
     return;
   }
   if (message.method === "thread/start" && (
-    scenario === "fresh" || scenario === "question" || scenario === "dogfood-question" || scenario === "subagents"
+    scenario === "fresh" || scenario === "question" || scenario === "dogfood-question" ||
+    scenario === "async-question" || scenario === "subagents"
   )) {
     send({ id: message.id, result: { thread: { id: threadId } } });
     return;
   }
   if (message.method === "turn/start") {
     if (scenario === "dogfood-question") dogfoodTurnCount += 1;
-    const turnId = dogfoodTurnCount > 1 ? `fixture-turn-${dogfoodTurnCount}` : "fixture-turn";
+    if (scenario === "async-question") asyncTurnCount += 1;
+    const turnId = scenario === "async-question" ? `fixture-async-turn-${asyncTurnCount}`
+      : dogfoodTurnCount > 1 ? `fixture-turn-${dogfoodTurnCount}` : "fixture-turn";
     send({ id: message.id, result: { turn: { id: turnId } } });
     send({ method: "turn/started", params: { threadId, turn: { id: turnId } } });
+    if (scenario === "async-question") {
+      const text = message.params?.input?.find((input) => input?.type === "text")?.text;
+      if (typeof text === "string" && text.includes("Answer: Patch")) {
+        if (!text.includes("Question: Which path should I use?")) {
+          process.stderr.write("async answer was not correlated with its question\n");
+          process.exitCode = 2;
+          return;
+        }
+        const receipt = process.env.WOLLIPOG_FAKE_CODEX_RECEIPT;
+        if (receipt) writeFileSync(receipt, JSON.stringify({ requestId: "codex-async:async-ask", answer: "Patch" }));
+        send({ method: "item/completed", params: { threadId, turnId, item: {
+          type: "agentMessage", id: "async-answer", text: "Async answer received by Codex.",
+        } } });
+      } else {
+        send({ method: "item/completed", params: { threadId, turnId, item: {
+          type: "agentMessage", id: "async-ask", text: "I will keep investigating.",
+          delivery: "async", questions: [{ title: "Which path should I use?", options: ["Patch", "Replace"] }],
+        } } });
+        send({ method: "item/completed", params: { threadId, turnId, item: {
+          type: "commandExecution", id: "continued-work", command: "inspect files", status: "completed", exitCode: 0,
+        } } });
+      }
+      send({ method: "turn/completed", params: { threadId, turn: { id: turnId, status: "completed" } } });
+      return;
+    }
     if (scenario === "question") {
       if (recovering) {
         const text = message.params?.input?.find((input) => input?.type === "text")?.text;

@@ -415,6 +415,7 @@ export class CodexAppServerDriver implements Driver {
   /** Once a turn settles, ignore late usage/completion notifications from its interrupt race. */
   private turnUsageClosed = true;
   private readonly seenItems = new Set<string>();
+  private readonly seenAsyncQuestionItems = new Set<string>();
   private readonly emittedErrors = new Set<string>();
   /** True after the active turn emits agent-message deltas. Successful turn settlement consumes
    * it into one content-free completion event; cancellation/failure clears it. */
@@ -1911,6 +1912,7 @@ export class CodexAppServerDriver implements Driver {
         // messageId, so emitting a second authoritative completion after deltas would duplicate
         // the bubble. A completion-only item is already whole and may be marked final safely.
         if (completed && item.text && !this.seenItems.has(`msg:${id}`)) {
+          this.seenItems.add(`msg:${id}`);
           this.cb.onEvent({
             kind: "agent_message",
             text: String(item.text),
@@ -1918,6 +1920,19 @@ export class CodexAppServerDriver implements Driver {
             final: true,
             ...(parentToolUseId ? { parentToolUseId } : {}),
           });
+        }
+        if (completed && item.questions != null && !this.seenAsyncQuestionItems.has(id)) {
+          this.seenAsyncQuestionItems.add(id);
+          if (this.seenAsyncQuestionItems.size > 256) {
+            this.seenAsyncQuestionItems.delete(this.seenAsyncQuestionItems.values().next().value!);
+          }
+          const questions = item.delivery === "async" && !parentToolUseId
+            ? normalizeCodexAsyncQuestions(item.questions) : null;
+          if (questions) {
+            this.cb.onEvent({ kind: "question_request", requestId: `codex-async:${id}`, questions, async: true });
+          } else {
+            this.cb.onEvent({ kind: "error", message: "Codex sent an async question format this Wollipog version cannot safely answer. Ask the agent to repeat the question in a normal message." });
+          }
         }
         break;
       case "reasoning":
@@ -2358,6 +2373,27 @@ function normalizedOptions(raw: unknown): AgentQuestion["options"] | null {
   if (options.some((option) => option == null)) return null;
   const valid = options as AgentQuestion["options"];
   return new Set(valid.map((option) => option.label)).size === valid.length ? valid : null;
+}
+
+/** App Server agentMessage.questions uses titles and plain string choices, not the blocking
+ * requestUserInput shape. Its answer is a later user turn, never a JSON-RPC request response. */
+export function normalizeCodexAsyncQuestions(raw: unknown): AgentQuestion[] | null {
+  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 3) return null;
+  const questions: AgentQuestion[] = [];
+  for (let index = 0; index < raw.length; index++) {
+    const entry = raw[index];
+    const title = boundedString(entry?.title, MAX_QUESTION_TEXT);
+    if (!title || (entry.options != null && !Array.isArray(entry.options))) return null;
+    const options = entry.options == null ? [] : entry.options.map((value: unknown) => boundedString(value, MAX_QUESTION_ID));
+    if (options.length > MAX_QUESTION_OPTIONS || options.some((value: string | null) => !value) ||
+        new Set(options).size !== options.length) return null;
+    questions.push({
+      id: String(index), question: title,
+      options: options.map((label: string) => ({ label })),
+      allowOther: true, inputFormat: "text", maxLength: MAX_FREE_TEXT,
+    });
+  }
+  return questions;
 }
 
 /** Normalize Codex's item/tool/requestUserInput request without synthesizing a user message. */

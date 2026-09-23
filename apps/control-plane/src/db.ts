@@ -12603,10 +12603,17 @@ export class ControlPlaneDb {
          WHERE session_id=? AND status IN ('queued','pending') AND resume_status IS NOT NULL`,
       ).run(id);
     }
-    // Provider asks and transient policy hooks follow provider status. Durable typed workflow
-    // decisions remain authoritative across nonterminal runner status changes.
+    // Blocking provider asks follow provider status. Async agent-message questions remain
+    // answerable after the turn settles, until an answer or replacement resolves them.
     if (effectiveStatus !== "input_required") {
-      this.stmt("UPDATE sessions SET pending_approval=NULL WHERE id=?").run(id);
+      const asyncRequests = isTerminal(status) ? [] : pendingRequests(pending)
+        .filter((request) => request.async)
+        .map(({ additionalRequests: _additionalRequests, ...request }) => request);
+      const retained = asyncRequests.length
+        ? { ...asyncRequests[0], ...(asyncRequests.length > 1 ? { additionalRequests: asyncRequests.slice(1) } : {}) }
+        : null;
+      this.stmt("UPDATE sessions SET pending_approval=? WHERE id=?")
+        .run(retained ? JSON.stringify(retained) : null, id);
     }
     this.enqueueOutboundStatusEventsInTransaction({
       sessionId: id,

@@ -7754,18 +7754,18 @@ export class SessionsService {
     if (invalid) return fail(`invalid answers: ${invalid}`, 400);
     const auditContent = questionAuditContent(pending, answers);
 
-    if (pending.recoveryReason === "provider_restart" && action === "submit") {
-      if (pending.ownerToolUseId) {
+    if ((pending.async || pending.recoveryReason === "provider_restart") && action === "submit") {
+      if (!pending.async && pending.ownerToolUseId) {
         return fail("the child answer channel ended when the provider restarted; dismiss this question", 409);
       }
-      if (pending.recoveryAction !== "resume_answer") {
+      if (!pending.async && pending.recoveryAction !== "resume_answer") {
         return fail("the original answer channel ended when the runner restarted; dismiss this question and continue with a new prompt", 409);
       }
       if ((pending.questions ?? []).some((question) => question.secret)) {
         return fail("recovered secret answers cannot be stored for durable delivery; dismiss this question and continue with a new prompt", 409);
       }
       if (!pending.recoveryId) {
-        return fail("the recovered question has no stable occurrence identity; dismiss it and continue with a new prompt", 409);
+        return fail("the question has no stable occurrence identity; dismiss it and continue with a new prompt", 409);
       }
       const capabilityFailure = this.capabilityFailure(
         session.runnerId,
@@ -7804,7 +7804,8 @@ export class SessionsService {
       // provider turn.
       const remaining = removePendingRequest(session.pendingApproval, requestId);
       this.db.setPendingApproval(sessionId, remaining);
-      this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "running", now);
+      this.db.updateSessionStatus(sessionId,
+        pending.async ? session.status : remaining ? "input_required" : "running", now);
       this.recordGovernanceAudit(
         session,
         pending,
@@ -7844,7 +7845,7 @@ export class SessionsService {
     this.db.setPendingApproval(sessionId, remaining);
     this.db.updateSessionStatus(
       sessionId,
-      remaining ? "input_required" : pending.recoveryReason === "provider_restart" && action === "dismiss"
+      pending.async ? session.status : remaining ? "input_required" : pending.recoveryReason === "provider_restart" && action === "dismiss"
         ? session.status === "input_required" ? "idle" : session.status
         : "running",
       now,
@@ -10508,6 +10509,8 @@ export class SessionsService {
       options: [],
       kind: "question",
       questions: payload.questions,
+      ...(payload.async ? { async: true } : {}),
+      ...(payload.async && payload.occurrenceId ? { recoveryId: payload.occurrenceId } : {}),
     } : null;
     const permissionDecision = payload.kind === "permission_request" ? (() => {
       const approval = incomingRequest!;
@@ -11008,8 +11011,10 @@ export class SessionsService {
         sessionId,
         addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
       );
-      this.db.updateSessionStatus(sessionId, "input_required", now);
-      this.notifyTransition(session, sessionId);
+      if (!payload.async) {
+        this.db.updateSessionStatus(sessionId, "input_required", now);
+        this.notifyTransition(session, sessionId);
+      }
     }
 
     // The runner now logs the resolution too — clear the cached card to match the box, UNLESS a
@@ -11390,6 +11395,8 @@ export class SessionsService {
         options: [],
         kind: "question",
         questions: payload.questions,
+        ...(payload.async ? { async: true } : {}),
+        ...(payload.async && payload.occurrenceId ? { recoveryId: payload.occurrenceId } : {}),
         ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
       });
     }
@@ -11411,7 +11418,7 @@ export class SessionsService {
   private settleHydratedAsk(sessionId: string, trailingAsk: PendingApproval | null): void {
     if (!trailingAsk) return;
     const cur = this.db.getSession(sessionId);
-    if (cur && cur.status === "input_required" && !cur.pendingApproval) {
+    if (cur && (cur.status === "input_required" || trailingAsk.async) && !cur.pendingApproval) {
       this.db.setPendingApproval(sessionId, trailingAsk);
       this.hub.sessionChangedById(sessionId);
     }

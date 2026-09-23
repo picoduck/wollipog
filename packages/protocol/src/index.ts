@@ -2782,6 +2782,7 @@ export type StructuredRequestResolutionReason =
   | "submitted"
   | "dismissed"
   | "replaced"
+  | "expired"
   | "provider_resolved";
 
 /** Bounded rendering of WHAT is being approved (tool name + its input) — the trust surface:
@@ -3406,6 +3407,8 @@ export interface PendingApproval {
   kind?: ApprovalKind;
   /** The structured questions when kind === "question". */
   questions?: AgentQuestion[];
+  /** Codex agent-message question: the provider continues and accepts the answer as user input. */
+  async?: boolean;
   /** The provider-owned response callback ended with its process. The question remains visible and
    * dismissible, but must not accept an answer that can no longer reach the exact request. */
   recoveryReason?: "provider_restart";
@@ -4248,7 +4251,7 @@ export type SessionEventPayload =
       /** Controlling session when this decision came through Parent Control. */
       resolvedByParentSessionId?: string;
     }
-  | { kind: "question_request"; requestId: string; occurrenceId?: string; questions: AgentQuestion[]; ownerToolUseId?: string }
+  | { kind: "question_request"; requestId: string; occurrenceId?: string; questions: AgentQuestion[]; ownerToolUseId?: string; async?: boolean }
   | { kind: "question_policy_answered"; requestId: string; questionEventSeq?: number; policies: { policyId: string; name: string }[] }
   | {
       kind: "question_resolved";
@@ -7019,9 +7022,10 @@ export interface PromptSessionMessage {
   };
 }
 
-/** Continue an established provider conversation with the preserved answer to a structured
- * question whose original process-owned callback was lost. This command is submit-only: dismiss
- * remains an immediate resolution and secret answers are never staged in its durable payload. */
+/** Continue an established provider conversation with a structured answer. Used when a blocking
+ * callback was lost on restart or an async question must be delivered as a later user turn.
+ * This command is submit-only: dismiss remains an immediate resolution and secret answers are
+ * never staged in its durable payload. */
 export interface AnswerRecoveredQuestionCommand {
   type: "answer_recovered_question";
   sessionId: string;

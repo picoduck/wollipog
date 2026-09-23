@@ -282,6 +282,7 @@ export function SessionRequestPanel({
             sessionId={selected.sessionId}
             requestId={selected.request.requestId}
             questions={selected.request.questions ?? []}
+            isAsync={selected.request.async}
             recoveryReason={selected.request.recoveryReason}
             recoveryAction={selected.request.recoveryAction}
             runnerOnline={selected.runnerOnline}

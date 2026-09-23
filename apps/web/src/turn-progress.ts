@@ -1,3 +1,4 @@
+import { pendingRequests } from "@wollipog/protocol";
 import type {
   PendingApproval,
   PlanEntry,
@@ -112,18 +113,19 @@ function retryKey(tool: ObservedToolCall): string | undefined {
 }
 
 function waitingReason(pendingApproval: PendingApproval | null): WaitingReason | undefined {
-  if (!pendingApproval) return undefined;
-  if (pendingApproval.kind === "question") {
+  const blocking = pendingRequests(pendingApproval).find((request) => !request.async);
+  if (!blocking) return undefined;
+  if (blocking.kind === "question") {
     return {
       kind: "question",
       label: "Waiting for Answer to Question",
-      title: pendingApproval.title,
+      title: blocking.title,
     };
   }
   return {
     kind: "approval",
     label: "Waiting for Approval",
-    title: pendingApproval.title,
+    title: blocking.title,
   };
 }
 
