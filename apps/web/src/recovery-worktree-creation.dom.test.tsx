@@ -226,7 +226,7 @@ test("a failed create names the failing phase and leaves the retained prompt Not
     await clock.tick();
     await clock.tick();
     assert.equal(view.alert(), "Creation Failed: Running Setup runner request timed out");
-    assert.match(view.card()?.textContent ?? "", /retained as Not Sent/u);
+    assert.match(view.card()?.textContent ?? "", /Messages marked Not Sent/u);
     assert.equal(view.progress(), null);
     assert.equal(view.createButton().disabled, false, "the failure stays actionable");
     assert.equal(view.createButton().textContent, "Create Replacement");
@@ -350,7 +350,7 @@ test("a create that vanishes while the incident remains is reported, not silentl
     await view.clickCreate();
     await clock.tick();
     assert.match(view.alert() ?? "", /^Creation Failed: Fetching Remote Replacement worktree creation ended without a result/u);
-    assert.match(view.card()?.textContent ?? "", /retained as Not Sent/u);
+    assert.match(view.card()?.textContent ?? "", /Messages marked Not Sent/u);
   } finally {
     await act(async () => view.root.unmount());
   }
