@@ -196,6 +196,34 @@ test("account usage follows a compatible WSL agent even when native is listed fi
   db.close();
 });
 
+test("a missing selected WSL account installation remains explicitly unsupported", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const native = { ...codexAgent("native"), available: true };
+  const wslSystem = { ...codexAgent("wsl-system"), available: true,
+    context: { kind: "wsl" as const, distro: "Ubuntu" },
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
+  const wslLocal = { ...codexAgent("wsl-local"), available: true,
+    context: { kind: "wsl" as const, distro: "Ubuntu" },
+    installation: { id: "local", path: "/home/user/bin/codex", via: "common-dir" as const } };
+  const owner = { organizationId: "org_personal", owner: { kind: "user" as const, userId: "alice" } };
+  const withAccount = (agents: AgentDefinition[]) => ({ ...meta("runner-1", agents), os: "windows" as const,
+    providerAccounts: [{ id: "work", label: "Work", provider: "codex" as const, authStatus: "authenticated" as const }] });
+  db.registerRunner(withAccount([native, wslSystem, wslLocal]), 1_000_000, PROTOCOL_VERSION, owner);
+  assert.ok(db.selectHarnessInstallation("runner-1", "wsl-local", "local"));
+  db.registerRunner(withAccount([native, wslSystem]), 1_000_001, PROTOCOL_VERSION, owner);
+  const unsupported = validateSubscriptionUsageSnapshot({ ...snapshot("runner-1", 1_000_001),
+    agentId: "wsl-system", providerAccountId: "work", sourceId: sourceId("runner-1", "wsl-system", "work"),
+    state: "unsupported", detail: "The selected harness installation is unavailable in this provider account's execution context.",
+    buckets: [],
+  }, "runner-1", db, 1_000_001);
+  db.upsertSubscriptionUsageSnapshot(unsupported);
+  const account = db.subscriptionUsageForPrincipal(human(), 1_000_001).sources.find((source) =>
+    source.providerAccountId === "work");
+  assert.deepEqual([account?.agentId, account?.state], ["wsl-system", "unsupported"]);
+  assert.match(account?.detail ?? "", /selected harness installation is unavailable/);
+  db.close();
+});
+
 test("account labels remain isolated by runner and switch atomically with available usage", () => {
   const db = ControlPlaneDb.open(":memory:");
   const now = 1_000_000;

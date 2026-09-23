@@ -706,6 +706,34 @@ test("a configured Claude credential scope never inherits the discovery account 
   ]);
 });
 
+test("Claude sessions on either agent of one account contribute to its usage source", () => {
+  const shared = { id: "shared", path: "/usr/bin/claude", via: "path" as const };
+  const work = claudeAgent({ id: "claude-work", defaultProviderAccountId: "work", installation: shared });
+  const other = claudeAgent({ id: "claude-other", defaultProviderAccountId: "personal", installation: shared });
+  const unselected = claudeAgent({ id: "claude-old", installation: { id: "old", path: "/opt/claude", via: "path" } });
+  for (const choices of [[], [{ family: "claude" as const, context: { kind: "native" as const }, installationId: "shared" }]]) {
+    const manager = new SubscriptionUsageManager({
+      runnerId: "runner-1",
+      agents: () => [work, other, unselected],
+      installationChoices: () => choices,
+      providerAccounts: () => [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }],
+      resolveEnv: () => ({}),
+      publish: () => {},
+      now: () => OBSERVED_AT,
+    });
+    const update = { provider: "claude" as const, kind: "sparse" as const,
+      payload: rateLimitEvent({ status: "allowed", rateLimitType: "five_hour",
+        unifiedWindows: { five_hour: { utilization: 0.5, resetsAt: FIVE_HOUR_RESET } } }) };
+    const observed = manager.observe("claude-other", "claude-code", { kind: "native" }, update, "work");
+    assert.equal(observed?.state, "available");
+    assert.equal(observed?.agentId, "claude-work", "an account source keeps its canonical agent");
+    assert.equal(manager.syncSources()[0]?.state, "available", "a later inventory does not erase the event");
+    if (choices.length) {
+      assert.equal(manager.observe("claude-old", "claude-code", { kind: "native" }, update, "work"), null);
+    }
+  }
+});
+
 /** Exactly the shape `claude --output-format stream-json` emits: `utilization` is the fraction of
  * the window consumed and `resetsAt` is unix epoch seconds. */
 function rateLimitEvent(info: Record<string, unknown>): Record<string, unknown> {
@@ -1495,6 +1523,31 @@ test("account probes keep credential-home compatibility before applying the sele
   await manager.refreshAccount("work");
   assert.deepEqual(probed, ["local"], "neither the unselected native binary nor WSL may use this home");
   assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "work")?.state, "unsupported");
+});
+
+test("a selected installation preserves each account's compatible default agent environment", async () => {
+  const installation = { id: "shared", path: "/usr/bin/codex", via: "path" as const };
+  const work = agent({ id: "codex-work", defaultProviderAccountId: "work", installation });
+  const personal = agent({ id: "codex-personal", defaultProviderAccountId: "personal", installation });
+  const probed: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [work, personal],
+    installationChoices: () => [{ family: "codex", context: { kind: "native" }, installationId: "shared" }],
+    providerAccounts: () => [
+      { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "codex", authStatus: "authenticated" },
+    ],
+    resolveEnv: (agentId) => agentId === "codex-work" ? { OPENAI_API_KEY: "test-only" } : {},
+    authorizeProbe: () => ({ cwd: "/safe/probe" }),
+    publish: () => {},
+    now: () => 20_000,
+    probeCodex: async (candidate) => { probed.push(candidate.id); return { state: "unavailable" }; },
+  });
+  await manager.refreshAccount("personal");
+  assert.deepEqual(probed, ["codex-personal"]);
+  assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "personal")?.agentId,
+    "codex-personal");
 });
 
 test("a runner without synchronized choices does not advertise selection-bound usage", async () => {

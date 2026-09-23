@@ -11132,11 +11132,10 @@ export class ControlPlaneDb {
       const sourceAgentFor = (agents: AgentDefinition[], preferred: AgentDefinition | undefined,
         provider: "codex" | "claude") => {
         const choice = preferred && selectionFor(preferred, provider);
-        return choice
-          ? agents.find((candidate) =>
-              harnessInstallationContext(candidate.context) === harnessInstallationContext(preferred.context) &&
-              candidate.installation?.id === choice.installationId) ?? preferred
-          : preferred;
+        if (!choice || preferred?.installation?.id === choice.installationId) return preferred;
+        return agents.find((candidate) =>
+          harnessInstallationContext(candidate.context) === harnessInstallationContext(preferred.context) &&
+          candidate.installation?.id === choice.installationId) ?? preferred;
       };
       const sourceCoordinates = [
         ...providerAccounts.flatMap((account) => {
@@ -11186,7 +11185,11 @@ export class ControlPlaneDb {
         const recordedAgent = account && recorded && runner.agents.find((candidate) => {
           if (candidate.id !== recorded.agentId || candidate.driver !== agent.driver) return false;
           const candidateSelection = selectionFor(candidate, provider);
-          return !candidateSelection || candidate.installation?.id === candidateSelection.installationId;
+          if (!candidateSelection || candidate.installation?.id === candidateSelection.installationId) return true;
+          return recorded.state === "unsupported" && !runner.agents.some((other) =>
+            other.driver === candidate.driver &&
+            harnessInstallationContext(other.context) === harnessInstallationContext(candidate.context) &&
+            other.installation?.id === candidateSelection.installationId);
         });
         const displayAgent = recordedAgent || agent;
         const selection = selectionFor(displayAgent, provider);
