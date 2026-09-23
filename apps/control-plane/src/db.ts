@@ -34,6 +34,7 @@ import {
   isPolicyApproval,
   isTerminal,
   pendingRequests,
+  removePendingRequest,
   parentControlRequestEligible,
   normalizeAgentHarnessIdentity,
   runnerSupportsProtocol,
@@ -12949,12 +12950,13 @@ export class ControlPlaneDb {
     return { perUserUsd, updatedAt: now };
   }
 
-  /** Live, unparked sessions a user owns in an organization: what a daily-budget breach parks. */
+  /** Live sessions a user owns in an organization. The policy gate decides whether their pending
+   * requests block parking; an async-only question must remain eligible for the budget fan-out. */
   listOpenSessionIdsForOwner(organizationId: string, userId: string): string[] {
     const rows = this.stmt(
       `SELECT s.id FROM sessions s JOIN session_ownership o ON o.session_id=s.id
         WHERE o.organization_id=? AND o.owner_kind='user' AND o.owner_id=?
-          AND s.status NOT IN ('completed','failed','stopped') AND s.pending_approval IS NULL
+          AND s.status NOT IN ('completed','failed','stopped')
         ORDER BY s.updated_at DESC LIMIT 200`,
     ).all(organizationId, userId) as unknown as Array<{ id: string }>;
     return rows.map((row) => row.id);
@@ -13308,7 +13310,8 @@ export class ControlPlaneDb {
       runnerId: row.runner_id,
       status: row.status,
       archived: row.archived === 1,
-      hasPendingApproval: row.pending_approval !== null,
+      hasPendingApproval: pendingRequests(parseJson<PendingApproval>(row.pending_approval))
+        .some((request) => !request.async),
     } : null;
   }
 
@@ -14509,7 +14512,7 @@ export class ControlPlaneDb {
     }
   }
 
-  /** Promote the oldest queued hook ask only when the CP-owned/session approval slot is empty. */
+  /** Promote the oldest queued hook ask when no blocking approval occupies the session. */
   promoteNextPolicyHookApproval(sessionId: string, now: number): PolicyHookApprovalRecord | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
@@ -14519,7 +14522,8 @@ export class ControlPlaneDb {
         this.db.exec("COMMIT");
         return null;
       }
-      if (session.pending_approval) {
+      const pending = pendingRequests(parseJson<PendingApproval>(session.pending_approval));
+      if (pending.some((request) => !request.async)) {
         this.db.exec("COMMIT");
         return null;
       }
@@ -14546,7 +14550,10 @@ export class ControlPlaneDb {
       ).run(sessionId, next.request_id);
       this.stmt(
         "UPDATE sessions SET pending_approval=?, status='input_required', updated_at=? WHERE id=?",
-      ).run(JSON.stringify(approval.approval), now, sessionId);
+      ).run(JSON.stringify({
+        ...approval.approval,
+        ...(pending.length ? { additionalRequests: pending } : {}),
+      }), now, sessionId);
       const promoted = this.getPolicyHookApproval(sessionId, next.request_id)!;
       this.db.exec("COMMIT");
       return promoted;
@@ -14569,9 +14576,16 @@ export class ControlPlaneDb {
     if (!row) return null;
     const pending = this.getPolicyHookApproval(sessionId, row.request_id);
     if (!pending?.approval) throw new Error("pending policy-hook approval has no durable card");
+    const session = this.stmt("SELECT pending_approval FROM sessions WHERE id=?")
+      .get(sessionId) as { pending_approval: string | null } | undefined;
+    const asyncQuestions = pendingRequests(parseJson<PendingApproval>(session?.pending_approval ?? null))
+      .filter((request) => request.async);
     this.stmt(
       "UPDATE sessions SET pending_approval=?, status='input_required', updated_at=? WHERE id=?",
-    ).run(JSON.stringify(pending.approval), now, sessionId);
+    ).run(JSON.stringify({
+      ...pending.approval,
+      ...(asyncQuestions.length ? { additionalRequests: asyncQuestions } : {}),
+    }), now, sessionId);
     return pending;
   }
 
@@ -14729,13 +14743,21 @@ export class ControlPlaneDb {
         `UPDATE policy_hook_approvals SET status=?, resolved_at=?
          WHERE session_id=? AND request_id=? AND status IN ('queued','pending')`,
       ).run(status, now, sessionId, requestId);
+      const session = this.stmt("SELECT pending_approval FROM sessions WHERE id=?")
+        .get(sessionId) as { pending_approval: string | null } | undefined;
+      const current = parseJson<PendingApproval>(session?.pending_approval ?? null);
+      const remaining = current?.requestId === requestId
+        ? removePendingRequest(current, requestId) : null;
       this.stmt(
         `UPDATE sessions
-         SET pending_approval=NULL,
+         SET pending_approval=?,
              status=CASE WHEN status='input_required' THEN ? ELSE status END,
              updated_at=?
          WHERE id=? AND json_extract(pending_approval, '$.requestId')=?`,
-      ).run(existing.resumeStatus ?? "running", now, sessionId, requestId);
+      ).run(remaining ? JSON.stringify(remaining) : null,
+        pendingRequests(remaining).some((request) => !request.async)
+          ? "input_required" : existing.resumeStatus ?? "running",
+        now, sessionId, requestId);
       if (audit) this.appendGovernanceAudit(audit);
       const resolved = this.getPolicyHookApproval(sessionId, requestId)!;
       this.db.exec("COMMIT");
@@ -14768,13 +14790,21 @@ export class ControlPlaneDb {
          SET status='denied', resolved_at=COALESCE(resolved_at, ?)
          WHERE session_id=? AND request_id=?`,
       ).run(now, sessionId, requestId);
+      const session = this.stmt("SELECT pending_approval FROM sessions WHERE id=?")
+        .get(sessionId) as { pending_approval: string | null } | undefined;
+      const current = parseJson<PendingApproval>(session?.pending_approval ?? null);
+      const remaining = current?.requestId === requestId
+        ? removePendingRequest(current, requestId) : null;
       this.stmt(
         `UPDATE sessions
-         SET pending_approval=NULL,
+         SET pending_approval=?,
              status=CASE WHEN status='input_required' THEN ? ELSE status END,
              updated_at=?
          WHERE id=? AND json_extract(pending_approval, '$.requestId')=?`,
-      ).run(existing.resumeStatus ?? "running", now, sessionId, requestId);
+      ).run(remaining ? JSON.stringify(remaining) : null,
+        pendingRequests(remaining).some((request) => !request.async)
+          ? "input_required" : existing.resumeStatus ?? "running",
+        now, sessionId, requestId);
       const recorded = this.stmt(
         `SELECT 1 FROM governance_audit
          WHERE session_id=? AND request_id=? AND approval_kind='policy_hook'

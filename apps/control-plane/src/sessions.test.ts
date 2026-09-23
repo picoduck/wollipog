@@ -12518,6 +12518,14 @@ test("an async question remains behind a parked policy-hook card", () => {
     toolUseId: "write-before-async-question",
     context: { toolName: "Write" },
   }, true).data!;
+  const next = svc.evaluatePolicyHook(id, {
+    hookEventName: "PreToolUse",
+    providerSessionId: "provider-async-question-barrier",
+    permissionMode: "plan",
+    toolUseId: "write-after-async-question",
+    context: { toolName: "Write" },
+  }, true).data!;
+  assert.equal(db.getPolicyHookApproval(id, next.approvalRequestId!)?.status, "queued");
   const dismissalsBefore = hub.sentOfType("answer_question").length;
 
   svc.onSessionEvent(id, {
@@ -12531,6 +12539,14 @@ test("an async question remains behind a parked policy-hook card", () => {
   [asked.approvalRequestId, "parallel-async-question"]);
   assert.equal(db.getSession(id)?.status, "input_required");
   assert.equal(hub.sentOfType("answer_question").length, dismissalsBefore);
+
+  assert.ok(svc.approve(id, asked.approvalRequestId, "allow").ok);
+  assert.deepEqual(pendingRequests(db.getSession(id)?.pendingApproval)
+    .map((request) => request.requestId),
+  [next.approvalRequestId, "parallel-async-question"]);
+  assert.ok(svc.approve(id, next.approvalRequestId, "allow").ok);
+  assert.equal(db.getSession(id)?.pendingApproval?.requestId, "parallel-async-question");
+  assert.equal(db.getSession(id)?.pendingApproval?.async, true);
 });
 
 test("protocol-v65 hook asks fail closed without parking an unpollable card", () => {
@@ -13371,6 +13387,25 @@ test("async questions cannot be dismissed through approval without an occurrence
   assert.equal(db.getSession(id)?.status, "idle");
   assert.equal(db.getSession(id)?.pendingApproval?.requestId, "codex-async:approve");
   assert.equal(hub.sentOfType("answer_question").length, 0);
+});
+
+test("an async-only card does not block an idle campaign continuation", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.raw().prepare("UPDATE sessions SET session_role='orchestrator', orchestrator_policy='{}' WHERE id=?")
+    .run(id);
+  db.updateSessionStatus(id, "idle", Date.now());
+  db.setPendingApproval(id, {
+    requestId: "codex-async:campaign", occurrenceId: "request_async_campaign",
+    title: "Which path?", kind: "question", async: true, options: [],
+    questions: [{ id: "0", question: "Which path?", options: [] }],
+  });
+  assert.equal(db.campaignContinuationLifecycle(id)?.hasPendingApproval, false);
+  db.setPendingApproval(id, {
+    requestId: "blocking-campaign", title: "Approve", options: [],
+    additionalRequests: pendingRequests(db.getSession(id)?.pendingApproval),
+  });
+  assert.equal(db.campaignContinuationLifecycle(id)?.hasPendingApproval, true);
 });
 
 test("a blocking approval can be resolved without clearing an async question", () => {
@@ -18700,6 +18735,31 @@ test("a daily-budget breach parks every live session the owner has, not only the
   assert.equal(db.getSession(a)!.pendingApproval?.kind, "daily_budget");
   assert.equal(db.getSession(b)!.pendingApproval?.kind, "daily_budget", "the sibling is parked too");
   assert.equal(db.getSession(b)!.status, "input_required");
+});
+
+test("a daily-budget breach parks a sibling with an unanswered async question", () => {
+  const { db, hub, svc } = makeHarness();
+  const a = seedSession(svc, hub, { prompt: "Spend" });
+  const b = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID, prompt: "Wait" });
+  for (const id of [a, b]) {
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(id);
+  }
+  db.updateSessionStatus(b, "running", Date.now());
+  svc.onSessionEvent(b, {
+    kind: "question_request", async: true, requestId: "codex-async:sibling",
+    occurrenceId: "request_async_sibling",
+    questions: [{ id: "0", question: "Which path?", options: [] }],
+  });
+  db.setUsageDailyBudget("org_personal", 2, Date.now());
+  db.appendEvent(a, { kind: "token_usage", inputTokens: 1, costUsd: 2.5 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(a, "idle");
+
+  const sibling = db.getSession(b)!;
+  assert.equal(sibling.status, "input_required");
+  assert.deepEqual(pendingRequests(sibling.pendingApproval).map((request) => request.kind),
+    ["daily_budget", "question"]);
+  assert.ok(hub.sentOfType("rearm_governance")
+    .some((message) => message.sessionId === b && message.holdFor === "control_plane"));
 });
 
 test("arming a soft guardrail on an unparked session that already exceeds it parks it at once", () => {
