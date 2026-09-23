@@ -544,6 +544,31 @@ test("a tool approval does not replace an unanswered async question", () => {
   }
 });
 
+test("a late async dismissal cannot clear a reused provider request id", () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:reused",
+      questions: [{ id: "0", question: "Old path?", options: [] }],
+    });
+    const oldOccurrence = store.readMeta("s_perm")?.pendingApproval?.occurrenceId;
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:reused",
+      questions: [{ id: "0", question: "New path?", options: [] }],
+    });
+    const newOccurrence = store.readMeta("s_perm")?.pendingApproval?.occurrenceId;
+    assert.notEqual(oldOccurrence, newOccurrence);
+    sm.answerQuestion("s_perm", "codex-async:reused", {}, "dismiss", undefined, oldOccurrence);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.occurrenceId, newOccurrence);
+    assert.equal(eventsOf(sent, "question_resolved").length, 0);
+    sm.answerQuestion("s_perm", "codex-async:reused", {}, "dismiss", undefined, newOccurrence);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(eventsOf(sent, "question_resolved").length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
 test("an accepted async answer outruns older queued prompts and survives a later question", async () => {
   const { sm, sent, store, cleanup } = makeHarness(true);
   try {
@@ -665,6 +690,50 @@ test("Codex async question remains an idle actionable card after runner restart"
     assert.equal(store.readMeta("s_perm")?.status, "idle");
     assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "codex-async:message-2");
     assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryReason, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("restart drops a blocking permission but preserves its concurrent async question", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:choice",
+      questions: [{ id: "0", question: "Which path?", options: [] }],
+    });
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request", requestId: "tool-approval", title: "Run Command",
+      options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+    });
+    assert.deepEqual(pendingRequests(store.readMeta("s_perm")?.pendingApproval)
+      .map((request) => request.requestId), ["tool-approval", "codex-async:choice"]);
+    sm.reconcileStore();
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "codex-async:choice");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.async, true);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryReason, undefined);
+  } finally {
+    cleanup();
+  }
+});
+
+test("restart reconstructs an async question behind a later permission from history", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:history-choice",
+      questions: [{ id: "0", question: "Which path?", options: [] }],
+    });
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request", requestId: "tool-approval", title: "Run Command",
+      options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+    });
+    store.patchMeta("s_perm", { pendingApproval: null });
+    sm.reconcileStore();
+    assert.equal(store.readMeta("s_perm")?.status, "idle");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "codex-async:history-choice");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.async, true);
   } finally {
     cleanup();
   }

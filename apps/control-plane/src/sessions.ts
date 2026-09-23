@@ -4988,7 +4988,7 @@ export class SessionsService {
     if (guardrailChanged && parkedGuardrail) {
       const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, parkedGuardrail.requestId);
       this.db.setPendingApproval(sessionId, remaining);
-      this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "idle", now);
+      this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "idle", now);
       this.recordRunnerGuardrailResolution(session, parkedGuardrail, "dismissed", actor, now, { content: config });
       if (!remaining) this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -7810,7 +7810,7 @@ export class SessionsService {
       const remaining = removePendingRequest(session.pendingApproval, requestId);
       this.db.setPendingApproval(sessionId, remaining);
       this.db.updateSessionStatus(sessionId,
-        pending.async ? session.status : remaining ? "input_required" : "running", now);
+        pending.async ? session.status : hasBlockingPendingRequest(remaining) ? "input_required" : "running", now);
       this.recordGovernanceAudit(
         session,
         pending,
@@ -7834,6 +7834,7 @@ export class SessionsService {
 
     const sent = this.hub.sendToRunner(session.runnerId, {
       type: "answer_question", sessionId, requestId, answers, action,
+      ...(pending.occurrenceId ? { occurrenceId: pending.occurrenceId } : {}),
       ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
     });
     if (!sent) {
@@ -7850,7 +7851,7 @@ export class SessionsService {
     this.db.setPendingApproval(sessionId, remaining);
     this.db.updateSessionStatus(
       sessionId,
-      pending.async ? session.status : remaining ? "input_required" : pending.recoveryReason === "provider_restart" && action === "dismiss"
+      pending.async ? session.status : hasBlockingPendingRequest(remaining) ? "input_required" : pending.recoveryReason === "provider_restart" && action === "dismiss"
         ? session.status === "input_required" ? "idle" : session.status
         : "running",
       now,
@@ -8020,7 +8021,7 @@ export class SessionsService {
         this.db.setPendingApproval(sessionId, remaining);
         // These cards never cancelled the provider turn: a session parked mid-turn is still
         // running, and only one parked at a settle frame goes back to idle.
-        this.db.updateSessionStatus(sessionId, remaining ? "input_required" :
+        this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" :
           (this.db.policyResumeStatus(sessionId) === "idle" ? "idle" : "running"), now);
         this.recordGovernanceAudit(session, pending, "resolution", "allowed", actor, now, { optionId });
         this.gateOnPolicy(sessionId, now);
@@ -8102,7 +8103,7 @@ export class SessionsService {
         } else if (nextConfig.maxToolCalls != null && nextConfig.maxToolCalls !== session.maxToolCalls) {
           this.db.updateSessionMaxToolCalls(sessionId, nextConfig.maxToolCalls, now, session.maxToolCallsStep);
         }
-        this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "idle", now);
+        this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "idle", now);
         // Asks are serialized through the single approval slot: if ANOTHER rule is also tripped,
         // park again immediately with its own card instead of waiting for the next turn settle.
         if (!remaining) this.gateOnPolicy(sessionId, now);
@@ -8145,6 +8146,7 @@ export class SessionsService {
       pending.kind === "question"
         ? {
             type: "answer_question", sessionId, requestId, answers: {}, action: "dismiss",
+            ...(pending.occurrenceId ? { occurrenceId: pending.occurrenceId } : {}),
             ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
           }
         : {
@@ -8165,7 +8167,7 @@ export class SessionsService {
     // deliberately gated off while a turn is in flight.
     const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, requestId);
     this.db.setPendingApproval(sessionId, remaining);
-    this.db.updateSessionStatus(sessionId, remaining ? "input_required" : pending.kind === "question" || optionId ? "running" : "idle", now);
+    this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : pending.kind === "question" || optionId ? "running" : "idle", now);
     const selected = optionId == null ? undefined : pending.options.find((option) => option.optionId === optionId);
     const outcome: GovernanceAuditOutcome = pending.kind === "question"
       ? "dismissed"
@@ -10777,7 +10779,7 @@ export class SessionsService {
             request.ownerToolUseId || request.kind === "workflow_decision")
             ? removePendingRequest(current, approval.requestId) : null;
           this.db.setPendingApproval(sessionId, remaining);
-          this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "running", now);
+          this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "running", now);
           this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
           this.recordGovernanceAudit(session, approval, "resolution", "allowed", actor, now, {
             optionId: actionAdmission.optionId,
@@ -10838,7 +10840,7 @@ export class SessionsService {
           this.db.setPendingApproval(sessionId, remaining);
           // A deny (including null-option cancellation) returns control to the still-active agent
           // turn just like a selected reject_once, so both auto effects remain running here.
-          this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "running", now);
+          this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "running", now);
           this.recordGovernanceAudit(
             session,
             approval,
@@ -11409,6 +11411,11 @@ export class SessionsService {
       });
     }
     if (payload.kind === "permission_resolved" || payload.kind === "question_resolved") {
+      if (payload.kind === "question_resolved" && payload.occurrenceId &&
+          !pendingRequests(trailingAsk).some((request) =>
+            request.requestId === payload.requestId && request.occurrenceId === payload.occurrenceId)) {
+        return trailingAsk;
+      }
       return removePendingRequest(trailingAsk, payload.requestId);
     }
     return trailingAsk;
@@ -12001,6 +12008,10 @@ function runnerHoldFor(kind: PolicyRuleKind | undefined): RunnerGuardrailKind | 
 
 function hasPolicyApproval(pending: PendingApproval | null | undefined): boolean {
   return pendingRequests(pending).some((request) => isPolicyApproval(request));
+}
+
+function hasBlockingPendingRequest(pending: PendingApproval | null | undefined): boolean {
+  return pendingRequests(pending).some((request) => !request.async);
 }
 
 /** Unlike addPendingRequest (which intentionally gives a CP policy card exclusive ownership), a

@@ -4106,8 +4106,7 @@ export class SessionManager {
   }
 
   /** Recover the newest question that durable history still shows as unresolved. A later user turn
-   * or permission request proves the old question is no longer the active interaction, even when
-   * an older runner failed to append an explicit replacement resolution. */
+   * replaces the old question; an async question can coexist with a later permission request. */
   private unresolvedQuestionFromHistory(sessionId: string): {
     scanned: boolean;
     question: SessionMeta["pendingApproval"];
@@ -4122,6 +4121,8 @@ export class SessionManager {
     let logEpoch: number | undefined;
     let throughSeq: number | undefined;
     let laterAgentActivity = false;
+    let laterPermissionRequest = false;
+    let laterBlockingQuestion = false;
     while (cursor > 0) {
       let span = Math.min(200, cursor);
       let events: StoredEvent[] | null = null;
@@ -4151,15 +4152,19 @@ export class SessionManager {
       for (let index = events.length - 1; index >= 0; index -= 1) {
         const payload = events[index]!.payload;
         if (payload.kind === "question_resolved") {
-          resolved.add(payload.requestId);
+          resolved.add(payload.occurrenceId ?? payload.requestId);
           continue;
         }
         if (payload.kind === "question_request") {
-          // A resolved newer question replaced every older pending question, so once its request
-          // is reached there is nothing earlier that can still be actionable.
-          if (resolved.has(payload.requestId) || (!payload.async && laterAgentActivity)) {
-            return { scanned: true, question: null, resolvedQuestionIds: resolved };
-          }
+          const wasResolved = resolved.has(payload.occurrenceId ?? payload.requestId) ||
+            resolved.has(payload.requestId);
+          // Blocking callbacks cannot survive subsequent agent work or another permission ask.
+          // Continue scanning: an older async question can still be actionable.
+          if (!payload.async) {
+            const superseded = laterAgentActivity || laterPermissionRequest || laterBlockingQuestion;
+            laterBlockingQuestion = true;
+            if (wasResolved || superseded) continue;
+          } else if (wasResolved) continue;
           return {
             scanned: true,
             question: {
@@ -4176,9 +4181,10 @@ export class SessionManager {
             resolvedQuestionIds: resolved,
           };
         }
-        if (payload.kind === "user_message" || payload.kind === "permission_request") {
+        if (payload.kind === "user_message") {
           return { scanned: true, question: null, resolvedQuestionIds: resolved };
         }
+        if (payload.kind === "permission_request") laterPermissionRequest = true;
         if (payload.kind === "agent_message" || payload.kind === "agent_thought" ||
             payload.kind === "tool_call" || payload.kind === "conversation_checkpoint" ||
             payload.kind === "turn_interrupted") laterAgentActivity = true;
@@ -4215,7 +4221,13 @@ export class SessionManager {
               ? payload.occurrenceId : `question:${generation.logEpoch}:${event.seq}`,
           });
         }
-        if (event.payload.kind === "question_resolved") requests.delete(event.payload.requestId);
+        if (event.payload.kind === "question_resolved") {
+          const pending = requests.get(event.payload.requestId);
+          if (pending && (!event.payload.occurrenceId || !pending.occurrenceId ||
+              pending.occurrenceId === event.payload.occurrenceId)) {
+            requests.delete(event.payload.requestId);
+          }
+        }
       }
       const last = page.events.at(-1)?.seq;
       if (last == null) return { requests: [...requests.values()], verified: generation.throughSeq === 0 };
@@ -4331,7 +4343,9 @@ export class SessionManager {
         // A crash can land after the resolution event is durable but before its metadata clear.
         // Prefer that exact durable resolution over the stale pending-card projection.
         const recovery = this.unresolvedQuestionFromHistory(m.sessionId);
-        pendingQuestionResolved = recovery.resolvedQuestionIds.has(reconciled.pendingApproval.requestId);
+        pendingQuestionResolved = recovery.resolvedQuestionIds.has(
+          reconciled.pendingApproval.occurrenceId ?? reconciled.pendingApproval.requestId) ||
+          recovery.resolvedQuestionIds.has(reconciled.pendingApproval.requestId);
         if (recovery.question?.requestId === reconciled.pendingApproval.requestId) {
           historicalQuestion = recovery.question;
         }
@@ -4341,6 +4355,11 @@ export class SessionManager {
         : reconciled.pendingApproval?.kind === "question" && !pendingQuestionResolved
           ? historicalQuestion ?? reconciled.pendingApproval
           : historicalQuestion;
+      const concurrentAsyncQuestions = !terminal && pendingRequests(reconciled.pendingApproval)
+        .some((request) => request.async)
+        ? this.recoveredWorkerQuestions(m.sessionId, reconciled.pendingApproval).requests
+          .filter((request) => request.async)
+        : [];
       if (reconciled.providerAuthBlock && reconciled.status === "stopped") {
         // Terminal operator intent dominates a stale/incomplete recovery generation.
         const dismissedCommandIds = this.abandonDurableProviderAuthenticationPrompts(
@@ -4411,10 +4430,25 @@ export class SessionManager {
           status: first ? "input_required" : "idle",
           pendingApproval: first ? { ...first, ...(rest.length ? { additionalRequests: rest } : {}) } : null,
         });
-      } else if (recoverableQuestion?.async) {
-        // An async question has no provider callback to recover. It remains answerable by a
-        // fresh user turn after the conversation is resumed.
-        this.store.patchMeta(m.sessionId, { status: "idle", pendingApproval: recoverableQuestion });
+      } else if (concurrentAsyncQuestions.length || recoverableQuestion?.async) {
+        // Async questions have no provider callback to recover. Keep them when a newer blocking
+        // approval is discarded, and retain any recoverable blocking question ahead of them.
+        const blocking = recoverableQuestion && !recoverableQuestion.async
+          ? {
+              ...recoverableQuestion,
+              recoveryReason: "provider_restart" as const,
+              ...(canResumeRecoveredQuestion(reconciled, recoverableQuestion)
+                ? { recoveryAction: "resume_answer" as const } : {}),
+            }
+          : null;
+        const [first, ...rest] = [
+          ...(blocking ? [blocking] : []),
+          ...(concurrentAsyncQuestions.length ? concurrentAsyncQuestions : recoverableQuestion ? [recoverableQuestion] : []),
+        ];
+        this.store.patchMeta(m.sessionId, {
+          status: blocking ? "input_required" : "idle",
+          pendingApproval: first ? { ...first, ...(rest.length ? { additionalRequests: rest } : {}) } : null,
+        });
       } else if (recoverableQuestion) {
         // A provider response callback cannot survive process loss. Preserve the exact durable
         // question and request identity as an explicit recovery card instead of making the
@@ -13133,11 +13167,13 @@ export class SessionManager {
     answers: Record<string, string | string[]>,
     action?: "submit" | "dismiss",
     resolvedByParentSessionId?: string,
+    occurrenceId?: string,
   ): void {
     const entry = this.active.get(sessionId);
     const asyncQuestion = pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
       .find((request) => request.requestId === requestId && request.kind === "question" && request.async);
     if (asyncQuestion) {
+      if (occurrenceId && asyncQuestion.occurrenceId !== occurrenceId) return;
       const submitted = action !== "dismiss" && (action === "submit" || Object.keys(answers).length > 0);
       if (submitted) {
         const text = asyncQuestion.questions!.map((question) =>

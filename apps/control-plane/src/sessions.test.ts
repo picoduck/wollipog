@@ -3227,7 +3227,9 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
       action: "answer", answers: { q: "Continue" },
     }, () => true);
     assert.ok(answered.ok, answered.error);
-    assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+    const { occurrenceId: deliveredOccurrence, ...deliveredAnswer } = hub.sentOfType("answer_question").at(-1)!;
+    assert.equal(deliveredOccurrence, "request_question_occurrence");
+    assert.deepEqual(deliveredAnswer, {
       type: "answer_question", sessionId: grandchild.id, requestId: "provider-reused-id",
       answers: { q: "Continue" }, action: "submit", resolvedByParentSessionId: parent.data.id,
     });
@@ -12481,7 +12483,9 @@ test("a provider question cannot overwrite a parked policy-hook card", () => {
 
   assert.equal(db.getSession(id)!.pendingApproval?.kind, "policy_hook");
   assert.equal(db.getSession(id)!.pendingApproval?.requestId, asked.approvalRequestId);
-  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+  const { occurrenceId: dismissedOccurrence, ...dismissalDelivery } = hub.sentOfType("answer_question").at(-1)!;
+  assert.equal(dismissedOccurrence, undefined);
+  assert.deepEqual(dismissalDelivery, {
     type: "answer_question",
     sessionId: id,
     requestId: "parallel-question",
@@ -13105,7 +13109,9 @@ test("an explicit empty question submission remains distinct from dismissal", ()
     "submit",
   );
   assert.ok(result.ok);
-  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+  const { occurrenceId: submittedOccurrence, ...submissionDelivery } = hub.sentOfType("answer_question").at(-1)!;
+  assert.match(submittedOccurrence ?? "", /^request_[0-9a-f]{32}$/u);
+  assert.deepEqual(submissionDelivery, {
     type: "answer_question",
     sessionId: id,
     requestId: "optional-form",
@@ -13150,7 +13156,9 @@ test("mixed-version multi-select Other requests reject submission but remain saf
     "dismiss",
   );
   assert.ok(dismissal.ok);
-  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+  const { occurrenceId: unsupportedOccurrence, ...unsupportedDelivery } = hub.sentOfType("answer_question").at(-1)!;
+  assert.match(unsupportedOccurrence ?? "", /^request_[0-9a-f]{32}$/u);
+  assert.deepEqual(unsupportedDelivery, {
     type: "answer_question",
     sessionId: id,
     requestId: "unsupported-question",
@@ -13195,7 +13203,9 @@ test("recovered questions reject unsafe submission but dismiss into an idle exac
   assert.ok(dismissal.ok);
   assert.equal(dismissal.data?.status, "idle");
   assert.equal(dismissal.data?.pendingApproval, null);
-  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+  const { occurrenceId: recoveredOccurrence, ...recoveredDelivery } = hub.sentOfType("answer_question").at(-1)!;
+  assert.match(recoveredOccurrence ?? "", /^request_[0-9a-f]{32}$/u);
+  assert.deepEqual(recoveredDelivery, {
     type: "answer_question",
     sessionId: id,
     requestId: "recovered-question",
@@ -13327,7 +13337,8 @@ test("a blocking approval can be resolved without clearing an async question", (
   });
   assert.deepEqual(pendingRequests(db.getSession(id)?.pendingApproval).map((request) => request.requestId),
     ["tool-approval", "codex-async:choice"]);
-  svc.onSessionEvent(id, { kind: "permission_resolved", requestId: "tool-approval", optionId: "allow" });
+  assert.equal(svc.approve(id, "tool-approval", "allow").ok, true);
+  assert.equal(db.getSession(id)?.status, "running");
   assert.equal(db.getSession(id)?.pendingApproval?.requestId, "codex-async:choice");
   assert.equal(db.getSession(id)?.pendingApproval?.async, true);
 });
@@ -13478,7 +13489,9 @@ test("recovered question dismissal does not phantom-idle a newer active status",
   assert.ok(dismissal.ok);
   assert.notEqual(dismissal.data?.status, "idle");
   assert.equal(dismissal.data?.pendingApproval, null);
-  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+  const { occurrenceId: duringNewTurnOccurrence, ...duringNewTurnDelivery } = hub.sentOfType("answer_question").at(-1)!;
+  assert.match(duringNewTurnOccurrence ?? "", /^request_[0-9a-f]{32}$/u);
+  assert.deepEqual(duringNewTurnDelivery, {
     type: "answer_question",
     sessionId: id,
     requestId: "recovery-during-new-turn",

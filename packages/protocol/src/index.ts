@@ -7294,6 +7294,8 @@ export interface AnswerQuestionMessage {
   type: "answer_question";
   sessionId: string;
   requestId: string;
+  /** Exact runner-generated question occurrence, when available. */
+  occurrenceId?: string;
   answers: Record<string, string | string[]>;
   /** Explicit UI intent distinguishes accepting an all-optional form from dismissing it.
    * Optional for rolling compatibility; absent peers retain the legacy empty-map convention. */
