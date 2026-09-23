@@ -625,7 +625,7 @@ export function AutomationsView() {
                   const boundId = workflowBindingEdits[`role:${role}`] ??
                     (reference ? resolvedInstallationAgentId(selectedRunner, reference) : undefined) ??
                     stored?.request.agentBindings?.[role] ?? role;
-                  const unavailable = !workflowBindingEdits[`role:${role}`] && (reference
+                  const unavailable = Boolean(stored) && !workflowBindingEdits[`role:${role}`] && (reference
                     ? !bindingAvailable(selectedRunner, reference)
                     : !selectedRunner?.agents.some((agent) => agent.id === boundId && !agent.installation));
                   return <div className="automation-field" key={role}>
@@ -729,14 +729,16 @@ export function AutomationsView() {
               <label>Alternate Workspace<select value={form.fallbackWorkspaceId} onChange={(event) => patch("fallbackWorkspaceId", event.target.value)}>{(selectedFallback?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}</select></label>
               {form.actionKind === "workflow_run" && workflowRoles.map((role) => {
                 const oldTarget = editingSpec?.runnerPolicy.kind === "alternate" &&
-                  editingSpec.action.kind === "workflow_run" ? editingSpec.runnerPolicy.targets[0] : undefined;
+                  editingSpec.action.kind === "workflow_run" &&
+                  editingSpec.action.request.workflowId === form.workflowId
+                  ? editingSpec.runnerPolicy.targets[0] : undefined;
                 const reference = oldTarget?.installationBindings?.[`role:${role}`];
                 const boundId = alternateWorkflowBindingEdits[`role:${role}`] ??
                   (reference ? resolvedInstallationAgentId(selectedFallback, reference) : undefined) ??
                   oldTarget?.agentBindings?.[role] ??
                   (editingSpec?.action.kind === "workflow_run"
                     ? editingSpec.action.request.agentBindings?.[role] : undefined) ?? role;
-                const unavailable = !alternateWorkflowBindingEdits[`role:${role}`] && (reference
+                const unavailable = Boolean(oldTarget) && !alternateWorkflowBindingEdits[`role:${role}`] && (reference
                   ? !bindingAvailable(selectedFallback, reference)
                   : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
                 return <div className="automation-field" key={role}>
@@ -872,8 +874,33 @@ export function AutomationsView() {
               return !actionRunner?.agents.some((agent) => agent.id === id && !agent.installation);
             }) ?? false;
           })();
+          const unavailableAlternate = item.runnerPolicy.kind === "alternate" &&
+            item.runnerPolicy.targets.some((target) => {
+              const runner = runners.get(target.runnerId);
+              const bindings = target.installationBindings;
+              if (Object.values(bindings ?? {}).some((binding) => !bindingAvailable(runner, binding))) return true;
+              if (item.action.kind === "create_session") {
+                return !bindings?.agent && !runner?.agents.some((agent) =>
+                  agent.id === target.agentId && !agent.installation);
+              }
+              if (!workflowAction) return false;
+              const workflow = workflows.find((definition) =>
+                definition.workflowId === workflowAction.request.workflowId &&
+                (workflowAction.request.workflowVersion === undefined ||
+                  definition.version === workflowAction.request.workflowVersion));
+              const unboundRole = workflow?.nodes.some((node) => {
+                if (node.kind !== "agent") return false;
+                const role = node.agentId!;
+                if (bindings?.[`role:${role}`]) return false;
+                const id = target.agentBindings?.[role] ?? workflowAction.request.agentBindings?.[role] ?? role;
+                return !runner?.agents.some((agent) => agent.id === id && !agent.installation);
+              }) ?? false;
+              const orchestrator = target.orchestratorAgentId ?? workflowAction.request.orchestratorAgentId;
+              return unboundRole || Boolean(orchestrator && !bindings?.orchestrator &&
+                !runner?.agents.some((agent) => agent.id === orchestrator && !agent.installation));
+            });
           return <AutomationCard key={item.automationId} id={item.automationId} name={item.name} action={actionSummary(item.action)} enabled={item.enabled}>
-            {(unavailableInstallation || unboundInstallation || unboundWorkflow) && <p className="automation-execution-error" role="alert">
+            {(unavailableInstallation || unboundInstallation || unboundWorkflow || unavailableAlternate) && <p className="automation-execution-error" role="alert">
               Saved Agent Harness installation unavailable or unbound. Edit this automation to choose an available installation.
             </p>}
             <dl className="automation-facts"><div><dt>Schedule</dt><dd><code>{item.cron}</code> · {item.timezone}</dd></div><div><dt>Next Fire</dt><dd>{formatTime(item.nextFireAt)}</dd></div><div><dt>Last Result</dt><dd>{latest ? `${titleCaseLabel(latest.status)} · ${formatTime(latest.completedAt ?? latest.startedAt ?? latest.createdAt)}` : "Never"}</dd></div><div><dt>Policies</dt><dd>{titleCaseLabel(item.misfirePolicy.kind)} · {titleCaseLabel(item.runnerPolicy.kind)} · {titleCaseLabel(item.concurrencyPolicy)}</dd></div><div><dt>Ceilings</dt><dd>${item.limits.maxCostUsd} · {item.limits.maxToolCalls} Tools</dd></div></dl>

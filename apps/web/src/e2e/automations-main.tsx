@@ -102,6 +102,24 @@ if (params.has("saved-installation")) {
   } };
 }
 
+const alternateRunner: RunnerView | null = params.has("alternate-installation") ? {
+  ...runner,
+  runnerId: "runner-2",
+  hostname: "backup-box",
+  protocolVersion: 175,
+  agents: [{ ...runner.agents[0]!, id: "agent-2", installation: {
+    id: params.get("alternate-installation") === "unavailable" ? "local" : "system",
+    path: "/usr/bin/agent", via: "path", selection: "selected",
+  } }],
+  workspaces: [{ id: "workspace-2", name: "Backup", path: "/home/misko/backup" }],
+} : null;
+if (alternateRunner) items[0]!.runnerPolicy = { kind: "alternate", targets: [{
+  runnerId: "runner-2", workspaceId: "workspace-2", agentId: "agent-2",
+  installationBindings: { agent: {
+    driver: "claude-code", context: { kind: "native" }, installationId: "system",
+  } },
+}] };
+
 const triggerItems: AutomationTriggerView[] = [{
   triggerId: "atr_issue_intake",
   automationId: "automation-nightly-sweep",
@@ -199,7 +217,7 @@ class FixtureSocket implements UiSocket {
           paginatedSessionHistory: false,
           projects: false,
         },
-        runners: [runner],
+        runners: alternateRunner ? [runner, alternateRunner] : [runner],
         boxes: [],
         sessions: [],
         runs: [],

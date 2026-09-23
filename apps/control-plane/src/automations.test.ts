@@ -1115,6 +1115,38 @@ test("scheduled sessions follow the saved installation through rediscovery and r
   assert.equal(db.getAutomation(automation.automationId)?.action.kind, "create_session");
 });
 
+test("reordering alternate targets preserves each runner's explicit installation binding", () => {
+  const discovered = (runnerId: string): RunnerMetadata => {
+    const base = runner(runnerId, undefined, "codex-app-server");
+    const system = { ...base.agents[0]!, command: "/usr/bin/codex", installation: {
+      id: "system", path: "/usr/bin/codex", via: "path" as const,
+    } };
+    return { ...base, agents: [system, { ...system, id: "local", command: "/home/u/bin/codex",
+      installation: { id: "local", path: "/home/u/bin/codex", via: "common-dir" as const } }] };
+  };
+  const { db, service } = harness(175, [runner("runner-1"), discovered("runner-2"), discovered("runner-3")]);
+  for (const runnerId of ["runner-2", "runner-3"]) {
+    assert.equal(db.selectHarnessInstallation(runnerId, "agent-1", "system")?.installationId, "system");
+  }
+  const actor = { kind: "human" as const, id: "device" };
+  const targets = ["runner-2", "runner-3"].map((runnerId) => ({ runnerId, workspaceId: "ws-1", agentId: "agent-1" }));
+  const automation = service.create(baseSpec({ runnerPolicy: { kind: "alternate", targets } }), actor, 0).data!;
+  assert.equal(automation.runnerPolicy.kind, "alternate");
+  if (automation.runnerPolicy.kind !== "alternate") throw new Error("expected alternate policy");
+  assert.equal(automation.runnerPolicy.targets[0]?.installationBindings?.agent?.installationId, "system");
+  assert.equal(db.selectHarnessInstallation("runner-2", "local", "local")?.installationId, "local");
+
+  const reordered = service.update(automation.automationId, baseSpec({ runnerPolicy: {
+    kind: "alternate", targets: [...automation.runnerPolicy.targets].reverse(),
+  } }), actor, 1_000).data!;
+  assert.equal(reordered.runnerPolicy.kind, "alternate");
+  if (reordered.runnerPolicy.kind !== "alternate") throw new Error("expected alternate policy");
+  assert.deepEqual(reordered.runnerPolicy.targets.map((target) =>
+    [target.runnerId, target.installationBindings?.agent?.installationId]),
+  [["runner-3", "system"], ["runner-2", "system"]],
+  "reordering cannot discard runner-2's explicit pin because its Machine selection changed");
+});
+
 test("an old plain-id automation requires an explicit installation migration", () => {
   const { db, service, created } = harness(175);
   const actor = { kind: "human" as const, id: "device" };
@@ -1272,6 +1304,8 @@ test("runner wait, bounded expiry, and explicit alternate target policies are du
   assert.equal(db.listAutomationExecutions(expiring.automationId).length, 0, "offline wait is safe to retry because nothing was sent");
   assert.equal(service.tick(120_000), 1);
   assert.equal(db.listAutomationExecutions(expiring.automationId)[0]?.status, "expired");
+  assert.match(db.listAutomationExecutions(expiring.automationId)[0]?.error ?? "", /Machine is online/,
+    "an offline Machine must not be diagnosed as a missing saved installation");
   assert.equal(notifications.at(-1)?.endsWith(":expired"), true);
 
   online.add("runner-2");

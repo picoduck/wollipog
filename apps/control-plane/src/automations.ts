@@ -449,8 +449,9 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
       action: { ...action, ...(primary ? { installationBindings: primary } : {}) },
       runnerPolicy: spec.runnerPolicy.kind !== "alternate" ? spec.runnerPolicy : {
         ...spec.runnerPolicy,
-        targets: spec.runnerPolicy.targets.map((target, index) => {
-          const oldTarget = previous?.runnerPolicy.kind === "alternate" ? previous.runnerPolicy.targets[index] : undefined;
+        targets: spec.runnerPolicy.targets.map((target) => {
+          const oldTarget = previous?.runnerPolicy.kind === "alternate"
+            ? previous.runnerPolicy.targets.find((candidate) => candidate.runnerId === target.runnerId) : undefined;
           const bindings = pin(target.runnerId, { agent: target.agentId! }, target.installationBindings,
             oldTarget ? { runnerId: oldTarget.runnerId, ids: { agent: oldTarget.agentId! },
               bindings: oldTarget.installationBindings } : undefined);
@@ -482,8 +483,9 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
     action: { ...action, ...(primary ? { installationBindings: primary } : {}) },
     runnerPolicy: spec.runnerPolicy.kind !== "alternate" ? spec.runnerPolicy : {
       ...spec.runnerPolicy,
-      targets: spec.runnerPolicy.targets.map((target, index) => {
-        const oldTarget = previous?.runnerPolicy.kind === "alternate" ? previous.runnerPolicy.targets[index] : undefined;
+      targets: spec.runnerPolicy.targets.map((target) => {
+        const oldTarget = previous?.runnerPolicy.kind === "alternate"
+          ? previous.runnerPolicy.targets.find((candidate) => candidate.runnerId === target.runnerId) : undefined;
         const bindings = pin(target.runnerId,
           ids({ ...(action.request.agentBindings ?? {}), ...(target.agentBindings ?? {}) },
             target.orchestratorAgentId ?? action.request.orchestratorAgentId),
@@ -1326,18 +1328,24 @@ export class AutomationsService {
     const candidates = automation.runnerPolicy.kind === "alternate"
       ? [primary, ...automation.runnerPolicy.targets]
       : [primary];
+    let installationUnavailable = false;
     for (const target of candidates) {
       if (!this.hub.isRunnerOnline(target.runnerId)) continue;
       if (!runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "automationCommandReceipts")) continue;
       if (!this.db.getWorkspacePath(target.runnerId, target.workspaceId)) continue;
       if (!this.projectTargetCompatible(target)) continue;
       const resolved = this.resolveSavedTarget(automation, target);
-      if (!resolved) continue;
-      if (automation.action.kind === "create_session" && !this.db.getAgentLaunch(resolved.runnerId, resolved.agentId!)) continue;
+      if (!resolved) { installationUnavailable = true; continue; }
+      if (automation.action.kind === "create_session" && !this.db.getAgentLaunch(resolved.runnerId, resolved.agentId!)) {
+        installationUnavailable = true;
+        continue;
+      }
       if (automation.action.kind === "workflow_run" && !this.workflowTargetCompatible(automation, resolved)) continue;
       return ok({ target: resolved });
     }
-    return fail("No configured automation target is available. Check its saved Agent Harness installation in Machine Settings, then edit the automation to select an available target.", 409);
+    return fail(installationUnavailable
+      ? "No configured automation target is available. Check its saved Agent Harness installation in Machine Settings, then edit the automation to select an available target."
+      : "No configured automation target is available. Check that its Machine is online, supports automations, and has an available Workspace and Project.", 409);
   }
 
   private resolveSavedTarget(

@@ -110,6 +110,33 @@ for (const { label, viewport } of [
   });
 }
 
+for (const { label, viewport } of [
+  { label: "desktop", viewport: { width: 1280, height: 900 } },
+  { label: "mobile", viewport: { width: 375, height: 812 } },
+]) {
+  for (const theme of ["dark", "light"] as const) {
+    test.describe(`${label} ${theme} alternate installation`, () => {
+      test.use({ viewport });
+      test("shows a card warning when an alternate's saved installation disappears", async ({ page }) => {
+        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+        const card = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
+        await page.goto(`/automations-e2e.html?theme=${theme}&alternate-installation=available`);
+        await card.click();
+        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toHaveCount(0);
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-alternate-before-${label}-${theme}.png`), fullPage: true,
+        });
+        await page.goto(`/automations-e2e.html?theme=${theme}&alternate-installation=unavailable`);
+        await card.click();
+        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toBeVisible();
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-alternate-after-${label}-${theme}.png`), fullPage: true,
+        });
+      });
+    });
+  }
+}
+
 test("configured trigger controls and content-free delivery provenance are visible", async ({ page }) => {
   await open(page);
   await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();

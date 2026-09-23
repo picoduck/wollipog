@@ -679,6 +679,57 @@ test("a workflow role named orchestrator keeps a role binding separate from its 
   }
 });
 
+test("switching workflows does not call a new discovered role's installation saved and unavailable", async () => {
+  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
+    ...runners[0]!.agents[0]!, installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
+    },
+  }] };
+  const stored = schedule("workflow-switch", "Workflow Switch");
+  stored.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "old-graph", task: "Build",
+  } };
+  const workflow = (workflowId: string): WorkflowDefinition => ({
+    workflowId, version: 1, name: workflowId, source: "custom", maxTransitions: 1,
+    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
+    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
+      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
+  });
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine],
+    [workflow("old-graph"), workflow("new-graph")]);
+  try {
+    await expandCard(fixture, "Workflow Switch");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await changeNativeSelect(fixture.container, "Workflow", "new-graph");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /This saved role installation is unavailable or unbound/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an unavailable alternate installation is visible on the automation card", async () => {
+  const alternate = { ...runners[1]!, protocolVersion: 175, agents: [{
+    ...runners[1]!.agents[0]!, installation: {
+      id: "local", path: "/home/u/bin/claude", via: "common-dir" as const,
+      selection: "selected" as const,
+    },
+  }] };
+  const stored = schedule("alternate-missing", "Alternate Missing");
+  stored.runnerPolicy = { kind: "alternate", targets: [{
+    runnerId: "runner-2", workspaceId: "runner-2-workspace", agentId: "alternate-agent",
+    installationBindings: { agent: {
+      driver: "claude-code", context: { kind: "native" }, installationId: "system",
+    } },
+  }] };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate]);
+  try {
+    await expandCard(fixture, "Alternate Missing");
+    assert.match(fixture.container.textContent ?? "", /Saved Agent Harness installation unavailable or unbound/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("automation cards are collapsed by default and render only their headers", async () => {
   const fixture = await mountFixture([
     schedule("automation-a", "Alpha"),
