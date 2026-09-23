@@ -13062,13 +13062,25 @@ export class ControlPlaneDb {
     return { perUserUsd, updatedAt: now };
   }
 
-  /** Live sessions a user owns in an organization. The policy gate decides whether their pending
-   * requests block parking; an async-only question must remain eligible for the budget fan-out. */
+  /** Live owned sessions eligible for an owner-budget card. Filter blocking requests before the
+   * 200-result limit, or newer parked sessions can hide an older sibling with an async question. */
   listOpenSessionIdsForOwner(organizationId: string, userId: string): string[] {
     const rows = this.stmt(
       `SELECT s.id FROM sessions s JOIN session_ownership o ON o.session_id=s.id
         WHERE o.organization_id=? AND o.owner_kind='user' AND o.owner_id=?
           AND s.status NOT IN ('completed','failed','stopped')
+          AND CASE
+            WHEN s.pending_approval IS NULL THEN 1
+            WHEN json_valid(s.pending_approval) THEN
+              (json_extract(s.pending_approval,'$.async') = 1 OR
+               json_extract(s.pending_approval,'$.kind') = 'workflow_decision')
+              AND NOT EXISTS (
+                SELECT 1 FROM json_each(s.pending_approval,'$.additionalRequests') AS request
+                 WHERE COALESCE(json_extract(request.value,'$.async'),0) <> 1
+                   AND COALESCE(json_extract(request.value,'$.kind'),'') <> 'workflow_decision'
+              )
+            ELSE 0
+          END
         ORDER BY s.updated_at DESC LIMIT 200`,
     ).all(organizationId, userId) as unknown as Array<{ id: string }>;
     return rows.map((row) => row.id);

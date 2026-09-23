@@ -18762,6 +18762,59 @@ test("a daily-budget breach parks a sibling with an unanswered async question", 
     .some((message) => message.sessionId === b && message.holdFor === "control_plane"));
 });
 
+test("a daily-budget fan-out counts eligible siblings rather than blocked rows toward its limit", () => {
+  const { db, hub, svc } = makeHarness();
+  const source = seedSession(svc, hub, { prompt: "Spend" });
+  const eligible = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID, prompt: "Wait" });
+  const own = db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?");
+  for (const id of [source, eligible]) own.run(id);
+  db.updateSessionStatus(eligible, "running", Date.now());
+  svc.onSessionEvent(eligible, {
+    kind: "question_request", async: true, requestId: "codex-async:older",
+    occurrenceId: "request_async_older",
+    questions: [{ id: "0", question: "Which path?", options: [] }],
+  });
+  // Keep the eligible session older than the source and every blocked sibling.
+  db.raw().prepare("UPDATE sessions SET updated_at=1 WHERE id=?").run(eligible);
+  const blocked: string[] = [];
+  for (let index = 0; index < 199; index++) {
+    const id = seedSession(svc, hub, { prompt: "Wait" });
+    own.run(id);
+    db.updateSessionStatus(id, "input_required", Date.now());
+    db.setPendingApproval(id, {
+      kind: "permission", requestId: `blocked-${index}`, title: "Permission", options: [],
+    });
+    blocked.push(id);
+  }
+  db.setPendingApproval(blocked[0]!, {
+    kind: "question", async: true, requestId: "async-with-blocker", title: "Question", options: [],
+    additionalRequests: [{ kind: "permission", requestId: "blocking-child", title: "Permission", options: [] }],
+  });
+  db.updateSessionStatus(blocked[1]!, "running", Date.now());
+  db.setPendingApproval(blocked[1]!, {
+    kind: "workflow_decision", requestId: "nonblocking-workflow", title: "Workflow", options: [],
+  });
+  const candidates = db.listOpenSessionIdsForOwner("org_personal", "usr_local_owner");
+  assert.equal(candidates.includes(eligible), true,
+    "blocked siblings must not consume the bounded eligible-session window");
+  assert.equal(candidates.includes(blocked[0]!), false, "a blocking child behind an async card still excludes the session");
+  assert.equal(candidates.includes(blocked[1]!), true, "a workflow decision alone does not block parking");
+  db.setUsageDailyBudget("org_personal", 2, Date.now());
+  db.appendEvent(source, { kind: "token_usage", inputTokens: 1, costUsd: 2.5 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(source, "idle");
+
+  const sibling = db.getSession(eligible)!;
+  assert.equal(sibling.status, "input_required");
+  assert.deepEqual(pendingRequests(sibling.pendingApproval).map((request) => request.kind),
+    ["daily_budget", "question"]);
+  assert.ok(hub.sentOfType("rearm_governance")
+    .some((message) => message.sessionId === eligible && message.holdFor === "control_plane"));
+  assert.deepEqual(pendingRequests(db.getSession(blocked[0]!)!.pendingApproval).map((request) => request.kind),
+    ["question", "permission"], "an unrelated blocking card remains authoritative");
+  assert.deepEqual(pendingRequests(db.getSession(blocked[1]!)!.pendingApproval).map((request) => request.kind),
+    ["daily_budget", "workflow_decision"]);
+});
+
 test("arming a soft guardrail on an unparked session that already exceeds it parks it at once", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub, { prompt: "spend" });
