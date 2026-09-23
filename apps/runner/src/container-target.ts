@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -92,6 +93,14 @@ function localRuntimePath(value: string): string {
   return value;
 }
 
+function localDockerEndpoint(value: string): string {
+  if (value.startsWith("unix://")) return `unix://${localRuntimePath(value.slice("unix://".length))}`;
+  const pipe = "npipe:////./pipe/";
+  if (process.platform === "win32" && value.startsWith(pipe) &&
+      /^[A-Za-z0-9_.-]{1,128}$/u.test(value.slice(pipe.length))) return value;
+  throw new Error("Docker endpoint is not local");
+}
+
 /** Keep client config and credentials isolated while retaining only local, non-secret runtime
  * locations needed to find a rootless image store or Unix daemon socket. */
 function setupCheckRuntimeEnvironment(home: string, runtime: RunnerContainerTarget["runtime"]): Record<string, string> {
@@ -103,19 +112,30 @@ function setupCheckRuntimeEnvironment(home: string, runtime: RunnerContainerTarg
     ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot ?? "C:\\Windows" } : {}),
   };
   if (runtime === "podman" && process.platform === "linux") {
+    // Podman may expand $HOME inside storage.conf, even when the config file itself is
+    // selected explicitly. Its general config root remains isolated below.
+    env.HOME = localRuntimePath(homedir());
     env.XDG_DATA_HOME = localRuntimePath(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"));
     if (process.env.XDG_RUNTIME_DIR !== undefined) {
       env.XDG_RUNTIME_DIR = localRuntimePath(process.env.XDG_RUNTIME_DIR);
     }
+    const configHome = localRuntimePath(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"));
+    const storageConfig = localRuntimePath(process.env.CONTAINERS_STORAGE_CONF ??
+      join(configHome, "containers", "storage.conf"));
+    if (process.env.CONTAINERS_STORAGE_CONF !== undefined || existsSync(storageConfig)) {
+      env.CONTAINERS_STORAGE_CONF = storageConfig;
+    }
+  }
+  if (runtime === "podman" && process.env.CONTAINER_CONNECTION) {
+    throw new Error("remote Podman connection is unsupported for setup checks");
   }
   const socket = runtime === "docker" ? process.env.DOCKER_HOST : process.env.CONTAINER_HOST;
-  if (runtime === "docker" && process.env.DOCKER_CONTEXT && process.env.DOCKER_CONTEXT !== "default") {
-    throw new Error("nonlocal container context is unsupported for setup checks");
-  }
-  if (socket) {
-    if (!socket.startsWith("unix://")) throw new Error("nonlocal container endpoint is unsupported for setup checks");
-    const path = localRuntimePath(socket.slice("unix://".length));
-    env[runtime === "docker" ? "DOCKER_HOST" : "CONTAINER_HOST"] = `unix://${path}`;
+  if (socket && (runtime !== "docker" || !process.env.DOCKER_CONTEXT)) {
+    if (runtime === "docker") env.DOCKER_HOST = localDockerEndpoint(socket);
+    else {
+      if (!socket.startsWith("unix://")) throw new Error("nonlocal container endpoint is unsupported for setup checks");
+      env.CONTAINER_HOST = `unix://${localRuntimePath(socket.slice("unix://".length))}`;
+    }
   }
   return env;
 }
@@ -168,6 +188,32 @@ export class ContainerTargetRegistry {
   ) {
     this.runnerKey = createHash("sha256").update(runnerId).digest("hex").slice(0, 20);
     this.warnLegacyContainerLabels = deps.warnLegacyContainerLabels ?? defaultDeps.warnLegacyContainerLabels!;
+  }
+
+  private async setupEnvironment(template: RunnerContainerTarget, runtime: ResolvedBinary, home: string): Promise<Record<string, string>> {
+    const env = setupCheckRuntimeEnvironment(home, template.runtime);
+    if (template.runtime !== "docker" || (process.env.DOCKER_HOST && !process.env.DOCKER_CONTEXT)) return env;
+    // A saved Docker context can select a local Unix socket even without DOCKER_CONTEXT. Ask
+    // Docker for only that endpoint using a bounded client environment and the operator's
+    // context directory; never expose its credential files to the actual setup check.
+    const config = localRuntimePath(process.env.DOCKER_CONFIG ?? join(homedir(), ".docker"));
+    if (!process.env.DOCKER_CONTEXT && !existsSync(join(config, "config.json"))) return env;
+    const context = process.env.DOCKER_CONTEXT;
+    if (context && !/^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/u.test(context)) {
+      throw new Error("container context name is invalid");
+    }
+    const result = await this.deps.run(runtime.launch.command, [
+      ...runtime.launch.args, "context", "inspect", "--format", "{{json .Endpoints.docker.Host}}",
+    ], { timeoutMs: 5_000, maxBuffer: 4_096, replaceEnv: true, env: {
+      PATH: env.PATH!, HOME: home, DOCKER_CONFIG: config,
+      ...(process.platform === "win32" ? { SystemRoot: env.SystemRoot! } : {}),
+      ...(context ? { DOCKER_CONTEXT: context } : {}),
+    } });
+    if (result.code !== 0 || result.timedOut || result.errorCode) throw new Error("Docker context could not be resolved");
+    const endpoint: unknown = JSON.parse(result.stdout.trim());
+    if (typeof endpoint !== "string") throw new Error("Docker context endpoint is invalid");
+    env.DOCKER_HOST = localDockerEndpoint(endpoint);
+    return env;
   }
 
   private cleanupOrphans(runtime: ResolvedBinary): Promise<string | null> {
@@ -343,7 +389,7 @@ export class ContainerTargetRegistry {
           break;
         }
         try {
-          const opts = { env: setupCheckRuntimeEnvironment(home, template.runtime), replaceEnv: true };
+          const opts = { env: await this.setupEnvironment(template, runtime, home), replaceEnv: true };
           const result = await this.deps.run(runtime.launch.command,
             [...prefix, ...setupCheckArgs(template, check, this.runnerKey)], { ...opts, timeoutMs: 30_000 });
           if (result.code !== 0 || result.timedOut || result.errorCode) {

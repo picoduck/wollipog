@@ -76,9 +76,11 @@ Before its first control-plane registration, the runner:
 4. runs every setup check in the pinned image with no network, no implicit image pull, a read-only
    root, all capabilities dropped, `no-new-privileges`, a PID limit, and private `/tmp` tmpfs.
 
-Setup checks launch the runtime client with an explicit minimal environment and an empty temporary
-home/config directory. Rootless Podman's local image and runtime directories and local Unix socket
-endpoints may be retained; other host variables, credentials, and runtime config are not inherited.
+Setup checks launch the runtime client with an explicit minimal environment and a temporary client
+config directory. Local Docker contexts are reduced to Unix socket or Windows named-pipe endpoints.
+Rootless Podman keeps its home, local image/runtime directories, and storage configuration file so
+its existing image store remains usable. General Podman container config and Docker client config are isolated. Other
+host variables and credentials are not inherited by the setup-check client or container.
 Check output is never included in an unavailable reason. A runtime that needs a credential or a
 remote client configuration for these checks fails closed.
 

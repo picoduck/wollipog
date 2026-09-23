@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import test from "node:test";
+import test, { afterEach, beforeEach } from "node:test";
 import type { ExecutionTargetRef } from "@wollipog/protocol";
 import type { RunnerContainerTarget } from "./config.js";
 import { CANONICAL_CONTAINER_LABELS, LEGACY_CONTAINER_LABELS } from "./container-identity.js";
@@ -15,6 +15,23 @@ const template: RunnerContainerTarget = {
   agentCommands: { codex: { command: "codex", args: ["app-server"] } },
   setupChecks: [{ name: "git", command: "git", args: ["--version"] }],
 };
+
+const HOST_RUNTIME_ENV = ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "CONTAINER_HOST",
+  "CONTAINER_CONNECTION", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "CONTAINERS_STORAGE_CONF"] as const;
+const emptyDockerConfig = join(tmpdir(), `wollipog-empty-docker-config-${randomUUID()}`);
+let savedHostRuntimeEnv: Record<string, string | undefined> = {};
+beforeEach(() => {
+  savedHostRuntimeEnv = Object.fromEntries(HOST_RUNTIME_ENV.map((name) => [name, process.env[name]]));
+  for (const name of HOST_RUNTIME_ENV) delete process.env[name];
+  process.env.DOCKER_CONFIG = emptyDockerConfig;
+});
+afterEach(() => {
+  for (const name of HOST_RUNTIME_ENV) {
+    const value = savedHostRuntimeEnv[name];
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  }
+});
 
 function runtime() {
   return { path: "/usr/bin/docker", via: "path" as const, launch: { command: "/usr/bin/docker", args: [] } };
@@ -148,8 +165,8 @@ test("rootless Podman checks retain local storage and runtime paths without host
     assert.equal(checkEnv?.XDG_DATA_HOME, "/tmp/wollipog-fixture-podman-data");
     assert.equal(checkEnv?.XDG_RUNTIME_DIR, "/run/user/1000");
     assert.equal(checkEnv?.CONTAINER_HOST, "unix:///run/user/1000/podman/podman.sock");
-    assert.equal(checkEnv?.HOME, checkEnv?.XDG_CONFIG_HOME);
-    assert.equal(checkEnv?.DOCKER_CONFIG, checkEnv?.HOME);
+    assert.notEqual(checkEnv?.HOME, checkEnv?.XDG_CONFIG_HOME);
+    assert.equal(checkEnv?.DOCKER_CONFIG, checkEnv?.XDG_CONFIG_HOME);
     assert.equal(Object.keys(checkEnv ?? {}).some((name) => /TOKEN|SECRET|CREDENTIAL/iu.test(name)), false);
   } finally {
     if (previousData === undefined) delete process.env.XDG_DATA_HOME;
@@ -158,6 +175,107 @@ test("rootless Podman checks retain local storage and runtime paths without host
     else process.env.XDG_RUNTIME_DIR = previousRuntime;
     if (previousHost === undefined) delete process.env.CONTAINER_HOST;
     else process.env.CONTAINER_HOST = previousHost;
+  }
+});
+
+test("a saved local Docker context supplies its Unix socket without exposing client config to the check", async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-docker-context-test-"));
+  writeFileSync(join(config, "config.json"), '{"currentContext":"local-fixture"}');
+  process.env.DOCKER_CONFIG = config;
+  try {
+    let checkEnv: Record<string, string> | undefined;
+    let contextEnv: Record<string, string> | undefined;
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "context") {
+          contextEnv = opts.env;
+          return { code: 0, stdout: '"unix:///run/user/1000/docker.sock"\n', stderr: "" };
+        }
+        if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(contextEnv?.DOCKER_CONFIG, config);
+    assert.deepEqual(Object.keys(contextEnv ?? {}).sort(),
+      (process.platform === "win32" ? ["PATH", "HOME", "DOCKER_CONFIG", "SystemRoot"] :
+        ["PATH", "HOME", "DOCKER_CONFIG"]).sort());
+    assert.equal(contextEnv?.HOME === config, false);
+    assert.equal(checkEnv?.DOCKER_HOST, "unix:///run/user/1000/docker.sock");
+    assert.notEqual(checkEnv?.DOCKER_CONFIG, config);
+    assert.equal(checkEnv?.DOCKER_CONFIG, checkEnv?.HOME);
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Windows Docker checks retain a local named-pipe endpoint", {
+  skip: process.platform !== "win32",
+}, async () => {
+  process.env.DOCKER_HOST = "npipe:////./pipe/docker_engine";
+  let checkEnv: Record<string, string> | undefined;
+  const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    resolveRuntime: async () => runtime(),
+    run: async (_file, args, opts) => {
+      if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  await registry.initialize();
+  assert.equal(registry.definitions()[0]!.available, true);
+  assert.equal(checkEnv?.DOCKER_HOST, "npipe:////./pipe/docker_engine");
+});
+
+test("a remote saved Docker context fails closed without running a setup check", async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-docker-remote-test-"));
+  writeFileSync(join(config, "config.json"), '{"currentContext":"remote-fixture"}');
+  process.env.DOCKER_CONFIG = config;
+  try {
+    let checkRan = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        if (args[0] === "context") return { code: 0, stdout: '"tcp://example.invalid:2376"\n', stderr: "" };
+        if (args[0] === "run" && args.includes("git")) checkRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.equal(checkRan, false);
+    assert.equal(registry.definitions()[0]!.unavailableReason,
+      "setup check 'git' could not launch isolated runtime");
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Podman keeps a configured local storage file without loading general container config", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-podman-storage-test-"));
+  const storage = join(config, "containers", "storage.conf");
+  mkdirSync(join(config, "containers"));
+  writeFileSync(storage, '[storage]\ngraphroot = "/tmp/wollipog-fixture-store"\n');
+  process.env.XDG_CONFIG_HOME = config;
+  try {
+    let checkEnv: Record<string, string> | undefined;
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(checkEnv?.CONTAINERS_STORAGE_CONF, storage);
+    assert.notEqual(checkEnv?.XDG_CONFIG_HOME, config);
+    assert.notEqual(checkEnv?.XDG_CONFIG_HOME, checkEnv?.HOME);
+  } finally {
+    rmSync(config, { recursive: true, force: true });
   }
 });
 
@@ -183,7 +301,9 @@ test("unsupported remote container endpoint fails closed before running a setup 
   }
 });
 
-test("an unavailable private runtime directory leaves only its target unavailable", async () => {
+test("an unavailable private runtime directory leaves only its target unavailable", {
+  skip: process.platform === "win32",
+}, async () => {
   const previous = process.env.TMPDIR;
   process.env.TMPDIR = join(tmpdir(), `wollipog-missing-${randomUUID()}`);
   try {
