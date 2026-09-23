@@ -32,7 +32,9 @@ test("failed release checks direct rediscovery of the same installation", () => 
   for (const failedResult of failedResults) {
     const assessment = classifyNpmHarnessUpdate("0.199.0", failedResult, "@openai/codex", 1);
     assert.equal(assessment.status, "check_failed");
-    assert.match(assessment.guidance, /select Rediscover for this Machine in Connections to recheck this installation/);
+    assert.match(assessment.guidance, /rediscover this installation in Connections/);
+    assert.match(assessment.guidance, /Select Rediscover for a native Machine, or Reconnect for an SSH Machine/);
+    assert.match(assessment.guidance, /organization owner or admin/);
     assert.doesNotMatch(assessment.guidance, /update|upgrade/i);
   }
 });

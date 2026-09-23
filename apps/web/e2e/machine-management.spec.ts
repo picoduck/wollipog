@@ -83,7 +83,7 @@ test("Machine and Connections explain pinned, suppressed, failed, and unavailabl
   await installation("Pi\\pi.exe").screenshot({ path: "test-results/failed-harness-check-mobile.png" });
   await page.setViewportSize({ width: 1280, height: 720 });
   await expect(installation("Pi\\pi.exe")).toContainText(
-    "select Rediscover for this Machine in Connections to recheck this installation",
+    "Select Rediscover for a native Machine, or Reconnect for an SSH Machine after active sessions finish",
   );
   await expect(installation("Legacy Tools")).toContainText("Unavailable");
   await expect(installation("Legacy Tools")).toContainText("older than the verified app-server floor");
@@ -141,6 +141,18 @@ test("offline Machines retain last-reported harness status without a fresh relea
   await page.getByRole("button", { name: "Manage", exact: true }).click();
   await expect(page.getByRole("dialog").locator(".machine-harness-installation").first()).toContainText("Last Reported: New Release Published");
   await page.screenshot({ path: "test-results/harness-installations-offline-desktop.png", fullPage: true });
+});
+
+test("failed release guidance names the SSH Machine's Reconnect action", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("harness-states-ssh"));
+  const card = page.locator(".box-card").filter({ hasText: "Design Workstation" });
+  await expect(card.getByRole("button", { name: "Reconnect", exact: true })).toBeVisible();
+  await card.locator(".runner-head-right").screenshot({ path: "test-results/failed-harness-check-ssh-action.png" });
+  await card.getByRole("button", { name: "Manage", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
+  const failedInstallation = dialog.locator(".machine-harness-installation").filter({ hasText: "Pi\\pi.exe" });
+  await expect(failedInstallation).toContainText("Reconnect for an SSH Machine after active sessions finish");
+  await failedInstallation.screenshot({ path: "test-results/failed-harness-check-ssh-guidance.png" });
 });
 
 test("Machine settings keep same-name container installations scoped to their targets", async ({ page }) => {

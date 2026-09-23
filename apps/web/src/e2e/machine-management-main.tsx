@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
   type AddBoxRequest,
+  type BoxView,
   type ControlPlaneToUi,
   type RunnerView,
   type UiSnapshotMessage,
@@ -120,6 +121,7 @@ let runner: RunnerView | null = {
   },
 };
 let socket: FixtureSocket | null = null;
+let box: BoxView | null = null;
 let lastRegisteredWorkspace: { name: string; path: string } | null = null;
 let lastAddBoxRequest: AddBoxRequest | null = null;
 
@@ -134,7 +136,7 @@ function snapshot(): UiSnapshotMessage {
       createProjectLocations: true,
     },
     runners: runner ? [structuredClone(runner)] : [],
-    boxes: [],
+    boxes: box ? [structuredClone(box)] : [],
     projects: [],
     sessions: [],
     runs: [],
@@ -369,7 +371,8 @@ declare global {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
       lastAddBoxRequest(): AddBoxRequest | null;
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
-        "multiple-installations" | "harness-states" | "target-installations" | "batch-wrapper"): void;
+        "multiple-installations" | "harness-states" | "harness-states-ssh" |
+        "target-installations" | "batch-wrapper"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
     };
   }
@@ -460,7 +463,7 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
           guidance: "This installation uses a Windows batch wrapper. Use the package or version manager that installed this exact copy." },
       }];
       runner.harnessSelections = [];
-    } else if (scenario === "harness-states") {
+    } else if (scenario === "harness-states" || scenario === "harness-states-ssh") {
       runner.protocolVersion = PROTOCOL_VERSION;
       runner.hostname = "demo-workstation";
       runner.workspaces = [{ id: "demo", name: "Demo", path: "C:\\Users\\example" }];
@@ -500,7 +503,7 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
           available: true, version: "0.8.0", installation: { id: "failed", path: "C:\\Tools\\Pi\\pi.exe", via: "path" },
           update: { status: "check_failed", installedVersion: "0.8.0", checkedAt: Date.UTC(2026, 8, 22),
             channel: "stable", evidenceSource: "npm dist-tags for @earendil-works/pi-coding-agent", managedExternally: true,
-            guidance: "The release check could not complete, so no current release status was established. The Machine may be offline, behind a proxy, or rate limited. After resolving the problem, select Rediscover for this Machine in Connections to recheck this installation." },
+            guidance: "The release check could not complete, so no current release status was established. The Machine may be offline, behind a proxy, or rate limited. After resolving the problem, have an organization owner or admin rediscover this installation in Connections. Select Rediscover for a native Machine, or Reconnect for an SSH Machine after active sessions finish." },
         },
         legacyCodex,
         { ...legacyCodex, id: "legacy-codex-exec", name: "Legacy Codex (Non-Interactive)", driver: "codex", available: true },
@@ -520,6 +523,11 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
         available: false,
         unavailableReason: "The configured command was not found or could not be started in this execution context.",
       }];
+    }
+    if (scenario === "harness-states-ssh") {
+      box = { boxId: "demo-box", runnerId: runner.runnerId, displayName: "Design Workstation",
+        sshTarget: "demo-workstation", status: "online", lastError: null, createdAt: 1 };
+      socket?.push({ type: "box_upsert", box: structuredClone(box) });
     }
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
   },

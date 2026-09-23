@@ -113,7 +113,7 @@ export function classifyNpmHarnessUpdate(
     managedExternally: true as const,
     guidance: `${managerGuidance} Published releases are not automatically known compatible with this Machine.`,
   };
-  const checkFailure = "The release check could not complete, so no current release status was established. The Machine may be offline, behind a proxy, or rate limited. After resolving the problem, select Rediscover for this Machine in Connections to recheck this installation.";
+  const checkFailure = "The release check could not complete, so no current release status was established. The Machine may be offline, behind a proxy, or rate limited. After resolving the problem, have an organization owner or admin rediscover this installation in Connections. Select Rediscover for a native Machine, or Reconnect for an SSH Machine after active sessions finish.";
   if (result.code !== 0 || result.timedOut) return { ...base, status: "check_failed", guidance: checkFailure };
   let tags: Record<string, unknown>;
   try { tags = JSON.parse(result.stdout) as Record<string, unknown>; }
