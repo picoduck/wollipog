@@ -5525,7 +5525,8 @@ export class SessionManager {
           ? prior.worktreePath : null;
         if (selected) {
           const failure = await this.persistedWorktreeFailure(prior!, selected, prior!.worktreeBranch);
-          if (failure && this.launchIsCurrent(spec.sessionId, launchGeneration)) {
+          if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
+          if (failure) {
             const latest = this.store.readMeta(spec.sessionId);
             if (latest && !latest.worktreePath && latest.worktreeBranch === prior!.worktreeBranch) {
               const retained = this.store.patchMeta(spec.sessionId, {
@@ -10868,20 +10869,25 @@ export class SessionManager {
       return;
     }
     if (entry.worktree) {
+      const path = entry.worktree.path;
       const selected = this.store.readMeta(sessionId);
       if (!selected) {
         durable?.failed("session disappeared before provider submission", "SESSION_NOT_FOUND");
         return;
       }
       const failure = await this.persistedWorktreeFailure(
-        selected, entry.worktree.path, selected.worktreeBranch,
+        selected, path, selected.worktreeBranch,
       );
       if (this.active.get(sessionId) !== entry) {
         durable?.failed("session stopped before provider submission", "COMMAND_CANCELLED");
         return;
       }
+      if (!entry.worktree || !sameWorktreePath(entry.context, entry.worktree.path, path)) {
+        durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
+        return;
+      }
       if (failure) {
-        if (this.recordWorktreeRecovery(selected, entry.worktree.path, failure, "before a live turn")) {
+        if (this.recordWorktreeRecovery(selected, path, failure, "before a live turn")) {
           durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
         } else {
           durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
@@ -10993,17 +10999,22 @@ export class SessionManager {
     // Snapshot and checkpoint work above can take time. Re-prove the path at the last awaited
     // boundary before provider submission so a tree removed during that work is still Not Sent.
     if (entry.worktree) {
+      const path = entry.worktree.path;
       const selected = this.store.readMeta(sessionId);
       const failure = selected ? await this.persistedWorktreeFailure(
-        selected, entry.worktree.path, selected.worktreeBranch,
+        selected, path, selected.worktreeBranch,
       ) : "session disappeared";
       if (this.active.get(sessionId) !== entry) {
         durable?.uncertain("session stopped after the durable user event was recorded");
         return;
       }
+      if (!entry.worktree || !sameWorktreePath(entry.context, entry.worktree.path, path)) {
+        durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
+        return;
+      }
       if (failure && !entry.cancelRequested && !entry.interruptRequested &&
           !entry.historyIntegrityFailure) {
-        if (selected && this.recordWorktreeRecovery(selected, entry.worktree.path, failure, "before provider submission")) {
+        if (selected && this.recordWorktreeRecovery(selected, path, failure, "before provider submission")) {
           durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
         } else {
           durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");

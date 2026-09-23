@@ -7391,6 +7391,62 @@ test("a worktree removed during turn snapshot is still Not Sent", { skip: !haveG
   }
 });
 
+test("a selection changed during live verification never sends in the old provider cwd", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-selection-during-proof-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(root, "sessions"));
+    const providerPrompts: string[] = [];
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      ((_driver: unknown, _launch: unknown) => ({
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async (text: string) => { providerPrompts.push(text); return "end_turn" as const; },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-selection",
+      })) as never, root, 1);
+    const spec = {
+      sessionId: "s_selection_during_proof", workspaceId: "repo", workspacePath: repo,
+      agentId: "codex", command: "codex", args: [], env: {}, useWorktree: true,
+      driver: "codex-app-server" as const, context: { kind: "native" as const },
+    };
+    assert.equal(await manager.start(spec), true);
+    let proofStarted!: () => void;
+    const started = new Promise<void>((resolve) => { proofStarted = resolve; });
+    let releaseProof!: () => void;
+    const gate = new Promise<void>((resolve) => { releaseProof = resolve; });
+    const internals = manager as unknown as {
+      persistedWorktreeFailure: (meta: SessionMeta, path: string, branch?: string) => Promise<string | null>;
+    };
+    const realProof = internals.persistedWorktreeFailure.bind(manager);
+    let held = false;
+    internals.persistedWorktreeFailure = async (meta, path, branch) => {
+      if (!held) {
+        held = true;
+        proofStarted();
+        await gate;
+      }
+      return realProof(meta, path, branch);
+    };
+    const failures: Array<{ code?: string }> = [];
+    manager.prompt(spec.sessionId, "old cwd prompt", [], undefined, undefined, {
+      commandId: "selection-race", queued() {}, started() {}, completed() {},
+      failed(_error, code) { failures.push({ code }); }, uncertain() {},
+    });
+    await started;
+    await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/new-selection" });
+    releaseProof();
+    await waitForCondition(() => failures.length > 0, "the superseded prompt was not settled");
+    assert.equal(failures[0]?.code, "COMMAND_CANCELLED");
+    assert.deepEqual(providerPrompts, [], "the old provider never receives the superseded prompt");
+    assert.equal(store.readMeta(spec.sessionId)?.worktreeRecovery, undefined,
+      "a healthy replacement is not mislabeled as invalid");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("restart preparation parks an invalid selected worktree for recovery", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-restart-removed-wt-"));
   let manager: SessionManager | undefined;
