@@ -251,6 +251,25 @@ test("account projection does not borrow another account's selected agent", () =
   db.close();
 });
 
+test("without a saved choice, account projection retains the runner's legacy agent", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const personal = { ...codexAgent("personal"), available: true, defaultProviderAccountId: "personal" };
+  const generic = { ...codexAgent("generic"), available: true };
+  const owner = { organizationId: "org_personal", owner: { kind: "user" as const, userId: "alice" } };
+  db.registerRunner({ ...meta("runner-1", [personal, generic]), providerAccounts: [
+    { id: "work", label: "Work", provider: "codex", authStatus: "authenticated" },
+    { id: "personal", label: "Personal", provider: "codex", authStatus: "authenticated" },
+  ] }, 1_000_000, PROTOCOL_VERSION, owner);
+  const available = validateSubscriptionUsageSnapshot({ ...snapshot("runner-1", 1_000_000),
+    agentId: "personal", providerAccountId: "work", sourceId: sourceId("runner-1", "personal", "work"),
+  }, "runner-1", db, 1_000_000);
+  db.upsertSubscriptionUsageSnapshot(available);
+  const work = db.subscriptionUsageForPrincipal(human(), 1_000_000).sources.find((source) =>
+    source.providerAccountId === "work");
+  assert.deepEqual([work?.agentId, work?.state, work?.buckets.length], ["personal", "available", 1]);
+  db.close();
+});
+
 test("account labels remain isolated by runner and switch atomically with available usage", () => {
   const db = ControlPlaneDb.open(":memory:");
   const now = 1_000_000;

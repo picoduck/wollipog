@@ -11191,8 +11191,9 @@ export class ControlPlaneDb {
         // credential home is compatible even when the control plane's display fallback is native.
         const recordedAgent = account && recorded && runner.agents.find((candidate) => {
           if (candidate.id !== recorded.agentId || candidate.driver !== agent.driver) return false;
-          if (candidate.defaultProviderAccountId && candidate.defaultProviderAccountId !== account.id) return false;
           const candidateSelection = selectionFor(candidate, provider);
+          if (candidateSelection && candidate.defaultProviderAccountId &&
+              candidate.defaultProviderAccountId !== account.id) return false;
           if (!candidateSelection || candidate.installation?.id === candidateSelection.installationId) return true;
           return recorded.state === "unsupported" && !runner.agents.some((other) =>
             other.driver === candidate.driver &&
