@@ -94,6 +94,7 @@ import {
   type AgentContext,
   type AgentDefinition,
   type HarnessInstallationSelection,
+  type TargetHarnessInstallationSelection,
   type AgentDriverKind,
   type EditorInfo,
   type ExecutionHandoffRequest,
@@ -612,6 +613,15 @@ CREATE TABLE IF NOT EXISTS machine_harness_selections (
   installation_id TEXT NOT NULL,
   snapshot TEXT NOT NULL,
   PRIMARY KEY (runner_id, family, context)
+);
+
+CREATE TABLE IF NOT EXISTS machine_target_harness_selections (
+  runner_id TEXT NOT NULL REFERENCES runners(runner_id) ON DELETE CASCADE,
+  target_id TEXT NOT NULL,
+  agent_id TEXT NOT NULL,
+  installation_id TEXT NOT NULL,
+  snapshot TEXT NOT NULL,
+  PRIMARY KEY (runner_id, target_id, agent_id)
 );
 
 CREATE TABLE IF NOT EXISTS sessions (
@@ -5499,7 +5509,8 @@ export class ControlPlaneDb {
   /** Replace a runner's advertised agents (e.g. after a discovery re-probe). Also stamps
    * agents_refreshed_at — agents_updated only ever carries a COMPLETED discovery result, so from
    * here on an empty list truthfully means "no agent CLIs found", not "still probing". */
-  updateRunnerAgents(runnerId: string, agents: AgentDefinition[], now: number, editors?: EditorInfo[], providerAccounts?: RunnerView["providerAccounts"]): void {
+  updateRunnerAgents(runnerId: string, agents: AgentDefinition[], now: number, editors?: EditorInfo[],
+    providerAccounts?: RunnerView["providerAccounts"], executionTargets?: ExecutionTargetDefinition[]): void {
     this.db.exec("BEGIN");
     try {
       const protocol = this.stmt("SELECT protocol_version FROM runners WHERE runner_id=?")
@@ -5512,6 +5523,19 @@ export class ControlPlaneDb {
         runnerSupportsProtocol(protocol?.protocol_version, "nativeTuiAccountingDiagnostics"),
         runnerSupportsProtocol(protocol?.protocol_version, "wslSafeLauncher"),
       );
+      if (executionTargets !== undefined) {
+        if (!runnerSupportsProtocol(protocol?.protocol_version, "targetHarnessInstallations") ||
+            !Array.isArray(executionTargets) ||
+            executionTargets.some((target) => target?.adapter !== "container" && target?.adapter !== "cloud")) {
+          throw new Error("runner cannot refresh target harness installations");
+        }
+        const validated = [
+          ...validateRunnerContainerTargets(runnerId, executionTargets.filter((target) => target.adapter === "container")),
+          ...validateRunnerCloudTargets(runnerId, executionTargets.filter((target) => target.adapter === "cloud")),
+        ];
+        this.stmt("UPDATE runners SET container_targets=? WHERE runner_id=?")
+          .run(JSON.stringify(validated), runnerId);
+      }
       this.stmt(
           "UPDATE runners SET agents_refreshed_at=?, updated_at=?, editors=COALESCE(?, editors), provider_accounts=COALESCE(?, provider_accounts) WHERE runner_id=?",
         )
@@ -9987,7 +10011,58 @@ export class ControlPlaneDb {
       }
       view.executionTargets = [...hostTargets, ...runnerTargets];
     }
+    view.targetHarnessSelections = this.getTargetHarnessInstallationSelections(
+      row.runner_id,
+      runnerSupportsProtocol(row.protocol_version, "targetHarnessInstallations") ? view.executionTargets : [],
+    );
+    if (!runnerSupportsProtocol(row.protocol_version, "targetHarnessInstallations")) {
+      for (const target of view.executionTargets ?? []) delete target.harnessInstallations;
+    }
     return view;
+  }
+
+  getTargetHarnessInstallationSelections(
+    runnerId: string, targets: ExecutionTargetDefinition[] | undefined,
+  ): TargetHarnessInstallationSelection[] {
+    const rows = this.stmt(
+      "SELECT target_id, agent_id, installation_id, snapshot FROM machine_target_harness_selections WHERE runner_id=? ORDER BY target_id, agent_id",
+    ).all(runnerId) as Array<{ target_id: string; agent_id: string; installation_id: string; snapshot: string }>;
+    return rows.map((row) => {
+      const snapshot = parseJson<{ targetName: string; path: string; version?: string }>(row.snapshot);
+      const target = targets?.find((candidate) => candidate.id === row.target_id && candidate.available);
+      const current = target?.harnessInstallations?.find((candidate) => candidate.agentId === row.agent_id &&
+        candidate.id === row.installation_id && candidate.available);
+      return {
+        targetId: row.target_id,
+        targetName: target?.name ?? snapshot?.targetName ?? row.target_id,
+        agentId: row.agent_id,
+        installationId: row.installation_id,
+        path: current?.path ?? snapshot?.path ?? "",
+        ...(current?.version ?? snapshot?.version ? { version: current?.version ?? snapshot?.version } : {}),
+        available: Boolean(current),
+      };
+    });
+  }
+
+  selectTargetHarnessInstallation(
+    runnerId: string, targetId: string, agentId: string, installationId: string,
+  ): TargetHarnessInstallationSelection | null {
+    const runner = this.getRunner(runnerId);
+    if (!runner || !runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations")) return null;
+    const target = runner.executionTargets?.find((candidate) => candidate.id === targetId && candidate.available &&
+      (candidate.adapter === "container" || candidate.adapter === "cloud"));
+    const choice = target?.harnessInstallations?.find((candidate) => candidate.agentId === agentId &&
+      candidate.id === installationId && candidate.available);
+    if (!target || !choice) return null;
+    this.stmt(
+      `INSERT INTO machine_target_harness_selections (runner_id, target_id, agent_id, installation_id, snapshot)
+       VALUES (?, ?, ?, ?, ?)
+       ON CONFLICT(runner_id, target_id, agent_id) DO UPDATE SET
+         installation_id=excluded.installation_id, snapshot=excluded.snapshot`,
+    ).run(runnerId, targetId, agentId, installationId,
+      JSON.stringify({ targetName: target.name, path: choice.path, version: choice.version }));
+    return this.getTargetHarnessInstallationSelections(runnerId, runner.executionTargets)
+      .find((selection) => selection.targetId === targetId && selection.agentId === agentId) ?? null;
   }
 
   getHarnessInstallationSelections(runnerId: string, agents?: AgentDefinition[]): HarnessInstallationSelection[] {
@@ -10042,16 +10117,17 @@ export class ControlPlaneDb {
   }
 
   /** Resolve a runner+agent to its launch command/args/env + driver/context. */
-  getAgentLaunch(runnerId: string, agentId: string): AgentLaunch | null {
+  getAgentLaunch(runnerId: string, agentId: string, targetBound = false): AgentLaunch | null {
     const row = this.stmt(
-      "SELECT command, args, env, driver, context, version, capabilities, wsl_agent_control, installation FROM runner_agents WHERE runner_id=? AND agent_id=? AND available = 1",
+      `SELECT command, args, env, driver, context, version, capabilities, wsl_agent_control, installation
+       FROM runner_agents WHERE runner_id=? AND agent_id=? ${targetBound ? "" : "AND available = 1"}`,
     )
       .get(runnerId, agentId) as unknown as
       | { command: string; args: string; env: string; driver: string; context: string | null; version: string | null; capabilities: string | null; wsl_agent_control: string | null; installation: string | null }
       | undefined;
     if (!row) return null;
     const family = harnessInstallationFamily(row.driver as AgentDriverKind);
-    if (family) {
+    if (family && !targetBound) {
       const selected = this.stmt(
         "SELECT installation_id FROM machine_harness_selections WHERE runner_id=? AND family=? AND context=?",
       ).get(runnerId, family, harnessInstallationContext(parseJson<AgentContext>(row.context) ?? undefined)) as
@@ -17637,6 +17713,7 @@ export class ControlPlaneDb {
         boundaries: target.boundaries,
         ...(target.environment ? { environment: target.environment } : {}),
         ...(target.policy ? { policy: target.policy } : {}),
+        ...(persistedTarget?.harnessInstallationId ? { harnessInstallationId: persistedTarget.harnessInstallationId } : {}),
       } : undefined,
       executionHandoff: (() => {
         try {

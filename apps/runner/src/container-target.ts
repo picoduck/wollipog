@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { AgentContext, ExecutionTargetDefinition, ExecutionTargetRef } from "@wollipog/protocol";
+import type { AgentContext, ExecutionTargetDefinition, ExecutionTargetRef, TargetHarnessInstallation } from "@wollipog/protocol";
 import type { RunnerContainerTarget } from "./config.js";
 import {
   CANONICAL_CONTAINER_LABELS,
@@ -30,24 +30,40 @@ interface PreparedContainerTarget {
   config: RunnerContainerTarget;
   definition: ExecutionTargetDefinition;
   runtime?: ResolvedBinary;
+  installations?: Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>;
 }
 
 export function containerTargetId(runnerId: string, templateId: string): string {
   return `runner:${encodeURIComponent(runnerId)}:container:${encodeURIComponent(templateId)}`;
 }
 
-export function containerSetupCheckDigest(template: Pick<RunnerContainerTarget, "revision" | "image" | "agentCommands" | "setupChecks">): string {
+export function containerSetupCheckDigest(template: Pick<RunnerContainerTarget, "revision" | "image" | "agentCommands" | "alternateCommands" | "setupChecks">): string {
   return createHash("sha256").update(JSON.stringify({
     revision: template.revision,
     image: template.image,
     agentCommands: Object.fromEntries(Object.entries(template.agentCommands).sort(([left], [right]) =>
       left < right ? -1 : left > right ? 1 : 0)),
+    ...(template.alternateCommands && Object.keys(template.alternateCommands).length ? {
+      alternateCommands: Object.fromEntries(Object.entries(template.alternateCommands).sort(([left], [right]) =>
+        left < right ? -1 : left > right ? 1 : 0)),
+    } : {}),
     setupChecks: template.setupChecks.map((check) => ({
       name: check.name,
       command: check.command,
       args: check.args ?? [],
     })),
   })).digest("hex");
+}
+
+const RESOLVE_IN_IMAGE = 'case "$1" in /*) path="$1";; *) path=$(command -v "$1") || exit 1;; esac; case "$path" in /*) ;; *) exit 1;; esac; real=$(readlink -f "$path") || exit 1; case "$real" in /*) ;; *) exit 1;; esac; test -x "$real" || exit 1; printf "%s\\n" "$real"';
+
+function candidateCommands(template: RunnerContainerTarget): Array<{ agentId: string; command: string; args: string[] }> {
+  return Object.entries(template.agentCommands).flatMap(([agentId, primary]) => [
+    { agentId, command: primary.command, args: primary.args ?? [] },
+    ...(template.alternateCommands?.[agentId] ?? []).map((candidate) => ({
+      agentId, command: candidate.command, args: candidate.args ?? [],
+    })),
+  ]);
 }
 
 function unavailableReason(text: string): string {
@@ -154,6 +170,59 @@ export class ContainerTargetRegistry {
     return cleanup;
   }
 
+  private async discoverInstallations(template: RunnerContainerTarget, runtime: ResolvedBinary, targetId: string): Promise<
+    Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>
+  > {
+    const installations = new Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>();
+    const seen = new Set<string>();
+    const probe = async (candidate: { agentId: string; command: string; args: string[] },
+      phase: "resolve" | "version", entrypoint: string, args: string[]): Promise<ExecResult> => {
+      const probeKey = createHash("sha256").update(JSON.stringify([
+        template.id, candidate.agentId, candidate.command, candidate.args, phase,
+      ])).digest("hex").slice(0, 16);
+      const name = `wollipog-probe-${this.runnerKey}-${probeKey}`;
+      // A named, runner-labelled container can be forcibly removed after a client timeout
+      // and found by startup orphan reconciliation if removal itself fails.
+      const result = await this.deps.run(runtime.launch.command, [
+        ...runtime.launch.args, "run", "--rm", "--name", name,
+        ...containerLabelArgs(this.runnerKey, template.id),
+        "--network", "none", "--read-only", "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges", "--pids-limit", "128",
+        "--tmpfs", "/tmp:rw,nosuid,nodev", "--entrypoint", entrypoint, template.image, ...args,
+      ], { timeoutMs: 5_000 });
+      if (result.timedOut || result.code === null) {
+        await this.deps.run(runtime.launch.command, [
+          ...runtime.launch.args, "rm", "-f", name,
+        ], { timeoutMs: 5_000 });
+      }
+      return result;
+    };
+    for (const candidate of candidateCommands(template)) {
+      // No workspace mount, network, host secrets, or interactive stdin reaches these probes.
+      const resolved = await probe(candidate, "resolve", "/bin/sh",
+        ["-c", RESOLVE_IN_IMAGE, "sh", candidate.command]);
+      const path = resolved.code === 0 ? resolved.stdout.trim() : "";
+      if (!/^\/[A-Za-z0-9_./+-]{1,255}$/.test(path) || path.split("/").includes("..")) continue;
+      const identity = JSON.stringify([candidate.agentId, path, candidate.args]);
+      if (seen.has(identity)) continue;
+      seen.add(identity);
+      const id = createHash("sha256").update(JSON.stringify([
+        targetId, template.revision, template.image, containerSetupCheckDigest(template), identity,
+      ])).digest("hex").slice(0, 24);
+      const versionProbe = await probe(candidate, "version", path, ["--version"]);
+      const firstLine = (versionProbe.stdout || versionProbe.stderr).split(/\r?\n/u)[0]?.trim() ?? "";
+      const version = firstLine.match(/\d+\.\d+\.\d+[\w.-]*/u)?.[0];
+      const info: TargetHarnessInstallation = {
+        agentId: candidate.agentId, id, path, provenance: "container-image",
+        authentication: "unknown", capability: "unknown",
+        available: versionProbe.code === 0 && !versionProbe.timedOut && Boolean(version),
+        ...(version ? { version } : {}),
+      };
+      installations.set(id, { ...candidate, command: path, info });
+    }
+    return installations;
+  }
+
   async initialize(): Promise<void> {
     this.prepared.clear();
     for (const template of this.templates) {
@@ -223,16 +292,34 @@ export class ContainerTargetRegistry {
           break;
         }
       }
+      const installations = failed ? new Map() : await this.discoverInstallations(template, runtime, id);
       this.prepared.set(id, {
         config: template,
         runtime,
-        definition: failed ? { ...base, unavailableReason: failed } : { ...base, available: true },
+        installations,
+        definition: failed ? { ...base, unavailableReason: failed } : {
+          ...base, available: true,
+          ...(installations.size ? { harnessInstallations: [...installations.values()].map((item) => item.info) } : {}),
+        },
       });
     }
   }
 
   definitions(): ExecutionTargetDefinition[] {
     return [...this.prepared.values()].map((item) => item.definition);
+  }
+
+  async refreshInstallations(): Promise<void> {
+    for (const [id, item] of this.prepared) {
+      if (!item.runtime || !item.definition.available) continue;
+      const installations = await this.discoverInstallations(item.config, item.runtime, id);
+      item.installations = installations;
+      item.definition = {
+        ...item.definition,
+        ...(installations.size ? { harnessInstallations: [...installations.values()].map((entry) => entry.info) } :
+          { harnessInstallations: undefined }),
+      };
+    }
   }
 
   validationError(target: ExecutionTargetRef, useWorktree: boolean, context: AgentContext, agentId: string): string | null {
@@ -242,6 +329,12 @@ export class ContainerTargetRegistry {
     if (!useWorktree || target.workspaceStrategy !== "worktree") return "container targets require an isolated worktree";
     if (context.kind !== "native") return "container targets require a native agent context";
     if (!prepared.config.agentCommands[agentId]) return `container target does not configure agent '${agentId}'`;
+    if (target.harnessInstallationId) {
+      const chosen = prepared.installations?.get(target.harnessInstallationId);
+      if (!chosen || chosen.agentId !== agentId || !chosen.info.available) {
+        return "selected container harness installation is unavailable";
+      }
+    }
     const expected = prepared.definition;
     if (!expected.available || !prepared.runtime) return expected.unavailableReason ?? "container target is unavailable";
     if (target.boundaries.filesystem !== "container" ||
@@ -270,7 +363,13 @@ export class ContainerTargetRegistry {
   ): ContainerSpawnIsolation {
     const prepared = this.prepared.get(target.id);
     if (!prepared?.runtime || !prepared.definition.available) throw new Error("container target is unavailable");
-    const agent = prepared.config.agentCommands[agentId];
+    const selected = target.harnessInstallationId
+      ? prepared.installations?.get(target.harnessInstallationId)
+      : undefined;
+    if (target.harnessInstallationId && (!selected || selected.agentId !== agentId || !selected.info.available)) {
+      throw new Error("selected container harness installation is unavailable");
+    }
+    const agent = selected ?? prepared.config.agentCommands[agentId];
     if (!agent) throw new Error(`container target does not configure agent '${agentId}'`);
     return {
       backend: "container",

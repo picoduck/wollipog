@@ -1237,6 +1237,11 @@ export function createApiClient(transport: ApiTransport) {
       `/api/runners/${encodeURIComponent(runnerId)}/harness-installation`,
       { method: "PUT", body: JSON.stringify({ agentId, installationId }) },
     ),
+  selectTargetHarnessInstallation: (runnerId: string, targetId: string, agentId: string, installationId: string) =>
+    req<{ selection: import("@wollipog/protocol").TargetHarnessInstallationSelection }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/target-harness-installation`,
+      { method: "PUT", body: JSON.stringify({ targetId, agentId, installationId }) },
+    ),
   updateMachineCapacity: (runnerId: string, body: { configuredUnits: number; expectedRevision: number }) =>
     req<{ capacity: import("@wollipog/protocol").RunnerCapacityConfiguration }>(
       `/api/runners/${encodeURIComponent(runnerId)}/capacity`,

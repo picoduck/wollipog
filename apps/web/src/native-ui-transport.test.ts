@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { createNativeUiConnection, type NativeUiChannel, type NativeUiEvent, type NativeUiRuntime } from "./native-ui-transport.js";
 
 function harness(options: { failOpen?: boolean } = {}) {
@@ -37,7 +38,7 @@ test("native UI sockets buffer early events, send only after open, and preserve 
   channels[0]!.onmessage({ type: "close", code: 1008 });
   assert.deepEqual(events, ["open", "world", "close:1008"]);
   assert.deepEqual(calls.map(({ command }) => command), ["remote_ui_open", "remote_ui_send"]);
-  assert.equal(calls[0]?.args?.protocolVersion, 175);
+  assert.equal(calls[0]?.args?.protocolVersion, PROTOCOL_VERSION);
   assert.doesNotMatch(JSON.stringify(calls), /token|https?:\/\//);
 });
 

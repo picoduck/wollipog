@@ -1277,7 +1277,7 @@ app.register(async (instance) => {
         break;
       case "agents_updated":
         if (runnerId === msg.runnerId) {
-          db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors, msg.providerAccounts);
+          db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors, msg.providerAccounts, msg.executionTargets);
           hub.runnerChanged(msg.runnerId);
           // A runner may register with an empty or stale agent list and only discover its
           // harnesses afterward — the registration-time skills_sync then resolved no targets.
@@ -2723,6 +2723,31 @@ app.put("/api/runners/:id/harness-installation", async (req, reply) => {
   }
   const selection = db.selectHarnessInstallation(id, agentId, installationId);
   if (!selection) return reply.code(409).send({ error: "This installation is no longer available for selection" });
+  hub.runnerChanged(id);
+  return { selection };
+});
+
+app.put("/api/runners/:id/target-harness-installation", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  const body = (req.body ?? {}) as { targetId?: unknown; agentId?: unknown; installationId?: unknown };
+  if (typeof body.targetId !== "string" || !body.targetId || body.targetId.length > 512 ||
+      typeof body.agentId !== "string" || !body.agentId || body.agentId.length > 128 ||
+      typeof body.installationId !== "string" || !/^[a-f0-9]{24}$/.test(body.installationId)) {
+    return reply.code(400).send({ error: "Target, agent, and installation must match a discovered candidate" });
+  }
+  const runner = db.getRunner(id);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations")) {
+    return reply.code(409).send({
+      error: runnerCapabilityRequirement(runner.protocolVersion, "targetHarnessInstallations", "Target Harness Installation selection"),
+    });
+  }
+  const selection = db.selectTargetHarnessInstallation(id, body.targetId, body.agentId, body.installationId);
+  if (!selection) return reply.code(409).send({ error: "This target installation is no longer available for selection" });
   hub.runnerChanged(id);
   return { selection };
 });

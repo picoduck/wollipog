@@ -676,6 +676,7 @@ function MachineSettingsDialog({
   const [capacityRevision, setCapacityRevision] = useState(runner?.capacity?.revision ?? 0);
   const [savingCapacity, setSavingCapacity] = useState(false);
   const [harnessSelections, setHarnessSelections] = useState(runner?.harnessSelections ?? []);
+  const [targetHarnessSelections, setTargetHarnessSelections] = useState(runner?.targetHarnessSelections ?? []);
   const [selectingHarness, setSelectingHarness] = useState(false);
   const [automaticAccountSwitching, setAutomaticAccountSwitching] = useState(
     runner?.automaticAccountSwitching?.enabled ?? false,
@@ -703,6 +704,9 @@ function MachineSettingsDialog({
   const capacityValid = Number.isInteger(capacityValue) && capacityValue >= 1 && capacityValue <= 256;
   const installationSupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "harnessInstallations");
   useEffect(() => { setHarnessSelections(runner?.harnessSelections ?? []); }, [runner?.harnessSelections]);
+  useEffect(() => { setTargetHarnessSelections(runner?.targetHarnessSelections ?? []); }, [runner?.targetHarnessSelections]);
+  const targetInstallations = (runner?.executionTargets ?? []).filter((target) =>
+    (target.adapter === "container" || target.adapter === "cloud") && target.harnessInstallations?.length);
   const installations = [...new Map((runner?.agents ?? [])
     .filter((agent) => agent.installation && agent.driver !== "codex")
     .map((agent) => [JSON.stringify([agentContextKey(agent.context), agent.installation!.id]), agent])).values()];
@@ -714,6 +718,21 @@ function MachineSettingsDialog({
       const { selection } = await api.selectHarnessInstallation(runner.runnerId, agentId, installationId);
       setHarnessSelections((current) => [...current.filter((item) =>
         !(item.family === selection.family && agentContextKey(item.context) === agentContextKey(selection.context))), selection]);
+    } catch (cause) {
+      setError(machineSettingsMutationError(cause));
+    } finally {
+      setSelectingHarness(false);
+    }
+  };
+  const chooseTargetInstallation = async (targetId: string, agentId: string, installationId: string) => {
+    if (!runner || selectingHarness || !runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations") ||
+        runner.canManage !== true) return;
+    setSelectingHarness(true);
+    setError(null);
+    try {
+      const { selection } = await api.selectTargetHarnessInstallation(runner.runnerId, targetId, agentId, installationId);
+      setTargetHarnessSelections((current) => [...current.filter((item) =>
+        !(item.targetId === targetId && item.agentId === agentId)), selection]);
     } catch (cause) {
       setError(machineSettingsMutationError(cause));
     } finally {
@@ -899,7 +918,8 @@ function MachineSettingsDialog({
         </dl>
       </section>}
 
-      {!capacityOnly && runner && (installations.length > 0 || harnessSelections.length > 0) && (
+      {!capacityOnly && runner && (installations.length > 0 || harnessSelections.length > 0 ||
+        targetInstallations.length > 0 || targetHarnessSelections.length > 0) && (
         <section className="machine-settings-section">
           <h3>Agent Harness Installations</h3>
           <p>Choose the executable this Machine uses for each harness and execution context. A missing choice stays saved until you select another installation.</p>
@@ -942,6 +962,40 @@ function MachineSettingsDialog({
               <p>Select another discovered installation to restore new sessions.</p>
             </div>
           ))}
+          {targetInstallations.flatMap((target) => (target.harnessInstallations ?? []).map((installation) => {
+            const selected = targetHarnessSelections.find((item) =>
+              item.targetId === target.id && item.agentId === installation.agentId);
+            const isSelected = selected?.installationId === installation.id;
+            const agent = runner.agents.find((candidate) => candidate.id === installation.agentId);
+            return (
+              <div className="machine-harness-installation" key={`${target.id}:${installation.id}`}>
+                <div><strong>{agent ? agentDisplayName(agent) : installation.agentId}</strong>{" · "}{target.name}{" · "}
+                  {target.adapter === "container" ? "Container" : "Cloud"}{" · "}
+                  {installation.version ? `v${installation.version}` : "Version Unknown"}</div>
+                <div><code>{installation.path}</code> · {installation.provenance === "container-image" ? "Container Image" : "Cloud Adapter"}</div>
+                <div>{installation.available ? "Available" : "Unavailable"}{" · "}
+                  {installation.authentication === "unknown" ? "Authentication Unknown" :
+                    installation.authentication === "authenticated" ? "Authenticated" : "Not Authenticated"}{" · "}
+                  {installation.capability === "verified" ? "Capability Verified" : "Capability Unknown"}</div>
+                <button type="button" className="btn sm" disabled={isSelected || !installation.available ||
+                  !runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations") ||
+                  runner.canManage !== true || selectingHarness}
+                  onClick={() => void chooseTargetInstallation(target.id, installation.agentId, installation.id)}>
+                  {isSelected ? "Selected" : "Use This Installation"}
+                </button>
+              </div>
+            );
+          }))}
+          {targetHarnessSelections.filter((selection) => !selection.available).map((selection) => {
+            const agent = runner.agents.find((item) => item.id === selection.agentId);
+            return (
+              <div className="machine-harness-installation" key={`missing:${selection.targetId}:${selection.agentId}`}>
+                <div><strong>{agent ? agentDisplayName(agent) : selection.agentId}</strong> · {selection.targetName} · Unavailable</div>
+                <div><code>{selection.path}</code> · {selection.version ? `v${selection.version}` : "Version Unknown"}</div>
+                <p>Select another discovered installation on this target to restore new sessions.</p>
+              </div>
+            );
+          })}
         </section>
       )}
 

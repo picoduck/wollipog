@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { createBrowserUiConnection, type UiSocket } from "./ui-transport.js";
 
 function inertSocket(): UiSocket {
@@ -32,8 +33,8 @@ test("browser UI connections snapshot a credential into each new socket URL", as
   token = null;
   connection.createSocket();
   assert.deepEqual(urls, [
-    "wss://a.example.test/ui?protocolVersion=175&token=paired+secret",
-    "wss://a.example.test/ui?protocolVersion=175",
+    `wss://a.example.test/ui?protocolVersion=${PROTOCOL_VERSION}&token=paired+secret`,
+    `wss://a.example.test/ui?protocolVersion=${PROTOCOL_VERSION}`,
   ]);
   connection.close();
   await assert.rejects(async () => connection.createSocket(), (error: unknown) =>

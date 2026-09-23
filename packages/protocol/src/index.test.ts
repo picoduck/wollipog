@@ -193,8 +193,8 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 175", () => {
-  assert.equal(PROTOCOL_VERSION, 175);
+test("PROTOCOL_VERSION is 176", () => {
+  assert.equal(PROTOCOL_VERSION, 176);
   assert.equal(runnerSupportsProtocol(174, "harnessInstallations"), false);
   assert.equal(runnerSupportsProtocol(175, "harnessInstallations"), true);
   assert.equal(runnerSupportsProtocol(170, "sessionProviderAccountSwitch"), false);
@@ -283,6 +283,8 @@ test("PROTOCOL_VERSION is 175", () => {
   assert.equal(runnerSupportsProtocol(121, "nativeTuiAccountingDiagnostics"), true);
   assert.equal(runnerSupportsProtocol(124, "wslMachineSkills"), false);
   assert.equal(runnerSupportsProtocol(125, "wslMachineSkills"), true);
+  assert.equal(runnerSupportsProtocol(175, "targetHarnessInstallations"), false);
+  assert.equal(runnerSupportsProtocol(176, "targetHarnessInstallations"), true);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.codexServiceTiers, 126);
   assert.equal(runnerSupportsProtocol(125, "codexServiceTiers"), false);
   assert.equal(runnerSupportsProtocol(126, "codexServiceTiers"), true);

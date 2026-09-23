@@ -113,6 +113,8 @@ export interface RunnerContainerTarget {
   image: string;
   network: "deny" | "bridge";
   agentCommands: Record<string, { command: string; args?: string[] }>;
+  /** Additional operator-authorized launch candidates in the same pinned image. */
+  alternateCommands?: Record<string, Array<{ command: string; args?: string[] }>>;
   setupChecks: RunnerContainerSetupCheck[];
 }
 
@@ -128,6 +130,8 @@ export interface RunnerCloudTarget {
   image: string;
   setupCheckDigest: string;
   agentCommands: Record<string, { command: string; args?: string[] }>;
+  /** Adapter v2 must prove these exact alternatives before they can be selected. */
+  alternateCommands?: Record<string, Array<{ command: string; args?: string[] }>>;
   policy: {
     maxConcurrentSessions: number;
     estimatedHourlyRateUsd: number;
@@ -576,6 +580,34 @@ export function resolveConfig(file: Partial<RunnerConfig>, overrides: Partial<Ru
   };
 }
 
+function validateAlternateTargetCommands(
+  value: Record<string, Array<{ command: string; args?: string[] }>> | undefined,
+  agentIds: string[],
+  targetId: string,
+): Record<string, Array<{ command: string; args: string[] }>> {
+  if (value === undefined) return {};
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.keys(value).length > agentIds.length) {
+    throw new Error(`runner config: target '${targetId}' alternateCommands must map configured agents`);
+  }
+  const result: Record<string, Array<{ command: string; args: string[] }>> = {};
+  let total = 0;
+  for (const [agentId, entries] of Object.entries(value)) {
+    if (!agentIds.includes(agentId) || !Array.isArray(entries) || entries.length > 8 || (total += entries.length) > 32) {
+      throw new Error(`runner config: target '${targetId}' has invalid alternate commands for agent '${agentId}'`);
+    }
+    result[agentId] = entries.map((entry) => {
+      const args = entry?.args ?? [];
+      if (typeof entry?.command !== "string" || !/^\/[A-Za-z0-9_./+-]{1,255}$/.test(entry.command) ||
+          entry.command.split("/").includes("..") || !Array.isArray(args) || args.length > 32 ||
+          args.some((arg) => typeof arg !== "string" || arg.length > 512 || arg.includes("\0"))) {
+        throw new Error(`runner config: target '${targetId}' has an invalid alternate command for agent '${agentId}'`);
+      }
+      return { command: entry.command, args: [...args] };
+    });
+  }
+  return result;
+}
+
 function validateContainerTargets(value: RunnerContainerTarget[]): RunnerContainerTarget[] {
   if (!Array.isArray(value) || value.length > 16) {
     throw new Error("runner config: 'containerTargets' must be an array with at most 16 entries");
@@ -641,7 +673,9 @@ function validateContainerTargets(value: RunnerContainerTarget[]): RunnerContain
       }
       return { name: checkName, command: check.command, args: [...args] };
     });
-    return { id: raw.id, name, revision: raw.revision, runtime: raw.runtime, image: raw.image, network: raw.network, agentCommands, setupChecks };
+    const alternateCommands = validateAlternateTargetCommands(raw.alternateCommands, Object.keys(agentCommands), raw.id);
+    return { id: raw.id, name, revision: raw.revision, runtime: raw.runtime, image: raw.image, network: raw.network,
+      agentCommands, ...(Object.keys(alternateCommands).length ? { alternateCommands } : {}), setupChecks };
   });
 }
 
@@ -720,10 +754,12 @@ function validateCloudTargets(value: RunnerCloudTarget[]): RunnerCloudTarget[] {
     if (policy.minimumBudgetUsd > policy.maximumBudgetUsd) {
       throw new Error(`runner config: cloud target '${raw.id}' minimumBudgetUsd cannot exceed maximumBudgetUsd`);
     }
+    const alternateCommands = validateAlternateTargetCommands(raw.alternateCommands, Object.keys(agentCommands), raw.id);
     return {
       id: raw.id, name, revision: raw.revision, adapterCommand: raw.adapterCommand,
       adapterArgs: [...adapterArgs], adapterEnv, image: raw.image, setupCheckDigest: raw.setupCheckDigest,
       agentCommands,
+      ...(Object.keys(alternateCommands).length ? { alternateCommands } : {}),
       policy: {
         maxConcurrentSessions: policy.maxConcurrentSessions,
         estimatedHourlyRateUsd: policy.estimatedHourlyRateUsd,

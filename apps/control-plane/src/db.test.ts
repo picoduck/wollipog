@@ -9,6 +9,7 @@ import { DatabaseSync } from "node:sqlite";
 import { createHash, randomUUID } from "node:crypto";
 import type {
   AgentDefinition,
+  ExecutionTargetDefinition,
   AutomationSpec,
   PendingApproval,
   RunnerMetadata,
@@ -1928,9 +1929,38 @@ test("Machine installation selection survives PATH reorder and fails closed when
   assert.equal(db.getRunner("runner-1")?.harnessSelections?.[0]?.agentId, null);
   assert.equal(db.getRunner("runner-1")?.harnessSelections?.[0]?.path, "/usr/bin/codex");
   assert.equal(db.getAgentLaunch("runner-1", "codex"), null);
-  db.registerRunner(meta({ agents: reordered }), 800, PROTOCOL_VERSION - 1);
+  db.registerRunner(meta({ agents: reordered }), 800, RUNNER_CAPABILITY_MIN_PROTOCOL.harnessInstallations - 1);
   assert.equal(db.getAgentLaunch("runner-1", "codex-installation-system"), null,
     "an older runner cannot claim to enforce the saved choice");
+});
+
+test("target harness selection is scoped to its exact target and survives unavailable rediscovery", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const makeTarget = (name: string, installationId: string): ExecutionTargetDefinition => ({
+    id: `runner:runner-1:container:${name}`, runnerId: "runner-1", name,
+    kind: "container", adapter: "container", workspaceStrategy: "worktree",
+    boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+    environment: { id: name, revision: 1, image: `example/agent@sha256:${"a".repeat(64)}`,
+      setupCheckDigest: "b".repeat(64) },
+    compatibleAgentIds: ["acp-agent"], available: true,
+    harnessInstallations: [{ agentId: "acp-agent", id: installationId, path: "/usr/bin/agent",
+      version: "1.2.3", provenance: "container-image", authentication: "unknown",
+      capability: "unknown", available: true }],
+  });
+  const alpha = makeTarget("alpha", "a".repeat(24));
+  const beta = makeTarget("beta", "b".repeat(24));
+  db.registerRunner(meta({ executionTargets: [alpha, beta] }), 500, PROTOCOL_VERSION);
+  assert.equal(db.selectTargetHarnessInstallation("runner-1", alpha.id, "acp-agent", "b".repeat(24)), null);
+  assert.equal(db.selectTargetHarnessInstallation("runner-1", alpha.id, "acp-agent", "a".repeat(24))?.available, true);
+  assert.equal(db.getRunner("runner-1")?.targetHarnessSelections?.[0]?.targetId, alpha.id);
+  db.updateRunnerAgents("runner-1", [acpAgent()], 600, undefined, undefined,
+    [{ ...alpha, harnessInstallations: [] }, beta]);
+  assert.equal(db.getRunner("runner-1")?.targetHarnessSelections?.[0]?.available, false);
+  assert.equal(db.getRunner("runner-1")?.targetHarnessSelections?.[0]?.path, "/usr/bin/agent");
+  db.registerRunner(meta({ executionTargets: [alpha, beta] }), 700,
+    RUNNER_CAPABILITY_MIN_PROTOCOL.targetHarnessInstallations - 1);
+  assert.equal(db.getRunner("runner-1")?.targetHarnessSelections?.[0]?.available, false,
+    "an older runner cannot claim to enforce the saved target choice");
 });
 
 test("a configured WSL wrapper is blocked by a selection regardless of context field order", () => {

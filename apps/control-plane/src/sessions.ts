@@ -1032,7 +1032,8 @@ function legacyCodexExecAgentId(agentId: string): string | null {
 /** Preserve the session's persisted driver when discovery reassigns the old `codex` id to app-server. */
 function launchForRestart(db: ControlPlaneDb, session: SessionView): AgentLaunch | null {
   if (!session.agentId) return null;
-  const exact = db.getAgentLaunch(session.runnerId, session.agentId);
+  const targetBound = session.executionTarget !== undefined && session.executionTarget.adapter !== "host";
+  const exact = db.getAgentLaunch(session.runnerId, session.agentId, targetBound);
   if (exact?.driver === session.driver) return exact;
   // Driver changes for ordinary configured agents have always restarted with the runner's
   // current definition. Codex exec is the one exception: discovery deliberately migrated its
@@ -1040,7 +1041,7 @@ function launchForRestart(db: ControlPlaneDb, session: SessionView): AgentLaunch
   if (session.driver !== "codex") return exact;
   const compatibilityId = legacyCodexExecAgentId(session.agentId);
   if (!compatibilityId) return null;
-  const compatibility = db.getAgentLaunch(session.runnerId, compatibilityId);
+  const compatibility = db.getAgentLaunch(session.runnerId, compatibilityId, targetBound);
   return compatibility?.driver === "codex" ? compatibility : null;
 }
 
@@ -3301,7 +3302,10 @@ export class SessionsService {
         (delivery?.sessionId !== undefined && snapshotSpec.sessionId !== delivery.sessionId))) {
       return fail("pre-staged session command snapshot conflicts with its resources", 409);
     }
-    const launch = snapshotSpec ? {
+    const targetBoundLaunch = !snapshotSpec && Boolean(req.executionTargetId &&
+      this.db.getRunner(req.runnerId)?.executionTargets?.some((target) =>
+        target.id === req.executionTargetId && target.adapter !== "host"));
+    let launch = snapshotSpec ? {
       command: snapshotSpec.command,
       args: snapshotSpec.args,
       env: snapshotSpec.env,
@@ -3309,7 +3313,7 @@ export class SessionsService {
       context: snapshotSpec.context ?? { kind: "native" as const },
       version: snapshotSpec.agentVersion,
       capabilities: snapshotSpec.capabilities,
-    } : this.db.getAgentLaunch(req.runnerId, req.agentId);
+    } : this.db.getAgentLaunch(req.runnerId, req.agentId, targetBoundLaunch);
     if (!launch) return fail(`unknown agent '${req.agentId}' on runner '${req.runnerId}'`, 404);
     const launchHarness = agentHarnessIdentityFor({
       id: req.agentId,
@@ -3354,7 +3358,30 @@ export class SessionsService {
       },
     );
     if ("error" in resolvedTarget) return fail(resolvedTarget.error, 400);
-    const executionTarget = executionTargetRef(resolvedTarget.target);
+    const targetSelection = runner.targetHarnessSelections?.find((selection) =>
+      selection.targetId === resolvedTarget.target.id && selection.agentId === req.agentId);
+    const selectedInstallationId = snapshotSpec
+      ? snapshotSpec.executionTarget?.harnessInstallationId
+      : targetSelection?.installationId;
+    if (selectedInstallationId) {
+      if (!runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations")) {
+        return fail("Selected target harness installation requires a newer runner", 409);
+      }
+      const candidate = resolvedTarget.target.harnessInstallations?.find((item) =>
+        item.agentId === req.agentId && item.id === selectedInstallationId && item.available);
+      if (!candidate || (targetSelection && !targetSelection.available && !snapshotSpec)) {
+        return fail("Selected target harness installation is unavailable; choose another installation in Machine settings", 409);
+      }
+    }
+    const executionTarget = {
+      ...executionTargetRef(resolvedTarget.target),
+      ...(selectedInstallationId ? { harnessInstallationId: selectedInstallationId } : {}),
+    };
+    if (executionTarget.adapter !== "host" && selectedInstallationId) {
+      const targetCandidate = resolvedTarget.target.harnessInstallations?.find((item) =>
+        item.agentId === req.agentId && item.id === selectedInstallationId);
+      launch = { ...launch, version: targetCandidate?.version, capabilities: undefined };
+    }
     const useWorktree = resolvedTarget.useWorktree;
     if (req.providerAccountId !== undefined &&
         (typeof req.providerAccountId !== "string" ||
@@ -3485,8 +3512,10 @@ export class SessionsService {
     if (images.length && delivery && !snapshotCommand) {
       return fail("pre-staged session creation cannot carry unexternalized prompt attachments", 409);
     }
-    const agentCapabilities = snapshotSpec?.capabilities ??
-      this.db.getRunner(req.runnerId)?.agents.find((agent) => agent.id === req.agentId)?.capabilities;
+    // A target-local executable has not advertised the host agent's model or permission catalog.
+    // Keep validation honest until that exact target can provide its own capabilities.
+    const agentCapabilities = selectedInstallationId ? undefined :
+      snapshotSpec?.capabilities ?? runner.agents.find((agent) => agent.id === req.agentId)?.capabilities;
     const requestedConfig = { ...(snapshotSpec?.config ?? req.config ?? {}) };
     if (!snapshotSpec) {
       const campaignBehavior = campaignController?.orchestratorPolicy?.behavior;
@@ -5920,6 +5949,18 @@ export class SessionsService {
       relaunchUseWorktree,
     );
     if ("error" in relaunchTarget) return fail(relaunchTarget.error, 409);
+    const selectedTargetInstallationId = relaunchTarget.target?.harnessInstallationId;
+    const restartAgentId = session.agentId;
+    const targetInstallation = selectedTargetInstallationId
+      ? targetRunner.executionTargets?.find((target) => target.id === relaunchTarget.target?.id)
+        ?.harnessInstallations?.find((item) =>
+          item.agentId === restartAgentId && item.id === selectedTargetInstallationId && item.available)
+      : undefined;
+    if (selectedTargetInstallationId && !targetInstallation) {
+      return fail("Selected target harness installation is unavailable; choose another installation in Machine settings", 409);
+    }
+    const launchVersion = selectedTargetInstallationId ? targetInstallation?.version : launch.version;
+    const launchCapabilities = selectedTargetInstallationId ? undefined : launch.capabilities;
     // A runner that predates the independent role would relaunch this Orchestrator as an ordinary
     // session while the control plane still granted it orchestrator routes; refuse instead.
     if (sessionRole(session) === "orchestrator" && !usesOrchestratorPresetPermissions(session)) {
@@ -5999,7 +6040,7 @@ export class SessionsService {
     ) ? resolveEffectiveServiceTier({
         model: session.model ?? undefined,
         serviceTier: session.serviceTier ?? undefined,
-      }, launch.capabilities, launch.driver)
+      }, launchCapabilities, launch.driver)
       : undefined;
     if (serviceTier !== (session.serviceTier ?? undefined)) {
       this.db.updateSessionConfig(sessionId, {
@@ -6018,8 +6059,8 @@ export class SessionsService {
       agentId,
       providerAccountId: session.providerAccountId,
       providerAccountLabel: session.providerAccountLabel,
-      agentVersion: launch.version,
-      capabilities: launch.capabilities,
+      agentVersion: launchVersion,
+      capabilities: launchCapabilities,
       codexExecFallbackReason: codexExecFallbackReason(this.db, session.runnerId, launch),
       title: session.title,
       titleSource: session.titleSource,

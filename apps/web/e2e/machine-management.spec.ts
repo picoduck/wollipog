@@ -116,6 +116,38 @@ test("offline Machines retain last-reported harness status without a fresh relea
   await page.screenshot({ path: "test-results/harness-installations-offline-desktop.png", fullPage: true });
 });
 
+test("Machine settings keep same-name container installations scoped to their targets", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("target-installations"));
+  await page.getByRole("button", { name: "Manage" }).click();
+  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
+  const installationSection = dialog.locator(".machine-settings-section").filter({ hasText: "Agent Harness Installations" });
+  const alpha = dialog.locator(".machine-harness-installation").filter({ hasText: "Alpha Image" });
+  const beta = dialog.locator(".machine-harness-installation").filter({ hasText: "Beta Image" });
+  await expect(alpha).toContainText("/usr/bin/codex");
+  await expect(beta).toContainText("/usr/bin/codex");
+  await expect(alpha.getByRole("button", { name: "Selected" })).toBeVisible();
+  await expect(beta.getByRole("button", { name: "Use This Installation" })).toBeVisible();
+  await installationSection.screenshot({ path: "test-results/target-installations-before-desktop.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installationSection.screenshot({ path: "test-results/target-installations-before-mobile.png" });
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+  await installationSection.screenshot({ path: "test-results/target-installations-before-mobile-light.png" });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await installationSection.screenshot({ path: "test-results/target-installations-before-desktop-light.png" });
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
+  await beta.getByRole("button", { name: "Use This Installation" }).click();
+  await expect(beta.getByRole("button", { name: "Selected" })).toBeVisible();
+  await expect(alpha.getByRole("button", { name: "Selected" })).toBeVisible();
+  await installationSection.screenshot({ path: "test-results/target-installations-after-desktop.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(beta).toBeVisible();
+  await installationSection.screenshot({ path: "test-results/target-installations-after-mobile.png" });
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+  await installationSection.screenshot({ path: "test-results/target-installations-after-mobile-light.png" });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await installationSection.screenshot({ path: "test-results/target-installations-after-desktop-light.png" });
+});
+
 test("Machine cards show account-scoped login status", async ({ page }) => {
   await page.getByText("Accounts", { exact: true }).click();
   const accounts = page.locator("details.runner-agents").filter({ hasText: "Accounts" });

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { createBrowserInstanceRuntime, createNativeInstanceRuntime } from "./instance-runtime.js";
 import type { NativeUiChannel, NativeUiEvent } from "./native-ui-transport.js";
 import type { UiSocket } from "./ui-transport.js";
@@ -46,7 +47,7 @@ test("an instance runtime binds HTTP and WebSocket clients to one identity and c
   assert.equal(runtime.ui.instanceId, "instance-a");
   assert.equal(runtime.publicOrigin, "https://instance-a.example.test");
   assert.deepEqual(requests, ["https://instance-a.example.test/api/identity"]);
-  assert.deepEqual(sockets, ["wss://instance-a.example.test/ui?protocolVersion=175&token=paired-secret"]);
+  assert.deepEqual(sockets, [`wss://instance-a.example.test/ui?protocolVersion=${PROTOCOL_VERSION}&token=paired-secret`]);
 
   runtime.close();
   assert.equal((socket as TrackingSocket).closeCount, 1);
