@@ -7299,7 +7299,9 @@ test("createSession binds a saved target installation and refuses a missing redi
       capability: "unknown" as const, available: true }],
   };
   db.registerRunner({ ...runnerMeta(), agents: runnerMeta().agents.map((agent) =>
-    agent.id === ACP_AGENT_ID ? { ...agent, available: false } : agent),
+    agent.id === ACP_AGENT_ID ? { ...agent, available: false,
+      capabilities: { models: [{ id: "host-only" }], effortLevels: [], slashCommands: [],
+        supportsImages: false, supportsApprovals: false } } : agent),
     executionTargets: [container] }, Date.now(), PROTOCOL_VERSION);
   const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
     agentId: ACP_AGENT_ID, executionTargetId: container.id, useWorktree: true };
@@ -7319,16 +7321,29 @@ test("createSession binds a saved target installation and refuses a missing redi
   assert.ok(recovered.ok, recovered.error);
   assert.equal(db.getSession(recovered.data!.id)?.executionTarget?.harnessInstallationId, undefined,
     "a later Machine selection must not rewrite a pre-staged exact launch");
-  const created = svc.createSession(request);
+  const created = svc.createSession({ ...request, config: { model: "target-model" } });
   assert.ok(created.ok, created.error);
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.executionTarget?.harnessInstallationId, installationId);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.config.model, "target-model",
+    "host-only model discovery must not reject a target-local executable");
   assert.equal(db.getSession(created.data!.id)?.executionTarget?.harnessInstallationId, installationId);
+  const restarted = svc.restart(created.data!.id);
+  assert.ok(restarted.ok, restarted.error);
+  const restartedSpec = hub.sentOfType("start_session").at(-1)!.spec;
+  assert.equal(restartedSpec.executionTarget?.harnessInstallationId, installationId,
+    "restart keeps the immutable target choice even when the host agent is unavailable");
+  assert.equal(restartedSpec.agentVersion, "1.2.3");
+  assert.equal(restartedSpec.capabilities, undefined,
+    "restart does not claim host capabilities for the selected target executable");
   db.updateRunnerAgents(RUNNER_ID, runnerMeta().agents, Date.now(), undefined, undefined,
     [{ ...container, harnessInstallations: [] }]);
   const missing = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
     agentId: ACP_AGENT_ID, executionTargetId: container.id, useWorktree: true });
   assert.equal(missing.ok, false);
   assert.match(missing.error ?? "", /Selected target harness installation is unavailable/);
+  const missingRestart = svc.restart(created.data!.id);
+  assert.equal(missingRestart.status, 409);
+  assert.match(missingRestart.error ?? "", /Selected target harness installation is unavailable/);
 });
 
 const hostTargetId = (strategy: "in_place" | "worktree"): string =>
