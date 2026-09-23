@@ -4424,6 +4424,12 @@ export class SessionManager {
           : this.providerAuthenticationOwner(block.credentialScopeId)?.sessionId === m.sessionId
             ? this.providerAuthenticationProjection(reconciled, block)
             : null;
+        // A retained campaign turn can coexist with several async questions. Keep all of their
+        // exact occurrences when rebuilding the authentication card after a runner restart.
+        const retainedQuestions = block.durableRetries?.some((retry) => retry.campaignContinuation)
+          ? pendingAsyncQuestions(reconciled.pendingApproval) : null;
+        const projectedApproval = projection
+          ? addPendingRequest(retainedQuestions, projection) : retainedQuestions;
         const missingRecoveryRequest = !!block.resolution && !!projection &&
           !this.store.readEvents(m.sessionId).some((event) =>
             event.payload.kind === "permission_request" && event.payload.requestId === projection.requestId);
@@ -4444,7 +4450,7 @@ export class SessionManager {
           this.store.patchMeta(m.sessionId, {
             providerAuthBlock: block,
             status: projection ? "input_required" : "idle",
-            pendingApproval: projection,
+            pendingApproval: projectedApproval,
           });
         }
       } else if (reconciled.worktreeRecovery && !terminal) {

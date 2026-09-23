@@ -894,6 +894,9 @@ test("a campaign continuation retained for authentication keeps its async questi
     const retained = store.readMeta("s_perm")!.providerAuthBlock!.durableRetries![0]!;
     assert.equal(retained.campaignContinuation, true);
     assert.equal(eventsOf(sent, "user_message").length, 0);
+    sm.reconcileStore();
+    assert.deepEqual(pendingRequests(store.readMeta("s_perm")?.pendingApproval)
+      .map((request) => request.recoveryId).filter(Boolean), [occurrence, secondOccurrence]);
     store.patchMeta("s_perm", {
       providerAuthBlock: { ...store.readMeta("s_perm")!.providerAuthBlock!, resolution: "approved" },
     });
