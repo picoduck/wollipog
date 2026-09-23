@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import test from "node:test";
 import type { ExecutionTargetRef } from "@wollipog/protocol";
 import type { RunnerContainerTarget } from "./config.js";
@@ -71,6 +72,55 @@ test("digest-pinned templates pass argv-native checks and produce an exact immut
   assert.deepEqual(isolation.hostAgentArgs, ["--host-only"]);
   assert.match(isolation.runnerKey, /^[a-f0-9]{20}$/);
   assert.match(isolation.containerName, /^wollipog-[a-f0-9]{24}$/);
+});
+
+test("setup checks launch the runtime without inherited host values or credential configuration", {
+  skip: process.platform === "win32",
+}, async () => {
+  const marker = "WOLLIPOG_SETUP_CHECK_TEST_CREDENTIAL";
+  const innocuous = "WOLLIPOG_SETUP_CHECK_TEST_VALUE";
+  const previousMarker = process.env[marker];
+  const previousInnocuous = process.env[innocuous];
+  process.env[marker] = "synthetic-fixture-only";
+  process.env[innocuous] = "also-synthetic";
+  const script = `
+    if [ "$1" = run ]; then
+      shift
+      while [ "$#" -gt 0 ]; do
+        if [ "$1" = --entrypoint ] && [ "$2" = git ]; then
+          [ -z "\${WOLLIPOG_SETUP_CHECK_TEST_CREDENTIAL+x}" ] || exit 7
+          [ -z "\${WOLLIPOG_SETUP_CHECK_TEST_VALUE+x}" ] || exit 7
+          [ "$HOME" = "$DOCKER_CONFIG" ] && [ "$HOME" = "$XDG_CONFIG_HOME" ] || exit 8
+          printf CHECK_OK
+          exit 0
+        fi
+        shift
+      done
+      exit 1
+    fi
+  `;
+  try {
+    let checkOutput = "";
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => ({ path: "/bin/sh", via: "path", launch: {
+        command: "/bin/sh", args: ["-c", script, "runtime"],
+      } }),
+      run: async (file, args, opts) => {
+        const { run } = await import("./discovery/resolve.js");
+        const result = await run(file, args, opts);
+        if (args.includes("git")) checkOutput = result.stdout;
+        return result;
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(checkOutput, "CHECK_OK");
+  } finally {
+    if (previousMarker === undefined) delete process.env[marker];
+    else process.env[marker] = previousMarker;
+    if (previousInnocuous === undefined) delete process.env[innocuous];
+    else process.env[innocuous] = previousInnocuous;
+  }
 });
 
 test("container installations stay target-bound, deduplicate aliases, and fail closed after rediscovery", async () => {
@@ -261,19 +311,30 @@ test("missing runtimes and failed checks stay visible but unavailable without fa
 
   let call = 0;
   const failedCalls: string[][] = [];
+  let setupHome = "";
   const failed = new ContainerTargetRegistry("r", "host", [template], {
     resolveRuntime: async () => runtime(),
-    run: async (_file, args) => {
+    run: async (_file, args, opts) => {
       failedCalls.push(args);
       call += 1;
+      if (args[0] === "run" || args[0] === "rm") {
+        assert.equal(opts.replaceEnv, true);
+        assert.deepEqual(Object.keys(opts.env ?? {}).sort(),
+          process.platform === "win32"
+            ? ["DOCKER_CONFIG", "HOME", "PATH", "SystemRoot", "XDG_CONFIG_HOME"].sort()
+            : ["DOCKER_CONFIG", "HOME", "PATH", "XDG_CONFIG_HOME"].sort());
+        setupHome = opts.env!.HOME!;
+      }
       return args[0] === "run"
-        ? { code: 1, stdout: "", stderr: "missing git" }
+        ? { code: 1, stdout: "", stderr: "fixture-sensitive-check-output" }
         : { code: 0, stdout: "", stderr: "" };
     },
   });
   await failed.initialize();
   assert.equal(failed.definitions()[0]!.available, false);
-  assert.match(failed.definitions()[0]!.unavailableReason!, /setup check 'git'.*missing git/);
+  assert.equal(failed.definitions()[0]!.unavailableReason, "setup check 'git' failed");
+  assert.doesNotMatch(JSON.stringify(failed.definitions()), /fixture-sensitive-check-output/);
+  assert.equal(existsSync(setupHome), false);
   assert.equal(call, 5);
   assert.deepEqual(failedCalls[4]?.slice(0, 2), ["rm", "-f"]);
   assert.match(failedCalls[4]?.[2] ?? "", /^wollipog-check-[a-f0-9]{20}-[a-f0-9]{16}$/);

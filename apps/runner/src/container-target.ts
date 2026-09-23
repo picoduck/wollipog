@@ -1,4 +1,7 @@
 import { createHash } from "node:crypto";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { AgentContext, ExecutionTargetDefinition, ExecutionTargetRef, TargetHarnessInstallation } from "@wollipog/protocol";
 import type { RunnerContainerTarget } from "./config.js";
 import {
@@ -80,6 +83,17 @@ function candidateCommands(template: RunnerContainerTarget): Array<{ agentId: st
 function unavailableReason(text: string): string {
   const normalized = text.replace(/\s+/g, " ").trim();
   return (normalized || "container environment check failed").slice(0, 300);
+}
+
+/** The runtime client may read credential files through HOME or its config directory. */
+function setupCheckRuntimeEnvironment(home: string): Record<string, string> {
+  return {
+    PATH: process.platform === "win32" ? `${process.env.SystemRoot ?? "C:\\Windows"}\\System32` : "/usr/local/bin:/usr/bin:/bin",
+    HOME: home,
+    DOCKER_CONFIG: home,
+    XDG_CONFIG_HOME: home,
+    ...(process.platform === "win32" ? { SystemRoot: process.env.SystemRoot ?? "C:\\Windows" } : {}),
+  };
 }
 
 function setupCheckArgs(
@@ -297,16 +311,23 @@ export class ContainerTargetRegistry {
       }
       let failed: string | null = null;
       for (const check of template.setupChecks) {
-        const result = await this.deps.run(runtime.launch.command, [...prefix, ...setupCheckArgs(template, check, this.runnerKey)], { timeoutMs: 30_000 });
-        if (result.code !== 0) {
-          // `execFile` timeouts can kill the attached client before --rm finishes. The stable
-          // name makes cleanup exact; a normal nonzero exit already removed it, so rm failure is
-          // intentionally ignored and the next startup still has runner-label reconciliation.
-          await this.deps.run(runtime.launch.command, [
-            ...prefix, "rm", "-f", setupCheckContainerName(template, check, this.runnerKey),
-          ], { timeoutMs: 15_000 });
-          failed = `setup check '${check.name}' failed: ${unavailableReason(result.stderr || result.stdout)}`;
-          break;
+        const home = await mkdtemp(join(tmpdir(), "wollipog-container-check-"));
+        try {
+          const opts = { env: setupCheckRuntimeEnvironment(home), replaceEnv: true };
+          const result = await this.deps.run(runtime.launch.command,
+            [...prefix, ...setupCheckArgs(template, check, this.runnerKey)], { ...opts, timeoutMs: 30_000 });
+          if (result.code !== 0 || result.timedOut || result.errorCode) {
+            // A timed-out client can leave a container behind. Use the same clean environment
+            // for removal and let startup reconciliation handle a failed removal.
+            await this.deps.run(runtime.launch.command, [
+              ...prefix, "rm", "-f", setupCheckContainerName(template, check, this.runnerKey),
+            ], { ...opts, timeoutMs: 15_000 });
+            // Command output may contain values from the image. It is never a safe diagnostic.
+            failed = `setup check '${check.name}' failed`;
+            break;
+          }
+        } finally {
+          await rm(home, { recursive: true, force: true });
         }
       }
       const installations = failed ? new Map() : await this.discoverInstallations(template, runtime, id);

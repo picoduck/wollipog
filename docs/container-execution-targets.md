@@ -76,6 +76,11 @@ Before its first control-plane registration, the runner:
 4. runs every setup check in the pinned image with no network, a read-only root, all capabilities
    dropped, `no-new-privileges`, a PID limit, and private `/tmp` tmpfs.
 
+Setup checks launch the runtime client with an explicit minimal environment and an empty temporary
+home/config directory. Host credentials and runtime configuration are not inherited, and check
+output is never included in an unavailable reason. A runtime that needs a host credential or
+custom host configuration for these checks fails closed.
+
 The environment reference contains the template id/revision, image digest, and a SHA-256 digest over
 the revision, image, sorted agent-command map, and ordered checks. Check output is not provenance and
 is not sent to the control plane. A missing runtime/image, failed check, failed orphan cleanup, or
