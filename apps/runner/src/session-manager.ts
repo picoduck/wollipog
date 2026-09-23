@@ -393,6 +393,8 @@ interface QueuedPrompt {
   sessionId?: string;
   /** Runner-owned continuation used only to consume orphaned Claude task notifications. */
   syntheticRecovery?: boolean;
+  /** Control-plane-authenticated automatic campaign turn, distinct from a human prompt. */
+  campaignContinuation?: boolean;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
   backgroundJobIds?: string[];
   /** Submit-only continuation for a lost callback or an async question answered in a later turn. */
@@ -4207,7 +4209,12 @@ export class SessionManager {
           };
         }
         if (payload.kind === "user_message") {
-          return { scanned: true, question: null, resolvedQuestionIds: resolved };
+          if (!payload.campaignContinuation) {
+            return { scanned: true, question: null, resolvedQuestionIds: resolved };
+          }
+          // Automatic campaign work can follow an unanswered async question. Older blocking
+          // callbacks are still superseded by this later provider activity.
+          laterAgentActivity = true;
         }
         if (payload.kind === "permission_request") laterPermissionRequest = true;
         if (payload.kind === "agent_message" || payload.kind === "agent_thought" ||
@@ -7794,6 +7801,7 @@ export class SessionManager {
     backgroundJobIds?: string[],
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
     queuedPromptId?: string,
+    campaignContinuation = false,
   ): boolean {
     if (durable && this.store.readEvents(sessionId).some((event) =>
       recoveredQuestion
@@ -7953,6 +7961,7 @@ export class SessionManager {
         images,
         slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
+        campaignContinuation,
       });
       if (!this.recoveryLaunching.has(sessionId)) {
         setImmediate(() => void this.recoverQueuedAppServer(sessionId).catch((error) =>
@@ -7975,6 +7984,7 @@ export class SessionManager {
         id: queuedPromptId ?? durable?.commandId ?? randomUUID(),
         ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId), text, images, slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
+        campaignContinuation,
       });
       this.preLaunchQueues.set(sessionId, queue);
       this.emitQueue(sessionId);
@@ -7996,6 +8006,7 @@ export class SessionManager {
         backgroundJobIds,
         recoveredQuestion,
         queuedPromptId,
+        campaignContinuation,
       ).catch((error) => {
         // resumeAndPrompt handles EXPECTED failures internally (durable.failed / error events). An
         // UNEXPECTED throw (e.g. a JSON.stringify RangeError writing a pathological config) escapes
@@ -8039,6 +8050,7 @@ export class SessionManager {
       images,
       slashCommand,
       config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
+      campaignContinuation,
     });
     this.emitQueue(sessionId);
     this.scheduleDrain(sessionId);
@@ -9469,6 +9481,7 @@ export class SessionManager {
     backgroundJobIds?: string[],
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
     queuedPromptId?: string,
+    campaignContinuation = false,
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
@@ -9626,6 +9639,7 @@ export class SessionManager {
         syntheticRecovery,
         backgroundJobIds,
         recoveredQuestion,
+        campaignContinuation,
       });
       this.preLaunchQueues.set(sessionId, queue);
     }
@@ -9782,6 +9796,7 @@ export class SessionManager {
         backgroundJobIds,
         recoveredQuestion,
         queuedPromptId,
+        campaignContinuation,
       );
     }
   }
@@ -10901,6 +10916,7 @@ export class SessionManager {
       syntheticRecovery,
       backgroundJobIds,
       recoveredQuestion,
+      campaignContinuation,
     } = queued;
     const rearmUnsubmittedRecovery = (delay = 0) => {
       if (!syntheticRecovery || this.active.get(sessionId) !== entry) return;
@@ -11028,6 +11044,7 @@ export class SessionManager {
           kind: "user_message",
           text: displayText,
           images: imageInputs.length ? imageInputs : undefined,
+          ...(campaignContinuation ? { campaignContinuation: true as const } : {}),
           ...(durable ? { commandId: durable.commandId } : {}),
           turnId: queued.id,
         }, durable);
@@ -11256,6 +11273,15 @@ export class SessionManager {
       if (!this.active.has(sessionId)) {
         durable?.uncertain("session stopped while provider execution was in progress");
         return;
+      }
+      if (stop === "refusal" && recoveredQuestion?.pendingQuestion.async) {
+        // The accepted answer turn could not be delivered. Correct its provisional history
+        // resolution so the original question is visibly replaced and cannot be resubmitted.
+        this.emitEvent(sessionId, {
+          kind: "question_resolved", requestId: recoveredQuestion.requestId,
+          occurrenceId: recoveredQuestion.recoveryId,
+          answered: false, resolutionReason: "replaced",
+        });
       }
       const postTurnTree = await this.captureDiff(sessionId);
       if (entry.historyIntegrityFailure) return;
@@ -14071,12 +14097,16 @@ export class SessionManager {
       return undefined;
     }
     if (payload.kind === "user_message") {
-      for (const old of pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)) {
-        if (old.async && !this.queuedAsyncAnswer(sessionId, old)) this.emitEvent(sessionId, {
-          kind: "question_resolved", requestId: old.requestId,
-          ...(old.occurrenceId ? { occurrenceId: old.occurrenceId } : {}),
-          answered: false, resolutionReason: "replaced",
-        });
+      const meta = this.store.readMeta(sessionId);
+      for (const old of pendingRequests(meta?.pendingApproval)) {
+        if (old.async && !this.queuedAsyncAnswer(sessionId, old) &&
+            (!payload.campaignContinuation || !meta || !canResumeRecoveredQuestion(meta, old))) {
+          this.emitEvent(sessionId, {
+            kind: "question_resolved", requestId: old.requestId,
+            ...(old.occurrenceId ? { occurrenceId: old.occurrenceId } : {}),
+            answered: false, resolutionReason: "replaced",
+          });
+        }
       }
     }
     try {
