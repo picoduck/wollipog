@@ -22,6 +22,21 @@ test("npm update comparison distinguishes newer, current, preview, and failed ch
   assert.doesNotMatch(classifyNpmHarnessUpdate("0.199.0", tags, "@openai/codex", 1).guidance, /original npm|belongs to/i);
 });
 
+test("failed release checks direct rediscovery of the same installation", () => {
+  const failedResults = [
+    result("", 1),
+    { ...result(""), timedOut: true },
+    result("not JSON"),
+    result(JSON.stringify({ next: "0.211.0-beta.1" })),
+  ];
+  for (const failedResult of failedResults) {
+    const assessment = classifyNpmHarnessUpdate("0.199.0", failedResult, "@openai/codex", 1);
+    assert.equal(assessment.status, "check_failed");
+    assert.match(assessment.guidance, /select Rediscover for this Machine in Connections to recheck this installation/);
+    assert.doesNotMatch(assessment.guidance, /update|upgrade/i);
+  }
+});
+
 test("an executable is npm-owned only when its exact launch resolves inside the matching package", () => {
   assert.equal(npmPackageForInstallation("codex", {
     path: "/home/u/.nvm/versions/node/v24/bin/codex", via: "version-manager",

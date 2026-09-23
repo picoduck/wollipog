@@ -77,6 +77,14 @@ test("Machine and Connections explain pinned, suppressed, failed, and unavailabl
   await expect(installation("Claude\\claude.exe")).toContainText("whether manual upgrades are permitted");
   await expect(installation("Pi\\pi.exe")).toContainText("Check Failed");
   await expect(installation("Pi\\pi.exe")).toContainText("no current release status was established");
+  await installation("Pi\\pi.exe").scrollIntoViewIfNeeded();
+  await installation("Pi\\pi.exe").screenshot({ path: "test-results/failed-harness-check-desktop.png" });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await installation("Pi\\pi.exe").screenshot({ path: "test-results/failed-harness-check-mobile.png" });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await expect(installation("Pi\\pi.exe")).toContainText(
+    "select Rediscover for this Machine in Connections to recheck this installation",
+  );
   await expect(installation("Legacy Tools")).toContainText("Unavailable");
   await expect(installation("Legacy Tools")).toContainText("older than the verified app-server floor");
   await expect(installation("Legacy Tools")).toContainText("New Release Published");

@@ -500,7 +500,7 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
           available: true, version: "0.8.0", installation: { id: "failed", path: "C:\\Tools\\Pi\\pi.exe", via: "path" },
           update: { status: "check_failed", installedVersion: "0.8.0", checkedAt: Date.UTC(2026, 8, 22),
             channel: "stable", evidenceSource: "npm dist-tags for @earendil-works/pi-coding-agent", managedExternally: true,
-            guidance: "The release check could not complete, so no current release status was established. The Machine may be offline, behind a proxy, or rate limited; retry the check after connectivity returns." },
+            guidance: "The release check could not complete, so no current release status was established. The Machine may be offline, behind a proxy, or rate limited. After resolving the problem, select Rediscover for this Machine in Connections to recheck this installation." },
         },
         legacyCodex,
         { ...legacyCodex, id: "legacy-codex-exec", name: "Legacy Codex (Non-Interactive)", driver: "codex", available: true },
