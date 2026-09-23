@@ -4436,6 +4436,11 @@ export class SessionManager {
           this.store.patchMeta(m.sessionId, { indexReset: true });
         });
       }
+      if (m.status === "failed" && (m.worktreePath || m.worktrees?.length)) {
+        void this.reconcileFailedWorktreeRecovery(m.sessionId).catch((error) => {
+          this.log(`failed worktree recovery reconciliation failed for ${boundedSessionIdForLog(m.sessionId)}: ${errText(error)}`);
+        });
+      }
     }
     // Register every known-session namespace synchronization before replaying cleanup records.
     // Otherwise a reaper invoked at the top of this method could capture an empty promise slot,
@@ -5147,6 +5152,7 @@ export class SessionManager {
       repoPath,
       worktreePath: null,
       worktreeBranch: priorMatchesWorkspace ? prior?.worktreeBranch : undefined,
+      worktreeRecovery: priorMatchesWorkspace ? prior?.worktreeRecovery : undefined,
       worktrees: priorMatchesWorkspace ? prior?.worktrees : undefined,
       worktreeHooks: priorMatchesWorkspace ? prior?.worktreeHooks : undefined,
       worktreeProcessMarkers: priorMatchesWorkspace ? prior?.worktreeProcessMarkers : undefined,
@@ -5514,6 +5520,27 @@ export class SessionManager {
         }
       } catch (err) {
         if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
+        const selected = prior?.repoPath === repoPath &&
+          agentContextKey(prior.context) === agentContextKey(context) && prior.worktreePath
+          ? prior.worktreePath : null;
+        if (selected) {
+          const failure = await this.persistedWorktreeFailure(prior!, selected, prior!.worktreeBranch);
+          if (failure && this.launchIsCurrent(spec.sessionId, launchGeneration)) {
+            const latest = this.store.readMeta(spec.sessionId);
+            if (latest && !latest.worktreePath && latest.worktreeBranch === prior!.worktreeBranch) {
+              const retained = this.store.patchMeta(spec.sessionId, {
+                worktreePath: selected,
+                worktreeBranch: prior!.worktreeBranch,
+                worktreePending: false,
+              });
+              if (retained) this.recordWorktreeRecovery(retained, selected, failure, "during restart preparation");
+              if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
+              this.releaseAdmissionIfInactive(spec.sessionId);
+              durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
+              return false;
+            }
+          }
+        }
         this.emitEvent(spec.sessionId, {
           kind: "error",
           message: `worktree isolation failed: ${errText(err)}`,
@@ -6561,6 +6588,66 @@ export class SessionManager {
     }
   }
 
+  /** Upgrade rows that failed on an older runner before it knew how to publish recovery. A
+   * failed status alone is insufficient evidence; Git must prove the retained selection invalid. */
+  private async reconcileFailedWorktreeRecovery(sessionId: string): Promise<void> {
+    const original = this.store.readMeta(sessionId);
+    if (!original || original.status !== "failed" || this.active.has(sessionId)) return;
+    // Older restart preparation cleared worktreePath before trying to reattach. Recover its
+    // selection only when the retained inventory and branch identify exactly one candidate.
+    const candidates = original.worktreePath ? [] : (original.worktrees ?? []).filter((item) =>
+      !original.worktreeBranch || item.branch === original.worktreeBranch);
+    const path = original.worktreePath ?? (candidates.length === 1 ? candidates[0]!.path : null);
+    if (!path) return;
+    const branch = original.worktreeBranch ?? candidates[0]?.branch;
+    const failure = await this.persistedWorktreeFailure(original, path, branch);
+    if (!failure) return;
+    const latest = this.store.readMeta(sessionId);
+    if (!latest || latest.status !== "failed" || this.active.has(sessionId) ||
+        latest.worktreePath !== original.worktreePath ||
+        (!original.worktreePath && !(latest.worktrees ?? []).some((item) =>
+          sameWorktreePath(latest.context, item.path, path))) ||
+        latest.worktreeBranch !== original.worktreeBranch) return;
+    const retained = latest.worktreePath ? latest : this.store.patchMeta(sessionId, {
+      worktreePath: path, worktreeBranch: branch,
+    });
+    if (retained) this.recordWorktreeRecovery(retained, path, failure, "after runner restart");
+  }
+
+  /** Publish one durable incident for a verified-invalid selection, regardless of which boundary
+   * discovered it. The path and branch guard prevents a slow Git proof from parking a replacement. */
+  private recordWorktreeRecovery(
+    meta: SessionMeta,
+    path: string,
+    detail: string,
+    phase: string,
+  ): boolean {
+    const latest = this.store.readMeta(meta.sessionId);
+    if (!latest || latest.status === "stopped" || !latest.worktreePath ||
+        !sameWorktreePath(latest.context, latest.worktreePath, path) ||
+        latest.worktreeBranch !== meta.worktreeBranch || !this.sessionCanOpen(meta.sessionId)) return false;
+    const branch = this.expectedWorktreeBranch(latest, path, latest.worktreeBranch);
+    const message = `the selected worktree could not be verified ${phase}: ${detail}` +
+      ` — restore ${path} or select another worktree for this session`;
+    const existing = latest.worktreeRecovery;
+    const sameIncident = existing !== undefined &&
+      sameWorktreePath(latest.context, existing.selectedPath, path) && existing.expectedBranch === branch;
+    const recovery = sameIncident
+      ? { ...existing, detail: message.slice(0, 4_096) }
+      : {
+          recoveryId: `worktree-recovery:${randomUUID()}`,
+          detectedAt: Date.now(),
+          selectedPath: path,
+          expectedBranch: branch,
+          detail: message.slice(0, 4_096),
+        };
+    const updated = this.store.patchMeta(meta.sessionId, { worktreeRecovery: recovery });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    if (!sameIncident) this.emitEvent(meta.sessionId, { kind: "error", message });
+    this.emitStatus(meta.sessionId, "input_required", message);
+    return true;
+  }
+
   /** The identity a session recorded for the worktree at `path`, or the one its layout implies when
    * the row predates `worktreeBranch`. Shared so every caller refuses the same drift. */
   private expectedWorktreeBranch(meta: SessionMeta, path: string, branch: string | undefined): string {
@@ -6673,33 +6760,7 @@ export class SessionManager {
     // still the live one, exactly as the rest of the launch path does after every await.
     if (!this.launchIsCurrent(meta.sessionId, launchGeneration) ||
         this.store.readMeta(meta.sessionId)?.status === "stopped") return false;
-    const message = `the selected worktree could not be verified before provider launch: ${detail}` +
-      ` — restore ${worktree.path} or select another worktree for this session`;
-    // The status and transcript keep their independently bounded actionable text, but the durable
-    // recovery projection has a 4 KiB validation limit. A near-PATH_MAX coordinate must not make
-    // the control plane discard the whole recovery record and accidentally re-enable Retry.
-    const recoveryDetail = message.slice(0, 4_096);
-    const latest = this.store.readMeta(meta.sessionId);
-    if (!latest || latest.status === "stopped") return false;
-    const existingRecovery = latest.worktreeRecovery;
-    const sameIncident = existingRecovery !== undefined &&
-      sameWorktreePath(latest.context, existingRecovery.selectedPath, worktree.path) &&
-      existingRecovery.expectedBranch === worktree.branch;
-    const recovery = sameIncident
-      ? { ...existingRecovery, detail: recoveryDetail }
-      : {
-          recoveryId: `worktree-recovery:${randomUUID()}`,
-          detectedAt: Date.now(),
-          selectedPath: worktree.path,
-          expectedBranch: worktree.branch,
-          detail: recoveryDetail,
-        };
-    const updated = this.store.patchMeta(meta.sessionId, { worktreeRecovery: recovery });
-    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
-    // One durable runner event owns the transcript card. Reconnects and duplicate launch attempts
-    // reuse the same incident without appending another event, while the status remains actionable.
-    if (!sameIncident) this.emitEvent(meta.sessionId, { kind: "error", message });
-    this.emitStatus(meta.sessionId, "input_required", message);
+    this.recordWorktreeRecovery(meta, worktree.path, detail, "before provider launch");
     return false;
   }
 
@@ -10806,6 +10867,28 @@ export class SessionManager {
       durable?.failed("session stopped while prompt images were materialized", "SESSION_NOT_FOUND");
       return;
     }
+    if (entry.worktree) {
+      const selected = this.store.readMeta(sessionId);
+      if (!selected) {
+        durable?.failed("session disappeared before provider submission", "SESSION_NOT_FOUND");
+        return;
+      }
+      const failure = await this.persistedWorktreeFailure(
+        selected, entry.worktree.path, selected.worktreeBranch,
+      );
+      if (this.active.get(sessionId) !== entry) {
+        durable?.failed("session stopped before provider submission", "COMMAND_CANCELLED");
+        return;
+      }
+      if (failure) {
+        if (this.recordWorktreeRecovery(selected, entry.worktree.path, failure, "before a live turn")) {
+          durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
+        } else {
+          durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
+        }
+        return;
+      }
+    }
     // The runner (the box) is the source of truth for ALL events including the user's prompt, so it
     // lands in the store + every dashboard's timeline. The control plane no longer appends it.
     const displayText = slashCommand ? `/${slashCommand}${text ? ` ${text}` : ""}`.trim() : text;
@@ -10906,6 +10989,27 @@ export class SessionManager {
     if (this.active.get(sessionId) !== entry) {
       durable?.uncertain("session stopped after the durable user event was recorded");
       return;
+    }
+    // Snapshot and checkpoint work above can take time. Re-prove the path at the last awaited
+    // boundary before provider submission so a tree removed during that work is still Not Sent.
+    if (entry.worktree) {
+      const selected = this.store.readMeta(sessionId);
+      const failure = selected ? await this.persistedWorktreeFailure(
+        selected, entry.worktree.path, selected.worktreeBranch,
+      ) : "session disappeared";
+      if (this.active.get(sessionId) !== entry) {
+        durable?.uncertain("session stopped after the durable user event was recorded");
+        return;
+      }
+      if (failure && !entry.cancelRequested && !entry.interruptRequested &&
+          !entry.historyIntegrityFailure) {
+        if (selected && this.recordWorktreeRecovery(selected, entry.worktree.path, failure, "before provider submission")) {
+          durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
+        } else {
+          durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
+        }
+        return;
+      }
     }
     if (entry.historyIntegrityFailure) return;
     if (entry.cancelRequested) {
