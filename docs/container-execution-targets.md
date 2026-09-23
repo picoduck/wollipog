@@ -48,9 +48,16 @@ executable with `--version` through the same boundary. Entries with the same res
 and base args are deduplicated within that target. The target id is part of each opaque installation
 id, so matching paths in two images cannot substitute for each other. A candidate that cannot be
 resolved or version-probed is not selectable; ordinary legacy target launches keep their configured
-primary command. Authentication and detailed capabilities are reported as unknown because the
-secret-free probe cannot prove them. Machine settings retain an explicit selection if rediscovery
-loses it; new launches fail until another candidate is selected. Probe containers carry runner labels
+primary command. For known Claude Code and Codex agents, the runner also executes read-only,
+non-interactive status and help commands through that same absolute executable in the pinned image.
+The probes have no workspace mount, network, injected host environment, or interactive stdin; each
+has a five-second deadline and 64 KiB output limit. Provider-native results can establish local
+authentication readiness or a specific help contract, and Machine settings show the probe method.
+An unsupported, ambiguous, timed-out, or generic agent probe stays `unknown`. Configured arguments
+that can change provider settings also suppress the status claim. A local status check does not
+guarantee that credentials will remain valid when a later session contacts the provider. Machine
+settings retain an explicit selection if rediscovery loses it; new launches fail until another
+candidate is selected. Probe containers carry runner labels
 and deterministic names so a timed-out probe can be forcibly removed and startup reconciliation can
 find any survivor.
 

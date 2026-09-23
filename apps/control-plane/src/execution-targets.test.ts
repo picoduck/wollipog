@@ -85,6 +85,48 @@ test("validates runner-owned container templates and resolves only compatible ag
   }]), /boundary claims/);
 });
 
+test("target probe claims require matching target-local evidence and never trust cloud v2 status", () => {
+  const common = {
+    id: "runner:dev%20box%2F1:container:tools", runnerId: "dev box/1", name: "builder · Tools",
+    kind: "container" as const, workspaceStrategy: "worktree" as const, adapter: "container" as const,
+    boundaries: { filesystem: "container" as const, network: "deny" as const,
+      secrets: "none" as const, billing: "none" as const },
+    environment: { id: "tools", revision: 1, image: `example/agent@sha256:${"e".repeat(64)}`,
+      setupCheckDigest: "f".repeat(64) },
+    compatibleAgentIds: ["codex"], available: true,
+  };
+  const candidate = { agentId: "codex", id: "a".repeat(24), path: "/usr/bin/codex", version: "0.154.0",
+    provenance: "container-image" as const, authentication: "authenticated" as const,
+    authenticationEvidence: "codex-login-status" as const, capability: "verified" as const,
+    capabilityEvidence: "codex-app-server-help" as const, available: true };
+  const installed = validateRunnerContainerTargets("dev box/1", [{ ...common,
+    harnessInstallations: [candidate] }])[0]!.harnessInstallations![0]!;
+  assert.equal(installed.authentication, "authenticated");
+  assert.equal(installed.capability, "verified");
+  assert.equal(installed.authenticationEvidence, "codex-login-status");
+  const legacy = validateRunnerContainerTargets("dev box/1", [{ ...common,
+    harnessInstallations: [{ ...candidate, authenticationEvidence: undefined, capabilityEvidence: undefined }] }])[0]!
+    .harnessInstallations![0]!;
+  assert.equal(legacy.authentication, "unknown");
+  assert.equal(legacy.capability, "unknown");
+  const offline = validateRunnerContainerTargets("dev box/1", [{ ...common,
+    harnessInstallations: [candidate] }], false)[0]!.harnessInstallations![0]!;
+  assert.equal(offline.authentication, "unknown");
+  assert.equal(offline.capability, "unknown");
+  assert.throws(() => validateRunnerContainerTargets("dev box/1", [{ ...common,
+    harnessInstallations: [{ ...candidate, authenticationEvidence: "claude-auth-status" }] }]), /invalid target harness/);
+  const cloud = validateRunnerCloudTargets("dev box/1", [{
+    ...common, id: "runner:dev%20box%2F1:cloud:tools", kind: "cloud", adapter: "cloud",
+    workspaceStrategy: "snapshot", boundaries: { filesystem: "snapshot", network: "policy",
+      secrets: "references", billing: "target_metered" },
+    policy: { cost: { currency: "USD", estimatedHourlyRateUsd: 1, minimumBudgetUsd: 1,
+      maximumBudgetUsd: 10 }, admission: { maxConcurrentSessions: 1, queue: "fifo" } },
+    harnessInstallations: [{ ...candidate, provenance: "cloud-adapter" }],
+  }])[0]!.harnessInstallations![0]!;
+  assert.equal(cloud.authentication, "unknown");
+  assert.equal(cloud.capability, "unknown");
+});
+
 test("validates metered cloud targets, snapshot selection, policy refs, and handoff receipts", () => {
   const target = validateRunnerCloudTargets("dev box/1", [{
     id: "runner:dev%20box%2F1:cloud:metered-tools",

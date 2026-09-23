@@ -25,13 +25,36 @@ function validateTargetHarnessInstallations(
         item.provenance !== provenance ||
         (item.version !== undefined && !/^\d+\.\d+\.\d+[\w.-]*$/.test(item.version)) ||
         !["authenticated", "unauthenticated", "unknown"].includes(item.authentication) ||
-        !["verified", "unknown"].includes(item.capability) || typeof item.available !== "boolean") {
+        !["verified", "unknown"].includes(item.capability) ||
+        (item.authenticationEvidence !== undefined &&
+          !["claude-auth-status", "codex-login-status"].includes(item.authenticationEvidence)) ||
+        (item.capabilityEvidence !== undefined &&
+          !["claude-help", "codex-app-server-help"].includes(item.capabilityEvidence)) ||
+        (item.authenticationEvidence === "claude-auth-status" && item.agentId !== "claude-code") ||
+        (item.authenticationEvidence === "codex-login-status" && !["codex", "codex-exec"].includes(item.agentId)) ||
+        (item.capabilityEvidence === "claude-help" && item.agentId !== "claude-code") ||
+        (item.capabilityEvidence === "codex-app-server-help" && item.agentId !== "codex") ||
+        typeof item.available !== "boolean") {
       throw new Error("runner advertised an invalid target harness installation");
     }
     ids.add(item.id);
+    // No concrete cloud adapter supplies an independently checked probe contract yet. Its v2
+    // identity proof selects an executable, but cannot substantiate auth or capability claims.
+    const probed = provenance === "container-image" && item.available;
+    const authentication = probed && item.authenticationEvidence ? item.authentication : "unknown";
+    const capability = probed && item.capabilityEvidence ? item.capability : "unknown";
     return { agentId: item.agentId, id: item.id, path: item.path, provenance,
-      authentication: item.authentication, capability: item.capability, available: item.available,
+      authentication, capability, available: item.available,
+      ...(authentication !== "unknown" ? { authenticationEvidence: item.authenticationEvidence } : {}),
+      ...(capability === "verified" ? { capabilityEvidence: item.capabilityEvidence } : {}),
       ...(item.version ? { version: item.version } : {}) };
+  });
+}
+
+function projectedTargetInstallations(items: TargetHarnessInstallation[], targetAvailable: boolean): TargetHarnessInstallation[] {
+  return items.map((item) => targetAvailable ? item : {
+    ...item, available: false, authentication: "unknown", capability: "unknown",
+    authenticationEvidence: undefined, capabilityEvidence: undefined,
   });
 }
 
@@ -105,7 +128,7 @@ export function validateRunnerContainerTargets(
         setupCheckDigest: template.setupCheckDigest,
       },
       compatibleAgentIds: [...compatibleAgentIds].sort((left, right) => left < right ? -1 : left > right ? 1 : 0),
-      ...(harnessInstallations ? { harnessInstallations: harnessInstallations.map((item) => ({ ...item, available: available && item.available })) } : {}),
+      ...(harnessInstallations ? { harnessInstallations: projectedTargetInstallations(harnessInstallations, available) } : {}),
       available,
       ...(unavailableReason ? { unavailableReason } : {}),
     };
@@ -183,7 +206,7 @@ export function validateRunnerCloudTargets(
         admission: { maxConcurrentSessions: admission!.maxConcurrentSessions, queue: "fifo" },
       },
       compatibleAgentIds: [...compatibleAgentIds].sort((left, right) => left < right ? -1 : left > right ? 1 : 0),
-      ...(harnessInstallations ? { harnessInstallations: harnessInstallations.map((item) => ({ ...item, available: available && item.available })) } : {}),
+      ...(harnessInstallations ? { harnessInstallations: projectedTargetInstallations(harnessInstallations, available) } : {}),
       available,
       ...(unavailableReason ? { unavailableReason } : {}),
     };

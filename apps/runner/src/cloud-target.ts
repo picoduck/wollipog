@@ -341,8 +341,10 @@ export class CloudTargetRegistry {
       if (output.has(id)) continue;
       const info: TargetHarnessInstallation = {
         agentId: candidate.agentId, id, path: raw.path, version: raw.version,
-        provenance: "cloud-adapter", authentication: raw.authentication,
-        capability: raw.capability, available: raw.available,
+        // Adapter v2 proves an exact executable identity for launch selection, but carries no
+        // target-local probe transcript or method. Do not promote its unverified status claims.
+        provenance: "cloud-adapter", authentication: "unknown",
+        capability: "unknown", available: raw.available,
       };
       output.set(id, { ...candidate, command: raw.path, identity: raw.identity, info });
     }

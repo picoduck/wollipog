@@ -909,7 +909,11 @@ export interface TargetHarnessInstallation {
   version?: string;
   provenance: "container-image" | "cloud-adapter";
   authentication: "authenticated" | "unauthenticated" | "unknown";
+  /** Read-only, target-local command whose parsed result supports a non-unknown auth claim. */
+  authenticationEvidence?: "claude-auth-status" | "codex-login-status";
   capability: "verified" | "unknown";
+  /** Read-only, target-local help contract supporting a verified capability claim. */
+  capabilityEvidence?: "claude-help" | "codex-app-server-help";
   available: boolean;
 }
 

@@ -51,7 +51,7 @@ export interface ExecResult {
 export function run(
   file: string,
   args: string[],
-  opts: { timeoutMs?: number; env?: Record<string, string>; maxBuffer?: number } = {},
+  opts: { timeoutMs?: number; env?: Record<string, string>; replaceEnv?: boolean; maxBuffer?: number } = {},
 ): Promise<ExecResult> {
   return new Promise((resolve) => {
     let spec;
@@ -67,7 +67,7 @@ export function run(
       {
         timeout: opts.timeoutMs ?? 5000,
         windowsHide: true,
-        env: opts.env ? { ...process.env, ...opts.env } : process.env,
+        env: opts.env ? (opts.replaceEnv ? opts.env : { ...process.env, ...opts.env }) : process.env,
         // Default execFile maxBuffer is 1 MB — way too small for catting agent transcripts; let
         // callers raise it so large reads don't silently fail with ENOBUFS.
         maxBuffer: opts.maxBuffer ?? 1024 * 1024,

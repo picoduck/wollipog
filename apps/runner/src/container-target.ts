@@ -8,11 +8,15 @@ import {
   containerLabelArgs,
 } from "./container-identity.js";
 import { resolveNative, run, type ExecResult, type ResolvedBinary } from "./discovery/resolve.js";
+import { sensitiveEnvironmentName } from "./env-security.js";
 import type { ContainerSpawnIsolation } from "./spawn.js";
+import { probeTargetHarness } from "./target-harness-probe.js";
 
 interface ContainerTargetDeps {
   resolveRuntime(name: string): Promise<ResolvedBinary | null>;
-  run(file: string, args: string[], opts: { timeoutMs?: number }): Promise<ExecResult>;
+  run(file: string, args: string[], opts: {
+    timeoutMs?: number; maxBuffer?: number; env?: Record<string, string>; replaceEnv?: boolean;
+  }): Promise<ExecResult>;
   warnLegacyContainerLabels?(message: string): void;
 }
 
@@ -25,6 +29,13 @@ const MAX_RUNNER_CONTAINER_INVENTORY = 128;
 const LEGACY_CONTAINER_LABEL_WARNING =
   "legacy-only com.misko-agent-manager.* container state was found during orphan cleanup; " +
   "compatibility remains active for this migration window";
+
+/** Match the real container launch's host-credential boundary even when a runtime is configured
+ * to forward its own client environment into containers. */
+export function targetProbeEnvironment(source: NodeJS.ProcessEnv): Record<string, string> {
+  return Object.fromEntries(Object.entries(source).filter(([name, value]) =>
+    value !== undefined && !sensitiveEnvironmentName(name))) as Record<string, string>;
+}
 
 interface PreparedContainerTarget {
   config: RunnerContainerTarget;
@@ -176,7 +187,7 @@ export class ContainerTargetRegistry {
     const installations = new Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>();
     const seen = new Set<string>();
     const probe = async (candidate: { agentId: string; command: string; args: string[] },
-      phase: "resolve" | "version", entrypoint: string, args: string[]): Promise<ExecResult> => {
+      phase: "resolve" | "version" | "capability" | "authentication", entrypoint: string, args: string[]): Promise<ExecResult> => {
       const probeKey = createHash("sha256").update(JSON.stringify([
         template.id, candidate.agentId, candidate.command, candidate.args, phase,
       ])).digest("hex").slice(0, 16);
@@ -188,9 +199,11 @@ export class ContainerTargetRegistry {
         ...containerLabelArgs(this.runnerKey, template.id),
         "--network", "none", "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--pids-limit", "128",
-        "--tmpfs", "/tmp:rw,nosuid,nodev", "--entrypoint", entrypoint, template.image, ...args,
-      ], { timeoutMs: 5_000 });
-      if (result.timedOut || result.code === null) {
+        "--tmpfs", "/tmp:rw,nosuid,nodev", "--workdir", "/tmp",
+        "--entrypoint", entrypoint, template.image, ...args,
+      ], { timeoutMs: 5_000, maxBuffer: 64 * 1024,
+        env: targetProbeEnvironment(process.env), replaceEnv: true });
+      if (result.timedOut || result.code === null || result.errorCode) {
         await this.deps.run(runtime.launch.command, [
           ...runtime.launch.args, "rm", "-f", name,
         ], { timeoutMs: 5_000 });
@@ -212,10 +225,14 @@ export class ContainerTargetRegistry {
       const versionProbe = await probe(candidate, "version", path, ["--version"]);
       const firstLine = (versionProbe.stdout || versionProbe.stderr).split(/\r?\n/u)[0]?.trim() ?? "";
       const version = firstLine.match(/\d+\.\d+\.\d+[\w.-]*/u)?.[0];
+      const available = versionProbe.code === 0 && !versionProbe.timedOut && !versionProbe.errorCode && Boolean(version);
+      const status = available && version
+        ? await probeTargetHarness(candidate.agentId, version, candidate.args, (args) => probe(candidate,
+          args[0] === "auth" || args[0] === "login" ? "authentication" : "capability", path, args))
+        : { authentication: "unknown" as const, capability: "unknown" as const };
       const info: TargetHarnessInstallation = {
         agentId: candidate.agentId, id, path, provenance: "container-image",
-        authentication: "unknown", capability: "unknown",
-        available: versionProbe.code === 0 && !versionProbe.timedOut && Boolean(version),
+        ...status, available,
         ...(version ? { version } : {}),
       };
       installations.set(id, { ...candidate, command: path, info });

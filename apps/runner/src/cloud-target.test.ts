@@ -161,6 +161,8 @@ test("only an adapter that proves exact cloud installations can expose a selecta
   assert.notEqual(definition.harnessInstallations![0]!.id, registry.definitions()[1]!.harnessInstallations![0]!.id,
     "same executable and display name in distinct cloud targets must never share a selection");
   const chosen = definition.harnessInstallations!.find((item) => item.path === "/opt/codex-preview")!;
+  assert.equal(chosen.authentication, "unknown", "v2 adapter status has no probe evidence");
+  assert.equal(chosen.capability, "unknown", "v2 adapter status has no probe evidence");
   const ref = { id: definition.id, runnerId: definition.runnerId, kind: definition.kind,
     workspaceStrategy: definition.workspaceStrategy, adapter: definition.adapter,
     boundaries: definition.boundaries, environment: definition.environment, policy: definition.policy,
