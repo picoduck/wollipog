@@ -38,7 +38,7 @@ export async function codexOffersSelfUpdate(
 function originalManagerGuidance(packageName: string | null, codexSelfUpdate: boolean): string {
   if (codexSelfUpdate) return "This installation advertises its built-in `codex update` command. Invoke `update` through this installation's exact Launch Command in Agent Details, in the Machine's execution context. A bare `codex` on PATH may be another installation. " + REDISCOVER;
   if (packageName) return `This launch target is inside the ${packageName} package tree. Use the package or version manager that installed this exact copy in the same execution context. ${REDISCOVER}`;
-  return "Use this installation's original package or version manager. If its manager is unknown, inspect the selected installation in Machine settings before upgrading. " + REDISCOVER;
+  return "Use this installation's original package or version manager. If its manager is unknown, inspect this installation in Machine settings before upgrading. " + REDISCOVER;
 }
 
 /** A PATH hit alone does not prove which package manager owns the executable. Only a launch

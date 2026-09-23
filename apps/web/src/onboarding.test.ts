@@ -150,6 +150,7 @@ test("Codex onboarding uses installation guidance without a universal npm comman
     }] }),
   }).find((check) => check.id === "agents")!;
   assert.equal(missing.command, undefined);
+  assert.match(missing.detail, /is unavailable or could not be launched/);
   assert.match(missing.detail, /Install Codex using a supported method/);
   assert.doesNotMatch(missing.detail, /selected installation|npm install/);
 });

@@ -61,7 +61,7 @@ import {
 
 function harnessUpdateLabel(status: NonNullable<AgentDefinition["update"]>["status"]): string {
   return ({
-    update_available: "Update Available",
+    update_available: "New Release Published",
     up_to_date: "Up to Date",
     check_failed: "Check Failed",
     version_unknown: "Version Unknown",
@@ -689,6 +689,7 @@ function MachineSettingsDialog({
   const [error, setError] = useState<string | null>(null);
   const canBrowse = runner?.status === "online" &&
     runnerSupportsProtocol(runner.protocolVersion, "directoryListing");
+  const harnessStatusCurrent = runner?.status === "online" && (!box || box.status === "online");
   const onlineNativeRunner = !box && runner?.status === "online";
   const capacitySupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "machineRunnerCapacity");
   const automaticAccountSwitchSupported = !!runner &&
@@ -911,7 +912,7 @@ function MachineSettingsDialog({
                 <div><strong>{agentDisplayName(agent)}</strong> · {contextLabel(agent.context)} · {agent.version ? `v${agent.version}` : "Version Unknown"}</div>
                 <div><code>{installation.path}</code> · {titleCaseLabel(installation.via.replace(/-/g, " "))}</div>
                 <div>{agent.available === true ? "Available" : agentAvailabilityLabel(agent)}</div>
-                {agent.update && <div>{runner.status === "online" ? harnessUpdateLabel(agent.update.status) : `Last Reported: ${harnessUpdateLabel(agent.update.status)}`} · {agent.update.latestKnownCompatibleVersion
+                {agent.update && <div>{harnessStatusCurrent ? harnessUpdateLabel(agent.update.status) : `Last Reported: ${harnessUpdateLabel(agent.update.status)}`} · {agent.update.latestKnownCompatibleVersion
                   ? `Latest Known Compatible v${agent.update.latestKnownCompatibleVersion}` : "Latest Known Compatible Version Unknown"} · {agent.update.latestPublishedVersion
                     ? `Latest Published v${agent.update.latestPublishedVersion}` : "Latest Published Version Unknown"} ·
                   Last Checked {new Date(agent.update.checkedAt).toLocaleString()} · {agent.update.evidenceSource}</div>}
@@ -1268,6 +1269,7 @@ export function BoxCard({
   // protocol version is unknown rather than stale, so do not offer a destructive redeploy on a
   // guess. The runner details still explain the unknown-version compatibility limitations.
   const needsUpdate = !!runner && runnerOutdated(runner.protocolVersion);
+  const harnessStatusCurrent = box.status === "online" && runner?.status === "online";
   const display = runnerDisplay(runner, box, box.runnerId);
   const [updating, setUpdating] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
@@ -1352,7 +1354,7 @@ export function BoxCard({
       </div>
       <div className="runner-head-right runner-card-actions">
         <span className="os-badge">SSH</span>
-        {runner?.status === "online" && runner.agents.some((agent) => agent.update?.status === "update_available") &&
+        {harnessStatusCurrent && runner.agents.some((agent) => agent.update?.status === "update_available") &&
           (canManage || runner.canManage === true) && (
           <button type="button" className="btn-rediscover needs-update" onClick={() => setShowMachineSettings(true)}>
             <span>New Harness Release · View Settings</span>
@@ -1420,7 +1422,7 @@ export function BoxCard({
         {sshRunnerLifecycleHint()}
       </div>
       {runner ? (
-        <RunnerDetails runner={runner} online={box.status === "online"} />
+        <RunnerDetails runner={runner} online={harnessStatusCurrent} />
       ) : inProgress ? (
         <div className="empty-sub">Waiting for the runner to come online…</div>
       ) : box.status === "offline" ? (

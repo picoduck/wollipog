@@ -90,7 +90,7 @@ function agentProblem(agent: AgentDefinition): { detail: string; command?: strin
       return { detail: `${label} needs a Codex version with interactive support. ${codexUpgradeGuidance(agent)}` };
     }
     if (agent.codexAppServer?.status === "unavailable") {
-      return { detail: `${label} is not installed. ${codexUpgradeGuidance(agent)}` };
+      return { detail: `${label} is unavailable or could not be launched. ${codexUpgradeGuidance(agent)}` };
     }
   } else if (agent.driver === "codex") {
     if (agent.authStatus === "unauthenticated") {
