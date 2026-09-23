@@ -5764,7 +5764,9 @@ test("an authentication hold defers worktree rebind and preserves its FIFO until
   }
 });
 
-test("pending Claude background work defers rebind until its automatic continuation is recorded", { skip: !haveGit() }, async () => {
+for (const startInWorktree of [false, true]) test(
+  `pending Claude background work defers rebind from ${startInWorktree ? "a worktree" : "the repository"} until its automatic continuation is recorded`,
+  { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-background-worktree-rebind-"));
   const repo = join(root, "repo");
   const dataDir = join(root, "data");
@@ -5830,10 +5832,11 @@ test("pending Claude background work defers rebind until its automatic continuat
     manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
     const spec = {
       sessionId: "s_background_rebind", workspaceId: "repo", workspacePath: repo, agentId: "claude",
-      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      command: "claude", args: [], env: {}, useWorktree: startInWorktree, driver: "claude-code" as const,
       context: { kind: "native" as const },
     };
     await manager.start(spec);
+    const originalCwd = store.readMeta(spec.sessionId)?.worktreePath ?? repo;
     manager.prompt(spec.sessionId, "first");
     await firstStarted;
     const requested = await manager.requestWorktree(spec.sessionId, {
@@ -5842,7 +5845,7 @@ test("pending Claude background work defers rebind until its automatic continuat
     manager.prompt(spec.sessionId, "second");
     releaseFirst();
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
-    assert.deepEqual(launchedCwds, [repo], "the task-owning provider must stay alive after its turn ends");
+    assert.deepEqual(launchedCwds, [originalCwd], "the task-owning provider must stay alive after its turn ends");
     assert.equal(store.readMeta(spec.sessionId)?.backgroundWorkState, "running");
 
     callbacksByLaunch[0]!.onBackgroundWork?.({
@@ -5860,13 +5863,13 @@ test("pending Claude background work defers rebind until its automatic continuat
     await waitForCondition(() => prompts.length === 3, "the background continuation and held prompt were not submitted", 3_000);
     await waitForCondition(() => launchedCwds.length === 2, "rebind did not resume after background delivery", 3_000);
     assert.equal(prompts.length, 3);
-    assert.equal(prompts[1]!.cwd, repo, "the task notification is consumed by its owning provider");
+    assert.equal(prompts[1]!.cwd, originalCwd, "the task notification is consumed by its owning provider");
     assert.match(prompts[1]!.text, /Managed background jobs reached their terminal barrier/);
     assert.deepEqual(prompts[2], { cwd: requested.worktree.path, text: "second" },
       "ordinary queued work remains FIFO-held until the rebind finishes");
     assert.equal(store.readEvents(spec.sessionId).some((event) =>
       event.payload.kind === "agent_message" && event.payload.text === "Background task completed."), true);
-    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
+    assert.deepEqual(launchedCwds, [originalCwd, requested.worktree.path]);
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);
   } finally {
@@ -7375,13 +7378,18 @@ test("a worktree removed during turn snapshot is still Not Sent", { skip: !haveG
       });
     });
     const failures: Array<{ code?: string }> = [];
+    const started: number[] = [];
     manager.prompt(spec.sessionId, "late loss", [], undefined, undefined, {
-      commandId: "late-missing", queued() {}, started() {}, completed() {},
+      commandId: "late-missing", queued() {}, started(seq) { started.push(seq); }, completed() {},
       failed(_error, code) { failures.push({ code }); }, uncertain() {},
     });
     await waitForCondition(() => failures.length > 0, "the late loss was not settled");
     assert.equal(removed, true, "the path disappeared after the first live-turn verification");
     assert.equal(failures[0]?.code, "WORKTREE_RECOVERY_REQUIRED");
+    assert.deepEqual(started, [], "a retryable receipt cannot cross the durable user-event boundary");
+    assert.equal(store.readEvents(spec.sessionId).some((event) =>
+      event.payload.kind === "user_message" && event.payload.text === "late loss"), false);
+    assert.equal(store.readMeta(spec.sessionId)?.turnCount ?? 0, 0);
     assert.equal(store.readMeta(spec.sessionId)?.status, "input_required");
     assert.deepEqual(providerPrompts, []);
   } finally {
@@ -7475,6 +7483,66 @@ test("restart preparation parks an invalid selected worktree for recovery", { sk
     assert.equal(meta?.worktreeRecovery?.selectedPath, path);
     assert.equal(meta?.worktreePath, path);
     assert.equal(meta?.agentSessionId, "thread-restart");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("restart does not restore a recovery card cleared by a concurrent selection", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-restart-selection-recovery-"));
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(root, "sessions"));
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined,
+      ((_driver: unknown, _launch: unknown) => ({
+        pid: 1, initialize: async () => {}, newSession: async () => {},
+        prompt: async () => "end_turn" as const,
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "thread-restart-selection",
+      })) as never, root, 1);
+    const spec = {
+      sessionId: "s_restart_selection_recovery", workspaceId: "repo", workspacePath: repo,
+      agentId: "codex", command: "codex", args: [], env: {}, useWorktree: true,
+      driver: "codex-app-server" as const, context: { kind: "native" as const },
+    };
+    assert.equal(await manager.start(spec), true);
+    const original = store.readMeta(spec.sessionId)!;
+    const oldPath = original.worktreePath!;
+    const replacement = join(root, "replacement");
+    execFileSync("git", ["-C", repo, "worktree", "add", "-b", "fix/restart-selection", replacement]);
+    manager.stop(spec.sessionId);
+    store.patchMeta(spec.sessionId, {
+      worktreeRecovery: {
+        recoveryId: "old-incident", detectedAt: Date.now(), selectedPath: oldPath,
+        expectedBranch: original.worktreeBranch!, detail: "old worktree unavailable",
+      },
+      status: "input_required",
+      worktrees: [
+        ...(original.worktrees ?? []),
+        { id: "replacement", path: replacement, branch: "fix/restart-selection", source: "attached" },
+      ],
+    });
+    const internals = manager as unknown as {
+      runWorktreeOperation: <T>(sessionId: string, operation: () => Promise<T>) => Promise<T>;
+    };
+    const run = internals.runWorktreeOperation.bind(manager);
+    let selected = false;
+    internals.runWorktreeOperation = (sessionId, operation) => run(sessionId, async () => {
+      if (!selected && sessionId === spec.sessionId) {
+        selected = true;
+        store.patchMeta(sessionId, {
+          worktreePath: replacement, worktreeBranch: "fix/restart-selection",
+          worktreeRecovery: undefined, status: "idle",
+        });
+      }
+      return operation();
+    });
+    assert.equal(await manager.start(spec), true);
+    assert.equal(selected, true);
+    assert.equal(store.readMeta(spec.sessionId)?.worktreePath, replacement);
+    assert.equal(store.readMeta(spec.sessionId)?.worktreeRecovery, undefined);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

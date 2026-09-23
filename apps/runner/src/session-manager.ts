@@ -5237,6 +5237,7 @@ export class SessionManager {
         shouldUseWorktree = spec.useWorktree || latestMatchesWorkspace && !!latest.worktreePath &&
           !!latest.worktrees?.some((item) => sameWorktreePath(latest.context, item.path, latest.worktreePath!));
         meta.worktreeBranch = latestMatchesWorkspace ? latest.worktreeBranch : undefined;
+        meta.worktreeRecovery = latestMatchesWorkspace ? latest.worktreeRecovery : undefined;
         meta.worktrees = latestMatchesWorkspace ? latest.worktrees : undefined;
         meta.worktreeHooks = latestMatchesWorkspace ? latest.worktreeHooks : undefined;
         meta.worktreeProcessMarkers = latestMatchesWorkspace ? latest.worktreeProcessMarkers : undefined;
@@ -10898,7 +10899,7 @@ export class SessionManager {
     // The runner (the box) is the source of truth for ALL events including the user's prompt, so it
     // lands in the store + every dashboard's timeline. The control plane no longer appends it.
     const displayText = slashCommand ? `/${slashCommand}${text ? ` ${text}` : ""}`.trim() : text;
-    const userEvent = recoveredQuestion
+    const publishUserEvent = () => recoveredQuestion
       ? this.emitEvent(sessionId, {
           kind: "question_resolved",
           requestId: recoveredQuestion.requestId,
@@ -10923,56 +10924,53 @@ export class SessionManager {
           ...(durable ? { commandId: durable.commandId } : {}),
           turnId: queued.id,
         }, durable);
-    if (!userEvent) return;
-    // This event is the durable no-replay boundary for an automated prompt. Force the session log
-    // to disk before the command journal says `started`, so sudden power loss cannot retain the
-    // receipt while losing the correlated turn marker.
-    if (durable) {
-      this.store.flush(sessionId);
-      durable.started(userEvent?.seq);
-    }
-    entry.status = "running";
-    this.emitStatus(sessionId, "running");
+    let snapshotWarning: string | undefined;
+    let preparedCheckpoint: {
+      path: string; snap: string | null; turn: number; worktreeId: string;
+      ownerHash: string | undefined; anchored: boolean;
+    } | undefined;
+    const discardPreparedCheckpoint = async () => {
+      if (!preparedCheckpoint?.anchored || this.active.get(sessionId) !== entry) return;
+      try {
+        // A removed worktree cannot run Git, but its repository can still release the ref.
+        const repoPath = this.store.readMeta(sessionId)?.repoPath;
+        if (repoPath) await withGitExecutionContext(entry.context, () => deleteTurnRef(
+          repoPath, sessionId, preparedCheckpoint!.turn,
+          preparedCheckpoint!.ownerHash, preparedCheckpoint!.worktreeId,
+        ));
+      } catch (error) {
+        this.log(`pre-turn checkpoint cleanup failed for ${sessionId}: ${errText(error)}`);
+      }
+    };
     // Snapshot the worktree BEFORE the agent can write — the last_turn diff base. Awaited (a
     // fire-and-forget would race the agent's first edits into the snapshot) but best-effort:
     // a failure stores null (overwriting any stale prior sha so multi-turn changes are never
     // mislabeled as one turn) and must never fail the prompt turn. A mid-turn diff read against
     // this snapshot shows "changes so far this turn" — intended.
     if (entry.worktree && !recoveredQuestion) {
+      const path = entry.worktree.path;
       let snap: string | null = null;
       try {
-        snap = await withGitExecutionContext(entry.context, () => captureWorktreeTree(entry.worktree!.path));
+        snap = await withGitExecutionContext(entry.context, () => captureWorktreeTree(path));
       } catch (err) {
         this.log(`turn snapshot failed for ${sessionId}: ${errText(err)} — last_turn diff unavailable for this turn`);
-        // Surface it on the timeline too — otherwise the user only learns when the Last-turn
-        // tab errors, with no hint why.
-        this.emitEvent(sessionId, {
-          kind: "stderr",
-          text: `turn snapshot failed (${errText(err)}) — the Last turn diff won't be available for this turn`,
-        });
+        snapshotWarning = `turn snapshot failed (${errText(err)}) — the Last turn diff won't be available for this turn`;
       }
       // Deleted/replaced mid-snapshot? Anchoring now would mint an ORPHAN ref after delete()
       // already ran its ref cleanup, pinning objects forever — bail before touching anything.
       if (this.active.get(sessionId) !== entry || !this.store.has(sessionId)) {
-        durable?.uncertain("session disappeared after the durable user event was recorded");
+        durable?.failed("session disappeared before provider submission", "COMMAND_CANCELLED");
         return;
       }
       const checkpointMeta = this.store.readMeta(sessionId);
       if (!checkpointMeta) {
-        durable?.uncertain("session disappeared after the durable user event was recorded");
+        durable?.failed("session disappeared before provider submission", "COMMAND_CANCELLED");
         return;
       }
       const checkpointOwnerHash = this.checkpointOwnerHash(checkpointMeta);
       const turn = (checkpointMeta.turnCount ?? 0) + 1;
-      const worktreeId = this.checkpointWorktreeId(checkpointMeta, entry.worktree.path);
-      this.store.patchMeta(sessionId, {
-        lastTurnBaseTree: snap,
-        turnCount: turn,
-        checkpointWorktreeIds: {
-          ...(checkpointMeta.checkpointWorktreeIds ?? {}),
-          [String(turn)]: worktreeId,
-        },
-      });
+      const worktreeId = this.checkpointWorktreeId(checkpointMeta, path);
+      preparedCheckpoint = { path, snap, turn, worktreeId, ownerHash: checkpointOwnerHash, anchored: false };
       // Per-turn CHECKPOINT (T3-style rewind target): anchor the pre-turn tree under a real
       // ref (gc can't prune it, unlike the dangling lastTurnBaseTree) and record it on the
       // timeline so the UI can offer "rewind files to before this turn". Best-effort: a
@@ -10980,9 +10978,9 @@ export class SessionManager {
       if (snap) {
         try {
           await withGitExecutionContext(entry.context, () => anchorTurnRef(
-            entry.worktree!.path, sessionId, turn, snap!, checkpointOwnerHash, worktreeId,
+            path, sessionId, turn, snap!, checkpointOwnerHash, worktreeId,
           ));
-          this.emitEvent(sessionId, { kind: "checkpoint", turn, tree: snap });
+          preparedCheckpoint.anchored = true;
         } catch (err) {
           this.log(`checkpoint anchor failed for ${sessionId} turn ${turn}: ${errText(err)}`);
         }
@@ -10993,7 +10991,14 @@ export class SessionManager {
     // disposed driver would happily spawn a fresh process, running a full invisible turn that
     // mutates the worktree after the user saw the session stop.
     if (this.active.get(sessionId) !== entry) {
-      durable?.uncertain("session stopped after the durable user event was recorded");
+      await discardPreparedCheckpoint();
+      durable?.failed("session stopped before provider submission", "COMMAND_CANCELLED");
+      return;
+    }
+    if (preparedCheckpoint && (!entry.worktree ||
+        !sameWorktreePath(entry.context, entry.worktree.path, preparedCheckpoint.path))) {
+      await discardPreparedCheckpoint();
+      durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
       return;
     }
     // Snapshot and checkpoint work above can take time. Re-prove the path at the last awaited
@@ -11002,18 +11007,21 @@ export class SessionManager {
       const path = entry.worktree.path;
       const selected = this.store.readMeta(sessionId);
       const failure = selected ? await this.persistedWorktreeFailure(
-        selected, path, selected.worktreeBranch,
+        selected, path, entry.worktree.branch,
       ) : "session disappeared";
       if (this.active.get(sessionId) !== entry) {
-        durable?.uncertain("session stopped after the durable user event was recorded");
+        await discardPreparedCheckpoint();
+        durable?.failed("session stopped before provider submission", "COMMAND_CANCELLED");
         return;
       }
       if (!entry.worktree || !sameWorktreePath(entry.context, entry.worktree.path, path)) {
+        await discardPreparedCheckpoint();
         durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
         return;
       }
       if (failure && !entry.cancelRequested && !entry.interruptRequested &&
           !entry.historyIntegrityFailure) {
+        await discardPreparedCheckpoint();
         if (selected && this.recordWorktreeRecovery(selected, path, failure, "before provider submission")) {
           durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
         } else {
@@ -11022,6 +11030,36 @@ export class SessionManager {
         return;
       }
     }
+    const userEvent = publishUserEvent();
+    if (!userEvent) {
+      await discardPreparedCheckpoint();
+      return;
+    }
+    // The transcript event is the durable no-replay boundary. All awaited pre-turn Git work and
+    // its final identity proof have finished, so a failure before this point remains retryable.
+    if (durable) {
+      this.store.flush(sessionId);
+      durable.started(userEvent.seq);
+    }
+    entry.status = "running";
+    this.emitStatus(sessionId, "running");
+    if (preparedCheckpoint) {
+      const checkpointMeta = this.store.readMeta(sessionId);
+      if (checkpointMeta) this.store.patchMeta(sessionId, {
+        lastTurnBaseTree: preparedCheckpoint.snap,
+        turnCount: preparedCheckpoint.turn,
+        checkpointWorktreeIds: {
+          ...(checkpointMeta.checkpointWorktreeIds ?? {}),
+          [String(preparedCheckpoint.turn)]: preparedCheckpoint.worktreeId,
+        },
+      });
+      if (preparedCheckpoint.anchored && preparedCheckpoint.snap) {
+        this.emitEvent(sessionId, {
+          kind: "checkpoint", turn: preparedCheckpoint.turn, tree: preparedCheckpoint.snap,
+        });
+      }
+    }
+    if (snapshotWarning) this.emitEvent(sessionId, { kind: "stderr", text: snapshotWarning });
     if (entry.historyIntegrityFailure) return;
     if (entry.cancelRequested) {
       entry.cancelRequested = false;
