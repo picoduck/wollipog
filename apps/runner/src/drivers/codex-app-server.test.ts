@@ -2998,34 +2998,40 @@ test("historical reconciliation proves one exact completed root command without 
 });
 
 test("historical reconciliation falls back to the durable rollout after App Server restart", async () => {
-  const h = makeHarness({
-    resumeId: "thread-restarted", context: { kind: "native" },
-    env: { HOME: "/provider/home", CODEX_HOME: "/provider/home/.codex" },
-  });
-  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
-  (h.driver as any).threadId = "thread-restarted";
-  (h.driver as any).peer = {
-    request: async () => ({
-      thread: { id: "thread-restarted", status: { type: "idle" }, turns: [] },
-    }),
-  };
-  let fallback: unknown[] | undefined;
-  (h.driver as any).readRolloutProof = async (...args: unknown[]) => {
-    fallback = args;
-    return {
-      commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
-      providerThreadId: "thread-restarted",
-      providerTurnId: "turn-historical",
-      providerAdmissionItemId: "admission-historical",
-      providerItemId: "command-historical",
+  const previousCodexHome = process.env.CODEX_HOME;
+  delete process.env.CODEX_HOME;
+  try {
+    const h = makeHarness({
+      resumeId: "thread-restarted", context: { kind: "native" }, env: { HOME: "/provider/home" },
+    });
+    const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
+    (h.driver as any).threadId = "thread-restarted";
+    (h.driver as any).peer = {
+      request: async () => ({
+        thread: { id: "thread-restarted", status: { type: "idle" }, turns: [] },
+      }),
     };
-  };
+    let fallback: unknown[] | undefined;
+    (h.driver as any).readRolloutProof = async (...args: unknown[]) => {
+      fallback = args;
+      return {
+        commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+        providerThreadId: "thread-restarted",
+        providerTurnId: "turn-historical",
+        providerAdmissionItemId: "admission-historical",
+        providerItemId: "command-historical",
+      };
+    };
 
-  const proof = await h.driver.reconcileCompletedCommand?.("workflow-historical", command);
-  assert.equal(proof?.providerItemId, "command-historical");
-  assert.deepEqual(fallback, [
-    { kind: "native" }, "/provider/home/.codex", "thread-restarted", "workflow-historical", command, undefined,
-  ]);
+    const proof = await h.driver.reconcileCompletedCommand?.("workflow-historical", command);
+    assert.equal(proof?.providerItemId, "command-historical");
+    assert.deepEqual(fallback, [
+      { kind: "native" }, "/provider/home/.codex", "thread-restarted", "workflow-historical", command, undefined,
+    ]);
+  } finally {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+  }
 });
 
 test("historical CLI admission survives a live projection that retained only the successful command", async () => {
