@@ -642,6 +642,8 @@ export class SubscriptionUsageManager {
     this.selectionGeneration++;
     for (const child of this.activeProbeChildren) (this.options.killProbe ?? killTree)(child);
     this.lastProbeAt.clear();
+    this.lastEvent.clear();
+    this.responded.clear();
     return this.syncSources();
   }
 
@@ -922,27 +924,30 @@ export class SubscriptionUsageManager {
   async refreshAccount(providerAccountId: string): Promise<SubscriptionUsageSnapshot[]> {
     if (this.shuttingDown) throw new Error("subscription usage manager is shutting down");
     this.syncSources();
+    const selectionGeneration = this.selectionGeneration;
     const sources = this.sources().filter((source) => source.providerAccountId === providerAccountId);
     if (sources.length === 0) throw new Error("provider account is not configured");
     for (const source of sources) {
-      if (source.provider === "codex") await this.refreshCodex(source);
+      if (source.provider === "codex") await this.refreshCodex(source, selectionGeneration);
     }
     return this.inventory();
   }
 
   private async refreshAllNow(): Promise<SubscriptionUsageSnapshot[]> {
     this.syncSources();
+    const selectionGeneration = this.selectionGeneration;
     const codexSources = this.sources().filter((source) => source.provider === "codex");
     // A runner may advertise several contexts. Probe sequentially to avoid concurrent mutation of
     // one provider HOME; the control plane derives a bounded deadline from this source count.
     // Duplicate manual requests share refreshPromise and each source has its own minimum interval.
-    for (const source of codexSources) await this.refreshCodex(source);
+    for (const source of codexSources) await this.refreshCodex(source, selectionGeneration);
     return this.inventory();
   }
 
-  private async refreshCodex(source: SubscriptionSource): Promise<void> {
-    if (this.shuttingDown) return;
-    const selectionGeneration = this.selectionGeneration;
+  private async refreshCodex(source: SubscriptionSource, selectionGeneration: number): Promise<void> {
+    if (this.shuttingDown || selectionGeneration !== this.selectionGeneration ||
+        !this.sources().some((current) => current.sourceId === source.sourceId &&
+          current.agent.id === source.agent.id)) return;
     const initial = this.initialSnapshot(source);
     if (initial.state === "unsupported" ||
         initial.state === "unauthenticated" ||

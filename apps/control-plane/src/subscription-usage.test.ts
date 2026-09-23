@@ -177,6 +177,25 @@ test("a missing account installation does not retain its previous available snap
   db.close();
 });
 
+test("account usage follows a compatible WSL agent even when native is listed first", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const native = { ...codexAgent("native"), available: true };
+  const wsl = { ...codexAgent("wsl"), available: true,
+    context: { kind: "wsl" as const, distro: "Ubuntu" } };
+  const owner = { organizationId: "org_personal", owner: { kind: "user" as const, userId: "alice" } };
+  db.registerRunner({ ...meta("runner-1", [native, wsl]), os: "windows",
+    providerAccounts: [{ id: "work", label: "Work", provider: "codex", authStatus: "authenticated" }],
+  }, 1_000_000, PROTOCOL_VERSION, owner);
+  const reported = validateSubscriptionUsageSnapshot({ ...snapshot("runner-1", 1_000_000),
+    agentId: "wsl", providerAccountId: "work", sourceId: sourceId("runner-1", "wsl", "work"),
+  }, "runner-1", db, 1_000_000);
+  db.upsertSubscriptionUsageSnapshot(reported);
+  const account = db.subscriptionUsageForPrincipal(human(), 1_000_000).sources.find((source) =>
+    source.providerAccountId === "work");
+  assert.deepEqual([account?.agentId, account?.state], ["wsl", "available"]);
+  db.close();
+});
+
 test("account labels remain isolated by runner and switch atomically with available usage", () => {
   const db = ControlPlaneDb.open(":memory:");
   const now = 1_000_000;

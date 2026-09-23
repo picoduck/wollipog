@@ -1588,3 +1588,37 @@ test("an in-flight probe stays invalid after selection changes away and back", a
   assert.deepEqual(published, []);
   assert.equal(manager.inventory()[0]?.state, "unavailable");
 });
+
+test("a queued unsupported source cannot republish after rediscovery selects an installation", async () => {
+  const native = agent({ id: "native" });
+  const wslSystem = agent({ id: "wsl-system", context: { kind: "wsl", distro: "Ubuntu" },
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" } });
+  const wslLocal = agent({ id: "wsl-local", context: { kind: "wsl", distro: "Ubuntu" },
+    installation: { id: "local", path: "/home/user/bin/codex", via: "common-dir" } });
+  let discovered = [native, wslSystem];
+  const choices: HarnessInstallationChoice[] = [
+    { family: "codex", context: { kind: "wsl", distro: "Ubuntu" }, installationId: "local" },
+  ];
+  let finishNative!: () => void;
+  const nativeProbe = new Promise<void>((resolve) => { finishNative = resolve; });
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => discovered,
+    installationChoices: () => choices,
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/probe" }),
+    publish: () => {},
+    now: () => 20_000,
+    probeCodex: async () => {
+      await nativeProbe;
+      return { state: "unavailable" };
+    },
+  });
+  const refresh = manager.refreshAll();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  discovered = [native, wslSystem, wslLocal];
+  manager.selectionChanged();
+  finishNative();
+  await refresh;
+  assert.deepEqual(manager.inventory().map((source) => source.agentId), ["native", "wsl-local"]);
+});

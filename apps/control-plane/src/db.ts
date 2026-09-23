@@ -11173,10 +11173,6 @@ export class ControlPlaneDb {
           }),
       ];
       for (const { agent, provider, account } of sourceCoordinates) {
-        const selection = selectionFor(agent, provider);
-        const unsupportedSelection = Boolean(selection &&
-          (!runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers") ||
-            agent.installation?.id !== selection.installationId));
         const context = agent.context?.kind === "wsl" ? `wsl:${agent.context.distro}` : "native";
         const sourceId = createHash("sha256")
           .update(JSON.stringify(account
@@ -11185,14 +11181,26 @@ export class ControlPlaneDb {
           .digest("hex")
           .slice(0, 32);
         const recorded = stored.get(`${runner.runnerId}:${sourceId}`);
-        const persisted = recorded?.agentId === agent.id &&
+        // Account source IDs omit the agent. The runner may legitimately probe a WSL agent whose
+        // credential home is compatible even when the control plane's display fallback is native.
+        const recordedAgent = account && recorded && runner.agents.find((candidate) => {
+          if (candidate.id !== recorded.agentId || candidate.driver !== agent.driver) return false;
+          const candidateSelection = selectionFor(candidate, provider);
+          return !candidateSelection || candidate.installation?.id === candidateSelection.installationId;
+        });
+        const displayAgent = recordedAgent || agent;
+        const selection = selectionFor(displayAgent, provider);
+        const unsupportedSelection = Boolean(selection &&
+          (!runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers") ||
+            displayAgent.installation?.id !== selection.installationId));
+        const persisted = recorded?.agentId === displayAgent.id &&
           (!unsupportedSelection || recorded.state === "unsupported")
           ? recorded : undefined;
         const fetchedAt = persisted?.fetchedAt ?? runner.lastSeen ?? now;
         const snapshot: SubscriptionUsageSnapshot = persisted ?? {
           sourceId,
           runnerId: runner.runnerId,
-          agentId: agent.id,
+          agentId: displayAgent.id,
           provider,
           state: unsupportedSelection
             ? "unsupported"
@@ -11217,7 +11225,7 @@ export class ControlPlaneDb {
         sources.push({
           ...snapshot,
           runnerName: runner.displayName ?? runner.hostname ?? runner.runnerId,
-          agentName: agent.name,
+          agentName: displayAgent.name,
           runnerStatus: runner.status,
           freshness: runner.status === "offline" || now - fetchedAt > staleAfterMs ? "stale" : "fresh",
         });

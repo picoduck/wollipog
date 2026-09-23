@@ -64,7 +64,7 @@ import {
   type RunnerConfig,
 } from "./config.js";
 import { stageRunnerCredentialFile } from "./runner-credential-file.js";
-import { harnessChoiceFor, harnessFamily } from "./harness-selection.js";
+import { harnessChoiceFor, harnessFamily, synchronizedHarnessChoices } from "./harness-selection.js";
 import {
   applyClaudeHookCapability,
   claudeHookCircuitLockPath,
@@ -1773,9 +1773,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       backoff = INITIAL_BACKOFF_MS;
       registered = true;
       controlPlaneProtocolVersion = msg.protocolVersion ?? null;
-      harnessInstallationChoices = runnerSupportsProtocol(controlPlaneProtocolVersion, "harnessSelectionBackgroundConsumers")
-        ? msg.harnessInstallationChoices ?? null
-        : null;
+      harnessInstallationChoices = synchronizedHarnessChoices(controlPlaneProtocolVersion, msg.harnessInstallationChoices);
       harnessSelectionGeneration++;
       subscriptionUsage.selectionChanged();
       if (msg.runnerCapacity && runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")) {

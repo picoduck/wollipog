@@ -1,10 +1,22 @@
 import {
   agentContextKey,
+  runnerSupportsProtocol,
   type AgentContext,
   type AgentDefinition,
   type AgentDriverKind,
   type HarnessInstallationChoice,
 } from "@wollipog/protocol";
+
+/** Pre-selection control planes cannot hold a saved choice; v175 can but cannot transmit it. */
+export function synchronizedHarnessChoices(
+  controlPlaneProtocolVersion: number | null,
+  choices: readonly HarnessInstallationChoice[] | undefined,
+): HarnessInstallationChoice[] | null {
+  if (runnerSupportsProtocol(controlPlaneProtocolVersion, "harnessSelectionBackgroundConsumers")) {
+    return choices ? [...choices] : null;
+  }
+  return runnerSupportsProtocol(controlPlaneProtocolVersion, "harnessInstallations") ? null : [];
+}
 
 export function harnessFamily(driver: AgentDriverKind | undefined): HarnessInstallationChoice["family"] | null {
   if (driver === "claude-code") return "claude";
