@@ -2999,7 +2999,8 @@ test("historical reconciliation proves one exact completed root command without 
 
 test("historical reconciliation falls back to the durable rollout after App Server restart", async () => {
   const h = makeHarness({
-    resumeId: "thread-restarted", context: { kind: "native" }, env: { HOME: "/provider/home" },
+    resumeId: "thread-restarted", context: { kind: "native" },
+    env: { HOME: "/provider/home", CODEX_HOME: "/provider/home/.codex" },
   });
   const command = `gh pr merge https://github.com/picoduck/wollipog/pull/1146 --squash --match-head-commit ${"a".repeat(40)}`;
   (h.driver as any).threadId = "thread-restarted";
