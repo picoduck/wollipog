@@ -405,8 +405,12 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
         environment: { id, revision: 1, image, setupCheckDigest: "b".repeat(64) },
         compatibleAgentIds: ["codex"], available: true,
         harnessInstallations: [{ agentId: "codex", id: installationId, path, version: "1.2.3",
-          provenance: "container-image" as const, authentication: "unknown" as const,
-          capability: "unknown" as const, available: true }],
+          provenance: "container-image" as const,
+          authentication: id === "alpha" ? "authenticated" as const : "unknown" as const,
+          ...(id === "alpha" ? { authenticationEvidence: "codex-login-status" as const } : {}),
+          capability: id === "alpha" ? "verified" as const : "unknown" as const,
+          ...(id === "alpha" ? { capabilityEvidence: "codex-app-server-help" as const } : {}),
+          available: true }],
       });
       runner.executionTargets = [target("alpha", "Alpha Image", "a".repeat(24), "/usr/bin/codex"),
         target("beta", "Beta Image", "b".repeat(24), "/usr/bin/codex")];

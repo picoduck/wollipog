@@ -122,6 +122,69 @@ test("container installations stay target-bound, deduplicate aliases, and fail c
   assert.match(registry.validationError(ref, true, { kind: "native" }, "codex")!, /unavailable/);
 });
 
+test("target-local probes use the selected image executable without mounts, host credentials, or interaction", async () => {
+  const calls: Array<{ args: string[]; timeoutMs?: number; maxBuffer?: number }> = [];
+  const configured: RunnerContainerTarget = {
+    ...template, agentCommands: { "claude-code": { command: "claude" } },
+  };
+  const registry = new ContainerTargetRegistry("runner", "host", [configured], {
+    resolveRuntime: async () => runtime(),
+    run: async (_file, args, opts) => {
+      calls.push({ args, ...opts });
+      if (args.includes("/bin/sh")) return { code: 0, stdout: "/usr/local/bin/claude\n", stderr: "" };
+      if (args.at(-1) === "--version") return { code: 0, stdout: "2.1.205 (Claude Code)\n", stderr: "" };
+      if (args.at(-1) === "--help") return { code: 0,
+        stdout: "--input-format stream-json\n--output-format stream-json\n--permission-mode (choices: \"acceptEdits\")", stderr: "" };
+      if (args.at(-1) === "status") return { code: 1, stdout: '{"loggedIn":false}', stderr: "" };
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  await registry.initialize();
+  const candidate = registry.definitions()[0]!.harnessInstallations![0]!;
+  assert.equal(candidate.authentication, "unauthenticated");
+  assert.equal(candidate.authenticationEvidence, "claude-auth-status");
+  assert.equal(candidate.capability, "verified");
+  assert.equal(candidate.capabilityEvidence, "claude-help");
+  const probes = calls.filter(({ args }) => args.includes("--entrypoint") &&
+    args[args.indexOf("--entrypoint") + 1] === "/usr/local/bin/claude");
+  assert.equal(probes.length, 3);
+  for (const { args, timeoutMs, maxBuffer } of probes) {
+    assert.equal(args[args.indexOf("--workdir") + 1], "/tmp");
+    assert.equal(args[args.indexOf("--entrypoint") + 1], candidate.path);
+    assert.ok(args.includes("--network") && args.includes("none"));
+    assert.equal(args.includes("--mount"), false);
+    assert.equal(args.includes("--env"), false);
+    assert.equal(args.includes("--interactive"), false);
+    assert.equal(timeoutMs, 5_000);
+    assert.equal(maxBuffer, 64 * 1024);
+  }
+});
+
+test("a timed-out authentication probe is removed and never becomes readiness evidence", async () => {
+  const calls: string[][] = [];
+  const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    resolveRuntime: async () => runtime(),
+    run: async (_file, args) => {
+      calls.push(args);
+      if (args.includes("/bin/sh")) return { code: 0, stdout: "/usr/bin/codex\n", stderr: "" };
+      if (args.at(-1) === "--version") return { code: 0, stdout: "codex 0.154.0\n", stderr: "" };
+      if (args.at(-1) === "--help") return { code: 0,
+        stdout: "Usage: codex app-server [OPTIONS] [COMMAND]\nCommands:\n  generate-json-schema\nOptions:\n  --listen <URL> (default: stdio://)\n", stderr: "" };
+      if (args.at(-1) === "status") return { code: null, stdout: "Logged in using ChatGPT",
+        stderr: "", timedOut: true };
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  await registry.initialize();
+  const installation = registry.definitions()[0]!.harnessInstallations![0]!;
+  assert.equal(installation.authentication, "unknown");
+  assert.equal(installation.authenticationEvidence, undefined);
+  assert.equal(installation.capability, "verified");
+  const auth = calls.find((args) => args.at(-1) === "status")!;
+  const name = auth[auth.indexOf("--name") + 1]!;
+  assert.deepEqual(calls.find((args) => args[0] === "rm"), ["rm", "-f", name]);
+});
+
 test("a timed-out container version probe is named, labelled, and forcibly removed", async () => {
   const calls: string[][] = [];
   const registry = new ContainerTargetRegistry("runner", "host", [template], {

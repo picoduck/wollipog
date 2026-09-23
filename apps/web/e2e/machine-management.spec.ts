@@ -125,6 +125,9 @@ test("Machine settings keep same-name container installations scoped to their ta
   const beta = dialog.locator(".machine-harness-installation").filter({ hasText: "Beta Image" });
   await expect(alpha).toContainText("/usr/bin/codex");
   await expect(beta).toContainText("/usr/bin/codex");
+  await expect(alpha).toContainText("Authenticated · Capability Verified");
+  await expect(alpha).toContainText("Codex Login Status · Codex App Server Help");
+  await expect(beta).toContainText("Authentication Unknown · Capability Unknown");
   await expect(alpha.getByRole("button", { name: "Selected" })).toBeVisible();
   await expect(beta.getByRole("button", { name: "Use This Installation" })).toBeVisible();
   await installationSection.screenshot({ path: "test-results/target-installations-before-desktop.png" });

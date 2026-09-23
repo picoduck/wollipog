@@ -79,10 +79,12 @@ must probe each actual executable in the attested remote environment and return 
 revision, image, setup digest, protocol version 2, and a bounded `candidates` array. Each returned
 candidate names its zero-based configured `index`, safe absolute resolved `path`, executable content
 `identity` in `sha256:<64 lowercase hex>` form, semantic `version`, `available` boolean, and
-`authentication` and `capability` status.
-The adapter may report `unknown` when it cannot verify authentication or capabilities; it must not
-copy host observations. Alias paths with the same identity and arguments are deduplicated. The
-runner mints the opaque installation id and never accepts a client-supplied path. A v2 selection is
+`authentication` and `capability` status. The v2 response establishes only executable identity for
+selection: Wollipog presents both statuses as `unknown`, even if an adapter asserts stronger values,
+because v2 supplies no target-local, non-secret probe evidence. Wollipog ships no concrete v2
+adapter or later authentication/capability evidence contract. Alias paths with the same identity
+and arguments are deduplicated. The runner mints the opaque installation id and never accepts a
+client-supplied path. A v2 selection is
 included with the probed path and identity in the `prepare` manifest and passed to `connect` as
 `--installation ID`; the adapter must revalidate the identity against that executable before
 launching. If the v2 operation fails or is

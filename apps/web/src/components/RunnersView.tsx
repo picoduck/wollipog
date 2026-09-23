@@ -977,6 +977,13 @@ function MachineSettingsDialog({
                   {installation.authentication === "unknown" ? "Authentication Unknown" :
                     installation.authentication === "authenticated" ? "Authenticated" : "Not Authenticated"}{" · "}
                   {installation.capability === "verified" ? "Capability Verified" : "Capability Unknown"}</div>
+                {(installation.authenticationEvidence || installation.capabilityEvidence) && <div className="muted">
+                  {installation.authenticationEvidence === "claude-auth-status" ? "Claude Auth Status" :
+                    installation.authenticationEvidence === "codex-login-status" ? "Codex Login Status" : null}
+                  {installation.authenticationEvidence && installation.capabilityEvidence ? " · " : null}
+                  {installation.capabilityEvidence === "claude-help" ? "Claude Help" :
+                    installation.capabilityEvidence === "codex-app-server-help" ? "Codex App Server Help" : null}
+                </div>}
                 <button type="button" className="btn sm" disabled={isSelected || !installation.available ||
                   !runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations") ||
                   runner.canManage !== true || selectingHarness}
