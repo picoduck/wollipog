@@ -131,16 +131,24 @@ function AgentDetailsDialog({ a, os, online, onClose }: { a: AgentDefinition; os
       </dl>
       <section className="agent-details-section">
         <h3>Launch Command</h3>
-        <p>The runner resolved this launch. Copy it into {launch.shell}; paths and arguments are quoted for that shell.</p>
-        <div className="agent-details-command">
-          <code>{launch.command}</code>
-          <CopyButton
-            text={launch.command}
-            iconOnly
-            className="copy-btn icon-only-copy"
-            ariaLabel={`Copy ${displayName} Launch Command`}
-          />
-        </div>
+        {launch.batchWrapper ? (
+          <>
+            <p>This Windows batch wrapper passes arguments through cmd.exe, which can change quotes or expand percent signs. A copyable launch command is unavailable; inspect the exact executable and arguments below.</p>
+            <dl className="agent-details-grid">
+              <div><dt>Executable</dt><dd><code>{a.command}</code></dd></div>
+              <div><dt>Arguments</dt><dd><code>{JSON.stringify(a.args)}</code></dd></div>
+            </dl>
+          </>
+        ) : (
+          <>
+            <p>The runner resolved this launch. Copy it into {launch.shell}; paths and arguments are quoted for that shell.</p>
+            <div className="agent-details-command">
+              <code>{launch.command}</code>
+              <CopyButton text={launch.command} iconOnly className="copy-btn icon-only-copy"
+                ariaLabel={`Copy ${displayName} Launch Command`} />
+            </div>
+          </>
+        )}
       </section>
       {a.update && (
         <section className="agent-details-section">

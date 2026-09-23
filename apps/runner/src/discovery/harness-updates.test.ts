@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { checkHarnessUpdate, classifyNpmHarnessUpdate, codexOffersSelfUpdate, harnessVersionPinned, manualCodexUpdateCommand, npmPackageForInstallation } from "./harness-updates.js";
 
 const result = (stdout: string, code = 0) => ({ code, stdout, stderr: "" });
@@ -76,6 +79,41 @@ test("manual update guidance quotes the selected launch in its stated shell", ()
     shell: "PowerShell 7.3 or later on this Machine",
   });
 });
+
+test("native Windows batch update commands are excluded, including embedded quotes and percent signs", () => {
+  for (const suffix of ["cmd", "BaT"]) {
+    const binary = { path: `C:\\Tools\\codex.${suffix}`, via: "path" as const,
+      launch: { command: `C:\\Tools\\codex.${suffix}`, args: ['embedded"quote', "%PATH%"] } };
+    assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+    assert.deepEqual(manualCodexUpdateCommand(binary, { kind: "wsl", distro: "Ubuntu" }, "win32"), {
+      command: `'C:\\Tools\\codex.${suffix}' 'embedded"quote' '%PATH%' 'update'`,
+      shell: "a POSIX shell inside WSL: Ubuntu",
+    });
+  }
+  assert.deepEqual(manualCodexUpdateCommand({ path: "C:\\Tools\\codex.exe", via: "path",
+    launch: { command: "C:\\Tools\\codex.exe", args: ['embedded"quote', "%PATH%"] } },
+  { kind: "native" }, "win32"), {
+    command: `& 'C:\\Tools\\codex.exe' 'embedded"quote' '%PATH%' 'update'`,
+    shell: "PowerShell 7.3 or later on this Machine",
+  });
+});
+
+test("a Windows batch shim advertising Codex update produces manager guidance, not a command",
+  { skip: process.platform !== "win32" }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "wollipog codex update "));
+    const shim = join(dir, "codex.cmd");
+    try {
+      writeFileSync(shim, "@echo off\r\necho Commands:\r\necho   update  Update Codex to the latest version\r\n", "utf8");
+      const binary = { path: shim, via: "path" as const, launch: { command: shim, args: [] } };
+      const assessment = await checkHarnessUpdate("codex", binary, { kind: "native" }, "0.2.0", true);
+      assert.equal(assessment.status, "managed_externally");
+      assert.match(assessment.guidance, /advertises its built-in `codex update` command/);
+      assert.match(assessment.guidance, /No copyable update command is available/);
+      assert.doesNotMatch(assessment.guidance, /Run `|& '.*codex\.cmd'/);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
 
 test("Machine pins identify only the named harness", () => {
   assert.equal(harnessVersionPinned("codex", "claude,codex"), true);

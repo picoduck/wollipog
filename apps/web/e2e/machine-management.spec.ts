@@ -107,6 +107,25 @@ test("Machine and Connections explain pinned, suppressed, failed, and unavailabl
   await page.screenshot({ path: "test-results/harness-command-desktop.png", fullPage: true });
 });
 
+test("Agent Details treats Windows batch wrapper arguments as reference data", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("batch-wrapper"));
+  await page.getByText("Agents", { exact: true }).click();
+  await page.getByRole("button", { name: "View Codex App Server Details" }).click();
+  const details = page.getByRole("dialog", { name: "Codex App Server Details" });
+  await expect(details.getByText(/A copyable launch command is unavailable/)).toBeVisible();
+  await expect(details.locator("dt").filter({ hasText: /^Executable$/ }).locator("+ dd code"))
+    .toHaveText("C:\\Program Files\\Codex Tools\\codex.cmd");
+  await expect(details.locator("dt", { hasText: "Arguments" }).locator("+ dd code"))
+    .toHaveText('["--profile","Team \\"Research\\"","%PATH%"]');
+  await expect(details.locator(".agent-details-command")).toHaveCount(0);
+  await expect(details.getByRole("button", { name: /Copy .* Launch Command/ })).toHaveCount(0);
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.screenshot({ path: "test-results/batch-wrapper-details-desktop.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(details).toBeVisible();
+  await page.screenshot({ path: "test-results/batch-wrapper-details-mobile.png", fullPage: true });
+});
+
 test("offline Machines retain last-reported harness status without a fresh release notice", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
   await setOffline(page);
