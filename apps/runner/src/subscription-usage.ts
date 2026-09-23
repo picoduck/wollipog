@@ -675,8 +675,10 @@ export class SubscriptionUsageManager {
         providerAgents.find((candidate) => (candidate.context?.kind ?? "native") === "native") ??
         providerAgents[0];
       const choice = fallback && harnessChoiceFor(choices, account.provider, fallback.context);
-      const accountCompatibleAgents = providerAgents.filter((candidate) =>
-        candidate.defaultProviderAccountId === account.id || !candidate.defaultProviderAccountId);
+      const accountCompatibleAgents = [
+        ...providerAgents.filter((candidate) => candidate.defaultProviderAccountId === account.id),
+        ...providerAgents.filter((candidate) => !candidate.defaultProviderAccountId),
+      ];
       const selected = fallback && choice
         ? accountCompatibleAgents.includes(fallback) && fallback.installation?.id === choice.installationId
           ? fallback
@@ -684,7 +686,7 @@ export class SubscriptionUsageManager {
         : fallback;
       const agent = selected ?? fallback;
       if (!agent) continue;
-      if (resolved || choice) accountContexts.add(`${account.provider}\0${contextKey(agent.context)}`);
+      if (resolved) accountContexts.add(`${account.provider}\0${contextKey(agent.context)}`);
       const sourceId = subscriptionUsageSourceId(
         this.options.runnerId,
         agent.id,

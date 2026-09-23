@@ -1581,7 +1581,9 @@ test("a selected account probe uses a generic agent before another account's def
     installation: { id: "selected", path: "/usr/bin/codex", via: "path" } });
   const generic = agent({ id: "codex-generic",
     installation: { id: "selected", path: "/usr/bin/codex", via: "path" } });
-  let discovered = [work, personal, generic];
+  const selectedWork = agent({ id: "codex-work-selected", defaultProviderAccountId: "work",
+    installation: { id: "selected", path: "/usr/bin/codex", via: "path" } });
+  let discovered = [work, personal, generic, selectedWork];
   const probed: string[] = [];
   const manager = new SubscriptionUsageManager({
     runnerId: "runner-1",
@@ -1595,21 +1597,54 @@ test("a selected account probe uses a generic agent before another account's def
     probeCodex: async (candidate) => { probed.push(candidate.id); return { state: "unavailable" }; },
   });
   await manager.refreshAccount("work");
-  assert.deepEqual(probed, ["codex-generic"]);
+  assert.deepEqual(probed, ["codex-work-selected"], "the account's selected default precedes a generic agent");
+  assert.equal(manager.inventory().find((source) => source.providerAccountId === "work")?.agentId,
+    "codex-work-selected");
+  discovered = [work, personal, generic];
+  manager.selectionChanged();
+  await manager.refreshAccount("work");
+  assert.deepEqual(probed, ["codex-work-selected", "codex-generic"]);
   assert.equal(manager.inventory().find((source) => source.providerAccountId === "work")?.agentId,
     "codex-generic");
   discovered = [work, personal];
   manager.selectionChanged();
   await manager.refreshAccount("work");
-  assert.deepEqual(probed, ["codex-generic"], "another account's configured agent is not borrowed");
+  assert.deepEqual(probed, ["codex-work-selected", "codex-generic"],
+    "another account's configured agent is not borrowed");
   assert.equal(manager.inventory().find((source) => source.providerAccountId === "work")?.state,
     "unsupported");
   discovered = [personal];
   manager.selectionChanged();
   await manager.refreshAccount("work");
-  assert.deepEqual(probed, ["codex-generic"], "the sole selected agent still belongs to another account");
+  assert.deepEqual(probed, ["codex-work-selected", "codex-generic"],
+    "the sole selected agent still belongs to another account");
   assert.equal(manager.inventory().find((source) => source.providerAccountId === "work")?.state,
     "unsupported");
+});
+
+test("an incompatible account does not hide a selected generic WSL usage source", async () => {
+  const wsl = agent({ id: "wsl-generic", context: { kind: "wsl", distro: "Ubuntu" },
+    installation: { id: "selected", path: "/usr/bin/codex", via: "path" } });
+  const probed: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [wsl],
+    installationChoices: () => [{ family: "codex", context: { kind: "wsl", distro: "Ubuntu" },
+      installationId: "selected" }],
+    providerAccounts: () => [{ id: "work", label: "Work", provider: "codex", authStatus: "authenticated" }],
+    resolveProviderAccountAgent: () => undefined,
+    resolveEnv: () => ({}),
+    authorizeProbe: () => ({ cwd: "/safe/probe" }),
+    publish: () => {},
+    now: () => 20_000,
+    probeCodex: async (candidate) => { probed.push(candidate.id); return { state: "unavailable" }; },
+  });
+  await manager.refreshAll();
+  assert.deepEqual(probed, ["wsl-generic"]);
+  assert.deepEqual(manager.inventory().map((source) => [source.agentId, source.providerAccountId, source.state]), [
+    ["wsl-generic", "work", "unsupported"],
+    ["wsl-generic", undefined, "unavailable"],
+  ]);
 });
 
 test("a runner without synchronized choices does not advertise selection-bound usage", async () => {
