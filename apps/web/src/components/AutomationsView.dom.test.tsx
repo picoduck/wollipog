@@ -801,6 +801,69 @@ test("switching alternate workflow Machines clears the old alternate installatio
   }
 });
 
+test("alternate workflow selectors follow the effective primary choice after a Machine switch", async () => {
+  const alternate = { ...runners[1]!, agents: [
+    { ...runners[0]!.agents[0]! },
+    { ...runners[0]!.agents[1]! },
+  ] };
+  const newPrimary = { ...runners[2]!, agents: [{
+    ...runners[2]!.agents[0]!, id: "rich-agent", driver: "acp" as const,
+  }] };
+  const stored = schedule("primary-switch-alternate", "Primary Switch Alternate");
+  stored.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
+    agentBindings: { "rich-agent": "other-agent" }, orchestratorAgentId: "other-agent",
+  } };
+  stored.runnerPolicy = { kind: "alternate", targets: [{
+    runnerId: "runner-2", workspaceId: "runner-2-workspace",
+  }] };
+  const workflow: WorkflowDefinition = {
+    workflowId: "graph-1", version: 1, name: "Graph", source: "custom", maxTransitions: 1,
+    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
+    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
+      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
+  };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate, newPrimary], [workflow]);
+  try {
+    await expandCard(fixture, "Primary Switch Alternate");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
+      /Alternate Rich-Agent Agent: Codex App Server/);
+    await choose(fixture.container, "Rich-Agent Agent", "Claude Code");
+    assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
+      /Alternate Rich-Agent Agent: Claude Code/,
+    "the alternate must follow an edited primary role when it has no override");
+    await changeNativeSelect(fixture.container, "Machine", "runner-3");
+    assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
+      /Alternate Rich-Agent Agent: Claude Code/,
+    "the alternate must not keep the old primary role override after that override is dropped");
+    assert.equal(choiceTrigger(fixture.container, "Alternate Orchestrator Agent"), undefined,
+      "the alternate must not display an orchestrator that the new primary request drops");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the automation card flags an unbound primary workflow orchestrator", async () => {
+  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
+    ...runners[0]!.agents[0]!, installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
+    },
+  }] };
+  const stored = schedule("unbound-orchestrator", "Unbound Orchestrator");
+  stored.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
+    orchestratorAgentId: "rich-agent",
+  } };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
+  try {
+    await expandCard(fixture, "Unbound Orchestrator");
+    assert.match(fixture.container.textContent ?? "", /Saved Agent Harness installation unavailable or unbound/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("an unavailable alternate installation is visible on the automation card", async () => {
   const alternate = { ...runners[1]!, protocolVersion: 175, agents: [{
     ...runners[1]!.agents[0]!, installation: {

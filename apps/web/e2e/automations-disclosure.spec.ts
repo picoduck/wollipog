@@ -115,6 +115,26 @@ for (const { label, viewport } of [
   { label: "mobile", viewport: { width: 375, height: 812 } },
 ]) {
   for (const theme of ["dark", "light"] as const) {
+    test.describe(`${label} ${theme} workflow orchestrator installation`, () => {
+      test.use({ viewport });
+      test("shows a card warning when the saved orchestrator has no installation binding", async ({ page }) => {
+        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+        const card = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
+        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-bound`);
+        await card.click();
+        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toHaveCount(0);
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-orchestrator-before-${label}-${theme}.png`), fullPage: true,
+        });
+        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-unbound`);
+        await card.click();
+        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toBeVisible();
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-orchestrator-after-${label}-${theme}.png`), fullPage: true,
+        });
+      });
+    });
+
     test.describe(`${label} ${theme} alternate installation`, () => {
       test.use({ viewport });
       test("shows a card warning when an alternate's saved installation disappears", async ({ page }) => {

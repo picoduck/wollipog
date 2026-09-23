@@ -148,9 +148,13 @@ if (workflowSwitchRunner) {
   items[0]!.action = { kind: "workflow_run", request: {
     runnerId: "runner-1", workspaceId: "workspace-1", workflowId: "workflow-1", task: "Audit",
     agentBindings: { "agent-1": "agent-1" },
+    ...(params.has("orchestrator-bound") || params.has("orchestrator-unbound")
+      ? { orchestratorAgentId: "agent-1" } : {}),
   }, installationBindings: { "role:agent-1": {
     driver: "claude-code", context: { kind: "native" }, installationId: "system",
-  } } };
+  }, ...(params.has("orchestrator-bound") ? { orchestrator: {
+    driver: "claude-code" as const, context: { kind: "native" as const }, installationId: "system",
+  } } : {}) } };
 }
 
 const triggerItems: AutomationTriggerView[] = [{

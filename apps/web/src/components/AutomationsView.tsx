@@ -739,11 +739,15 @@ export function AutomationsView() {
                   editingSpec.runnerPolicy.targets[0]?.runnerId === form.fallbackRunnerId
                   ? editingSpec.runnerPolicy.targets[0] : undefined;
                 const reference = oldTarget?.installationBindings?.[`role:${role}`];
+                const primaryChoice = workflowBindingEdits[`role:${role}`] ??
+                  (editingSpec?.action.kind === "workflow_run" &&
+                    editingSpec.action.request.workflowId === form.workflowId &&
+                    editingSpec.action.request.runnerId === form.runnerId
+                    ? editingSpec.action.request.agentBindings?.[role] : undefined);
                 const boundId = alternateWorkflowBindingEdits[`role:${role}`] ??
                   (reference ? resolvedInstallationAgentId(selectedFallback, reference) : undefined) ??
                   oldTarget?.agentBindings?.[role] ??
-                  (editingSpec?.action.kind === "workflow_run"
-                    ? editingSpec.action.request.agentBindings?.[role] : undefined) ?? role;
+                  primaryChoice ?? role;
                 const unavailable = Boolean(oldTarget) && !alternateWorkflowBindingEdits[`role:${role}`] && (reference
                   ? !bindingAvailable(selectedFallback, reference)
                   : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
@@ -766,18 +770,20 @@ export function AutomationsView() {
                   </p>}
                 </div>;
               })}
-              {form.actionKind === "workflow_run" && editingSpec?.action.kind === "workflow_run" &&
-                (editingSpec.runnerPolicy.kind === "alternate" &&
-                  editingSpec.runnerPolicy.targets[0]?.orchestratorAgentId ||
-                  editingSpec.action.request.orchestratorAgentId) && (() => {
+              {form.actionKind === "workflow_run" && editingSpec?.action.kind === "workflow_run" && (() => {
                   const oldTarget = editingSpec.runnerPolicy.kind === "alternate" &&
                     editingSpec.action.request.workflowId === form.workflowId &&
                     editingSpec.runnerPolicy.targets[0]?.runnerId === form.fallbackRunnerId
                     ? editingSpec.runnerPolicy.targets[0] : undefined;
+                  const primaryChoice = workflowBindingEdits.orchestrator ??
+                    (editingSpec.action.request.workflowId === form.workflowId &&
+                      editingSpec.action.request.runnerId === form.runnerId
+                      ? editingSpec.action.request.orchestratorAgentId : undefined);
+                  if (!oldTarget?.orchestratorAgentId && !primaryChoice) return null;
                   const reference = oldTarget?.installationBindings?.orchestrator;
                   const boundId = alternateWorkflowBindingEdits.orchestrator ??
                     (reference ? resolvedInstallationAgentId(selectedFallback, reference) : undefined) ??
-                    oldTarget?.orchestratorAgentId ?? editingSpec.action.request.orchestratorAgentId!;
+                    oldTarget?.orchestratorAgentId ?? primaryChoice!;
                   const unavailable = Boolean(oldTarget) && !alternateWorkflowBindingEdits.orchestrator && (reference
                     ? !bindingAvailable(selectedFallback, reference)
                     : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
@@ -881,6 +887,9 @@ export function AutomationsView() {
               return !actionRunner?.agents.some((agent) => agent.id === id && !agent.installation);
             }) ?? false;
           })();
+          const unboundOrchestrator = workflowAction?.request.orchestratorAgentId &&
+            !savedBindings?.orchestrator && !actionRunner?.agents.some((agent) =>
+              agent.id === workflowAction.request.orchestratorAgentId && !agent.installation);
           const unavailableAlternate = item.runnerPolicy.kind === "alternate" &&
             item.runnerPolicy.targets.some((target) => {
               const runner = runners.get(target.runnerId);
@@ -907,7 +916,7 @@ export function AutomationsView() {
                 !runner?.agents.some((agent) => agent.id === orchestrator && !agent.installation));
             });
           return <AutomationCard key={item.automationId} id={item.automationId} name={item.name} action={actionSummary(item.action)} enabled={item.enabled}>
-            {(unavailableInstallation || unboundInstallation || unboundWorkflow || unavailableAlternate) && <p className="automation-execution-error" role="alert">
+            {(unavailableInstallation || unboundInstallation || unboundWorkflow || unboundOrchestrator || unavailableAlternate) && <p className="automation-execution-error" role="alert">
               Saved Agent Harness installation unavailable or unbound. Edit this automation to choose an available installation.
             </p>}
             <dl className="automation-facts"><div><dt>Schedule</dt><dd><code>{item.cron}</code> · {item.timezone}</dd></div><div><dt>Next Fire</dt><dd>{formatTime(item.nextFireAt)}</dd></div><div><dt>Last Result</dt><dd>{latest ? `${titleCaseLabel(latest.status)} · ${formatTime(latest.completedAt ?? latest.startedAt ?? latest.createdAt)}` : "Never"}</dd></div><div><dt>Policies</dt><dd>{titleCaseLabel(item.misfirePolicy.kind)} · {titleCaseLabel(item.runnerPolicy.kind)} · {titleCaseLabel(item.concurrencyPolicy)}</dd></div><div><dt>Ceilings</dt><dd>${item.limits.maxCostUsd} · {item.limits.maxToolCalls} Tools</dd></div></dl>
@@ -977,6 +986,7 @@ export function AutomationsView() {
               setPrimaryAgentTouched(false);
               setAlternateAgentTouched(false);
               setWorkflowBindingEdits({});
+              setAlternateWorkflowBindingEdits({});
               setShowForm(true);
             }}>Edit</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: `Delete “${item.name}”?`, message: "The automation is removed permanently. Execution history remains in the audit database.", confirmLabel: "Delete Automation", tone: "danger" })) { if (editingId === item.automationId) closeEditor(); await mutate(() => api.deleteAutomation(item.automationId)); } })()}>Delete</button></div>
             {executions.length > 0 && <details className="automation-history"><summary>Execution History ({executions.length})</summary><div className="automation-history-list">{executions.map((execution) => <div className="automation-execution" key={execution.executionId}><div><strong>{titleCaseLabel(execution.status)}</strong><span>{formatTime(execution.scheduledFor)}</span></div><code>{execution.idempotencyKey}</code>{execution.triggerDelivery && <small>Delivered Fields: {deliverySummary(execution.triggerDelivery)}{execution.triggerDelivery.promptSha256 ? ` · Prompt Digest ${execution.triggerDelivery.promptSha256.slice(0, 12)}…` : ""}</small>}{execution.commands?.length ? <ul className="automation-command-list" aria-label="Durable Runner Command Receipts">{execution.commands.map((command) => <li key={command.commandId}><span>{titleCaseLabel(command.kind.replace("_", " "))} · {titleCaseLabel(command.state)}</span><small>{command.attemptCount} delivery attempt{command.attemptCount === 1 ? "" : "s"}</small>{command.lastError && <em>{command.lastError}</em>}</li>)}</ul> : execution.deliveryMode === "legacy_at_most_once" ? <small className="automation-legacy-delivery">Legacy At-Most-Once Delivery</small> : null}{execution.error && <p>{execution.error}</p>}{execution.sessionId && <button className="link-button" type="button" onClick={() => navigate({ name: "session", id: execution.sessionId! })}>Open Session</button>}</div>)}</div></details>}
