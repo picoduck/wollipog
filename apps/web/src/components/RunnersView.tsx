@@ -1615,7 +1615,7 @@ export function RunnersView() {
     void api.getIdentity().then((nextIdentity) => {
       setIdentity(nextIdentity);
     }).catch((error) => {
-      setIdentityError((error as Error).message);
+      setIdentityError(error instanceof Error ? error.message : String(error));
     });
   };
   useEffect(loadMachineAccess, [api]);
