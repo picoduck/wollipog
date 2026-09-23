@@ -4990,7 +4990,7 @@ export class SessionsService {
       this.db.setPendingApproval(sessionId, remaining);
       this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "idle", now);
       this.recordRunnerGuardrailResolution(session, parkedGuardrail, "dismissed", actor, now, { content: config });
-      if (!remaining) this.gateOnPolicy(sessionId, now);
+      this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
       this.clearSettledPolicyResumeStatus(sessionId);
     } else if (guardrailChanged && !parked) {
@@ -8106,7 +8106,7 @@ export class SessionsService {
         this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "idle", now);
         // Asks are serialized through the single approval slot: if ANOTHER rule is also tripped,
         // park again immediately with its own card instead of waiting for the next turn settle.
-        if (!remaining) this.gateOnPolicy(sessionId, now);
+        this.gateOnPolicy(sessionId, now);
         this.reconcilePolicyHookTimeouts(now, sessionId);
         this.clearSettledPolicyResumeStatus(sessionId);
       } else {
@@ -8134,6 +8134,9 @@ export class SessionsService {
     // be meaningless to the driver's updatedInput contract.
     if (pending.kind === "question" && optionId !== null) {
       return fail("this is a question — answer it via /answer, or dismiss with optionId null", 409);
+    }
+    if (pending.kind === "question" && pending.async) {
+      return fail("dismiss async questions via /answer with their occurrence id", 409);
     }
 
     // Deliver first; only mutate state if the runner actually received it, so an
@@ -10337,9 +10340,9 @@ export class SessionsService {
   /** The guardrail ask gateOnPolicy would park on right now, without parking. */
   private pendingPolicyAsk(s: SessionView, softOnly = false) {
     const occupied = pendingRequests(s.pendingApproval);
-    // A typed workflow decision is an authorization record, not a provider turn barrier. Soft
-    // guardrails must be able to park alongside it while other provider/user asks retain priority.
-    if (occupied.some((request) => request.kind !== "workflow_decision")) return null;
+    // Typed workflow decisions and async questions do not block the provider turn. Soft
+    // guardrails must park alongside them before the runner drains another queued prompt.
+    if (occupied.some((request) => request.kind !== "workflow_decision" && !request.async)) return null;
     const rules = rulesFromSession(this.guardrailFields(s));
     if (rules.length === 0) return null;
     // sessionView already computed the count when the guardrail is armed — don't re-query.
@@ -10966,12 +10969,21 @@ export class SessionsService {
         { content: payload.questions },
       );
       const occupiedHook = this.db.getSession(sessionId)?.pendingApproval;
+      if (occupiedHook?.kind === "policy_hook" && payload.async) {
+        // The hook owns a blocking decision, but an async question can remain answerable behind
+        // it. Preserve both instead of dismissing a non-blocking question at the turn barrier.
+        this.hub.sessionEvent(ev, { suppressReminderWake: true });
+        this.db.setPendingApproval(sessionId, appendPendingApproval(occupiedHook, approval));
+        this.hub.sessionChangedById(sessionId);
+        return;
+      }
       if (occupiedHook?.kind === "policy_hook") {
         this.hub.sessionEvent(ev, { suppressReminderWake: true });
         const sent = this.hub.sendToRunner(session.runnerId, {
           type: "answer_question",
           sessionId,
           requestId: approval.requestId,
+          ...(approval.occurrenceId ? { occurrenceId: approval.occurrenceId } : {}),
           answers: {},
           action: "dismiss",
         });
@@ -11433,7 +11445,8 @@ export class SessionsService {
   private settleHydratedAsk(sessionId: string, trailingAsk: PendingApproval | null): void {
     if (!trailingAsk) return;
     const cur = this.db.getSession(sessionId);
-    if (cur && (cur.status === "input_required" || trailingAsk.async) && !cur.pendingApproval) {
+    if (cur && !isTerminal(cur.status) &&
+        (cur.status === "input_required" || trailingAsk.async) && !cur.pendingApproval) {
       this.db.setPendingApproval(sessionId, trailingAsk);
       this.hub.sessionChangedById(sessionId);
     }
@@ -12033,6 +12046,11 @@ function addPendingRequestPreservingRunnerGuardrails(
   current: PendingApproval | null | undefined,
   next: PendingApproval,
 ): PendingApproval {
+  // An async question does not own a turn barrier. It cannot displace a policy pause that has
+  // already stopped the queue; keep that card first and make the question available behind it.
+  if (next.async && pendingRequests(current).some((request) => isPolicyApproval(request))) {
+    return appendPendingApproval(current, next);
+  }
   const durableCards = pendingRequests(current).filter((request) =>
     request.runnerGuardrail || request.kind === "workflow_decision");
   let combined = addPendingRequest(current, next);

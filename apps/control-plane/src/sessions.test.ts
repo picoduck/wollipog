@@ -12478,13 +12478,14 @@ test("a provider question cannot overwrite a parked policy-hook card", () => {
   svc.onSessionEvent(id, {
     kind: "question_request",
     requestId: "parallel-question",
+    occurrenceId: "request_parallel_question",
     questions: [{ id: "choice", question: "Which option?", options: [{ label: "A" }] }],
   });
 
   assert.equal(db.getSession(id)!.pendingApproval?.kind, "policy_hook");
   assert.equal(db.getSession(id)!.pendingApproval?.requestId, asked.approvalRequestId);
   const { occurrenceId: dismissedOccurrence, ...dismissalDelivery } = hub.sentOfType("answer_question").at(-1)!;
-  assert.equal(dismissedOccurrence, undefined);
+  assert.equal(dismissedOccurrence, "request_parallel_question");
   assert.deepEqual(dismissalDelivery, {
     type: "answer_question",
     sessionId: id,
@@ -12496,6 +12497,40 @@ test("a provider question cannot overwrite a parked policy-hook card", () => {
     entry.requestId === "parallel-question" &&
     entry.outcome === "dismissed" &&
     entry.actor.id === "policy-hook-turn-barrier"));
+});
+
+test("an async question remains behind a parked policy-hook card", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.upsertGovernancePolicy({
+    policyId: "ask-before-async-question",
+    name: "Ask Before Async Question",
+    effect: "ask",
+    priority: 100,
+    enabled: true,
+    scope: { toolName: "Write" },
+  });
+  const asked = svc.evaluatePolicyHook(id, {
+    hookEventName: "PreToolUse",
+    providerSessionId: "provider-async-question-barrier",
+    permissionMode: "plan",
+    toolUseId: "write-before-async-question",
+    context: { toolName: "Write" },
+  }, true).data!;
+  const dismissalsBefore = hub.sentOfType("answer_question").length;
+
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "parallel-async-question",
+    occurrenceId: "request_parallel_async_question",
+    questions: [{ id: "choice", question: "Which option?", options: [{ label: "A" }] }],
+  });
+
+  assert.deepEqual(pendingRequests(db.getSession(id)?.pendingApproval)
+    .map((request) => request.requestId),
+  [asked.approvalRequestId, "parallel-async-question"]);
+  assert.equal(db.getSession(id)?.status, "input_required");
+  assert.equal(hub.sentOfType("answer_question").length, dismissalsBefore);
 });
 
 test("protocol-v65 hook asks fail closed without parking an unpollable card", () => {
@@ -13320,6 +13355,22 @@ test("Codex async question keeps a running session active and rejects stale answ
     msg.command.type === "answer_recovered_question" &&
     msg.command.requestId === "codex-async:message-1" &&
     msg.command.recoveryId === "request_async_occurrence"));
+});
+
+test("async questions cannot be dismissed through approval without an occurrence", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "idle", Date.now());
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "codex-async:approve",
+    occurrenceId: "request_async_approve",
+    questions: [{ id: "0", question: "Which path?", options: [] }],
+  });
+  assert.equal(db.getSession(id)?.status, "idle");
+  assert.equal(svc.approve(id, "codex-async:approve", null).status, 409);
+  assert.equal(db.getSession(id)?.status, "idle");
+  assert.equal(db.getSession(id)?.pendingApproval?.requestId, "codex-async:approve");
+  assert.equal(hub.sentOfType("answer_question").length, 0);
 });
 
 test("a blocking approval can be resolved without clearing an async question", () => {
@@ -18453,6 +18504,48 @@ test("cost checkpoints park once each, approval advances, and a decline stops wi
   db.updateSessionStatus(id, "idle", Date.now());
   svc.onSessionStatus(id, "idle");
   assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_checkpoint");
+});
+
+test("an async question cannot suppress a cost checkpoint at usage or turn settle", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID, prompt: "Spend" });
+  assert.ok(svc.setConfig(id, { costCheckpointsUsd: [1] }).ok);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "codex-async:budget",
+    occurrenceId: "request_async_budget",
+    questions: [{ id: "0", question: "Which path?", options: [] }],
+  });
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 1.2 });
+  svc.onSessionStatus(id, "idle");
+
+  const session = db.getSession(id)!;
+  assert.equal(session.status, "input_required");
+  assert.deepEqual(pendingRequests(session.pendingApproval).map((request) => request.kind),
+    ["cost_checkpoint", "question"]);
+  assert.equal(pendingRequests(session.pendingApproval)[1]?.requestId, "codex-async:budget");
+  assert.ok(hub.sentOfType("rearm_governance").some((message) => message.holdFor === "control_plane"));
+});
+
+test("an async question arriving after a cost checkpoint keeps the pause in front", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID, prompt: "Spend" });
+  assert.ok(svc.setConfig(id, { costCheckpointsUsd: [1] }).ok);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 1.2 });
+  const checkpointId = db.getSession(id)?.pendingApproval?.requestId;
+  assert.equal(db.getSession(id)?.pendingApproval?.kind, "cost_checkpoint");
+
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "codex-async:after-budget",
+    occurrenceId: "request_async_after_budget",
+    questions: [{ id: "0", question: "Which path?", options: [] }],
+  });
+
+  const session = db.getSession(id)!;
+  assert.equal(session.status, "input_required");
+  assert.deepEqual(pendingRequests(session.pendingApproval).map((request) => request.requestId),
+    [checkpointId, "codex-async:after-budget"]);
 });
 
 test("a budgeted session whose usage cannot be priced fails closed until the user continues without the budget", () => {
