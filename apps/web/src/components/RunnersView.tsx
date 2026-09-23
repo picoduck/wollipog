@@ -16,6 +16,7 @@ import { useStore } from "../store.js";
 import { osLabel, relativeTime, sshErrorHint, titleCaseLabel } from "../format.js";
 import {
   agentInstallHints,
+  codexUpgradeGuidance,
   formatAdmissionPolicy,
   formatExecutionIsolation,
   machineSettingsMutationError,
@@ -60,7 +61,7 @@ import {
 
 function harnessUpdateLabel(status: NonNullable<AgentDefinition["update"]>["status"]): string {
   return ({
-    update_available: "Update Available",
+    update_available: "New Release Published",
     up_to_date: "Up to Date",
     check_failed: "Check Failed",
     version_unknown: "Version Unknown",
@@ -101,7 +102,7 @@ function acpCapabilitySummary(a: AgentDefinition): string {
   return enabled.length ? `Live capabilities: ${enabled.join(", ")}` : "Live ACP handshake reported no optional stable capabilities";
 }
 
-function AgentDetailsDialog({ a, onClose }: { a: AgentDefinition; onClose: () => void }) {
+function AgentDetailsDialog({ a, online, onClose }: { a: AgentDefinition; online: boolean; onClose: () => void }) {
   const launchCommand = [a.command, ...a.args].join(" ");
   const displayName = agentDisplayName(a);
   return (
@@ -121,7 +122,7 @@ function AgentDetailsDialog({ a, onClose }: { a: AgentDefinition; onClose: () =>
         <div><dt>Version</dt><dd>{a.version ? `v${a.version}` : "Unknown"}</dd></div>
         <div><dt>Availability</dt><dd>{agentAvailabilityLabel(a)}</dd></div>
         <div><dt>Authentication</dt><dd>{titleCaseLabel(a.authStatus ?? "unknown")}</dd></div>
-        {a.update && <div><dt>Update Status</dt><dd>{harnessUpdateLabel(a.update.status)}</dd></div>}
+        {a.update && <div><dt>Update Status</dt><dd>{online ? harnessUpdateLabel(a.update.status) : `Last Reported: ${harnessUpdateLabel(a.update.status)}`}</dd></div>}
       </dl>
       <section className="agent-details-section">
         <h3>Launch Command</h3>
@@ -144,7 +145,7 @@ function AgentDetailsDialog({ a, onClose }: { a: AgentDefinition; onClose: () =>
             <div><dt>Latest Known Compatible Version</dt><dd>{a.update.latestKnownCompatibleVersion ?? "Unknown"}</dd></div>
             <div><dt>Latest Published Version</dt><dd>{a.update.latestPublishedVersion ?? "Unknown"}</dd></div>
             <div><dt>Release Channel</dt><dd>{titleCaseLabel(a.update.channel)}</dd></div>
-            <div><dt>Checked At</dt><dd>{new Date(a.update.checkedAt).toLocaleString()}</dd></div>
+            <div><dt>Last Checked</dt><dd>{new Date(a.update.checkedAt).toLocaleString()}</dd></div>
             <div><dt>Evidence Source</dt><dd>{a.update.evidenceSource}</dd></div>
           </dl>
           <p>{a.update.guidance}</p>
@@ -201,11 +202,7 @@ function AgentRow({
   const codexRemediation = driver.startsWith("codex")
     ? a.authStatus === "unauthenticated"
       ? "codex login"
-      : a.codexAppServer?.status === "unsupported"
-        ? "npm install -g @openai/codex@latest"
-        : a.codexAppServer?.status === "unavailable"
-          ? agentInstallHints(a.context?.kind === "wsl" ? "linux" : os).find((hint) => /codex/i.test(hint.name))?.command
-          : undefined
+      : undefined
     : undefined;
   const remediation = claudeRemediation ?? codexRemediation;
   const displayName = agentDisplayName(a);
@@ -270,7 +267,7 @@ function AgentRow({
         <span className="atag ctx">{contextLabel(a.context)}</span>
         {a.source === "discovered" && <span className="atag discovered">Discovered</span>}
         {a.source === "registry" && <span className="atag discovered">ACP Registry</span>}
-        {a.update?.status === "update_available" && <span className="atag" role="status">Update Available</span>}
+        {online && a.update?.status === "update_available" && <span className="atag" role="status">New Release Published</span>}
         {a.available !== true && <span className="atag broken">{agentAvailabilityLabel(a)}</span>}
         {a.registry && <span className="atag">{a.registry.transport}</span>}
         {!a.registry && a.acpTransport && <span className="atag">{a.acpTransport}</span>}
@@ -321,6 +318,10 @@ function AgentRow({
           <CopyButton text={remediation} iconOnly ariaLabel={`Copy ${displayName} Remediation Command`} className="copy-btn icon-only-copy" />
         </pre>
       )}
+      {(a.codexAppServer?.status === "unsupported" || a.codexAppServer?.status === "unavailable") &&
+        driver.startsWith("codex") && a.authStatus !== "unauthenticated" && (
+          <p className="empty-sub">{codexUpgradeGuidance(a)}</p>
+        )}
       {a.registry && a.registry.installStatus !== "installed" && (
         <div>
           <div className="empty-sub">
@@ -356,7 +357,7 @@ function AgentRow({
         </div>
       )}
     </div>
-    {showDetails && <AgentDetailsDialog a={a} onClose={() => setShowDetails(false)} />}
+    {showDetails && <AgentDetailsDialog a={a} online={online} onClose={() => setShowDetails(false)} />}
     </>
   );
 }
@@ -461,8 +462,8 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
                         <p className="hint">No usable agent CLIs found on this machine — install one:</p>
                         {agentInstallHints(runner.os).map((h) => (
                           <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
-                            {h.command}
-                            <CopyButton text={h.command} />
+                            {h.command ?? h.guidance}
+                            {h.command && <CopyButton text={h.command} />}
                           </pre>
                         ))}
                       </>
@@ -477,8 +478,8 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
                 <p className="hint">No agent CLIs found on this machine — install one:</p>
                 {agentInstallHints(runner.os).map((h) => (
                   <pre key={h.name} className="code-block install-cmd" title={`Install ${h.name}`}>
-                    {h.command}
-                    <CopyButton text={h.command} />
+                    {h.command ?? h.guidance}
+                    {h.command && <CopyButton text={h.command} />}
                   </pre>
                 ))}
               </div>
@@ -688,6 +689,7 @@ function MachineSettingsDialog({
   const [error, setError] = useState<string | null>(null);
   const canBrowse = runner?.status === "online" &&
     runnerSupportsProtocol(runner.protocolVersion, "directoryListing");
+  const harnessStatusCurrent = runner?.status === "online" && (!box || box.status === "online");
   const onlineNativeRunner = !box && runner?.status === "online";
   const capacitySupported = !!runner && runnerSupportsProtocol(runner.protocolVersion, "machineRunnerCapacity");
   const automaticAccountSwitchSupported = !!runner &&
@@ -910,10 +912,10 @@ function MachineSettingsDialog({
                 <div><strong>{agentDisplayName(agent)}</strong> · {contextLabel(agent.context)} · {agent.version ? `v${agent.version}` : "Version Unknown"}</div>
                 <div><code>{installation.path}</code> · {titleCaseLabel(installation.via.replace(/-/g, " "))}</div>
                 <div>{agent.available === true ? "Available" : agentAvailabilityLabel(agent)}</div>
-                {agent.update && <div>{harnessUpdateLabel(agent.update.status)} · {agent.update.latestKnownCompatibleVersion
+                {agent.update && <div>{harnessStatusCurrent ? harnessUpdateLabel(agent.update.status) : `Last Reported: ${harnessUpdateLabel(agent.update.status)}`} · {agent.update.latestKnownCompatibleVersion
                   ? `Latest Known Compatible v${agent.update.latestKnownCompatibleVersion}` : "Latest Known Compatible Version Unknown"} · {agent.update.latestPublishedVersion
                     ? `Latest Published v${agent.update.latestPublishedVersion}` : "Latest Published Version Unknown"} ·
-                  Checked {new Date(agent.update.checkedAt).toLocaleString()} · {agent.update.evidenceSource}</div>}
+                  Last Checked {new Date(agent.update.checkedAt).toLocaleString()} · {agent.update.evidenceSource}</div>}
                 {agent.update && <p>{agent.update.guidance}</p>}
                 <button type="button" className="btn sm" disabled={isSelected || !installationSupported ||
                   runner.canManage !== true || selectingHarness}
@@ -1267,6 +1269,7 @@ export function BoxCard({
   // protocol version is unknown rather than stale, so do not offer a destructive redeploy on a
   // guess. The runner details still explain the unknown-version compatibility limitations.
   const needsUpdate = !!runner && runnerOutdated(runner.protocolVersion);
+  const harnessStatusCurrent = box.status === "online" && runner?.status === "online";
   const display = runnerDisplay(runner, box, box.runnerId);
   const [updating, setUpdating] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
@@ -1351,10 +1354,10 @@ export function BoxCard({
       </div>
       <div className="runner-head-right runner-card-actions">
         <span className="os-badge">SSH</span>
-        {runner?.agents.some((agent) => agent.update?.status === "update_available") &&
+        {harnessStatusCurrent && runner.agents.some((agent) => agent.update?.status === "update_available") &&
           (canManage || runner.canManage === true) && (
           <button type="button" className="btn-rediscover needs-update" onClick={() => setShowMachineSettings(true)}>
-            <span>Harness Update Available · View Settings</span>
+            <span>New Harness Release · View Settings</span>
           </button>
         )}
         {canManage && needsUpdate && !inProgress && (
@@ -1419,7 +1422,7 @@ export function BoxCard({
         {sshRunnerLifecycleHint()}
       </div>
       {runner ? (
-        <RunnerDetails runner={runner} online={box.status === "online"} />
+        <RunnerDetails runner={runner} online={harnessStatusCurrent} />
       ) : inProgress ? (
         <div className="empty-sub">Waiting for the runner to come online…</div>
       ) : box.status === "offline" ? (
@@ -1472,10 +1475,10 @@ export function NativeRunnerCard({
       </div>
       <div className="runner-head-right runner-card-actions">
         <span className={`os-badge os-${runner.os}`}>{osLabel(runner.os)}</span>
-        {runner.agents.some((agent) => agent.update?.status === "update_available") &&
+        {runner.status === "online" && runner.agents.some((agent) => agent.update?.status === "update_available") &&
           (canManage || runner.canManage === true) && (
           <button type="button" className="btn-rediscover needs-update" onClick={() => onManage(runner.runnerId)}>
-            <span>Harness Update Available · View Settings</span>
+            <span>New Harness Release · View Settings</span>
           </button>
         )}
         {canManage && <button

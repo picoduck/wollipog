@@ -127,6 +127,34 @@ test("onboarding health gives exact recovery commands for offline and unauthenti
   assert.equal(checks.find((check) => check.id === "agents")?.command, "claude auth login");
 });
 
+test("Codex onboarding uses installation guidance without a universal npm command", () => {
+  const update = {
+    status: "managed_externally" as const, checkedAt: 1, channel: "stable" as const,
+    evidenceSource: "Executable installation provenance", managedExternally: true as const,
+    guidance: "Use this installation's exact manager.",
+  };
+  const unsupported = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceId: "repo",
+    runner: runner({ agents: [{ id: "codex", name: "Codex", command: "codex", args: [], env: {},
+      driver: "codex-app-server", available: false,
+      codexAppServer: { status: "unsupported", appServerAvailable: false }, update,
+    }] }),
+  }).find((check) => check.id === "agents")!;
+  assert.equal(unsupported.command, undefined);
+  assert.match(unsupported.detail, /Use this installation's exact manager/);
+  assert.doesNotMatch(unsupported.detail, /npm install/);
+
+  const missing = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceId: "repo",
+    runner: runner({ agents: [{ id: "codex", name: "Codex", command: "codex", args: [], env: {},
+      driver: "codex-app-server", available: false,
+      codexAppServer: { status: "unavailable", appServerAvailable: false },
+    }] }),
+  }).find((check) => check.id === "agents")!;
+  assert.equal(missing.command, undefined);
+  assert.match(missing.detail, /is unavailable or could not be launched/);
+  assert.match(missing.detail, /Install Codex using a supported method/);
+  assert.doesNotMatch(missing.detail, /selected installation|npm install/);
+});
+
 test("onboarding health waits for current discovery even when registration carries stale ready rows", () => {
   const checks = onboardingHealth({
     credentialAvailable: true,
