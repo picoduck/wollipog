@@ -422,12 +422,12 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
       if (old && (old.runnerId !== runnerId || old.ids[key] !== agentId)) delete bindings[key];
       if (bindings[key]) continue;
       if (old?.runnerId === runnerId && old.ids[key] === agentId) {
-        // Omitted metadata comes from older clients and preserves the pin. An explicit empty map
-        // means the operator reselected the same plain id after rediscovery; capture its current
-        // installation (or leave a config-authored agent unbound).
+        // Omitted metadata comes from older clients and preserves the pin. A missing key in an
+        // explicit map may represent a re-selection, but only a previously pinned key may be
+        // recaptured; unrelated edits must not turn an unbound ID into a new installation.
         if (existing === undefined) {
           if (old.bindings?.[key]) bindings[key] = old.bindings[key];
-        } else {
+        } else if (old.bindings?.[key]) {
           const selected = db.savedHarnessInstallation(runnerId, agentId);
           if (selected) bindings[key] = selected;
         }

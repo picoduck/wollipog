@@ -1166,6 +1166,48 @@ test("explicitly reselecting a reused plain id clears a pinned installation", ()
   assert.deepEqual(updated.action.kind === "create_session" && updated.action.installationBindings, {});
   service.tick(60_000);
   assert.equal(created[0]?.agentId, "agent-1", "the explicit config agent replaces the previous install");
+  const discovered = { ...system, driver: "claude-code" as const, installation: {
+    id: "other", path: "/usr/bin/claude", via: "path" as const,
+  } };
+  db.updateRunnerAgents("runner-1", [discovered, { ...system, id: "system-new" }], 61_000);
+  db.selectHarnessInstallation("runner-1", "agent-1", "other");
+  const unrelated = service.update(automation.automationId, baseSpec({
+    name: "Renamed Schedule", action: updated.action,
+  }), actor, 62_000).data!;
+  assert.deepEqual(unrelated.action.kind === "create_session" && unrelated.action.installationBindings, {},
+    "a later unrelated edit must not bind the newly discovered installation");
+});
+
+test("a partially pinned workflow does not adopt a rediscovered unbound role on pause", () => {
+  const base = runnerWithAgents("runner-1", [
+    { id: "worker", driver: "codex-app-server" }, { id: "reviewer", driver: "acp" },
+  ]);
+  const worker = { ...base.agents[0]!, installation: {
+    id: "worker-system", path: "/usr/bin/codex", via: "path" as const,
+  } };
+  const { db, service } = harness(175, [{ ...base, agents: [worker, base.agents[1]!] }]);
+  installCapabilityWorkflow(db);
+  db.selectHarnessInstallation("runner-1", "worker", "worker-system");
+  const actor = { kind: "human" as const, id: "device" };
+  const request: CreateWorkflowRunRequest = {
+    runnerId: "runner-1", workspaceId: "ws-1", workflowId: "workflow-capabilities", task: "Build",
+  };
+  const automation = service.create(baseSpec({ action: { kind: "workflow_run", request } }), actor, 0).data!;
+  assert.equal(automation.action.kind === "workflow_run" &&
+    automation.action.installationBindings?.["role:worker"]?.installationId, "worker-system");
+  assert.equal(automation.action.kind === "workflow_run" &&
+    automation.action.installationBindings?.["role:reviewer"], undefined);
+  const discovered = { ...base.agents[1]!, driver: "claude-code" as const, installation: {
+    id: "reviewer-system", path: "/usr/bin/claude", via: "path" as const,
+  } };
+  db.updateRunnerAgents("runner-1", [worker, discovered], 1_000);
+  db.selectHarnessInstallation("runner-1", "reviewer", "reviewer-system");
+  const paused = service.update(automation.automationId, baseSpec({
+    enabled: false, action: automation.action,
+  }), actor, 2_000).data!;
+  assert.equal(paused.action.kind === "workflow_run" &&
+    paused.action.installationBindings?.["role:reviewer"], undefined,
+  "an unrelated pause must leave the reused role unbound");
 });
 
 test("scheduled workflow role bindings keep their selected installation after agent ids move", () => {
