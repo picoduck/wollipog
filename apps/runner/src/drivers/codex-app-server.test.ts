@@ -1696,6 +1696,22 @@ test("completed async agentMessage retains its text and exposes structured quest
   });
 });
 
+test("a later Codex turn may reuse an async message item id", async () => {
+  const h = makeHarness();
+  const message = { type: "agentMessage", id: "ask", text: "First turn", delivery: "async",
+    questions: [{ title: "First question?", options: ["Patch"] }] };
+  h.onItem(message, true);
+  (h.driver as any).threadId = "thread-reused-item";
+  (h.driver as any).peer = { request: async () => ({ turn: { id: "second-turn" } }) };
+  const turn = h.driver.prompt("continue");
+  await nextTask();
+  h.onItem({ ...message, text: "Second turn", questions: [{ title: "Second question?", options: ["Replace"] }] }, true);
+  h.driver.cancel();
+  await turn;
+  assert.deepEqual(h.events.filter((event) => event.kind === "question_request").map((event) =>
+    event.questions[0]?.question), ["First question?", "Second question?"]);
+});
+
 test("unsupported async question payload reports compatibility failure without an answer card", () => {
   const h = makeHarness();
   h.onItem({ type: "agentMessage", id: "unsupported-ask", text: "Please decide.", delivery: "async",

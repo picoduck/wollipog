@@ -985,6 +985,7 @@ export class CodexAppServerDriver implements Driver {
     this.stagedImages = { generation, turnId: null, images: staged };
     return new Promise<StopReason>((resolve) => {
       this.seenItems.clear();
+      this.seenAsyncQuestionItems.clear();
       this.emittedErrors.clear();
       this.streamedAgentResponse = false;
       this.declinePendingRequests("provider_resolved", true);
