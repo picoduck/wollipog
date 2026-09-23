@@ -2066,6 +2066,13 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             msg.command.slashCommand,
             msg.command.config,
             lifecycle,
+            false,
+            undefined,
+            false,
+            undefined,
+            undefined,
+            undefined,
+            Boolean(msg.command.campaignContinuation),
           );
         } catch (error) {
           lifecycle.failed(`prompt acceptance failed: ${errText(error)}`);

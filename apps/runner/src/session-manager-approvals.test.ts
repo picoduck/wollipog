@@ -679,6 +679,309 @@ test("a durable async answer accepted before replacement still reaches its exact
   }
 });
 
+test("campaign continuation keeps a resumable async question until its exact late answer", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    const prompts: string[] = [];
+    entry.running = false;
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "codex-thread";
+    entry.client.prompt = async (text: string) => {
+      prompts.push(text);
+      return "end_turn" as const;
+    };
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex", agentSessionId: "codex-thread" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:campaign",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+    const occurrence = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "campaign_command",
+      queued: () => {}, started: () => {}, completed: () => {},
+      failed: (error) => { throw new Error(error); },
+      uncertain: (error) => { throw new Error(error); },
+    };
+    assert.equal(sm.prompt("s_perm", "Automatic campaign work", [], undefined, undefined,
+      lifecycle, false, undefined, false, undefined, undefined, undefined, true), true);
+    for (let attempt = 0; attempt < 40 && prompts.length < 1; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(prompts[0], "Automatic campaign work");
+    assert.equal((eventsOf(sent, "user_message")[0] as { payload: { campaignContinuation?: boolean } })
+      .payload.campaignContinuation, true);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryId, occurrence);
+    assert.equal(eventsOf(sent, "question_resolved").length, 0);
+    const answerTransitions: string[] = [];
+    sm.answerRecoveredQuestion("s_perm", "codex-async:campaign", occurrence, { "0": "Patch" }, {
+      commandId: "campaign_late_answer",
+      queued: () => { answerTransitions.push("queued"); },
+      started: () => { answerTransitions.push("started"); },
+      completed: () => { answerTransitions.push("completed"); },
+      failed: (error) => { answerTransitions.push(`failed:${error}`); },
+      uncertain: (error) => { answerTransitions.push(`uncertain:${error}`); },
+    });
+    for (let attempt = 0; attempt < 40 && !answerTransitions.includes("completed"); attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(answerTransitions, ["queued", "started", "completed"]);
+    assert.match(prompts[1]!, /Which path\?\nAnswer: Patch/u);
+    const resolved = eventsOf(sent, "question_resolved");
+    assert.equal(resolved.length, 1);
+    assert.equal((resolved[0] as { payload: { occurrenceId: string } }).payload.occurrenceId, occurrence);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("a question arriving before a queued campaign turn survives, while a human prompt replaces it", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    entry.running = true;
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "codex-thread";
+    entry.client.prompt = async () => "end_turn" as const;
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex", agentSessionId: "codex-thread" });
+    assert.equal(sm.prompt("s_perm", "Campaign queued first", [], undefined, undefined,
+      undefined, false, undefined, false, undefined, undefined, undefined, true), true);
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:queued-campaign",
+      questions: [{ id: "0", question: "Choose", options: [] }],
+    });
+    const occurrence = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    entry.running = false;
+    (sm as any).emitStatus("s_perm", "idle");
+    (sm as any).scheduleDrain("s_perm");
+    for (let attempt = 0; attempt < 40 && eventsOf(sent, "user_message").length < 1; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryId, occurrence);
+    assert.equal(sm.prompt("s_perm", "Human follow-up"), true);
+    for (let attempt = 0; attempt < 40 && eventsOf(sent, "question_resolved").length < 1; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.equal((eventsOf(sent, "question_resolved")[0] as { payload: { resolutionReason: string } })
+      .payload.resolutionReason, "replaced");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("an accepted async answer runs before a queued campaign continuation", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    const prompts: string[] = [];
+    entry.running = true;
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "codex-thread";
+    entry.client.prompt = async (text: string) => { prompts.push(text); return "end_turn" as const; };
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex", agentSessionId: "codex-thread" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:before-campaign",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+    const occurrence = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    assert.equal(sm.prompt("s_perm", "Campaign queued", [], undefined, undefined,
+      undefined, false, undefined, false, undefined, undefined, undefined, true), true);
+    const transitions: string[] = [];
+    sm.answerRecoveredQuestion("s_perm", "codex-async:before-campaign", occurrence, { "0": "Patch" }, {
+      commandId: "answer_before_campaign",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    });
+    entry.running = false;
+    (sm as any).emitStatus("s_perm", "idle");
+    (sm as any).scheduleDrain("s_perm");
+    for (let attempt = 0; attempt < 40 && prompts.length < 2; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(transitions, ["queued", "started", "completed"]);
+    assert.match(prompts[0]!, /Which path\?\nAnswer: Patch/u);
+    assert.equal(prompts[1], "Campaign queued");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal(eventsOf(sent, "question_resolved").length, 1);
+  } finally {
+    cleanup();
+  }
+});
+
+test("campaign continuation replaces a question that cannot resume for a late answer", () => {
+  const { sm, sent, store, cleanup } = makeHarness("none");
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:no-resume",
+      questions: [{ id: "0", question: "Choose", options: [] }],
+    });
+    (sm as any).emitEvent("s_perm", {
+      kind: "user_message", text: "Automatic campaign work", campaignContinuation: true,
+    });
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+    assert.equal((eventsOf(sent, "question_resolved")[0] as { payload: { resolutionReason: string } })
+      .payload.resolutionReason, "replaced");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a campaign continuation retained for authentication keeps its async question on replay", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    const prompts: string[] = [];
+    entry.running = false;
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "codex-thread";
+    entry.client.prompt = async (text: string) => { prompts.push(text); return "end_turn" as const; };
+    (sm as any).providerAuthRecovery = {};
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex", agentSessionId: "codex-thread" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:auth-campaign",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+    const occurrence = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:auth-campaign-second",
+      questions: [{ id: "0", question: "Which follow-up?", options: [{ label: "Review" }] }],
+    });
+    const secondOccurrence = pendingRequests(store.readMeta("s_perm")?.pendingApproval)[1]!.recoveryId!;
+    const block = {
+      version: 1 as const, recoveryId: "auth-campaign", credentialScopeId: "scope-auth-campaign",
+      detectedAt: Date.now(), phase: "turn" as const, delivery: "not_delivered" as const,
+      canStartLogin: false, configuredCredential: false,
+    };
+    store.patchMeta("s_perm", { providerAuthBlock: block });
+    (sm as any).emitEvent("s_perm", {
+      kind: "permission_request", requestId: "provider-auth:auth-campaign", purpose: "authentication",
+      title: "Authentication Required", options: [],
+    });
+    assert.deepEqual(pendingRequests(store.readMeta("s_perm")?.pendingApproval).map((request) => request.kind),
+      ["authentication", "question", "question"]);
+    const transitions: string[] = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "retained_campaign_turn",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    };
+    assert.equal(sm.prompt("s_perm", "Campaign after authentication", [], undefined, undefined,
+      lifecycle, false, undefined, false, undefined, undefined, undefined, true), true);
+    const retained = store.readMeta("s_perm")!.providerAuthBlock!.durableRetries![0]!;
+    assert.equal(retained.campaignContinuation, true);
+    assert.equal(eventsOf(sent, "user_message").length, 0);
+    sm.reconcileStore();
+    assert.deepEqual(pendingRequests(store.readMeta("s_perm")?.pendingApproval)
+      .map((request) => request.recoveryId).filter(Boolean), [occurrence, secondOccurrence]);
+    store.patchMeta("s_perm", {
+      providerAuthBlock: { ...store.readMeta("s_perm")!.providerAuthBlock!, resolution: "approved" },
+    });
+    (sm as any).settleResolvedProviderAuthentication("s_perm");
+    for (let attempt = 0; attempt < 40 && !transitions.includes("completed"); attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.ok(transitions.includes("completed"), transitions.join(", "));
+    assert.deepEqual(prompts, ["Campaign after authentication"]);
+    assert.equal((eventsOf(sent, "user_message")[0] as { payload: { campaignContinuation?: boolean } })
+      .payload.campaignContinuation, true);
+    assert.deepEqual(pendingRequests(store.readMeta("s_perm")?.pendingApproval)
+      .map((request) => request.recoveryId), [occurrence, secondOccurrence]);
+    assert.equal(eventsOf(sent, "question_resolved").length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("restart reconstructs an async question across a synthetic campaign message", () => {
+  const { sm, store, cleanup } = makeHarness("none");
+  try {
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex", agentSessionId: "codex-thread" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:restart-campaign",
+      questions: [{ id: "0", question: "Choose", options: [] }],
+    });
+    const occurrence = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    (sm as any).emitEvent("s_perm", {
+      kind: "user_message", text: "Automatic campaign work", campaignContinuation: true,
+    });
+    (sm as any).emitEvent("s_perm", { kind: "agent_message", text: "Continuing", final: true });
+    store.patchMeta("s_perm", { status: "running", pendingApproval: null });
+    sm.reconcileStore();
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryId, occurrence);
+  } finally {
+    cleanup();
+  }
+});
+
+test("provider refusal marks a late async answer replaced", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    let calls = 0;
+    entry.running = false;
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "codex-thread";
+    entry.client.prompt = async () => { calls += 1; return "refusal" as const; };
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex", agentSessionId: "codex-thread" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:refused",
+      questions: [{ id: "0", question: "Choose", options: [{ label: "Patch" }] }],
+    });
+    const occurrence = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    const transitions: string[] = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "refused_late_answer",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: () => { transitions.push("failed"); },
+      uncertain: () => { transitions.push("uncertain"); },
+    };
+    sm.answerRecoveredQuestion("s_perm", "codex-async:refused", occurrence, { "0": "Patch" }, lifecycle);
+    for (let attempt = 0; attempt < 40 && !transitions.includes("failed"); attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(transitions, ["queued", "started", "failed"]);
+    assert.equal(calls, 1);
+    const resolved = eventsOf(sent, "question_resolved");
+    assert.equal((resolved.at(-1) as { payload: { answered: boolean; resolutionReason: string; occurrenceId: string } })
+      .payload.resolutionReason, "replaced");
+    assert.equal((resolved.at(-1) as { payload: { answered: boolean; occurrenceId: string } })
+      .payload.occurrenceId, occurrence);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
+  } finally {
+    cleanup();
+  }
+});
+
 test("Codex async question remains an idle actionable card after runner restart", () => {
   const { sm, store, cleanup } = makeHarness("none");
   try {

@@ -4211,6 +4211,8 @@ export type SessionEventPayload =
       kind: "user_message";
       text: string;
       images?: PromptImageInput[];
+      /** Runner-authenticated automatic campaign turn; preserves earlier async questions. */
+      campaignContinuation?: true;
       final?: boolean;
       commandId?: string;
       /** Runner-assigned active-turn coordinate. Optional so older peers retain legacy behavior. */

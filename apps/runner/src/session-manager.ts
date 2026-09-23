@@ -393,6 +393,8 @@ interface QueuedPrompt {
   sessionId?: string;
   /** Runner-owned continuation used only to consume orphaned Claude task notifications. */
   syntheticRecovery?: boolean;
+  /** Control-plane-authenticated automatic campaign turn, distinct from a human prompt. */
+  campaignContinuation?: boolean;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
   backgroundJobIds?: string[];
   /** Submit-only continuation for a lost callback or an async question answered in a later turn. */
@@ -619,6 +621,13 @@ function canResumeSession(meta: SessionMeta): boolean {
   }
   return meta.driver === "claude-code" || meta.driver === "codex" || meta.driver === "codex-app-server" ||
     meta.driver === "pi";
+}
+
+/** Keep nonblocking questions while authentication owns the visible approval barrier. */
+function pendingAsyncQuestions(pending: PendingApproval | null | undefined): PendingApproval | null {
+  return pendingRequests(pending)
+    .filter((request) => request.kind === "question" && request.async)
+    .reduce<PendingApproval | null>((current, request) => addPendingRequest(current, request), null);
 }
 
 function canResumeRecoveredQuestion(
@@ -4207,7 +4216,12 @@ export class SessionManager {
           };
         }
         if (payload.kind === "user_message") {
-          return { scanned: true, question: null, resolvedQuestionIds: resolved };
+          if (!payload.campaignContinuation) {
+            return { scanned: true, question: null, resolvedQuestionIds: resolved };
+          }
+          // Automatic campaign work can follow an unanswered async question. Older blocking
+          // callbacks are still superseded by this later provider activity.
+          laterAgentActivity = true;
         }
         if (payload.kind === "permission_request") laterPermissionRequest = true;
         if (payload.kind === "agent_message" || payload.kind === "agent_thought" ||
@@ -4410,6 +4424,12 @@ export class SessionManager {
           : this.providerAuthenticationOwner(block.credentialScopeId)?.sessionId === m.sessionId
             ? this.providerAuthenticationProjection(reconciled, block)
             : null;
+        // A retained campaign turn can coexist with several async questions. Keep all of their
+        // exact occurrences when rebuilding the authentication card after a runner restart.
+        const retainedQuestions = block.durableRetries?.some((retry) => retry.campaignContinuation)
+          ? pendingAsyncQuestions(reconciled.pendingApproval) : null;
+        const projectedApproval = projection
+          ? addPendingRequest(retainedQuestions, projection) : retainedQuestions;
         const missingRecoveryRequest = !!block.resolution && !!projection &&
           !this.store.readEvents(m.sessionId).some((event) =>
             event.payload.kind === "permission_request" && event.payload.requestId === projection.requestId);
@@ -4430,7 +4450,7 @@ export class SessionManager {
           this.store.patchMeta(m.sessionId, {
             providerAuthBlock: block,
             status: projection ? "input_required" : "idle",
-            pendingApproval: projection,
+            pendingApproval: projectedApproval,
           });
         }
       } else if (reconciled.worktreeRecovery && !terminal) {
@@ -7794,6 +7814,7 @@ export class SessionManager {
     backgroundJobIds?: string[],
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
     queuedPromptId?: string,
+    campaignContinuation = false,
   ): boolean {
     if (durable && this.store.readEvents(sessionId).some((event) =>
       recoveredQuestion
@@ -7921,6 +7942,7 @@ export class SessionManager {
           durable,
           reservedOrdinal,
           recoveredQuestion,
+          campaignContinuation,
         );
       }
       this.emitEvent(sessionId, {
@@ -7953,6 +7975,7 @@ export class SessionManager {
         images,
         slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
+        campaignContinuation,
       });
       if (!this.recoveryLaunching.has(sessionId)) {
         setImmediate(() => void this.recoverQueuedAppServer(sessionId).catch((error) =>
@@ -7975,6 +7998,7 @@ export class SessionManager {
         id: queuedPromptId ?? durable?.commandId ?? randomUUID(),
         ordinal: reservedOrdinal ?? this.nextQueueOrdinal(sessionId), text, images, slashCommand,
         config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
+        campaignContinuation,
       });
       this.preLaunchQueues.set(sessionId, queue);
       this.emitQueue(sessionId);
@@ -7996,6 +8020,7 @@ export class SessionManager {
         backgroundJobIds,
         recoveredQuestion,
         queuedPromptId,
+        campaignContinuation,
       ).catch((error) => {
         // resumeAndPrompt handles EXPECTED failures internally (durable.failed / error events). An
         // UNEXPECTED throw (e.g. a JSON.stringify RangeError writing a pathological config) escapes
@@ -8039,6 +8064,7 @@ export class SessionManager {
       images,
       slashCommand,
       config: effectiveConfig, durable, syntheticRecovery, backgroundJobIds, recoveredQuestion,
+      campaignContinuation,
     });
     this.emitQueue(sessionId);
     this.scheduleDrain(sessionId);
@@ -9469,6 +9495,7 @@ export class SessionManager {
     backgroundJobIds?: string[],
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
     queuedPromptId?: string,
+    campaignContinuation = false,
   ): Promise<void> {
     const meta = this.store.readMeta(sessionId);
     if (!meta) {
@@ -9626,6 +9653,7 @@ export class SessionManager {
         syntheticRecovery,
         backgroundJobIds,
         recoveredQuestion,
+        campaignContinuation,
       });
       this.preLaunchQueues.set(sessionId, queue);
     }
@@ -9710,6 +9738,7 @@ export class SessionManager {
           durable,
           reservedOrdinal,
           recoveredQuestion,
+          campaignContinuation,
         );
       } else if (blocked?.providerAuthBlock?.delivery === "not_delivered" &&
           blocked.providerAuthRetryAttemptedRecoveryId !== blocked.providerAuthBlock.recoveryId &&
@@ -9782,6 +9811,7 @@ export class SessionManager {
         backgroundJobIds,
         recoveredQuestion,
         queuedPromptId,
+        campaignContinuation,
       );
     }
   }
@@ -10901,6 +10931,7 @@ export class SessionManager {
       syntheticRecovery,
       backgroundJobIds,
       recoveredQuestion,
+      campaignContinuation,
     } = queued;
     const rearmUnsubmittedRecovery = (delay = 0) => {
       if (!syntheticRecovery || this.active.get(sessionId) !== entry) return;
@@ -11028,6 +11059,7 @@ export class SessionManager {
           kind: "user_message",
           text: displayText,
           images: imageInputs.length ? imageInputs : undefined,
+          ...(campaignContinuation ? { campaignContinuation: true as const } : {}),
           ...(durable ? { commandId: durable.commandId } : {}),
           turnId: queued.id,
         }, durable);
@@ -11256,6 +11288,15 @@ export class SessionManager {
       if (!this.active.has(sessionId)) {
         durable?.uncertain("session stopped while provider execution was in progress");
         return;
+      }
+      if (stop === "refusal" && recoveredQuestion?.pendingQuestion.async) {
+        // The accepted answer turn could not be delivered. Correct its provisional history
+        // resolution so the original question is visibly replaced and cannot be resubmitted.
+        this.emitEvent(sessionId, {
+          kind: "question_resolved", requestId: recoveredQuestion.requestId,
+          occurrenceId: recoveredQuestion.recoveryId,
+          answered: false, resolutionReason: "replaced",
+        });
       }
       const postTurnTree = await this.captureDiff(sessionId);
       if (entry.historyIntegrityFailure) return;
@@ -14071,12 +14112,16 @@ export class SessionManager {
       return undefined;
     }
     if (payload.kind === "user_message") {
-      for (const old of pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)) {
-        if (old.async && !this.queuedAsyncAnswer(sessionId, old)) this.emitEvent(sessionId, {
-          kind: "question_resolved", requestId: old.requestId,
-          ...(old.occurrenceId ? { occurrenceId: old.occurrenceId } : {}),
-          answered: false, resolutionReason: "replaced",
-        });
+      const meta = this.store.readMeta(sessionId);
+      for (const old of pendingRequests(meta?.pendingApproval)) {
+        if (old.async && !this.queuedAsyncAnswer(sessionId, old) &&
+            (!payload.campaignContinuation || !meta || !canResumeRecoveredQuestion(meta, old))) {
+          this.emitEvent(sessionId, {
+            kind: "question_resolved", requestId: old.requestId,
+            ...(old.occurrenceId ? { occurrenceId: old.occurrenceId } : {}),
+            answered: false, resolutionReason: "replaced",
+          });
+        }
       }
     }
     try {
@@ -15652,6 +15697,7 @@ export class SessionManager {
     durable: DurableCommandLifecycle,
     reservedOrdinal: number | undefined,
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
+    campaignContinuation = false,
   ): boolean {
     const block = meta.providerAuthBlock;
     if (!block) return false;
@@ -15683,6 +15729,7 @@ export class SessionManager {
         images,
         ...(slashCommand ? { slashCommand } : {}),
         ...(config ? { config } : {}),
+        ...(campaignContinuation ? { campaignContinuation: true as const } : {}),
         ...(recoveredQuestion ? { recoveredQuestion } : {}),
       };
       this.ensureQueueOrdinal(meta.sessionId, retry);
@@ -15717,6 +15764,9 @@ export class SessionManager {
     const durableRetries = block.durableRetries ?? [];
     if (durableRetries.some((retry) => !this.providerAuthDurables.has(retry.commandId))) {
       const projection = this.providerAuthenticationRecoveryProjection(meta, block);
+      const projectedApproval = durableRetries.some((retry) => retry.campaignContinuation)
+        ? addPendingRequest(pendingAsyncQuestions(meta.pendingApproval), projection)
+        : projection;
       if (meta.pendingApproval?.requestId !== projection.requestId) {
         this.emitEvent(meta.sessionId, {
           kind: "permission_request",
@@ -15729,7 +15779,7 @@ export class SessionManager {
       } else {
         // The request identity is stable across the wait, but newly retained durable work changes
         // its count. Refresh the live projection without appending a duplicate transcript event.
-        this.store.patchMeta(meta.sessionId, { pendingApproval: projection });
+        this.store.patchMeta(meta.sessionId, { pendingApproval: projectedApproval });
       }
       this.emitStatus(
         sessionId,
@@ -15759,7 +15809,8 @@ export class SessionManager {
     }
     this.store.patchMeta(sessionId, {
       providerAuthBlock: undefined,
-      pendingApproval: null,
+      pendingApproval: durableRetries.some((retry) => retry.campaignContinuation)
+        ? pendingAsyncQuestions(meta.pendingApproval) : null,
       status: "idle",
       ...(block.retry ? { providerAuthRetryAttemptedRecoveryId: block.recoveryId } : {}),
     });
@@ -15775,6 +15826,18 @@ export class SessionManager {
     for (const retry of retries) {
       if ("commandId" in retry) this.providerAuthDurables.delete(retry.commandId);
       try {
+        if ("campaignContinuation" in retry && retry.campaignContinuation === true) {
+          const recovered = this.unresolvedQuestionFromHistory(sessionId);
+          const question = recovered.question;
+          if (question?.async) {
+            // Authentication temporarily hid the async card. Restore the exact occurrence before
+            // this automatic turn, so the normal resumability gate can retain or replace it.
+            this.store.patchMeta(sessionId, {
+              pendingApproval: addPendingRequest(this.store.readMeta(sessionId)?.pendingApproval, question),
+            });
+            this.store.flush(sessionId);
+          }
+        }
         if ("recoveredQuestion" in retry && retry.recoveredQuestion) {
           // The authentication card displaced this recovered question while provider launch was
           // blocked. Restore the exact validated occurrence so runPrompt can clear it only after
@@ -15797,6 +15860,8 @@ export class SessionManager {
           true,
           undefined,
           "recoveredQuestion" in retry ? retry.recoveredQuestion : undefined,
+          undefined,
+          "campaignContinuation" in retry && retry.campaignContinuation === true,
         );
         if (!accepted && "commandId" in retry && retry.recoveredQuestion) {
           refusedRecoveredQuestion = { commandId: retry.commandId, question: retry.recoveredQuestion };
@@ -16438,7 +16503,8 @@ export class SessionManager {
         providerCredentialIdentityId: observation.identityId,
         providerCredentialIdentityEvidence: retainedEvidence,
         providerAuthBlock: durableRetries.length ? { ...block, resolution: "approved" } : undefined,
-        pendingApproval: null,
+        pendingApproval: durableRetries.some((entry) => entry.campaignContinuation)
+          ? pendingAsyncQuestions(meta.pendingApproval) : null,
         status: "idle",
         ...(retry && !durableRetries.length
           ? { providerAuthRetryAttemptedRecoveryId: block.recoveryId }
