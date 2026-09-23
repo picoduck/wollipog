@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { platform, tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { test } from "node:test";
@@ -125,6 +125,43 @@ test("an upgraded symlink keeps its installation entry point but needs rediscove
   } finally {
     if (oldPath === undefined) delete process.env.PATH;
     else process.env.PATH = oldPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("replacement at the same native executable path invalidates discovery until a new probe", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-harness-in-place-"));
+  const path = join(root, "codex");
+  const replacement = join(root, "next");
+  try {
+    writeFileSync(path, "first generation");
+    const old = { path, via: "path" as const, launch: { command: path, args: [] } };
+    const identity = resolvedLaunchIdentity(old);
+    assert.equal(launchTargetStillMatches(old.launch, { kind: "native" }, identity), true);
+    writeFileSync(replacement, "second generation");
+    renameSync(replacement, path);
+    assert.equal(launchTargetStillMatches(old.launch, { kind: "native" }, identity), false);
+    const refreshed = resolvedLaunchIdentity(old);
+    assert.notEqual(refreshed, identity);
+    assert.equal(launchTargetStillMatches(old.launch, { kind: "native" }, refreshed), true);
+    writeFileSync(path, "third generation with a longer body");
+    assert.equal(launchTargetStillMatches(old.launch, { kind: "native" }, refreshed), false,
+      "an overwrite of the existing inode is stale too");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a replaced node entry script invalidates its discovered launch", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-harness-script-"));
+  const script = join(root, "codex.js");
+  try {
+    writeFileSync(script, "old script");
+    const launch = { command: process.execPath, args: [script] };
+    const identity = resolvedLaunchIdentity({ path: script, via: "version-manager", launch });
+    writeFileSync(script, "new script with changed bytes");
+    assert.equal(launchTargetStillMatches(launch, { kind: "native" }, identity), false);
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });

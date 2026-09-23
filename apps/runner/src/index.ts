@@ -200,6 +200,7 @@ import {
   probeConfiguredPiAgents,
 } from "./discovery/discover.js";
 import { claudeCodeCapabilitiesForControlPlane } from "./discovery/claude-code.js";
+import { invalidateStaleNativeInstallation, staleNativeInstallationKey } from "./discovery/stale-installation.js";
 import {
   prepareClaudeSlashCommandCatalog,
 } from "./discovery/claude-commands.js";
@@ -534,7 +535,8 @@ function safeWslLaunchKey(value: Pick<AgentDefinition, "command" | "args" | "dri
 /** Never advertise secret environment data or an orchestration preset
  * to a control plane that cannot enforce its credential boundary. */
 function agentsForControlPlane() {
-  return projectOrchestratorPresetForPeer(metadata.agents, {
+  return projectOrchestratorPresetForPeer(metadata.agents.map((agent) =>
+    invalidateStaleNativeInstallation(agent)), {
     controlPlaneProtocolVersion,
     isolationMode: config.executionIsolation.mode,
   }).filter((agent) =>
@@ -1707,6 +1709,7 @@ let shuttingDown = false;
 // handler attached in connect() and by startHeartbeat() when a fresh socket registers.
 let missedHeartbeatPongs = 0;
 let heartbeatPongObserved = false;
+let reportedStaleInstallationKey = "[]";
 const sessionCommandRecoveryTimer = setInterval(recoverStaleSessionCommands, 10_000);
 sessionCommandRecoveryTimer.unref?.();
 recoverStaleSessionCommands();
@@ -1737,6 +1740,16 @@ function startHeartbeat(socket: WebSocket, intervalMs: number): void {
       return;
     }
     missedHeartbeatPongs++;
+    const staleKey = staleNativeInstallationKey(metadata.agents);
+    if (staleKey !== reportedStaleInstallationKey) {
+      reportedStaleInstallationKey = staleKey;
+      if (staleKey !== "[]") {
+        sendUp({ type: "agents_updated", runnerId: config.runnerId,
+          agents: agentsForControlPlane(), providerAccounts: providerAccountsForControlPlane(), editors: metadata.editors });
+        void runDiscovery(false, false).catch((error) =>
+          log(`harness rediscovery after native target change failed: ${errText(error)}`));
+      }
+    }
     const beat: HeartbeatMessage = { type: "heartbeat", runnerId: config.runnerId, ts: Date.now() };
     socket.send(JSON.stringify(beat));
     // A pong resets missedHeartbeatPongs via the connect() handler; a live peer therefore never

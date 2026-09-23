@@ -231,15 +231,34 @@ function directLaunch(path: string): ResolvedLaunch {
   return { command: path, args: [] };
 }
 
-/** Resolve an agent binary on the NATIVE host. Returns null if not found. */
+/** Native launch identity includes file metadata, not just canonical paths. An installer may
+ * replace bytes at the same path without changing the selected installation's entry point. */
+function nativeLaunchIdentity(launch: ResolvedLaunch): string | null {
+  const file = (path: string, required: boolean): string | string[] | null => {
+    if (!isAbsolute(path)) return required ? null : path;
+    let canonical: string;
+    try { canonical = realpathSync(path); }
+    catch { return required ? null : path; }
+    try {
+      const stat = statSync(canonical, { bigint: true });
+      if (!stat.isFile()) return required ? null : canonical;
+      return [canonical, stat.dev, stat.ino, stat.size, stat.mtimeNs, stat.ctimeNs,
+        stat.birthtimeNs, stat.mode]
+        .map(String);
+    } catch { return required ? null : canonical; }
+  };
+  const command = file(launch.command, true);
+  if (!command) return null;
+  return JSON.stringify([command, ...launch.args.map((arg) => file(arg, false))]);
+}
+
 /** An executable's canonical launch identity. Aliases collapse, while a node shim launched by
  * different version-manager runtimes remains distinct. */
 export function resolvedLaunchIdentity(binary: ResolvedBinary): string {
   if (binary.identity) return binary.identity;
-  const canonical = (path: string): string => {
-    try { return realpathSync(path); } catch { return path; }
-  };
-  return JSON.stringify([canonical(binary.launch.command), ...binary.launch.args.map(canonical)]);
+  const identity = nativeLaunchIdentity(binary.launch);
+  if (!identity) throw new Error("Discovered native harness executable is no longer available");
+  return identity;
 }
 
 /** Recheck native entry points immediately before spawn; WSL launches the pinned canonical path.
@@ -255,8 +274,7 @@ export function launchTargetStillMatches(
       // Avoid a synchronous wsl.exe startup on the runner's event loop for every session.
       return JSON.stringify([launch.command, ...launch.args]) === expectedIdentity;
     }
-    const canonical = (path: string) => isAbsolute(path) ? realpathSync(path) : path;
-    return JSON.stringify([canonical(launch.command), ...launch.args.map(canonical)]) === expectedIdentity;
+    return nativeLaunchIdentity(launch) === expectedIdentity;
   } catch { return false; }
 }
 
@@ -293,7 +311,8 @@ export async function resolveNativeCandidates(name: string): Promise<ResolvedBin
         if (launch.command === path) launch = directLaunch(path);
       } catch { /* The executable check above still lets a native binary launch directly. */ }
     }
-    hits.push({ path, via, launch });
+    const identity = nativeLaunchIdentity(launch);
+    if (identity) hits.push({ path, via, launch, identity });
   };
 
   // The runner's PATH order determines only the default, never the complete candidate set.
