@@ -1957,7 +1957,8 @@ test("target harness selection is scoped to its exact target and survives unavai
     [{ ...alpha, harnessInstallations: [] }, beta]);
   assert.equal(db.getRunner("runner-1")?.targetHarnessSelections?.[0]?.available, false);
   assert.equal(db.getRunner("runner-1")?.targetHarnessSelections?.[0]?.path, "/usr/bin/agent");
-  db.registerRunner(meta({ executionTargets: [alpha, beta] }), 700, PROTOCOL_VERSION - 1);
+  db.registerRunner(meta({ executionTargets: [alpha, beta] }), 700,
+    RUNNER_CAPABILITY_MIN_PROTOCOL.targetHarnessInstallations - 1);
   assert.equal(db.getRunner("runner-1")?.targetHarnessSelections?.[0]?.available, false,
     "an older runner cannot claim to enforce the saved target choice");
 });

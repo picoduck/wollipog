@@ -3359,7 +3359,9 @@ export class SessionsService {
     if ("error" in resolvedTarget) return fail(resolvedTarget.error, 400);
     const targetSelection = runner.targetHarnessSelections?.find((selection) =>
       selection.targetId === resolvedTarget.target.id && selection.agentId === req.agentId);
-    const selectedInstallationId = snapshotSpec?.executionTarget?.harnessInstallationId ?? targetSelection?.installationId;
+    const selectedInstallationId = snapshotSpec
+      ? snapshotSpec.executionTarget?.harnessInstallationId
+      : targetSelection?.installationId;
     if (selectedInstallationId) {
       if (!runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations")) {
         return fail("Selected target harness installation requires a newer runner", 409);
@@ -3374,7 +3376,7 @@ export class SessionsService {
       ...executionTargetRef(resolvedTarget.target),
       ...(selectedInstallationId ? { harnessInstallationId: selectedInstallationId } : {}),
     };
-    if (executionTarget.adapter !== "host") {
+    if (executionTarget.adapter !== "host" && selectedInstallationId) {
       const targetCandidate = resolvedTarget.target.harnessInstallations?.find((item) =>
         item.agentId === req.agentId && item.id === selectedInstallationId);
       launch = { ...launch, version: targetCandidate?.version, capabilities: undefined };

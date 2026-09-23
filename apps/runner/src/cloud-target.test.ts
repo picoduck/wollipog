@@ -111,6 +111,9 @@ test("cloud registry advertises exact environment, boundaries, policy, and deter
   const prepare = adapterCalls.find((args) => args.includes("prepare"))!;
   assert.equal(prepare[prepare.indexOf("--source") + 1], "C:\\worktrees\\source-1");
   assert.equal(prepare[prepare.indexOf("--idempotency-key") + 1], launch.receipt.manifestDigest);
+  const manifest = JSON.parse(Buffer.from(prepare[prepare.indexOf("--manifest") + 1]!, "base64url").toString("utf8"));
+  assert.equal(manifest.target.agentCommand, undefined,
+    "a v1 adapter must retain its original prepare manifest shape when no installation is selected");
   assert.deepEqual(launch.isolation.agentArgs, ["app-server"]);
   await registry.cancel(ref, launch.adapterHandoffKey);
   assert.equal(adapterCalls.filter((args) => args.includes("cancel")).length, 1);

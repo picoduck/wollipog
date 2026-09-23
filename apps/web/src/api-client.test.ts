@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import { createApiClient } from "./api.js";
 import type { ApiTransport } from "./api-transport.js";
 
@@ -86,7 +87,7 @@ test("authoritative reminder reads use the encoded no-cache endpoint", async () 
 
   assert.deepEqual(await client.sessionReminder("session/1"), { reminder: null });
   assert.deepEqual(calls, [{
-    path: "/api/sessions/session%2F1/reminder?protocolVersion=175",
+    path: `/api/sessions/session%2F1/reminder?protocolVersion=${PROTOCOL_VERSION}`,
     method: "GET",
     cache: "no-store",
   }]);

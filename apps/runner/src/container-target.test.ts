@@ -122,6 +122,28 @@ test("container installations stay target-bound, deduplicate aliases, and fail c
   assert.match(registry.validationError(ref, true, { kind: "native" }, "codex")!, /unavailable/);
 });
 
+test("a timed-out container version probe is named, labelled, and forcibly removed", async () => {
+  const calls: string[][] = [];
+  const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    resolveRuntime: async () => runtime(),
+    run: async (_file, args) => {
+      calls.push(args);
+      if (args.includes("/bin/sh")) return { code: 0, stdout: "/usr/bin/codex\n", stderr: "" };
+      if (args[args.indexOf("--entrypoint") + 1] === "/usr/bin/codex") {
+        return { code: null, stdout: "", stderr: "timed out", timedOut: true };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  await registry.initialize();
+  const versionProbe = calls.find((args) => args[args.indexOf("--entrypoint") + 1] === "/usr/bin/codex")!;
+  const name = versionProbe[versionProbe.indexOf("--name") + 1]!;
+  assert.match(name, /^wollipog-probe-[a-f0-9]{20}-[a-f0-9]{16}$/);
+  assert.ok(versionProbe.includes(`com.wollipog.runner=${runnerKey("runner")}`));
+  assert.deepEqual(calls.find((args) => args[0] === "rm"), ["rm", "-f", name]);
+  assert.equal(registry.definitions()[0]!.harnessInstallations?.[0]?.available, false);
+});
+
 test("container target display names stay within the control-plane registration bound", async () => {
   const registry = new ContainerTargetRegistry(
     "runner",

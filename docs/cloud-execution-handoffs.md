@@ -45,7 +45,7 @@ adapter. Increment the revision whenever the remote template, setup procedure, o
 changes. `agentCommands` replaces the runner host command only for the actual provider launch;
 driver-added dynamic arguments are appended. Helper processes keep their own basename and arguments.
 
-Protocol v177 can also expose target-specific harness choices. `alternateCommands` maps an existing
+Protocol v176 can also expose target-specific harness choices. `alternateCommands` maps an existing
 agent id to up to eight additional absolute paths and base arguments. A cloud adapter must implement
 the opt-in `inspect-installations` protocol v2 operation before any choice is advertised. Wollipog
 ships no adapter that implements this operation; existing v1 targets remain launchable with their

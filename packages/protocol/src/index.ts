@@ -533,11 +533,10 @@
 // 175: runners advertise independently probed harness installations with stable identities.
 //      The control plane can pin one installation per Machine and execution context, and rejects
 //      launch requests that do not resolve to that exact candidate while a pin exists.
-// 176: saved harness choices synchronize to background consumers (#1616).
-// 177: runner-probed container and opt-in cloud-adapter harness installations are target-bound.
+// 176: runner-probed container and opt-in cloud-adapter harness installations are target-bound.
 //      Exact installation ids travel with the immutable execution target and are enforced by the
 //      runner; older peers cannot persist or launch a target-specific choice.
-export const PROTOCOL_VERSION = 177;
+export const PROTOCOL_VERSION = 176;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -663,7 +662,7 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
-  targetHarnessInstallations: 177,
+  targetHarnessInstallations: 176,
   harnessInstallations: 175,
   automaticProviderAccountSwitch: 173,
   sessionProviderAccountSwitch: 171,
@@ -6736,7 +6735,7 @@ export interface AgentsUpdatedMessage {
   providerAccounts?: ProviderAccountDefinition[];
   /** Editors found by the same discovery pass (absent on pre-v22 runners). */
   editors?: EditorInfo[];
-  /** Protocol v177: target-local harness probes refreshed without replacing the target template. */
+  /** Protocol v176: target-local harness probes refreshed without replacing the target template. */
   executionTargets?: ExecutionTargetDefinition[];
 }
 

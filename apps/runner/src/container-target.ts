@@ -175,17 +175,32 @@ export class ContainerTargetRegistry {
   > {
     const installations = new Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>();
     const seen = new Set<string>();
+    const probe = async (candidate: { agentId: string; command: string; args: string[] },
+      phase: "resolve" | "version", entrypoint: string, args: string[]): Promise<ExecResult> => {
+      const probeKey = createHash("sha256").update(JSON.stringify([
+        template.id, candidate.agentId, candidate.command, candidate.args, phase,
+      ])).digest("hex").slice(0, 16);
+      const name = `wollipog-probe-${this.runnerKey}-${probeKey}`;
+      // A named, runner-labelled container can be forcibly removed after a client timeout
+      // and found by startup orphan reconciliation if removal itself fails.
+      const result = await this.deps.run(runtime.launch.command, [
+        ...runtime.launch.args, "run", "--rm", "--name", name,
+        ...containerLabelArgs(this.runnerKey, template.id),
+        "--network", "none", "--read-only", "--cap-drop", "ALL",
+        "--security-opt", "no-new-privileges", "--pids-limit", "128",
+        "--tmpfs", "/tmp:rw,nosuid,nodev", "--entrypoint", entrypoint, template.image, ...args,
+      ], { timeoutMs: 5_000 });
+      if (result.timedOut || result.code === null) {
+        await this.deps.run(runtime.launch.command, [
+          ...runtime.launch.args, "rm", "-f", name,
+        ], { timeoutMs: 5_000 });
+      }
+      return result;
+    };
     for (const candidate of candidateCommands(template)) {
       // No workspace mount, network, host secrets, or interactive stdin reaches these probes.
-      const prefix = [
-        ...runtime.launch.args, "run", "--rm", "--network", "none", "--read-only",
-        "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "128",
-        "--tmpfs", "/tmp:rw,nosuid,nodev",
-      ];
-      const resolved = await this.deps.run(runtime.launch.command, [
-        ...prefix, "--entrypoint", "/bin/sh", template.image,
-        "-c", RESOLVE_IN_IMAGE, "sh", candidate.command,
-      ], { timeoutMs: 5_000 });
+      const resolved = await probe(candidate, "resolve", "/bin/sh",
+        ["-c", RESOLVE_IN_IMAGE, "sh", candidate.command]);
       const path = resolved.code === 0 ? resolved.stdout.trim() : "";
       if (!/^\/[A-Za-z0-9_./+-]{1,255}$/.test(path) || path.split("/").includes("..")) continue;
       const identity = JSON.stringify([candidate.agentId, path, candidate.args]);
@@ -194,9 +209,7 @@ export class ContainerTargetRegistry {
       const id = createHash("sha256").update(JSON.stringify([
         targetId, template.revision, template.image, containerSetupCheckDigest(template), identity,
       ])).digest("hex").slice(0, 24);
-      const versionProbe = await this.deps.run(runtime.launch.command, [
-        ...prefix, "--entrypoint", path, template.image, "--version",
-      ], { timeoutMs: 5_000 });
+      const versionProbe = await probe(candidate, "version", path, ["--version"]);
       const firstLine = (versionProbe.stdout || versionProbe.stderr).split(/\r?\n/u)[0]?.trim() ?? "";
       const version = firstLine.match(/\d+\.\d+\.\d+[\w.-]*/u)?.[0];
       const info: TargetHarnessInstallation = {

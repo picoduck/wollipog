@@ -7262,6 +7262,8 @@ test("createSession selects and persists an exact compatible container environme
   });
   assert.equal(containerStart.spec.providerAccountId, undefined,
     "runner-local credentials do not cross the container boundary");
+  assert.equal(containerStart.spec.agentVersion, "2.1.0",
+    "an unselected target keeps its prior launch metadata during mixed-version operation");
   assert.equal(result.data.providerAccountId, undefined);
   assert.deepEqual(db.getSession(result.data.id)!.executionTarget, containerStart.spec.executionTarget);
 
@@ -7299,9 +7301,25 @@ test("createSession binds a saved target installation and refuses a missing redi
   db.registerRunner({ ...runnerMeta(), agents: runnerMeta().agents.map((agent) =>
     agent.id === ACP_AGENT_ID ? { ...agent, available: false } : agent),
     executionTargets: [container] }, Date.now(), PROTOCOL_VERSION);
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+    agentId: ACP_AGENT_ID, executionTargetId: container.id, useWorktree: true };
+  let staged: PreStagedDeliveryPlan | undefined;
+  assert.throws(() => svc.createSession(request, {
+    sessionId: "s_target_snapshot",
+    stage(plan) { staged = plan; throw new Error("simulated crash after staging"); },
+    activate() { assert.fail("must not activate before materialization"); },
+  }), /simulated crash after staging/);
+  assert.equal(staged?.commands[0]?.type, "start_session");
+  assert.equal(staged!.commands[0]!.spec.executionTarget?.harnessInstallationId, undefined);
   assert.equal(db.selectTargetHarnessInstallation(RUNNER_ID, container.id, ACP_AGENT_ID, installationId)?.available, true);
-  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
-    agentId: ACP_AGENT_ID, executionTargetId: container.id, useWorktree: true });
+  const recovered = svc.createSession(request, {
+    sessionId: "s_target_snapshot", commandSnapshots: staged!.commands,
+    stage() {}, activate() {},
+  });
+  assert.ok(recovered.ok, recovered.error);
+  assert.equal(db.getSession(recovered.data!.id)?.executionTarget?.harnessInstallationId, undefined,
+    "a later Machine selection must not rewrite a pre-staged exact launch");
+  const created = svc.createSession(request);
   assert.ok(created.ok, created.error);
   assert.equal(hub.sentOfType("start_session").at(-1)!.spec.executionTarget?.harnessInstallationId, installationId);
   assert.equal(db.getSession(created.data!.id)?.executionTarget?.harnessInstallationId, installationId);

@@ -986,13 +986,16 @@ function MachineSettingsDialog({
               </div>
             );
           }))}
-          {targetHarnessSelections.filter((selection) => !selection.available).map((selection) => (
-            <div className="machine-harness-installation" key={`missing:${selection.targetId}:${selection.agentId}`}>
-              <div><strong>{selection.agentId}</strong> · {selection.targetName} · Unavailable</div>
-              <div><code>{selection.path}</code> · {selection.version ? `v${selection.version}` : "Version Unknown"}</div>
-              <p>Select another discovered installation on this target to restore new sessions.</p>
-            </div>
-          ))}
+          {targetHarnessSelections.filter((selection) => !selection.available).map((selection) => {
+            const agent = runner.agents.find((item) => item.id === selection.agentId);
+            return (
+              <div className="machine-harness-installation" key={`missing:${selection.targetId}:${selection.agentId}`}>
+                <div><strong>{agent ? agentDisplayName(agent) : selection.agentId}</strong> · {selection.targetName} · Unavailable</div>
+                <div><code>{selection.path}</code> · {selection.version ? `v${selection.version}` : "Version Unknown"}</div>
+                <p>Select another discovered installation on this target to restore new sessions.</p>
+              </div>
+            );
+          })}
         </section>
       )}
 
