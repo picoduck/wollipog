@@ -340,7 +340,8 @@ export function AutomationsView() {
       const installations = { ...spec.action.installationBindings };
       for (const [key, agentId] of Object.entries(workflowBindingEdits)) {
         const installation = installationFor(selectedRunner, agentId);
-        if (!installation) throw new Error(`Select an available Agent Harness installation for ${key}.`);
+        if (!installation) throw new Error(`Select an available Agent Harness installation for ${
+          key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length))}.`);
         if (key === "orchestrator") {
           request.orchestratorAgentId = agentId;
           installations.orchestrator = installation;
@@ -360,7 +361,8 @@ export function AutomationsView() {
       const installations = { ...target.installationBindings };
       for (const [key, agentId] of Object.entries(alternateWorkflowBindingEdits)) {
         const installation = installationFor(selectedFallback, agentId);
-        if (!installation) throw new Error(`Select an available alternate Agent Harness installation for ${key}.`);
+        if (!installation) throw new Error(`Select an available alternate Agent Harness installation for ${
+          key === "orchestrator" ? "the Orchestrator" : titleCaseLabel(key.slice("role:".length))}.`);
         if (key === "orchestrator") {
           target.orchestratorAgentId = agentId;
           installations.orchestrator = installation;
@@ -557,6 +559,7 @@ export function AutomationsView() {
               <>
                 <label>Machine<select value={form.runnerId} onChange={(event) => {
                   const runner = runners.get(event.target.value);
+                  setRebindPrimary(false);
                   setForm((current) => ({ ...withAgent(current, defaultAgentId(runner?.agents)),
                     runnerId: event.target.value, workspaceId: runner?.workspaces[0]?.id ?? "" }));
                 }}>{[...runners.values()].map((runner) => <option
@@ -566,7 +569,10 @@ export function AutomationsView() {
                 <label>Workspace<select value={form.workspaceId} onChange={(event) => patch("workspaceId", event.target.value)}>
                   {(selectedRunner?.workspaces ?? []).map((workspace) => <option key={workspace.id} value={workspace.id}>{workspace.name}</option>)}
                 </select></label>
-                {form.actionKind === "create_session" ? <label>Agent<select value={form.agentId} onChange={(event) => setForm((current) => withAgent(current, event.target.value))}>
+                {form.actionKind === "create_session" ? <label>Agent<select value={form.agentId} onChange={(event) => {
+                  setRebindPrimary(false);
+                  setForm((current) => withAgent(current, event.target.value));
+                }}>
                   {(selectedRunner?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}
                     disabled={agentOptions(selectedRunner?.agents ?? []).some((option) => option.agent.id === agent.id && option.disabled)}>{agentDisplayName(agent)}</option>)}
                 </select></label> : <label>Workflow<select value={form.workflowId} onChange={(event) => patch("workflowId", event.target.value)}>
@@ -679,6 +685,7 @@ export function AutomationsView() {
             {form.runnerPolicy === "alternate" && <>
               <label>Alternate Machine<select value={form.fallbackRunnerId} onChange={(event) => {
                 const runner = runners.get(event.target.value);
+                setRebindAlternate(false);
                 setForm((current) => ({ ...current, fallbackRunnerId: event.target.value,
                   fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "", fallbackAgentId: defaultAgentId(runner?.agents) }));
               }}><option value="">Select…</option>{[...runners.values()]
@@ -749,7 +756,10 @@ export function AutomationsView() {
                     </p>}
                   </div>;
                 })()}
-              {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => patch("fallbackAgentId", event.target.value)}>{(selectedFallback?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}
+              {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => {
+                setRebindAlternate(false);
+                patch("fallbackAgentId", event.target.value);
+              }}>{(selectedFallback?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}
                 disabled={agentOptions(selectedFallback?.agents ?? []).some((option) => option.agent.id === agent.id && option.disabled)}>{agentDisplayName(agent)}</option>)}</select></label>}
               {form.actionKind === "create_session" && editingSpec?.runnerPolicy.kind === "alternate" &&
                 !rebindAlternate && (() => {

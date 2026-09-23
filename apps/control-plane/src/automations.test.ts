@@ -1097,15 +1097,15 @@ test("scheduled sessions follow the saved installation through rediscovery and r
   const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
   assert.equal(automation.action.kind === "create_session" &&
     automation.action.installationBindings?.agent?.installationId, "system");
-  const edited = service.update(automation.automationId, baseSpec({ name: "Edited Schedule" }),
-    { kind: "human", id: "device" }, 100).data!;
-  assert.equal(edited.action.kind === "create_session" &&
-    edited.action.installationBindings?.agent?.installationId, "system",
-  "an older client may omit the binding during an unrelated edit");
 
   db.updateRunnerAgents("runner-1", [
     { ...local, id: "agent-1" }, { ...system, id: "system-new" },
   ], 1_000);
+  const edited = service.update(automation.automationId, baseSpec({ name: "Edited Schedule" }),
+    { kind: "human", id: "device" }, 1_100).data!;
+  assert.equal(edited.action.kind === "create_session" &&
+    edited.action.installationBindings?.agent?.installationId, "system",
+    "an older client may omit the binding after an agent id is reused");
   service.tick(60_000);
   assert.equal(created[0]?.agentId, "system-new");
 

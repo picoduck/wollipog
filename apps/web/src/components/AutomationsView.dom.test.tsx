@@ -594,7 +594,9 @@ test("editing a pinned automation shows its rediscovered installation instead of
     id: "system", path: "/usr/bin/claude", via: "path" as const,
     selection: "selected" as const,
   } };
-  const machine = { ...runners[0]!, protocolVersion: 175, agents: [oldId, selected] };
+  const manual = { ...runners[0]!.agents[0]!, id: "manual", driver: "acp" as const,
+    installation: undefined };
+  const machine = { ...runners[0]!, protocolVersion: 175, agents: [oldId, selected, manual] };
   const stored = schedule("pinned", "Pinned Sweep");
   stored.action = { kind: "create_session", request: {
     runnerId: "runner-1", workspaceId: "runner-1-workspace", agentId: "rich-agent", prompt: "Sweep",
@@ -612,6 +614,13 @@ test("editing a pinned automation shows its rediscovered installation instead of
     assert.equal(action?.kind === "create_session" && action.request.agentId, "system-new");
     assert.equal(action?.kind === "create_session" &&
       action.installationBindings?.agent?.installationId, "system");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await changeNativeSelect(fixture.container, "Agent", "manual");
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    assert.equal(fixture.updates[1]?.spec.action.kind === "create_session" &&
+      fixture.updates[1].spec.action.request.agentId, "manual",
+    "switching to a config-authored agent clears the automatic installation rebind");
   } finally {
     await unmountFixture(fixture);
   }
