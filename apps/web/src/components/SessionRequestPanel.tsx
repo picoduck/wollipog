@@ -281,6 +281,7 @@ export function SessionRequestPanel({
             key={selected.key}
             sessionId={selected.sessionId}
             requestId={selected.request.requestId}
+            occurrenceId={selected.request.occurrenceId}
             questions={selected.request.questions ?? []}
             isAsync={selected.request.async}
             recoveryReason={selected.request.recoveryReason}

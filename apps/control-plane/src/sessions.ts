@@ -7714,6 +7714,7 @@ export class SessionsService {
         actor,
         resolution.action === "answer" ? "submit" : "dismiss",
         parentSessionId,
+        occurrenceId,
       );
     } else {
       if (pending.kind === "question") return fail("the descendant request is not an approval", 409);
@@ -7735,6 +7736,7 @@ export class SessionsService {
     actor: GovernanceActor = { kind: "human", id: "local" },
     action: "submit" | "dismiss" = Object.keys(answers).length > 0 ? "submit" : "dismiss",
     resolvedByParentSessionId?: string,
+    occurrenceId?: string,
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -7745,6 +7747,9 @@ export class SessionsService {
     const pending = pendingRequests(session.pendingApproval).find((request) => request.requestId === requestId) ?? session.pendingApproval;
     if (!pending) return fail("no pending question for this session", 409);
     if (pending.requestId !== requestId) return fail("question request id does not match the pending one", 409);
+    if (pending.async && (!occurrenceId || occurrenceId !== pending.occurrenceId)) {
+      return fail("async question occurrence is stale or missing", 409);
+    }
     if (pending.expiresAt != null && pending.expiresAt <= Date.now()) return fail("question request has expired", 409);
     if (pending.kind !== "question") return fail("the pending approval is not a question", 409);
     // Answers ride verbatim into the agent's updatedInput — reject anything the pending card
@@ -11027,8 +11032,11 @@ export class SessionsService {
         if (!requests?.size) this.automaticQuestions.delete(sessionId);
       }
       const current = this.db.getSession(sessionId)?.pendingApproval;
-      const settledRequest = pendingRequests(current).find((request) => request.requestId === payload.requestId);
-      if (!settledRequest || !isPolicyApproval(settledRequest)) {
+      const settledRequest = pendingRequests(current).find((request) => request.requestId === payload.requestId &&
+        (payload.kind !== "question_resolved" || !payload.occurrenceId ||
+          request.occurrenceId === payload.occurrenceId));
+      if ((!settledRequest && !(payload.kind === "question_resolved" && payload.occurrenceId)) ||
+          (settledRequest && !isPolicyApproval(settledRequest))) {
         this.db.setPendingApproval(sessionId, removePendingRequest(current, payload.requestId));
       }
       this.gateOnPolicy(sessionId, now);

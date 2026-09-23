@@ -10,7 +10,7 @@ import { test } from "node:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RunnerToControlPlane } from "@wollipog/protocol";
+import { pendingRequests, type RunnerToControlPlane } from "@wollipog/protocol";
 import { SessionManager, type DurableCommandLifecycle } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 
@@ -522,6 +522,138 @@ test("Codex async question stays actionable while running and queues its answer 
   }
 });
 
+test("a tool approval does not replace an unanswered async question", () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:choice",
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request", requestId: "tool-approval", title: "Run Command",
+      options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+    });
+    assert.deepEqual(pendingRequests(store.readMeta("s_perm")?.pendingApproval)
+      .map((request) => request.requestId), ["tool-approval", "codex-async:choice"]);
+    assert.equal(store.readMeta("s_perm")?.status, "input_required");
+    sm.resolvePermission("s_perm", "tool-approval", "allow");
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.requestId, "codex-async:choice");
+    assert.equal(eventsOf(sent, "question_resolved").length, 0);
+  } finally {
+    cleanup();
+  }
+});
+
+test("an accepted async answer outruns older queued prompts and survives a later question", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const prompts: string[] = [];
+    const entry = (sm as any).active.get("s_perm");
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "codex-thread";
+    entry.client.prompt = async (text: string) => {
+      prompts.push(text);
+      return "end_turn" as const;
+    };
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex", agentSessionId: "codex-thread",
+      status: "running" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:older",
+      questions: [{ id: "0", question: "Old question?", options: [{ label: "Patch" }] }],
+    });
+    const recoveryId = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    assert.equal(sm.prompt("s_perm", "ordinary prompt queued first"), true);
+    const transitions: string[] = [];
+    const lifecycle: DurableCommandLifecycle = {
+      commandId: "accepted_async_answer",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    };
+    sm.answerRecoveredQuestion("s_perm", "codex-async:older", recoveryId, { "0": "Patch" }, lifecycle);
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "permission_request", requestId: "continued-work-approval", title: "Run Command",
+      options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+    });
+    assert.deepEqual(pendingRequests(store.readMeta("s_perm")?.pendingApproval)
+      .map((request) => request.requestId), ["continued-work-approval", "codex-async:older"]);
+    sm.resolvePermission("s_perm", "continued-work-approval", "allow");
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:newer",
+      questions: [{ id: "0", question: "New question?", options: [] }],
+    });
+    assert.equal(eventsOf(sent, "question_resolved").length, 0);
+    entry.running = false;
+    (sm as any).emitStatus("s_perm", "idle");
+    (sm as any).scheduleDrain("s_perm");
+    for (let attempt = 0; attempt < 40 && prompts.length < 2; attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(transitions, ["queued", "started", "completed"]);
+    assert.match(prompts[0]!, /Old question\?\nAnswer: Patch/u);
+    assert.equal(prompts[1], "ordinary prompt queued first");
+  } finally {
+    cleanup();
+  }
+});
+
+test("a durable async answer accepted before replacement still reaches its exact occurrence", async () => {
+  const { sm, sent, store, cleanup } = makeHarness(true);
+  try {
+    const entry = (sm as any).active.get("s_perm");
+    const prompts: string[] = [];
+    entry.running = false;
+    entry.launchGeneration = 1;
+    entry.context = { kind: "native" };
+    entry.providerReady = true;
+    entry.steerFenceIds = new Set();
+    entry.reservedPromotions = new Map();
+    entry.client.agentSessionId = () => "codex-thread";
+    entry.client.prompt = async (text: string) => {
+      prompts.push(text);
+      return "end_turn" as const;
+    };
+    store.patchMeta("s_perm", { driver: "codex-app-server", command: "codex", agentSessionId: "codex-thread" });
+    (sm as any).emitEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:old",
+      questions: [{ id: "0", question: "Old question?", options: [{ label: "Patch" }] }],
+    });
+    const oldOccurrence = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    (sm as any).onDriverEvent("s_perm", {
+      kind: "question_request", async: true, requestId: "codex-async:new",
+      questions: [{ id: "0", question: "New question?", options: [] }],
+    });
+    const currentOccurrence = store.readMeta("s_perm")!.pendingApproval!.recoveryId!;
+    const transitions: string[] = [];
+    sm.answerRecoveredQuestion("s_perm", "codex-async:old", oldOccurrence, { "0": "Patch" }, {
+      commandId: "late_accepted_async_answer",
+      queued: () => { transitions.push("queued"); },
+      started: () => { transitions.push("started"); },
+      completed: () => { transitions.push("completed"); },
+      failed: (error) => { transitions.push(`failed:${error}`); },
+      uncertain: (error) => { transitions.push(`uncertain:${error}`); },
+    });
+    for (let attempt = 0; attempt < 40 && !transitions.includes("completed"); attempt += 1) {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(transitions, ["queued", "started", "completed"]);
+    assert.match(prompts[0]!, /Old question\?\nAnswer: Patch/u);
+    assert.equal(store.readMeta("s_perm")?.pendingApproval?.recoveryId, currentOccurrence);
+    const answered = eventsOf(sent, "question_resolved").find((event) =>
+      (event as { payload: { requestId: string; answered: boolean } }).payload.requestId === "codex-async:old" &&
+      (event as { payload: { requestId: string; answered: boolean } }).payload.answered);
+    assert.equal((answered as { payload: { occurrenceId: string } }).payload.occurrenceId, oldOccurrence);
+  } finally {
+    cleanup();
+  }
+});
+
 test("Codex async question remains an idle actionable card after runner restart", () => {
   const { sm, store, cleanup } = makeHarness("none");
   try {
@@ -568,11 +700,14 @@ test("terminal session status expires an unanswered async question once", () => 
     (sm as any).emitStatus("s_perm", "stopped");
     (sm as any).emitStatus("s_perm", "stopped");
     assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
-    assert.deepEqual(eventsOf(sent, "question_resolved").map((event) =>
-      (event as { payload: unknown }).payload), [{
+    const resolutions = eventsOf(sent, "question_resolved").map((event) =>
+      (event as { payload: { occurrenceId?: string } }).payload);
+    assert.equal(resolutions.length, 1);
+    assert.match(resolutions[0]!.occurrenceId!, /^request_[0-9a-f]{32}$/u);
+    assert.deepEqual({ ...resolutions[0], occurrenceId: undefined }, {
       kind: "question_resolved", requestId: "codex-async:expires",
-      answered: false, resolutionReason: "expired",
-    }]);
+      occurrenceId: undefined, answered: false, resolutionReason: "expired",
+    });
   } finally {
     cleanup();
   }

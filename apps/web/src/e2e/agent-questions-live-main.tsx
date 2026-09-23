@@ -126,6 +126,7 @@ function LiveQuestionFixture() {
                           sessionId: session.id,
                           pendingQuestion: pendingQuestion ? {
                             requestId: pendingQuestion.requestId,
+                            occurrenceId: pendingQuestion.occurrenceId,
                             questions: pendingQuestion.questions ?? [],
                             async: pendingQuestion.async,
                             recoveryReason: pendingQuestion.recoveryReason,

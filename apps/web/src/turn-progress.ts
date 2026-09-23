@@ -225,7 +225,8 @@ export class IncrementalActiveTurnProgress {
 
   private push(event: SessionEvent): void {
     const payload = event.payload;
-    if (payload.kind === "user_message" && payload.deliveryIntent !== "steer") {
+    if ((payload.kind === "user_message" && payload.deliveryIntent !== "steer") ||
+        (payload.kind === "question_resolved" && payload.startsTurn)) {
       this.resetTurn();
       this.awaitingActiveTurnStart = false;
       this.turnStart = event;

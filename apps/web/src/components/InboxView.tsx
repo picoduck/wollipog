@@ -1114,7 +1114,11 @@ export function InboxView({
           openRequest(targetSession, approval.requestId);
           return;
         }
-        const updated = await api.answerQuestion(targetSession.id, { requestId: approval.requestId, answers: {}, action: "dismiss" });
+        const updated = await api.answerQuestion(targetSession.id, {
+          requestId: approval.requestId,
+          ...(approval.occurrenceId ? { occurrenceId: approval.occurrenceId } : {}),
+          answers: {}, action: "dismiss",
+        });
         loadSession(updated);
         return;
       }

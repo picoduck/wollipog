@@ -52,6 +52,7 @@ export interface TimelineQuestionContext {
   sessionId: string;
   pendingQuestion: {
     requestId: string;
+    occurrenceId?: string;
     questions: AgentQuestion[];
     async?: boolean;
     recoveryReason?: "provider_restart";

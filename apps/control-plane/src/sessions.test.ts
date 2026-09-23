@@ -13301,13 +13301,54 @@ test("Codex async question keeps a running session active and rejects stale answ
   assert.equal(db.getSession(id)?.status, "running");
   assert.equal(db.getSession(id)?.pendingApproval?.async, true);
   assert.equal(svc.answerQuestion(id, "codex-async:wrong", { "0": "Patch" }).ok, false);
-  assert.equal(svc.answerQuestion(id, "codex-async:message-1", { "0": "Patch" }).ok, true);
+  assert.equal(svc.answerQuestion(id, "codex-async:message-1", { "0": "Patch" }).ok, false);
+  assert.equal(svc.answerQuestion(id, "codex-async:message-1", { "0": "Patch" },
+    undefined, "submit", undefined, "request_async_occurrence").ok, true);
   assert.equal(db.getSession(id)?.status, "running");
   assert.equal(db.getSession(id)?.pendingApproval, null);
   assert.ok(hub.sentToRunner.some(({ msg }) => msg.type === "durable_session_command" &&
     msg.command.type === "answer_recovered_question" &&
     msg.command.requestId === "codex-async:message-1" &&
     msg.command.recoveryId === "request_async_occurrence"));
+});
+
+test("a blocking approval can be resolved without clearing an async question", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "codex-async:choice",
+    occurrenceId: "request_async_choice",
+    questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+  });
+  svc.onSessionEvent(id, {
+    kind: "permission_request", requestId: "tool-approval", title: "Run Command",
+    options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+  });
+  assert.deepEqual(pendingRequests(db.getSession(id)?.pendingApproval).map((request) => request.requestId),
+    ["tool-approval", "codex-async:choice"]);
+  svc.onSessionEvent(id, { kind: "permission_resolved", requestId: "tool-approval", optionId: "allow" });
+  assert.equal(db.getSession(id)?.pendingApproval?.requestId, "codex-async:choice");
+  assert.equal(db.getSession(id)?.pendingApproval?.async, true);
+});
+
+test("a late async resolution cannot clear a reused request id", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  for (const occurrenceId of ["request_old", "request_new"]) {
+    svc.onSessionEvent(id, {
+      kind: "question_request", async: true, requestId: "codex-async:reused", occurrenceId,
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+  }
+  svc.onSessionEvent(id, {
+    kind: "question_resolved", requestId: "codex-async:reused", occurrenceId: "request_old",
+    answered: true, resolutionReason: "submitted",
+  });
+  assert.equal(db.getSession(id)?.pendingApproval?.recoveryId, "request_new");
+  assert.equal(svc.answerQuestion(id, "codex-async:reused", { "0": "Patch" },
+    undefined, "submit", undefined, "request_old").ok, false);
+  assert.equal(db.getSession(id)?.pendingApproval?.recoveryId, "request_new");
 });
 
 test("recovered answers reapply the same post-resolution policy gate as live answers", () => {

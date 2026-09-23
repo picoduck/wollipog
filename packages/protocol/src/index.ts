@@ -4256,7 +4256,11 @@ export type SessionEventPayload =
   | {
       kind: "question_resolved";
       requestId: string;
+      /** Present for async questions so a late answer cannot clear a reused request id. */
+      occurrenceId?: string;
       answered: boolean;
+      /** A delivered async answer starts a new provider turn. */
+      startsTurn?: boolean;
       resolutionReason?: StructuredRequestResolutionReason;
       /** Controlling session when this answer came through Parent Control. */
       resolvedByParentSessionId?: string;
