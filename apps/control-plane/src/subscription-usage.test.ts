@@ -224,6 +224,33 @@ test("a missing selected WSL account installation remains explicitly unsupported
   db.close();
 });
 
+test("account projection does not borrow another account's selected agent", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const work = { ...codexAgent("work"), available: true, defaultProviderAccountId: "work",
+    installation: { id: "old", path: "/opt/codex", via: "path" as const } };
+  const personal = { ...codexAgent("personal"), available: true, defaultProviderAccountId: "personal",
+    installation: { id: "selected", path: "/usr/bin/codex", via: "path" as const } };
+  const generic = { ...codexAgent("generic"), available: true,
+    installation: { id: "selected", path: "/usr/bin/codex", via: "path" as const } };
+  const owner = { organizationId: "org_personal", owner: { kind: "user" as const, userId: "alice" } };
+  const withAccount = (agents: AgentDefinition[]) => ({ ...meta("runner-1", agents),
+    providerAccounts: [{ id: "work", label: "Work", provider: "codex" as const, authStatus: "authenticated" as const }] });
+  db.registerRunner(withAccount([work, personal, generic]), 1_000_000, PROTOCOL_VERSION, owner);
+  assert.ok(db.selectHarnessInstallation("runner-1", "personal", "selected"));
+  const first = db.subscriptionUsageForPrincipal(human(), 1_000_000).sources.find((source) =>
+    source.providerAccountId === "work");
+  assert.deepEqual([first?.agentId, first?.state], ["generic", "unavailable"]);
+  db.registerRunner(withAccount([work, personal]), 1_000_001, PROTOCOL_VERSION, owner);
+  const missing = db.subscriptionUsageForPrincipal(human(), 1_000_001).sources.find((source) =>
+    source.providerAccountId === "work");
+  assert.deepEqual([missing?.agentId, missing?.state], ["work", "unsupported"]);
+  db.registerRunner(withAccount([personal]), 1_000_002, PROTOCOL_VERSION, owner);
+  const incompatible = db.subscriptionUsageForPrincipal(human(), 1_000_002).sources.find((source) =>
+    source.providerAccountId === "work");
+  assert.deepEqual([incompatible?.agentId, incompatible?.state], ["personal", "unsupported"]);
+  db.close();
+});
+
 test("account labels remain isolated by runner and switch atomically with available usage", () => {
   const db = ControlPlaneDb.open(":memory:");
   const now = 1_000_000;

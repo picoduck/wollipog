@@ -11130,12 +11130,16 @@ export class ControlPlaneDb {
         runner.harnessSelections?.find((choice) => choice.family === provider &&
           harnessInstallationContext(choice.context) === harnessInstallationContext(agent.context));
       const sourceAgentFor = (agents: AgentDefinition[], preferred: AgentDefinition | undefined,
-        provider: "codex" | "claude") => {
+        provider: "codex" | "claude", accountId: string) => {
         const choice = preferred && selectionFor(preferred, provider);
-        if (!choice || preferred?.installation?.id === choice.installationId) return preferred;
-        return agents.find((candidate) =>
+        if (!choice || (preferred?.installation?.id === choice.installationId &&
+          (!preferred.defaultProviderAccountId || preferred.defaultProviderAccountId === accountId))) return preferred;
+        return agents.find((candidate) => candidate.defaultProviderAccountId === accountId &&
           harnessInstallationContext(candidate.context) === harnessInstallationContext(preferred.context) &&
-          candidate.installation?.id === choice.installationId) ?? preferred;
+          candidate.installation?.id === choice.installationId) ??
+          agents.find((candidate) => !candidate.defaultProviderAccountId &&
+            harnessInstallationContext(candidate.context) === harnessInstallationContext(preferred.context) &&
+            candidate.installation?.id === choice.installationId) ?? preferred;
       };
       const sourceCoordinates = [
         ...providerAccounts.flatMap((account) => {
@@ -11143,8 +11147,11 @@ export class ControlPlaneDb {
             ? candidate.driver === "codex-app-server"
             : candidate.driver === "claude-code");
           const preferred = compatible.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
+            compatible.find((candidate) => !candidate.defaultProviderAccountId &&
+              (candidate.context?.kind ?? "native") === "native") ??
+            compatible.find((candidate) => !candidate.defaultProviderAccountId) ??
             compatible.find((candidate) => (candidate.context?.kind ?? "native") === "native") ?? compatible[0];
-          const agent = sourceAgentFor(compatible, preferred, account.provider);
+          const agent = sourceAgentFor(compatible, preferred, account.provider, account.id);
           return agent ? [{ agent, provider: account.provider, account }] : [];
         }),
         ...runner.agents.flatMap((agent) => {
@@ -11184,6 +11191,7 @@ export class ControlPlaneDb {
         // credential home is compatible even when the control plane's display fallback is native.
         const recordedAgent = account && recorded && runner.agents.find((candidate) => {
           if (candidate.id !== recorded.agentId || candidate.driver !== agent.driver) return false;
+          if (candidate.defaultProviderAccountId && candidate.defaultProviderAccountId !== account.id) return false;
           const candidateSelection = selectionFor(candidate, provider);
           if (!candidateSelection || candidate.installation?.id === candidateSelection.installationId) return true;
           return recorded.state === "unsupported" && !runner.agents.some((other) =>
@@ -11195,7 +11203,9 @@ export class ControlPlaneDb {
         const selection = selectionFor(displayAgent, provider);
         const unsupportedSelection = Boolean(selection &&
           (!runnerSupportsProtocol(runner.protocolVersion, "harnessSelectionBackgroundConsumers") ||
-            displayAgent.installation?.id !== selection.installationId));
+            displayAgent.installation?.id !== selection.installationId ||
+            Boolean(account && displayAgent.defaultProviderAccountId &&
+              displayAgent.defaultProviderAccountId !== account.id)));
         const persisted = recorded?.agentId === displayAgent.id &&
           (!unsupportedSelection || recorded.state === "unsupported")
           ? recorded : undefined;

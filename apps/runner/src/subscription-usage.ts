@@ -675,10 +675,12 @@ export class SubscriptionUsageManager {
         providerAgents.find((candidate) => (candidate.context?.kind ?? "native") === "native") ??
         providerAgents[0];
       const choice = fallback && harnessChoiceFor(choices, account.provider, fallback.context);
+      const accountCompatibleAgents = providerAgents.filter((candidate) =>
+        candidate.defaultProviderAccountId === account.id || !candidate.defaultProviderAccountId);
       const selected = fallback && choice
-        ? fallback.installation?.id === choice.installationId
+        ? accountCompatibleAgents.includes(fallback) && fallback.installation?.id === choice.installationId
           ? fallback
-          : selectedHarnessAgent(providerAgents, fallback.driver ?? "acp", fallback.context ?? { kind: "native" }, choices)
+          : selectedHarnessAgent(accountCompatibleAgents, fallback.driver ?? "acp", fallback.context ?? { kind: "native" }, choices)
         : fallback;
       const agent = selected ?? fallback;
       if (!agent) continue;
@@ -854,20 +856,13 @@ export class SubscriptionUsageManager {
     if (!provider || provider !== update.provider) return null;
     const sourceId = subscriptionUsageSourceId(this.options.runnerId, agentId, provider, context, providerAccountId);
     const source = this.sources().find((candidate) => candidate.sourceId === sourceId &&
-      !candidate.unsupportedDetail && (providerAccountId !== undefined || candidate.agent.id === agentId));
+      (providerAccountId !== undefined || (!candidate.unsupportedDetail && candidate.agent.id === agentId)));
     if (!source) return null;
-    if (providerAccountId) {
-      const choice = harnessChoiceFor(this.options.installationChoices?.() ?? [], provider, context);
-      if (choice) {
-        const eventAgent = this.options.agents().find((candidate) =>
-          candidate.id === agentId && candidate.driver === driver &&
-          contextKey(candidate.context) === contextKey(context));
-        if (eventAgent?.installation?.id !== choice.installationId) return null;
-      }
-    }
-    if (update.kind === "response_observed") return this.observeProviderResponse(sourceId);
-    // An account source is shared by its sessions, but an unselected installation cannot report
-    // against it. Keep the canonical source agent so subsequent inventories retain the event.
+    if (update.kind === "response_observed") return source.unsupportedDetail
+      ? null : this.observeProviderResponse(sourceId);
+    // Account events come from live sessions, including sessions started before a choice changed.
+    // Keep the canonical source agent for persistence, but return an event from an unsupported
+    // source to its session so automatic account switching can still use the rate-limit window.
     const base = {
       sourceId,
       runnerId: this.options.runnerId,
@@ -878,6 +873,7 @@ export class SubscriptionUsageManager {
       ? normalizeCodexRateLimits(update.payload, base, this.now())
       : normalizeClaudeRateLimits(update.payload, base, this.now());
     if (!normalized) return null;
+    if (source.unsupportedDetail) return normalized;
     const prior = this.snapshots.get(sourceId);
     if (prior && normalized.fetchedAt < prior.fetchedAt) return prior;
     const { fetchedAt: _fetchedAt, ...eventShape } = normalized;

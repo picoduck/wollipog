@@ -729,9 +729,33 @@ test("Claude sessions on either agent of one account contribute to its usage sou
     assert.equal(observed?.agentId, "claude-work", "an account source keeps its canonical agent");
     assert.equal(manager.syncSources()[0]?.state, "available", "a later inventory does not erase the event");
     if (choices.length) {
-      assert.equal(manager.observe("claude-old", "claude-code", { kind: "native" }, update, "work"), null);
+      assert.equal(manager.observe("claude-old", "claude-code", { kind: "native" }, update, "work")?.state,
+        "available", "an existing session still reports account usage after its installation is unselected");
     }
   }
+});
+
+test("a missing selected installation keeps the usage card unsupported but returns account events to the live session", () => {
+  const old = claudeAgent({ id: "claude-old", defaultProviderAccountId: "work",
+    installation: { id: "old", path: "/opt/claude", via: "path" } });
+  const published: SubscriptionUsageSnapshot[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [old],
+    installationChoices: () => [{ family: "claude", context: { kind: "native" }, installationId: "missing" }],
+    providerAccounts: () => [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }],
+    resolveEnv: () => ({}),
+    publish: (snapshot) => published.push(snapshot),
+    now: () => OBSERVED_AT,
+  });
+  const observed = manager.observe("claude-old", "claude-code", { kind: "native" }, {
+    provider: "claude", kind: "sparse",
+    payload: rateLimitEvent({ status: "allowed_warning", rateLimitType: "five_hour",
+      unifiedWindows: { five_hour: { utilization: 1, resetsAt: FIVE_HOUR_RESET } } }),
+  }, "work");
+  assert.equal(observed?.state, "available", "the running session still receives exhaustion evidence");
+  assert.equal(manager.inventory()[0]?.state, "unsupported", "the unavailable selection is not replaced by old usage");
+  assert.deepEqual(published, []);
 });
 
 /** Exactly the shape `claude --output-format stream-json` emits: `utilization` is the fraction of
@@ -1548,6 +1572,44 @@ test("a selected installation preserves each account's compatible default agent 
   assert.deepEqual(probed, ["codex-personal"]);
   assert.equal(manager.inventory().find((snapshot) => snapshot.providerAccountId === "personal")?.agentId,
     "codex-personal");
+});
+
+test("a selected account probe uses a generic agent before another account's default", async () => {
+  const work = agent({ id: "codex-work", defaultProviderAccountId: "work",
+    installation: { id: "old", path: "/opt/codex", via: "path" } });
+  const personal = agent({ id: "codex-personal", defaultProviderAccountId: "personal",
+    installation: { id: "selected", path: "/usr/bin/codex", via: "path" } });
+  const generic = agent({ id: "codex-generic",
+    installation: { id: "selected", path: "/usr/bin/codex", via: "path" } });
+  let discovered = [work, personal, generic];
+  const probed: string[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => discovered,
+    installationChoices: () => [{ family: "codex", context: { kind: "native" }, installationId: "selected" }],
+    providerAccounts: () => [{ id: "work", label: "Work", provider: "codex", authStatus: "authenticated" }],
+    resolveEnv: (agentId) => agentId === "codex-personal" ? { OPENAI_API_KEY: "test-only" } : {},
+    authorizeProbe: () => ({ cwd: "/safe/probe" }),
+    publish: () => {},
+    now: () => 20_000,
+    probeCodex: async (candidate) => { probed.push(candidate.id); return { state: "unavailable" }; },
+  });
+  await manager.refreshAccount("work");
+  assert.deepEqual(probed, ["codex-generic"]);
+  assert.equal(manager.inventory().find((source) => source.providerAccountId === "work")?.agentId,
+    "codex-generic");
+  discovered = [work, personal];
+  manager.selectionChanged();
+  await manager.refreshAccount("work");
+  assert.deepEqual(probed, ["codex-generic"], "another account's configured agent is not borrowed");
+  assert.equal(manager.inventory().find((source) => source.providerAccountId === "work")?.state,
+    "unsupported");
+  discovered = [personal];
+  manager.selectionChanged();
+  await manager.refreshAccount("work");
+  assert.deepEqual(probed, ["codex-generic"], "the sole selected agent still belongs to another account");
+  assert.equal(manager.inventory().find((source) => source.providerAccountId === "work")?.state,
+    "unsupported");
 });
 
 test("a runner without synchronized choices does not advertise selection-bound usage", async () => {
