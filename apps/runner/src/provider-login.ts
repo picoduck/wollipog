@@ -21,7 +21,7 @@ const DEFAULT_CEREMONY_TIMEOUT_MS = 15_000;
 const URL_PATTERN = /https:\/\/[^\s<>"'\u0000-\u001f\u007f]+/giu;
 const LABELED_DEVICE_CODE_PATTERN = /one-time code:?\s*([A-Z0-9-]+)[ \t]*(?=\r?\n)/giu;
 const HYPHENATED_DEVICE_CODE_LINE_PATTERN = /^[ \t]*([A-Z0-9]+(?:-[A-Z0-9]+)+)[ \t]*(?=\r?\n)/gmu;
-const ANSI_ESCAPE_PATTERN = /\u001b(?:\][^\u0007]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~])|\u009b[0-?]*[ -/]*[@-~]/gu;
+const ANSI_ESCAPE_PATTERN = /\u001b(?:\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\[[0-?]*[ -/]*[@-~])|\u009b[0-?]*[ -/]*[@-~]/gu;
 const CODEX_LOGIN_CLIENT_INFO = { name: "wollipog-provider-login", version: "1.0.0" } as const;
 
 export function agentsMatchingHarnessInstallationSelections(
@@ -170,7 +170,10 @@ function safeVerificationUrl(raw: string, trimPresentationPunctuation = true): s
 }
 
 function stripAnsi(value: string): string {
-  return value.replace(ANSI_ESCAPE_PATTERN, "");
+  const stripped = value.replace(ANSI_ESCAPE_PATTERN, "");
+  // An unfinished or malformed OSC must not expose its payload as ceremony text.
+  const incompleteOsc = stripped.indexOf("\u001b]");
+  return incompleteOsc < 0 ? stripped : stripped.slice(0, incompleteOsc);
 }
 
 function safeDeviceCode(raw: unknown): string | undefined {
