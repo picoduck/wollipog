@@ -1097,6 +1097,11 @@ test("scheduled sessions follow the saved installation through rediscovery and r
   const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
   assert.equal(automation.action.kind === "create_session" &&
     automation.action.installationBindings?.agent?.installationId, "system");
+  const edited = service.update(automation.automationId, baseSpec({ name: "Edited Schedule" }),
+    { kind: "human", id: "device" }, 100).data!;
+  assert.equal(edited.action.kind === "create_session" &&
+    edited.action.installationBindings?.agent?.installationId, "system",
+  "an older client may omit the binding during an unrelated edit");
 
   db.updateRunnerAgents("runner-1", [
     { ...local, id: "agent-1" }, { ...system, id: "system-new" },
@@ -1164,6 +1169,35 @@ test("scheduled workflow role bindings keep their selected installation after ag
     { ...worker, id: "worker-new" }, base.agents[1]!], 1_000);
   service.tick(60_000);
   assert.equal(workflows[0]?.agentBindings?.worker, "worker-new");
+});
+
+test("an unavailable pinned workflow role does not validate against a reused id", () => {
+  const supported = modelCapabilities("gpt-5");
+  const narrowed = modelCapabilities("claude-opus-4-1");
+  const base = runnerWithAgents("runner-1", [
+    { id: "worker", capabilities: supported }, { id: "reviewer", capabilities: supported },
+  ]);
+  const worker = { ...base.agents[0]!, installation: {
+    id: "system", path: "/usr/bin/claude", via: "path" as const,
+  } };
+  const reused = { ...worker, capabilities: narrowed, installation: {
+    id: "local", path: "/home/u/.local/bin/claude", via: "common-dir" as const,
+  } };
+  const { db, service } = harness(175, [{ ...base, agents: [worker, base.agents[1]!] }]);
+  installCapabilityWorkflow(db);
+  db.selectHarnessInstallation("runner-1", "worker", "system");
+  const request: CreateWorkflowRunRequest = {
+    runnerId: "runner-1", workspaceId: "ws-1", workflowId: "workflow-capabilities",
+    task: "Build", config: { model: "gpt-5", effort: "high" },
+  };
+  const actor = { kind: "human" as const, id: "device" };
+  const automation = service.create(baseSpec({ action: { kind: "workflow_run", request } }), actor, 0).data!;
+  db.updateRunnerAgents("runner-1", [reused, base.agents[1]!], 1_000);
+  const updated = service.update(automation.automationId,
+    baseSpec({ name: "Updated Schedule", action: { kind: "workflow_run", request } }), actor, 2_000);
+  assert.equal(updated.status, 200, "an unavailable saved role waits instead of checking the reused id");
+  assert.equal(updated.data?.action.kind === "workflow_run" &&
+    updated.data.action.installationBindings?.["role:worker"]?.installationId, "system");
 });
 
 test("runner wait, bounded expiry, and explicit alternate target policies are durable", () => {

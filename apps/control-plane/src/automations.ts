@@ -382,16 +382,20 @@ function automationCapabilityError(
   for (const target of targets) {
     const agentBindings = { ...(request.agentBindings ?? {}), ...(target.agentBindings ?? {}) };
     const definition = db.getWorkflowDefinition(request.workflowId, request.workflowVersion);
+    let unavailableBinding = false;
     for (const node of definition?.nodes ?? []) {
       if (node.kind !== "agent") continue;
       const saved = target.installationBindings?.[`role:${node.agentId!}`];
-      if (saved) agentBindings[node.agentId!] =
-        db.resolveSavedHarnessInstallation(target.runnerId, saved) ?? agentBindings[node.agentId!] ?? node.agentId!;
+      if (!saved) continue;
+      const resolved = db.resolveSavedHarnessInstallation(target.runnerId, saved);
+      if (!resolved) { unavailableBinding = true; break; }
+      agentBindings[node.agentId!] = resolved;
     }
+    if (unavailableBinding) continue;
     const orchestrator = target.installationBindings?.orchestrator
-      ? db.resolveSavedHarnessInstallation(target.runnerId, target.installationBindings.orchestrator) ??
-        target.orchestratorAgentId ?? request.orchestratorAgentId
+      ? db.resolveSavedHarnessInstallation(target.runnerId, target.installationBindings.orchestrator)
       : target.orchestratorAgentId ?? request.orchestratorAgentId;
+    if (target.installationBindings?.orchestrator && !orchestrator) continue;
     const error = sessions.workflowRunCapabilityError({
       ...request,
       runnerId: target.runnerId,
@@ -412,12 +416,15 @@ function automationCapabilityError(
 function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: AutomationSchedule): AutomationSpec {
   if (spec.action.kind === "prompt_session") return spec;
   const pin = (runnerId: string, ids: Record<string, string>, existing?: AutomationInstallationBindings,
-    old?: { runnerId: string; ids: Record<string, string> }) => {
+    old?: { runnerId: string; ids: Record<string, string>; bindings?: AutomationInstallationBindings }) => {
     const bindings = { ...existing };
     for (const [key, agentId] of Object.entries(ids)) {
       if (old && (old.runnerId !== runnerId || old.ids[key] !== agentId)) delete bindings[key];
       if (bindings[key]) continue;
-      if (old?.runnerId === runnerId && old.ids[key] === agentId) continue;
+      if (old?.runnerId === runnerId && old.ids[key] === agentId) {
+        if (old.bindings?.[key]) bindings[key] = old.bindings[key];
+        continue;
+      }
       const saved = db.savedHarnessInstallation(runnerId, agentId);
       if (saved) bindings[key] = saved;
     }
@@ -427,7 +434,8 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
     const action = spec.action;
     const oldAction = previous?.action.kind === "create_session" ? previous.action : undefined;
     const primary = pin(action.request.runnerId, { agent: action.request.agentId }, action.installationBindings,
-      oldAction ? { runnerId: oldAction.request.runnerId, ids: { agent: oldAction.request.agentId } } : undefined);
+      oldAction ? { runnerId: oldAction.request.runnerId, ids: { agent: oldAction.request.agentId },
+        bindings: oldAction.installationBindings } : undefined);
     return {
       ...spec,
       action: { ...action, ...(primary ? { installationBindings: primary } : {}) },
@@ -436,7 +444,8 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
         targets: spec.runnerPolicy.targets.map((target, index) => {
           const oldTarget = previous?.runnerPolicy.kind === "alternate" ? previous.runnerPolicy.targets[index] : undefined;
           const bindings = pin(target.runnerId, { agent: target.agentId! }, target.installationBindings,
-            oldTarget ? { runnerId: oldTarget.runnerId, ids: { agent: oldTarget.agentId! } } : undefined);
+            oldTarget ? { runnerId: oldTarget.runnerId, ids: { agent: oldTarget.agentId! },
+              bindings: oldTarget.installationBindings } : undefined);
           return { ...target, ...(bindings ? { installationBindings: bindings } : {}) };
         }),
       },
@@ -458,7 +467,8 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
     ids(action.request.agentBindings ?? {}, action.request.orchestratorAgentId),
     previous && !oldAction ? undefined : action.installationBindings,
     oldAction ? { runnerId: oldAction.request.runnerId,
-      ids: ids(oldAction.request.agentBindings ?? {}, oldAction.request.orchestratorAgentId) } : undefined);
+      ids: ids(oldAction.request.agentBindings ?? {}, oldAction.request.orchestratorAgentId),
+      bindings: oldAction.installationBindings } : undefined);
   return {
     ...spec,
     action: { ...action, ...(primary ? { installationBindings: primary } : {}) },
@@ -472,7 +482,8 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
           previous && !oldAction ? undefined : target.installationBindings,
           oldTarget && oldAction ? { runnerId: oldTarget.runnerId,
             ids: ids({ ...(oldAction.request.agentBindings ?? {}), ...(oldTarget.agentBindings ?? {}) },
-              oldTarget.orchestratorAgentId ?? oldAction.request.orchestratorAgentId) } : undefined);
+              oldTarget.orchestratorAgentId ?? oldAction.request.orchestratorAgentId),
+            bindings: oldTarget.installationBindings } : undefined);
         return { ...target, ...(bindings ? { installationBindings: bindings } : {}) };
       }),
     },

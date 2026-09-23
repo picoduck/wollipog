@@ -242,14 +242,17 @@ export function AutomationsView() {
       ? { driver: agent.driver ?? "acp", context: agent.context ?? { kind: "native" as const },
           installationId: agent.installation.id } : null;
   };
-  const bindingAvailable = (runner: typeof selectedRunner, saved: {
+  const resolvedInstallationAgentId = (runner: typeof selectedRunner, saved: {
     driver: string; context: { kind: string; distro?: string }; installationId: string;
-  }) => runner?.agents.some((agent) => {
+  }) => runner?.agents.find((agent) => {
     const current = installationFor(runner, agent.id);
     return current?.installationId === saved.installationId && current.driver === saved.driver &&
       current.context.kind === saved.context.kind &&
       (current.context.kind !== "wsl" || current.context.distro === saved.context.distro);
-  }) ?? false;
+  })?.id;
+  const bindingAvailable = (runner: typeof selectedRunner, saved: {
+    driver: string; context: { kind: string; distro?: string }; installationId: string;
+  }) => Boolean(resolvedInstallationAgentId(runner, saved));
   const primaryInstallationIssue = editingSpec?.action.kind === "create_session" &&
     editingSpec.action.request.runnerId === form.runnerId && !rebindPrimary
     ? editingSpec.action.installationBindings?.agent
@@ -335,16 +338,17 @@ export function AutomationsView() {
       const request = spec.action.request;
       const bindings = { ...request.agentBindings };
       const installations = { ...spec.action.installationBindings };
-      for (const [role, agentId] of Object.entries(workflowBindingEdits)) {
+      for (const [key, agentId] of Object.entries(workflowBindingEdits)) {
         const installation = installationFor(selectedRunner, agentId);
-        if (!installation) throw new Error(`Select an available Agent Harness installation for ${role}.`);
-        if (role === "orchestrator") {
+        if (!installation) throw new Error(`Select an available Agent Harness installation for ${key}.`);
+        if (key === "orchestrator") {
           request.orchestratorAgentId = agentId;
           installations.orchestrator = installation;
           continue;
         }
+        const role = key.slice("role:".length);
         bindings[role] = agentId;
-        installations[`role:${role}`] = installation;
+        installations[key] = installation;
       }
       request.agentBindings = bindings;
       spec.action.installationBindings = installations;
@@ -354,16 +358,17 @@ export function AutomationsView() {
       const target = spec.runnerPolicy.targets[0]!;
       const bindings = { ...target.agentBindings };
       const installations = { ...target.installationBindings };
-      for (const [role, agentId] of Object.entries(alternateWorkflowBindingEdits)) {
+      for (const [key, agentId] of Object.entries(alternateWorkflowBindingEdits)) {
         const installation = installationFor(selectedFallback, agentId);
-        if (!installation) throw new Error(`Select an available alternate Agent Harness installation for ${role}.`);
-        if (role === "orchestrator") {
+        if (!installation) throw new Error(`Select an available alternate Agent Harness installation for ${key}.`);
+        if (key === "orchestrator") {
           target.orchestratorAgentId = agentId;
           installations.orchestrator = installation;
           continue;
         }
+        const role = key.slice("role:".length);
         bindings[role] = agentId;
-        installations[`role:${role}`] = installation;
+        installations[key] = installation;
       }
       target.agentBindings = bindings;
       target.installationBindings = installations;
@@ -576,15 +581,17 @@ export function AutomationsView() {
                 {form.actionKind === "workflow_run" && workflowRoles.map((role) => {
                   const stored = editingSpec?.action.kind === "workflow_run" &&
                     editingSpec.action.request.workflowId === form.workflowId ? editingSpec.action : null;
-                  const boundId = workflowBindingEdits[role] ?? stored?.request.agentBindings?.[role] ?? role;
                   const reference = stored?.installationBindings?.[`role:${role}`];
-                  const unavailable = !workflowBindingEdits[role] && (reference
+                  const boundId = workflowBindingEdits[`role:${role}`] ??
+                    (reference ? resolvedInstallationAgentId(selectedRunner, reference) : undefined) ??
+                    stored?.request.agentBindings?.[role] ?? role;
+                  const unavailable = !workflowBindingEdits[`role:${role}`] && (reference
                     ? !bindingAvailable(selectedRunner, reference)
                     : !selectedRunner?.agents.some((agent) => agent.id === boundId && !agent.installation));
                   return <div className="automation-field" key={role}>
                     <span className="field-label">{titleCaseLabel(role)} Agent</span>
                     <Select label={`${titleCaseLabel(role)} Agent`} value={boundId}
-                      onChange={(agentId) => setWorkflowBindingEdits((current) => ({ ...current, [role]: agentId }))}
+                      onChange={(agentId) => setWorkflowBindingEdits((current) => ({ ...current, [`role:${role}`]: agentId }))}
                       options={[
                         ...(!bindableAgents(selectedRunner).some((option) => option.agent.id === boundId)
                           ? [{ value: boundId, label: `${boundId} (Unavailable)` }] : []),
@@ -594,7 +601,7 @@ export function AutomationsView() {
                       This saved role installation is unavailable or unbound.
                       <button type="button" className="btn ghost sm"
                         disabled={!installationFor(selectedRunner, boundId)}
-                        onClick={() => setWorkflowBindingEdits((current) => ({ ...current, [role]: boundId }))}>
+                        onClick={() => setWorkflowBindingEdits((current) => ({ ...current, [`role:${role}`]: boundId }))}>
                         Use Current Installation
                       </button>
                     </p>}
@@ -603,8 +610,10 @@ export function AutomationsView() {
                 {form.actionKind === "workflow_run" && editingSpec?.action.kind === "workflow_run" &&
                   editingSpec.action.request.orchestratorAgentId && (() => {
                     const stored = editingSpec.action as Extract<AutomationAction, { kind: "workflow_run" }>;
-                    const boundId = workflowBindingEdits.orchestrator ?? stored.request.orchestratorAgentId!;
                     const reference = stored.installationBindings?.orchestrator;
+                    const boundId = workflowBindingEdits.orchestrator ??
+                      (reference ? resolvedInstallationAgentId(selectedRunner, reference) : undefined) ??
+                      stored.request.orchestratorAgentId!;
                     const unavailable = !workflowBindingEdits.orchestrator && (reference
                       ? !bindingAvailable(selectedRunner, reference)
                       : !selectedRunner?.agents.some((agent) => agent.id === boundId && !agent.installation));
@@ -679,17 +688,19 @@ export function AutomationsView() {
               {form.actionKind === "workflow_run" && workflowRoles.map((role) => {
                 const oldTarget = editingSpec?.runnerPolicy.kind === "alternate" &&
                   editingSpec.action.kind === "workflow_run" ? editingSpec.runnerPolicy.targets[0] : undefined;
-                const boundId = alternateWorkflowBindingEdits[role] ?? oldTarget?.agentBindings?.[role] ??
+                const reference = oldTarget?.installationBindings?.[`role:${role}`];
+                const boundId = alternateWorkflowBindingEdits[`role:${role}`] ??
+                  (reference ? resolvedInstallationAgentId(selectedFallback, reference) : undefined) ??
+                  oldTarget?.agentBindings?.[role] ??
                   (editingSpec?.action.kind === "workflow_run"
                     ? editingSpec.action.request.agentBindings?.[role] : undefined) ?? role;
-                const reference = oldTarget?.installationBindings?.[`role:${role}`];
-                const unavailable = !alternateWorkflowBindingEdits[role] && (reference
+                const unavailable = !alternateWorkflowBindingEdits[`role:${role}`] && (reference
                   ? !bindingAvailable(selectedFallback, reference)
                   : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
                 return <div className="automation-field" key={role}>
                   <span className="field-label">Alternate {titleCaseLabel(role)} Agent</span>
                   <Select label={`Alternate ${titleCaseLabel(role)} Agent`} value={boundId}
-                    onChange={(agentId) => setAlternateWorkflowBindingEdits((current) => ({ ...current, [role]: agentId }))}
+                    onChange={(agentId) => setAlternateWorkflowBindingEdits((current) => ({ ...current, [`role:${role}`]: agentId }))}
                     options={[
                       ...(!bindableAgents(selectedFallback).some((option) => option.agent.id === boundId)
                         ? [{ value: boundId, label: `${boundId} (Unavailable)` }] : []),
@@ -699,7 +710,7 @@ export function AutomationsView() {
                     This saved alternate role installation is unavailable or unbound.
                     <button type="button" className="btn ghost sm"
                       disabled={!installationFor(selectedFallback, boundId)}
-                      onClick={() => setAlternateWorkflowBindingEdits((current) => ({ ...current, [role]: boundId }))}>
+                      onClick={() => setAlternateWorkflowBindingEdits((current) => ({ ...current, [`role:${role}`]: boundId }))}>
                       Use Current Installation
                     </button>
                   </p>}
@@ -711,10 +722,11 @@ export function AutomationsView() {
                   editingSpec.action.request.orchestratorAgentId) && (() => {
                   const oldTarget = editingSpec.runnerPolicy.kind === "alternate"
                     ? editingSpec.runnerPolicy.targets[0] : undefined;
-                  const boundId = alternateWorkflowBindingEdits.orchestrator ??
-                    oldTarget?.orchestratorAgentId ?? editingSpec.action.request.orchestratorAgentId!;
                   const reference = oldTarget?.installationBindings?.orchestrator ??
                     editingSpec.action.installationBindings?.orchestrator;
+                  const boundId = alternateWorkflowBindingEdits.orchestrator ??
+                    (reference ? resolvedInstallationAgentId(selectedFallback, reference) : undefined) ??
+                    oldTarget?.orchestratorAgentId ?? editingSpec.action.request.orchestratorAgentId!;
                   const unavailable = !alternateWorkflowBindingEdits.orchestrator && (reference
                     ? !bindingAvailable(selectedFallback, reference)
                     : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
@@ -859,7 +871,32 @@ export function AutomationsView() {
                 ? `Signed body may add: ${[policy.allowPrompt ? "prompt" : "", policy.parameterNames.length ? "parameters" : "", policy.sessionSelectors?.length ? "target" : ""].filter(Boolean).join(", ")}.`
                 : trigger.kind === "chatops" ? 'Signed body: {"eventId":"...","command":"run","sender":"opaque actor"}' : 'Signed body: {"eventId":"..."}'}</p><div className="automation-trigger-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: "Rotate signing secret?", message: "The previous secret stops working immediately.", confirmLabel: "Rotate Secret", tone: "danger" })) await rotateTrigger(item.automationId, trigger.triggerId); })()}>Rotate Secret</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: "Revoke signed trigger?", message: "Pending unclaimed deliveries will be rejected.", confirmLabel: "Revoke Trigger", tone: "danger" })) await revokeTrigger(item.automationId, trigger.triggerId); })()}>Revoke</button></div></div>;
             })}<p className="automation-hint">Send <code>application/vnd.wollipog.automation-trigger+json</code> with X-Wollipog-Timestamp, X-Wollipog-Nonce, and X-Wollipog-Signature. Every optional field must be explicitly allowed by this fixed automation trigger; deliveries cannot change agents, runners, policies, or ceilings.</p></div>}
-            <div className="automation-card-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void mutate(() => api.updateAutomation(item.automationId, { ...specOf(item), enabled: !item.enabled }))}>{item.enabled ? "Pause" : "Enable"}</button><button className="btn ghost sm" onClick={() => { setEditingId(item.automationId); setEditingSpec(specOf(item)); setForm(formFrom(specOf(item))); setRebindPrimary(false); setRebindAlternate(false); setWorkflowBindingEdits({}); setShowForm(true); }}>Edit</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: `Delete “${item.name}”?`, message: "The automation is removed permanently. Execution history remains in the audit database.", confirmLabel: "Delete Automation", tone: "danger" })) { if (editingId === item.automationId) closeEditor(); await mutate(() => api.deleteAutomation(item.automationId)); } })()}>Delete</button></div>
+            <div className="automation-card-actions"><button className="btn ghost sm" disabled={busy} onClick={() => void mutate(() => api.updateAutomation(item.automationId, { ...specOf(item), enabled: !item.enabled }))}>{item.enabled ? "Pause" : "Enable"}</button><button className="btn ghost sm" onClick={() => {
+              const spec = specOf(item);
+              const loaded = formFrom(spec);
+              let refreshedPrimary = false;
+              let refreshedAlternate = false;
+              if (spec.action.kind === "create_session") {
+                const current = spec.action.installationBindings?.agent;
+                if (current) loaded.agentId = resolvedInstallationAgentId(
+                  runners.get(spec.action.request.runnerId), current) ?? loaded.agentId;
+                refreshedPrimary = loaded.agentId !== spec.action.request.agentId;
+                if (spec.runnerPolicy.kind === "alternate") {
+                  const alternate = spec.runnerPolicy.targets[0];
+                  const saved = alternate?.installationBindings?.agent;
+                  if (saved) loaded.fallbackAgentId = resolvedInstallationAgentId(
+                    runners.get(alternate.runnerId), saved) ?? loaded.fallbackAgentId;
+                  refreshedAlternate = Boolean(alternate && loaded.fallbackAgentId !== alternate.agentId);
+                }
+              }
+              setEditingId(item.automationId);
+              setEditingSpec(spec);
+              setForm(loaded);
+              setRebindPrimary(refreshedPrimary);
+              setRebindAlternate(refreshedAlternate);
+              setWorkflowBindingEdits({});
+              setShowForm(true);
+            }}>Edit</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: `Delete “${item.name}”?`, message: "The automation is removed permanently. Execution history remains in the audit database.", confirmLabel: "Delete Automation", tone: "danger" })) { if (editingId === item.automationId) closeEditor(); await mutate(() => api.deleteAutomation(item.automationId)); } })()}>Delete</button></div>
             {executions.length > 0 && <details className="automation-history"><summary>Execution History ({executions.length})</summary><div className="automation-history-list">{executions.map((execution) => <div className="automation-execution" key={execution.executionId}><div><strong>{titleCaseLabel(execution.status)}</strong><span>{formatTime(execution.scheduledFor)}</span></div><code>{execution.idempotencyKey}</code>{execution.triggerDelivery && <small>Delivered Fields: {deliverySummary(execution.triggerDelivery)}{execution.triggerDelivery.promptSha256 ? ` · Prompt Digest ${execution.triggerDelivery.promptSha256.slice(0, 12)}…` : ""}</small>}{execution.commands?.length ? <ul className="automation-command-list" aria-label="Durable Runner Command Receipts">{execution.commands.map((command) => <li key={command.commandId}><span>{titleCaseLabel(command.kind.replace("_", " "))} · {titleCaseLabel(command.state)}</span><small>{command.attemptCount} delivery attempt{command.attemptCount === 1 ? "" : "s"}</small>{command.lastError && <em>{command.lastError}</em>}</li>)}</ul> : execution.deliveryMode === "legacy_at_most_once" ? <small className="automation-legacy-delivery">Legacy At-Most-Once Delivery</small> : null}{execution.error && <p>{execution.error}</p>}{execution.sessionId && <button className="link-button" type="button" onClick={() => navigate({ name: "session", id: execution.sessionId! })}>Open Session</button>}</div>)}</div></details>}
           </AutomationCard>;
         })}
