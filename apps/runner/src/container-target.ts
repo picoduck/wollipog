@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import type { AgentContext, ExecutionTargetDefinition, ExecutionTargetRef, TargetHarnessInstallation } from "@wollipog/protocol";
@@ -130,7 +130,7 @@ function setupCheckRuntimeEnvironment(home: string, runtime: RunnerContainerTarg
     throw new Error("remote Podman connection is unsupported for setup checks");
   }
   const socket = runtime === "docker" ? process.env.DOCKER_HOST : process.env.CONTAINER_HOST;
-  if (socket && (runtime !== "docker" || !process.env.DOCKER_CONTEXT)) {
+  if (socket) {
     if (runtime === "docker") env.DOCKER_HOST = localDockerEndpoint(socket);
     else {
       if (!socket.startsWith("unix://")) throw new Error("nonlocal container endpoint is unsupported for setup checks");
@@ -192,7 +192,14 @@ export class ContainerTargetRegistry {
 
   private async setupEnvironment(template: RunnerContainerTarget, runtime: ResolvedBinary, home: string): Promise<Record<string, string>> {
     const env = setupCheckRuntimeEnvironment(home, template.runtime);
-    if (template.runtime !== "docker" || (process.env.DOCKER_HOST && !process.env.DOCKER_CONTEXT)) return env;
+    if (template.runtime === "podman") {
+      const config = join(home, "containers.conf");
+      // CONTAINERS_CONF bypasses system and user containers.conf, either of which can set
+      // implicit container environment values. Storage-only configuration remains separate.
+      await writeFile(config, "", { flag: "wx", mode: 0o600 });
+      env.CONTAINERS_CONF = config;
+    }
+    if (template.runtime !== "docker" || process.env.DOCKER_HOST) return env;
     // A saved Docker context can select a local Unix socket even without DOCKER_CONTEXT. Ask
     // Docker for only that endpoint using a bounded client environment and the operator's
     // context directory; never expose its credential files to the actual setup check.

@@ -156,7 +156,10 @@ test("rootless Podman checks retain local storage and runtime paths without host
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
-        if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
+        if (args[0] === "run" && args.includes("git")) {
+          checkEnv = opts.env;
+          assert.equal(existsSync(opts.env?.CONTAINERS_CONF ?? ""), true);
+        }
         return { code: 0, stdout: "", stderr: "" };
       },
     });
@@ -165,6 +168,7 @@ test("rootless Podman checks retain local storage and runtime paths without host
     assert.equal(checkEnv?.XDG_DATA_HOME, "/tmp/wollipog-fixture-podman-data");
     assert.equal(checkEnv?.XDG_RUNTIME_DIR, "/run/user/1000");
     assert.equal(checkEnv?.CONTAINER_HOST, "unix:///run/user/1000/podman/podman.sock");
+    assert.equal(existsSync(checkEnv?.CONTAINERS_CONF ?? ""), false, "private config is removed after the check");
     assert.notEqual(checkEnv?.HOME, checkEnv?.XDG_CONFIG_HOME);
     assert.equal(checkEnv?.DOCKER_CONFIG, checkEnv?.XDG_CONFIG_HOME);
     assert.equal(Object.keys(checkEnv ?? {}).some((name) => /TOKEN|SECRET|CREDENTIAL/iu.test(name)), false);
@@ -252,6 +256,30 @@ test("a remote saved Docker context fails closed without running a setup check",
   }
 });
 
+test("DOCKER_HOST wins over a stale or remote Docker context", async () => {
+  for (const [host, available] of [
+    ["unix:///run/user/1000/docker.sock", true],
+    ["tcp://example.invalid:2376", false],
+  ] as const) {
+    process.env.DOCKER_HOST = host;
+    process.env.DOCKER_CONTEXT = available ? "missing-context" : "local-context";
+    let contextInspected = false;
+    let checkEnv: Record<string, string> | undefined;
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "context") contextInspected = true;
+        if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(contextInspected, false);
+    assert.equal(registry.definitions()[0]!.available, available);
+    assert.equal(checkEnv?.DOCKER_HOST, available ? host : undefined);
+  }
+});
+
 test("Podman keeps a configured local storage file without loading general container config", {
   skip: process.platform !== "linux",
 }, async () => {
@@ -272,6 +300,7 @@ test("Podman keeps a configured local storage file without loading general conta
     await registry.initialize();
     assert.equal(registry.definitions()[0]!.available, true);
     assert.equal(checkEnv?.CONTAINERS_STORAGE_CONF, storage);
+    assert.equal(checkEnv?.CONTAINERS_CONF?.startsWith(checkEnv?.XDG_CONFIG_HOME ?? ""), true);
     assert.notEqual(checkEnv?.XDG_CONFIG_HOME, config);
     assert.notEqual(checkEnv?.XDG_CONFIG_HOME, checkEnv?.HOME);
   } finally {
