@@ -4,6 +4,7 @@ import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import {
   adoptAction,
   agentInstallHints,
+  codexUpgradeGuidance,
   externalSessionKey,
   formatAdmissionPolicy,
   formatExecutionIsolation,
@@ -172,6 +173,16 @@ test("agentInstallHints gives a native Claude installer and neutral Codex guidan
     assert.match(hints[0]!.command!, /^curl -fsSL https:\/\/claude\.ai\/install\.sh/);
     assert.equal(hints[1]!.command, undefined);
   }
+});
+
+test("Codex remediation follows installation evidence without assuming npm or a selected copy", () => {
+  assert.match(codexUpgradeGuidance({}), /Install Codex using a supported method/);
+  assert.match(codexUpgradeGuidance({ installation: { id: "other", path: "/other/codex", via: "path" } }), /this installation in Machine settings/);
+  const guidance = codexUpgradeGuidance({ update: {
+    status: "managed_externally", checkedAt: 1, channel: "stable", evidenceSource: "help",
+    managedExternally: true, guidance: "Use this exact installation's manager.",
+  } });
+  assert.equal(guidance, "Use this exact installation's manager.");
 });
 
 test("sshTargetHost keeps unbracketed IPv6 literals whole", () => {

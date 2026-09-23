@@ -2,6 +2,7 @@
 
 import type { AgentDefinition, RunnerView } from "@wollipog/protocol";
 import { agentDriverLabel } from "./agent-presentation.js";
+import { codexUpgradeGuidance } from "./runners.js";
 
 export interface RunnerConfigOptions {
   runnerId: string;
@@ -86,10 +87,10 @@ function agentProblem(agent: AgentDefinition): { detail: string; command?: strin
       return { detail: `${label} is installed but not signed in.`, command: "codex login" };
     }
     if (agent.codexAppServer?.status === "unsupported") {
-      return { detail: `${label} needs a Codex version with interactive support. ${agent.update?.guidance ?? "Inspect its selected installation and use its original manager, then Rediscover."}` };
+      return { detail: `${label} needs a Codex version with interactive support. ${codexUpgradeGuidance(agent)}` };
     }
     if (agent.codexAppServer?.status === "unavailable") {
-      return { detail: `${label} is not installed. Choose a supported installation method, then Rediscover.` };
+      return { detail: `${label} is not installed. ${codexUpgradeGuidance(agent)}` };
     }
   } else if (agent.driver === "codex") {
     if (agent.authStatus === "unauthenticated") {
@@ -112,7 +113,7 @@ function agentProblem(agent: AgentDefinition): { detail: string; command?: strin
     return agent.driver === "claude-code"
       ? { detail: `${label} is not installed or could not be launched.`, command: "npm install -g @anthropic-ai/claude-code" }
       : agent.driver?.startsWith("codex")
-        ? { detail: `${label} is not installed or could not be launched. ${agent.update?.guidance ?? "Inspect its selected installation and use its original manager, then Rediscover."}` }
+        ? { detail: `${label} is not installed or could not be launched. ${codexUpgradeGuidance(agent)}` }
         : { detail: `${label} is unavailable. Check its launch command on the runner.` };
   }
   return null;

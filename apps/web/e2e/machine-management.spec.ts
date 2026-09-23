@@ -55,6 +55,8 @@ test("Machine settings show competing installations and switch the saved target"
   await expect(system).toContainText("Update Available");
   await expect(system).toContainText("compatibility with this Machine has not been verified");
   await expect(local).toContainText("`codex update`");
+  await expect(local.locator("p")).not.toContainText("selected Codex installation");
+  await expect(local.locator("p")).toContainText("exact Launch Command");
   await page.screenshot({ path: "test-results/harness-installations-before-desktop.png", fullPage: true });
   await local.getByRole("button", { name: "Use This Installation" }).click();
   await expect(local.getByRole("button", { name: "Selected" })).toBeVisible();

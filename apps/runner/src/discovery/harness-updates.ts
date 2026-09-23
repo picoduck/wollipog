@@ -30,14 +30,14 @@ export async function codexOffersSelfUpdate(
   const args = context.kind === "wsl"
     ? ["-d", context.distro, "--exec", binary.launch.command, ...binary.launch.args, "--help"]
     : [...binary.launch.args, "--help"];
-  const result = await execute(command, args, { timeoutMs: 3000 });
+  const result = await execute(command, args, { timeoutMs: context.kind === "wsl" ? 8000 : 3000 });
   return result.code === 0 && !result.timedOut &&
     /^\s*update\s+Update Codex to the latest version\b/im.test(`${result.stdout}\n${result.stderr}`);
 }
 
 function originalManagerGuidance(packageName: string | null, codexSelfUpdate: boolean): string {
-  if (codexSelfUpdate) return "This selected Codex installation advertises `codex update`. Run the selected executable's built-in update command in its execution context. " + REDISCOVER;
-  if (packageName) return `This installation belongs to ${packageName} in an npm package tree. Use its original npm or Node version manager in the same execution context. ${REDISCOVER}`;
+  if (codexSelfUpdate) return "This installation advertises its built-in `codex update` command. Invoke `update` through this installation's exact Launch Command in Agent Details, in the Machine's execution context. A bare `codex` on PATH may be another installation. " + REDISCOVER;
+  if (packageName) return `This launch target is inside the ${packageName} package tree. Use the package or version manager that installed this exact copy in the same execution context. ${REDISCOVER}`;
   return "Use this installation's original package or version manager. If its manager is unknown, inspect the selected installation in Machine settings before upgrading. " + REDISCOVER;
 }
 
@@ -178,7 +178,7 @@ export async function checkHarnessUpdate(
     latestKnownCompatibleVersion: installedCompatible ? installedVersion : undefined,
     checkedAt,
     channel: installedVersion?.includes("-") ? "preview" : installedVersion ? "stable" : "unknown",
-    evidenceSource: `Installed npm package ${packageName}; exact npm runtime unavailable`,
+    evidenceSource: `Package tree for ${packageName}; exact npm runtime unavailable`,
     managedExternally: true,
     guidance: managerGuidance,
   };

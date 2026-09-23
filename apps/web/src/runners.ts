@@ -5,6 +5,7 @@
 import {
   PROTOCOL_VERSION,
   type BoxView,
+  type AgentDefinition,
   type ExternalSessionDescriptor,
   type OS,
   type RunnerView,
@@ -157,6 +158,14 @@ export interface InstallHint {
   name: string;
   guidance: string;
   command?: string;
+}
+
+/** Shared neutral fallback for Codex remediation when discovery has no manager guidance. */
+export function codexUpgradeGuidance(agent: Pick<AgentDefinition, "installation" | "update">): string {
+  if (agent.update?.guidance) return agent.update.guidance;
+  return agent.installation
+    ? "Inspect this installation in Machine settings and use the manager that installed this exact copy, then Rediscover."
+    : "Install Codex using a supported method for this Machine, then Rediscover.";
 }
 
 /** Installation hints are neutral where no selected installation proves manager ownership. */

@@ -7,8 +7,10 @@ Machine's npm proxy/registry configuration. A published version is not automatic
 with that Machine. A failed check leaves the installed version visible without exposing proxy or
 registry diagnostics; an offline Machine shows its last reported status. The selected Codex executable
 is probed through `--help` for its built-in `codex update` command. When it advertises that command, guidance prefers the
-selected executable's own updater; otherwise it names the verified npm installation or directs the
-operator to the original manager. Generic npm upgrade commands are not offered for existing installs.
+selected executable's own updater through its exact launch command; otherwise it names the package
+tree and directs the operator to the manager that installed that copy. A package-tree path alone does
+not prove whether npm, Bun, Yarn, Homebrew, or another manager owns it. Generic npm upgrade commands
+are not offered for existing installs.
 Set `WOLLIPOG_HARNESS_UPDATE_CHECKS=off` in the runner environment when organization policy disallows
 registry checks. Set `WOLLIPOG_HARNESS_UPDATE_PINNED=claude,codex` (or another comma-separated subset
 of `claude`, `codex`, and `pi`) to mark installed versions as pinned and suppress release checks and

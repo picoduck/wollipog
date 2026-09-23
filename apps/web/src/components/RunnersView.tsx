@@ -16,6 +16,7 @@ import { useStore } from "../store.js";
 import { osLabel, relativeTime, sshErrorHint, titleCaseLabel } from "../format.js";
 import {
   agentInstallHints,
+  codexUpgradeGuidance,
   formatAdmissionPolicy,
   formatExecutionIsolation,
   machineSettingsMutationError,
@@ -319,7 +320,7 @@ function AgentRow({
       )}
       {(a.codexAppServer?.status === "unsupported" || a.codexAppServer?.status === "unavailable") &&
         driver.startsWith("codex") && a.authStatus !== "unauthenticated" && (
-          <p className="empty-sub">{a.update?.guidance ?? "Inspect the selected installation and use its original manager, then Rediscover."}</p>
+          <p className="empty-sub">{codexUpgradeGuidance(a)}</p>
         )}
       {a.registry && a.registry.installStatus !== "installed" && (
         <div>

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { classifyNpmHarnessUpdate, codexOffersSelfUpdate, harnessVersionPinned, npmPackageForInstallation } from "./harness-updates.js";
+import { checkHarnessUpdate, classifyNpmHarnessUpdate, codexOffersSelfUpdate, harnessVersionPinned, npmPackageForInstallation } from "./harness-updates.js";
 
 const result = (stdout: string, code = 0) => ({ code, stdout, stderr: "" });
 
@@ -15,6 +15,7 @@ test("npm update comparison distinguishes newer, current, preview, and failed ch
   assert.match(classifyNpmHarnessUpdate("0.199.0", result("", 1), "@openai/codex", 1).guidance, /offline, behind a proxy, or rate limited/);
   assert.match(classifyNpmHarnessUpdate("0.211.0-beta.0", tags, "@openai/codex", 1).guidance, /preview channel/);
   assert.match(classifyNpmHarnessUpdate("0.199.0", tags, "@openai/codex", 1).guidance, /compatibility.*not been verified/);
+  assert.doesNotMatch(classifyNpmHarnessUpdate("0.199.0", tags, "@openai/codex", 1).guidance, /original npm|belongs to/i);
 });
 
 test("an executable is npm-owned only when its exact launch resolves inside the matching package", () => {
@@ -44,15 +45,15 @@ test("an executable is npm-owned only when its exact launch resolves inside the 
 test("built-in update support is probed on the exact discovered launch", async () => {
   const binary = { path: "/first/codex", via: "path" as const,
     launch: { command: "/first/node", args: ["/first/codex.js"] } };
-  const observed: Array<{ command: string; args: string[] }> = [];
-  const execute = async (command: string, args: string[]) => {
-    observed.push({ command, args });
+  const observed: Array<{ command: string; args: string[]; timeoutMs: number | undefined }> = [];
+  const execute = async (command: string, args: string[], options: { timeoutMs?: number } = {}) => {
+    observed.push({ command, args, timeoutMs: options.timeoutMs });
     return result("Commands:\n  update  Update Codex to the latest version\n");
   };
   assert.equal(await codexOffersSelfUpdate(binary, { kind: "native" }, execute), true);
-  assert.deepEqual(observed.pop(), { command: "/first/node", args: ["/first/codex.js", "--help"] });
+  assert.deepEqual(observed.pop(), { command: "/first/node", args: ["/first/codex.js", "--help"], timeoutMs: 3000 });
   assert.equal(await codexOffersSelfUpdate(binary, { kind: "wsl", distro: "Ubuntu" }, execute), true);
-  assert.deepEqual(observed.pop(), { command: "wsl.exe", args: ["-d", "Ubuntu", "--exec", "/first/node", "/first/codex.js", "--help"] });
+  assert.deepEqual(observed.pop(), { command: "wsl.exe", args: ["-d", "Ubuntu", "--exec", "/first/node", "/first/codex.js", "--help"], timeoutMs: 8000 });
   assert.equal(await codexOffersSelfUpdate(binary, { kind: "native" }, async () => result("unknown command")), false);
 });
 
@@ -61,4 +62,28 @@ test("Machine pins identify only the named harness", () => {
   assert.equal(harnessVersionPinned("claude", "claude,codex"), true);
   assert.equal(harnessVersionPinned("pi", "claude,codex"), false);
   assert.equal(harnessVersionPinned("codex", "codex-other"), false);
+});
+
+test("pinned and checks-off policies suppress executable and registry probes", async () => {
+  const originalPins = process.env.WOLLIPOG_HARNESS_UPDATE_PINNED;
+  const originalChecks = process.env.WOLLIPOG_HARNESS_UPDATE_CHECKS;
+  const binary = { path: "/missing/codex", via: "path" as const,
+    launch: { command: "/missing/codex", args: [] } };
+  try {
+    process.env.WOLLIPOG_HARNESS_UPDATE_PINNED = "codex";
+    delete process.env.WOLLIPOG_HARNESS_UPDATE_CHECKS;
+    const pinned = await checkHarnessUpdate("codex", binary, { kind: "native" }, "0.155.1", true);
+    assert.equal(pinned.evidenceSource, "Machine pinned-version policy");
+    assert.equal(pinned.status, "managed_externally");
+    delete process.env.WOLLIPOG_HARNESS_UPDATE_PINNED;
+    process.env.WOLLIPOG_HARNESS_UPDATE_CHECKS = "off";
+    const disabled = await checkHarnessUpdate("codex", binary, { kind: "native" }, "0.155.1", true);
+    assert.equal(disabled.evidenceSource, "Machine update-check policy");
+    assert.equal(disabled.status, "managed_externally");
+  } finally {
+    if (originalPins === undefined) delete process.env.WOLLIPOG_HARNESS_UPDATE_PINNED;
+    else process.env.WOLLIPOG_HARNESS_UPDATE_PINNED = originalPins;
+    if (originalChecks === undefined) delete process.env.WOLLIPOG_HARNESS_UPDATE_CHECKS;
+    else process.env.WOLLIPOG_HARNESS_UPDATE_CHECKS = originalChecks;
+  }
 });

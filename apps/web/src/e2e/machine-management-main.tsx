@@ -392,7 +392,7 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
             latestKnownCompatibleVersion: "0.199.0", latestPublishedVersion: "0.210.0",
             checkedAt: Date.UTC(2026, 8, 22), channel: "stable",
             evidenceSource: "npm dist-tags for @openai/codex", managedExternally: true,
-            guidance: "A newer release is published, but compatibility with this Machine has not been verified. This installation belongs to @openai/codex in an npm package tree. Use its original npm or Node version manager in the same execution context. Stop sessions using this executable before upgrading. Restart and Rediscover before treating the new version as ready." },
+            guidance: "A newer release is published, but compatibility with this Machine has not been verified. This launch target is inside the @openai/codex package tree. Use the package or version manager that installed this exact copy in the same execution context. Stop sessions using this executable before upgrading. Restart and Rediscover before treating the new version as ready." },
         },
         {
           id: "codex-installation-local", name: "Codex",
@@ -404,7 +404,7 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
             latestKnownCompatibleVersion: "0.210.0",
             checkedAt: Date.UTC(2026, 8, 22), channel: "stable",
             evidenceSource: "Executable installation provenance", managedExternally: true,
-            guidance: "This selected Codex installation advertises `codex update`. Run the selected executable's built-in update command in its execution context. Stop sessions using this executable before upgrading. Restart and Rediscover before treating the new version as ready." },
+            guidance: "This installation advertises its built-in `codex update` command. Invoke `update` through this installation's exact Launch Command in Agent Details, in the Machine's execution context. A bare `codex` on PATH may be another installation. Stop sessions using this executable before upgrading. Restart and Rediscover before treating the new version as ready." },
         },
       ];
       runner.harnessSelections = [{ family: "codex", context: { kind: "native" },
