@@ -10823,6 +10823,20 @@ export class SessionManager {
       backgroundJobIds,
       recoveredQuestion,
     } = queued;
+    const rearmUnsubmittedRecovery = (delay = 0) => {
+      if (!syntheticRecovery || this.active.get(sessionId) !== entry) return;
+      // No provider acceptance or continuationSubmittedAt exists yet. A selection or failed
+      // proof may consume this in-memory synthetic prompt; wake its durable scheduler again.
+      if (backgroundJobIds?.length) {
+        this.cancelBackgroundContinuationTimer(sessionId);
+        this.scheduleBackgroundContinuation(sessionId, delay);
+      } else if (this.store.readMeta(sessionId)?.orphanedWork) {
+        const timer = this.orphanRecoveryTimers.get(sessionId);
+        if (timer) clearTimeout(timer);
+        this.orphanRecoveryTimers.delete(sessionId);
+        this.scheduleOrphanRecovery(sessionId, delay);
+      }
+    };
     if (recoveredQuestion) {
       const pending = this.store.readMeta(sessionId)?.pendingApproval;
       const invalid = pending?.kind === "question"
@@ -10877,20 +10891,23 @@ export class SessionManager {
         return;
       }
       const failure = await this.persistedWorktreeFailure(
-        selected, path, selected.worktreeBranch,
+        selected, path, entry.worktree.branch,
       );
       if (this.active.get(sessionId) !== entry) {
         durable?.failed("session stopped before provider submission", "COMMAND_CANCELLED");
         return;
       }
       if (!entry.worktree || !sameWorktreePath(entry.context, entry.worktree.path, path)) {
+        rearmUnsubmittedRecovery();
         durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
         return;
       }
       if (failure) {
         if (this.recordWorktreeRecovery(selected, path, failure, "before a live turn")) {
+          rearmUnsubmittedRecovery(ORPHAN_RECOVERY_RETRY_MS);
           durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
         } else {
+          rearmUnsubmittedRecovery();
           durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
         }
         return;
@@ -10998,6 +11015,7 @@ export class SessionManager {
     if (preparedCheckpoint && (!entry.worktree ||
         !sameWorktreePath(entry.context, entry.worktree.path, preparedCheckpoint.path))) {
       await discardPreparedCheckpoint();
+      rearmUnsubmittedRecovery();
       durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
       return;
     }
@@ -11016,6 +11034,7 @@ export class SessionManager {
       }
       if (!entry.worktree || !sameWorktreePath(entry.context, entry.worktree.path, path)) {
         await discardPreparedCheckpoint();
+        rearmUnsubmittedRecovery();
         durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
         return;
       }
@@ -11023,8 +11042,10 @@ export class SessionManager {
           !entry.historyIntegrityFailure) {
         await discardPreparedCheckpoint();
         if (selected && this.recordWorktreeRecovery(selected, path, failure, "before provider submission")) {
+          rearmUnsubmittedRecovery(ORPHAN_RECOVERY_RETRY_MS);
           durable?.failed(`${failure}; this message was not sent`, "WORKTREE_RECOVERY_REQUIRED");
         } else {
+          rearmUnsubmittedRecovery();
           durable?.failed("selected worktree changed before provider submission", "COMMAND_CANCELLED");
         }
         return;

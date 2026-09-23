@@ -5764,14 +5764,17 @@ test("an authentication hold defers worktree rebind and preserves its FIFO until
   }
 });
 
-for (const startInWorktree of [false, true]) test(
-  `pending Claude background work defers rebind from ${startInWorktree ? "a worktree" : "the repository"} until its automatic continuation is recorded`,
+for (const [startInWorktree, switchDuringContinuation] of [
+  [false, false], [true, false], [true, true],
+] as const) test(
+  `pending Claude background work defers rebind from ${startInWorktree ? "a worktree" : "the repository"}${switchDuringContinuation ? " during continuation proof" : ""} until its automatic continuation is recorded`,
   { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-background-worktree-rebind-"));
   const repo = join(root, "repo");
   const dataDir = join(root, "data");
   let manager: SessionManager | undefined;
   let releaseFirst = () => {};
+  let releaseProof = () => {};
   try {
     execFileSync("git", ["init", repo]);
     execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
@@ -5839,16 +5842,19 @@ for (const startInWorktree of [false, true]) test(
     const originalCwd = store.readMeta(spec.sessionId)?.worktreePath ?? repo;
     manager.prompt(spec.sessionId, "first");
     await firstStarted;
-    const requested = await manager.requestWorktree(spec.sessionId, {
-      baseRef: "HEAD", branch: "fix/background-rebind",
-    });
-    manager.prompt(spec.sessionId, "second");
+    let requested: Awaited<ReturnType<SessionManager["requestWorktree"]>>;
+    if (!switchDuringContinuation) {
+      requested = await manager.requestWorktree(spec.sessionId, {
+        baseRef: "HEAD", branch: "fix/background-rebind",
+      });
+      manager.prompt(spec.sessionId, "second");
+    }
     releaseFirst();
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
     assert.deepEqual(launchedCwds, [originalCwd], "the task-owning provider must stay alive after its turn ends");
     assert.equal(store.readMeta(spec.sessionId)?.backgroundWorkState, "running");
 
-    callbacksByLaunch[0]!.onBackgroundWork?.({
+    const completeBackgroundWork = () => callbacksByLaunch[0]!.onBackgroundWork?.({
       state: null,
       pendingTaskIds: [],
       terminalJobs: [{
@@ -5860,8 +5866,36 @@ for (const startInWorktree of [false, true]) test(
         continuationRequired: true,
       }],
     });
-    await waitForCondition(() => prompts.length === 3, "the background continuation and held prompt were not submitted", 3_000);
-    await waitForCondition(() => launchedCwds.length === 2, "rebind did not resume after background delivery", 3_000);
+    if (switchDuringContinuation) {
+      let proofStarted!: () => void;
+      const started = new Promise<void>((resolve) => { proofStarted = resolve; });
+      const gate = new Promise<void>((resolve) => { releaseProof = resolve; });
+      const internals = manager as unknown as {
+        persistedWorktreeFailure: (meta: SessionMeta, path: string, branch?: string) => Promise<string | null>;
+      };
+      const realProof = internals.persistedWorktreeFailure.bind(manager);
+      let held = false;
+      internals.persistedWorktreeFailure = async (meta, path, branch) => {
+        if (!held) {
+          held = true;
+          proofStarted();
+          await gate;
+        }
+        return realProof(meta, path, branch);
+      };
+      completeBackgroundWork();
+      await started;
+      requested = await manager.requestWorktree(spec.sessionId, {
+        baseRef: "HEAD", branch: "fix/background-rebind",
+      });
+      manager.prompt(spec.sessionId, "second");
+      releaseProof();
+    } else {
+      completeBackgroundWork();
+    }
+    const handoffAttempts = switchDuringContinuation ? 500 : 3_000;
+    await waitForCondition(() => prompts.length === 3, "the background continuation and held prompt were not submitted", handoffAttempts);
+    await waitForCondition(() => launchedCwds.length === 2, "rebind did not resume after background delivery", handoffAttempts);
     assert.equal(prompts.length, 3);
     assert.equal(prompts[1]!.cwd, originalCwd, "the task notification is consumed by its owning provider");
     assert.match(prompts[1]!.text, /Managed background jobs reached their terminal barrier/);
@@ -5874,6 +5908,7 @@ for (const startInWorktree of [false, true]) test(
     await manager.delete(spec.sessionId);
   } finally {
     releaseFirst();
+    releaseProof();
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
