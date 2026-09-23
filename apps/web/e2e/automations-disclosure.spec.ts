@@ -137,6 +137,32 @@ for (const { label, viewport } of [
   }
 }
 
+for (const { label, viewport } of [
+  { label: "desktop", viewport: { width: 1280, height: 900 } },
+  { label: "mobile", viewport: { width: 375, height: 812 } },
+]) {
+  for (const theme of ["dark", "light"] as const) {
+    test.describe(`${label} ${theme} workflow Machine switch`, () => {
+      test.use({ viewport });
+      test("shows the new Machine's configured role instead of the old installation", async ({ page }) => {
+        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch`);
+        await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
+        await page.getByRole("button", { name: "Edit", exact: true }).click();
+        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-machine-before-${label}-${theme}.png`), fullPage: true,
+        });
+        await page.getByRole("combobox", { name: "Machine", exact: true }).selectOption("runner-2");
+        await expect(page.getByRole("button", { name: "Agent-1 Agent: Configured Agent" })).toBeVisible();
+        await expect(page.getByText(/This saved role installation is unavailable or unbound/)).toHaveCount(0);
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-machine-after-${label}-${theme}.png`), fullPage: true,
+        });
+      });
+    });
+  }
+}
+
 test("configured trigger controls and content-free delivery provenance are visible", async ({ page }) => {
   await open(page);
   await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();

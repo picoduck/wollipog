@@ -26,6 +26,7 @@ test("titleCaseLabel formats trusted compact UI labels while preserving acronyms
   assert.equal(titleCaseLabel("API and CLI status"), "API and CLI Status");
   assert.equal(titleCaseLabel("out-of-band review"), "Out-of-Band Review");
   assert.equal(titleCaseLabel("chatops and github status"), "Chat-Ops and GitHub Status");
+  assert.equal(titleCaseLabel("agent-1 Agent"), "Agent-1 Agent");
 });
 
 test("formatTokens: small counts are exact", () => {

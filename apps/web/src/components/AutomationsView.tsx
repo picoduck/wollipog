@@ -593,6 +593,7 @@ export function AutomationsView() {
                   const runner = runners.get(event.target.value);
                   setRebindPrimary(false);
                   setPrimaryAgentTouched(true);
+                  setWorkflowBindingEdits({});
                   setForm((current) => ({ ...withAgent(current, defaultAgentId(runner?.agents)),
                     runnerId: event.target.value, workspaceId: runner?.workspaces[0]?.id ?? "" }));
                 }}>{[...runners.values()].map((runner) => <option
@@ -620,7 +621,8 @@ export function AutomationsView() {
                   </div>}
                 {form.actionKind === "workflow_run" && workflowRoles.map((role) => {
                   const stored = editingSpec?.action.kind === "workflow_run" &&
-                    editingSpec.action.request.workflowId === form.workflowId ? editingSpec.action : null;
+                    editingSpec.action.request.workflowId === form.workflowId &&
+                    editingSpec.action.request.runnerId === form.runnerId ? editingSpec.action : null;
                   const reference = stored?.installationBindings?.[`role:${role}`];
                   const boundId = workflowBindingEdits[`role:${role}`] ??
                     (reference ? resolvedInstallationAgentId(selectedRunner, reference) : undefined) ??
@@ -648,6 +650,8 @@ export function AutomationsView() {
                   </div>;
                 })}
                 {form.actionKind === "workflow_run" && editingSpec?.action.kind === "workflow_run" &&
+                  editingSpec.action.request.runnerId === form.runnerId &&
+                  editingSpec.action.request.workflowId === form.workflowId &&
                   editingSpec.action.request.orchestratorAgentId && (() => {
                     const stored = editingSpec.action as Extract<AutomationAction, { kind: "workflow_run" }>;
                     const reference = stored.installationBindings?.orchestrator;
@@ -721,6 +725,7 @@ export function AutomationsView() {
                 const runner = runners.get(event.target.value);
                 setRebindAlternate(false);
                 setAlternateAgentTouched(true);
+                setAlternateWorkflowBindingEdits({});
                 setForm((current) => ({ ...current, fallbackRunnerId: event.target.value,
                   fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "", fallbackAgentId: defaultAgentId(runner?.agents) }));
               }}><option value="">Select…</option>{[...runners.values()]
@@ -730,7 +735,8 @@ export function AutomationsView() {
               {form.actionKind === "workflow_run" && workflowRoles.map((role) => {
                 const oldTarget = editingSpec?.runnerPolicy.kind === "alternate" &&
                   editingSpec.action.kind === "workflow_run" &&
-                  editingSpec.action.request.workflowId === form.workflowId
+                  editingSpec.action.request.workflowId === form.workflowId &&
+                  editingSpec.runnerPolicy.targets[0]?.runnerId === form.fallbackRunnerId
                   ? editingSpec.runnerPolicy.targets[0] : undefined;
                 const reference = oldTarget?.installationBindings?.[`role:${role}`];
                 const boundId = alternateWorkflowBindingEdits[`role:${role}`] ??
@@ -764,14 +770,15 @@ export function AutomationsView() {
                 (editingSpec.runnerPolicy.kind === "alternate" &&
                   editingSpec.runnerPolicy.targets[0]?.orchestratorAgentId ||
                   editingSpec.action.request.orchestratorAgentId) && (() => {
-                  const oldTarget = editingSpec.runnerPolicy.kind === "alternate"
+                  const oldTarget = editingSpec.runnerPolicy.kind === "alternate" &&
+                    editingSpec.action.request.workflowId === form.workflowId &&
+                    editingSpec.runnerPolicy.targets[0]?.runnerId === form.fallbackRunnerId
                     ? editingSpec.runnerPolicy.targets[0] : undefined;
-                  const reference = oldTarget?.installationBindings?.orchestrator ??
-                    editingSpec.action.installationBindings?.orchestrator;
+                  const reference = oldTarget?.installationBindings?.orchestrator;
                   const boundId = alternateWorkflowBindingEdits.orchestrator ??
                     (reference ? resolvedInstallationAgentId(selectedFallback, reference) : undefined) ??
                     oldTarget?.orchestratorAgentId ?? editingSpec.action.request.orchestratorAgentId!;
-                  const unavailable = !alternateWorkflowBindingEdits.orchestrator && (reference
+                  const unavailable = Boolean(oldTarget) && !alternateWorkflowBindingEdits.orchestrator && (reference
                     ? !bindingAvailable(selectedFallback, reference)
                     : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
                   return <div className="automation-field">
