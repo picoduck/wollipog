@@ -1913,6 +1913,8 @@ test("Machine installation selection survives PATH reorder and fails closed when
   db.registerRunner(meta({ agents: [system, local] }), 500, PROTOCOL_VERSION);
   assert.equal(db.selectHarnessInstallation("runner-1", "codex", "wrong"), null);
   assert.equal(db.selectHarnessInstallation("runner-1", "codex", "system")?.installationId, "system");
+  const saved = db.savedHarnessInstallation("runner-1", "codex");
+  assert.deepEqual(saved, { driver: "codex", context: { kind: "native" }, installationId: "system" });
   assert.equal(db.getAgentLaunch("runner-1", "codex")?.command, "/usr/bin/codex");
   assert.equal(db.getAgentLaunch("runner-1", "codex-installation-local"), null);
 
@@ -1923,15 +1925,18 @@ test("Machine installation selection survives PATH reorder and fails closed when
   db.updateRunnerAgents("runner-1", reordered, 600);
   assert.equal(db.getAgentLaunch("runner-1", "codex"), null);
   assert.equal(db.getAgentLaunch("runner-1", "codex-installation-system")?.command, "/usr/bin/codex");
+  assert.equal(db.resolveSavedHarnessInstallation("runner-1", saved!), "codex-installation-system");
   assert.equal(db.getRunner("runner-1")?.harnessSelections?.[0]?.agentId, "codex-installation-system");
 
   db.updateRunnerAgents("runner-1", [reordered[0]!], 700);
   assert.equal(db.getRunner("runner-1")?.harnessSelections?.[0]?.agentId, null);
   assert.equal(db.getRunner("runner-1")?.harnessSelections?.[0]?.path, "/usr/bin/codex");
   assert.equal(db.getAgentLaunch("runner-1", "codex"), null);
+  assert.equal(db.resolveSavedHarnessInstallation("runner-1", saved!), null);
   db.registerRunner(meta({ agents: reordered }), 800, RUNNER_CAPABILITY_MIN_PROTOCOL.harnessInstallations - 1);
   assert.equal(db.getAgentLaunch("runner-1", "codex-installation-system"), null,
     "an older runner cannot claim to enforce the saved choice");
+  assert.equal(db.resolveSavedHarnessInstallation("runner-1", saved!), null);
 });
 
 test("target harness selection is scoped to its exact target and survives unavailable rediscovery", () => {

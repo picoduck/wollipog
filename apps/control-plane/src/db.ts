@@ -10091,6 +10091,30 @@ export class ControlPlaneDb {
     });
   }
 
+  /** Capture only an advertised exact installation. Legacy agents remain plain-id choices. */
+  savedHarnessInstallation(runnerId: string, agentId: string): import("@wollipog/protocol").SavedHarnessInstallation | null {
+    const runner = this.getRunner(runnerId);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "harnessInstallations")) return null;
+    const agent = runner?.agents.find((candidate) => candidate.id === agentId);
+    if (!agent?.installation || !this.getAgentLaunch(runnerId, agentId)) return null;
+    return { driver: agent.driver ?? "acp", context: agent.context ?? { kind: "native" },
+      installationId: agent.installation.id };
+  }
+
+  /** Rebind a saved action only to the same installation and execution context. */
+  resolveSavedHarnessInstallation(
+    runnerId: string,
+    saved: import("@wollipog/protocol").SavedHarnessInstallation,
+  ): string | null {
+    const runner = this.getRunner(runnerId);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "harnessInstallations")) return null;
+    const agent = runner?.agents.find((candidate) =>
+      candidate.driver === saved.driver && candidate.installation?.id === saved.installationId &&
+      harnessInstallationContext(candidate.context) === harnessInstallationContext(saved.context) &&
+      candidate.available === true && this.getAgentLaunch(runnerId, candidate.id));
+    return agent?.id ?? null;
+  }
+
   /** Select the exact rediscovered installation for one Machine/context. Returns null if this
    * runner cannot represent the choice; no preference is written in that case. */
   selectHarnessInstallation(runnerId: string, agentId: string, expectedInstallationId: string): HarnessInstallationSelection | null {

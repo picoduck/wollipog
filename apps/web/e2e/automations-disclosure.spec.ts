@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { join } from "node:path";
 
 /**
  * The automation card disclosure (#793), across the two widths the acceptance criteria call out.
@@ -109,6 +110,79 @@ for (const { label, viewport } of [
   });
 }
 
+for (const { label, viewport } of [
+  { label: "desktop", viewport: { width: 1280, height: 900 } },
+  { label: "mobile", viewport: { width: 375, height: 812 } },
+]) {
+  for (const theme of ["dark", "light"] as const) {
+    test.describe(`${label} ${theme} workflow orchestrator installation`, () => {
+      test.use({ viewport });
+      test("shows a card warning when the saved orchestrator has no installation binding", async ({ page }) => {
+        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+        const card = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
+        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-bound`);
+        await card.click();
+        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toHaveCount(0);
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-orchestrator-before-${label}-${theme}.png`), fullPage: true,
+        });
+        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch&orchestrator-unbound`);
+        await card.click();
+        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toBeVisible();
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-orchestrator-after-${label}-${theme}.png`), fullPage: true,
+        });
+      });
+    });
+
+    test.describe(`${label} ${theme} alternate installation`, () => {
+      test.use({ viewport });
+      test("shows a card warning when an alternate's saved installation disappears", async ({ page }) => {
+        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+        const card = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
+        await page.goto(`/automations-e2e.html?theme=${theme}&alternate-installation=available`);
+        await card.click();
+        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toHaveCount(0);
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-alternate-before-${label}-${theme}.png`), fullPage: true,
+        });
+        await page.goto(`/automations-e2e.html?theme=${theme}&alternate-installation=unavailable`);
+        await card.click();
+        await expect(page.getByText(/Saved Agent Harness installation unavailable or unbound/)).toBeVisible();
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-alternate-after-${label}-${theme}.png`), fullPage: true,
+        });
+      });
+    });
+  }
+}
+
+for (const { label, viewport } of [
+  { label: "desktop", viewport: { width: 1280, height: 900 } },
+  { label: "mobile", viewport: { width: 375, height: 812 } },
+]) {
+  for (const theme of ["dark", "light"] as const) {
+    test.describe(`${label} ${theme} workflow Machine switch`, () => {
+      test.use({ viewport });
+      test("shows the new Machine's configured role instead of the old installation", async ({ page }) => {
+        await page.goto(`/automations-e2e.html?theme=${theme}&workflow-machine-switch`);
+        await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
+        await page.getByRole("button", { name: "Edit", exact: true }).click();
+        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-machine-before-${label}-${theme}.png`), fullPage: true,
+        });
+        await page.getByRole("combobox", { name: "Machine", exact: true }).selectOption("runner-2");
+        await expect(page.getByRole("button", { name: "Agent-1 Agent: Configured Agent" })).toBeVisible();
+        await expect(page.getByText(/This saved role installation is unavailable or unbound/)).toHaveCount(0);
+        if (evidenceDir) await page.screenshot({
+          path: join(evidenceDir, `automation-machine-after-${label}-${theme}.png`), fullPage: true,
+        });
+      });
+    });
+  }
+}
+
 test("configured trigger controls and content-free delivery provenance are visible", async ({ page }) => {
   await open(page);
   await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
@@ -139,3 +213,28 @@ test("outbound subscription state, privacy defaults, pause reason, and journal a
   await expect(outbound.getByText("HTTP 503", { exact: true })).toHaveCount(2);
   await expect(outbound.getByText(/Next Retry/)).toBeVisible();
 });
+
+for (const { label, viewport } of [
+  { label: "desktop", viewport: { width: 1280, height: 900 } },
+  { label: "mobile", viewport: { width: 375, height: 812 } },
+]) {
+  for (const theme of ["dark", "light"] as const) {
+    test.describe(`${label} ${theme} saved installation`, () => {
+      test.use({ viewport });
+      test("shows an actionable unavailable choice", async ({ page }) => {
+        const openEditor = async (saved: boolean) => {
+          await page.goto(`/automations-e2e.html?theme=${theme}${saved ? "&saved-installation" : ""}`);
+          await page.getByRole("button", { name: /Nightly Dependency Sweep/ }).click();
+          await page.getByRole("button", { name: "Edit", exact: true }).click();
+        };
+        await openEditor(false);
+        const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+        if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `automation-before-${label}-${theme}.png`), fullPage: true });
+        await openEditor(true);
+        await expect(page.getByText(/saved Agent Harness installation is unavailable or unbound/i)).toBeVisible();
+        await expect(page.getByRole("button", { name: "Use Current Installation" })).toBeEnabled();
+        if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `automation-after-${label}-${theme}.png`), fullPage: true });
+      });
+    });
+  }
+}

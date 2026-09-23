@@ -14,6 +14,7 @@ import type {
   OutboundEventSubscriptionView,
   RunnerView,
   UiSnapshotMessage,
+  WorkflowDefinition,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -21,6 +22,7 @@ import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { AutomationsView } from "./AutomationsView.js";
+import { agentOptions } from "./agent-options.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -130,7 +132,7 @@ const navigation: ViewNavigation = {
   listen: () => () => {},
 };
 
-function snapshot(): UiSnapshotMessage {
+function snapshot(runnerViews = runners): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: {
@@ -139,7 +141,7 @@ function snapshot(): UiSnapshotMessage {
       paginatedSessionHistory: false,
       projects: false,
     },
-    runners,
+    runners: runnerViews,
     boxes: [],
     sessions: [],
     runs: [],
@@ -173,6 +175,8 @@ async function mountFixture(
   triggerViews: Record<string, AutomationTriggerView[]> = {},
   outboundSubscriptions: OutboundEventSubscriptionView[] = [],
   outboundDeliveries: Record<string, OutboundEventDeliveryView[]> = {},
+  runnerViews: RunnerView[] = runners,
+  workflowViews: WorkflowDefinition[] = [],
 ): Promise<Fixture> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -210,7 +214,7 @@ async function mountFixture(
       triggerViews[id] = [...(triggerViews[id] ?? []), trigger];
       return { trigger, secret: `wollipogwhsec_${"A".repeat(43)}` };
     },
-    workflowDefinitions: async () => [],
+    workflowDefinitions: async () => workflowViews,
     outboundEventSubscriptions: async () => [...outboundSubscriptions],
     outboundEventDeliveries: async (subscriptionId: string) => outboundDeliveries[subscriptionId] ?? [],
     createOutboundEventSubscription: async (request: CreateOutboundEventSubscriptionRequest) => {
@@ -246,7 +250,7 @@ async function mountFixture(
       </ApiProvider>,
     );
   });
-  await act(async () => { socket.push(snapshot()); });
+  await act(async () => { socket.push(snapshot(runnerViews)); });
   await act(settle);
   return { container, root, updates, triggerCreates, outboundCreates };
 }
@@ -541,6 +545,343 @@ test("editing and saving without changes sends the exact stored multi-alternate 
     const { automationId: _id, revision: _revision, createdBy: _createdBy,
       createdAt: _createdAt, updatedAt: _updatedAt, ...storedSpec } = stored;
     assert.deepEqual(fixture.updates[0], { id: stored.automationId, spec: storedSpec });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an unavailable automation installation stays visible until explicitly rebound", async () => {
+  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
+    ...runners[0]!.agents[0]!, id: "rich-agent", installation: {
+      id: "local", path: "/home/u/.local/bin/claude", via: "common-dir" as const,
+      selection: "selected" as const,
+    },
+  }] };
+  const stored: AutomationSchedule = {
+    automationId: "saved-installation", revision: 1, name: "Pinned Sweep",
+    cron: "0 2 * * *", timezone: "UTC", enabled: true,
+    action: { kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "runner-1-workspace", agentId: "rich-agent", prompt: "Sweep",
+    }, installationBindings: { agent: {
+      driver: "claude-code", context: { kind: "native" }, installationId: "system",
+    } } },
+    runnerPolicy: { kind: "wait" }, misfirePolicy: { kind: "skip" },
+    concurrencyPolicy: "wait", limits: { maxCostUsd: 5, maxToolCalls: 50 },
+    notifications: { pushEvents: [] }, createdBy: { kind: "human", id: "test" },
+    createdAt: 1, updatedAt: 1,
+  };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
+  try {
+    await expandCard(fixture, "Pinned Sweep");
+    assert.match(fixture.container.textContent ?? "", /Saved Agent Harness installation unavailable/);
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await act(async () => { button(fixture.container, "Use Current Installation").click(); });
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    const action = fixture.updates[0]?.spec.action;
+    assert.equal(action?.kind === "create_session" &&
+      action.installationBindings?.agent?.installationId, "local");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("editing a pinned automation shows its rediscovered installation instead of a reused id", async () => {
+  const oldId = { ...runners[0]!.agents[0]!, id: "rich-agent", driver: "acp" as const,
+    installation: undefined };
+  const selected = { ...runners[0]!.agents[0]!, id: "system-new", installation: {
+    id: "system", path: "/usr/bin/claude", via: "path" as const,
+    selection: "selected" as const,
+  } };
+  const manual = { ...runners[0]!.agents[0]!, id: "manual", driver: "acp" as const,
+    installation: undefined };
+  const machine = { ...runners[0]!, protocolVersion: 175, agents: [oldId, selected, manual] };
+  const stored = schedule("pinned", "Pinned Sweep");
+  stored.action = { kind: "create_session", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", agentId: "rich-agent", prompt: "Sweep",
+  }, installationBindings: { agent: {
+    driver: "claude-code", context: { kind: "native" }, installationId: "system",
+  } } };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
+  try {
+    await expandCard(fixture, "Pinned Sweep");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    assert.equal(nativeSelect(fixture.container, "Agent").value, "system-new");
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    const action = fixture.updates[0]?.spec.action;
+    assert.equal(action?.kind === "create_session" && action.request.agentId, "system-new");
+    assert.equal(action?.kind === "create_session" &&
+      action.installationBindings?.agent?.installationId, "system");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await changeNativeSelect(fixture.container, "Agent", "manual");
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    assert.equal(fixture.updates[1]?.spec.action.kind === "create_session" &&
+      fixture.updates[1].spec.action.request.agentId, "manual",
+    "switching to a config-authored agent clears the automatic installation rebind");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await changeNativeSelect(fixture.container, "Agent", "rich-agent");
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    const reselected = fixture.updates[2]?.spec.action;
+    assert.equal(reselected?.kind === "create_session" && reselected.request.agentId, "rich-agent");
+    assert.deepEqual(reselected?.kind === "create_session" && reselected.installationBindings, {},
+      "explicitly choosing a reused plain id clears the old installation reference");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a workflow role named orchestrator keeps a role binding separate from its orchestrator", async () => {
+  const manual = { ...runners[0]!.agents[0]!, id: "manual", driver: "acp" as const,
+    installation: undefined };
+  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
+    ...runners[0]!.agents[0]!, id: "orchestrator", installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const,
+      selection: "selected" as const,
+    },
+  }, manual] };
+  const stored = schedule("role-orchestrator", "Workflow Sweep");
+  stored.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
+  } };
+  const workflow: WorkflowDefinition = {
+    workflowId: "graph-1", version: 1, name: "Graph", source: "custom",
+    maxTransitions: 1, createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
+    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "orchestrator",
+      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
+  };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine], [workflow]);
+  try {
+    await expandCard(fixture, "Workflow Sweep");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await act(async () => { button(fixture.container, "Use Current Installation").click(); });
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    const action = fixture.updates[0]?.spec.action;
+    assert.equal(action?.kind === "workflow_run" && action.request.agentBindings?.orchestrator, "orchestrator");
+    assert.equal(action?.kind === "workflow_run" && action.request.orchestratorAgentId, undefined);
+    assert.equal(action?.kind === "workflow_run" &&
+      action.installationBindings?.["role:orchestrator"]?.installationId, "system");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await choose(fixture.container, "Orchestrator Agent",
+      agentOptions(machine.agents).find((option) => option.agent.id === "manual")!.label);
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    const configAction = fixture.updates[1]?.spec.action;
+    assert.equal(configAction?.kind === "workflow_run" &&
+      configAction.request.agentBindings?.orchestrator, "manual");
+    assert.equal(configAction?.kind === "workflow_run" &&
+      configAction.installationBindings?.["role:orchestrator"], undefined);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("switching workflows does not call a new discovered role's installation saved and unavailable", async () => {
+  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
+    ...runners[0]!.agents[0]!, installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
+    },
+  }] };
+  const stored = schedule("workflow-switch", "Workflow Switch");
+  stored.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "old-graph", task: "Build",
+  } };
+  const workflow = (workflowId: string): WorkflowDefinition => ({
+    workflowId, version: 1, name: workflowId, source: "custom", maxTransitions: 1,
+    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
+    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
+      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
+  });
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine],
+    [workflow("old-graph"), workflow("new-graph")]);
+  try {
+    await expandCard(fixture, "Workflow Switch");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await changeNativeSelect(fixture.container, "Workflow", "new-graph");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /This saved role installation is unavailable or unbound/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("switching workflow Machines stops displaying the old Machine's installation binding", async () => {
+  const oldMachine = { ...runners[0]!, protocolVersion: 175, agents: [{
+    ...runners[0]!.agents[0]!, installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
+    },
+  }] };
+  const newMachine = { ...runners[1]!, protocolVersion: 175, agents: [
+    { ...runners[0]!.agents[0]!, driver: "acp" as const, installation: undefined },
+    { ...runners[1]!.agents[0]!, id: "new-agent", installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
+    } },
+  ] };
+  const stored = schedule("workflow-machine", "Workflow Machine");
+  stored.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
+    agentBindings: { "rich-agent": "rich-agent" },
+  }, installationBindings: { "role:rich-agent": {
+    driver: "claude-code", context: { kind: "native" }, installationId: "system",
+  } } };
+  const workflow: WorkflowDefinition = {
+    workflowId: "graph-1", version: 1, name: "Graph", source: "custom", maxTransitions: 1,
+    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
+    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
+      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
+  };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [oldMachine, newMachine], [workflow]);
+  try {
+    await expandCard(fixture, "Workflow Machine");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await changeNativeSelect(fixture.container, "Machine", "runner-2");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /This saved role installation is unavailable or unbound/);
+    assert.match(choiceTrigger(fixture.container, "Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
+      /Rich-Agent Agent: Rich Agent/,
+    "the new Machine's same-id installation must not replace the role shown in the editor");
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    const action = fixture.updates[0]?.spec.action;
+    assert.equal(action?.kind === "workflow_run" && action.request.runnerId, "runner-2");
+    assert.equal(action?.kind === "workflow_run" && action.request.agentBindings, undefined);
+    assert.equal(action?.kind === "workflow_run" && action.installationBindings, undefined);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("switching alternate workflow Machines clears the old alternate installation display", async () => {
+  const oldAlternate = { ...runners[1]!, protocolVersion: 175, agents: [{
+    ...runners[1]!.agents[0]!, id: "rich-agent", installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
+    },
+  }] };
+  const newAlternate = { ...runners[2]!, protocolVersion: 175, agents: [
+    { ...runners[2]!.agents[0]!, id: "rich-agent", name: "Configured Alternate",
+      driver: "acp" as const, installation: undefined },
+    { ...runners[2]!.agents[0]!, id: "new-agent", name: "Discovered Alternate", installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
+    } },
+  ] };
+  const stored = schedule("alternate-workflow-machine", "Alternate Workflow Machine");
+  stored.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
+  } };
+  stored.runnerPolicy = { kind: "alternate", targets: [{
+    runnerId: "runner-2", workspaceId: "runner-2-workspace",
+    agentBindings: { "rich-agent": "rich-agent" },
+    installationBindings: { "role:rich-agent": {
+      driver: "claude-code", context: { kind: "native" }, installationId: "system",
+    } },
+  }] };
+  const workflow: WorkflowDefinition = {
+    workflowId: "graph-1", version: 1, name: "Graph", source: "custom", maxTransitions: 1,
+    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
+    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
+      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
+  };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, oldAlternate, newAlternate], [workflow]);
+  try {
+    await expandCard(fixture, "Alternate Workflow Machine");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await changeNativeSelect(fixture.container, "Alternate Machine", "runner-3");
+    assert.doesNotMatch(fixture.container.textContent ?? "", /This saved alternate role installation is unavailable or unbound/);
+    assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
+      /Alternate Rich-Agent Agent: Configured Alternate/);
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    const policy = fixture.updates[0]?.spec.runnerPolicy;
+    assert.equal(policy?.kind, "alternate");
+    assert.equal(policy?.kind === "alternate" && policy.targets[0]?.runnerId, "runner-3");
+    assert.equal(policy?.kind === "alternate" && policy.targets[0]?.installationBindings, undefined);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("alternate workflow selectors follow the effective primary choice after a Machine switch", async () => {
+  const alternate = { ...runners[1]!, agents: [
+    { ...runners[0]!.agents[0]! },
+    { ...runners[0]!.agents[1]! },
+  ] };
+  const newPrimary = { ...runners[2]!, agents: [{
+    ...runners[2]!.agents[0]!, id: "rich-agent", driver: "acp" as const,
+  }] };
+  const stored = schedule("primary-switch-alternate", "Primary Switch Alternate");
+  stored.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
+    agentBindings: { "rich-agent": "other-agent" }, orchestratorAgentId: "other-agent",
+  } };
+  stored.runnerPolicy = { kind: "alternate", targets: [{
+    runnerId: "runner-2", workspaceId: "runner-2-workspace",
+  }] };
+  const workflow: WorkflowDefinition = {
+    workflowId: "graph-1", version: 1, name: "Graph", source: "custom", maxTransitions: 1,
+    createdBy: { kind: "human", id: "test" }, createdAt: 1, edges: [],
+    nodes: [{ nodeId: "worker", kind: "agent", role: "worker", agentId: "rich-agent",
+      inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
+  };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate, newPrimary], [workflow]);
+  try {
+    await expandCard(fixture, "Primary Switch Alternate");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
+      /Alternate Rich-Agent Agent: Codex App Server/);
+    await choose(fixture.container, "Rich-Agent Agent", "Claude Code");
+    assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
+      /Alternate Rich-Agent Agent: Claude Code/,
+    "the alternate must follow an edited primary role when it has no override");
+    await changeNativeSelect(fixture.container, "Machine", "runner-3");
+    assert.match(choiceTrigger(fixture.container, "Alternate Rich-Agent Agent")?.getAttribute("aria-label") ?? "",
+      /Alternate Rich-Agent Agent: Claude Code/,
+    "the alternate must not keep the old primary role override after that override is dropped");
+    assert.equal(choiceTrigger(fixture.container, "Alternate Orchestrator Agent"), undefined,
+      "the alternate must not display an orchestrator that the new primary request drops");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("the automation card flags an unbound primary workflow orchestrator", async () => {
+  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
+    ...runners[0]!.agents[0]!, installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
+    },
+  }] };
+  const stored = schedule("unbound-orchestrator", "Unbound Orchestrator");
+  stored.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "runner-1-workspace", workflowId: "graph-1", task: "Build",
+    orchestratorAgentId: "rich-agent",
+  } };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
+  try {
+    await expandCard(fixture, "Unbound Orchestrator");
+    assert.match(fixture.container.textContent ?? "", /Saved Agent Harness installation unavailable or unbound/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("an unavailable alternate installation is visible on the automation card", async () => {
+  const alternate = { ...runners[1]!, protocolVersion: 175, agents: [{
+    ...runners[1]!.agents[0]!, installation: {
+      id: "local", path: "/home/u/bin/claude", via: "common-dir" as const,
+      selection: "selected" as const,
+    },
+  }] };
+  const stored = schedule("alternate-missing", "Alternate Missing");
+  stored.runnerPolicy = { kind: "alternate", targets: [{
+    runnerId: "runner-2", workspaceId: "runner-2-workspace", agentId: "alternate-agent",
+    installationBindings: { agent: {
+      driver: "claude-code", context: { kind: "native" }, installationId: "system",
+    } },
+  }] };
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate]);
+  try {
+    await expandCard(fixture, "Alternate Missing");
+    assert.match(fixture.container.textContent ?? "", /Saved Agent Harness installation unavailable or unbound/);
   } finally {
     await unmountFixture(fixture);
   }

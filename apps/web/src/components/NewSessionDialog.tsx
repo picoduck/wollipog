@@ -776,7 +776,9 @@ export function NewSessionDialog({
 
   const selectAgent = (id: string) => {
     setAgentId(id);
-    setAgentDefaults((defaults) => saveAgentDefault(defaults, runnerId, id, instanceScope));
+    setAgentDefaults((defaults) => saveAgentDefault(
+      defaults, runnerId, id, instanceScope, runner?.agents.find((candidate) => candidate.id === id),
+    ));
   };
 
   const selectHostMode = (worktree: boolean) => {
@@ -1480,11 +1482,14 @@ export function NewSessionDialog({
                 <span>
                   {selectionIssue === "legacy"
                     ? "Your saved default uses Codex non-interactive mode. Codex App Server supports interactive approvals and resumable conversations."
+                    : selectionIssue === "unbound"
+                      ? "This older saved agent choice has no installation identity. Select the installation shown here to keep future sessions bound to it."
                     : selectionIssue === "unavailable"
                       ? "The selected agent is unavailable on this runner."
-                      : "Your saved default is no longer advertised by this runner."}
+                      : "Your saved installation is no longer available on this Machine. Select an available agent to recover."}
                 </span>
-                {suggestedAgentOption && savedSelection.recommendedId !== agentDefaults[runnerId] && (
+                {suggestedAgentOption && (selectionIssue === "unbound" ||
+                  savedSelection.recommendedId !== agentDefaults[runnerId]) && (
                   <button type="button" className="btn ghost sm" onClick={() => selectAgent(savedSelection.recommendedId)}>
                     Use {suggestedAgentOption.label}
                   </button>

@@ -8,6 +8,7 @@ import type {
   OutboundEventSubscriptionView,
   RunnerView,
   UiSnapshotMessage,
+  WorkflowDefinition,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -90,6 +91,71 @@ const items: AutomationSchedule[] = [
     updatedAt: 1,
   },
 ];
+
+if (params.has("saved-installation")) {
+  runner.protocolVersion = 175;
+  runner.agents[0]!.installation = {
+    id: "local", path: "/home/misko/.local/bin/agent", via: "common-dir", selection: "selected",
+  };
+  const first = items[0]!.action;
+  if (first.kind === "create_session") first.installationBindings = { agent: {
+    driver: "claude-code", context: { kind: "native" }, installationId: "system",
+  } };
+}
+
+const alternateRunner: RunnerView | null = params.has("alternate-installation") ? {
+  ...runner,
+  runnerId: "runner-2",
+  hostname: "backup-box",
+  protocolVersion: 175,
+  agents: [{ ...runner.agents[0]!, id: "agent-2", installation: {
+    id: params.get("alternate-installation") === "unavailable" ? "local" : "system",
+    path: "/usr/bin/agent", via: "path", selection: "selected",
+  } }],
+  workspaces: [{ id: "workspace-2", name: "Backup", path: "/home/misko/backup" }],
+} : null;
+if (alternateRunner) items[0]!.runnerPolicy = { kind: "alternate", targets: [{
+  runnerId: "runner-2", workspaceId: "workspace-2", agentId: "agent-2",
+  installationBindings: { agent: {
+    driver: "claude-code", context: { kind: "native" }, installationId: "system",
+  } },
+}] };
+
+const workflowSwitchRunner: RunnerView | null = params.has("workflow-machine-switch") ? {
+  ...runner,
+  runnerId: "runner-2",
+  hostname: "second-box",
+  protocolVersion: 175,
+  agents: [
+    { ...runner.agents[0]!, name: "Configured Agent", driver: "acp", installation: undefined },
+    { ...runner.agents[0]!, id: "new-agent", name: "Discovered Agent", installation: {
+      id: "system", path: "/usr/bin/agent", via: "path", selection: "selected",
+    } },
+  ],
+  workspaces: [{ id: "workspace-2", name: "Second", path: "/home/misko/second" }],
+} : null;
+const workflowDefinitions: WorkflowDefinition[] = workflowSwitchRunner ? [{
+  workflowId: "workflow-1", version: 1, name: "Audit Workflow", source: "custom",
+  maxTransitions: 1, createdBy: { kind: "human", id: "e2e" }, createdAt: 1, edges: [],
+  nodes: [{ nodeId: "audit", kind: "agent", role: "auditor", agentId: "agent-1",
+    inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }],
+}] : [];
+if (workflowSwitchRunner) {
+  runner.protocolVersion = 175;
+  runner.agents[0]!.installation = {
+    id: "system", path: "/usr/bin/agent", via: "path", selection: "selected",
+  };
+  items[0]!.action = { kind: "workflow_run", request: {
+    runnerId: "runner-1", workspaceId: "workspace-1", workflowId: "workflow-1", task: "Audit",
+    agentBindings: { "agent-1": "agent-1" },
+    ...(params.has("orchestrator-bound") || params.has("orchestrator-unbound")
+      ? { orchestratorAgentId: "agent-1" } : {}),
+  }, installationBindings: { "role:agent-1": {
+    driver: "claude-code", context: { kind: "native" }, installationId: "system",
+  }, ...(params.has("orchestrator-bound") ? { orchestrator: {
+    driver: "claude-code" as const, context: { kind: "native" as const }, installationId: "system",
+  } } : {}) } };
+}
 
 const triggerItems: AutomationTriggerView[] = [{
   triggerId: "atr_issue_intake",
@@ -188,7 +254,8 @@ class FixtureSocket implements UiSocket {
           paginatedSessionHistory: false,
           projects: false,
         },
-        runners: [runner],
+        runners: [runner, ...(alternateRunner ? [alternateRunner] : []),
+          ...(workflowSwitchRunner ? [workflowSwitchRunner] : [])],
         boxes: [],
         sessions: [],
         runs: [],
@@ -229,7 +296,7 @@ const client = {
   }),
   outboundEventSubscriptions: async () => outboundSubscriptions,
   outboundEventDeliveries: async () => outboundDeliveries,
-  workflowDefinitions: async () => [],
+  workflowDefinitions: async () => workflowDefinitions,
 } as unknown as ApiClient;
 
 const root = document.getElementById("root");

@@ -4,6 +4,7 @@ import type {
   AutomationAction,
   AutomationAuditEvent,
   AutomationExecution,
+  AutomationInstallationBindings,
   AutomationNotificationEvent,
   AutomationRunnerTarget,
   AutomationSchedule,
@@ -165,14 +166,27 @@ function validateTriggerDeliveryPolicy(
 
 function validateTarget(value: unknown, kind: AutomationAction["kind"]): value is AutomationRunnerTarget {
   if (!object(value) || !keysOnly(value, [
-    "runnerId", "workspaceId", "projectId", "projectLocationId", "agentId", "agentBindings", "orchestratorAgentId",
+    "runnerId", "workspaceId", "projectId", "projectLocationId", "agentId", "agentBindings", "orchestratorAgentId", "installationBindings",
   ]) || !boundedString(value.runnerId) || !boundedString(value.workspaceId) || !validProjectAssignment(value)) return false;
   if (kind === "create_session" && !boundedString(value.agentId)) return false;
   if (kind === "workflow_run" && value.agentId !== undefined) return false;
   if (value.agentBindings !== undefined && (!object(value.agentBindings) ||
       Object.keys(value.agentBindings).length > 32 ||
       Object.entries(value.agentBindings).some(([key, entry]) => !boundedString(key) || !boundedString(entry)))) return false;
-  return value.orchestratorAgentId === undefined || boundedString(value.orchestratorAgentId);
+  return (value.orchestratorAgentId === undefined || boundedString(value.orchestratorAgentId)) &&
+    validInstallationBindings(value.installationBindings);
+}
+
+function validInstallationBindings(value: unknown): value is AutomationInstallationBindings | undefined {
+  return value === undefined || (object(value) && Object.keys(value).length <= 34 &&
+    Object.entries(value).every(([key, entry]) =>
+      (key === "agent" || key === "orchestrator" || /^role:[^\x00-\x1f\x7f]{1,256}$/.test(key)) &&
+      object(entry) && keysOnly(entry, ["driver", "context", "installationId"]) &&
+      ["acp", "claude-code", "codex", "codex-app-server", "pi"].includes(String(entry.driver)) &&
+      boundedString(entry.installationId) && object(entry.context) &&
+      (entry.context.kind === "native" && keysOnly(entry.context, ["kind"]) ||
+        entry.context.kind === "wsl" && keysOnly(entry.context, ["kind", "distro"]) &&
+        boundedString(entry.context.distro))));
 }
 
 function validProjectAssignment(value: Record<string, unknown>): boolean {
@@ -206,7 +220,8 @@ function validBindings(value: unknown): boolean {
 function validateAction(value: unknown): string | null {
   if (!object(value) || !boundedString(value.kind, 32)) return "automation action is malformed";
   if (value.kind === "create_session") {
-    if (!keysOnly(value, ["kind", "request"]) || !object(value.request)) return "create-session action is malformed";
+    if (!keysOnly(value, ["kind", "request", "installationBindings"]) || !object(value.request) ||
+        !validInstallationBindings(value.installationBindings)) return "create-session action is malformed";
     const request = value.request;
     if (!keysOnly(request, [
       "runnerId", "workspaceId", "projectId", "projectLocationId", "agentId", "title", "prompt", "useWorktree", "config",
@@ -227,7 +242,8 @@ function validateAction(value: unknown): string | null {
       return "prompt-session action requires a target and text or slash command, and cannot persist images";
     }
   } else if (value.kind === "workflow_run") {
-    if (!keysOnly(value, ["kind", "request"]) || !object(value.request)) return "workflow-run action is malformed";
+    if (!keysOnly(value, ["kind", "request", "installationBindings"]) || !object(value.request) ||
+        !validInstallationBindings(value.installationBindings)) return "workflow-run action is malformed";
     const request = value.request;
     if (!keysOnly(request, ["runnerId", "workspaceId", "projectId", "projectLocationId", "workflowId", "workflowVersion", "task", "title",
       "useWorktree", "config", "costBudgetUsd", "maxToolCalls", "agentBindings", "orchestratorAgentId"]) ||
@@ -331,11 +347,14 @@ function automationCapabilityError(
     const config = request.config;
     if (!config) return null;
     const targets = [
-      { runnerId: request.runnerId, workspaceId: request.workspaceId, agentId: request.agentId },
+      { runnerId: request.runnerId, workspaceId: request.workspaceId, agentId: request.agentId,
+        installationBindings: spec.action.installationBindings },
       ...(spec.runnerPolicy.kind === "alternate" ? spec.runnerPolicy.targets : []),
     ];
     for (const target of targets) {
-      const agentId = target.agentId;
+      const agentId = target.installationBindings?.agent
+        ? db.resolveSavedHarnessInstallation(target.runnerId, target.installationBindings.agent)
+        : target.agentId;
       if (!agentId) continue; // Shape validation requires this for create-session targets.
       const agent = db.getRunner(target.runnerId)?.agents.find((candidate) => candidate.id === agentId);
       if (!agent) continue;
@@ -355,18 +374,34 @@ function automationCapabilityError(
     workspaceId: request.workspaceId,
     ...(request.agentBindings ? { agentBindings: request.agentBindings } : {}),
     ...(request.orchestratorAgentId ? { orchestratorAgentId: request.orchestratorAgentId } : {}),
+    ...(spec.action.installationBindings ? { installationBindings: spec.action.installationBindings } : {}),
   };
   const targets = spec.runnerPolicy.kind === "alternate"
     ? [primary, ...spec.runnerPolicy.targets]
     : [primary];
   for (const target of targets) {
     const agentBindings = { ...(request.agentBindings ?? {}), ...(target.agentBindings ?? {}) };
+    const definition = db.getWorkflowDefinition(request.workflowId, request.workflowVersion);
+    let unavailableBinding = false;
+    for (const node of definition?.nodes ?? []) {
+      if (node.kind !== "agent") continue;
+      const saved = target.installationBindings?.[`role:${node.agentId!}`];
+      if (!saved) continue;
+      const resolved = db.resolveSavedHarnessInstallation(target.runnerId, saved);
+      if (!resolved) { unavailableBinding = true; break; }
+      agentBindings[node.agentId!] = resolved;
+    }
+    if (unavailableBinding) continue;
+    const orchestrator = target.installationBindings?.orchestrator
+      ? db.resolveSavedHarnessInstallation(target.runnerId, target.installationBindings.orchestrator)
+      : target.orchestratorAgentId ?? request.orchestratorAgentId;
+    if (target.installationBindings?.orchestrator && !orchestrator) continue;
     const error = sessions.workflowRunCapabilityError({
       ...request,
       runnerId: target.runnerId,
       workspaceId: target.workspaceId,
       ...(Object.keys(agentBindings).length ? { agentBindings } : {}),
-      ...(target.orchestratorAgentId ? { orchestratorAgentId: target.orchestratorAgentId } : {}),
+      ...(orchestrator ? { orchestratorAgentId: orchestrator } : {}),
     });
     if (error) {
       const identity = `${target.runnerId}/${target.workspaceId}`;
@@ -374,6 +409,95 @@ function automationCapabilityError(
     }
   }
   return null;
+}
+
+/** Upgrade plain ids when their current exact installation is known. An unresolved old id stays
+ * unchanged and the launch gate refuses it; guessing from a same-name candidate would retarget it. */
+function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: AutomationSchedule): AutomationSpec {
+  if (spec.action.kind === "prompt_session") return spec;
+  const pin = (runnerId: string, ids: Record<string, string>, existing?: AutomationInstallationBindings,
+    old?: { runnerId: string; ids: Record<string, string>; bindings?: AutomationInstallationBindings }) => {
+    const bindings = { ...existing };
+    for (const [key, agentId] of Object.entries(ids)) {
+      if (old && (old.runnerId !== runnerId || old.ids[key] !== agentId)) delete bindings[key];
+      if (bindings[key]) continue;
+      if (old?.runnerId === runnerId && old.ids[key] === agentId) {
+        // Omitted metadata comes from older clients and preserves the pin. A missing key in an
+        // explicit map may represent a re-selection, but only a previously pinned key may be
+        // recaptured; unrelated edits must not turn an unbound ID into a new installation.
+        if (existing === undefined) {
+          if (old.bindings?.[key]) bindings[key] = old.bindings[key];
+        } else if (old.bindings?.[key]) {
+          const selected = db.savedHarnessInstallation(runnerId, agentId);
+          if (selected) bindings[key] = selected;
+        }
+        continue;
+      }
+      const saved = db.savedHarnessInstallation(runnerId, agentId);
+      if (saved) bindings[key] = saved;
+    }
+    return Object.keys(bindings).length ? bindings : undefined;
+  };
+  if (spec.action.kind === "create_session") {
+    const action = spec.action;
+    const oldAction = previous?.action.kind === "create_session" ? previous.action : undefined;
+    const primary = pin(action.request.runnerId, { agent: action.request.agentId }, action.installationBindings,
+      oldAction ? { runnerId: oldAction.request.runnerId, ids: { agent: oldAction.request.agentId },
+        bindings: oldAction.installationBindings } : undefined);
+    return {
+      ...spec,
+      action: { ...action, ...(primary ? { installationBindings: primary } : {}) },
+      runnerPolicy: spec.runnerPolicy.kind !== "alternate" ? spec.runnerPolicy : {
+        ...spec.runnerPolicy,
+        targets: spec.runnerPolicy.targets.map((target) => {
+          const oldTarget = previous?.runnerPolicy.kind === "alternate"
+            ? previous.runnerPolicy.targets.find((candidate) => candidate.runnerId === target.runnerId) : undefined;
+          const bindings = pin(target.runnerId, { agent: target.agentId! }, target.installationBindings,
+            oldTarget ? { runnerId: oldTarget.runnerId, ids: { agent: oldTarget.agentId! },
+              bindings: oldTarget.installationBindings } : undefined);
+          return { ...target, ...(bindings ? { installationBindings: bindings } : {}) };
+        }),
+      },
+    };
+  }
+  const action = spec.action;
+  const oldAction = previous?.action.kind === "workflow_run" &&
+    previous.action.request.workflowId === action.request.workflowId &&
+    previous.action.request.workflowVersion === action.request.workflowVersion
+    ? previous.action : undefined;
+  const definition = db.getWorkflowDefinition(action.request.workflowId, action.request.workflowVersion);
+  if (!definition) return spec;
+  const ids = (bindings: Record<string, string>, orchestrator?: string) => ({
+    ...Object.fromEntries(definition.nodes.filter((node) => node.kind === "agent")
+      .map((node) => [`role:${node.agentId!}`, bindings[node.agentId!] ?? node.agentId!])),
+    ...(orchestrator ? { orchestrator } : {}),
+  });
+  const primary = pin(action.request.runnerId,
+    ids(action.request.agentBindings ?? {}, action.request.orchestratorAgentId),
+    previous && !oldAction ? undefined : action.installationBindings,
+    oldAction ? { runnerId: oldAction.request.runnerId,
+      ids: ids(oldAction.request.agentBindings ?? {}, oldAction.request.orchestratorAgentId),
+      bindings: oldAction.installationBindings } : undefined);
+  return {
+    ...spec,
+    action: { ...action, ...(primary ? { installationBindings: primary } : {}) },
+    runnerPolicy: spec.runnerPolicy.kind !== "alternate" ? spec.runnerPolicy : {
+      ...spec.runnerPolicy,
+      targets: spec.runnerPolicy.targets.map((target) => {
+        const oldTarget = previous?.runnerPolicy.kind === "alternate"
+          ? previous.runnerPolicy.targets.find((candidate) => candidate.runnerId === target.runnerId) : undefined;
+        const bindings = pin(target.runnerId,
+          ids({ ...(action.request.agentBindings ?? {}), ...(target.agentBindings ?? {}) },
+            target.orchestratorAgentId ?? action.request.orchestratorAgentId),
+          previous && !oldAction ? undefined : target.installationBindings,
+          oldTarget && oldAction ? { runnerId: oldTarget.runnerId,
+            ids: ids({ ...(oldAction.request.agentBindings ?? {}), ...(oldTarget.agentBindings ?? {}) },
+              oldTarget.orchestratorAgentId ?? oldAction.request.orchestratorAgentId),
+            bindings: oldTarget.installationBindings } : undefined);
+        return { ...target, ...(bindings ? { installationBindings: bindings } : {}) };
+      }),
+    },
+  };
 }
 
 interface DuePlan {
@@ -455,7 +579,7 @@ export class AutomationsService {
   create(input: CreateAutomationRequest, actor: GovernanceActor, now = Date.now()): ServiceResult<AutomationSchedule> {
     const parsed = validateAutomationSpec(input);
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
-    const spec = parsed.data!;
+    const spec = pinAutomationSpec(this.db, parsed.data!);
     const capabilityError = automationCapabilityError(this.db, this.sessions, spec);
     if (capabilityError) return fail(capabilityError, 409);
     let nextFireAt: number | null = null;
@@ -473,10 +597,11 @@ export class AutomationsService {
     actor: GovernanceActor,
     now = Date.now(),
   ): ServiceResult<AutomationSchedule> {
-    if (!this.db.getAutomation(automationId)) return fail("automation not found", 404);
+    const previous = this.db.getAutomation(automationId);
+    if (!previous) return fail("automation not found", 404);
     const parsed = validateAutomationSpec(input);
     if (!parsed.ok) return fail(parsed.error ?? "automation request is malformed", parsed.status);
-    const spec = parsed.data!;
+    const spec = pinAutomationSpec(this.db, parsed.data!, previous);
     // Always allow disabling so capability drift cannot trap a failing automation in the enabled state.
     const capabilityError = spec.enabled ? automationCapabilityError(this.db, this.sessions, spec) : null;
     if (capabilityError) return fail(capabilityError, 409);
@@ -1185,6 +1310,8 @@ export class AutomationsService {
         ...(request.projectId !== undefined ? { projectId: request.projectId } : {}),
         ...(request.projectLocationId !== undefined ? { projectLocationId: request.projectLocationId } : {}),
         agentId: request.agentId,
+        ...(automation.action.installationBindings
+          ? { installationBindings: automation.action.installationBindings } : {}),
       };
     } else {
       const request = automation.action.request;
@@ -1194,21 +1321,72 @@ export class AutomationsService {
         ...(request.projectLocationId !== undefined ? { projectLocationId: request.projectLocationId } : {}),
         ...(request.agentBindings ? { agentBindings: request.agentBindings } : {}),
         ...(request.orchestratorAgentId ? { orchestratorAgentId: request.orchestratorAgentId } : {}),
+        ...(automation.action.installationBindings
+          ? { installationBindings: automation.action.installationBindings } : {}),
       };
     }
     const candidates = automation.runnerPolicy.kind === "alternate"
       ? [primary, ...automation.runnerPolicy.targets]
       : [primary];
+    let installationUnavailable = false;
     for (const target of candidates) {
       if (!this.hub.isRunnerOnline(target.runnerId)) continue;
       if (!runnerSupportsProtocol(this.db.getRunner(target.runnerId)?.protocolVersion, "automationCommandReceipts")) continue;
       if (!this.db.getWorkspacePath(target.runnerId, target.workspaceId)) continue;
       if (!this.projectTargetCompatible(target)) continue;
-      if (automation.action.kind === "create_session" && !this.db.getAgentLaunch(target.runnerId, target.agentId!)) continue;
-      if (automation.action.kind === "workflow_run" && !this.workflowTargetCompatible(automation, target)) continue;
-      return ok({ target });
+      const resolved = this.resolveSavedTarget(automation, target);
+      if (!resolved) { installationUnavailable = true; continue; }
+      if (automation.action.kind === "create_session" && !this.db.getAgentLaunch(resolved.runnerId, resolved.agentId!)) {
+        installationUnavailable = true;
+        continue;
+      }
+      if (automation.action.kind === "workflow_run" && !this.workflowTargetCompatible(automation, resolved)) continue;
+      return ok({ target: resolved });
     }
-    return fail("no configured protocol-v53 compatible automation runner is online", 409);
+    return fail(installationUnavailable
+      ? "No configured automation target is available. Check its saved Agent Harness installation in Machine Settings, then edit the automation to select an available target."
+      : "No configured automation target is available. Check that its Machine is online, supports automations, and has an available Workspace and Project.", 409);
+  }
+
+  private resolveSavedTarget(
+    automation: AutomationSchedule,
+    target: AutomationRunnerTarget,
+  ): AutomationRunnerTarget | null {
+    const saved = target.installationBindings;
+    if (automation.action.kind === "create_session") {
+      if (!saved?.agent && this.db.getRunner(target.runnerId)?.agents.some((agent) =>
+        agent.id === target.agentId && agent.installation)) return null;
+      const agentId = saved?.agent
+        ? this.db.resolveSavedHarnessInstallation(target.runnerId, saved.agent)
+        : target.agentId;
+      return agentId ? { ...target, agentId } : null;
+    }
+    if (automation.action.kind !== "workflow_run") return target;
+    const request = automation.action.request;
+    const definition = this.db.getWorkflowDefinition(request.workflowId, request.workflowVersion);
+    if (!definition) return target;
+    const bindings = { ...(request.agentBindings ?? {}), ...(target.agentBindings ?? {}) };
+    for (const role of new Set(definition.nodes.filter((node) => node.kind === "agent")
+      .map((node) => node.agentId!))) {
+      const reference = saved?.[`role:${role}`];
+      if (!reference) {
+        const agentId = bindings[role] ?? role;
+        if (this.db.getRunner(target.runnerId)?.agents.some((agent) =>
+          agent.id === agentId && agent.installation)) return null;
+        continue;
+      }
+      const agentId = this.db.resolveSavedHarnessInstallation(target.runnerId, reference);
+      if (!agentId) return null;
+      bindings[role] = agentId;
+    }
+    const orchestrator = saved?.orchestrator
+      ? this.db.resolveSavedHarnessInstallation(target.runnerId, saved.orchestrator)
+      : target.orchestratorAgentId ?? request.orchestratorAgentId;
+    if (!saved?.orchestrator && orchestrator && this.db.getRunner(target.runnerId)?.agents.some((agent) =>
+      agent.id === orchestrator && agent.installation)) return null;
+    if (saved?.orchestrator && !orchestrator) return null;
+    return { ...target, agentBindings: bindings,
+      ...(orchestrator ? { orchestratorAgentId: orchestrator } : {}) };
   }
 
   private projectTargetCompatible(target: AutomationRunnerTarget): boolean {

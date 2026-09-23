@@ -269,7 +269,10 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
         : {}),
       ...(baseWorkflow?.costBudgetUsd !== undefined ? { costBudgetUsd: baseWorkflow.costBudgetUsd } : {}),
       ...(baseWorkflow?.maxToolCalls !== undefined ? { maxToolCalls: baseWorkflow.maxToolCalls } : {}),
-    } };
+    },
+      ...(sameWorkflow && sameRunner && baseAction?.kind === "workflow_run" &&
+          baseAction.installationBindings ? { installationBindings: baseAction.installationBindings } : {}),
+    };
   } else {
     const config = sessionConfig(form, baseCreate?.config);
     action = { kind: "create_session", request: {
@@ -282,7 +285,11 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
         : { useWorktree: form.useWorktree }),
       ...(baseCreate?.title !== undefined ? { title: baseCreate.title } : {}),
       ...(config ? { config } : {}),
-    } };
+    },
+      ...(baseAction?.kind === "create_session" && baseCreate?.runnerId === form.runnerId &&
+          baseCreate.agentId === form.agentId && baseAction.installationBindings
+        ? { installationBindings: baseAction.installationBindings } : {}),
+    };
   }
   const alternatePlacement = form.runnerPolicy === "alternate"
     ? automationProjectPlacement(context.projectsSupported, projectList, {
@@ -337,6 +344,10 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
             runnerId: form.fallbackRunnerId, workspaceId: form.fallbackWorkspaceId,
             ...alternatePlacement,
             ...(form.actionKind === "create_session" ? { agentId: form.fallbackAgentId } : {}),
+            ...(baseFirstAlternate?.runnerId === form.fallbackRunnerId &&
+                (form.actionKind === "workflow_run" || baseFirstAlternate.agentId === form.fallbackAgentId) &&
+                baseFirstAlternate.installationBindings
+              ? { installationBindings: baseFirstAlternate.installationBindings } : {}),
             ...(form.actionKind === "workflow_run" && sameWorkflow &&
                 baseFirstAlternate?.runnerId === form.fallbackRunnerId
               ? {

@@ -6128,6 +6128,16 @@ export type AutomationRunnerPolicy =
   | { kind: "expire"; afterMinutes: number }
   | { kind: "alternate"; targets: AutomationRunnerTarget[]; expireAfterMinutes?: number };
 
+/** Stable Machine installation identity captured when a saved action is configured. */
+export interface SavedHarnessInstallation {
+  driver: AgentDriverKind;
+  context: AgentContext;
+  installationId: string;
+}
+
+/** Keys are `agent`, `role:<graph agent id>`, or `orchestrator`. */
+export type AutomationInstallationBindings = Record<string, SavedHarnessInstallation>;
+
 /** Explicit runner-local mappings only. Display-name/path matching is never used to infer that two
  * targets are equivalent. `agentId` applies to create-session; bindings apply to workflow-run. */
 export interface AutomationRunnerTarget {
@@ -6139,6 +6149,7 @@ export interface AutomationRunnerTarget {
   agentId?: string;
   agentBindings?: Record<string, string>;
   orchestratorAgentId?: string;
+  installationBindings?: AutomationInstallationBindings;
 }
 
 /** `wait` retains one due occurrence until the previous execution settles; `skip` records and
@@ -6160,9 +6171,9 @@ export interface AutomationNotificationRouting {
 }
 
 export type AutomationAction =
-  | { kind: "create_session"; request: CreateSessionRequest }
+  | { kind: "create_session"; request: CreateSessionRequest; installationBindings?: AutomationInstallationBindings }
   | { kind: "prompt_session"; sessionId: string; request: Omit<PromptRequest, "images"> }
-  | { kind: "workflow_run"; request: CreateWorkflowRunRequest };
+  | { kind: "workflow_run"; request: CreateWorkflowRunRequest; installationBindings?: AutomationInstallationBindings };
 
 export interface AutomationSpec {
   name: string;

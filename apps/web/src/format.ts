@@ -55,6 +55,7 @@ export function titleCaseLabel(value: string): string {
     return word.replace(/[A-Za-z][A-Za-z'-]*/g, (part) => {
       const segments = part.split("-");
       return segments.map((segment, segmentIndex) => {
+        if (!segment) return segment;
         if (/^[A-Z0-9]+$/.test(segment)) return segment;
         const lower = segment.toLowerCase();
         const override = TITLE_CASE_OVERRIDES[lower];
