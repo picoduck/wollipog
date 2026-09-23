@@ -160,16 +160,17 @@ test("externalSessionKey scopes opaque ACP ids to their exact adapter", () => {
   );
 });
 
-test("agentInstallHints gives the per-OS Claude installer plus the Codex npm one-liner", () => {
+test("agentInstallHints gives a native Claude installer and neutral Codex guidance", () => {
   const win = agentInstallHints("windows");
   assert.equal(win.length, 2);
-  assert.match(win[0]!.command, /^irm https:\/\/claude\.ai\/install\.ps1/);
-  assert.equal(win[1]!.command, "npm install -g @openai/codex");
+  assert.match(win[0]!.command!, /^irm https:\/\/claude\.ai\/install\.ps1/);
+  assert.equal(win[1]!.command, undefined);
+  assert.match(win[1]!.guidance, /supported method/);
 
   for (const os of ["linux", "macos"] as const) {
     const hints = agentInstallHints(os);
-    assert.match(hints[0]!.command, /^curl -fsSL https:\/\/claude\.ai\/install\.sh/);
-    assert.equal(hints[1]!.command, "npm install -g @openai/codex");
+    assert.match(hints[0]!.command!, /^curl -fsSL https:\/\/claude\.ai\/install\.sh/);
+    assert.equal(hints[1]!.command, undefined);
   }
 });
 

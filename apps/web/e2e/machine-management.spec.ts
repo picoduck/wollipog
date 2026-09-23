@@ -46,13 +46,15 @@ test("Connections distinguish verified, unavailable, and unverified agents", asy
 
 test("Machine settings show competing installations and switch the saved target", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
-  await page.getByRole("button", { name: "Harness Update Available · View Settings" }).click();
+  await page.getByRole("button", { name: "New Harness Release · View Settings" }).click();
   const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
   const system = dialog.locator(".machine-harness-installation").filter({ hasText: "/usr/bin/codex" });
   const local = dialog.locator(".machine-harness-installation").filter({ hasText: "/home/misko/.local/bin/codex" });
   await expect(system.getByRole("button", { name: "Selected" })).toBeVisible();
   await expect(local.getByRole("button", { name: "Use This Installation" })).toBeVisible();
   await expect(system).toContainText("Update Available");
+  await expect(system).toContainText("compatibility with this Machine has not been verified");
+  await expect(local).toContainText("`codex update`");
   await page.screenshot({ path: "test-results/harness-installations-before-desktop.png", fullPage: true });
   await local.getByRole("button", { name: "Use This Installation" }).click();
   await expect(local.getByRole("button", { name: "Selected" })).toBeVisible();
@@ -60,6 +62,15 @@ test("Machine settings show competing installations and switch the saved target"
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(dialog).toBeVisible();
   await page.screenshot({ path: "test-results/harness-installations-after-mobile.png", fullPage: true });
+});
+
+test("offline Machines retain last-reported harness status without a fresh release notice", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
+  await setOffline(page);
+  await expect(page.getByRole("button", { name: "New Harness Release · View Settings" })).toHaveCount(0);
+  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  await expect(page.getByRole("dialog").locator(".machine-harness-installation").first()).toContainText("Last Reported: Update Available");
+  await page.screenshot({ path: "test-results/harness-installations-offline-desktop.png", fullPage: true });
 });
 
 test("Machine cards show account-scoped login status", async ({ page }) => {

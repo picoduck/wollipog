@@ -11,12 +11,47 @@ const PACKAGES = {
 
 type Harness = keyof typeof PACKAGES;
 
+/** A Machine operator may pin a harness independently of network-check policy. Unknown names
+ * are ignored so a typo cannot authorize any update behavior. */
+export function harnessVersionPinned(harness: Harness, value: string | undefined): boolean {
+  return (value ?? "").split(",").some((entry) => entry.trim() === harness);
+}
+
+const REDISCOVER = "Stop sessions using this executable before upgrading. Restart and Rediscover before treating the new version as ready.";
+
+/** Only the discovered launch is probed. A same-name CLI later on PATH cannot establish support
+ * for this installation's built-in updater. Help output is deliberately discarded. */
+export async function codexOffersSelfUpdate(
+  binary: ResolvedBinary,
+  context: AgentContext,
+  execute: typeof run = run,
+): Promise<boolean> {
+  const command = context.kind === "wsl" ? "wsl.exe" : binary.launch.command;
+  const args = context.kind === "wsl"
+    ? ["-d", context.distro, "--exec", binary.launch.command, ...binary.launch.args, "--help"]
+    : [...binary.launch.args, "--help"];
+  const result = await execute(command, args, { timeoutMs: 3000 });
+  return result.code === 0 && !result.timedOut &&
+    /^\s*update\s+Update Codex to the latest version\b/im.test(`${result.stdout}\n${result.stderr}`);
+}
+
+function originalManagerGuidance(packageName: string | null, codexSelfUpdate: boolean): string {
+  if (codexSelfUpdate) return "This selected Codex installation advertises `codex update`. Run the selected executable's built-in update command in its execution context. " + REDISCOVER;
+  if (packageName) return `This installation belongs to ${packageName} in an npm package tree. Use its original npm or Node version manager in the same execution context. ${REDISCOVER}`;
+  return "Use this installation's original package or version manager. If its manager is unknown, inspect the selected installation in Machine settings before upgrading. " + REDISCOVER;
+}
+
 /** A PATH hit alone does not prove which package manager owns the executable. Only a launch
  * resolving inside the expected npm package is eligible for the registry comparison. */
 export function npmPackageForInstallation(harness: Harness, binary: ResolvedBinary): string | null {
   const packageName = PACKAGES[harness];
-  const paths = [binary.path, binary.launch.command, ...binary.launch.args, binary.identity ?? ""];
-  try { paths.push(realpathSync(binary.path)); } catch { /* WSL paths are not host paths. */ }
+  // Only the executable actually launched (or its Node entry script) can establish ownership.
+  // The discovered path may be an alias, or another CLI argument may mention an npm package.
+  const target = /(?:^|[\\/])node(?:\.exe)?$/i.test(binary.launch.command)
+    ? binary.launch.args[0] : binary.launch.command;
+  if (!target) return null;
+  const paths = [target];
+  try { paths.push(realpathSync(target)); } catch { /* WSL paths are not host paths. */ }
   return paths.some((path) => path.replace(/\\/g, "/").includes(`/node_modules/${packageName}/`))
     ? packageName : null;
 }
@@ -32,6 +67,7 @@ export function classifyNpmHarnessUpdate(
   packageName: string,
   checkedAt: number,
   installedCompatible = true,
+  managerGuidance = originalManagerGuidance(packageName, false),
 ): HarnessUpdateAssessment {
   const preview = !!installedVersion && /-/.test(installedVersion);
   const base = {
@@ -41,24 +77,29 @@ export function classifyNpmHarnessUpdate(
     channel: preview ? "preview" as const : "stable" as const,
     evidenceSource: `npm dist-tags for ${packageName}`,
     managedExternally: true as const,
-    guidance: "A newer published release has not been compatibility-tested on this Machine. Use the installation's original package or version manager, then restart idle sessions and rediscover.",
+    guidance: `${managerGuidance} Published releases are not automatically known compatible with this Machine.`,
   };
-  if (result.code !== 0 || result.timedOut) return { ...base, status: "check_failed" };
+  const checkFailure = "The release check could not complete. The Machine may be offline, behind a proxy, or rate limited; retry after connectivity returns. " + managerGuidance;
+  if (result.code !== 0 || result.timedOut) return { ...base, status: "check_failed", guidance: checkFailure };
   let tags: Record<string, unknown>;
   try { tags = JSON.parse(result.stdout) as Record<string, unknown>; }
-  catch { return { ...base, status: "check_failed" }; }
+  catch { return { ...base, status: "check_failed", guidance: checkFailure }; }
   const latest = tags[preview && typeof tags.next === "string" ? "next" : "latest"];
-  if (typeof latest !== "string" || !versionTuple(latest)) return { ...base, status: "check_failed" };
+  if (typeof latest !== "string" || !versionTuple(latest)) return { ...base, status: "check_failed", guidance: checkFailure };
   if (!installedVersion || !versionTuple(installedVersion)) {
     return { ...base, status: "version_unknown", latestPublishedVersion: latest };
   }
-  if (preview) return { ...base, status: "preview_channel", latestPublishedVersion: latest };
+  if (preview) return { ...base, status: "preview_channel", latestPublishedVersion: latest,
+    guidance: `This installation is on a preview channel. Verify its release policy with the original manager before changing channels. ${managerGuidance}` };
   const installed = versionTuple(installedVersion)!;
   const published = versionTuple(latest)!;
   const newer = published[0] > installed[0] ||
     (published[0] === installed[0] && published[1] > installed[1]) ||
     (published[0] === installed[0] && published[1] === installed[1] && published[2] > installed[2]);
-  return { ...base, status: newer ? "update_available" : "up_to_date", latestPublishedVersion: latest };
+  return { ...base, status: newer ? "update_available" : "up_to_date", latestPublishedVersion: latest,
+    guidance: newer
+      ? `A newer release is published, but compatibility with this Machine has not been verified. ${managerGuidance}`
+      : managerGuidance };
 }
 
 /** Bounded, non-interactive check. npm handles its configured proxy and registry; failures are
@@ -71,6 +112,17 @@ export async function checkHarnessUpdate(
   installedCompatible: boolean,
 ): Promise<HarnessUpdateAssessment> {
   const checkedAt = Date.now();
+  const packageName = npmPackageForInstallation(harness, binary);
+  if (harnessVersionPinned(harness, process.env.WOLLIPOG_HARNESS_UPDATE_PINNED)) return {
+    status: "managed_externally",
+    installedVersion,
+    latestKnownCompatibleVersion: installedCompatible ? installedVersion : undefined,
+    checkedAt,
+    channel: installedVersion?.includes("-") ? "preview" : installedVersion ? "stable" : "unknown",
+    evidenceSource: "Machine pinned-version policy",
+    managedExternally: true,
+    guidance: `This harness installation is pinned by Machine policy. Keep the selected version until the operator changes that policy. ${originalManagerGuidance(packageName, false)}`,
+  };
   if (process.env.WOLLIPOG_HARNESS_UPDATE_CHECKS === "off") return {
     status: !installedVersion ? "version_unknown" : "managed_externally",
     installedVersion,
@@ -79,9 +131,10 @@ export async function checkHarnessUpdate(
     channel: installedVersion?.includes("-") ? "preview" : installedVersion ? "stable" : "unknown",
     evidenceSource: "Machine update-check policy",
     managedExternally: true,
-    guidance: "Version checks are disabled by this Machine's policy. Use the original installation manager and rediscover after an upgrade.",
+    guidance: `Version checks are disabled by this Machine's policy. ${originalManagerGuidance(packageName, false)}`,
   };
-  const packageName = npmPackageForInstallation(harness, binary);
+  const selfUpdate = harness === "codex" && await codexOffersSelfUpdate(binary, context);
+  const managerGuidance = originalManagerGuidance(packageName, selfUpdate);
   if (!packageName) return {
     status: !installedVersion ? "version_unknown" : installedVersion.includes("-")
       ? "preview_channel" : "managed_externally",
@@ -91,7 +144,7 @@ export async function checkHarnessUpdate(
     channel: installedVersion?.includes("-") ? "preview" : installedVersion ? "stable" : "unknown",
     evidenceSource: "Executable installation provenance",
     managedExternally: true,
-    guidance: "Use the original installation manager to check for upgrades, then rediscover this Machine.",
+    guidance: managerGuidance,
   };
   const args = ["view", packageName, "dist-tags", "--json"];
   let result: ExecResult | null = null;
@@ -127,7 +180,7 @@ export async function checkHarnessUpdate(
     channel: installedVersion?.includes("-") ? "preview" : installedVersion ? "stable" : "unknown",
     evidenceSource: `Installed npm package ${packageName}; exact npm runtime unavailable`,
     managedExternally: true,
-    guidance: "Use this installation's original package or version manager to check and apply upgrades, then rediscover.",
+    guidance: managerGuidance,
   };
-  return classifyNpmHarnessUpdate(installedVersion, result, packageName, checkedAt, installedCompatible);
+  return classifyNpmHarnessUpdate(installedVersion, result, packageName, checkedAt, installedCompatible, managerGuidance);
 }

@@ -155,22 +155,22 @@ export function externalSessionKey(
 
 export interface InstallHint {
   name: string;
-  command: string;
+  guidance: string;
+  command?: string;
 }
 
-/** Copy-pasteable install one-liners for the agent CLIs, matching the host OS. Claude Code uses the
- * official native installer (npm is only a listed alternative — see docs/product-gaps.md #15);
- * Codex has no native installer, so npm it is. */
+/** Installation hints are neutral where no selected installation proves manager ownership. */
 export function agentInstallHints(os: OS): InstallHint[] {
   return [
     {
       name: "Claude Code",
+      guidance: "Install Claude Code with its official installer, then Rediscover.",
       command:
         os === "windows"
           ? "irm https://claude.ai/install.ps1 | iex"
           : "curl -fsSL https://claude.ai/install.sh | bash",
     },
-    { name: "Codex", command: "npm install -g @openai/codex" },
+    { name: "Codex", guidance: "Install Codex using a supported method for this Machine, then Rediscover. Existing installations should be updated through their own manager." },
   ];
 }
 
