@@ -1600,6 +1600,10 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
     }
     metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
     metadata.editors = editors;
+    if (refreshModels && metadata.executionTargets) {
+      await Promise.all([containerTargets.refreshInstallations(), cloudTargets.refreshInstallations()]);
+      metadata.executionTargets = [...containerTargets.definitions(), ...cloudTargets.definitions()];
+    }
     await Promise.all(config.providerAccounts.map(async (account) => {
       const agent = agentForProviderAccount(metadata.agents, account);
       if (!agent || agent.available !== true) {
@@ -1639,6 +1643,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       agents: agentsForControlPlane(),
       providerAccounts: providerAccountsForControlPlane(),
       editors,
+      ...(refreshModels && metadata.executionTargets ? { executionTargets: metadata.executionTargets } : {}),
     };
     sendUp(update);
     // Discovery may have changed the agent list, and harness skill dirs drift out of band: heal

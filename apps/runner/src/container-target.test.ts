@@ -73,6 +73,55 @@ test("digest-pinned templates pass argv-native checks and produce an exact immut
   assert.match(isolation.containerName, /^wollipog-[a-f0-9]{24}$/);
 });
 
+test("container installations stay target-bound, deduplicate aliases, and fail closed after rediscovery", async () => {
+  let missing = false;
+  const configurations: RunnerContainerTarget[] = [
+    { ...template, id: "alpha", agentCommands: { codex: { command: "codex", args: ["app-server"] } },
+      alternateCommands: { codex: [
+        { command: "/opt/codex-alias", args: ["app-server"] },
+        { command: "/opt/codex-preview", args: ["app-server"] },
+      ] } },
+    { ...template, id: "beta", agentCommands: { codex: { command: "codex", args: ["app-server"] } } },
+  ];
+  const registry = new ContainerTargetRegistry("runner", "host", configurations, {
+    resolveRuntime: async () => runtime(),
+    run: async (_file, args) => {
+      if (args.includes("/bin/sh")) {
+        const requested = args.at(-1);
+        if (missing && requested === "/opt/codex-preview") return { code: 1, stdout: "", stderr: "missing" };
+        const path = requested === "/opt/codex-preview" ? "/opt/codex-preview" : "/usr/bin/codex";
+        return { code: 0, stdout: `${path}\n`, stderr: "" };
+      }
+      if (args.includes("--entrypoint") && args.at(-1) === "--version") {
+        return { code: 0, stdout: "codex 1.2.3\n", stderr: "" };
+      }
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  await registry.initialize();
+  const [alpha, beta] = registry.definitions();
+  assert.equal(alpha!.harnessInstallations?.length, 2, "the alias is the same effective launch");
+  assert.equal(beta!.harnessInstallations?.length, 1);
+  const selected = alpha!.harnessInstallations!.find((item) => item.path === "/opt/codex-preview")!;
+  assert.notEqual(alpha!.harnessInstallations![0]!.id, beta!.harnessInstallations![0]!.id,
+    "same executable name in distinct targets has a distinct identity");
+  const ref = { id: alpha!.id, runnerId: alpha!.runnerId, kind: alpha!.kind,
+    adapter: alpha!.adapter, workspaceStrategy: alpha!.workspaceStrategy,
+    boundaries: alpha!.boundaries, environment: alpha!.environment,
+    harnessInstallationId: selected.id };
+  assert.equal(registry.validationError(ref, true, { kind: "native" }, "codex"), null);
+  assert.equal(registry.isolation(ref, "codex", "host-codex", [], "session").agentCommand, "/opt/codex-preview");
+  const primary = alpha!.harnessInstallations!.find((item) => item.path === "/usr/bin/codex")!;
+  assert.equal(registry.isolation({ ...ref, harnessInstallationId: primary.id }, "codex", "host-codex", [], "session")
+    .agentCommand, "/usr/bin/codex", "the selected alias launches its resolved executable, not PATH spelling");
+  assert.match(registry.validationError({ ...ref, id: beta!.id, environment: beta!.environment }, true,
+    { kind: "native" }, "codex")!, /selected container harness installation is unavailable/);
+  missing = true;
+  await registry.refreshInstallations();
+  assert.equal(registry.definitions()[0]!.harnessInstallations?.length, 1);
+  assert.match(registry.validationError(ref, true, { kind: "native" }, "codex")!, /unavailable/);
+});
+
 test("container target display names stay within the control-plane registration bound", async () => {
   const registry = new ContainerTargetRegistry(
     "runner",

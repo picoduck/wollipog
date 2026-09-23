@@ -240,6 +240,19 @@ const client = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { selection };
   },
+  selectTargetHarnessInstallation: async (_runnerId: string, targetId: string, agentId: string, installationId: string) => {
+    if (!runner) throw new Error("runner not found");
+    const target = runner.executionTargets?.find((candidate) => candidate.id === targetId);
+    const installation = target?.harnessInstallations?.find((candidate) =>
+      candidate.agentId === agentId && candidate.id === installationId && candidate.available);
+    if (!target || !installation) throw new Error("target installation not found");
+    const selection = { targetId, targetName: target.name, agentId, installationId,
+      path: installation.path, version: installation.version, available: true };
+    runner.targetHarnessSelections = [...(runner.targetHarnessSelections ?? []).filter((item) =>
+      !(item.targetId === targetId && item.agentId === agentId)), selection];
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { selection };
+  },
   updateMachineCapacity: async (_runnerId: string, body: { configuredUnits: number; expectedRevision: number }) => {
     if (!runner?.capacity) throw new Error("runner not found");
     if (body.expectedRevision !== runner.capacity.revision) throw new Error("Runner Capacity changed in another client");
@@ -355,7 +368,8 @@ declare global {
     __WOLLIPOG_MACHINE_E2E__: {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
       lastAddBoxRequest(): AddBoxRequest | null;
-      setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" | "multiple-installations" | "harness-states"): void;
+      setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
+        "multiple-installations" | "harness-states" | "target-installations"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
     };
   }
@@ -378,6 +392,27 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
         context: { kind: "native" },
         source: "config",
       }];
+    } else if (scenario === "target-installations") {
+      runner.protocolVersion = PROTOCOL_VERSION;
+      runner.agents = [{ id: "codex", name: "Codex", command: "codex", args: [], env: {},
+        driver: "codex-app-server", context: { kind: "native" }, available: true }];
+      const image = `example/agent@sha256:${"a".repeat(64)}`;
+      const target = (id: string, name: string, installationId: string, path: string) => ({
+        id: `runner:${runner!.runnerId}:container:${id}`, runnerId: runner!.runnerId, name,
+        kind: "container" as const, adapter: "container" as const, workspaceStrategy: "worktree" as const,
+        boundaries: { filesystem: "container" as const, network: "deny" as const,
+          secrets: "none" as const, billing: "none" as const },
+        environment: { id, revision: 1, image, setupCheckDigest: "b".repeat(64) },
+        compatibleAgentIds: ["codex"], available: true,
+        harnessInstallations: [{ agentId: "codex", id: installationId, path, version: "1.2.3",
+          provenance: "container-image" as const, authentication: "unknown" as const,
+          capability: "unknown" as const, available: true }],
+      });
+      runner.executionTargets = [target("alpha", "Alpha Image", "a".repeat(24), "/usr/bin/codex"),
+        target("beta", "Beta Image", "b".repeat(24), "/usr/bin/codex")];
+      runner.targetHarnessSelections = [{ targetId: runner.executionTargets[0]!.id, targetName: "Alpha Image",
+        agentId: "codex", installationId: "a".repeat(24), path: "/usr/bin/codex",
+        version: "1.2.3", available: true }];
     } else if (scenario === "multiple-installations") {
       runner.protocolVersion = PROTOCOL_VERSION;
       runner.agents = [

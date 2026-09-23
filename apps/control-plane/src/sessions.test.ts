@@ -7281,6 +7281,38 @@ test("createSession selects and persists an exact compatible container environme
   assert.match(hostContext.error ?? "", /do not permit ACP/);
 });
 
+test("createSession binds a saved target installation and refuses a missing rediscovery", () => {
+  const { db, hub, svc } = makeHarness();
+  const installationId = "a".repeat(24);
+  const container = {
+    id: `runner:${RUNNER_ID}:container:chosen`, runnerId: RUNNER_ID, name: "host · Chosen",
+    kind: "container" as const, workspaceStrategy: "worktree" as const, adapter: "container" as const,
+    boundaries: { filesystem: "container" as const, network: "deny" as const,
+      secrets: "none" as const, billing: "none" as const },
+    environment: { id: "chosen", revision: 1,
+      image: `example/agent@sha256:${"a".repeat(64)}`, setupCheckDigest: "b".repeat(64) },
+    compatibleAgentIds: [ACP_AGENT_ID], available: true,
+    harnessInstallations: [{ agentId: ACP_AGENT_ID, id: installationId, path: "/opt/agent",
+      version: "1.2.3", provenance: "container-image" as const, authentication: "unknown" as const,
+      capability: "unknown" as const, available: true }],
+  };
+  db.registerRunner({ ...runnerMeta(), agents: runnerMeta().agents.map((agent) =>
+    agent.id === ACP_AGENT_ID ? { ...agent, available: false } : agent),
+    executionTargets: [container] }, Date.now(), PROTOCOL_VERSION);
+  assert.equal(db.selectTargetHarnessInstallation(RUNNER_ID, container.id, ACP_AGENT_ID, installationId)?.available, true);
+  const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+    agentId: ACP_AGENT_ID, executionTargetId: container.id, useWorktree: true });
+  assert.ok(created.ok, created.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.executionTarget?.harnessInstallationId, installationId);
+  assert.equal(db.getSession(created.data!.id)?.executionTarget?.harnessInstallationId, installationId);
+  db.updateRunnerAgents(RUNNER_ID, runnerMeta().agents, Date.now(), undefined, undefined,
+    [{ ...container, harnessInstallations: [] }]);
+  const missing = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+    agentId: ACP_AGENT_ID, executionTargetId: container.id, useWorktree: true });
+  assert.equal(missing.ok, false);
+  assert.match(missing.error ?? "", /Selected target harness installation is unavailable/);
+});
+
 const hostTargetId = (strategy: "in_place" | "worktree"): string =>
   `runner:${encodeURIComponent(RUNNER_ID)}:host:${strategy}`;
 

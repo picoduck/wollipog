@@ -5,10 +5,35 @@ import type {
   ExecutionHandoffReceipt,
   ExecutionTargetDefinition,
   ExecutionTargetRef,
+  TargetHarnessInstallation,
   RunnerView,
 } from "@wollipog/protocol";
 
 export type HostExecutionTargetSource = Pick<RunnerView, "runnerId" | "hostname" | "status" | "runtime">;
+
+function validateTargetHarnessInstallations(
+  value: ExecutionTargetDefinition["harnessInstallations"],
+  compatibleAgentIds: string[],
+  provenance: TargetHarnessInstallation["provenance"],
+): TargetHarnessInstallation[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value) || value.length > 288) throw new Error("runner advertised too many target harness installations");
+  const ids = new Set<string>();
+  return value.map((item) => {
+    if (!item || !compatibleAgentIds.includes(item.agentId) || !/^[a-f0-9]{24}$/.test(item.id) || ids.has(item.id) ||
+        !/^\/[A-Za-z0-9_./+-]{1,255}$/.test(item.path) || item.path.split("/").includes("..") ||
+        item.provenance !== provenance ||
+        (item.version !== undefined && !/^\d+\.\d+\.\d+[\w.-]*$/.test(item.version)) ||
+        !["authenticated", "unauthenticated", "unknown"].includes(item.authentication) ||
+        !["verified", "unknown"].includes(item.capability) || typeof item.available !== "boolean") {
+      throw new Error("runner advertised an invalid target harness installation");
+    }
+    ids.add(item.id);
+    return { agentId: item.agentId, id: item.id, path: item.path, provenance,
+      authentication: item.authentication, capability: item.capability, available: item.available,
+      ...(item.version ? { version: item.version } : {}) };
+  });
+}
 
 function targetId(runnerId: string, workspace: "in_place" | "worktree"): string {
   return `runner:${encodeURIComponent(runnerId)}:host:${workspace}`;
@@ -56,6 +81,7 @@ export function validateRunnerContainerTargets(
       throw new Error("runner advertised invalid container agent compatibility");
     }
     const available = online && target.available === true;
+    const harnessInstallations = validateTargetHarnessInstallations(target.harnessInstallations, compatibleAgentIds, "container-image");
     const unavailableReason = online
       ? (available ? undefined : (target.unavailableReason?.trim().slice(0, 300) || "container target is unavailable"))
       : "runner is offline";
@@ -79,6 +105,7 @@ export function validateRunnerContainerTargets(
         setupCheckDigest: template.setupCheckDigest,
       },
       compatibleAgentIds: [...compatibleAgentIds].sort((left, right) => left < right ? -1 : left > right ? 1 : 0),
+      ...(harnessInstallations ? { harnessInstallations: harnessInstallations.map((item) => ({ ...item, available: available && item.available })) } : {}),
       available,
       ...(unavailableReason ? { unavailableReason } : {}),
     };
@@ -133,6 +160,7 @@ export function validateRunnerCloudTargets(
       throw new Error("runner advertised an invalid cloud cost or admission policy");
     }
     const available = online && target.available === true;
+    const harnessInstallations = validateTargetHarnessInstallations(target.harnessInstallations, compatibleAgentIds, "cloud-adapter");
     const unavailableReason = online
       ? (available ? undefined : (target.unavailableReason?.trim().slice(0, 300) || "cloud target is unavailable"))
       : "runner is offline";
@@ -155,6 +183,7 @@ export function validateRunnerCloudTargets(
         admission: { maxConcurrentSessions: admission!.maxConcurrentSessions, queue: "fifo" },
       },
       compatibleAgentIds: [...compatibleAgentIds].sort((left, right) => left < right ? -1 : left > right ? 1 : 0),
+      ...(harnessInstallations ? { harnessInstallations: harnessInstallations.map((item) => ({ ...item, available: available && item.available })) } : {}),
       available,
       ...(unavailableReason ? { unavailableReason } : {}),
     };

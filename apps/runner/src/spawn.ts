@@ -231,6 +231,8 @@ export interface CloudSpawnIsolation {
   hostAgentArgs: string[];
   agentCommand: string;
   agentArgs: string[];
+  /** Adapter v2 revalidates this identity before connecting the selected executable. */
+  harnessInstallationId?: string;
   /** Trust-gated repository setup names the proxy must forward to the remote command. */
   sessionEnvironmentKeys?: string[];
 }
@@ -301,6 +303,7 @@ export function buildCloudArgs(
     "--target", isolation.targetId,
     "--handoff", isolation.handoffId,
     "--session", isolation.sessionId,
+    ...(agentLaunch && isolation.harnessInstallationId ? ["--installation", isolation.harnessInstallationId] : []),
     ...(opts.cloudEnvironmentKeys ?? isolation.sessionEnvironmentKeys ?? []).flatMap((key) => ["--env", key]),
     "--",
     command,

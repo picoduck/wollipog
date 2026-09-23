@@ -40,6 +40,18 @@ The runner accepts up to 16 `containerTargets`. Images must already exist locall
 driver-added dynamic args are appended at launch. Host executable paths and host-only configured args
 do not cross the container boundary. Setup checks are ordered argv arrays, not shell fragments.
 
+For protocol v177 and newer, `alternateCommands` may map an existing agent id to up to eight
+additional absolute executable paths with optional base args. The primary `agentCommands` entry is
+also a candidate. On startup and explicit Rediscover, the runner resolves each entry inside the
+digest-pinned image using a bounded, network-free, read-only container, then invokes the resolved
+executable with `--version` through the same boundary. Entries with the same resolved executable
+and base args are deduplicated within that target. The target id is part of each opaque installation
+id, so matching paths in two images cannot substitute for each other. A candidate that cannot be
+resolved or version-probed is not selectable; ordinary legacy target launches keep their configured
+primary command. Authentication and detailed capabilities are reported as unknown because the
+secret-free probe cannot prove them. Machine settings retain an explicit selection if rediscovery
+loses it; new launches fail until another candidate is selected.
+
 `network: "deny"` becomes runtime network `none`. `network: "bridge"` uses the runtime's ordinary
 bridge and is advertised as a policy boundary, not as filtered egress. Setup checks always use no
 network, including for a bridge-enabled target.

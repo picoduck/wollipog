@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import type { RunnerCloudTarget } from "./config.js";
 import { CloudTargetRegistry, cloudTargetId, type CloudTargetDeps } from "./cloud-target.js";
+import { buildCloudArgs } from "./spawn.js";
 
 const image = `registry.example/cloud/agent@sha256:${"a".repeat(64)}`;
 const target: RunnerCloudTarget = {
@@ -113,6 +114,77 @@ test("cloud registry advertises exact environment, boundaries, policy, and deter
   assert.deepEqual(launch.isolation.agentArgs, ["app-server"]);
   await registry.cancel(ref, launch.adapterHandoffKey);
   assert.equal(adapterCalls.filter((args) => args.includes("cancel")).length, 1);
+});
+
+test("only an adapter that proves exact cloud installations can expose a selectable launch", async () => {
+  const configured: RunnerCloudTarget = { ...target, alternateCommands: {
+    codex: [{ command: "/opt/codex-preview", args: ["app-server"] },
+      { command: "/opt/codex-alias", args: ["app-server"] }],
+  } };
+  let probeAvailable = true;
+  const base = fixture();
+  const adapterCalls: string[][] = [];
+  const second = { ...configured, id: "metered-tools-second", name: configured.name };
+  const registry = new CloudTargetRegistry("runner", "host", [configured, second], {
+    ...base.deps,
+    runAdapter: async (file, args, opts) => {
+      adapterCalls.push(args);
+      const requestedTarget = args[args.indexOf("--target") + 1]!;
+      if (args.includes("inspect-installations")) {
+        if (!probeAvailable) return { code: 1, stdout: "", stderr: "v2 unsupported" };
+        return { code: 0, stderr: "", stdout: JSON.stringify({
+          protocolVersion: 2, targetId: requestedTarget, revision: configured.revision,
+          image: configured.image, setupCheckDigest: configured.setupCheckDigest,
+          candidates: [
+            { index: 0, path: "/usr/bin/codex", identity: `sha256:${"a".repeat(64)}`, version: "1.2.3",
+              authentication: "unknown", capability: "verified", available: true },
+            { index: 1, path: "/opt/codex-preview", identity: `sha256:${"b".repeat(64)}`, version: "2.0.0",
+              authentication: "authenticated", capability: "verified", available: true },
+            { index: 2, path: "/opt/codex-alias", identity: `sha256:${"a".repeat(64)}`, version: "1.2.3",
+              authentication: "unknown", capability: "verified", available: true },
+          ],
+        }) };
+      }
+      if (args.includes("inspect")) return { code: 0, stderr: "", stdout: JSON.stringify({
+        protocolVersion: 1, targetId: requestedTarget, revision: configured.revision,
+        image: configured.image, setupCheckDigest: configured.setupCheckDigest, available: true,
+      }) };
+      return base.deps.runAdapter(file, args, opts);
+    },
+  });
+  await registry.initialize();
+  const definition = registry.definitions()[0]!;
+  assert.equal(definition.harnessInstallations?.length, 2, "the alias has the same remote executable identity and arguments");
+  assert.notEqual(definition.harnessInstallations![0]!.id, registry.definitions()[1]!.harnessInstallations![0]!.id,
+    "same executable and display name in distinct cloud targets must never share a selection");
+  const chosen = definition.harnessInstallations!.find((item) => item.path === "/opt/codex-preview")!;
+  const ref = { id: definition.id, runnerId: definition.runnerId, kind: definition.kind,
+    workspaceStrategy: definition.workspaceStrategy, adapter: definition.adapter,
+    boundaries: definition.boundaries, environment: definition.environment, policy: definition.policy,
+    harnessInstallationId: chosen.id };
+  assert.equal(registry.validationError(ref, true, { kind: "native" }, "codex", { costBudgetUsd: 5 }), null);
+  assert.equal(registry.isolation(ref, "codex", "host", [], "session", "handoff").agentCommand,
+    "/opt/codex-preview");
+  const primary = definition.harnessInstallations!.find((item) => item.path === "/usr/bin/codex")!;
+  assert.equal(registry.isolation({ ...ref, harnessInstallationId: primary.id }, "codex", "host", [],
+    "session", "handoff").agentCommand, "/usr/bin/codex");
+  assert.match(registry.validationError({ ...ref, id: registry.definitions()[1]!.id,
+    environment: registry.definitions()[1]!.environment }, true, { kind: "native" }, "codex",
+  { costBudgetUsd: 5 })!, /selected cloud harness installation is unavailable/);
+  const launch = await registry.prepareLaunch({ target: ref, agentId: "codex", hostAgentCommand: "host",
+    hostAgentArgs: [], sessionId: "session", sourcePath: "/tmp/source", artifacts: [], budgetUsd: 5 });
+  const prepare = adapterCalls.find((args) => args.includes("prepare"))!;
+  const manifest = JSON.parse(Buffer.from(prepare[prepare.indexOf("--manifest") + 1]!, "base64url").toString("utf8"));
+  assert.equal(manifest.target.harnessInstallationId, chosen.id);
+  assert.equal(manifest.target.installationIdentity, `sha256:${"b".repeat(64)}`);
+  assert.equal(manifest.target.agentCommand, "/opt/codex-preview");
+  assert.deepEqual(buildCloudArgs({ command: "host", args: [], cloudAgentLaunch: true }, launch.isolation).slice(-5),
+    ["--installation", chosen.id, "--", "/opt/codex-preview", "app-server"]);
+  probeAvailable = false;
+  await registry.refreshInstallations();
+  assert.equal(registry.definitions()[0]!.harnessInstallations, undefined,
+    "v1 target readiness must not advertise exact-installation selection");
+  assert.match(registry.validationError(ref, true, { kind: "native" }, "codex", { costBudgetUsd: 5 })!, /unavailable/);
 });
 
 test("cloud adapter boundary scrubs prefix-only current and legacy environment names", async () => {

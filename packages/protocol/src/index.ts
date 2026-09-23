@@ -533,7 +533,11 @@
 // 175: runners advertise independently probed harness installations with stable identities.
 //      The control plane can pin one installation per Machine and execution context, and rejects
 //      launch requests that do not resolve to that exact candidate while a pin exists.
-export const PROTOCOL_VERSION = 175;
+// 176: saved harness choices synchronize to background consumers (#1616).
+// 177: runner-probed container and opt-in cloud-adapter harness installations are target-bound.
+//      Exact installation ids travel with the immutable execution target and are enforced by the
+//      runner; older peers cannot persist or launch a target-specific choice.
+export const PROTOCOL_VERSION = 177;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -659,6 +663,7 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  targetHarnessInstallations: 177,
   harnessInstallations: 175,
   automaticProviderAccountSwitch: 173,
   sessionProviderAccountSwitch: 171,
@@ -881,6 +886,8 @@ export interface ExecutionTargetDefinition {
   policy?: ExecutionTargetPolicy;
   /** Exact runner agent ids whose in-image commands were checked/configured for this target. */
   compatibleAgentIds?: string[];
+  /** Probe results from this placement. Absent means it cannot prove an exact harness launch. */
+  harnessInstallations?: TargetHarnessInstallation[];
   available: boolean;
   unavailableReason?: string;
 }
@@ -889,7 +896,20 @@ export interface ExecutionTargetDefinition {
 export type ExecutionTargetRef = Pick<
   ExecutionTargetDefinition,
   "id" | "runnerId" | "kind" | "workspaceStrategy" | "adapter" | "boundaries" | "environment" | "policy"
->;
+> & { harnessInstallationId?: string };
+
+/** One runner-probed launch in a container image or cloud adapter target. */
+export interface TargetHarnessInstallation {
+  agentId: string;
+  id: string;
+  /** Safe display location; never accepted as a launch command from a client. */
+  path: string;
+  version?: string;
+  provenance: "container-image" | "cloud-adapter";
+  authentication: "authenticated" | "unauthenticated" | "unknown";
+  capability: "verified" | "unknown";
+  available: boolean;
+}
 
 /** Immutable workflow-artifact metadata carried into a cloud handoff. Artifact bytes remain in
  * the existing authorized artifact store; adapter access is an operator-owned integration. */
@@ -2449,6 +2469,17 @@ export interface HarnessInstallationSelection {
   agentId: string | null;
 }
 
+/** A target-specific preference; retained when its installation or target disappears. */
+export interface TargetHarnessInstallationSelection {
+  targetId: string;
+  targetName: string;
+  agentId: string;
+  installationId: string;
+  path: string;
+  version?: string;
+  available: boolean;
+}
+
 /** Denormalised runner record as the UI consumes it (REST + WS). */
 export interface RunnerView {
   runnerId: string;
@@ -2462,6 +2493,7 @@ export interface RunnerView {
   status: RunnerStatus;
   agents: AgentDefinition[];
   harnessSelections?: HarnessInstallationSelection[];
+  targetHarnessSelections?: TargetHarnessInstallationSelection[];
   providerAccounts?: ProviderAccountDefinition[];
   providerLogins?: ProviderLoginView[];
   workspaces: WorkspaceInfo[];
@@ -6704,6 +6736,8 @@ export interface AgentsUpdatedMessage {
   providerAccounts?: ProviderAccountDefinition[];
   /** Editors found by the same discovery pass (absent on pre-v22 runners). */
   editors?: EditorInfo[];
+  /** Protocol v177: target-local harness probes refreshed without replacing the target template. */
+  executionTargets?: ExecutionTargetDefinition[];
 }
 
 /** Authoritative replacement of one runner's active/recent provider-login cards. */

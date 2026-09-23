@@ -3301,7 +3301,10 @@ export class SessionsService {
         (delivery?.sessionId !== undefined && snapshotSpec.sessionId !== delivery.sessionId))) {
       return fail("pre-staged session command snapshot conflicts with its resources", 409);
     }
-    const launch = snapshotSpec ? {
+    const targetBoundLaunch = !snapshotSpec && Boolean(req.executionTargetId &&
+      this.db.getRunner(req.runnerId)?.executionTargets?.some((target) =>
+        target.id === req.executionTargetId && target.adapter !== "host"));
+    let launch = snapshotSpec ? {
       command: snapshotSpec.command,
       args: snapshotSpec.args,
       env: snapshotSpec.env,
@@ -3309,7 +3312,7 @@ export class SessionsService {
       context: snapshotSpec.context ?? { kind: "native" as const },
       version: snapshotSpec.agentVersion,
       capabilities: snapshotSpec.capabilities,
-    } : this.db.getAgentLaunch(req.runnerId, req.agentId);
+    } : this.db.getAgentLaunch(req.runnerId, req.agentId, targetBoundLaunch);
     if (!launch) return fail(`unknown agent '${req.agentId}' on runner '${req.runnerId}'`, 404);
     const launchHarness = agentHarnessIdentityFor({
       id: req.agentId,
@@ -3354,7 +3357,28 @@ export class SessionsService {
       },
     );
     if ("error" in resolvedTarget) return fail(resolvedTarget.error, 400);
-    const executionTarget = executionTargetRef(resolvedTarget.target);
+    const targetSelection = runner.targetHarnessSelections?.find((selection) =>
+      selection.targetId === resolvedTarget.target.id && selection.agentId === req.agentId);
+    const selectedInstallationId = snapshotSpec?.executionTarget?.harnessInstallationId ?? targetSelection?.installationId;
+    if (selectedInstallationId) {
+      if (!runnerSupportsProtocol(runner.protocolVersion, "targetHarnessInstallations")) {
+        return fail("Selected target harness installation requires a newer runner", 409);
+      }
+      const candidate = resolvedTarget.target.harnessInstallations?.find((item) =>
+        item.agentId === req.agentId && item.id === selectedInstallationId && item.available);
+      if (!candidate || (targetSelection && !targetSelection.available && !snapshotSpec)) {
+        return fail("Selected target harness installation is unavailable; choose another installation in Machine settings", 409);
+      }
+    }
+    const executionTarget = {
+      ...executionTargetRef(resolvedTarget.target),
+      ...(selectedInstallationId ? { harnessInstallationId: selectedInstallationId } : {}),
+    };
+    if (executionTarget.adapter !== "host") {
+      const targetCandidate = resolvedTarget.target.harnessInstallations?.find((item) =>
+        item.agentId === req.agentId && item.id === selectedInstallationId);
+      launch = { ...launch, version: targetCandidate?.version, capabilities: undefined };
+    }
     const useWorktree = resolvedTarget.useWorktree;
     if (req.providerAccountId !== undefined &&
         (typeof req.providerAccountId !== "string" ||

@@ -45,6 +45,12 @@ adapter. Increment the revision whenever the remote template, setup procedure, o
 changes. `agentCommands` replaces the runner host command only for the actual provider launch;
 driver-added dynamic arguments are appended. Helper processes keep their own basename and arguments.
 
+Protocol v177 can also expose target-specific harness choices. `alternateCommands` maps an existing
+agent id to up to eight additional absolute paths and base arguments. A cloud adapter must implement
+the opt-in `inspect-installations` protocol v2 operation before any choice is advertised. Wollipog
+ships no adapter that implements this operation; existing v1 targets remain launchable with their
+configured primary command and show no selectable cloud installation.
+
 Adapter credentials must be supplied through `adapterEnv` references. The runner resolves each
 `fromEnv` value only in its native process immediately before adapter use. Never place credentials in
 `adapterArgs`, `agentCommands`, image names, or policy fields. The control plane receives neither
@@ -61,6 +67,26 @@ prepare --protocol 1 --target ID --source ABSOLUTE_PATH --idempotency-key SHA256
 connect --protocol 1 --target ID --handoff PRIVATE_ID --session SESSION_ID [--env NAME]... -- COMMAND [ARGS...]
 cancel  --protocol 1 --target ID --handoff PRIVATE_ID
 ```
+
+For exact installation selection, the runner additionally calls:
+
+```text
+inspect-installations --protocol 2 --target ID --revision N --image DIGEST --setup-check-digest SHA256 --candidates BASE64URL_JSON
+```
+
+`candidates` is an ordered array of runner-configured `{agentId,command,args}` objects. The adapter
+must probe each actual executable in the attested remote environment and return the exact target,
+revision, image, setup digest, protocol version 2, and a bounded `candidates` array. Each returned
+candidate names its zero-based configured `index`, safe absolute resolved `path`, executable content
+`identity` in `sha256:<64 lowercase hex>` form, semantic `version`, `available` boolean, and
+`authentication` and `capability` status.
+The adapter may report `unknown` when it cannot verify authentication or capabilities; it must not
+copy host observations. Alias paths with the same identity and arguments are deduplicated. The
+runner mints the opaque installation id and never accepts a client-supplied path. A v2 selection is
+included with the probed path and identity in the `prepare` manifest and passed to `connect` as
+`--installation ID`; the adapter must revalidate the identity against that executable before
+launching. If the v2 operation fails or is
+malformed, no choices are advertised and a previously saved choice becomes unavailable.
 
 `inspect` must exit zero and return one bounded JSON object containing the exact protocol version,
 target id, revision, image, setup-check digest, and `available: true`. Any mismatch leaves the target

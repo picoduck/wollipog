@@ -9,6 +9,7 @@ import type {
   ExecutionHandoffReceipt,
   ExecutionTargetDefinition,
   ExecutionTargetRef,
+  TargetHarnessInstallation,
   SessionConfig,
 } from "@wollipog/protocol";
 import type { RunnerCloudTarget } from "./config.js";
@@ -34,6 +35,7 @@ interface PreparedCloudTarget {
   definition: ExecutionTargetDefinition;
   adapter?: ResolvedBinary;
   adapterEnv?: Record<string, string>;
+  installations?: Map<string, { agentId: string; command: string; args: string[]; identity: string; info: TargetHarnessInstallation }>;
 }
 
 export interface PreparedCloudLaunch {
@@ -278,19 +280,90 @@ export class CloudTargetRegistry {
       const ready = inspected.code === 0 && response?.protocolVersion === ADAPTER_PROTOCOL_VERSION &&
         response.targetId === config.id && response.revision === config.revision &&
         response.image === config.image && response.setupCheckDigest === config.setupCheckDigest && response.available === true;
+      const installations = ready
+        ? await this.discoverInstallations(config, adapter, adapterEnv, id)
+        : new Map<string, { agentId: string; command: string; args: string[]; identity: string; info: TargetHarnessInstallation }>();
       this.prepared.set(id, {
         config,
         adapter,
         adapterEnv,
+        installations,
         definition: ready
-          ? { ...base, available: true }
+          ? { ...base, available: true,
+              ...(installations.size ? { harnessInstallations: [...installations.values()].map((item) => item.info) } : {}) }
           : { ...base, unavailableReason: unavailableReason(inspected.stderr || "cloud adapter readiness response did not match the target") },
       });
     }
   }
 
+  /** Adapter v2 is opt-in. A v1 adapter remains launchable, but cannot claim exact installation
+   * selection: its inspect response proves only target readiness, not an executable identity. */
+  private async discoverInstallations(
+    config: RunnerCloudTarget, adapter: ResolvedBinary, env: Record<string, string>, targetId: string,
+  ): Promise<Map<string, { agentId: string; command: string; args: string[]; identity: string; info: TargetHarnessInstallation }>> {
+    if (!Object.values(config.alternateCommands ?? {}).some((choices) => choices.length > 0)) return new Map();
+    const configured = Object.entries(config.agentCommands).flatMap(([agentId, primary]) => [
+      { agentId, command: primary.command, args: primary.args ?? [] },
+      ...(config.alternateCommands?.[agentId] ?? []).map((choice) => ({
+        agentId, command: choice.command, args: choice.args ?? [],
+      })),
+    ]);
+    const result = await this.deps.runAdapter(adapter.launch.command, [
+      ...adapter.launch.args, ...(config.adapterArgs ?? []), "inspect-installations",
+      "--protocol", "2", "--target", config.id, "--revision", String(config.revision),
+      "--image", config.image, "--setup-check-digest", config.setupCheckDigest,
+      "--candidates", Buffer.from(JSON.stringify(configured)).toString("base64url"),
+    ], { timeoutMs: 30_000, env, maxBuffer: 64 * 1024 });
+    const response = parseJsonObject(result.stdout);
+    const output = new Map<string, { agentId: string; command: string; args: string[]; identity: string; info: TargetHarnessInstallation }>();
+    if (result.code !== 0 || response?.protocolVersion !== 2 || response.targetId !== config.id ||
+        response.revision !== config.revision || response.image !== config.image ||
+        response.setupCheckDigest !== config.setupCheckDigest || !Array.isArray(response.candidates) ||
+        response.candidates.length > configured.length) return output;
+    const seen = new Set<string>();
+    for (const raw of response.candidates) {
+      if (!raw || typeof raw !== "object" || !Number.isInteger(raw.index) ||
+          raw.index < 0 || raw.index >= configured.length || seen.has(String(raw.index)) ||
+          typeof raw.path !== "string" || !/^\/[A-Za-z0-9_./+-]{1,255}$/.test(raw.path) ||
+          raw.path.split("/").includes("..") || typeof raw.identity !== "string" ||
+          !/^sha256:[a-f0-9]{64}$/.test(raw.identity) ||
+          typeof raw.version !== "string" || !/^\d+\.\d+\.\d+[\w.-]*$/.test(raw.version) ||
+          !["authenticated", "unauthenticated", "unknown"].includes(raw.authentication) ||
+          !["verified", "unknown"].includes(raw.capability) || typeof raw.available !== "boolean") {
+        return new Map();
+      }
+      seen.add(String(raw.index));
+      const candidate = configured[raw.index]!;
+      const identity = JSON.stringify([candidate.agentId, raw.identity, candidate.args]);
+      const id = sha256(JSON.stringify([
+        targetId, config.revision, config.image, config.setupCheckDigest, identity,
+      ])).slice(0, 24);
+      if (output.has(id)) continue;
+      const info: TargetHarnessInstallation = {
+        agentId: candidate.agentId, id, path: raw.path, version: raw.version,
+        provenance: "cloud-adapter", authentication: raw.authentication,
+        capability: raw.capability, available: raw.available,
+      };
+      output.set(id, { ...candidate, command: raw.path, identity: raw.identity, info });
+    }
+    return output;
+  }
+
   definitions(): ExecutionTargetDefinition[] {
     return [...this.prepared.values()].map((item) => item.definition);
+  }
+
+  async refreshInstallations(): Promise<void> {
+    for (const [id, item] of this.prepared) {
+      if (!item.adapter || !item.adapterEnv || !item.definition.available) continue;
+      const installations = await this.discoverInstallations(item.config, item.adapter, item.adapterEnv, id);
+      item.installations = installations;
+      item.definition = {
+        ...item.definition,
+        ...(installations.size ? { harnessInstallations: [...installations.values()].map((entry) => entry.info) } :
+          { harnessInstallations: undefined }),
+      };
+    }
   }
 
   validationError(
@@ -306,6 +379,12 @@ export class CloudTargetRegistry {
     if (!useWorktree || target.workspaceStrategy !== "snapshot") return "cloud targets require an isolated source worktree";
     if (context.kind !== "native") return "cloud targets require a native gateway runner context";
     if (!prepared.config.agentCommands[agentId]) return `cloud target does not configure agent '${agentId}'`;
+    if (target.harnessInstallationId) {
+      const chosen = prepared.installations?.get(target.harnessInstallationId);
+      if (!chosen || chosen.agentId !== agentId || !chosen.info.available) {
+        return "selected cloud harness installation is unavailable";
+      }
+    }
     if (!prepared.definition.available || !prepared.adapter || !prepared.adapterEnv) {
       return prepared.definition.unavailableReason ?? "cloud target is unavailable";
     }
@@ -337,7 +416,11 @@ export class CloudTargetRegistry {
     handoffId: string,
   ): CloudSpawnIsolation {
     const prepared = this.prepared.get(target.id);
-    const agent = prepared?.config.agentCommands[agentId];
+    const selected = target.harnessInstallationId ? prepared?.installations?.get(target.harnessInstallationId) : undefined;
+    if (target.harnessInstallationId && (!selected || selected.agentId !== agentId || !selected.info.available)) {
+      throw new Error("selected cloud harness installation is unavailable");
+    }
+    const agent = selected ?? prepared?.config.agentCommands[agentId];
     if (!prepared?.adapter || !prepared.adapterEnv || !prepared.definition.available || !agent) {
       throw new Error("cloud target is unavailable for this agent");
     }
@@ -354,6 +437,7 @@ export class CloudTargetRegistry {
       hostAgentArgs: [...hostAgentArgs],
       agentCommand: agent.command,
       agentArgs: [...(agent.args ?? [])],
+      ...(target.harnessInstallationId ? { harnessInstallationId: target.harnessInstallationId } : {}),
     };
   }
 
@@ -388,7 +472,12 @@ export class CloudTargetRegistry {
   }): Promise<PreparedCloudLaunch> {
     const prepared = this.prepared.get(input.target.id);
     if (!prepared?.adapter || !prepared.adapterEnv || !prepared.definition.available) throw new Error("cloud target is unavailable");
-    const agent = prepared.config.agentCommands[input.agentId];
+    const selected = input.target.harnessInstallationId
+      ? prepared.installations?.get(input.target.harnessInstallationId) : undefined;
+    if (input.target.harnessInstallationId && (!selected || selected.agentId !== input.agentId || !selected.info.available)) {
+      throw new Error("selected cloud harness installation is unavailable");
+    }
+    const agent = selected ?? prepared.config.agentCommands[input.agentId];
     if (!agent) throw new Error(`cloud target does not configure agent '${input.agentId}'`);
     const artifacts = validateArtifacts(input.artifacts);
     const git = await gitProvenance(input.sourcePath, this.deps);
@@ -401,6 +490,10 @@ export class CloudTargetRegistry {
         environment: input.target.environment,
         policy: input.target.policy,
         boundaries: input.target.boundaries,
+        ...(input.target.harnessInstallationId ? { harnessInstallationId: input.target.harnessInstallationId } : {}),
+        ...(selected ? { installationIdentity: selected.identity } : {}),
+        agentCommand: agent.command,
+        agentArgs: agent.args ?? [],
       },
       git,
       artifacts,
