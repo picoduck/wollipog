@@ -918,8 +918,10 @@ export class SessionManager {
   private readonly preLaunchQueues = new Map<string, QueuedPrompt[]>();
   private readonly recoveryLaunching = new Set<string>();
   private readonly orphanRecoveryLaunching = new Set<string>();
+  private readonly orphanRecoveryWakeAfterRepair = new Set<string>();
   private readonly orphanRecoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly backgroundContinuationLaunching = new Set<string>();
+  private readonly backgroundContinuationWakeAfterRepair = new Set<string>();
   private readonly backgroundContinuationTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly orphanDiscoveryLaunching = new Set<string>();
   private lastOrphanRecoveryScanAt = 0;
@@ -2202,7 +2204,30 @@ export class SessionManager {
     const snapshot = this.snapshot(updated);
     this.send({ type: "session_runtime_updated", snapshot });
     if (resumeAfterRecovery) this.emitStatus(meta.sessionId, "idle", undefined, worktree.path);
+    if (recoveringWorktree) this.wakeWorktreeRecoveryContinuations(updated);
     return snapshot;
+  }
+
+  private wakeWorktreeRecoveryContinuations(meta: SessionMeta): void {
+    // A failed pre-submission proof leaves durable recovery work behind a 30-second retry.
+    // The newly activated worktree is already verified, so replace that timer with an
+    // immediate attempt. Both schedulers recheck holds and provider-acceptance fences.
+    if (this.queuedBackgroundJobIds(meta).length) {
+      if (this.backgroundContinuationLaunching.has(meta.sessionId)) {
+        this.backgroundContinuationWakeAfterRepair.add(meta.sessionId);
+      }
+      this.cancelBackgroundContinuationTimer(meta.sessionId);
+      this.scheduleBackgroundContinuation(meta.sessionId);
+    }
+    if (meta.orphanedWork && !meta.orphanedWork.recoveryAttemptedAt) {
+      if (this.orphanRecoveryLaunching.has(meta.sessionId)) {
+        this.orphanRecoveryWakeAfterRepair.add(meta.sessionId);
+      }
+      const timer = this.orphanRecoveryTimers.get(meta.sessionId);
+      if (timer) clearTimeout(timer);
+      this.orphanRecoveryTimers.delete(meta.sessionId);
+      this.scheduleOrphanRecovery(meta.sessionId);
+    }
   }
 
   /** Session-scoped operation seam consumed by the local CLI/MCP service. */
@@ -13776,7 +13801,9 @@ export class SessionManager {
     this.preLaunchQueues.clear();
     this.recoveryLaunching.clear();
     this.orphanRecoveryLaunching.clear();
+    this.orphanRecoveryWakeAfterRepair.clear();
     this.backgroundContinuationLaunching.clear();
+    this.backgroundContinuationWakeAfterRepair.clear();
     this.orphanDiscoveryLaunching.clear();
     if (this.orphanRecoveryScanTimer) clearTimeout(this.orphanRecoveryScanTimer);
     this.orphanRecoveryScanTimer = null;
@@ -14777,12 +14804,13 @@ export class SessionManager {
       }
     } finally {
       this.backgroundContinuationLaunching.delete(sessionId);
+      const wakeAfterRepair = this.backgroundContinuationWakeAfterRepair.delete(sessionId);
       const remaining = this.queuedBackgroundJobIds(this.store.readMeta(sessionId));
       const alreadyQueued = (prompt: { backgroundJobIds?: string[] }) =>
         prompt.backgroundJobIds?.some((id) => remaining.includes(id));
       if (remaining.length > 0 && !this.active.get(sessionId)?.queue.some(alreadyQueued) &&
           !this.preLaunchQueues.get(sessionId)?.some(alreadyQueued)) {
-        this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+        this.scheduleBackgroundContinuation(sessionId, wakeAfterRepair ? 0 : ORPHAN_RECOVERY_RETRY_MS);
       }
     }
   }
@@ -15009,6 +15037,24 @@ export class SessionManager {
 
   private async runOrphanRecovery(sessionId: string): Promise<void> {
     if (this.shuttingDown || this.orphanRecoveryLaunching.has(sessionId)) return;
+    try {
+      await this.performOrphanRecovery(sessionId);
+    } finally {
+      // An activation can race the receipt inspection or provider relaunch. If its first
+      // immediate timer fired while this attempt was still running, retry once it settles.
+      if (this.orphanRecoveryWakeAfterRepair.delete(sessionId)) {
+        const current = this.store.readMeta(sessionId);
+        if (current?.orphanedWork && !current.orphanedWork.recoveryAttemptedAt && current.status !== "stopped") {
+          const timer = this.orphanRecoveryTimers.get(sessionId);
+          if (timer) clearTimeout(timer);
+          this.orphanRecoveryTimers.delete(sessionId);
+          this.scheduleOrphanRecovery(sessionId);
+        }
+      }
+    }
+  }
+
+  private async performOrphanRecovery(sessionId: string): Promise<void> {
     let meta = this.store.readMeta(sessionId);
     if (!meta?.orphanedWork || meta.driver !== "claude-code" || meta.status === "stopped") return;
     // Terminal receipts settle ownership without a paid recovery turn, including while a
