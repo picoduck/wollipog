@@ -165,6 +165,8 @@ export function AutomationsView() {
   const [editingSpec, setEditingSpec] = useState<AutomationSpec | null>(null);
   const [rebindPrimary, setRebindPrimary] = useState(false);
   const [rebindAlternate, setRebindAlternate] = useState(false);
+  const [primaryAgentTouched, setPrimaryAgentTouched] = useState(false);
+  const [alternateAgentTouched, setAlternateAgentTouched] = useState(false);
   const [workflowBindingEdits, setWorkflowBindingEdits] = useState<Record<string, string>>({});
   const [alternateWorkflowBindingEdits, setAlternateWorkflowBindingEdits] = useState<Record<string, string>>({});
   useEffect(() => { setAlternateWorkflowBindingEdits({}); }, [editingId]);
@@ -322,6 +324,12 @@ export function AutomationsView() {
     ...(alternateCapabilities ? { alternateCapabilities } : {}),
     });
     if (spec.action.kind === "create_session") {
+      const previous = editingSpec?.action.kind === "create_session" ? editingSpec.action : undefined;
+      if (primaryAgentTouched && previous?.installationBindings?.agent &&
+          form.runnerId === previous.request.runnerId && form.agentId === previous.request.agentId &&
+          resolvedInstallationAgentId(selectedRunner, previous.installationBindings.agent) !== form.agentId) {
+        spec.action.installationBindings = {};
+      }
       if (rebindPrimary) {
         const installation = installationFor(selectedRunner, form.agentId);
         if (!installation) throw new Error("Select an available Agent Harness installation on this Machine.");
@@ -333,6 +341,16 @@ export function AutomationsView() {
         spec.runnerPolicy.targets[0]!.installationBindings = {
           ...spec.runnerPolicy.targets[0]!.installationBindings, agent: installation,
         };
+      }
+      if (alternateAgentTouched && !rebindAlternate && spec.runnerPolicy.kind === "alternate" &&
+          editingSpec?.runnerPolicy.kind === "alternate") {
+        const previousTarget = editingSpec.runnerPolicy.targets[0];
+        const target = spec.runnerPolicy.targets[0];
+        if (previousTarget?.installationBindings?.agent && target &&
+            target.runnerId === previousTarget.runnerId && target.agentId === previousTarget.agentId &&
+            resolvedInstallationAgentId(selectedFallback, previousTarget.installationBindings.agent) !== target.agentId) {
+          target.installationBindings = {};
+        }
       }
     } else if (spec.action.kind === "workflow_run" && Object.keys(workflowBindingEdits).length) {
       const request = spec.action.request;
@@ -389,6 +407,8 @@ export function AutomationsView() {
       setEditingSpec(null);
       setRebindPrimary(false);
       setRebindAlternate(false);
+      setPrimaryAgentTouched(false);
+      setAlternateAgentTouched(false);
       setWorkflowBindingEdits({});
       setAlternateWorkflowBindingEdits({});
       setForm(defaults());
@@ -416,6 +436,8 @@ export function AutomationsView() {
     setEditingSpec(null);
     setRebindPrimary(false);
     setRebindAlternate(false);
+    setPrimaryAgentTouched(false);
+    setAlternateAgentTouched(false);
     setWorkflowBindingEdits({});
     setAlternateWorkflowBindingEdits({});
     setForm(defaults());
@@ -426,6 +448,8 @@ export function AutomationsView() {
     setEditingSpec(null);
     setRebindPrimary(false);
     setRebindAlternate(false);
+    setPrimaryAgentTouched(false);
+    setAlternateAgentTouched(false);
     setWorkflowBindingEdits({});
     setAlternateWorkflowBindingEdits({});
     setForm(defaults());
@@ -560,6 +584,7 @@ export function AutomationsView() {
                 <label>Machine<select value={form.runnerId} onChange={(event) => {
                   const runner = runners.get(event.target.value);
                   setRebindPrimary(false);
+                  setPrimaryAgentTouched(true);
                   setForm((current) => ({ ...withAgent(current, defaultAgentId(runner?.agents)),
                     runnerId: event.target.value, workspaceId: runner?.workspaces[0]?.id ?? "" }));
                 }}>{[...runners.values()].map((runner) => <option
@@ -571,6 +596,7 @@ export function AutomationsView() {
                 </select></label>
                 {form.actionKind === "create_session" ? <label>Agent<select value={form.agentId} onChange={(event) => {
                   setRebindPrimary(false);
+                  setPrimaryAgentTouched(true);
                   setForm((current) => withAgent(current, event.target.value));
                 }}>
                   {(selectedRunner?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}
@@ -686,6 +712,7 @@ export function AutomationsView() {
               <label>Alternate Machine<select value={form.fallbackRunnerId} onChange={(event) => {
                 const runner = runners.get(event.target.value);
                 setRebindAlternate(false);
+                setAlternateAgentTouched(true);
                 setForm((current) => ({ ...current, fallbackRunnerId: event.target.value,
                   fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "", fallbackAgentId: defaultAgentId(runner?.agents) }));
               }}><option value="">Select…</option>{[...runners.values()]
@@ -758,6 +785,7 @@ export function AutomationsView() {
                 })()}
               {form.actionKind === "create_session" && <label>Alternate Agent<select value={form.fallbackAgentId} onChange={(event) => {
                 setRebindAlternate(false);
+                setAlternateAgentTouched(true);
                 patch("fallbackAgentId", event.target.value);
               }}>{(selectedFallback?.agents ?? []).map((agent) => <option key={agent.id} value={agent.id}
                 disabled={agentOptions(selectedFallback?.agents ?? []).some((option) => option.agent.id === agent.id && option.disabled)}>{agentDisplayName(agent)}</option>)}</select></label>}
@@ -904,6 +932,8 @@ export function AutomationsView() {
               setForm(loaded);
               setRebindPrimary(refreshedPrimary);
               setRebindAlternate(refreshedAlternate);
+              setPrimaryAgentTouched(false);
+              setAlternateAgentTouched(false);
               setWorkflowBindingEdits({});
               setShowForm(true);
             }}>Edit</button><button className="btn danger sm" disabled={busy} onClick={() => void (async () => { if (await confirm({ title: `Delete “${item.name}”?`, message: "The automation is removed permanently. Execution history remains in the audit database.", confirmLabel: "Delete Automation", tone: "danger" })) { if (editingId === item.automationId) closeEditor(); await mutate(() => api.deleteAutomation(item.automationId)); } })()}>Delete</button></div>

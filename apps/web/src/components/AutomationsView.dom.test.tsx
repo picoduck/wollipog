@@ -586,11 +586,9 @@ test("an unavailable automation installation stays visible until explicitly rebo
 });
 
 test("editing a pinned automation shows its rediscovered installation instead of a reused id", async () => {
-  const oldId = { ...runners[0]!.agents[0]!, id: "rich-agent", installation: {
-    id: "local", path: "/home/u/.local/bin/claude", via: "common-dir" as const,
-    selection: "other" as const,
-  } };
-  const selected = { ...oldId, id: "system-new", installation: {
+  const oldId = { ...runners[0]!.agents[0]!, id: "rich-agent", driver: "acp" as const,
+    installation: undefined };
+  const selected = { ...runners[0]!.agents[0]!, id: "system-new", installation: {
     id: "system", path: "/usr/bin/claude", via: "path" as const,
     selection: "selected" as const,
   } };
@@ -621,6 +619,14 @@ test("editing a pinned automation shows its rediscovered installation instead of
     assert.equal(fixture.updates[1]?.spec.action.kind === "create_session" &&
       fixture.updates[1].spec.action.request.agentId, "manual",
     "switching to a config-authored agent clears the automatic installation rebind");
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    await changeNativeSelect(fixture.container, "Agent", "rich-agent");
+    await act(async () => { button(fixture.container, "Save Automation").click(); });
+    await act(settle);
+    const reselected = fixture.updates[2]?.spec.action;
+    assert.equal(reselected?.kind === "create_session" && reselected.request.agentId, "rich-agent");
+    assert.deepEqual(reselected?.kind === "create_session" && reselected.installationBindings, {},
+      "explicitly choosing a reused plain id clears the old installation reference");
   } finally {
     await unmountFixture(fixture);
   }

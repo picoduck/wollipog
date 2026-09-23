@@ -1147,6 +1147,27 @@ test("an old plain-id automation requires an explicit installation migration", (
   assert.equal(created.at(-1)?.agentId, "agent-1");
 });
 
+test("explicitly reselecting a reused plain id clears a pinned installation", () => {
+  const system = { ...runner("runner-1").agents[0]!, driver: "codex-app-server" as const,
+    command: "/usr/bin/codex", installation: {
+      id: "system", path: "/usr/bin/codex", via: "path" as const,
+    } };
+  const config = { ...system, driver: "acp" as const, installation: undefined };
+  const { db, service, created } = harness(175, [{ ...runner("runner-1"), agents: [system] }]);
+  db.selectHarnessInstallation("runner-1", "agent-1", "system");
+  const actor = { kind: "human" as const, id: "device" };
+  const automation = service.create(baseSpec(), actor, 0).data!;
+  db.updateRunnerAgents("runner-1", [config, { ...system, id: "system-new" }], 1_000);
+  const updated = service.update(automation.automationId, baseSpec({ action: {
+    kind: "create_session", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1", prompt: "Build",
+    }, installationBindings: {},
+  } }), actor, 2_000).data!;
+  assert.deepEqual(updated.action.kind === "create_session" && updated.action.installationBindings, {});
+  service.tick(60_000);
+  assert.equal(created[0]?.agentId, "agent-1", "the explicit config agent replaces the previous install");
+});
+
 test("scheduled workflow role bindings keep their selected installation after agent ids move", () => {
   const base = runnerWithAgents("runner-1", [{ id: "worker", driver: "codex-app-server" },
     { id: "reviewer", driver: "claude-code" }]);
