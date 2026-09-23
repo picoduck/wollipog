@@ -32,6 +32,43 @@ for (const [name, value] of Object.entries({
 
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
 
+test("Composer Answer Mode binds a reused async request id to its current occurrence", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const calls: Parameters<ApiClient["answerQuestion"]>[1][] = [];
+  const client = { ...api, answerQuestion: async (_id, body) => {
+    calls.push(body);
+    return { id: "session-1" } as SessionView;
+  } } as ApiClient;
+  const render = (occurrenceId: string) => root.render(<ApiProvider client={client}>
+    <ComposerQuestionResponse sessionId="session-1" requestId="ask-reused"
+      occurrenceId={occurrenceId} isAsync
+      questions={[{ id: "0", question: "Which path?", options: [], allowOther: true }]}
+      runnerOnline active showWaiting inputRef={{ current: null }} onEnter={() => {}} onExit={() => {}} />
+  </ApiProvider>);
+  try {
+    await act(async () => render("request_old"));
+    await act(async () => setInputValue(container.querySelector<HTMLInputElement>(".composer-answer-input")!, "Old answer"));
+    await act(async () => render("request_new"));
+    const input = container.querySelector<HTMLInputElement>(".composer-answer-input")!;
+    assert.equal(input.value, "");
+    await act(async () => {
+      setInputValue(input, "New answer");
+      input.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true }) as never);
+    });
+    assert.deepEqual(calls, [{
+      requestId: "ask-reused", occurrenceId: "request_new",
+      answers: { "0": "New answer" }, action: "submit",
+    }]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    clearQuestionDrafts("session-1", "ask-reused:request_old");
+    clearQuestionDrafts("session-1", "ask-reused:request_new");
+  }
+});
+
 afterEach(() => {
   for (const requestId of ["ask-single", "ask-flow", "ask-palette", "ask-replacement"]) {
     clearQuestionDrafts("session-1", requestId);

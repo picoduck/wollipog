@@ -29,6 +29,42 @@ for (const [name, value] of Object.entries({
 
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
 
+test("a reused async request id starts a fresh draft and sends its exact occurrence", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const calls: Parameters<ApiClient["answerQuestion"]>[1][] = [];
+  const client = { ...api, answerQuestion: async (_id, body) => {
+    calls.push(body);
+    return { id: "session-1" } as SessionView;
+  } } as ApiClient;
+  const render = (occurrenceId: string) => root.render(<ApiProvider client={client}>
+    <SessionQuestionBanner sessionId="session-1" requestId="question-reused"
+      occurrenceId={occurrenceId} isAsync
+      questions={[{ id: "0", question: "Which path?", options: [], allowOther: true }]}
+      runnerOnline />
+  </ApiProvider>);
+  try {
+    setQuestionResponseStyle("interactive", domWindow as never);
+    await act(async () => render("request_old"));
+    await act(async () => setInputValue(container.querySelector("input")!, "Old answer"));
+    await act(async () => render("request_new"));
+    const input = container.querySelector<HTMLInputElement>("input")!;
+    assert.equal(input.value, "", "a reused provider id must not carry the old answer draft");
+    await act(async () => setInputValue(input, "New answer"));
+    await act(async () => container.querySelector<HTMLButtonElement>('[data-session-request-control="submit"]')!.click());
+    assert.deepEqual(calls, [{
+      requestId: "question-reused", occurrenceId: "request_new",
+      answers: { "0": "New answer" }, action: "submit",
+    }]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+    clearQuestionDrafts("session-1", "question-reused:request_old");
+    clearQuestionDrafts("session-1", "question-reused:request_new");
+  }
+});
+
 function deferredAnswer() {
   let resolve!: (session: SessionView) => void;
   let reject!: (error: Error) => void;

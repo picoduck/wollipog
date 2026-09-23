@@ -171,10 +171,12 @@ export function SessionApprovalRegion({
       {questionFallback && (
         <div data-session-request-id={approval.requestId} data-session-request-session={session.id}>
           <SessionQuestionBanner
-            key={approval.requestId}
+            key={`${approval.requestId}:${approval.occurrenceId ?? ""}`}
             sessionId={session.id}
             requestId={approval.requestId}
+            occurrenceId={approval.occurrenceId}
             questions={approval.questions ?? []}
+            isAsync={approval.async}
             recoveryReason={approval.recoveryReason}
             recoveryAction={approval.recoveryAction}
             runnerOnline={runnerOnline}
@@ -209,7 +211,9 @@ export function SessionTimelineQuestionRegion({
   sessionId: string;
   pendingQuestion: {
     requestId: string;
+    occurrenceId?: string;
     questions: AgentQuestion[];
+    async?: boolean;
     recoveryReason?: "provider_restart";
     recoveryAction?: "resume_answer";
   } | null;
@@ -230,7 +234,9 @@ export function SessionTimelineQuestionRegion({
         <SessionQuestionBanner
           sessionId={sessionId}
           requestId={approval.requestId}
+          occurrenceId={approval.occurrenceId}
           questions={approval.questions.length > 0 ? approval.questions : eventQuestions}
+          isAsync={approval.async}
           recoveryReason={approval.recoveryReason}
           recoveryAction={approval.recoveryAction}
           runnerOnline={runnerOnline}
@@ -477,7 +483,9 @@ export function SessionApprovalBanner({
       <SessionQuestionBanner
         sessionId={session.id}
         requestId={approval.requestId}
+        occurrenceId={approval.occurrenceId}
         questions={approval.questions ?? []}
+        isAsync={approval.async}
         recoveryReason={approval.recoveryReason}
         recoveryAction={approval.recoveryAction}
         runnerOnline={runnerOnline}
@@ -700,7 +708,9 @@ export function SessionApprovalBanner({
 export function SessionQuestionBanner({
   sessionId,
   requestId,
+  occurrenceId,
   questions,
+  isAsync,
   recoveryReason,
   recoveryAction,
   runnerOnline,
@@ -709,7 +719,9 @@ export function SessionQuestionBanner({
 }: {
   sessionId: string;
   requestId: string;
+  occurrenceId?: string;
   questions: AgentQuestion[];
+  isAsync?: boolean;
   recoveryReason?: "provider_restart";
   recoveryAction?: "resume_answer";
   runnerOnline: boolean;
@@ -718,13 +730,14 @@ export function SessionQuestionBanner({
 }) {
   const api = useApi();
   const responseStyle = useQuestionResponseStyle();
+  const answerKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
   const [busy, setBusy] = useState<"submit" | "dismiss" | null>(null);
   const [drafts, setDrafts] = useState<{
     requestId: string;
     values: Record<string, QuestionResponseDraft>;
   }>(() => ({
-    requestId,
-    values: storedQuestionDrafts(sessionId, requestId),
+    requestId: answerKey,
+    values: storedQuestionDrafts(sessionId, answerKey),
   }));
   const [validationAttempted, setValidationAttempted] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -735,9 +748,9 @@ export function SessionQuestionBanner({
     liveRequestRef.current = {};
     operationPendingRef.current = null;
     return () => { liveRequestRef.current = null; };
-  }, [requestId, sessionId]);
+  }, [answerKey, sessionId]);
   const questionBlockRefs = useRef(new Map<string, HTMLDivElement | null>());
-  const previousDraftRequestRef = useRef({ sessionId, requestId });
+  const previousDraftRequestRef = useRef({ sessionId, requestId: answerKey });
   // React's opaque useId contains colons. They are valid in HTML ids but break the selector-based
   // HTMLInputElement.list lookup used by some DOM implementations, so keep this idref family plain.
   const labelPrefix = useId().replace(/:/g, "");
@@ -749,25 +762,25 @@ export function SessionQuestionBanner({
 
   useEffect(() => {
     const previous = previousDraftRequestRef.current;
-    if (previous.sessionId !== sessionId || previous.requestId !== requestId) {
+    if (previous.sessionId !== sessionId || previous.requestId !== answerKey) {
       clearQuestionDrafts(previous.sessionId, previous.requestId);
-      clearQuestionDrafts(sessionId, requestId);
-      previousDraftRequestRef.current = { sessionId, requestId };
-      setDrafts({ requestId, values: {} });
+      clearQuestionDrafts(sessionId, answerKey);
+      previousDraftRequestRef.current = { sessionId, requestId: answerKey };
+      setDrafts({ requestId: answerKey, values: {} });
     } else {
-      setDrafts({ requestId, values: storedQuestionDrafts(sessionId, requestId) });
+      setDrafts({ requestId: answerKey, values: storedQuestionDrafts(sessionId, answerKey) });
     }
     setValidationAttempted(false);
     setBusy(null);
     setError(null);
-  }, [requestId, sessionId]);
+  }, [answerKey, sessionId]);
 
   useEffect(() => {
-    setDrafts({ requestId, values: storedQuestionDrafts(sessionId, requestId) });
+    setDrafts({ requestId: answerKey, values: storedQuestionDrafts(sessionId, answerKey) });
     setValidationAttempted(false);
-  }, [requestId, responseStyle, sessionId]);
+  }, [answerKey, responseStyle, sessionId]);
 
-  const draftValues = drafts.requestId === requestId ? drafts.values : {};
+  const draftValues = drafts.requestId === answerKey ? drafts.values : {};
   const draftValue = (questionId: string) => Object.hasOwn(draftValues, questionId) ? draftValues[questionId] : undefined;
   const resolved = questionDraftAnswers(questions, draftValues);
   const unsupportedQuestionFormat = questions.some((question) => !isAnswerableAgentQuestion(question));
@@ -776,7 +789,7 @@ export function SessionQuestionBanner({
 
   const updateDraft = (question: AgentQuestion, value: QuestionResponseDraft) => {
     setDrafts((current) => {
-      const values = { ...(current.requestId === requestId ? current.values : {}), [question.id]: value };
+      const values = { ...(current.requestId === answerKey ? current.values : {}), [question.id]: value };
       const cacheable: Record<string, QuestionResponseDraft> = {};
       for (const candidate of questions) {
         if (candidate.secret || !Object.hasOwn(values, candidate.id)) continue;
@@ -787,8 +800,8 @@ export function SessionQuestionBanner({
           writable: true,
         });
       }
-      storeQuestionDrafts(sessionId, requestId, cacheable);
-      return { requestId, values };
+      storeQuestionDrafts(sessionId, answerKey, cacheable);
+      return { requestId: answerKey, values };
     });
   };
 
@@ -816,7 +829,7 @@ export function SessionQuestionBanner({
       });
       return;
     }
-    const releaseOperation = claimQuestionResponseOperation(sessionId, requestId);
+    const releaseOperation = claimQuestionResponseOperation(sessionId, answerKey);
     if (!releaseOperation) {
       setError("Another response is already being submitted for this question.");
       return;
@@ -827,9 +840,11 @@ export function SessionQuestionBanner({
     setBusy("submit");
     setError(null);
     try {
-      const updated = await api.answerQuestion(sessionId, { requestId, answers: resolved.answers, action: "submit" });
+      const updated = await api.answerQuestion(sessionId, {
+        requestId, ...(occurrenceId ? { occurrenceId } : {}), answers: resolved.answers, action: "submit",
+      });
       if (liveRequestRef.current !== submittedRequest) return;
-      clearQuestionDrafts(sessionId, requestId);
+      clearQuestionDrafts(sessionId, answerKey);
       onSessionUpdate?.(updated);
     } catch (cause) {
       if (liveRequestRef.current === submittedRequest) setError((cause as Error).message);
@@ -842,7 +857,7 @@ export function SessionQuestionBanner({
 
   const dismiss = async () => {
     if (operationPendingRef.current || busy !== null || !runnerOnline) return;
-    const releaseOperation = claimQuestionResponseOperation(sessionId, requestId);
+    const releaseOperation = claimQuestionResponseOperation(sessionId, answerKey);
     if (!releaseOperation) {
       setError("Another response is already being submitted for this question.");
       return;
@@ -853,9 +868,11 @@ export function SessionQuestionBanner({
     setBusy("dismiss");
     setError(null);
     try {
-      const updated = await api.answerQuestion(sessionId, { requestId, answers: {}, action: "dismiss" });
+      const updated = await api.answerQuestion(sessionId, {
+        requestId, ...(occurrenceId ? { occurrenceId } : {}), answers: {}, action: "dismiss",
+      });
       if (liveRequestRef.current !== submittedRequest) return;
-      clearQuestionDrafts(sessionId, requestId);
+      clearQuestionDrafts(sessionId, answerKey);
       onSessionUpdate?.(updated);
     } catch (cause) {
       if (liveRequestRef.current === submittedRequest) setError((cause as Error).message);
@@ -880,7 +897,7 @@ export function SessionQuestionBanner({
       <div className="approval-main">
         <span className="approval-icon" aria-hidden="true">❓</span>
         <span className="approval-text">
-          {recoveryRequired
+          {isAsync ? "Async Agent Question" : recoveryRequired
             ? "Agent Question Recovery Required"
             : `The agent has ${questions.length === 1 ? "a question" : `${questions.length} questions`}`}
           {!runnerOnline && <span className="muted"> · Runner Offline</span>}

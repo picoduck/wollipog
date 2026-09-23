@@ -22,6 +22,8 @@ import { StructuredQuestionText } from "./StructuredQuestionText.js";
 export interface ComposerQuestionResponseProps {
   sessionId: string;
   requestId: string;
+  occurrenceId?: string;
+  isAsync?: boolean;
   questions: AgentQuestion[];
   runnerOnline: boolean;
   active: boolean;
@@ -75,6 +77,8 @@ function focusSoon(ref: RefObject<HTMLInputElement | null>): void {
 export function ComposerQuestionResponse({
   sessionId,
   requestId,
+  occurrenceId,
+  isAsync,
   questions,
   runnerOnline,
   active,
@@ -85,10 +89,11 @@ export function ComposerQuestionResponse({
   onSessionUpdate,
 }: ComposerQuestionResponseProps) {
   const api = useApi();
+  const answerKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
   const ids = useId().replace(/:/g, "");
   const [draftState, setDraftState] = useState(() => ({
-    requestId,
-    values: storedQuestionDrafts(sessionId, requestId),
+    requestId: answerKey,
+    values: storedQuestionDrafts(sessionId, answerKey),
   }));
   const [questionIndex, setQuestionIndex] = useState(0);
   const [paletteFocusIndex, setPaletteFocusIndex] = useState(0);
@@ -103,25 +108,25 @@ export function ComposerQuestionResponse({
     // token also prevents an earlier incarnation of the same request from regaining ownership.
     liveRequestRef.current = {};
     return () => { liveRequestRef.current = null; };
-  }, [requestId, sessionId]);
+  }, [answerKey, sessionId]);
 
   useEffect(() => {
-    setDraftState({ requestId, values: storedQuestionDrafts(sessionId, requestId) });
+    setDraftState({ requestId: answerKey, values: storedQuestionDrafts(sessionId, answerKey) });
     setQuestionIndex(0);
     setPaletteFocusIndex(0);
     setValidationError(null);
     setSubmissionError(null);
     setBusy(false);
     operationPendingRef.current = null;
-  }, [requestId, sessionId]);
+  }, [answerKey, sessionId]);
 
   useEffect(() => {
     const entering = active && !previousActiveRef.current;
     previousActiveRef.current = active;
     if (!entering) return;
-    const stored = storedQuestionDrafts(sessionId, requestId);
+    const stored = storedQuestionDrafts(sessionId, answerKey);
     setDraftState((current) => {
-      const values = current.requestId === requestId ? { ...current.values } : {};
+      const values = current.requestId === answerKey ? { ...current.values } : {};
       // Interactive Form may have changed non-secret answers while this mounted composer surface
       // was inactive. Merge those exact drafts without erasing a page-only secret kept here.
       for (const question of questions) {
@@ -133,9 +138,9 @@ export function ComposerQuestionResponse({
           writable: true,
         });
       }
-      return { requestId, values };
+      return { requestId: answerKey, values };
     });
-  }, [active, questions, requestId, sessionId]);
+  }, [active, questions, answerKey, sessionId]);
 
   if (questions.length === 0) return null;
   if (!active) {
@@ -152,7 +157,7 @@ export function ComposerQuestionResponse({
 
   const currentIndex = Math.min(questionIndex, questions.length - 1);
   const question = questions[currentIndex]!;
-  const values = draftState.requestId === requestId ? draftState.values : {};
+  const values = draftState.requestId === answerKey ? draftState.values : {};
   const currentDraft = Object.hasOwn(values, question.id) ? values[question.id] : undefined;
   const rawValue = questionDraftText(currentDraft);
   const questionLabelId = `${ids}-composer-question`;
@@ -165,8 +170,8 @@ export function ComposerQuestionResponse({
 
   const updateDraft = (draft: QuestionResponseDraft): Record<string, QuestionResponseDraft> => {
     const next = withDraft(values, question.id, draft);
-    setDraftState({ requestId, values: next });
-    persistDrafts(sessionId, requestId, questions, next);
+    setDraftState({ requestId: answerKey, values: next });
+    persistDrafts(sessionId, answerKey, questions, next);
     setValidationError(null);
     setSubmissionError(null);
     return next;
@@ -192,26 +197,27 @@ export function ComposerQuestionResponse({
       focusSoon(inputRef);
       return;
     }
-    if (operationPendingRef.current === requestId || !runnerOnline) return;
+    if (operationPendingRef.current === answerKey || !runnerOnline) return;
     const submittedRequestId = requestId;
     const submittedRequest = liveRequestRef.current;
-    const releaseOperation = claimQuestionResponseOperation(sessionId, submittedRequestId);
+    const releaseOperation = claimQuestionResponseOperation(sessionId, answerKey);
     if (!releaseOperation) {
       setSubmissionError("Another response is already being submitted for this question.");
       focusSoon(inputRef);
       return;
     }
-    operationPendingRef.current = submittedRequestId;
+    operationPendingRef.current = answerKey;
     setBusy(true);
     setSubmissionError(null);
     try {
       const updated = await api.answerQuestion(sessionId, {
         requestId: submittedRequestId,
+        ...(occurrenceId ? { occurrenceId } : {}),
         answers: resolved.answers,
         action: "submit",
       });
       if (liveRequestRef.current !== submittedRequest) return;
-      clearQuestionDrafts(sessionId, submittedRequestId);
+      clearQuestionDrafts(sessionId, answerKey);
       onExit();
       onSessionUpdate?.(updated);
     } catch (cause) {
@@ -221,7 +227,7 @@ export function ComposerQuestionResponse({
       }
     } finally {
       releaseOperation();
-      if (operationPendingRef.current === submittedRequestId) operationPendingRef.current = null;
+      if (operationPendingRef.current === answerKey) operationPendingRef.current = null;
       if (liveRequestRef.current === submittedRequest) setBusy(false);
     }
   };

@@ -2700,7 +2700,7 @@ function SessionDetailLoaded({
     activeTurnId: session.activeTurnId,
     supportsSteering: sessionCaps?.supportsSteering,
     policyPaused,
-    inputPending: session.pendingApproval != null,
+    inputPending: pendingRequests(session.pendingApproval).some((request) => !request.async),
     queueHeld: session.queueHeld === true,
     stopPending: stopRequestPending,
   } as const;
@@ -3532,10 +3532,13 @@ function SessionDetailLoaded({
   // heartbeat, usage, and lifecycle snapshots that replace the surrounding SessionView.
   const timelinePendingQuestion = useMemo(() => pendingQuestion ? {
     requestId: pendingQuestion.requestId,
+    occurrenceId: pendingQuestion.occurrenceId,
     questions: pendingQuestion.questions ?? [],
+    async: pendingQuestion.async,
     recoveryReason: pendingQuestion.recoveryReason,
     recoveryAction: pendingQuestion.recoveryAction,
-  } : null, [session.id, pendingQuestion?.requestId, pendingQuestion?.recoveryReason, pendingQuestion?.recoveryAction]);
+  } : null, [session.id, pendingQuestion?.requestId, pendingQuestion?.occurrenceId,
+    pendingQuestion?.recoveryReason, pendingQuestion?.recoveryAction]);
   const [inlineQuestionRequestId, setInlineQuestionRequestId] = useState<string | null>(null);
   const handlePendingQuestionAvailabilityChange = useCallback((requestId: string, available: boolean) => {
     setInlineQuestionRequestId((current) => available
@@ -5369,6 +5372,8 @@ function SessionDetailLoaded({
                 <ComposerQuestionResponse
                   sessionId={session.id}
                   requestId={pendingQuestion.requestId}
+                  occurrenceId={pendingQuestion.occurrenceId}
+                  isAsync={pendingQuestion.async}
                   questions={composerQuestions}
                   runnerOnline={runnerOnline}
                   active={composerAnswerActive}

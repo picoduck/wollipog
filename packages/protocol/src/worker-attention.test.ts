@@ -37,6 +37,22 @@ test("legacy replacement and stale child resolutions do not erase a newer reques
   assert.deepEqual(removePendingRequest(pending, "old"), pending);
 });
 
+test("an async question coexists with a later blocking approval", () => {
+  const question: PendingApproval = {
+    requestId: "async-question", title: "Which path?", kind: "question", async: true,
+    options: [], questions: [{ id: "0", question: "Which path?", options: [] }],
+  };
+  const approval = addPendingRequest(question, ask("tool-approval"));
+  assert.deepEqual(pendingRequests(approval).map((request) => request.requestId),
+    ["tool-approval", "async-question"]);
+  assert.deepEqual(prioritizedPendingRequests(approval).map((request) => request.requestId),
+    ["tool-approval", "async-question"]);
+  assert.deepEqual(pendingRequests(removePendingRequest(approval, "tool-approval"))
+    .map((request) => request.requestId), ["async-question"]);
+  assert.deepEqual(pendingRequests(addPendingRequest(ask("tool-approval"), question))
+    .map((request) => request.requestId), ["tool-approval", "async-question"]);
+});
+
 test("root replacement preserves children but not obsolete roots or policy cards", () => {
   const mixed = addPendingRequest(ask("root-old"), ask("child", "owner"));
   const replaced = addPendingRequest(mixed, ask("root-new"));

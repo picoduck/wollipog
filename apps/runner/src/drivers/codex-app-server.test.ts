@@ -1677,6 +1677,49 @@ test("agentMessage completed -> agent_message; reasoning -> agent_thought; todoL
   );
 });
 
+test("completed async agentMessage retains its text and exposes structured questions", () => {
+  const h = makeHarness();
+  const message = {
+    type: "agentMessage", id: "async-ask", text: "I will keep investigating.", delivery: "async",
+    questions: [{ title: "Which path should I use?", options: ["Patch", "Replace"] }],
+  };
+  h.onItem(message, true);
+  h.onItem(message, true);
+  assert.deepEqual(h.events.map((event) => event.kind), ["agent_message", "question_request"]);
+  assert.deepEqual(h.events[1], {
+    kind: "question_request",
+    requestId: "codex-async:async-ask",
+    async: true,
+    questions: [{ id: "0", question: "Which path should I use?", options: [
+      { label: "Patch" }, { label: "Replace" },
+    ], allowOther: true, inputFormat: "text", maxLength: 4000 }],
+  });
+});
+
+test("a later Codex turn may reuse an async message item id", async () => {
+  const h = makeHarness();
+  const message = { type: "agentMessage", id: "ask", text: "First turn", delivery: "async",
+    questions: [{ title: "First question?", options: ["Patch"] }] };
+  h.onItem(message, true);
+  (h.driver as any).threadId = "thread-reused-item";
+  (h.driver as any).peer = { request: async () => ({ turn: { id: "second-turn" } }) };
+  const turn = h.driver.prompt("continue");
+  await nextTask();
+  h.onItem({ ...message, text: "Second turn", questions: [{ title: "Second question?", options: ["Replace"] }] }, true);
+  h.driver.cancel();
+  await turn;
+  assert.deepEqual(h.events.filter((event) => event.kind === "question_request").map((event) =>
+    event.questions[0]?.question), ["First question?", "Second question?"]);
+});
+
+test("unsupported async question payload reports compatibility failure without an answer card", () => {
+  const h = makeHarness();
+  h.onItem({ type: "agentMessage", id: "unsupported-ask", text: "Please decide.", delivery: "async",
+    questions: [{ title: "Where?", options: [{ label: "Invalid shape" }] }] }, true);
+  assert.deepEqual(h.events.map((event) => event.kind), ["agent_message", "error"]);
+  assert.match((h.events[1] as { message: string }).message, /cannot safely answer/);
+});
+
 test("structured Codex collaboration items expose recursive live subagent output and lifecycle", () => {
   const h = makeHarness();
   (h.driver as any).threadId = "root-thread";

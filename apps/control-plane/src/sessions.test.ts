@@ -3227,7 +3227,9 @@ test("opt-in Parent Control resolves exact nested request occurrences with agent
       action: "answer", answers: { q: "Continue" },
     }, () => true);
     assert.ok(answered.ok, answered.error);
-    assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+    const { occurrenceId: deliveredOccurrence, ...deliveredAnswer } = hub.sentOfType("answer_question").at(-1)!;
+    assert.equal(deliveredOccurrence, "request_question_occurrence");
+    assert.deepEqual(deliveredAnswer, {
       type: "answer_question", sessionId: grandchild.id, requestId: "provider-reused-id",
       answers: { q: "Continue" }, action: "submit", resolvedByParentSessionId: parent.data.id,
     });
@@ -12476,12 +12478,15 @@ test("a provider question cannot overwrite a parked policy-hook card", () => {
   svc.onSessionEvent(id, {
     kind: "question_request",
     requestId: "parallel-question",
+    occurrenceId: "request_parallel_question",
     questions: [{ id: "choice", question: "Which option?", options: [{ label: "A" }] }],
   });
 
   assert.equal(db.getSession(id)!.pendingApproval?.kind, "policy_hook");
   assert.equal(db.getSession(id)!.pendingApproval?.requestId, asked.approvalRequestId);
-  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+  const { occurrenceId: dismissedOccurrence, ...dismissalDelivery } = hub.sentOfType("answer_question").at(-1)!;
+  assert.equal(dismissedOccurrence, "request_parallel_question");
+  assert.deepEqual(dismissalDelivery, {
     type: "answer_question",
     sessionId: id,
     requestId: "parallel-question",
@@ -12492,6 +12497,56 @@ test("a provider question cannot overwrite a parked policy-hook card", () => {
     entry.requestId === "parallel-question" &&
     entry.outcome === "dismissed" &&
     entry.actor.id === "policy-hook-turn-barrier"));
+});
+
+test("an async question remains behind a parked policy-hook card", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.upsertGovernancePolicy({
+    policyId: "ask-before-async-question",
+    name: "Ask Before Async Question",
+    effect: "ask",
+    priority: 100,
+    enabled: true,
+    scope: { toolName: "Write" },
+  });
+  const asked = svc.evaluatePolicyHook(id, {
+    hookEventName: "PreToolUse",
+    providerSessionId: "provider-async-question-barrier",
+    permissionMode: "plan",
+    toolUseId: "write-before-async-question",
+    context: { toolName: "Write" },
+  }, true).data!;
+  const next = svc.evaluatePolicyHook(id, {
+    hookEventName: "PreToolUse",
+    providerSessionId: "provider-async-question-barrier",
+    permissionMode: "plan",
+    toolUseId: "write-after-async-question",
+    context: { toolName: "Write" },
+  }, true).data!;
+  assert.equal(db.getPolicyHookApproval(id, next.approvalRequestId!)?.status, "queued");
+  const dismissalsBefore = hub.sentOfType("answer_question").length;
+
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "parallel-async-question",
+    occurrenceId: "request_parallel_async_question",
+    questions: [{ id: "choice", question: "Which option?", options: [{ label: "A" }] }],
+  });
+
+  assert.deepEqual(pendingRequests(db.getSession(id)?.pendingApproval)
+    .map((request) => request.requestId),
+  [asked.approvalRequestId, "parallel-async-question"]);
+  assert.equal(db.getSession(id)?.status, "input_required");
+  assert.equal(hub.sentOfType("answer_question").length, dismissalsBefore);
+
+  assert.ok(svc.approve(id, asked.approvalRequestId, "allow").ok);
+  assert.deepEqual(pendingRequests(db.getSession(id)?.pendingApproval)
+    .map((request) => request.requestId),
+  [next.approvalRequestId, "parallel-async-question"]);
+  assert.ok(svc.approve(id, next.approvalRequestId, "allow").ok);
+  assert.equal(db.getSession(id)?.pendingApproval?.requestId, "parallel-async-question");
+  assert.equal(db.getSession(id)?.pendingApproval?.async, true);
 });
 
 test("protocol-v65 hook asks fail closed without parking an unpollable card", () => {
@@ -13105,7 +13160,9 @@ test("an explicit empty question submission remains distinct from dismissal", ()
     "submit",
   );
   assert.ok(result.ok);
-  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+  const { occurrenceId: submittedOccurrence, ...submissionDelivery } = hub.sentOfType("answer_question").at(-1)!;
+  assert.match(submittedOccurrence ?? "", /^request_[0-9a-f]{32}$/u);
+  assert.deepEqual(submissionDelivery, {
     type: "answer_question",
     sessionId: id,
     requestId: "optional-form",
@@ -13150,7 +13207,9 @@ test("mixed-version multi-select Other requests reject submission but remain saf
     "dismiss",
   );
   assert.ok(dismissal.ok);
-  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+  const { occurrenceId: unsupportedOccurrence, ...unsupportedDelivery } = hub.sentOfType("answer_question").at(-1)!;
+  assert.match(unsupportedOccurrence ?? "", /^request_[0-9a-f]{32}$/u);
+  assert.deepEqual(unsupportedDelivery, {
     type: "answer_question",
     sessionId: id,
     requestId: "unsupported-question",
@@ -13195,7 +13254,9 @@ test("recovered questions reject unsafe submission but dismiss into an idle exac
   assert.ok(dismissal.ok);
   assert.equal(dismissal.data?.status, "idle");
   assert.equal(dismissal.data?.pendingApproval, null);
-  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+  const { occurrenceId: recoveredOccurrence, ...recoveredDelivery } = hub.sentOfType("answer_question").at(-1)!;
+  assert.match(recoveredOccurrence ?? "", /^request_[0-9a-f]{32}$/u);
+  assert.deepEqual(recoveredDelivery, {
     type: "answer_question",
     sessionId: id,
     requestId: "recovered-question",
@@ -13287,6 +13348,104 @@ test("reused provider request ids receive distinct durable identities per recove
   assert.notEqual(second.commandId, first.commandId);
   assert.equal(second.command.recoveryId, "question:2:27");
   assert.deepEqual(second.command.answers, { target: "Staging" });
+});
+
+test("Codex async question keeps a running session active and rejects stale answers", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "codex-async:message-1",
+    occurrenceId: "request_async_occurrence",
+    questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }], allowOther: true }],
+  });
+  assert.equal(db.getSession(id)?.status, "running");
+  assert.equal(db.getSession(id)?.pendingApproval?.async, true);
+  assert.equal(svc.answerQuestion(id, "codex-async:wrong", { "0": "Patch" }).ok, false);
+  assert.equal(svc.answerQuestion(id, "codex-async:message-1", { "0": "Patch" }).ok, false);
+  assert.equal(svc.answerQuestion(id, "codex-async:message-1", { "0": "Patch" },
+    undefined, "submit", undefined, "request_async_occurrence").ok, true);
+  assert.equal(db.getSession(id)?.status, "running");
+  assert.equal(db.getSession(id)?.pendingApproval, null);
+  assert.ok(hub.sentToRunner.some(({ msg }) => msg.type === "durable_session_command" &&
+    msg.command.type === "answer_recovered_question" &&
+    msg.command.requestId === "codex-async:message-1" &&
+    msg.command.recoveryId === "request_async_occurrence"));
+});
+
+test("async questions cannot be dismissed through approval without an occurrence", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "idle", Date.now());
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "codex-async:approve",
+    occurrenceId: "request_async_approve",
+    questions: [{ id: "0", question: "Which path?", options: [] }],
+  });
+  assert.equal(db.getSession(id)?.status, "idle");
+  assert.equal(svc.approve(id, "codex-async:approve", null).status, 409);
+  assert.equal(db.getSession(id)?.status, "idle");
+  assert.equal(db.getSession(id)?.pendingApproval?.requestId, "codex-async:approve");
+  assert.equal(hub.sentOfType("answer_question").length, 0);
+});
+
+test("an async-only card does not block an idle campaign continuation", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.raw().prepare("UPDATE sessions SET session_role='orchestrator', orchestrator_policy='{}' WHERE id=?")
+    .run(id);
+  db.updateSessionStatus(id, "idle", Date.now());
+  db.setPendingApproval(id, {
+    requestId: "codex-async:campaign", occurrenceId: "request_async_campaign",
+    title: "Which path?", kind: "question", async: true, options: [],
+    questions: [{ id: "0", question: "Which path?", options: [] }],
+  });
+  assert.equal(db.campaignContinuationLifecycle(id)?.hasPendingApproval, false);
+  db.setPendingApproval(id, {
+    requestId: "blocking-campaign", title: "Approve", options: [],
+    additionalRequests: pendingRequests(db.getSession(id)?.pendingApproval),
+  });
+  assert.equal(db.campaignContinuationLifecycle(id)?.hasPendingApproval, true);
+});
+
+test("a blocking approval can be resolved without clearing an async question", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "codex-async:choice",
+    occurrenceId: "request_async_choice",
+    questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+  });
+  svc.onSessionEvent(id, {
+    kind: "permission_request", requestId: "tool-approval", title: "Run Command",
+    options: [{ optionId: "allow", name: "Allow Once", kind: "allow_once" }],
+  });
+  assert.deepEqual(pendingRequests(db.getSession(id)?.pendingApproval).map((request) => request.requestId),
+    ["tool-approval", "codex-async:choice"]);
+  assert.equal(svc.approve(id, "tool-approval", "allow").ok, true);
+  assert.equal(db.getSession(id)?.status, "running");
+  assert.equal(db.getSession(id)?.pendingApproval?.requestId, "codex-async:choice");
+  assert.equal(db.getSession(id)?.pendingApproval?.async, true);
+});
+
+test("a late async resolution cannot clear a reused request id", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID });
+  for (const occurrenceId of ["request_old", "request_new"]) {
+    svc.onSessionEvent(id, {
+      kind: "question_request", async: true, requestId: "codex-async:reused", occurrenceId,
+      questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+    });
+  }
+  svc.onSessionEvent(id, {
+    kind: "question_resolved", requestId: "codex-async:reused", occurrenceId: "request_old",
+    answered: true, resolutionReason: "submitted",
+  });
+  assert.equal(db.getSession(id)?.pendingApproval?.recoveryId, "request_new");
+  assert.equal(svc.answerQuestion(id, "codex-async:reused", { "0": "Patch" },
+    undefined, "submit", undefined, "request_old").ok, false);
+  assert.equal(db.getSession(id)?.pendingApproval?.recoveryId, "request_new");
 });
 
 test("recovered answers reapply the same post-resolution policy gate as live answers", () => {
@@ -13416,7 +13575,9 @@ test("recovered question dismissal does not phantom-idle a newer active status",
   assert.ok(dismissal.ok);
   assert.notEqual(dismissal.data?.status, "idle");
   assert.equal(dismissal.data?.pendingApproval, null);
-  assert.deepEqual(hub.sentOfType("answer_question").at(-1), {
+  const { occurrenceId: duringNewTurnOccurrence, ...duringNewTurnDelivery } = hub.sentOfType("answer_question").at(-1)!;
+  assert.match(duringNewTurnOccurrence ?? "", /^request_[0-9a-f]{32}$/u);
+  assert.deepEqual(duringNewTurnDelivery, {
     type: "answer_question",
     sessionId: id,
     requestId: "recovery-during-new-turn",
@@ -18380,6 +18541,48 @@ test("cost checkpoints park once each, approval advances, and a decline stops wi
   assert.equal(db.getSession(id)!.pendingApproval?.kind, "cost_checkpoint");
 });
 
+test("an async question cannot suppress a cost checkpoint at usage or turn settle", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID, prompt: "Spend" });
+  assert.ok(svc.setConfig(id, { costCheckpointsUsd: [1] }).ok);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "codex-async:budget",
+    occurrenceId: "request_async_budget",
+    questions: [{ id: "0", question: "Which path?", options: [] }],
+  });
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 1.2 });
+  svc.onSessionStatus(id, "idle");
+
+  const session = db.getSession(id)!;
+  assert.equal(session.status, "input_required");
+  assert.deepEqual(pendingRequests(session.pendingApproval).map((request) => request.kind),
+    ["cost_checkpoint", "question"]);
+  assert.equal(pendingRequests(session.pendingApproval)[1]?.requestId, "codex-async:budget");
+  assert.ok(hub.sentOfType("rearm_governance").some((message) => message.holdFor === "control_plane"));
+});
+
+test("an async question arriving after a cost checkpoint keeps the pause in front", () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID, prompt: "Spend" });
+  assert.ok(svc.setConfig(id, { costCheckpointsUsd: [1] }).ok);
+  db.updateSessionStatus(id, "running", Date.now());
+  svc.onSessionEvent(id, { kind: "token_usage", costUsd: 1.2 });
+  const checkpointId = db.getSession(id)?.pendingApproval?.requestId;
+  assert.equal(db.getSession(id)?.pendingApproval?.kind, "cost_checkpoint");
+
+  svc.onSessionEvent(id, {
+    kind: "question_request", async: true, requestId: "codex-async:after-budget",
+    occurrenceId: "request_async_after_budget",
+    questions: [{ id: "0", question: "Which path?", options: [] }],
+  });
+
+  const session = db.getSession(id)!;
+  assert.equal(session.status, "input_required");
+  assert.deepEqual(pendingRequests(session.pendingApproval).map((request) => request.requestId),
+    [checkpointId, "codex-async:after-budget"]);
+});
+
 test("a budgeted session whose usage cannot be priced fails closed until the user continues without the budget", () => {
   const { db, svc } = makeHarness();
   const id = seedSession(svc, hub_for(svc), { prompt: "spend" });
@@ -18532,6 +18735,31 @@ test("a daily-budget breach parks every live session the owner has, not only the
   assert.equal(db.getSession(a)!.pendingApproval?.kind, "daily_budget");
   assert.equal(db.getSession(b)!.pendingApproval?.kind, "daily_budget", "the sibling is parked too");
   assert.equal(db.getSession(b)!.status, "input_required");
+});
+
+test("a daily-budget breach parks a sibling with an unanswered async question", () => {
+  const { db, hub, svc } = makeHarness();
+  const a = seedSession(svc, hub, { prompt: "Spend" });
+  const b = seedSession(svc, hub, { agentId: CODEX_APP_AGENT_ID, prompt: "Wait" });
+  for (const id of [a, b]) {
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(id);
+  }
+  db.updateSessionStatus(b, "running", Date.now());
+  svc.onSessionEvent(b, {
+    kind: "question_request", async: true, requestId: "codex-async:sibling",
+    occurrenceId: "request_async_sibling",
+    questions: [{ id: "0", question: "Which path?", options: [] }],
+  });
+  db.setUsageDailyBudget("org_personal", 2, Date.now());
+  db.appendEvent(a, { kind: "token_usage", inputTokens: 1, costUsd: 2.5 }, Date.now(), { accrueUsage: true });
+  svc.onSessionStatus(a, "idle");
+
+  const sibling = db.getSession(b)!;
+  assert.equal(sibling.status, "input_required");
+  assert.deepEqual(pendingRequests(sibling.pendingApproval).map((request) => request.kind),
+    ["daily_budget", "question"]);
+  assert.ok(hub.sentOfType("rearm_governance")
+    .some((message) => message.sessionId === b && message.holdFor === "control_plane"));
 });
 
 test("arming a soft guardrail on an unparked session that already exceeds it parks it at once", () => {

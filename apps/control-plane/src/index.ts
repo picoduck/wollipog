@@ -4671,9 +4671,10 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
 // differ — N answers keyed by question id vs one optionId decision.
 app.post("/api/sessions/:id/answer", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const body = req.body as { requestId?: string; answers?: Record<string, string | string[]>; action?: "submit" | "dismiss" };
+  const body = req.body as { requestId?: string; occurrenceId?: string; answers?: Record<string, string | string[]>; action?: "submit" | "dismiss" };
   if (
     typeof body?.requestId !== "string" ||
+    (body.occurrenceId != null && typeof body.occurrenceId !== "string") ||
     body.answers == null ||
     typeof body.answers !== "object" ||
     Array.isArray(body.answers) ||
@@ -4685,7 +4686,7 @@ app.post("/api/sessions/:id/answer", async (req, reply) => {
   return respond(reply, svc.answerQuestion(id, body.requestId, body.answers, {
     kind: "human",
     id: humanActorId(req),
-  }, action));
+  }, action, undefined, body.occurrenceId));
 });
 
 // Git/PR workflow: run a git action (status/commit/open_pr) in the session's

@@ -165,7 +165,7 @@ async function expectQuestionControlsInsideCard(page: Page): Promise<void> {
 
 async function startLiveStack(
   provider: "claude" | "codex" = "claude",
-  codexScenario: "question" | "dogfood-question" = "question",
+  codexScenario: "question" | "dogfood-question" | "async-question" = "question",
   restartRecovery = false,
 ): Promise<LiveStack> {
   const port = await reservePort();
@@ -344,17 +344,22 @@ async function startLiveStack(
       for (let attempt = 0; attempt < 100; attempt += 1) {
         const session = await fetchSession({ httpBase, ownerToken, sessionId });
         lastSession = session;
-        if (session.pendingApproval?.kind === "question" &&
-            session.pendingApproval.recoveryReason === "provider_restart" &&
-            session.pendingApproval.recoveryAction === "resume_answer") return;
+        if (session.pendingApproval?.kind === "question" && (
+          codexScenario === "async-question"
+            ? session.pendingApproval.async === true && session.status === "idle"
+            : session.pendingApproval.recoveryReason === "provider_restart" &&
+              session.pendingApproval.recoveryAction === "resume_answer"
+        )) return;
         if (restartedRunner.exitCode !== null) throw new Error(`runner exited during restart recovery\n${logs()}`);
         await delay(100);
       }
       throw new Error(`recovered question never became resumable: ${JSON.stringify(lastSession)}\n${logs()}`);
     };
     const stack = { httpBase, ownerToken, receiptPath, sessionId, logs, restart, stop };
+    let lastSession: SessionView | null = null;
     for (let attempt = 0; attempt < 300; attempt += 1) {
       const session = await fetchSession(stack);
+      lastSession = session;
       if (session.pendingApproval?.kind === "question") return stack;
       if (session.status === "failed") {
         throw new Error(`session failed before asking a question: ${JSON.stringify(session)}\n` +
@@ -362,7 +367,8 @@ async function startLiveStack(
       }
       await delay(100);
     }
-    throw new Error(`${provider === "codex" ? "Codex" : "Claude"} question never reached the control plane\n${logs()}`);
+    throw new Error(`${provider === "codex" ? "Codex" : "Claude"} question never reached the control plane\n` +
+      `session: ${JSON.stringify(lastSession)}\nevents: ${JSON.stringify(await fetchEvents(stack))}\n${logs()}`);
   } catch (error) {
     await stop();
     throw error;
@@ -503,6 +509,70 @@ for (const style of ["interactive", "composer"] as const) test(`Codex structured
     }).toContain("Question answers received by Codex.");
   } catch (error) {
     throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${stack.logs()}`);
+  } finally {
+    await stack.stop();
+  }
+});
+
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "mobile", width: 390, height: 844 },
+]) test(`Codex async question remains answerable after continued work on ${viewport.name}`, async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.setViewportSize(viewport);
+  const stack = await startLiveStack("codex", "async-question");
+  try {
+    const pending = await fetchSession(stack);
+    expect(pending.status).toBe("idle");
+    expect(pending.pendingApproval).toMatchObject({
+      kind: "question", async: true, requestId: "codex-async:async-ask",
+    });
+    const events = await fetchEvents(stack);
+    const kinds = events.events.map((event) => event.payload.kind);
+    expect(kinds.filter((kind) => kind === "agent_message")).toHaveLength(1);
+    expect(kinds.indexOf("question_request")).toBeLessThan(kinds.indexOf("tool_call"));
+    expect(events.events.find((event) => event.payload.kind === "question_request")?.payload).toMatchObject({ async: true });
+
+    const fragment = new URLSearchParams({
+      origin: stack.httpBase, token: stack.ownerToken,
+      sessionId: stack.sessionId, actualAsyncMessage: "1",
+    });
+    await page.addInitScript(() => localStorage.setItem("wollipog.question-response-style", "interactive"));
+    await page.goto(`/agent-questions-live-e2e.html#${fragment.toString()}`);
+    await expect(page.locator(".tl-agent-msg")).toHaveCount(1);
+    await expect(page.locator(".tl-agent-msg")).toContainText("I will keep investigating.");
+    const card = page.getByRole("region", { name: "Agent Questions" });
+    await expect(card).toContainText("Async Agent Question");
+    await page.reload();
+    await expect(card).toContainText("Async Agent Question");
+    if (viewport.name === "desktop") {
+      await stack.restart();
+      await page.reload();
+      await expect(card).toContainText("Async Agent Question");
+    }
+    const evidenceDir = process.env.WOLLIPOG_ISSUE_1602_EVIDENCE_DIR;
+    if (evidenceDir) {
+      mkdirSync(evidenceDir, { recursive: true });
+      for (const theme of ["dark", "light"] as const) {
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await page.screenshot({ path: join(evidenceDir, `async-question-${viewport.name}-${theme}.png`) });
+      }
+    }
+    await card.getByRole("radio", { name: "Patch" }).click();
+    await card.getByRole("button", { name: "Submit" }).click();
+    await expect.poll(async () => {
+      try { return JSON.parse(await readFile(stack.receiptPath, "utf8")); }
+      catch { return null; }
+    }, { timeout: 30_000 }).toEqual({ requestId: "codex-async:async-ask", answer: "Patch" });
+    await expect.poll(async () => (await fetchSession(stack)).pendingApproval).toBeNull();
+    await expect.poll(async () => (await fetchSession(stack)).preview).toContain("Async answer received by Codex.");
+    if (evidenceDir) {
+      await page.screenshot({ path: join(evidenceDir, `async-answer-${viewport.name}-light.png`) });
+    }
+  } catch (error) {
+    throw new Error(`${error instanceof Error ? error.stack : String(error)}\n` +
+      `session: ${JSON.stringify(await fetchSession(stack))}\n` +
+      `events: ${JSON.stringify((await fetchEvents(stack)).events.map((event) => event.payload))}\n${stack.logs()}`);
   } finally {
     await stack.stop();
   }

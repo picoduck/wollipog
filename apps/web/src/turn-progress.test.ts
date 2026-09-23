@@ -49,6 +49,21 @@ test("steady progress is scoped to the latest non-steer turn and reports observa
   assert.equal(progress.currentPlanStep?.content, "Run focused tests");
 });
 
+test("a delivered async question answer starts fresh turn progress", () => {
+  seq = 0;
+  const events = [
+    event({ kind: "user_message", text: "Investigate" }, 1_000),
+    event({ kind: "tool_call", toolCallId: "old", title: "Inspect", status: "completed" }, 1_100),
+    event({ kind: "question_resolved", requestId: "async-ask", answered: true,
+      resolutionReason: "submitted", startsTurn: true }, 2_000),
+    event({ kind: "tool_call", toolCallId: "new", title: "Patch", status: "in_progress" }, 2_100),
+  ];
+  const progress = derive(events)!;
+  assert.equal(progress.turnStartedAt, 2_000);
+  assert.equal(progress.completedTools, 0);
+  assert.equal(progress.currentOperation?.title, "Patch");
+});
+
 test("retry churn groups only consecutive failures with identical identity and unchanged output", () => {
   seq = 0;
   const events = [

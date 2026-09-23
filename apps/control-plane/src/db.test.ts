@@ -3038,6 +3038,32 @@ test("updateSessionStatus clears pending approval when leaving input_required", 
   assert.equal(db.getSession("sess-1")!.pendingApproval, null);
 });
 
+test("async questions survive nonterminal status changes while blocking asks clear", () => {
+  const db = withRunner();
+  db.createSession(newSession());
+  const asyncQuestion: PendingApproval = {
+    requestId: "codex-async:ask-1", kind: "question", async: true,
+    title: "Which path?", options: [],
+    questions: [{ id: "0", question: "Which path?", options: [{ label: "Patch" }] }],
+  };
+  db.setPendingApproval("sess-1", asyncQuestion);
+  const identified = db.getSession("sess-1")!.pendingApproval!;
+  db.updateSessionStatus("sess-1", "idle", 2_000);
+  assert.deepEqual(db.getSession("sess-1")!.pendingApproval, identified);
+  assert.equal(db.getSession("sess-1")!.status, "idle");
+  db.updateSessionStatus("sess-1", "running", 2_100);
+  assert.deepEqual(db.getSession("sess-1")!.pendingApproval, identified);
+  db.setPendingApproval("sess-1", {
+    requestId: "blocking-ask", kind: "question", title: "Block?", options: [],
+    questions: [{ id: "0", question: "Block?", options: [] }],
+    additionalRequests: [identified],
+  });
+  db.updateSessionStatus("sess-1", "idle", 2_200);
+  assert.deepEqual(db.getSession("sess-1")!.pendingApproval, identified);
+  db.updateSessionStatus("sess-1", "stopped", 2_300);
+  assert.equal(db.getSession("sess-1")!.pendingApproval, null);
+});
+
 test("updateSessionConfig persists changes and sessionView shows them", () => {
   const db = withRunner();
   db.createSession(

@@ -395,7 +395,7 @@ interface QueuedPrompt {
   syntheticRecovery?: boolean;
   /** Durable managed jobs whose barrier terminal observation caused this continuation. */
   backgroundJobIds?: string[];
-  /** Submit-only continuation for a structured question whose process-owned callback was lost. */
+  /** Submit-only continuation for a lost callback or an async question answered in a later turn. */
   recoveredQuestion?: {
     requestId: string;
     recoveryId: string;
@@ -638,6 +638,8 @@ function recoveredQuestionContinuationText(
   answers: Record<string, string | string[]>,
 ): string {
   const questions = question.kind === "question" ? (question.questions ?? []) : [];
+  if (question.async) return questions.map((candidate) =>
+    `Question: ${candidate.question}\nAnswer: ${String(answers[candidate.id] ?? "")}`).join("\n\n");
   const responses = questions.map((candidate) => ({
     id: candidate.id,
     question: candidate.question,
@@ -4104,8 +4106,7 @@ export class SessionManager {
   }
 
   /** Recover the newest question that durable history still shows as unresolved. A later user turn
-   * or permission request proves the old question is no longer the active interaction, even when
-   * an older runner failed to append an explicit replacement resolution. */
+   * replaces the old question; an async question can coexist with a later permission request. */
   private unresolvedQuestionFromHistory(sessionId: string): {
     scanned: boolean;
     question: SessionMeta["pendingApproval"];
@@ -4119,6 +4120,9 @@ export class SessionManager {
     let cursor = durableTail;
     let logEpoch: number | undefined;
     let throughSeq: number | undefined;
+    let laterAgentActivity = false;
+    let laterPermissionRequest = false;
+    let laterBlockingQuestion = false;
     while (cursor > 0) {
       let span = Math.min(200, cursor);
       let events: StoredEvent[] | null = null;
@@ -4148,35 +4152,42 @@ export class SessionManager {
       for (let index = events.length - 1; index >= 0; index -= 1) {
         const payload = events[index]!.payload;
         if (payload.kind === "question_resolved") {
-          resolved.add(payload.requestId);
+          resolved.add(payload.occurrenceId ?? payload.requestId);
           continue;
         }
         if (payload.kind === "question_request") {
-          // A resolved newer question replaced every older pending question, so once its request
-          // is reached there is nothing earlier that can still be actionable.
-          if (resolved.has(payload.requestId)) {
-            return { scanned: true, question: null, resolvedQuestionIds: resolved };
-          }
+          const wasResolved = resolved.has(payload.occurrenceId ?? payload.requestId) ||
+            resolved.has(payload.requestId);
+          // Blocking callbacks cannot survive subsequent agent work or another permission ask.
+          // Continue scanning: an older async question can still be actionable.
+          if (!payload.async) {
+            const superseded = laterAgentActivity || laterPermissionRequest || laterBlockingQuestion;
+            laterBlockingQuestion = true;
+            if (wasResolved || superseded) continue;
+          } else if (wasResolved) continue;
           return {
             scanned: true,
             question: {
               requestId: payload.requestId,
               ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
-              recoveryId: `question:${logEpoch}:${events[index]!.seq}`,
+              recoveryId: payload.async && payload.occurrenceId
+                ? payload.occurrenceId : `question:${logEpoch}:${events[index]!.seq}`,
               title: payload.questions[0]?.question ?? "The agent has a question",
               options: [],
               kind: "question",
               questions: payload.questions,
+              ...(payload.async ? { async: true } : {}),
             },
             resolvedQuestionIds: resolved,
           };
         }
-        if (
-          payload.kind === "user_message" || payload.kind === "agent_message" ||
-          payload.kind === "agent_thought" || payload.kind === "tool_call" ||
-          payload.kind === "permission_request" || payload.kind === "conversation_checkpoint" ||
-          payload.kind === "turn_interrupted"
-        ) return { scanned: true, question: null, resolvedQuestionIds: resolved };
+        if (payload.kind === "user_message") {
+          return { scanned: true, question: null, resolvedQuestionIds: resolved };
+        }
+        if (payload.kind === "permission_request") laterPermissionRequest = true;
+        if (payload.kind === "agent_message" || payload.kind === "agent_thought" ||
+            payload.kind === "tool_call" || payload.kind === "conversation_checkpoint" ||
+            payload.kind === "turn_interrupted") laterAgentActivity = true;
       }
       cursor = events[0]!.seq - 1;
     }
@@ -4204,11 +4215,19 @@ export class SessionManager {
             requestId: payload.requestId, kind: "question", options: [],
             ...(payload.occurrenceId ? { occurrenceId: payload.occurrenceId } : {}),
             questions: payload.questions, title: payload.questions[0]?.question ?? "The agent has a question",
+            ...(payload.async ? { async: true } : {}),
             ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
-            recoveryId: `question:${generation.logEpoch}:${event.seq}`,
+            recoveryId: payload.async && payload.occurrenceId
+              ? payload.occurrenceId : `question:${generation.logEpoch}:${event.seq}`,
           });
         }
-        if (event.payload.kind === "question_resolved") requests.delete(event.payload.requestId);
+        if (event.payload.kind === "question_resolved") {
+          const pending = requests.get(event.payload.requestId);
+          if (pending && (!event.payload.occurrenceId || !pending.occurrenceId ||
+              pending.occurrenceId === event.payload.occurrenceId)) {
+            requests.delete(event.payload.requestId);
+          }
+        }
       }
       const last = page.events.at(-1)?.seq;
       if (last == null) return { requests: [...requests.values()], verified: generation.throughSeq === 0 };
@@ -4324,7 +4343,9 @@ export class SessionManager {
         // A crash can land after the resolution event is durable but before its metadata clear.
         // Prefer that exact durable resolution over the stale pending-card projection.
         const recovery = this.unresolvedQuestionFromHistory(m.sessionId);
-        pendingQuestionResolved = recovery.resolvedQuestionIds.has(reconciled.pendingApproval.requestId);
+        pendingQuestionResolved = recovery.resolvedQuestionIds.has(
+          reconciled.pendingApproval.occurrenceId ?? reconciled.pendingApproval.requestId) ||
+          recovery.resolvedQuestionIds.has(reconciled.pendingApproval.requestId);
         if (recovery.question?.requestId === reconciled.pendingApproval.requestId) {
           historicalQuestion = recovery.question;
         }
@@ -4334,6 +4355,11 @@ export class SessionManager {
         : reconciled.pendingApproval?.kind === "question" && !pendingQuestionResolved
           ? historicalQuestion ?? reconciled.pendingApproval
           : historicalQuestion;
+      const concurrentAsyncQuestions = !terminal && pendingRequests(reconciled.pendingApproval)
+        .some((request) => request.async)
+        ? this.recoveredWorkerQuestions(m.sessionId, reconciled.pendingApproval).requests
+          .filter((request) => request.async)
+        : [];
       if (reconciled.providerAuthBlock && reconciled.status === "stopped") {
         // Terminal operator intent dominates a stale/incomplete recovery generation.
         const dismissedCommandIds = this.abandonDurableProviderAuthenticationPrompts(
@@ -4402,6 +4428,25 @@ export class SessionManager {
         const [first, ...rest] = recovered;
         this.store.patchMeta(m.sessionId, {
           status: first ? "input_required" : "idle",
+          pendingApproval: first ? { ...first, ...(rest.length ? { additionalRequests: rest } : {}) } : null,
+        });
+      } else if (concurrentAsyncQuestions.length || recoverableQuestion?.async) {
+        // Async questions have no provider callback to recover. Keep them when a newer blocking
+        // approval is discarded, and retain any recoverable blocking question ahead of them.
+        const blocking = recoverableQuestion && !recoverableQuestion.async
+          ? {
+              ...recoverableQuestion,
+              recoveryReason: "provider_restart" as const,
+              ...(canResumeRecoveredQuestion(reconciled, recoverableQuestion)
+                ? { recoveryAction: "resume_answer" as const } : {}),
+            }
+          : null;
+        const [first, ...rest] = [
+          ...(blocking ? [blocking] : []),
+          ...(concurrentAsyncQuestions.length ? concurrentAsyncQuestions : recoverableQuestion ? [recoverableQuestion] : []),
+        ];
+        this.store.patchMeta(m.sessionId, {
+          status: blocking ? "input_required" : "idle",
           pendingApproval: first ? { ...first, ...(rest.length ? { additionalRequests: rest } : {}) } : null,
         });
       } else if (recoverableQuestion) {
@@ -10663,11 +10708,18 @@ export class SessionManager {
 
   private hasPendingAgentInput(sessionId: string): boolean {
     const meta = this.store.readMeta(sessionId);
-    return meta?.status === "input_required" || meta?.pendingApproval != null;
+    return meta?.status === "input_required" || pendingRequests(meta?.pendingApproval).some((request) => !request.async);
   }
 
   private hasPendingApproval(sessionId: string): boolean {
-    return this.store.readMeta(sessionId)?.pendingApproval != null;
+    return pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => !request.async);
+  }
+
+  private queuedAsyncAnswer(sessionId: string, request: PendingApproval): boolean {
+    return Boolean(request.async && this.active.get(sessionId)?.queue.some((prompt) =>
+      prompt.recoveredQuestion?.pendingQuestion.async &&
+      prompt.recoveredQuestion.requestId === request.requestId &&
+      prompt.recoveredQuestion.recoveryId === request.recoveryId));
   }
 
   private queuedPromptResolvesPendingQuestion(sessionId: string, prompt: QueuedPrompt | undefined): boolean {
@@ -10680,12 +10732,14 @@ export class SessionManager {
     );
   }
 
-  /** A recovered answer resolves the approval barrier itself, so it must run before ordinary work
-   * admitted while the card was visible. The relative FIFO of every other prompt stays intact. */
+  /** A recovered blocking answer crosses its approval barrier. An async answer does not cross a
+   * separate blocking ask, but runs before ordinary queued messages once that ask is resolved. */
   private promoteQueuedRecoveredAnswer(sessionId: string, queue: QueuedPrompt[]): boolean {
-    if (!this.hasPendingApproval(sessionId)) return true;
-    const index = queue.findIndex((prompt) => this.queuedPromptResolvesPendingQuestion(sessionId, prompt));
-    if (index < 0) return false;
+    const blocking = this.hasPendingApproval(sessionId);
+    const index = queue.findIndex((prompt) => blocking
+      ? this.queuedPromptResolvesPendingQuestion(sessionId, prompt)
+      : prompt.recoveredQuestion?.pendingQuestion.async === true);
+    if (index < 0) return !blocking;
     if (index > 0) queue.unshift(queue.splice(index, 1)[0]!);
     return true;
   }
@@ -10838,13 +10892,21 @@ export class SessionManager {
       }
     };
     if (recoveredQuestion) {
-      const pending = this.store.readMeta(sessionId)?.pendingApproval;
+      const currentApproval = this.store.readMeta(sessionId)?.pendingApproval;
+      const pending = currentApproval?.requestId === recoveredQuestion.requestId &&
+          currentApproval.recoveryId === recoveredQuestion.recoveryId
+        ? currentApproval
+        : pendingRequests(currentApproval).find((request) =>
+            request.async && request.requestId === recoveredQuestion.requestId &&
+            request.recoveryId === recoveredQuestion.recoveryId) ??
+          (recoveredQuestion.pendingQuestion.async ? recoveredQuestion.pendingQuestion : undefined);
       const invalid = pending?.kind === "question"
         ? validateQuestionAnswers(pending.questions ?? [], recoveredQuestion.answers, "submit")
         : "the recovered question is absent";
       if (pending?.kind !== "question" || pending.requestId !== recoveredQuestion.requestId ||
           pending.recoveryId !== recoveredQuestion.recoveryId ||
-          pending.recoveryReason !== "provider_restart" || pending.recoveryAction !== "resume_answer" || invalid) {
+          (!pending.async && (pending.recoveryReason !== "provider_restart" ||
+            pending.recoveryAction !== "resume_answer")) || invalid) {
         durable?.failed(invalid ? `recovered answer is no longer valid: ${invalid}` :
           "the recovered question is no longer pending", "COMMAND_CANCELLED");
         return;
@@ -10920,7 +10982,10 @@ export class SessionManager {
       ? this.emitEvent(sessionId, {
           kind: "question_resolved",
           requestId: recoveredQuestion.requestId,
+          ...(recoveredQuestion.pendingQuestion.async
+            ? { occurrenceId: recoveredQuestion.recoveryId } : {}),
           answered: true,
+          ...(recoveredQuestion.pendingQuestion.async ? { startsTurn: true } : {}),
           resolutionReason: "submitted",
           ...(recoveredQuestion.resolvedByParentSessionId
             ? { resolvedByParentSessionId: recoveredQuestion.resolvedByParentSessionId }
@@ -10964,7 +11029,7 @@ export class SessionManager {
     // a failure stores null (overwriting any stale prior sha so multi-turn changes are never
     // mislabeled as one turn) and must never fail the prompt turn. A mid-turn diff read against
     // this snapshot shows "changes so far this turn" — intended.
-    if (entry.worktree && !recoveredQuestion) {
+    if (entry.worktree && (!recoveredQuestion || recoveredQuestion.pendingQuestion.async)) {
       const path = entry.worktree.path;
       let snap: string | null = null;
       try {
@@ -13276,8 +13341,27 @@ export class SessionManager {
     answers: Record<string, string | string[]>,
     action?: "submit" | "dismiss",
     resolvedByParentSessionId?: string,
+    occurrenceId?: string,
   ): void {
     const entry = this.active.get(sessionId);
+    const asyncQuestion = pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
+      .find((request) => request.requestId === requestId && request.kind === "question" && request.async);
+    if (asyncQuestion) {
+      if (occurrenceId && asyncQuestion.occurrenceId !== occurrenceId) return;
+      const submitted = action !== "dismiss" && (action === "submit" || Object.keys(answers).length > 0);
+      if (submitted) {
+        const text = asyncQuestion.questions!.map((question) =>
+          `Question: ${question.question}\nAnswer: ${String(answers[question.id] ?? "")}`).join("\n\n");
+        if (!this.prompt(sessionId, text)) return;
+      }
+      this.emitEvent(sessionId, {
+        kind: "question_resolved", requestId, answered: submitted,
+        ...(asyncQuestion.occurrenceId ? { occurrenceId: asyncQuestion.occurrenceId } : {}),
+        resolutionReason: submitted ? "submitted" : "dismissed",
+        ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+      });
+      return;
+    }
     const delivered = entry?.client.answerQuestion ? entry.client.answerQuestion(requestId, answers, action) : false;
     if (delivered) {
       const started = this.approvalStarted.get(`${sessionId}:${requestId}`);
@@ -13331,9 +13415,9 @@ export class SessionManager {
     this.emitStatus(sessionId, status);
   }
 
-  /** Resume an established conversation after its process-owned structured-question callback was
-   * lost. The durable command journal owns deduplication; runPrompt records the one correlated
-   * resolution immediately before invoking the synthesized continuation turn. */
+  /** Deliver a structured answer as a later user turn when the original callback was lost or
+   * the question was async. The durable command journal owns deduplication; runPrompt records
+   * the correlated resolution before invoking the continuation turn. */
   answerRecoveredQuestion(
     sessionId: string,
     requestId: string,
@@ -13350,10 +13434,24 @@ export class SessionManager {
     const retained = meta.providerAuthBlock?.durableRetries?.find((retry) =>
       retry.commandId === durable.commandId && retry.recoveredQuestion);
     const retainedQuestion = retained?.recoveredQuestion;
-    const pending = meta.pendingApproval?.kind === "question" &&
-      meta.pendingApproval.requestId === requestId && meta.pendingApproval.recoveryId === recoveryId
+    const pending: PendingApproval | undefined = meta.pendingApproval?.requestId === requestId &&
+      meta.pendingApproval.recoveryId === recoveryId
       ? meta.pendingApproval
-      : undefined;
+      : pendingRequests(meta.pendingApproval).find((request) =>
+          request.async && request.kind === "question" && request.requestId === requestId &&
+          request.recoveryId === recoveryId) ?? (() => {
+            // The control plane accepted this durable answer while the card was actionable. A
+            // later provider event may have displaced the runner snapshot before delivery.
+            const ask = this.store.readEvents(sessionId).reverse().find((event) =>
+              event.payload.kind === "question_request" && event.payload.async &&
+              event.payload.requestId === requestId && event.payload.occurrenceId === recoveryId);
+            if (!ask || ask.payload.kind !== "question_request") return undefined;
+            return {
+              requestId, recoveryId, occurrenceId: recoveryId, async: true,
+              kind: "question" as const, title: ask.payload.questions[0]?.question ?? "The agent has a question",
+              options: [], questions: ask.payload.questions,
+            };
+          })();
     let recoveredQuestion: NonNullable<QueuedPrompt["recoveredQuestion"]>;
     if (retainedQuestion) {
       if (retainedQuestion.requestId !== requestId || retainedQuestion.recoveryId !== recoveryId ||
@@ -13364,7 +13462,8 @@ export class SessionManager {
       }
       recoveredQuestion = retainedQuestion;
     } else {
-      if (pending?.recoveryReason !== "provider_restart" || pending.recoveryAction !== "resume_answer") {
+      if (!pending || (!pending.async &&
+          (pending.recoveryReason !== "provider_restart" || pending.recoveryAction !== "resume_answer"))) {
         durable.failed("the recovered question is no longer pending", "COMMAND_CANCELLED");
         return;
       }
@@ -13848,15 +13947,28 @@ export class SessionManager {
     }
     const entry = this.active.get(sessionId);
     const terminal = status === "completed" || status === "failed" || status === "stopped";
-    const childAttention = !terminal && pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
-      .some((request) => request.ownerToolUseId);
+    if (terminal) {
+      for (const request of pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)) {
+        if (request.async) this.emitEvent(sessionId, {
+          kind: "question_resolved", requestId: request.requestId,
+          ...(request.occurrenceId ? { occurrenceId: request.occurrenceId } : {}),
+          answered: false, resolutionReason: "expired",
+        });
+      }
+    }
+    const pending = this.store.readMeta(sessionId)?.pendingApproval;
+    const childAttention = !terminal && pendingRequests(pending)
+      .some((request) => request.ownerToolUseId && !request.async);
     const projectedStatus = childAttention ? "input_required" : status;
     if (entry) entry.status = projectedStatus;
     // Foreground idle does not end independently owned child callbacks. Keep their snapshot
     // actionable while the raw foreground status still reaches workflow/pod settlement consumers.
     const settled = projectedStatus !== "running" && projectedStatus !== "starting" && projectedStatus !== "input_required";
+    const [firstAsync, ...otherAsync] = terminal ? [] : pendingRequests(pending).filter((request) => request.async);
     this.store.patchMeta(sessionId, settled
-      ? { status: projectedStatus, pendingApproval: null, capacityWait: status === "queued" ? capacityWait : undefined }
+      ? { status: projectedStatus, pendingApproval: firstAsync
+          ? { ...firstAsync, ...(otherAsync.length ? { additionalRequests: otherAsync } : {}) } : null,
+          capacityWait: status === "queued" ? capacityWait : undefined }
       : { status: projectedStatus, capacityWait: status === "queued" ? capacityWait : undefined });
     this.send({
       type: "session_status",
@@ -13930,6 +14042,15 @@ export class SessionManager {
     if (entry?.historyIntegrityFailure) {
       durable?.failed(entry.historyIntegrityFailure, "INVALID_COMMAND");
       return undefined;
+    }
+    if (payload.kind === "user_message") {
+      for (const old of pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)) {
+        if (old.async && !this.queuedAsyncAnswer(sessionId, old)) this.emitEvent(sessionId, {
+          kind: "question_resolved", requestId: old.requestId,
+          ...(old.occurrenceId ? { occurrenceId: old.occurrenceId } : {}),
+          answered: false, resolutionReason: "replaced",
+        });
+      }
     }
     try {
       // Provider request ids are not occurrence identities: some providers may reuse one after a
@@ -15172,7 +15293,8 @@ export class SessionManager {
         this.emitEvent(sessionId, { kind: "turn_interrupted" });
         this.settleTurnInterruption(sessionId, live);
       }
-      this.emitStatus(sessionId, pending ? "input_required" : state === "started" ? "running" : "idle");
+      this.emitStatus(sessionId, pendingRequests(pending).some((request) => !request.async)
+        ? "input_required" : state === "started" ? "running" : "idle");
       if (interrupted &&
           (live.queue.length || live.pendingProviderAccountSwitch || live.pendingWorktreeRebind)) {
         setImmediate(() => this.scheduleDrain(sessionId));
@@ -15187,8 +15309,17 @@ export class SessionManager {
     const entry = this.active.get(sessionId);
     if (entry?.historyIntegrityFailure) return;
     if (entry?.providerInitiatedTurnActive &&
-        (payload.kind === "permission_request" || payload.kind === "question_request")) {
+        (payload.kind === "permission_request" || payload.kind === "question_request" && !payload.async)) {
       entry.providerInitiatedRequestIds?.add(payload.requestId);
+    }
+    if (payload.kind === "question_request" && payload.async) {
+      for (const old of pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)) {
+        if (old.async && old.requestId !== payload.requestId && !this.queuedAsyncAnswer(sessionId, old)) {
+          this.emitEvent(sessionId, { kind: "question_resolved", requestId: old.requestId,
+            ...(old.occurrenceId ? { occurrenceId: old.occurrenceId } : {}),
+            answered: false, resolutionReason: "replaced" });
+        }
+      }
     }
     const managedAttentionResolution = (payload.kind === "permission_resolved" || payload.kind === "question_resolved") &&
       pendingRequests(this.store.readMeta(sessionId)?.pendingApproval).some((request) => request.ownerToolUseId);
@@ -15198,7 +15329,8 @@ export class SessionManager {
       this.flushPolicyHookDecisionAfterToolCall(sessionId, payload.toolCallId);
     }
     if (managedAttentionResolution && entry) {
-      this.emitStatus(sessionId, this.store.readMeta(sessionId)?.pendingApproval
+      this.emitStatus(sessionId, pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
+        .some((request) => !request.async)
         ? "input_required" : entry.running || entry.providerInitiatedTurnActive ? "running" : "idle");
     }
     if (entry?.currentBackgroundJobIds?.length && payload.kind === "agent_message" &&
@@ -16420,18 +16552,34 @@ export class SessionManager {
           options: [],
           kind: "question",
           questions: payload.questions,
+          ...(payload.async ? { async: true } : {}),
+          ...(payload.async && payload.occurrenceId ? { recoveryId: payload.occurrenceId } : {}),
           ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
         }),
-        status: "input_required",
+        status: payload.async ? this.store.readMeta(sessionId)?.status ?? "idle" : "input_required",
       });
     } else if (payload.kind === "permission_resolved" || payload.kind === "question_resolved") {
+      const before = this.store.readMeta(sessionId);
+      if (payload.kind === "question_resolved" && payload.occurrenceId &&
+          !pendingRequests(before?.pendingApproval).some((request) =>
+            request.requestId === payload.requestId && request.occurrenceId === payload.occurrenceId)) {
+        return;
+      }
       this.approvalStarted.delete(`${sessionId}:${payload.requestId}`);
       if (payload.kind === "permission_resolved") {
         this.forgetPermissionOptionKinds(sessionId, payload.requestId);
       }
       // Card answered — the turn resumes, so clear the approval and restore the running status.
-      const pendingApproval = removePendingRequest(this.store.readMeta(sessionId)?.pendingApproval, payload.requestId);
-      this.store.patchMeta(sessionId, { pendingApproval, status: pendingApproval ? "input_required" : "running" });
+      const resolvedAsync = pendingRequests(before?.pendingApproval)
+        .some((request) => request.requestId === payload.requestId && request.async);
+      const pendingApproval = removePendingRequest(before?.pendingApproval, payload.requestId);
+      const live = this.active.get(sessionId);
+      this.store.patchMeta(sessionId, {
+        pendingApproval,
+        status: pendingRequests(pendingApproval).some((request) => !request.async)
+          ? "input_required" : resolvedAsync && !live?.running && !live?.providerInitiatedTurnActive
+            ? before?.status === "input_required" ? "idle" : before?.status ?? "idle" : "running",
+      });
     } else if (payload.kind === "token_usage" && !payload.parentToolUseId) {
       // Subagent usage is retained in the event log for UI rollups; the parentless provider result
       // is the authoritative total and already includes delegated work.

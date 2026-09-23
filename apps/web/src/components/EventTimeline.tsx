@@ -52,7 +52,9 @@ export interface TimelineQuestionContext {
   sessionId: string;
   pendingQuestion: {
     requestId: string;
+    occurrenceId?: string;
     questions: AgentQuestion[];
+    async?: boolean;
     recoveryReason?: "provider_restart";
     recoveryAction?: "resume_answer";
   } | null;
@@ -2105,6 +2107,8 @@ const TimelineRow = memo(function TimelineRow({
                       : `→ Dismissed by Parent ${item.resolvedByParentSessionId}`
                     : item.answeredByPolicies?.length ? `→ Answered by Policy: ${item.answeredByPolicies.join(", ")}` : item.resolutionReason === "replaced"
                     ? "→ Replaced"
+                    : item.resolutionReason === "expired"
+                      ? "→ Expired"
                     : item.resolutionReason === "provider_resolved"
                       ? "→ Resolved by Provider"
                       : item.answered ? "→ Answered" : "→ Dismissed"}

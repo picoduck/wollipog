@@ -4988,9 +4988,9 @@ export class SessionsService {
     if (guardrailChanged && parkedGuardrail) {
       const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, parkedGuardrail.requestId);
       this.db.setPendingApproval(sessionId, remaining);
-      this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "idle", now);
+      this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "idle", now);
       this.recordRunnerGuardrailResolution(session, parkedGuardrail, "dismissed", actor, now, { content: config });
-      if (!remaining) this.gateOnPolicy(sessionId, now);
+      this.gateOnPolicy(sessionId, now);
       this.reconcilePolicyHookTimeouts(now, sessionId);
       this.clearSettledPolicyResumeStatus(sessionId);
     } else if (guardrailChanged && !parked) {
@@ -7714,6 +7714,7 @@ export class SessionsService {
         actor,
         resolution.action === "answer" ? "submit" : "dismiss",
         parentSessionId,
+        occurrenceId,
       );
     } else {
       if (pending.kind === "question") return fail("the descendant request is not an approval", 409);
@@ -7735,6 +7736,7 @@ export class SessionsService {
     actor: GovernanceActor = { kind: "human", id: "local" },
     action: "submit" | "dismiss" = Object.keys(answers).length > 0 ? "submit" : "dismiss",
     resolvedByParentSessionId?: string,
+    occurrenceId?: string,
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -7745,6 +7747,9 @@ export class SessionsService {
     const pending = pendingRequests(session.pendingApproval).find((request) => request.requestId === requestId) ?? session.pendingApproval;
     if (!pending) return fail("no pending question for this session", 409);
     if (pending.requestId !== requestId) return fail("question request id does not match the pending one", 409);
+    if (pending.async && (!occurrenceId || occurrenceId !== pending.occurrenceId)) {
+      return fail("async question occurrence is stale or missing", 409);
+    }
     if (pending.expiresAt != null && pending.expiresAt <= Date.now()) return fail("question request has expired", 409);
     if (pending.kind !== "question") return fail("the pending approval is not a question", 409);
     // Answers ride verbatim into the agent's updatedInput — reject anything the pending card
@@ -7754,18 +7759,18 @@ export class SessionsService {
     if (invalid) return fail(`invalid answers: ${invalid}`, 400);
     const auditContent = questionAuditContent(pending, answers);
 
-    if (pending.recoveryReason === "provider_restart" && action === "submit") {
-      if (pending.ownerToolUseId) {
+    if ((pending.async || pending.recoveryReason === "provider_restart") && action === "submit") {
+      if (!pending.async && pending.ownerToolUseId) {
         return fail("the child answer channel ended when the provider restarted; dismiss this question", 409);
       }
-      if (pending.recoveryAction !== "resume_answer") {
+      if (!pending.async && pending.recoveryAction !== "resume_answer") {
         return fail("the original answer channel ended when the runner restarted; dismiss this question and continue with a new prompt", 409);
       }
       if ((pending.questions ?? []).some((question) => question.secret)) {
         return fail("recovered secret answers cannot be stored for durable delivery; dismiss this question and continue with a new prompt", 409);
       }
       if (!pending.recoveryId) {
-        return fail("the recovered question has no stable occurrence identity; dismiss it and continue with a new prompt", 409);
+        return fail("the question has no stable occurrence identity; dismiss it and continue with a new prompt", 409);
       }
       const capabilityFailure = this.capabilityFailure(
         session.runnerId,
@@ -7804,7 +7809,8 @@ export class SessionsService {
       // provider turn.
       const remaining = removePendingRequest(session.pendingApproval, requestId);
       this.db.setPendingApproval(sessionId, remaining);
-      this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "running", now);
+      this.db.updateSessionStatus(sessionId,
+        pending.async ? session.status : hasBlockingPendingRequest(remaining) ? "input_required" : "running", now);
       this.recordGovernanceAudit(
         session,
         pending,
@@ -7828,6 +7834,7 @@ export class SessionsService {
 
     const sent = this.hub.sendToRunner(session.runnerId, {
       type: "answer_question", sessionId, requestId, answers, action,
+      ...(pending.occurrenceId ? { occurrenceId: pending.occurrenceId } : {}),
       ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
     });
     if (!sent) {
@@ -7844,7 +7851,7 @@ export class SessionsService {
     this.db.setPendingApproval(sessionId, remaining);
     this.db.updateSessionStatus(
       sessionId,
-      remaining ? "input_required" : pending.recoveryReason === "provider_restart" && action === "dismiss"
+      pending.async ? session.status : hasBlockingPendingRequest(remaining) ? "input_required" : pending.recoveryReason === "provider_restart" && action === "dismiss"
         ? session.status === "input_required" ? "idle" : session.status
         : "running",
       now,
@@ -8014,7 +8021,7 @@ export class SessionsService {
         this.db.setPendingApproval(sessionId, remaining);
         // These cards never cancelled the provider turn: a session parked mid-turn is still
         // running, and only one parked at a settle frame goes back to idle.
-        this.db.updateSessionStatus(sessionId, remaining ? "input_required" :
+        this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" :
           (this.db.policyResumeStatus(sessionId) === "idle" ? "idle" : "running"), now);
         this.recordGovernanceAudit(session, pending, "resolution", "allowed", actor, now, { optionId });
         this.gateOnPolicy(sessionId, now);
@@ -8096,10 +8103,10 @@ export class SessionsService {
         } else if (nextConfig.maxToolCalls != null && nextConfig.maxToolCalls !== session.maxToolCalls) {
           this.db.updateSessionMaxToolCalls(sessionId, nextConfig.maxToolCalls, now, session.maxToolCallsStep);
         }
-        this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "idle", now);
+        this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "idle", now);
         // Asks are serialized through the single approval slot: if ANOTHER rule is also tripped,
         // park again immediately with its own card instead of waiting for the next turn settle.
-        if (!remaining) this.gateOnPolicy(sessionId, now);
+        this.gateOnPolicy(sessionId, now);
         this.reconcilePolicyHookTimeouts(now, sessionId);
         this.clearSettledPolicyResumeStatus(sessionId);
       } else {
@@ -8128,6 +8135,9 @@ export class SessionsService {
     if (pending.kind === "question" && optionId !== null) {
       return fail("this is a question — answer it via /answer, or dismiss with optionId null", 409);
     }
+    if (pending.kind === "question" && pending.async) {
+      return fail("dismiss async questions via /answer with their occurrence id", 409);
+    }
 
     // Deliver first; only mutate state if the runner actually received it, so an
     // offline runner can't make us lose the pending approval irrecoverably.
@@ -8139,6 +8149,7 @@ export class SessionsService {
       pending.kind === "question"
         ? {
             type: "answer_question", sessionId, requestId, answers: {}, action: "dismiss",
+            ...(pending.occurrenceId ? { occurrenceId: pending.occurrenceId } : {}),
             ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
           }
         : {
@@ -8159,7 +8170,7 @@ export class SessionsService {
     // deliberately gated off while a turn is in flight.
     const remaining = removePendingRequest(this.db.getSession(sessionId)?.pendingApproval, requestId);
     this.db.setPendingApproval(sessionId, remaining);
-    this.db.updateSessionStatus(sessionId, remaining ? "input_required" : pending.kind === "question" || optionId ? "running" : "idle", now);
+    this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : pending.kind === "question" || optionId ? "running" : "idle", now);
     const selected = optionId == null ? undefined : pending.options.find((option) => option.optionId === optionId);
     const outcome: GovernanceAuditOutcome = pending.kind === "question"
       ? "dismissed"
@@ -10329,9 +10340,9 @@ export class SessionsService {
   /** The guardrail ask gateOnPolicy would park on right now, without parking. */
   private pendingPolicyAsk(s: SessionView, softOnly = false) {
     const occupied = pendingRequests(s.pendingApproval);
-    // A typed workflow decision is an authorization record, not a provider turn barrier. Soft
-    // guardrails must be able to park alongside it while other provider/user asks retain priority.
-    if (occupied.some((request) => request.kind !== "workflow_decision")) return null;
+    // Typed workflow decisions and async questions do not block the provider turn. Soft
+    // guardrails must park alongside them before the runner drains another queued prompt.
+    if (occupied.some((request) => request.kind !== "workflow_decision" && !request.async)) return null;
     const rules = rulesFromSession(this.guardrailFields(s));
     if (rules.length === 0) return null;
     // sessionView already computed the count when the guardrail is armed — don't re-query.
@@ -10508,6 +10519,8 @@ export class SessionsService {
       options: [],
       kind: "question",
       questions: payload.questions,
+      ...(payload.async ? { async: true } : {}),
+      ...(payload.async && payload.occurrenceId ? { recoveryId: payload.occurrenceId } : {}),
     } : null;
     const permissionDecision = payload.kind === "permission_request" ? (() => {
       const approval = incomingRequest!;
@@ -10769,7 +10782,7 @@ export class SessionsService {
             request.ownerToolUseId || request.kind === "workflow_decision")
             ? removePendingRequest(current, approval.requestId) : null;
           this.db.setPendingApproval(sessionId, remaining);
-          this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "running", now);
+          this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "running", now);
           this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
           this.recordGovernanceAudit(session, approval, "resolution", "allowed", actor, now, {
             optionId: actionAdmission.optionId,
@@ -10830,7 +10843,7 @@ export class SessionsService {
           this.db.setPendingApproval(sessionId, remaining);
           // A deny (including null-option cancellation) returns control to the still-active agent
           // turn just like a selected reject_once, so both auto effects remain running here.
-          this.db.updateSessionStatus(sessionId, remaining ? "input_required" : "running", now);
+          this.db.updateSessionStatus(sessionId, hasBlockingPendingRequest(remaining) ? "input_required" : "running", now);
           this.recordGovernanceAudit(
             session,
             approval,
@@ -10956,12 +10969,21 @@ export class SessionsService {
         { content: payload.questions },
       );
       const occupiedHook = this.db.getSession(sessionId)?.pendingApproval;
+      if (occupiedHook?.kind === "policy_hook" && payload.async) {
+        // The hook owns a blocking decision, but an async question can remain answerable behind
+        // it. Preserve both instead of dismissing a non-blocking question at the turn barrier.
+        this.hub.sessionEvent(ev, { suppressReminderWake: true });
+        this.db.setPendingApproval(sessionId, appendPendingApproval(occupiedHook, approval));
+        this.hub.sessionChangedById(sessionId);
+        return;
+      }
       if (occupiedHook?.kind === "policy_hook") {
         this.hub.sessionEvent(ev, { suppressReminderWake: true });
         const sent = this.hub.sendToRunner(session.runnerId, {
           type: "answer_question",
           sessionId,
           requestId: approval.requestId,
+          ...(approval.occurrenceId ? { occurrenceId: approval.occurrenceId } : {}),
           answers: {},
           action: "dismiss",
         });
@@ -11008,8 +11030,10 @@ export class SessionsService {
         sessionId,
         addPendingRequestPreservingRunnerGuardrails(this.db.getSession(sessionId)?.pendingApproval, approval),
       );
-      this.db.updateSessionStatus(sessionId, "input_required", now);
-      this.notifyTransition(session, sessionId);
+      if (!payload.async) {
+        this.db.updateSessionStatus(sessionId, "input_required", now);
+        this.notifyTransition(session, sessionId);
+      }
     }
 
     // The runner now logs the resolution too — clear the cached card to match the box, UNLESS a
@@ -11022,8 +11046,11 @@ export class SessionsService {
         if (!requests?.size) this.automaticQuestions.delete(sessionId);
       }
       const current = this.db.getSession(sessionId)?.pendingApproval;
-      const settledRequest = pendingRequests(current).find((request) => request.requestId === payload.requestId);
-      if (!settledRequest || !isPolicyApproval(settledRequest)) {
+      const settledRequest = pendingRequests(current).find((request) => request.requestId === payload.requestId &&
+        (payload.kind !== "question_resolved" || !payload.occurrenceId ||
+          request.occurrenceId === payload.occurrenceId));
+      if ((!settledRequest && !(payload.kind === "question_resolved" && payload.occurrenceId)) ||
+          (settledRequest && !isPolicyApproval(settledRequest))) {
         this.db.setPendingApproval(sessionId, removePendingRequest(current, payload.requestId));
       }
       this.gateOnPolicy(sessionId, now);
@@ -11390,10 +11417,17 @@ export class SessionsService {
         options: [],
         kind: "question",
         questions: payload.questions,
+        ...(payload.async ? { async: true } : {}),
+        ...(payload.async && payload.occurrenceId ? { recoveryId: payload.occurrenceId } : {}),
         ...(payload.ownerToolUseId ? { ownerToolUseId: payload.ownerToolUseId } : {}),
       });
     }
     if (payload.kind === "permission_resolved" || payload.kind === "question_resolved") {
+      if (payload.kind === "question_resolved" && payload.occurrenceId &&
+          !pendingRequests(trailingAsk).some((request) =>
+            request.requestId === payload.requestId && request.occurrenceId === payload.occurrenceId)) {
+        return trailingAsk;
+      }
       return removePendingRequest(trailingAsk, payload.requestId);
     }
     return trailingAsk;
@@ -11411,7 +11445,8 @@ export class SessionsService {
   private settleHydratedAsk(sessionId: string, trailingAsk: PendingApproval | null): void {
     if (!trailingAsk) return;
     const cur = this.db.getSession(sessionId);
-    if (cur && cur.status === "input_required" && !cur.pendingApproval) {
+    if (cur && !isTerminal(cur.status) &&
+        (cur.status === "input_required" || trailingAsk.async) && !cur.pendingApproval) {
       this.db.setPendingApproval(sessionId, trailingAsk);
       this.hub.sessionChangedById(sessionId);
     }
@@ -11988,6 +12023,10 @@ function hasPolicyApproval(pending: PendingApproval | null | undefined): boolean
   return pendingRequests(pending).some((request) => isPolicyApproval(request));
 }
 
+function hasBlockingPendingRequest(pending: PendingApproval | null | undefined): boolean {
+  return pendingRequests(pending).some((request) => !request.async);
+}
+
 /** Unlike addPendingRequest (which intentionally gives a CP policy card exclusive ownership), a
  * runner trip must wait behind an unrelated provider request without replacing it. */
 function appendPendingApproval(
@@ -12007,6 +12046,11 @@ function addPendingRequestPreservingRunnerGuardrails(
   current: PendingApproval | null | undefined,
   next: PendingApproval,
 ): PendingApproval {
+  // An async question does not own a turn barrier. It cannot displace a policy pause that has
+  // already stopped the queue; keep that card first and make the question available behind it.
+  if (next.async && pendingRequests(current).some((request) => isPolicyApproval(request))) {
+    return appendPendingApproval(current, next);
+  }
   const durableCards = pendingRequests(current).filter((request) =>
     request.runnerGuardrail || request.kind === "workflow_decision");
   let combined = addPendingRequest(current, next);
