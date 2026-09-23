@@ -369,7 +369,7 @@ declare global {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
       lastAddBoxRequest(): AddBoxRequest | null;
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
-        "multiple-installations" | "harness-states" | "target-installations"): void;
+        "multiple-installations" | "harness-states" | "target-installations" | "batch-wrapper"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
     };
   }
@@ -448,6 +448,18 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
       ];
       runner.harnessSelections = [{ family: "codex", context: { kind: "native" },
         installationId: "system", path: "/usr/bin/codex", via: "path", version: "0.199.0", agentId: "codex" }];
+    } else if (scenario === "batch-wrapper") {
+      runner.protocolVersion = PROTOCOL_VERSION;
+      runner.agents = [{
+        id: "batch-codex", name: "Batch Codex", command: "C:\\Program Files\\Codex Tools\\codex.cmd",
+        args: ["--profile", 'Team "Research"', "%PATH%"], env: {}, driver: "codex-app-server",
+        context: { kind: "native" }, source: "discovered", available: true,
+        installation: { id: "batch", path: "C:\\Program Files\\Codex Tools\\codex.cmd", via: "path" },
+        update: { status: "managed_externally", checkedAt: Date.UTC(2026, 8, 22),
+          channel: "unknown", evidenceSource: "Executable installation provenance", managedExternally: true,
+          guidance: "This installation uses a Windows batch wrapper. Use the package or version manager that installed this exact copy." },
+      }];
+      runner.harnessSelections = [];
     } else if (scenario === "harness-states") {
       runner.protocolVersion = PROTOCOL_VERSION;
       runner.hostname = "demo-workstation";
