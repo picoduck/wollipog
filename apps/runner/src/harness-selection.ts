@@ -7,7 +7,7 @@ import {
   type HarnessInstallationChoice,
 } from "@wollipog/protocol";
 
-/** Pre-selection control planes cannot hold a saved choice; v175 can but cannot transmit it. */
+/** Pre-selection control planes cannot hold a saved choice; v175–176 can but cannot transmit it. */
 export function synchronizedHarnessChoices(
   controlPlaneProtocolVersion: number | null,
   choices: readonly HarnessInstallationChoice[] | undefined,

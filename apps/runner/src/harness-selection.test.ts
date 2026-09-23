@@ -11,7 +11,9 @@ test("background selection remains compatible with pre-selection control planes 
     "v174 cannot store a choice, so legacy usage and native adoption remain available");
   assert.equal(synchronizedHarnessChoices(175, undefined), null,
     "v175 can store a choice but cannot synchronize it, so background work fails closed");
-  assert.equal(synchronizedHarnessChoices(176, undefined), null,
+  assert.equal(synchronizedHarnessChoices(176, [choice]), null,
+    "v176 target-bound installations do not imply background selection support");
+  assert.equal(synchronizedHarnessChoices(177, undefined), null,
     "a current control plane must include its authoritative choices");
-  assert.deepEqual(synchronizedHarnessChoices(176, [choice]), [choice]);
+  assert.deepEqual(synchronizedHarnessChoices(177, [choice]), [choice]);
 });
