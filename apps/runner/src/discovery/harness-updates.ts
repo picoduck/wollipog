@@ -34,10 +34,9 @@ export function manualCodexUpdateCommand(
     command: words.map(posixWord).join(" "),
     shell: `a POSIX shell inside WSL: ${context.distro}`,
   };
-  // An extensionless Windows command may resolve through PATHEXT to a batch wrapper. Neither
-  // its target nor the wrapper's cmd.exe argument parsing can be reconstructed safely.
-  if (platform === "win32" && (/\.(?:cmd|bat)$/i.test(binary.launch.command) ||
-    !/(?:^|[\\/])[^\\/]+\.[^./\\]+$/.test(binary.launch.command))) return null;
+  // Even a dotted name such as codex.v2 can resolve through PATHEXT to a batch wrapper.
+  // Only an explicit native executable suffix rules out that ambiguous lookup.
+  if (platform === "win32" && !/(?:^|[\\/])[^\\/]+\.(?:exe|com)$/i.test(binary.launch.command)) return null;
   if (platform === "win32") return {
     command: `& ${words.map(powerShellWord).join(" ")}`,
     shell: "PowerShell 7.3 or later on this Machine",

@@ -134,6 +134,21 @@ test("Agent Details treats Windows batch wrapper arguments as reference data", a
   await page.screenshot({ path: "test-results/batch-wrapper-details-mobile.png", fullPage: true });
 });
 
+test("Agent Details does not offer a copyable command for dotted Windows batch aliases", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("dotted-batch-wrapper"));
+  await page.getByText("Agents", { exact: true }).click();
+  await page.getByRole("button", { name: "View Codex App Server Details" }).click();
+  const details = page.getByRole("dialog", { name: "Codex App Server Details" });
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.screenshot({ path: "test-results/dotted-batch-wrapper-details-desktop.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.screenshot({ path: "test-results/dotted-batch-wrapper-details-mobile.png", fullPage: true });
+  await expect(details.getByText(/A copyable launch command is unavailable/)).toBeVisible();
+  await expect(details.locator("dt").filter({ hasText: /^Executable$/ }).locator("+ dd code"))
+    .toHaveText("codex.v2");
+  await expect(details.getByRole("button", { name: /Copy .* Launch Command/ })).toHaveCount(0);
+});
+
 test("Agent Details does not offer an extensionless Windows batch launch to copy", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("extensionless-batch-wrapper"));
   await page.getByText("Agents", { exact: true }).click();

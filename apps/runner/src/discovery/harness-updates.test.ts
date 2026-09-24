@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -124,7 +124,16 @@ test("extensionless native Windows update commands cannot promise batch-safe arg
   }
 });
 
-test("temporary native Windows dotted-command lookup probe", { skip: process.platform !== "win32" }, () => {
+test("dotted native Windows update commands can still resolve to batch wrappers", () => {
+  for (const command of ["codex.v2", "C:\\Tools\\codex.v2"]) {
+    const binary = { path: "C:\\Tools\\codex.v2.cmd", via: "path" as const,
+      launch: { command, args: ['embedded"quote', "%PATH%"] } };
+    assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+  }
+});
+
+test("PowerShell resolves dotted harness names to batch wrappers, so update guidance stays non-copyable",
+  { skip: process.platform !== "win32" }, () => {
   for (const suffix of ["cmd", "bat"]) {
     const dir = mkdtempSync(join(tmpdir(), "wollipog dotted lookup "));
     try {
@@ -139,8 +148,13 @@ test("temporary native Windows dotted-command lookup probe", { skip: process.pla
       const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-File", script], {
         encoding: "utf8", env: { ...process.env, PATH: `${dir};${process.env.PATH}`, PATHEXT: ".COM;.EXE;.BAT;.CMD" },
       });
-      console.log(`DOTTED_LOOKUP_PROBE_${suffix.toUpperCase()}: ${JSON.stringify({ status: probe.status, stdout: probe.stdout, stderr: probe.stderr })}`);
-      assert.equal(probe.status, 0, "PowerShell lookup probe should run");
+      assert.equal(probe.status, 0, probe.stderr);
+      assert.match(probe.stdout, new RegExp(`RESOLVED:.*codex\\.v2\\.${suffix}`, "i"));
+      assert.match(probe.stdout, /DOTTED_WRAPPER_EXECUTED:probe/);
+      assert.match(probe.stdout, /NATIVE_EXIT:0/);
+      const binary = { path: join(dir, `codex.v2.${suffix}`), via: "path" as const,
+        launch: { command: "codex.v2", args: ['embedded"quote', "%PATH%"] } };
+      assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

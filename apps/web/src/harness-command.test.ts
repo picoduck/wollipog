@@ -46,3 +46,12 @@ test("extensionless native Windows launches cannot promise batch-safe copyable a
     });
   }
 });
+
+test("dotted native Windows names can still resolve through PATHEXT to batch wrappers", () => {
+  for (const command of ["codex.v2", "C:\\Tools\\codex.v2"]) {
+    assert.deepEqual(formatHarnessLaunchCommand(command, ['embedded"quote', "%PATH%"],
+      { kind: "native" }, "windows"), {
+      command: null, shell: null, batchWrapper: true,
+    });
+  }
+});

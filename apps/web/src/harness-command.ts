@@ -24,9 +24,9 @@ export function formatHarnessLaunchCommand(
     };
   }
   if (os === "windows") {
-    // An extensionless command may resolve through PATHEXT to a batch wrapper. The browser
-    // cannot prove the selected target or preserve its cmd.exe argument parsing.
-    if (/\.(?:cmd|bat)$/i.test(command) || !/(?:^|[\\/])[^\\/]+\.[^./\\]+$/.test(command)) {
+    // Even a dotted name such as codex.v2 can resolve through PATHEXT to a batch wrapper.
+    // Only an explicit native executable suffix rules out that ambiguous lookup.
+    if (!/(?:^|[\\/])[^\\/]+\.(?:exe|com)$/i.test(command)) {
       return { command: null, shell: null, batchWrapper: true };
     }
     return {
