@@ -1,11 +1,13 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { api, type ApiClient } from "../api.js";
+import { api, createApiClient, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { createNativeApiTransport, type NativeInvokeRuntime } from "../native-api-transport.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
@@ -28,12 +30,12 @@ for (const [name, value] of Object.entries({
 const ipcFailure = "The remote HTTP command requires a binary request frame.";
 const client = { ...api, getIdentity: async () => { throw ipcFailure; } } as ApiClient;
 
-async function render(children: React.ReactNode) {
+async function render(children: React.ReactNode, activeClient: ApiClient = client) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<ApiProvider client={client}>{children}</ApiProvider>);
+    root.render(<ApiProvider client={activeClient}>{children}</ApiProvider>);
     await Promise.resolve();
   });
   return { container, unmount: async () => { await act(async () => root.unmount()); container.remove(); } };
@@ -51,6 +53,41 @@ test("Create Project shows a native IPC string rejection and stops loading acces
     const create = [...container.querySelectorAll("button")].find((button) => button.textContent?.trim() === "Create Project");
     assert.ok(create);
     assert.equal(create.disabled, true);
+  } finally {
+    await unmount();
+  }
+});
+
+test("Create Project shows an IPC string error when submission fails", async () => {
+  const desktop: NativeInvokeRuntime = {
+    async invoke<T>(): Promise<T> { throw "native request failed"; },
+  };
+  const transport = createNativeApiTransport({
+    instanceId: "a",
+    runtimeKey: "a:1",
+    publicOrigin: "https://a.test",
+    desktop,
+  });
+  const { container, unmount } = await render(<CreateProjectDialog
+    accessScopeManagementSupported={false}
+    onClose={() => {}}
+    onCreated={() => {}}
+  />, createApiClient(transport));
+  try {
+    const input = container.querySelector<HTMLInputElement>("input")!;
+    await act(async () => {
+      fireDomEvent.change(input, { target: { value: "Test Project" } });
+    });
+    const create = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent?.trim() === "Create Project");
+    assert.ok(create);
+    assert.equal(create.disabled, false);
+    await act(async () => {
+      fireDomEvent.submit(container.querySelector<HTMLFormElement>("form")!);
+      await Promise.resolve();
+    });
+    assert.equal(container.querySelector('[role="alert"]')?.textContent, "native request failed");
+    assert.equal(create.disabled, false);
   } finally {
     await unmount();
   }
