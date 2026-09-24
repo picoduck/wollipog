@@ -39,6 +39,13 @@ argument.
 Built-in Codex update guidance likewise sends the operator to the
 original manager for that exact installation instead of promising a safe copied command.
 Other explicit `.exe` and `.com` launches and POSIX commands inside WSL retain their shell-specific command guidance.
+During a rolling upgrade, a runner built before the Windows command guard may still report a
+copyable Codex update command for a launch that uses legacy PowerShell argument passing. The
+dashboard applies its own launch classification to runner-provided guidance in Agent Details,
+Machine Settings, agent remediation, and onboarding. For such a native Windows launch it replaces
+an old PowerShell update command with manager guidance. Safe advisory text from current runners, other
+explicit native executables, and WSL guidance remain visible. Protocol version alone cannot
+identify the guard because both runner builds use protocol v179.
 
 Boxes run the runner **binary deployed to them** (a Node SEA executable copied over SSH), not
 this repo's source. Restarting your dev stack updates the *local* runner you launch from source,

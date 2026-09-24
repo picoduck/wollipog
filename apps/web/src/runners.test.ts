@@ -5,6 +5,7 @@ import {
   adoptAction,
   agentInstallHints,
   codexUpgradeGuidance,
+  harnessUpdateGuidance,
   externalSessionKey,
   formatAdmissionPolicy,
   formatExecutionIsolation,
@@ -176,13 +177,58 @@ test("agentInstallHints gives a native Claude installer and neutral Codex guidan
 });
 
 test("Codex remediation follows installation evidence without assuming npm or a selected copy", () => {
-  assert.match(codexUpgradeGuidance({}), /Install Codex using a supported method/);
-  assert.match(codexUpgradeGuidance({ installation: { id: "other", path: "/other/codex", via: "path" } }), /this installation in Machine settings/);
-  const guidance = codexUpgradeGuidance({ update: {
+  const agent = { command: "codex", args: [] };
+  assert.match(codexUpgradeGuidance(agent, "linux"), /Install Codex using a supported method/);
+  assert.match(codexUpgradeGuidance({ ...agent, installation: { id: "other", path: "/other/codex", via: "path" } }, "linux"), /this installation in Machine settings/);
+  const guidance = codexUpgradeGuidance({ ...agent, update: {
     status: "managed_externally", checkedAt: 1, channel: "stable", evidenceSource: "help",
     managedExternally: true, guidance: "Use this exact installation's manager.",
-  } });
+  } }, "linux");
   assert.equal(guidance, "Use this exact installation's manager.");
+});
+
+test("older Windows runner update text cannot offer an executable command for a legacy launch", () => {
+  const agent = {
+    command: "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/c", "echo", "%PATH%"],
+    context: { kind: "native" as const },
+    update: {
+      status: "managed_externally" as const, checkedAt: 1, channel: "stable" as const,
+      evidenceSource: "Executable installation provenance", managedExternally: true as const,
+      guidance: "This installation advertises its built-in `codex update` command. Run `& 'C:\\Windows\\System32\\cmd.exe' '/d' '/c' 'echo' '%PATH%' 'update'` in PowerShell 7.3 or later on this Machine after stopping sessions.",
+    },
+  };
+  const safe = harnessUpdateGuidance(agent, "windows");
+  assert.match(safe!, /No copyable update command is available/);
+  assert.doesNotMatch(safe!, /Run `|%PATH%/);
+  assert.equal(codexUpgradeGuidance(agent, "windows"), safe);
+});
+
+test("Windows update filtering is scoped to unsafe native launches and keeps advisory guidance", () => {
+  const legacyGuidance = "A newer release is published. Run `& 'C:\\Tools\\codex' 'update'` in PowerShell.";
+  const modernGuidance = "This installation advertises its built-in `codex update` command, but its selected Windows launch may resolve to a batch wrapper. No copyable update command is available for this launch; use the original manager.";
+  const agent = (command: string, context: { kind: "native" } | { kind: "wsl"; distro: string }, guidance: string) => ({
+    command, args: ["%PATH%"], context,
+    update: {
+      status: "managed_externally" as const, checkedAt: 1, channel: "stable" as const,
+      evidenceSource: "Executable installation provenance", managedExternally: true as const, guidance,
+    },
+  });
+  for (const command of ["codex", "codex.v2", "C:\\Tools\\codex.cmd",
+    "C:\\Windows\\System32\\cscript.exe"]) {
+    assert.match(harnessUpdateGuidance(agent(command, { kind: "native" }, legacyGuidance), "windows")!,
+      /No copyable update command is available/);
+    assert.equal(harnessUpdateGuidance(agent(command, { kind: "native" }, modernGuidance), "windows"),
+      modernGuidance);
+  }
+  assert.equal(harnessUpdateGuidance(agent("C:\\Tools\\codex.exe", { kind: "native" }, legacyGuidance), "windows"),
+    legacyGuidance);
+  assert.equal(harnessUpdateGuidance(agent("/usr/bin/codex", { kind: "wsl", distro: "Ubuntu" }, legacyGuidance), "windows"),
+    legacyGuidance);
+  assert.equal(harnessUpdateGuidance(agent("codex", { kind: "native" }, legacyGuidance), "linux"),
+    legacyGuidance);
+  const posixGuidance = "Run `'/home/example/.local/bin/codex' 'update'` in a POSIX shell on this Machine.";
+  assert.equal(harnessUpdateGuidance(agent("/home/example/.local/bin/codex",
+    { kind: "native" }, posixGuidance), "windows"), posixGuidance);
 });
 
 test("sshTargetHost keeps unbracketed IPv6 literals whole", () => {

@@ -17,6 +17,7 @@ import { osLabel, relativeTime, sshErrorHint, titleCaseLabel } from "../format.j
 import {
   agentInstallHints,
   codexUpgradeGuidance,
+  harnessUpdateGuidance,
   formatAdmissionPolicy,
   formatExecutionIsolation,
   machineSettingsMutationError,
@@ -161,7 +162,7 @@ function AgentDetailsDialog({ a, os, online, onClose }: { a: AgentDefinition; os
             <div><dt>Last Checked</dt><dd>{new Date(a.update.checkedAt).toLocaleString()}</dd></div>
             <div><dt>Evidence Source</dt><dd>{a.update.evidenceSource}</dd></div>
           </dl>
-          <p>{a.update.guidance}</p>
+          <p>{harnessUpdateGuidance(a, os)}</p>
         </section>
       )}
       {a.codexAppServer?.failure?.message && (
@@ -333,7 +334,7 @@ function AgentRow({
       )}
       {(a.codexAppServer?.status === "unsupported" || a.codexAppServer?.status === "unavailable") &&
         driver.startsWith("codex") && a.authStatus !== "unauthenticated" && (
-          <p className="empty-sub">{codexUpgradeGuidance(a)}</p>
+          <p className="empty-sub">{codexUpgradeGuidance(a, os)}</p>
         )}
       {a.registry && a.registry.installStatus !== "installed" && (
         <div>
@@ -954,7 +955,7 @@ function MachineSettingsDialog({
                   ? `Latest Known Compatible v${agent.update.latestKnownCompatibleVersion}` : "Latest Known Compatible Version Unknown"} · {agent.update.latestPublishedVersion
                     ? `Latest Published v${agent.update.latestPublishedVersion}` : "Latest Published Version Unknown"} ·
                   Last Checked {new Date(agent.update.checkedAt).toLocaleString()} · {agent.update.evidenceSource}</div>}
-                {agent.update && <p>{agent.update.guidance}</p>}
+                {agent.update && <p>{harnessUpdateGuidance(agent, runner.os)}</p>}
                 <button type="button" className="btn sm" disabled={isSelected || !installationSupported ||
                   runner.canManage !== true || selectingHarness}
                   onClick={() => void chooseInstallation(agent.id, installation.id)}>

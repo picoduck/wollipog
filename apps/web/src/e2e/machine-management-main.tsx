@@ -373,7 +373,7 @@ declare global {
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
         "multiple-installations" | "harness-states" | "harness-states-ssh" |
         "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper" | "dotted-batch-wrapper" |
-        "explicit-interpreter"): void;
+        "explicit-interpreter" | "older-interpreter-guidance"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
     };
   }
@@ -453,21 +453,25 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
       runner.harnessSelections = [{ family: "codex", context: { kind: "native" },
         installationId: "system", path: "/usr/bin/codex", via: "path", version: "0.199.0", agentId: "codex" }];
     } else if (scenario === "batch-wrapper" || scenario === "extensionless-batch-wrapper" ||
-      scenario === "dotted-batch-wrapper" || scenario === "explicit-interpreter") {
-      runner.protocolVersion = PROTOCOL_VERSION;
+      scenario === "dotted-batch-wrapper" || scenario === "explicit-interpreter" ||
+      scenario === "older-interpreter-guidance") {
+      runner.protocolVersion = scenario === "older-interpreter-guidance" ? 179 : PROTOCOL_VERSION;
+      const interpreter = scenario === "explicit-interpreter" || scenario === "older-interpreter-guidance";
       runner.agents = [{
-        id: "batch-codex", name: scenario === "explicit-interpreter" ? "Interpreter Codex" : "Batch Codex",
-        command: scenario === "explicit-interpreter" ? "C:\\Windows\\System32\\cmd.exe" : scenario === "batch-wrapper"
+        id: "batch-codex", name: interpreter ? "Interpreter Codex" : "Batch Codex",
+        command: interpreter ? "C:\\Windows\\System32\\cmd.exe" : scenario === "batch-wrapper"
           ? "C:\\Program Files\\Codex Tools\\codex.cmd" : scenario === "dotted-batch-wrapper"
             ? "codex.v2" : "codex",
-        args: scenario === "explicit-interpreter" ? ["/d", "/c", "echo", "%PATH%"]
+        args: interpreter ? ["/d", "/c", "echo", "%PATH%"]
           : ["--profile", 'Team "Research"', "%PATH%"], env: {}, driver: "codex-app-server",
         context: { kind: "native" }, source: "discovered", available: true,
-        installation: { id: "batch", path: scenario === "explicit-interpreter" ? "C:\\Windows\\System32\\cmd.exe" : scenario === "dotted-batch-wrapper"
+        installation: { id: "batch", path: interpreter ? "C:\\Windows\\System32\\cmd.exe" : scenario === "dotted-batch-wrapper"
           ? "C:\\Program Files\\Codex Tools\\codex.v2.cmd" : "C:\\Program Files\\Codex Tools\\codex.cmd", via: "path" },
         update: { status: "managed_externally", checkedAt: Date.UTC(2026, 8, 22),
           channel: "unknown", evidenceSource: "Executable installation provenance", managedExternally: true,
-          guidance: scenario === "explicit-interpreter"
+          guidance: scenario === "older-interpreter-guidance"
+            ? "This installation advertises its built-in `codex update` command. Run `& 'C:\\Windows\\System32\\cmd.exe' '/d' '/c' 'echo' '%PATH%' 'update'` in PowerShell 7.3 or later on this Machine after stopping sessions. Restart and Rediscover before treating the new version as ready."
+            : scenario === "explicit-interpreter"
             ? "This launch uses PowerShell legacy argument passing. Use the package or version manager that installed this exact copy."
             : "This installation uses a Windows batch wrapper. Use the package or version manager that installed this exact copy." },
       }];
