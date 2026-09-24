@@ -5,6 +5,7 @@ import {
   SKILL_MAX_FILE_BYTES,
   SKILL_MAX_FILES,
   SKILL_MAX_TOTAL_BYTES,
+  isSkillScriptPath,
   validSkillFilePath,
   validSkillName,
   type SkillFile,
@@ -59,6 +60,16 @@ test("skill file paths are strictly relative POSIX with bounded depth and length
   assert.equal(validSkillFilePath("docs/inn\ner.md"), false);
   assert.equal(validSkillFilePath("a/b/c/d/e/f/g/h/i"), false);
   assert.equal(validSkillFilePath("a".repeat(257)), false);
+});
+
+test("script-like skill files are recognized by mode, extension, or scripts directory", () => {
+  for (const path of ["run.sh", "tools/check.py", "index.MJS", "setup.ps1", "scripts/run", "a/bin/tool"]) {
+    assert.equal(isSkillScriptPath(path), true, path);
+  }
+  for (const path of ["SKILL.md", "reference/api.txt", "agents/openai.yaml", "scriptsfoo/run", "robin/x"]) {
+    assert.equal(isSkillScriptPath(path), false, path);
+  }
+  assert.equal(isSkillScriptPath("tool", true), true);
 });
 
 test("skill version digest is deterministic over file order and transport encoding", () => {

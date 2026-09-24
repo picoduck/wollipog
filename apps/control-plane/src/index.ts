@@ -241,6 +241,7 @@ import { principalCanReadWorkflowArtifact } from "./artifact-exports.js";
 import { registerWorkflowArtifactExportRoute } from "./artifact-export-route.js";
 import { registerRunnerCredentialRoutes } from "./runner-credential-route.js";
 import { makeSkillsSyncPusher, registerSkillRoutes } from "./skills-route.js";
+import { SKILL_GIT_AUTO_UPDATE_SWEEP_MS, SkillGitAutoUpdater, skillGitAutoUpdateIntervalMs } from "./skill-git-auto-update.js";
 import { registerPromptImageRoutes } from "./prompt-image-route.js";
 import {
   makeManagedBoxRunnerCredentialIssuer,
@@ -2234,6 +2235,8 @@ registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
 /* ------------------------------- Skills ---------------------------------- */
 
 registerSkillRoutes(app, { db, hub, requestHuman, requestPrincipal, pushSkillsSync });
+db.skillGitAutoUpdateIntervalMs = skillGitAutoUpdateIntervalMs(process.env.CONTROL_PLANE_SKILL_GIT_UPDATE_INTERVAL_MS);
+const skillGitAutoUpdater = new SkillGitAutoUpdater({ db, intervalMs: db.skillGitAutoUpdateIntervalMs, pushSkillsSync });
 
 /* ------------------------------- Devices --------------------------------- */
 
@@ -5593,6 +5596,13 @@ outboundEventTimer.unref();
 void sweepOutboundChecks();
 const outboundCheckTimer = setInterval(() => void sweepOutboundChecks(), 30_000);
 outboundCheckTimer.unref();
+const skillGitAutoUpdateTimer = setInterval(() => {
+  void skillGitAutoUpdater.tick().catch((error) => {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) },
+      "skill Git automatic update sweep deferred");
+  });
+}, SKILL_GIT_AUTO_UPDATE_SWEEP_MS);
+skillGitAutoUpdateTimer.unref();
 const usagePricingTimer = setInterval(() => {
   void usagePricing.ensure().then(() => db.setUsageRateTable(usagePricing.current()));
 }, 60 * 60 * 1000);
@@ -5708,6 +5718,7 @@ app.addHook("onClose", async () => {
   clearInterval(automationTimer);
   clearInterval(outboundEventTimer);
   clearInterval(outboundCheckTimer);
+  clearInterval(skillGitAutoUpdateTimer);
   clearInterval(usagePricingTimer);
   clearInterval(sessionReminderTimer);
   clearInterval(sessionCommandRetryTimer);

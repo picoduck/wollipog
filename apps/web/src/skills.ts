@@ -38,6 +38,15 @@ export interface SkillVersionSummary {
 }
 
 export interface SkillGitSource { url: string; ref: string; subdirectory: string }
+/** Opt-in unattended Git updates; `held` waits for a reviewed import through the preview. */
+export interface SkillGitAutoUpdate {
+  enabled: boolean;
+  intervalMs?: number;
+  checkedAt?: number | null;
+  checkedCommit?: string | null;
+  error?: { message: string; at: number } | null;
+  held?: { commit: string; reason: "scripts" | "local_changes"; scriptPaths: string[]; heldAt: number } | null;
+}
 export interface SkillVersionPreview { version: SkillVersionSummary; currentVersion: SkillVersionSummary | null }
 export interface MachineSkillVersionPreview {
   policy: { versionId: string | null; revision: string } | null;
@@ -96,6 +105,7 @@ export interface SkillSummary {
   groupId?: string | null;
   source?: string;
   gitSource?: SkillVersionSummary["gitSource"];
+  gitAutoUpdate?: SkillGitAutoUpdate;
   latestVersion?: SkillVersionSummary | null;
   assignmentCount?: number;
 }

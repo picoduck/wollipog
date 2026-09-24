@@ -1,5 +1,5 @@
 import { useState } from "react";
-import type { SkillFile } from "@wollipog/protocol";
+import { isSkillScriptPath, type SkillFile } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import type { SkillGitPreview, SkillGitSource } from "../skills.js";
 import { Modal } from "./common.js";
@@ -82,7 +82,7 @@ export function SkillGitImportDialog({ onClose, onImported, source }: {
             const before = candidate.previousFiles.find((file) => file.path === path);
             const after = candidate.files.find((file) => file.path === path);
             const change = !before ? "Added" : !after ? "Removed" : contents(before) === contents(after) ? "Unchanged" : "Changed";
-            return <details key={path}><summary>{path}{candidate.executablePaths.includes(path) || /\.(sh|py|js|mjs|ts|ps1|bat|cmd)$/.test(path) ? " · Script" : ""} · {change}</summary>
+            return <details key={path}><summary>{path}{isSkillScriptPath(path, candidate.executablePaths.includes(path)) ? " · Script" : ""} · {change}</summary>
               {candidate.disposition !== "new" && <><h4>Current</h4><pre className="skill-import-content">{contents(before)}</pre></>}
               <h4>Proposed</h4><pre className="skill-import-content">{contents(after)}</pre>
             </details>;

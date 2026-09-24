@@ -10,6 +10,7 @@ import { Select } from "./ui/ChoiceControls.js";
 import { SkillsIcon } from "./Icons.js";
 import { Markdown } from "./Markdown.js";
 import { SkillGitImportDialog } from "./SkillGitImportDialog.js";
+import { SkillGitAutoUpdateControls } from "./SkillGitAutoUpdate.js";
 import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
 import { SkillVersionHistoryDialog } from "./SkillVersionHistoryDialog.js";
 import { SkillMachineVersionDialog } from "./SkillMachineVersionDialog.js";
@@ -329,6 +330,7 @@ export function SkillsView() {
 
   const latest = detail?.latestVersion ?? null;
   const gitSource = detail?.gitSource ?? latest?.gitSource;
+  const heldUpdate = detail?.gitAutoUpdate?.enabled ? detail.gitAutoUpdate.held : null;
   const skillMd = latest?.files?.find((file) => file.path === "SKILL.md" && file.encoding === "utf8");
 
   return (
@@ -427,7 +429,11 @@ export function SkillsView() {
                 <h4>Git Source</h4>
                 <p className="skills-hint">{gitSource.url} · {gitSource.path || "/"} · {gitSource.ref}</p>
                 <p className="skills-hint">Commit {gitSource.commit}</p>
-                <button className="btn sm" type="button" onClick={() => setDialog("git-update")}>Check for Updates</button>
+                <SkillGitAutoUpdateControls status={detail.gitAutoUpdate} gitRef={gitSource.ref} busy={busy}
+                  onChange={(enabled) => void mutate(() => api.setSkillGitAutoUpdate(detail.id, enabled), () => refreshDetail(detail.id))} />
+                <button className={`btn sm${heldUpdate ? " primary" : ""}`} type="button" onClick={() => setDialog("git-update")}>
+                  {heldUpdate ? "Review Held Update" : "Check for Updates"}
+                </button>
               </section>}
               {latest?.machineSource && <section className="skills-section skills-machine-import">
                 <h4>Machine Snapshot Source</h4>
