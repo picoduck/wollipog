@@ -852,7 +852,8 @@ parameters.
 Each delivery records a server-side review receipt bound to the reviewer, child, occurrence, policy
 revision, evidence identifier, artifact, and digest. `resolve_descendant_workflow_decision` approves a
 UI-evidence decision only when an acknowledged, unexpired (one hour), unconsumed, unrevoked receipt exists for every
-item; repeating `evidenceReviewed` identifiers is not sufficient. Denial needs no receipts. Receipts
+item; repeating `evidenceReviewed` identifiers is not sufficient. Denial needs no receipts and must omit
+`evidenceReviewed`, which accompanies only an approval. Receipts
 are spent by resolution and revoked with the decision, so a policy-revision or ownership change,
 supersession, or revocation invalidates them. The resolution audit lists evidence identifier and
 digest pairs and the receipt ids spent; each delivery is a `review`-stage audit entry.

@@ -1029,7 +1029,7 @@ export const TOOLS: McpTool[] = [
         occurrenceId: { type: "string" },
         outcome: { type: "string", enum: ["approve", "deny"] },
         selectedOptionId: { type: "string", description: "Required approved option for implementation questions only" },
-        evidenceReviewed: { type: "array", items: { type: "string" }, description: "Every evidence id actually inspected; required for UI evidence approval" },
+        evidenceReviewed: { type: "array", items: { type: "string" }, description: "Every evidence id actually inspected; required to approve a UI evidence decision, and must be omitted when denying one or resolving any other category" },
         rationale: { type: "string", description: "Audit-only: never retained or shown to the child; only its digest is recorded" },
         childMessage: {
           type: "string",

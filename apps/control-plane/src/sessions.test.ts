@@ -3637,6 +3637,13 @@ test("typed workflow decisions isolate categories and fail closed across stale p
     assert.equal(svc.resolveWorkflowDecision(parent.data.id, child.id, ui.data.occurrenceId,
       { outcome: "approve" }, "human", { kind: "human", id: "owner" }, () => true).status, 400,
     "the human still identifies the exact evidence reviewed");
+    const deniedWithReviewed = svc.resolveWorkflowDecision(parent.data.id, child.id, ui.data.occurrenceId,
+      { outcome: "deny", evidenceReviewed: ["after"] }, "human", { kind: "human", id: "owner" }, () => true);
+    assert.equal(deniedWithReviewed.status, 400);
+    assert.equal(deniedWithReviewed.error,
+      "a denied UI evidence decision cannot carry evidenceReviewed; omit it when denying",
+      "a denial carrying a reviewed list is refused for its outcome, not its category");
+    assert.equal(db.workflowDecisionByOccurrence(ui.data.occurrenceId)?.status, "pending");
     assert.ok(svc.resolveWorkflowDecision(parent.data.id, child.id, ui.data.occurrenceId,
       { outcome: "approve", evidenceReviewed: ["after"] }, "human",
       { kind: "human", id: "owner" }, () => true).ok);
@@ -3646,6 +3653,11 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       resourceSnapshot: { ...mergeSnapshot, pullRequest: 125 },
     });
     assert.ok(pending.ok && pending.data);
+    const mergeWithReviewed = svc.resolveDescendantRequest(parent.data.id, child.id, pending.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["after"] }, () => true);
+    assert.equal(mergeWithReviewed.status, 400);
+    assert.equal(mergeWithReviewed.error, "evidenceReviewed is valid only for ui_evidence_approval decisions",
+      "a reviewed list on another category is refused for its category");
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, pending.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
     const pendingSnapshot = { ...mergeSnapshot, pullRequest: 125 };
