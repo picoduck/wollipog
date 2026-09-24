@@ -677,7 +677,7 @@ test("a WSL restart with a persisted container target bypasses host isolation", 
     let captured: DriverOptions | undefined;
     const messages: unknown[] = [];
     const adapter = {
-      backend: "container" as const, command: "docker", args: [], image: target.environment.image,
+      backend: "container" as const, runtime: "docker" as const, command: "docker", args: [], image: target.environment.image,
       network: "deny" as const, templateId: "tools", runnerKey: "runnerkey", containerName: "wollipog-s1", hostAgentCommand: "claude", hostAgentArgs: [],
       agentCommand: "claude", agentArgs: [],
     };

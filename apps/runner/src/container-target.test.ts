@@ -180,6 +180,7 @@ test("rootless local Podman checks retain storage and runtime paths without host
   process.env.XDG_RUNTIME_DIR = "/run/user/1000";
   try {
     let checkEnv: Record<string, string> | undefined;
+    let argsFromCheck: string[] | undefined;
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       podmanDefaultsSafe: () => true,
       resolveRuntime: async () => runtime(),
@@ -187,6 +188,7 @@ test("rootless local Podman checks retain storage and runtime paths without host
         if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
         if (args[0] === "run" && args.includes("git")) {
           checkEnv = opts.env;
+          argsFromCheck = args;
           assert.equal(existsSync(opts.env?.CONTAINERS_CONF ?? ""), true);
         }
         return { code: 0, stdout: "", stderr: "" };
@@ -197,6 +199,7 @@ test("rootless local Podman checks retain storage and runtime paths without host
     assert.equal(checkEnv?.XDG_DATA_HOME, "/tmp/wollipog-fixture-podman-data");
     assert.equal(checkEnv?.XDG_RUNTIME_DIR, "/run/user/1000");
     assert.equal(checkEnv?.CONTAINER_HOST, undefined);
+    assert.ok(argsFromCheck?.includes("--http-proxy=false"));
     assert.equal(existsSync(checkEnv?.CONTAINERS_CONF ?? ""), false, "private config is removed after the check");
     assert.notEqual(checkEnv?.HOME, checkEnv?.XDG_CONFIG_HOME);
     assert.equal(checkEnv?.DOCKER_CONFIG, checkEnv?.XDG_CONFIG_HOME);
@@ -871,7 +874,40 @@ test("probe client environment strips sensitive host names even when a runtime f
     PATH: "/usr/bin", HOME: "/home/runner", ANTHROPIC_API_KEY: "host-secret",
     OpenAI_Api_Key: "host-secret", WOLLIPOG_SESSION_ID: "host-session",
     RUNNER_TOKEN_FILE: "/secret/path", PODMAN_AUTHORIZATION: "host-secret",
-  }), { PATH: "/usr/bin", HOME: "/home/runner" });
+    HTTP_PROXY: "http://proxy.example.invalid:8080",
+  }), { PATH: "/usr/bin", HOME: "/home/runner", HTTP_PROXY: "http://proxy.example.invalid:8080" });
+});
+
+test("Podman installation probes disable default forwarding of client proxy variables", {
+  skip: process.platform !== "linux",
+}, async () => {
+  const previousProxy = process.env.HTTP_PROXY;
+  process.env.HTTP_PROXY = "http://user:synthetic-password@proxy.example.invalid:8080";
+  try {
+    const probes: Array<{ args: string[]; env?: Record<string, string> }> = [];
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      podmanDefaultsSafe: () => true,
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
+        if (args[0] === "run" && args[args.indexOf("--name") + 1]?.startsWith("wollipog-probe-")) {
+          probes.push({ args, env: opts.env });
+          if (args.includes("/bin/sh")) return { code: 0, stdout: "/usr/bin/codex\n", stderr: "" };
+          if (args.includes("--version")) return { code: 0, stdout: "codex 1.0.0\n", stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.ok(probes.length >= 2, "resolution and version both launch probe containers");
+    for (const probe of probes) {
+      assert.equal(probe.env?.HTTP_PROXY, process.env.HTTP_PROXY, "Podman client has the host proxy");
+      assert.ok(probe.args.includes("--http-proxy=false"), "the client cannot pass that proxy into the container");
+    }
+  } finally {
+    if (previousProxy === undefined) delete process.env.HTTP_PROXY;
+    else process.env.HTTP_PROXY = previousProxy;
+  }
 });
 
 test("a timed-out authentication probe is removed and never becomes readiness evidence", async () => {
@@ -1075,7 +1111,9 @@ test("Docker and Podman discover both generations and produce exact dual-label W
     assert.deepEqual(calls[runtimeName === "podman" ? 5 : 4], {
       file: `/usr/bin/${runtimeName}`,
       args: [
-        "run", "--rm", "--pull=never", "--name", `wollipog-check-${expectedRunnerKey}-${expectedCheckKey}`,
+        "run", "--rm", "--pull=never",
+        ...(runtimeName === "podman" ? ["--http-proxy=false"] : []),
+        "--name", `wollipog-check-${expectedRunnerKey}-${expectedCheckKey}`,
         "--label", `com.wollipog.runner=${expectedRunnerKey}`,
         "--label", `com.wollipog.template=${template.id}`,
         "--label", `com.misko-agent-manager.runner=${expectedRunnerKey}`,
