@@ -63,6 +63,7 @@ wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
 wollipog decision request --request-id ID --resource-key KEY --snapshot JSON --json
 wollipog decision get OCCURRENCE_ID --json
 wollipog decision consume OCCURRENCE_ID --snapshot JSON [--action JSON] --json
+wollipog decision reconcile OCCURRENCE_ID --snapshot JSON --json
 wollipog admin <pairing-url|status|user list|device list|device create|device revoke|runner-credential ...> [--json]
 wollipog service <install|status|restart|logs|upgrade|uninstall> [options]
 wollipog doctor
@@ -701,11 +702,13 @@ verification. A later policy change can revoke only approvals that have not been
 not claim to roll back an action already in progress.
 
 An injected child without the management MCP server uses the same shared handlers through
-`wollipog decision request`, `wollipog decision get`, and `wollipog decision consume`. The exact
+`wollipog decision request`, `wollipog decision get`, `wollipog decision consume`, and
+`wollipog decision reconcile`. The exact
 resource snapshot (and PR-merge action, when applicable) is passed as JSON. These commands are
 self-scoped: they reject `--session`, send the injected session principal on every request, and do
 not expose any resolution operation, so a child cannot target another session or approve itself.
-They require protocol v139 and fail before sending the operation to an older control plane.
+The first three require protocol v139; reconciliation requires v153. Each fails before sending
+its operation to an older control plane.
 
 Protocol v150 adds a read-only reconciliation path for a PR merge that completed before its exact
 armed occurrence was consumed. The child must be resumed on the same App Server thread and submit

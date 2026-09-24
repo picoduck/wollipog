@@ -56,7 +56,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["admin", ["admin pairing-url", "admin status", "admin doctor", "admin device create", "admin runner-credential"]],
     ["session", ["session list", "session capabilities", "session create", "session wait", "session guardrails", "--effort"]],
     ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard"]],
-    ["decision", ["decision request", "decision get", "decision consume", "request_workflow_decision", "--snapshot"]],
+    ["decision", ["decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision", "--snapshot"]],
     ["init", ["wollipog init", ".wollipog.json", "does not run", "never overwritten"]],
   ];
   for (const [topic, expected] of topics) {
@@ -821,14 +821,60 @@ test("CLI typed decisions preserve exact snapshots while confining a child to it
   assert.ok(requests.every((call) => call.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER] === "codex-child"));
 });
 
+test("CLI reconciliation forwards only the original snapshot and preserves the server result or refusal", async () => {
+  const snapshot = {
+    category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 42,
+    headSha: "a".repeat(40), reviewResult: "merge",
+    requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 1,
+      checks: [{ name: "Required", state: "passed" }] },
+  };
+  const calls: Array<{ url: string; method?: string; body?: string; headers?: Record<string, string> }> = [];
+  let refused = false;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, method: init?.method, body: init?.body, headers: init?.headers });
+    if (url.endsWith("/api/compatibility")) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ protocolVersion: PROTOCOL_VERSION }) };
+    }
+    return refused
+      ? { ok: false, status: 409, text: async () => JSON.stringify({ error: "workflow decision has no exact armed enqueue action to reconcile" }) }
+      : { ok: true, status: 200, text: async () => JSON.stringify({ occurrenceId: "workflow_1", status: "consumed" }) };
+  };
+  const env = {
+    WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "child-token", WOLLIPOG_SESSION_ID: "codex-child",
+  };
+  const run = async (): Promise<{ code: number; result: { decision?: unknown; error?: string } }> => {
+    let stdout = "";
+    const code = await runWollipogCli(
+      ["node", "cli.js", "--wollipog-cli", "decision", "reconcile", "workflow_1", "--snapshot", JSON.stringify(snapshot), "--json"],
+      env,
+      { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("JSON output belongs on stdout") },
+      fetch,
+    );
+    return { code, result: JSON.parse(stdout) };
+  };
+  assert.deepEqual(await run(), { code: 0, result: { decision: { occurrenceId: "workflow_1", status: "consumed" } } });
+  refused = true;
+  assert.deepEqual(await run(), { code: 1, result: { error: "HTTP 409: workflow decision has no exact armed enqueue action to reconcile" } });
+  const requests = calls.filter((call) => !call.url.endsWith("/api/compatibility"));
+  assert.equal(requests.length, 2);
+  assert.ok(requests.every((call) =>
+    call.url === "http://cp/api/sessions/codex-child/workflow-decisions/workflow_1/reconcile" &&
+    call.method === "POST" &&
+    call.headers?.[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER] === "codex-child" &&
+    call.headers?.authorization === "Bearer child-token"));
+  assert.ok(requests.every((call) => call.body === JSON.stringify({ resourceSnapshot: snapshot })),
+    "reconciliation forwards no action or new admission");
+});
+
 test("CLI typed-decision help is discoverable and malformed or cross-session commands make no request", async () => {
   const rootHelpText = await captureCli(["help"]);
-  assert.match(rootHelpText.stdout, /^\s+decision\s+Request, read, and consume typed workflow decisions/mu);
+  assert.match(rootHelpText.stdout, /^\s+decision\s+Request, read, consume, and reconcile typed workflow decisions/mu);
   const topic = await captureCli(["help", "workflow-decisions"]);
   assert.equal(topic.code, 0);
   for (const text of [
-    "decision request", "decision get", "decision consume", "request_workflow_decision",
-    "get_workflow_decision", "consume_workflow_decision", "cannot resolve its own decision",
+    "decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision",
+    "get_workflow_decision", "consume_workflow_decision", "reconcile_workflow_decision",
+    "protocol v153", "cannot resolve its own decision",
   ]) assert.ok(topic.stdout.includes(text), `decision help omits ${text}`);
 
   for (const malformed of [
@@ -837,12 +883,17 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "get"],
     ["decision", "consume", "--snapshot", "{}"],
     ["decision", "consume", "workflow_1", "--snapshot", "[]"],
+    ["decision", "reconcile", "--snapshot", "{}"],
+    ["decision", "reconcile", "workflow_1", "--snapshot", "[]"],
+    ["decision", "reconcile", "workflow_1", "--snapshot", "not-json"],
+    ["decision", "reconcile", "workflow_1", "--snapshot", "{}", "--action", "{}"],
+    ["decision", "reconcile", "workflow_1", "--session", "other", "--snapshot", "{}"],
     ["decision", "get", "workflow_1", "--session", "other"],
   ]) {
     const result = await captureCli([...malformed, "--json"]);
     assert.equal(result.code, 2, malformed.join(" "));
     assert.equal(result.stderr, "", malformed.join(" "));
-    assert.match(JSON.parse(result.stdout).error, /requires|valid JSON|JSON object|do not accept --session/u);
+    assert.match(JSON.parse(result.stdout).error, /requires|valid JSON|JSON object|not accept/u);
   }
 });
 
@@ -869,4 +920,26 @@ test("CLI typed decisions fail closed before their protocol capability", async (
     `requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.typedWorkflowDecisionDelegation}`, "u",
   ));
   assert.equal(calls, 1, "an old control plane receives only the compatibility probe");
+});
+
+test("CLI reconciliation requires protocol v153 before calling the endpoint", async () => {
+  const calls: string[] = [];
+  const fetch: McpFetch = async (url) => {
+    calls.push(url);
+    return { ok: true, status: 200, text: async () => JSON.stringify({
+      protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation - 1,
+    }) };
+  };
+  let stdout = "";
+  assert.equal(await runWollipogCli(
+    ["node", "cli.js", "--wollipog-cli", "decision", "reconcile", "workflow_old", "--snapshot",
+      JSON.stringify({ category: "pr_merge" }), "--json"],
+    { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "child-token", WOLLIPOG_SESSION_ID: "child" },
+    { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("JSON output belongs on stdout") },
+    fetch,
+  ), 1);
+  assert.match(JSON.parse(stdout).error, new RegExp(
+    `requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation}`, "u",
+  ));
+  assert.deepEqual(calls, ["http://cp/api/compatibility"]);
 });
