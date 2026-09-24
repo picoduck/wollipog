@@ -25,6 +25,14 @@ function abortError(message: string): DOMException {
   return new DOMException(message, "AbortError");
 }
 
+function nativeRequestError(cause: unknown): Error {
+  if (cause instanceof Error) return cause;
+  if (typeof cause === "string" && cause.trim()) return new Error(cause);
+  if (cause !== null && typeof cause === "object" && "message" in cause &&
+      typeof cause.message === "string" && cause.message.trim()) return new Error(cause.message);
+  return new Error("The native request failed.");
+}
+
 export interface NativeApiTransportOptions {
   instanceId: string;
   runtimeKey: string;
@@ -82,6 +90,8 @@ export function createNativeApiTransport(options: NativeApiTransportOptions): Ap
       let raw: ArrayBuffer | Uint8Array | number[];
       try {
         raw = await Promise.race([native, cancelled]);
+      } catch (cause) {
+        throw nativeRequestError(cause);
       } finally {
         lifetime.signal.removeEventListener("abort", abort);
         init.signal?.removeEventListener("abort", abort);

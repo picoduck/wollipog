@@ -28,6 +28,36 @@ test("native API transport rejects unsupported methods before invoking Rust", as
   assert.equal(calls, 0);
 });
 
+test("native API transport presents IPC string rejections as Errors", async () => {
+  const desktop: NativeInvokeRuntime = {
+    async invoke<T>(): Promise<T> { throw "native request failed"; },
+  };
+  const transport = createNativeApiTransport({
+    instanceId: "a",
+    runtimeKey: "a:1",
+    publicOrigin: "https://a.test",
+    desktop,
+  });
+  await assert.rejects(
+    () => transport.request("/api/identity"),
+    (error: unknown) => error instanceof Error && error.message === "native request failed",
+  );
+});
+
+test("native API transport preserves Error rejections", async () => {
+  const failure = new TypeError("native request failed");
+  const desktop: NativeInvokeRuntime = {
+    async invoke<T>(): Promise<T> { throw failure; },
+  };
+  const transport = createNativeApiTransport({
+    instanceId: "a",
+    runtimeKey: "a:1",
+    publicOrigin: "https://a.test",
+    desktop,
+  });
+  await assert.rejects(() => transport.request("/api/identity"), (error: unknown) => error === failure);
+});
+
 function responseFrame(status: number, body: Uint8Array): Uint8Array {
   const meta = new TextEncoder().encode(JSON.stringify({
     status,
