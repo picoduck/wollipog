@@ -532,7 +532,7 @@ export class ContainerTargetRegistry {
       if (result.timedOut || result.code === null || result.errorCode) {
         await this.deps.run(runtime.launch.command, [
           ...runtime.launch.args, "rm", "-f", name,
-        ], { timeoutMs: 5_000 });
+        ], { timeoutMs: 5_000, maxBuffer: 64 * 1024, env, replaceEnv: true });
       }
       return result;
     };
