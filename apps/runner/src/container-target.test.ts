@@ -7,7 +7,8 @@ import test, { afterEach, beforeEach } from "node:test";
 import type { ExecutionTargetRef } from "@wollipog/protocol";
 import type { RunnerContainerTarget } from "./config.js";
 import { CANONICAL_CONTAINER_LABELS, LEGACY_CONTAINER_LABELS } from "./container-identity.js";
-import { ContainerTargetRegistry, containerSetupCheckDigest, containerTargetId, podmanDefaultsSafeForPaths, targetProbeEnvironment } from "./container-target.js";
+import { ContainerTargetRegistry, containerSetupCheckDigest, containerTargetId, podmanDefaultsSafeForPaths, resolveContainerRuntime, targetProbeEnvironment } from "./container-target.js";
+import { run } from "./discovery/resolve.js";
 import { spawnAgent } from "./spawn.js";
 
 const image = `example/agent@sha256:${"a".repeat(64)}`;
@@ -53,6 +54,63 @@ function podmanDefaultsFixture(config: string): () => boolean {
     configHome: config, uid: 1000,
   });
 }
+
+test("a Docker-named Podman shim cannot advertise a secret-free target", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-docker-podman-shim-"));
+  try {
+    const shim = join(root, "docker");
+    writeFileSync(shim, "#!/bin/sh\nprintf 'podman version 5.4.0\\n'\n", { mode: 0o755 });
+    mkdirSync(join(root, "system"), { recursive: true });
+    writeFileSync(join(root, "system", "containers.conf"), "[containers]\nenv_host=true\n");
+    const defaultsSafe = podmanDefaultsFixture(root);
+    assert.equal(defaultsSafe(), false);
+    const runtime = await resolveContainerRuntime("docker", async () => ({
+      path: shim, via: "path", launch: { command: shim, args: [] },
+    }), run);
+    assert.match(runtime?.unavailableReason ?? "", /Docker command resolves to Podman/u);
+    let containerCalls = 0;
+    const registry = new ContainerTargetRegistry("runner-shim", "host", [template], {
+      resolveRuntime: async () => runtime,
+      podmanDefaultsSafe: defaultsSafe,
+      run: async () => { containerCalls += 1; return { code: 0, stdout: "", stderr: "" }; },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]?.boundaries.secrets, "none");
+    assert.equal(registry.definitions()[0]?.available, false);
+    assert.equal(containerCalls, 0, "no setup check or container probe may run through the shim");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Docker CLI version probes distinguish a Podman API engine from Docker Engine", async () => {
+  const command = runtime();
+  const resolve = async () => command;
+  for (const [serverName, expectedReason] of [
+    ["Podman Engine", /Podman engine/u],
+    ["Engine", null],
+  ] as const) {
+    const calls: string[][] = [];
+    const checked = await resolveContainerRuntime("docker", resolve, async (_file, args) => {
+      calls.push(args);
+      return args[0] === "--version"
+        ? { code: 0, stdout: "Docker version 29.2.1, build a5c7197\n", stderr: "" }
+        : { code: 0, stdout: JSON.stringify({ Server: { Components: [{ Name: serverName }] } }), stderr: "" };
+    });
+    assert.deepEqual(calls, [["--version"], ["version", "--format", "{{json .}}"]]);
+    if (expectedReason) assert.match(checked?.unavailableReason ?? "", expectedReason);
+    else assert.equal(checked?.unavailableReason, undefined);
+  }
+});
+
+test("an unrecognized Docker-compatible command fails closed", async () => {
+  const checked = await resolveContainerRuntime("docker", async () => runtime(), async () => ({
+    code: 0, stdout: "compatible container tool 1.0\n", stderr: "",
+  }));
+  assert.match(checked?.unavailableReason ?? "", /identity could not be verified/u);
+});
 
 test("Podman mount scanning rejects inherited rootless UID source changes", () => {
   const config = mkdtempSync(join(tmpdir(), "wollipog-podman-uid-"));
