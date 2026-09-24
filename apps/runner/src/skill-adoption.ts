@@ -1,4 +1,5 @@
-/** Internal Linux source-preservation transaction. Not registered as a runner/RPC command.
+/** Internal source-preservation transaction. Not registered as a runner/RPC command. Linux runs
+ * it in-process through descriptor paths; macOS delegates the same steps to its fixed native helper.
  * The caller must serialize this with reconcile/GC, own the provider-HOME lease, and supply
  * a fresh durable-library/explicit-assignment authorization fence. No preflight report is a grant. */
 import { randomUUID } from "node:crypto";
@@ -6,6 +7,7 @@ import { closeSync, constants, fsyncSync, fstatSync, mkdirSync, openSync, readli
 import { join, sep } from "node:path";
 import { validSkillName, type AgentDefinition, type MachineSkillCandidate } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
+import { platformSkillAdoptionHelper, type SkillAdoptionPlatformHelper } from "./skill-adoption-platform.js";
 import { directoryGeneration, inspectSkillTree, openSkillDirectory } from "./skill-snapshots.js";
 import { SKILL_DIRS } from "./skills.js";
 
@@ -27,12 +29,16 @@ export interface SkillAdoptionOptions {
   platform?: NodeJS.Platform;
   /** Fault-injection seam; not an RPC input. */
   checkpoint?: (stage: Stage) => void;
+  /** Test seam replacing the platform's fixed native helper; not an RPC input. */
+  helper?: SkillAdoptionPlatformHelper;
 }
 export type SkillAdoptionResult =
   | { status: "rejected"; error: string }
   | { status: "adopted" | "recovery_required"; operationId: string; backupDirectory: string;
       providerAccountId?: string; error?: string };
 
+const REJECTED = "Adoption authorization, source or stored version could not be validated. No source directory was replaced.";
+const RECOVERY = "Adoption stopped. Inspect the private journal and preserved original; no automatic restore or cleanup was attempted.";
 const flags = constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW;
 const fdPath = (fd: number) => `/proc/self/fd/${fd}`;
 const identity = (fd: number) => { const stat = fstatSync(fd); return `${stat.dev}:${stat.ino}`; };
@@ -47,18 +53,66 @@ function record(parent: number, name: string, value: unknown): void {
   fsyncSync(parent);
 }
 
+function validRequest(options: SkillAdoptionOptions): boolean {
+  const { candidate, digest } = options;
+  if (!candidate || !validSkillName(candidate.name) || !/^[0-9a-f]{64}$/.test(digest)) return false;
+  const allowed = new Set([".agents/skills", ...options.agents.filter((agent) =>
+    (agent.context?.kind ?? "native") === "native").map((agent) => SKILL_DIRS[agent.driver ?? "acp"]).filter(Boolean)]);
+  return allowed.has(candidate.sourceDirectory);
+}
+
 /** Preserve the original by same-filesystem rename, then exclusively publish an untransformed
  * store-target link. Never unlink, recursively delete, overwrite a source, or auto-restore over
  * a newly occupied path. Interrupted operations leave a private journal and recoverable original.
  * A later serialized reconciler can route harness links through the canonical link as usual. */
 export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionResult {
-  if ((options.platform ?? process.platform) !== "linux") return { status: "rejected", error: "Recoverable adoption requires Linux." };
+  const platform = options.platform ?? process.platform;
+  if (platform === "linux") return adoptLinuxSkill(options);
+  const helper = options.helper ?? platformSkillAdoptionHelper(platform);
+  if (!helper) return { status: "rejected", error: "Recoverable adoption requires Linux or macOS." };
+  return adoptWithHelper(options, helper);
+}
+
+/** The helper repeats every source, store, and identity check under its own pinned handles. The
+ * runner's guards run first; the synchronous helper call cannot interleave with runner state. */
+function adoptWithHelper(options: SkillAdoptionOptions, helper: SkillAdoptionPlatformHelper): SkillAdoptionResult {
+  if (!validRequest(options)) return { status: "rejected", error: "Invalid adoption source or digest." };
   const { candidate, digest } = options;
-  const allowed = new Set([".agents/skills", ...options.agents.filter((agent) =>
-    (agent.context?.kind ?? "native") === "native").map((agent) => SKILL_DIRS[agent.driver ?? "acp"]).filter(Boolean)]);
-  if (!candidate || !validSkillName(candidate.name) || !allowed.has(candidate.sourceDirectory) || !/^[0-9a-f]{64}$/.test(digest)) {
-    return { status: "rejected", error: "Invalid adoption source or digest." };
+  try {
+    guard(options.acquireProviderHomeLease);
+    guard(options.assertAuthorized);
+  } catch {
+    return { status: "rejected", error: REJECTED };
   }
+  const operationId = randomUUID();
+  const recovery = { operationId, backupDirectory: `${candidate.sourceDirectory}/.wollipog-adoption-${operationId}`,
+    ...(candidate.providerAccountId ? { providerAccountId: candidate.providerAccountId } : {}) };
+  let outcome;
+  try {
+    outcome = helper.adopt({
+      home: options.home,
+      localSourceDirectory: options.localSourceDirectory ?? candidate.sourceDirectory,
+      sourceDirectory: candidate.sourceDirectory,
+      name: candidate.name,
+      generation: candidate.generation,
+      digest,
+      dataDir: options.dataDir,
+      operationId,
+      ...(candidate.providerAccountId ? { providerAccountId: candidate.providerAccountId } : {}),
+    });
+  } catch {
+    // An unexpected wrapper failure cannot prove that no journal was created.
+    outcome = { journal: true, adopted: false };
+  }
+  if (outcome.adopted) return { status: "adopted", ...recovery };
+  return outcome.journal
+    ? { status: "recovery_required", ...recovery, error: RECOVERY }
+    : { status: "rejected", error: REJECTED };
+}
+
+function adoptLinuxSkill(options: SkillAdoptionOptions): SkillAdoptionResult {
+  const { candidate, digest } = options;
+  if (!validRequest(options)) return { status: "rejected", error: "Invalid adoption source or digest." };
   const opened: number[] = [];
   const keep = (fd: number) => { opened.push(fd); return fd; };
   let recovery: { operationId: string; backupDirectory: string } | undefined;
@@ -152,8 +206,8 @@ export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionR
   } catch {
     return recovery ? { status: "recovery_required", ...recovery,
       ...(candidate.providerAccountId ? { providerAccountId: candidate.providerAccountId } : {}),
-      error: "Adoption stopped. Inspect the private journal and preserved original; no automatic restore or cleanup was attempted." }
-      : { status: "rejected", error: "Adoption authorization, source or stored version could not be validated. No source directory was replaced." };
+      error: RECOVERY }
+      : { status: "rejected", error: REJECTED };
   } finally {
     // A close failure must not discard the recovery receipt; all data safety decisions have
     // already been made and journaled before descriptor cleanup.

@@ -496,7 +496,7 @@ test("recovery inspection and explicit restore are authorized, capability-gated,
   assert.equal(requests, 0);
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "macos", version: "1",
     agents: [], workspaces: [] }, 2, 116);
-  assert.equal((await inspect()).statusCode, 409, "unsupported platforms do not receive commands");
+  assert.equal((await inspect()).statusCode, 409, "a macOS runner without native adoption does not receive commands");
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1",
     agents: [], workspaces: [] }, 3, 116);
   principal = { ...owner, role: "operator" };
@@ -514,4 +514,99 @@ test("recovery inspection and explicit restore are authorized, capability-gated,
   assert.equal(restored.statusCode, 200, restored.body);
   assert.equal(restored.json().status, "restored");
   assert.deepEqual(pushed, ["runner-1"]);
+});
+
+test("adoption and recovery are gated per platform so older and unsupported runners keep refusing", async (t) => {
+  const db = ControlPlaneDb.open(":memory:");
+  const app = Fastify();
+  t.after(async () => { await app.close(); db.close(); });
+  const owner: HumanPrincipal = { kind: "human", actorId: LOCAL_OWNER_USER_ID, userId: LOCAL_OWNER_USER_ID,
+    userName: "Owner", organizationId: PERSONAL_ORGANIZATION_ID, organizationName: "Personal",
+    role: "owner", deviceId: null, localBootstrap: true };
+  const candidate = { id: "platform-candidate", name: "alpha", sourceDirectory: ".codex/skills", generation: "a".repeat(64) };
+  const operation = {
+    operationId: "123e4567-e89b-42d3-a456-426614174000",
+    backupDirectory: ".codex/skills/.wollipog-adoption-123e4567-e89b-42d3-a456-426614174000",
+    sourceDirectory: ".codex/skills", name: "alpha", digest: "a".repeat(64), state: "managed_linked" as const,
+    detail: "The managed link is active and the original is preserved.",
+  };
+  const requests: string[] = [];
+  const register = (os: "linux" | "macos" | "windows", protocol: number) => db.registerRunner({ runnerId: "runner-1",
+    hostname: "host", os, version: "1", agents: [
+      { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex" },
+    ], workspaces: [] }, protocol, protocol);
+  register("macos", RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption - 1);
+  const payload = validateSkillPayload({ name: "alpha", files: [
+    { path: "SKILL.md", encoding: "utf8", content: "---\nname: alpha\n---\nOriginal" },
+  ] });
+  if (!payload.ok) throw new Error();
+  const push = ((_: string) => {}) as SkillsSyncPusher;
+  push.handleNeed = async () => {};
+  push.request = async (runnerId, requestId) => ({ type: "skills_state", runnerId, requestId, deployed: [],
+    unmanaged: [], removals: [] });
+  registerMachineSkillRoutes(app, { db, requestHuman: () => owner, requestPrincipal: () => owner, pushSkillsSync: push,
+    hub: { isRunnerOnline: () => true, sendToRunner: () => true,
+      requestFromRunner: async (runnerId, requestId, request) => {
+        requests.push(request.type === "skill_snapshot" ? `snapshot:${request.operation}` : request.type);
+        if (request.type === "skill_adoption") {
+          return { type: "skill_adoption_result", runnerId, requestId, status: "adopted",
+            operationId: operation.operationId, backupDirectory: operation.backupDirectory };
+        }
+        if (request.type === "skill_adoption_recovery") {
+          return { type: "skill_adoption_recovery_result", runnerId, requestId, status: "listed",
+            operations: [operation], truncated: false };
+        }
+        if (request.type !== "skill_snapshot") throw new Error();
+        return request.operation === "list"
+          ? { type: "skill_snapshot_result", runnerId, requestId, candidates: [candidate] }
+          : { type: "skill_snapshot_result", runnerId, requestId,
+              snapshot: { candidate, files: payload.files, digest: payload.digest } };
+      } },
+  });
+  const id = (await app.inject({ method: "POST", url: "/api/runners/runner-1/skill-snapshots" })).json().discoveryId;
+  const preview = async () => (await app.inject({ method: "POST", url: `/api/skill-machine/${id}/preview`,
+    payload: { candidateId: candidate.id } })).json().previewId as string;
+  const skill = (await app.inject({ method: "POST", url: `/api/skill-machine/${id}/import`,
+    payload: { previewId: await preview() } })).json().skill;
+  db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "runner-1",
+    agentSelector: { kind: "agent", agentId: "codex" } });
+  const preflight = async () => {
+    const previewId = await preview();
+    return { previewId, response: await app.inject({ method: "POST",
+      url: `/api/skill-machine/${id}/adoption-preflight`, payload: { previewId } }) };
+  };
+  const inspect = () => app.inject({ method: "POST", url: "/api/runners/runner-1/skill-adoption-recovery" });
+
+  requests.length = 0;
+  const older = (await preflight()).response;
+  assert.equal(older.statusCode, 409);
+  assert.match(older.json().error, /macOS machine skill adoption requires protocol v181/u);
+  const olderRecovery = await inspect();
+  assert.equal(olderRecovery.statusCode, 409);
+  assert.match(olderRecovery.json().error, /macOS machine skill adoption recovery requires protocol v181/u);
+  assert.deepEqual(requests, ["snapshot:read"], "an older macOS runner receives no adoption or recovery command");
+
+  register("windows", RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption);
+  requests.length = 0;
+  const windows = (await preflight()).response;
+  assert.equal(windows.statusCode, 409);
+  assert.match(windows.json().error, /not available for this Machine/u);
+  assert.match((await inspect()).json().error, /requires a Linux or macOS runner/u);
+  assert.deepEqual(requests, ["snapshot:read"]);
+
+  register("macos", RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption);
+  requests.length = 0;
+  const { previewId, response } = await preflight();
+  assert.equal(response.statusCode, 200, response.body);
+  assert.equal(response.json().mutationSupported, true);
+  const adopted = await app.inject({ method: "POST", url: `/api/skill-machine/${id}/adopt`,
+    payload: { previewId, adoptionToken: response.json().adoptionToken, confirmation: "explicit",
+      acceptSharedImpact: false } });
+  assert.equal(adopted.statusCode, 200, adopted.body);
+  assert.equal(adopted.json().status, "adopted");
+  const listed = await inspect();
+  assert.equal(listed.statusCode, 200, listed.body);
+  assert.deepEqual(listed.json(), { operations: [operation], truncated: false });
+  assert.deepEqual(requests, ["snapshot:read", "snapshot:read", "snapshot:read", "skill_adoption",
+    "skill_adoption_recovery"], "preview, preflight, and adoption each reread the source");
 });

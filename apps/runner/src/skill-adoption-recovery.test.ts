@@ -135,7 +135,7 @@ test("never overwrites a source occupant and rejects malformed or unsupported re
   assert.equal(fs.readFileSync(join(f.source, "new-user-file"), "utf8"), "keep me");
   assert.equal(f.recovery("../../outside").status, "blocked");
   assert.equal(restoreSkillAdoptionRecovery({ home: "/does-not-exist", dataDir: "/none", agents,
-    operationId: interrupted.operationId, platform: "darwin",
+    operationId: interrupted.operationId, platform: "win32",
     acquireProviderHomeLease: () => assert.fail("must not lease") }).status, "blocked");
 });
 

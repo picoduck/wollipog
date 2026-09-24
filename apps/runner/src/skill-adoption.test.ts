@@ -203,7 +203,8 @@ test("ordinary snapshots do not opt into durability operations", linux, (t) => {
   assert.ok(snapshots.handle({ ...message, operation: "read", candidateId: candidate.id }).snapshot);
 });
 
-test("unsupported platforms do not touch the filesystem or call guards", () => {
-  assert.equal(adoptMachineSkill({ platform: "darwin" } as SkillAdoptionOptions).status, "rejected");
+test("unsupported platforms and invalid requests do not touch the filesystem or call guards", () => {
   assert.equal(adoptMachineSkill({ platform: "win32" } as SkillAdoptionOptions).status, "rejected");
+  assert.equal(adoptMachineSkill({ platform: "freebsd" } as SkillAdoptionOptions).status, "rejected");
+  assert.equal(adoptMachineSkill({ platform: "darwin" } as SkillAdoptionOptions).status, "rejected");
 });

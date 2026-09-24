@@ -551,7 +551,11 @@
 //      never enters events, snapshots, logs, or stored identity evidence. The selection rechecks
 //      the chosen credential context and pins the identity it observed before provider work
 //      resumes. Older runners keep the existing recovery actions.
-export const PROTOCOL_VERSION = 180;
+// 181: native macOS runners adopt an unmanaged skill directory and inspect or restore its recovery
+//      journal through the fixed descriptor-anchored helper, with the same explicit confirmation,
+//      source recheck, preserved original, and exclusive link publication as Linux. Older macOS
+//      runners keep the snapshot-only refusal.
+export const PROTOCOL_VERSION = 181;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -800,6 +804,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   codexServiceTiers: 126,
   machineSkillAdoption: 115,
   machineSkillAdoptionRecovery: 116,
+  /** Native macOS adoption and recovery through the fixed no-follow helper. */
+  nativeMacosMachineSkillAdoption: 181,
   chunkedAgentSkills: 96,
   /** v96 runners emit the additive `skills_state.removals` event projection. */
   skillLinkRemovalReporting: 96,
@@ -1109,6 +1115,34 @@ export function projectRunnerMessageForProtocol(
     return { ...message, code: worktreeRecoveryReceiptCode(protocolVersion) };
   }
   return message;
+}
+
+export interface MachineSkillAdoptionRequirement {
+  capability: RunnerProtocolCapability;
+  label: string;
+}
+
+/** Adoption is gated per platform: a runner advertises only the platforms whose handle-anchored
+ * transaction it implements, so older runners keep refusing. Null means no runner supports it. */
+export function machineSkillAdoptionRequirement(
+  os: OS | undefined,
+  context?: MachineSkillCandidate["context"],
+): MachineSkillAdoptionRequirement | null {
+  if (context?.kind === "wsl") return null;
+  if (os === "linux") return { capability: "machineSkillAdoption", label: "Machine skill adoption" };
+  if (os === "macos") return { capability: "nativeMacosMachineSkillAdoption", label: "macOS machine skill adoption" };
+  return null;
+}
+
+/** Recovery inspection and restore share the adoption platform gate; Linux added them separately. */
+export function machineSkillAdoptionRecoveryRequirement(os: OS | undefined): MachineSkillAdoptionRequirement | null {
+  if (os === "linux") {
+    return { capability: "machineSkillAdoptionRecovery", label: "Machine skill adoption recovery" };
+  }
+  if (os === "macos") {
+    return { capability: "nativeMacosMachineSkillAdoption", label: "macOS machine skill adoption recovery" };
+  }
+  return null;
 }
 
 /** Shared actionable copy for HTTP errors and disabled UI affordances. */

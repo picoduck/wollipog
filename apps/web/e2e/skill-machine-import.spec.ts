@@ -65,21 +65,64 @@ test("a snapshot-capable runner explains the newer recovery protocol requirement
   await expect(page.getByText("Recovery inspection requires protocol 116 or newer.")).toBeVisible();
 });
 
-test("a macOS runner offers snapshots through its native no-follow reader", async ({ page }) => {
+test("an older macOS runner offers snapshots and explains the adoption protocol requirement", async ({ page }, info) => {
   await page.goto("/skills-removals-e2e.html?macos=1");
   await page.getByRole("button", { name: "Import from Machine" }).click();
   await expect(page.getByRole("button", { name: "Discover Skills" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Inspect Recovery" })).toBeDisabled();
-  await expect(page.getByText("Recovery inspection and source adoption require a Linux runner.")).toBeVisible();
+  await expect(page.getByText("Recovery inspection and source adoption on macOS require protocol 181 or newer."))
+    .toBeVisible();
+  await page.screenshot({ path: info.outputPath("macos-legacy-adoption.png"), fullPage: true });
 });
 
-test("a Windows runner offers snapshots while explaining that adoption remains Linux-only", async ({ page }) => {
+test("a Windows runner offers snapshots while explaining where adoption is available", async ({ page }, info) => {
   await page.goto("/skills-removals-e2e.html?windows=1");
   await page.getByRole("button", { name: "Import from Machine" }).click();
   await expect(page.getByRole("button", { name: "Discover Skills" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Inspect Recovery" })).toBeDisabled();
-  await expect(page.getByText("Recovery inspection and source adoption require a Linux runner.")).toBeVisible();
+  await expect(page.getByText("Recovery inspection and source adoption require a Linux or macOS runner."))
+    .toBeVisible();
+  await page.screenshot({ path: info.outputPath("windows-adoption-unavailable.png"), fullPage: true });
 });
+
+for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
+  `a macOS runner with native adoption offers adoption and recovery at ${width} in ${theme}`,
+  async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    const candidate = { id: "opaque", name: "code-review", sourceDirectory: ".claude/skills", generation: "a".repeat(64) };
+    await page.route("**/api/runners/runner-1/skill-snapshots", (route) =>
+      route.fulfill({ json: { discoveryId: "discovery", candidates: [candidate] } }));
+    await page.route("**/api/skill-machine/discovery/preview", (route) =>
+      route.fulfill({ json: { previewId: "preview", candidate, digest: "a".repeat(64), disposition: "identical",
+        assignmentCount: 1, files: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: code-review\n---\nReview" }],
+        previousFiles: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: code-review\n---\nReview" }] } }));
+    let preflights = 0;
+    await page.route("**/api/skill-machine/discovery/adoption-preflight", async (route) => {
+      preflights++;
+      await route.fulfill({ json: { status: "prerequisites_met", mutationSupported: true, blockers: [], advisories: [],
+        adoptionToken: "approval", sharedReaders: [], source: { candidate, digest: "a".repeat(64), checkedAt: 1 },
+        notice: "Read-only prerequisite report. No directory was changed." } });
+    });
+    await page.route("**/api/runners/runner-1/skill-adoption-recovery", (route) =>
+      route.fulfill({ json: { operations: [], truncated: false } }));
+    await page.goto("/skills-removals-e2e.html?macosAdoption=1");
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    await page.getByRole("button", { name: "Import from Machine" }).click();
+    await expect(page.getByText(/or a macOS runner on protocol 181 or newer/u)).toBeVisible();
+    await expect(page.getByText(/require a Linux or macOS runner|require protocol 181/u)).toBeHidden();
+    await page.getByRole("button", { name: "Inspect Recovery" }).click();
+    await expect(page.getByText("No adoption recovery journals were found.")).toBeVisible();
+    await page.getByRole("button", { name: "Discover Skills" }).click();
+    await page.getByRole("button", { name: "Preview Files for code-review from .claude/skills" }).click();
+    await page.getByRole("button", { name: "Check Adoption" }).click();
+    await expect(page.getByRole("button", { name: "Adopt Source Directory" })).toBeDisabled();
+    expect(preflights).toBe(1);
+    await page.getByRole("checkbox", { name: "Confirm Recoverable Adoption" }).check();
+    await expect(page.getByRole("button", { name: "Adopt Source Directory" })).toBeEnabled();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath(`macos-adoption-${width}-${theme}.png`), fullPage: true });
+  },
+);
 
 test("WSL snapshot candidates identify their distro without exposing transport paths", async ({ page }) => {
   const candidate = { id: "wsl-opaque", name: "review", sourceDirectory: ".codex/skills",
