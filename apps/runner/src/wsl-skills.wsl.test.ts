@@ -104,22 +104,34 @@ test("the Windows runner adopts and restores a WSL skill inside the distro", { s
     args: [], env: {}, driver: "codex", context: { kind: "wsl", distro: distro! } };
   cacheSkillSyncEntry(root, [agent], { name, files, versionDigest: digest,
     targets: [{ agentId: agent.id, invocation: "agent" }] });
+  let operationId = "";
+  let modes = ["", ""];
   t.after(async () => {
-    await wslExec(["sh", "-c", "rm -rf -- \"$HOME/.codex/skills/$1\" \"$HOME/.codex/skills\"/.wollipog-adoption-*", "sh", name]);
+    // Remove only this test's skill and journal, then put the harness directories back as found:
+    // a developer's distro may hold unrelated journals or deliberately private directories.
+    await wslExec(["sh", "-c", [
+      "rm -rf -- \"$HOME/.codex/skills/$1\"",
+      "if [ -n \"$2\" ]; then rm -rf -- \"$HOME/.codex/skills/.wollipog-adoption-$2\"; fi",
+      "if [ \"$4\" = absent ]; then rmdir \"$HOME/.codex/skills\" 2>/dev/null || true; elif [ -n \"$4\" ]; then chmod \"$4\" \"$HOME/.codex/skills\"; fi",
+      "if [ \"$3\" = absent ]; then rmdir \"$HOME/.codex\" 2>/dev/null || true; elif [ -n \"$3\" ]; then chmod \"$3\" \"$HOME/.codex\"; fi",
+    ].join("; "), "sh", name, /^[0-9a-f-]{36}$/u.test(operationId) ? operationId : "", modes[0]!, modes[1]!]);
     rmSync(root, { recursive: true, force: true });
     rmSync(nativeHome, { recursive: true, force: true });
   });
-  await wslExec(["sh", "-c", [
+  // WSL reconciliation refuses group- or world-writable harness directories; drop only those bits.
+  modes = (await wslExec(["sh", "-c", [
     "set -eu",
+    "for d in \"$HOME/.codex\" \"$HOME/.codex/skills\"; do if [ -d \"$d\" ]; then stat -c %a \"$d\"; else echo absent; fi; done",
     "mkdir -p -- \"$HOME/.codex/skills/$1\"",
-    "chmod 755 \"$HOME/.codex\" \"$HOME/.codex/skills\"",
+    "chmod go-w \"$HOME/.codex\" \"$HOME/.codex/skills\"",
     "printf '%s\\n' '---' \"name: $1\" '---' 'Adopted inside WSL' > \"$HOME/.codex/skills/$1/SKILL.md\"",
-  ].join("; "), "sh", name]);
+  ].join("; "), "sh", name])).trim().split(/\s+/u);
   const environment = { ownerHash: "d".repeat(64), dataDir: root };
   const candidate: MachineSkillCandidate = { id: "real-wsl", name, sourceDirectory: ".codex/skills",
     generation: "a".repeat(64), context: { kind: "wsl", distro: distro! } };
   const adopted = await adoptWslSkill({ ...environment, agents: [agent], candidate, digest,
     assertAuthorized: () => undefined });
+  if ("operationId" in adopted && adopted.operationId) operationId = adopted.operationId;
   assert.equal(adopted.status, "adopted", JSON.stringify(adopted));
   if (adopted.status !== "adopted") return;
   const wslHome = (await wslExec(["printenv", "HOME"])).trim();

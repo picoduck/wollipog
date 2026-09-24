@@ -1048,19 +1048,22 @@ def record(parent, name, value, once=False):
     finally: os.close(fd)
     os.fsync(parent)
 
-def rename_noreplace(source_parent, source, target_parent, target):
+def renameat2_function():
+    # Resolved before any mutation, so a libc without renameat2 refuses with nothing changed.
     try:
         renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
-        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-        renameat2.restype = ctypes.c_int
-    except AttributeError: renameat2 = None
-    if renameat2 is not None:
-        if renameat2(source_parent, os.fsencode(source), target_parent, os.fsencode(target), RENAME_NOREPLACE) == 0: return
-        code = ctypes.get_errno()
-        if code not in (errno.ENOSYS, errno.EINVAL): raise OSError(code, os.strerror(code))
-    # Filesystems without RENAME_NOREPLACE keep the Linux runner's semantics inside a private journal.
-    if entry_kind(target_parent, target) != "absent": fail("the rename target is occupied")
-    os.rename(source, target, src_dir_fd=source_parent, dst_dir_fd=target_parent)
+    except AttributeError: fail("no-replace rename is unavailable")
+    renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    renameat2.restype = ctypes.c_int
+    return renameat2
+
+def rename_noreplace(source_parent, source, target_parent, target):
+    # Never emulate no-replace with a check and a plain rename: another process could occupy the
+    # target between them. A kernel or filesystem without RENAME_NOREPLACE stops the transaction.
+    if renameat2_function()(source_parent, os.fsencode(source), target_parent, os.fsencode(target), RENAME_NOREPLACE) == 0:
+        return
+    code = ctypes.get_errno()
+    raise OSError(code, os.strerror(code))
 
 def store_root_text(spec):
     # Recovery names the managed link by text only, so it must work after the store is lost.
@@ -1090,6 +1093,7 @@ def adopt(spec):
         not isinstance(generation, str) or not DIGEST.fullmatch(generation) or not isinstance(digest, str) or
         not DIGEST.fullmatch(digest) or not isinstance(operation, str) or not UUID.fullmatch(operation)):
         fail("invalid adoption request")
+    renameat2_function()
     owner, home_fd, home, store_fd, store_root = adoption_roots(spec)
     opened, lease = [], None
     def keep(fd):
@@ -1239,6 +1243,7 @@ def restore(spec):
         not isinstance(digest, str) or not DIGEST.fullmatch(digest) or not isinstance(parent_expected, str) or
         not IDENTITY.fullmatch(parent_expected) or not isinstance(source_expected, str) or
         not IDENTITY.fullmatch(source_expected)): fail("invalid restore request")
+    renameat2_function()
     owner, home_fd, home, _, store_root = adoption_roots(spec, open_store=False)
     opened, lease = [], None
     def keep(fd):

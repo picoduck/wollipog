@@ -329,7 +329,8 @@ with descriptor-relative calls from the pinned HOME. It walks the harness direct
 reconciliation's ownership rule (owned by the user, not group- or world-writable) and checks source
 and store content twice against the approved digest, which it computes with the same canonical
 manifest. It refuses executable files, hard links, and links, and creates the private journal. The
-original moves with `renameat2(RENAME_NOREPLACE)`, and the managed link is published with an exclusive
+original moves with `renameat2(RENAME_NOREPLACE)`. A libc, kernel, or filesystem without it stops the
+transaction instead of falling back to a plain rename. The managed link is published with an exclusive
 `symlink` to the store path as the distro sees it, so reconciliation later routes a harness link
 through the canonical link as usual. The journal, parent, and original paths are verified before each
 move and before and after publication. Because the helper runs after asynchronous preparation, the
