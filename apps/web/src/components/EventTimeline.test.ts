@@ -14,6 +14,7 @@ import {
   IncrementalTimelineRows,
   stabilizeTimelineRowKeys,
   stabilizeWorkGroupKeys,
+  permissionResolutionLabel,
   timelineFileSourceLocation,
   userRewindTurns,
 } from "./EventTimeline.js";
@@ -1187,4 +1188,15 @@ test("user rows prepare deliberate resend and expose edit-in-fork only for an el
     "Edit in Fork uses the same fork glyph language as plain Fork");
   assert.match(html, /Edit &amp; Resend/);
   assert.match(html, /Edit in Fork/);
+});
+
+test("only never-offered runner authentication outcomes get readable resolution labels", () => {
+  assert.equal(permissionResolutionLabel([], "auth:select-account"), "Another Account Selected");
+  assert.equal(permissionResolutionLabel([], "auth:automatic-retry"), "Rechecked Automatically");
+  assert.equal(permissionResolutionLabel([{ optionId: "trust" }], "trust"), "trust",
+    "an offered option keeps its established raw id display");
+  assert.equal(permissionResolutionLabel([{ optionId: "auth:select-account" }], "auth:select-account"),
+    "auth:select-account", "a provider option that reuses a runner id is still shown raw");
+  assert.equal(permissionResolutionLabel([], "toString"), "toString",
+    "an id matching an inherited property is never replaced");
 });

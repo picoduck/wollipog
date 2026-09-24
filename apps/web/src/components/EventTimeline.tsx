@@ -132,8 +132,13 @@ const RUNNER_RESOLUTION_LABELS: Record<string, string> = {
   "auth:select-account": "Another Account Selected",
 };
 
-export function permissionResolutionLabel(optionId: string): string {
-  return RUNNER_RESOLUTION_LABELS[optionId] ?? optionId;
+export function permissionResolutionLabel(
+  options: ReadonlyArray<{ optionId: string }>,
+  optionId: string,
+): string {
+  // Providers choose their own option ids, so an offered option always keeps its raw id display.
+  if (options.some((option) => option.optionId === optionId)) return optionId;
+  return Object.hasOwn(RUNNER_RESOLUTION_LABELS, optionId) ? RUNNER_RESOLUTION_LABELS[optionId]! : optionId;
 }
 
 export function timelineFileSourceLocation(path: string): SourceLocation | null {
@@ -2042,7 +2047,7 @@ const TimelineRow = memo(function TimelineRow({
                     : item.resolutionReason === "dismissed"
                       ? "→ Dismissed"
                       : item.resolvedOptionId
-                      ? `→ ${permissionResolutionLabel(item.resolvedOptionId)}`
+                      ? `→ ${permissionResolutionLabel(item.options, item.resolvedOptionId)}`
                       : "→ Dismissed"}
               </span>
             ) : (
