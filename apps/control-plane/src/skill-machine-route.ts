@@ -112,7 +112,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     }
     const requirement = machineSkillAdoptionRecoveryRequirement(runner.os);
     if (!requirement) {
-      reply.code(409).send({ error: "Machine skill adoption recovery currently requires a Linux or macOS runner." });
+      reply.code(409).send({ error: "Machine skill adoption recovery requires a Linux, macOS, or Windows runner." });
       return false;
     }
     if (!runnerSupportsProtocol(runner.protocolVersion, requirement.capability)) {

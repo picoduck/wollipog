@@ -75,18 +75,18 @@ test("an older macOS runner offers snapshots and explains the adoption protocol 
   await page.screenshot({ path: info.outputPath("macos-legacy-adoption.png"), fullPage: true });
 });
 
-test("a Windows runner offers snapshots while explaining where adoption is available", async ({ page }, info) => {
+test("an older Windows runner offers snapshots and explains the adoption protocol requirement", async ({ page }, info) => {
   await page.goto("/skills-removals-e2e.html?windows=1");
   await page.getByRole("button", { name: "Import from Machine" }).click();
   await expect(page.getByRole("button", { name: "Discover Skills" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Inspect Recovery" })).toBeDisabled();
-  await expect(page.getByText("Recovery inspection and source adoption require a Linux or macOS runner."))
+  await expect(page.getByText("Recovery inspection and source adoption on Windows require protocol 182 or newer."))
     .toBeVisible();
-  await page.screenshot({ path: info.outputPath("windows-adoption-unavailable.png"), fullPage: true });
+  await page.screenshot({ path: info.outputPath("windows-legacy-adoption.png"), fullPage: true });
 });
 
-for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
-  `a macOS runner with native adoption offers adoption and recovery at ${width} in ${theme}`,
+for (const platform of ["macos", "windows"] as const) for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
+  `a ${platform} runner with native adoption offers adoption and recovery at ${width} in ${theme}`,
   async ({ page }, info) => {
     await page.setViewportSize({ width, height: 900 });
     const candidate = { id: "opaque", name: "code-review", sourceDirectory: ".claude/skills", generation: "a".repeat(64) };
@@ -105,11 +105,12 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
     });
     await page.route("**/api/runners/runner-1/skill-adoption-recovery", (route) =>
       route.fulfill({ json: { operations: [], truncated: false } }));
-    await page.goto("/skills-removals-e2e.html?macosAdoption=1");
+    await page.goto(`/skills-removals-e2e.html?${platform}Adoption=1`);
     await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
     await page.getByRole("button", { name: "Import from Machine" }).click();
-    await expect(page.getByText(/or a macOS runner on protocol 181 or newer/u)).toBeVisible();
-    await expect(page.getByText(/require a Linux or macOS runner|require protocol 181/u)).toBeHidden();
+    await expect(page.getByText(/a macOS runner on protocol 181 or newer, or a Windows runner on protocol 182 or newer/u))
+      .toBeVisible();
+    await expect(page.getByText(/require a Linux, macOS, or Windows runner|require protocol 18[12]/u)).toBeHidden();
     await page.getByRole("button", { name: "Inspect Recovery" }).click();
     await expect(page.getByText("No adoption recovery journals were found.")).toBeVisible();
     await page.getByRole("button", { name: "Discover Skills" }).click();
@@ -120,7 +121,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
     await page.getByRole("checkbox", { name: "Confirm Recoverable Adoption" }).check();
     await expect(page.getByRole("button", { name: "Adopt Source Directory" })).toBeEnabled();
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.screenshot({ path: info.outputPath(`macos-adoption-${width}-${theme}.png`), fullPage: true });
+    await page.screenshot({ path: info.outputPath(`${platform}-adoption-${width}-${theme}.png`), fullPage: true });
   },
 );
 

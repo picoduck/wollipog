@@ -163,7 +163,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
   </>}>
     <div className="form skills-machine-import">
       <p>Import a read-only snapshot. After an identical library version is assigned, a separate confirmed action can preserve the original and replace it with a managed link. New skills stay unassigned; accepted updates deploy to current assignments on unpinned machines.</p>
-      <p className="skills-hint">Snapshot import requires protocol 111 on Linux, protocol 119 on Windows, protocol 120 on macOS, or protocol 125 for WSL locations. Adoption requires a connected Linux runner on protocol 115 or newer, or a macOS runner on protocol {RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption} or newer. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
+      <p className="skills-hint">Snapshot import requires protocol 111 on Linux, protocol 119 on Windows, protocol 120 on macOS, or protocol 125 for WSL locations. Adoption requires a connected Linux runner on protocol 115 or newer, a macOS runner on protocol {RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption} or newer, or a Windows runner on protocol {RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillAdoption} or newer; WSL locations are not adopted yet. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
       <label className="field"><span>Machine</span><Select label="Machine" value={runnerId} disabled={busy || discovery !== null}
         options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={selectRunner} /></label>
       {compatible.length === 0 && <p>No compatible connected machines. Update a Linux, macOS, or Windows runner to enable snapshot imports.</p>}
@@ -173,9 +173,9 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
       {selectedRunner && !recoverySupported && <p className="skills-hint">
         {selectedRunner.os === "linux"
           ? "Recovery inspection requires protocol 116 or newer. Update this runner to inspect or restore adoption journals."
-          : selectedRunner.os === "macos"
-            ? `Recovery inspection and source adoption on macOS require protocol ${RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption} or newer. Update this runner to adopt skills or restore adoption journals.`
-            : "Recovery inspection and source adoption require a Linux or macOS runner. Read-only snapshot import remains available."}
+          : recoveryRequirement
+            ? `Recovery inspection and source adoption on ${selectedRunner.os === "macos" ? "macOS" : "Windows"} require protocol ${RUNNER_CAPABILITY_MIN_PROTOCOL[recoveryRequirement.capability]} or newer. Update this runner to adopt skills or restore adoption journals.`
+            : "Recovery inspection and source adoption require a Linux, macOS, or Windows runner. Read-only snapshot import remains available."}
       </p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {imported && <p role="status">Imported: {imported}. The source directory was not adopted.</p>}

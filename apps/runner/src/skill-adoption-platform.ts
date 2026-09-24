@@ -1,5 +1,6 @@
 import type { SkillAdoptionRecoveryOperation } from "@wollipog/protocol";
 import { macosSkillAdoptionHelper } from "./macos-skill-snapshots.js";
+import { windowsSkillAdoptionHelper } from "./windows-skill-adoption.js";
 
 /** One adoption transaction delegated to a fixed platform helper. Paths are the runner's own
  * configured roots; the helper resolves and pins them itself and never receives client input. */
@@ -73,6 +74,7 @@ export interface SkillAdoptionPlatformHelper {
  * descriptor implementation; everything else refuses. */
 export function platformSkillAdoptionHelper(platform: NodeJS.Platform): SkillAdoptionPlatformHelper | null {
   if (platform === "darwin") return macosSkillAdoptionHelper();
+  if (platform === "win32") return windowsSkillAdoptionHelper();
   return null;
 }
 

@@ -12,13 +12,15 @@ import "../styles.css";
 
 const accountScopes = new URLSearchParams(location.search).has("accountScopes");
 const macosAdoption = new URLSearchParams(location.search).has("macosAdoption");
+const windowsAdoption = new URLSearchParams(location.search).has("windowsAdoption");
 
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "runner-host",
   os: new URLSearchParams(location.search).has("macos") || macosAdoption
     ? "macos"
-    : new URLSearchParams(location.search).has("windows") || new URLSearchParams(location.search).has("wslSkills")
+    : new URLSearchParams(location.search).has("windows") || new URLSearchParams(location.search).has("wslSkills") ||
+        windowsAdoption
       ? "windows" : "linux",
   version: "1",
   status: "online",
@@ -49,6 +51,8 @@ const runner: RunnerView = {
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.accountScopedAgentSkills
     : macosAdoption
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption
+    : windowsAdoption
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillAdoption
     : new URLSearchParams(location.search).has("legacySkills")
     ? 1
     : new URLSearchParams(location.search).has("legacyRecovery")
