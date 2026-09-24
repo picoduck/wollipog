@@ -372,7 +372,7 @@ declare global {
       lastAddBoxRequest(): AddBoxRequest | null;
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
         "multiple-installations" | "harness-states" | "harness-states-ssh" |
-        "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper"): void;
+        "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper" | "dotted-batch-wrapper"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
     };
   }
@@ -451,14 +451,16 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
       ];
       runner.harnessSelections = [{ family: "codex", context: { kind: "native" },
         installationId: "system", path: "/usr/bin/codex", via: "path", version: "0.199.0", agentId: "codex" }];
-    } else if (scenario === "batch-wrapper" || scenario === "extensionless-batch-wrapper") {
+    } else if (scenario === "batch-wrapper" || scenario === "extensionless-batch-wrapper" || scenario === "dotted-batch-wrapper") {
       runner.protocolVersion = PROTOCOL_VERSION;
       runner.agents = [{
         id: "batch-codex", name: "Batch Codex", command: scenario === "batch-wrapper"
-          ? "C:\\Program Files\\Codex Tools\\codex.cmd" : "codex",
+          ? "C:\\Program Files\\Codex Tools\\codex.cmd" : scenario === "dotted-batch-wrapper"
+            ? "codex.v2" : "codex",
         args: ["--profile", 'Team "Research"', "%PATH%"], env: {}, driver: "codex-app-server",
         context: { kind: "native" }, source: "discovered", available: true,
-        installation: { id: "batch", path: "C:\\Program Files\\Codex Tools\\codex.cmd", via: "path" },
+        installation: { id: "batch", path: scenario === "dotted-batch-wrapper"
+          ? "C:\\Program Files\\Codex Tools\\codex.v2.cmd" : "C:\\Program Files\\Codex Tools\\codex.cmd", via: "path" },
         update: { status: "managed_externally", checkedAt: Date.UTC(2026, 8, 22),
           channel: "unknown", evidenceSource: "Executable installation provenance", managedExternally: true,
           guidance: "This installation uses a Windows batch wrapper. Use the package or version manager that installed this exact copy." },

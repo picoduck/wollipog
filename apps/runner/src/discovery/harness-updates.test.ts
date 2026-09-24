@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -120,6 +121,43 @@ test("extensionless native Windows update commands cannot promise batch-safe arg
     const binary = { path: "C:\\Tools\\codex.cmd", via: "path" as const,
       launch: { command, args: ['embedded"quote', "%PATH%"] } };
     assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+  }
+});
+
+test("dotted native Windows update commands can still resolve to batch wrappers", () => {
+  for (const command of ["codex.v2", "C:\\Tools\\codex.v2"]) {
+    const binary = { path: "C:\\Tools\\codex.v2.cmd", via: "path" as const,
+      launch: { command, args: ['embedded"quote', "%PATH%"] } };
+    assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+  }
+});
+
+test("PowerShell resolves dotted harness names to batch wrappers, so update guidance stays non-copyable",
+  { skip: process.platform !== "win32" }, () => {
+  for (const suffix of ["cmd", "bat"]) {
+    const dir = mkdtempSync(join(tmpdir(), "wollipog dotted lookup "));
+    try {
+      writeFileSync(join(dir, `codex.v2.${suffix}`), "@echo off\r\necho DOTTED_WRAPPER_EXECUTED:%*\r\n");
+      const script = join(dir, "probe.ps1");
+      writeFileSync(script, [
+        "$resolved = Get-Command codex.v2 -ErrorAction SilentlyContinue",
+        "Write-Output \"RESOLVED:$($resolved.Source)\"",
+        "& codex.v2 probe",
+        "Write-Output \"NATIVE_EXIT:$LASTEXITCODE\"",
+      ].join("\r\n"));
+      const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-File", script], {
+        encoding: "utf8", env: { ...process.env, PATH: `${dir};${process.env.PATH}`, PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+      });
+      assert.equal(probe.status, 0, probe.stderr);
+      assert.match(probe.stdout, new RegExp(`RESOLVED:.*codex\\.v2\\.${suffix}`, "i"));
+      assert.match(probe.stdout, /DOTTED_WRAPPER_EXECUTED:probe/);
+      assert.match(probe.stdout, /NATIVE_EXIT:0/);
+      const binary = { path: join(dir, `codex.v2.${suffix}`), via: "path" as const,
+        launch: { command: "codex.v2", args: ['embedded"quote', "%PATH%"] } };
+      assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 
