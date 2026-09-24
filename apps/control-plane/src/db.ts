@@ -2424,6 +2424,7 @@ CREATE TABLE IF NOT EXISTS skill_git_auto_updates (
   error          TEXT,
   error_at       INTEGER,
   held           TEXT,
+  checked_modes  TEXT,
   updated_at     INTEGER NOT NULL
 );
 
@@ -7199,12 +7200,14 @@ export class ControlPlaneDb {
         this.stmt("INSERT OR IGNORE INTO skill_git_provenance (version_id, source) VALUES (?, ?)")
           .run(current.latestVersion.id, JSON.stringify(input.source));
         this.stmt("UPDATE skills SET source='git' WHERE id=?").run(current.id);
+        this.recordSkillGitBaselineModes(current.id, current.latestVersion.id, input.source.executablePaths);
         return this.getSkill(current.id)!;
       }
       const skill = current ?? this.createSkill(input);
       const version = current ? this.addSkillVersion(current.id, input)! : this.getSkillVersion(skill.latestVersion!.id)!;
       this.stmt("INSERT INTO skill_git_provenance (version_id, source) VALUES (?, ?)")
         .run(version.id, JSON.stringify(input.source));
+      if (current) this.recordSkillGitBaselineModes(current.id, version.id, input.source.executablePaths);
       this.stmt("UPDATE skills SET source='git' WHERE id=?").run(skill.id);
       return this.getSkill(skill.id)!;
     });
@@ -7237,12 +7240,25 @@ export class ControlPlaneDb {
       if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return false;
       this.stmt(`INSERT INTO skill_git_auto_updates (skill_id, enabled, updated_at) VALUES (?, ?, ?)
         ON CONFLICT(skill_id) DO UPDATE SET enabled=excluded.enabled, checked_at=NULL, checked_commit=NULL,
-          error=NULL, error_at=NULL, held=NULL, updated_at=excluded.updated_at, revision=revision+1`).run(skillId, enabled ? 1 : 0, now);
+          error=NULL, error_at=NULL, held=NULL, checked_modes=NULL, updated_at=excluded.updated_at,
+          revision=revision+1`).run(skillId, enabled ? 1 : 0, now);
       return true;
     });
   }
 
   /** Opaque write counter; null when the skill has never had an automatic-update setting. */
+  /** Executable paths of the last handled commit, valid only while `versionId` is still latest.
+   * Provenance is immutable, so a mode-only commit with identical content is recorded here. */
+  getSkillGitBaselineModes(skillId: string): { versionId: string; executablePaths: string[] } | null {
+    const row = this.stmt("SELECT checked_modes FROM skill_git_auto_updates WHERE skill_id=?").get(skillId) as { checked_modes: string | null } | undefined;
+    return row?.checked_modes ? JSON.parse(row.checked_modes) as { versionId: string; executablePaths: string[] } : null;
+  }
+
+  private recordSkillGitBaselineModes(skillId: string, versionId: string, executablePaths: string[] | undefined): void {
+    this.stmt(`UPDATE skill_git_auto_updates SET checked_modes=?, revision=revision+1 WHERE skill_id=? AND enabled=1`)
+      .run(Array.isArray(executablePaths) ? JSON.stringify({ versionId, executablePaths }) : null, skillId);
+  }
+
   getSkillGitAutoUpdateRevision(skillId: string): number | null {
     const row = this.stmt("SELECT revision FROM skill_git_auto_updates WHERE skill_id=?").get(skillId) as { revision: number } | undefined;
     return row ? Number(row.revision) : null;
@@ -7293,6 +7309,7 @@ export class ControlPlaneDb {
       this.stmt("INSERT OR IGNORE INTO skill_git_provenance (version_id, source) VALUES (?, ?)")
         .run(versionId, JSON.stringify(input.source));
       this.recordSkillGitAutoUpdateCheck(input.skillId, { kind: "handled", commit: input.source.commit, at: input.at, held: null });
+      this.recordSkillGitBaselineModes(input.skillId, versionId, input.source.executablePaths);
       return { changed };
     });
   }

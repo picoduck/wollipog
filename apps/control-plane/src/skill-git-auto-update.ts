@@ -122,11 +122,15 @@ export class SkillGitAutoUpdater {
     const source = { ...upstream, path: candidate.path, commit: candidate.commit, executablePaths: candidate.executablePaths };
     let held: SkillGitAutoUpdateView["held"] = null;
     if (latest.digest !== candidate.digest) {
-      const scriptPaths = changedSkillScripts(latest.files, latest.gitSource?.executablePaths ?? [], candidate);
+      // Previous modes: the latest version's provenance plus the last handled commit for this exact
+      // version (a mode-only commit leaves provenance unchanged). Their union is conservative.
+      const baseline = db.getSkillGitBaselineModes(skillId);
+      const knownModes = [latest.gitSource?.executablePaths, baseline?.versionId === latest.id ? baseline.executablePaths : undefined]
+        .filter((paths): paths is string[] => Array.isArray(paths));
+      const scriptPaths = changedSkillScripts(latest.files, knownModes.flat(), candidate);
       // Imports that predate executable tracking cannot prove a changed file was not executable,
       // so their first changing update is reviewed once; that import then records the modes.
-      const untracked = latest.gitSource && !Array.isArray(latest.gitSource.executablePaths)
-        ? changedExistingFiles(latest.files, candidate) : [];
+      const untracked = latest.gitSource && !knownModes.length ? changedExistingFiles(latest.files, candidate) : [];
       // Edits made in the library since the last import would be overwritten; a human decides.
       if (!latest.gitSource) held = { commit: candidate.commit, reason: "local_changes", scriptPaths, heldAt: this.now() };
       else if (scriptPaths.length) held = { commit: candidate.commit, reason: "scripts", scriptPaths, heldAt: this.now() };
