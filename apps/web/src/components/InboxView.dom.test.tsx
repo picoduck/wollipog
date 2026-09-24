@@ -736,6 +736,8 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   const applyOrder = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent?.trim() === "Apply New Order");
   assert.ok(applyOrder, "sustained desktop activity exposes a deliberate reorder boundary");
+  assert.equal(applyOrder.nextElementSibling, container.querySelector(".sessions-view-toggle"),
+    "the conditional button leads List / Board so showing it cannot move the toggle (#1675)");
   assert.match(container.textContent ?? "", /A newer Inbox order is available/);
   await act(async () => { applyOrder.click(); });
   assert.deepEqual(rowTitles(container), ["Session B", "Session C", "Session A"]);

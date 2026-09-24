@@ -346,7 +346,7 @@ for (const viewport of [
 
 test("desktop can apply a pending Inbox order without losing selection or scroll anchor", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 760 });
-  await page.goto("/command-inbox-projects-e2e.html?scenario=inbox-live-scroll");
+  await page.goto("/command-inbox-projects-e2e.html?scenario=inbox-live-scroll&reminders=1");
   const list = page.locator(".inbox-list");
   await expect(list.locator("[data-virtual-total='36']")).toBeVisible();
   await expect.poll(() => list.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true);
@@ -359,6 +359,17 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   const selectedKey = await list.locator('.inbox-row-shell[aria-selected="true"]').evaluate((row) =>
     row.closest<HTMLElement>("[data-virtual-row]")?.dataset.virtualKey ?? null);
   expect(selectedKey).not.toBeNull();
+  // List / Board and everything to its right, in toolbar order. The pending-order button is
+  // conditional, so none of these may move when it appears or leaves (#1675).
+  const stationaryToolbar = () => page.locator(".inbox-toolbar-actions > :not(.sr-only, .inbox-order-update)")
+    .evaluateAll((elements) => elements.map((element) => {
+      const rect = element.getBoundingClientRect();
+      return { className: element.className, left: rect.left, right: rect.right };
+    }));
+  const toolbarWithoutButton = await stationaryToolbar();
+  expect(toolbarWithoutButton.map(({ className }) => className)).toEqual([
+    "ui-seg sessions-view-toggle", "ui-seg inbox-reminder-view", "inbox-create-menu", "inbox-search",
+  ]);
 
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-overflow-35", {
@@ -369,12 +380,19 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   });
   const applyOrder = page.getByRole("button", { name: "Apply New Order" });
   await expect(applyOrder).toBeVisible();
+  expect(await stationaryToolbar()).toEqual(toolbarWithoutButton);
+  const applyOrderBox = await applyOrder.boundingBox();
+  const toggleBox = await page.locator(".sessions-view-toggle").boundingBox();
+  expect(applyOrderBox && toggleBox && applyOrderBox.x + applyOrderBox.width <= toggleBox.x).toBe(true);
+  // The toolbar gives the button its width from the Project tabs, not by clipping the button.
+  expect(await applyOrder.evaluate((button) => button.scrollWidth <= button.clientWidth)).toBe(true);
   const before = await inboxViewportAnchor(page);
   expect(before.key).not.toBeNull();
 
   await applyOrder.click();
   await settlePreviewLayout(page);
   await expect(applyOrder).toHaveCount(0);
+  expect(await stationaryToolbar()).toEqual(toolbarWithoutButton);
   await expect(list).toBeFocused();
   const after = await inboxViewportAnchor(page);
   expect(after.key).toBe(before.key);

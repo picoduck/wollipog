@@ -1296,6 +1296,22 @@ export function InboxView({
             })}
           </div>
           <div className="inbox-toolbar-actions">
+            <span className="sr-only" aria-live="polite" aria-atomic="true">
+              {orderUpdateAvailable ? "A newer Inbox order is available." : ""}
+            </span>
+            {/* Leading, not beside the Reminder View: this group is pinned to the toolbar's right edge,
+                so a conditional control must grow it leftward or it moves List / Board under the
+                pointer each time it appears (#1675). */}
+            {orderUpdateAvailable && (
+              <button
+                type="button"
+                className="btn sm inbox-order-update"
+                title="Apply the latest session order."
+                onClick={applyCanonicalOrder}
+              >
+                Apply New Order
+              </button>
+            )}
             <SegmentedControl<SessionsViewMode>
               className="sessions-view-toggle"
               label="Sessions View"
@@ -1320,19 +1336,6 @@ export function InboxView({
                 navigate(mode === "board" ? { name: "board" } : { name: "inbox" });
               }}
             />
-            <span className="sr-only" aria-live="polite" aria-atomic="true">
-              {orderUpdateAvailable ? "A newer Inbox order is available." : ""}
-            </span>
-            {orderUpdateAvailable && (
-              <button
-                type="button"
-                className="btn sm inbox-order-update"
-                title="Apply the latest session order."
-                onClick={applyCanonicalOrder}
-              >
-                Apply New Order
-              </button>
-            )}
             {sessionRemindersSupported && (
               <SegmentedControl<ReminderInboxMode>
                 className="inbox-reminder-view"

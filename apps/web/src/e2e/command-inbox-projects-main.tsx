@@ -62,6 +62,7 @@ const INCLUDE_SESSION_SHELL = FIXTURE_QUERY.get("sessionShell") === "1";
 const LEGACY_WORKSPACES = FIXTURE_QUERY.get("legacyWorkspaces") === "1";
 const UNFILED_WORKSPACE = FIXTURE_QUERY.get("unfiledWorkspace") === "1";
 const LONG_AGENT = FIXTURE_QUERY.get("longAgent") === "1";
+const SESSION_REMINDERS = FIXTURE_QUERY.get("reminders") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
 const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
 
@@ -701,6 +702,7 @@ function snapshot(): UiSnapshotMessage {
       createProjectLocations: !LEGACY_WORKSPACES,
       nativeTuiLaunch: true,
       stopBeforeArchive: true,
+      ...(SESSION_REMINDERS ? { sessionReminders: true } : {}),
       ...(orchestratorRoleSupported ? { orchestratorRole: true } : {}),
     },
     runners: [runner],
