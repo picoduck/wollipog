@@ -303,6 +303,23 @@ test("a macOS parent symlink swap cannot redirect writes outside the pinned pare
   assert.match(fs.readFileSync(join(moved, backupName, "original/SKILL.md"), "utf8"), /Original instructions/u);
 });
 
+test("a retargeted data-directory symlink cannot separate the verified store from the published link", native,
+  async (t) => {
+    const f = fixture(t);
+    const verified = f.dataDir + "-verified", replacement = f.dataDir + "-replacement";
+    fs.renameSync(f.dataDir, verified);
+    fs.symlinkSync(verified, f.dataDir);
+    fs.cpSync(verified, replacement, { recursive: true });
+    fs.writeFileSync(join(replacement, "skills/store/alpha", f.options.digest, "SKILL.md"), "unverified content");
+    const run = await atCheckpoint(f.helper, adoptionArguments(f), "intent_durable", "c", () => {
+      fs.unlinkSync(f.dataDir);
+      fs.symlinkSync(replacement, f.dataDir);
+    });
+    assert.deepEqual(macosAdoptionOutcome(run.lines, run.code === 0), { journal: true, adopted: true });
+    assert.equal(fs.readlinkSync(f.source), join(fs.realpathSync(verified), "skills/store/alpha", f.options.digest));
+    assert.match(fs.readFileSync(join(f.source, "SKILL.md"), "utf8"), /Original instructions/u);
+  });
+
 for (const stage of ["restore_intent_durable", "managed_link_preserved", "recovery_link_created"] as const) {
   test(`macOS restore retries safely after interruption at ${stage}`, native, async (t) => {
     const f = fixture(t);

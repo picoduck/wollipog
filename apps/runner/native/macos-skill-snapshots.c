@@ -749,8 +749,21 @@ static void check_content(int fd, const char *digest, int reject_executable) {
   if (strcmp(first, digest) || strcmp(second, digest) || strcmp(before, after)) fail();
 }
 
+/* Open an already-resolved absolute path without following any component. Each root is resolved
+ * once, so the pinned descriptor names exactly the directory whose path becomes link text. */
+static int open_real(const char *real) {
+  if (real[0] != '/') return -1;
+  int current = open("/", O_RDONLY | O_DIRECTORY);
+  if (current < 0) fail();
+  if (!real[1]) return current;
+  int next = open_relative(current, real + 1, 0);
+  close(current);
+  return next;
+}
+
 static void check_path(const char *root, const char *relative, const char *expected) {
-  int base = open_home(root);
+  int base = open_real(root);
+  if (base < 0) fail();
   int fd = open_relative(base, relative, 0);
   if (fd < 0) fail();
   char actual[48];
@@ -886,19 +899,21 @@ static void adopt_candidate(int argc, char **argv) {
   if (!strcmp(source_path, target_path) || nested(source_path, target_path) ||
       nested(target_path, source_path)) fail();
 
-  int home_fd = open_home(home);
+  int home_fd = open_real(home_real);
+  if (home_fd < 0) fail();
   int parent = open_relative(home_fd, local, 1);
   if (parent < 0) fail();
   int source = openat(parent, name, DIRECTORY_FLAGS);
   if (source < 0) fail();
-  int data_fd = open_home(data);
+  int data_fd = open_real(data_real);
+  if (data_fd < 0) fail();
   int target = open_relative(data_fd, target_relative, 1);
   if (target < 0) fail();
   char parent_id[48], source_id[48], target_id[48];
   identity(parent, parent_id);
   identity(source, source_id);
   identity(target, target_id);
-  check_source(home, local, source_relative, parent_id, source_id, source, expected_generation, digest);
+  check_source(home_real, local, source_relative, parent_id, source_id, source, expected_generation, digest);
   check_content(target, digest, 0);
 
   char backup_name[64];
@@ -925,8 +940,8 @@ static void adopt_candidate(int argc, char **argv) {
 
   /* Both rename endpoints are anchored to held descriptors, so a concurrently renamed parent
    * cannot redirect the move; the path checks detect it and stop before publication. */
-  check_source(home, local, source_relative, parent_id, source_id, source, expected_generation, digest);
-  check_path(data, target_relative, target_id);
+  check_source(home_real, local, source_relative, parent_id, source_id, source, expected_generation, digest);
+  check_path(data_real, target_relative, target_id);
   if (renameatx_np(parent, name, backup, "original", RENAME_EXCL) != 0) fail();
   flush(backup);
   flush(parent);
@@ -940,15 +955,15 @@ static void adopt_candidate(int argc, char **argv) {
   char receipt[256];
   snprintf(receipt, sizeof(receipt), "{\"sourceIdentity\":\"%s\",\"digest\":\"%s\"}", source_id, digest);
   record(backup, "preserved.json", receipt);
-  check_path(home, local, parent_id);
-  check_path(data, target_relative, target_id);
+  check_path(home_real, local, parent_id);
+  check_path(data_real, target_relative, target_id);
   check_content(target, digest, 0);
   /* symlinkat() fails with EEXIST rather than replacing anything created during the rename gap. */
   if (symlinkat(target_path, parent, name) != 0) fail();
   flush(parent);
   checkpoint("link_created");
-  check_path(home, local, parent_id);
-  check_path(data, target_relative, target_id);
+  check_path(home_real, local, parent_id);
+  check_path(data_real, target_relative, target_id);
   check_content(target, digest, 0);
   if (!link_equals(parent, name, target_path)) fail();
   snprintf(receipt, sizeof(receipt), "{\"digest\":\"%s\"}", digest);
@@ -981,7 +996,7 @@ static void inspect_recovery(int argc, char **argv) {
   append(&output, "WMS1I", 5);
   char *home_real = realpath(home, NULL);
   char *data_real = realpath(data, NULL);
-  int home_fd = home_real ? open(home_real, DIRECTORY_FLAGS) : -1;
+  int home_fd = home_real ? open_real(home_real) : -1;
   int parent = home_fd >= 0 ? open_relative(home_fd, local, 0) : -1;
   if (parent < 0) {
     append_blob(&output, "", 0);
@@ -1092,7 +1107,8 @@ static void restore_recovery(int argc, char **argv) {
   char *home_real = realpath(home, NULL);
   char *data_real = realpath(data, NULL);
   if (!home_real || !data_real) fail();
-  int home_fd = open_home(home);
+  int home_fd = open_real(home_real);
+  if (home_fd < 0) fail();
   int parent = open_relative(home_fd, local, 1);
   if (parent < 0) fail();
   char actual[48];

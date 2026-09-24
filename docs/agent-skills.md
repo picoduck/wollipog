@@ -182,7 +182,9 @@ already reads macOS snapshots (`apps/runner/native/macos-skill-snapshots.c`) per
 filesystem step of adoption, recovery inspection, and restore. The runner validates the command,
 resolves the candidate and credential home, holds the provider-home lease, and runs its
 authorization guard before launching the helper once, synchronously, so no runner state can change
-in between. The helper then repeats the Linux sequence under pinned no-follow descriptors:
+in between. The helper resolves the home and data directories once and opens each resolved path
+without following any component, so the verified store and the published link text cannot come
+from different roots. It then repeats the Linux sequence under pinned no-follow descriptors:
 `openat` walks with a flush of each parent, two bounded content passes against the discovery
 generation and the approved digest for both source and store, `mkdirat` of the mode-0700 journal
 with a mode-0600 `intent.json`, `renameatx_np(RENAME_EXCL)` of the original into the journal,
