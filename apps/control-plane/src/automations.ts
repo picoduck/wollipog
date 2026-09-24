@@ -448,9 +448,17 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
     const primary = pin(action.request.runnerId, { agent: action.request.agentId }, action.installationBindings,
       oldAction ? { runnerId: oldAction.request.runnerId, ids: { agent: oldAction.request.agentId },
         bindings: oldAction.installationBindings } : undefined);
+    // A create-session action has only an Agent selection. API clients can carry installation
+    // metadata from an earlier Machine or action; never save an unrelated Orchestrator pin.
+    const agentOnly = (bindings: AutomationInstallationBindings | undefined, explicit: boolean):
+      AutomationInstallationBindings | undefined =>
+      bindings?.agent ? { agent: bindings.agent } : explicit ? {} : undefined;
+    const { installationBindings: _oldPrimaryBindings, ...primaryAction } = action;
+    const cleanedPrimary = agentOnly(primary, action.installationBindings !== undefined);
     return {
       ...spec,
-      action: { ...action, ...(primary ? { installationBindings: primary } : {}) },
+      action: { ...primaryAction,
+        ...(cleanedPrimary !== undefined ? { installationBindings: cleanedPrimary } : {}) },
       runnerPolicy: spec.runnerPolicy.kind !== "alternate" ? spec.runnerPolicy : {
         ...spec.runnerPolicy,
         targets: spec.runnerPolicy.targets.map((target) => {
@@ -459,7 +467,9 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
           const bindings = pin(target.runnerId, { agent: target.agentId! }, target.installationBindings,
             oldTarget ? { runnerId: oldTarget.runnerId, ids: { agent: oldTarget.agentId! },
               bindings: oldTarget.installationBindings } : undefined);
-          return { ...target, ...(bindings ? { installationBindings: bindings } : {}) };
+          const { installationBindings: _oldTargetBindings, ...cleanTarget } = target;
+          const cleaned = agentOnly(bindings, target.installationBindings !== undefined);
+          return { ...cleanTarget, ...(cleaned !== undefined ? { installationBindings: cleaned } : {}) };
         }),
       },
     };
