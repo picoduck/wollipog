@@ -213,7 +213,7 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
     const args = buildContainerArgs(
       { command: "C:\\host\\codex.cmd", args: ["--host-config", "--json"], cwd: "C:\\worktrees\\session-1", containerAgentLaunch: true },
       {
-        backend: "container", command: runtime, args: [],
+        backend: "container", runtime, command: runtime, args: [],
         image: `example/agent@sha256:${"b".repeat(64)}`, network: "deny", templateId: "tools",
         runnerKey: "runnerkey", containerName: "wollipog-session",
         hostAgentCommand: "C:\\host\\codex.cmd", hostAgentArgs: ["--host-config"],
@@ -226,6 +226,7 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
       "--label", "com.wollipog.template=tools",
       "--label", "com.misko-agent-manager.runner=runnerkey",
       "--label", "com.misko-agent-manager.template=tools", "--sig-proxy=true",
+      ...(runtime === "podman" ? ["--http-proxy=false"] : []),
       "--network", "none", "--read-only",
       "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
       "--tmpfs", "/tmp:rw,nosuid,nodev",
@@ -234,7 +235,7 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
     ]);
   }
   assert.throws(() => buildContainerArgs({ command: "agent", args: [], cwd: "C:\\bad,path" }, {
-    backend: "container", command: "docker", args: [], image: `x@sha256:${"c".repeat(64)}`,
+    backend: "container", runtime: "docker", command: "docker", args: [], image: `x@sha256:${"c".repeat(64)}`,
     network: "bridge", templateId: "x", runnerKey: "runnerkey", containerName: "wollipog-x",
     hostAgentCommand: "agent", hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
   }), /mount character/);
@@ -246,7 +247,7 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
       containerEnvironmentKeys: ["PROJECT_ROOT"],
     },
     {
-      backend: "container", command: "docker", args: [], image: `x@sha256:${"c".repeat(64)}`,
+      backend: "container", runtime: "docker", command: "docker", args: [], image: `x@sha256:${"c".repeat(64)}`,
       network: "bridge", templateId: "x", runnerKey: "runnerkey", containerName: "wollipog-x",
       hostAgentCommand: "agent", hostAgentArgs: [], agentCommand: "agent", agentArgs: ["host-only"],
     },
@@ -254,7 +255,7 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
   assert.throws(() => buildContainerArgs(
     { command: "agent", args: ["--unexpected"], cwd: "C:\\worktrees\\session-1", containerAgentLaunch: true },
     {
-      backend: "container", command: "docker", args: [], image: `x@sha256:${"c".repeat(64)}`,
+      backend: "container", runtime: "docker", command: "docker", args: [], image: `x@sha256:${"c".repeat(64)}`,
       network: "bridge", templateId: "x", runnerKey: "runnerkey", containerName: "wollipog-x",
       hostAgentCommand: "agent", hostAgentArgs: ["--configured"], agentCommand: "agent", agentArgs: [],
     },
@@ -276,7 +277,7 @@ test("container launches exclude provider values while forwarding trust-gated se
       containerAgentLaunch: true,
       containerEnvironmentKeys: ["PROJECT_ROOT"],
       isolation: {
-        backend: "container", command: process.execPath, args: [script],
+        backend: "container", runtime: "docker", command: process.execPath, args: [script],
         image: `x@sha256:${"d".repeat(64)}`, network: "deny", templateId: "x",
         runnerKey: "runnerkey", containerName: "wollipog-x", hostAgentCommand: "agent",
         hostAgentArgs: [], agentCommand: "agent", agentArgs: [],

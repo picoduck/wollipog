@@ -199,6 +199,7 @@ export interface WindowsJobSpawnIsolation {
 
 export interface ContainerSpawnIsolation {
   backend: "container";
+  runtime: "docker" | "podman";
   /** Resolved native Docker/Podman client plus any resolver prefix arguments. */
   command: string;
   args: string[];
@@ -266,6 +267,7 @@ export function buildContainerArgs(
     "--name", isolation.containerName,
     ...containerLabelArgs(isolation.runnerKey, isolation.templateId),
     "--sig-proxy=true",
+    ...(isolation.runtime === "podman" ? ["--http-proxy=false"] : []),
     "--network", isolation.network === "deny" ? "none" : "bridge",
     "--read-only",
     "--cap-drop", "ALL",

@@ -273,6 +273,7 @@ function setupCheckArgs(
   const containerName = setupCheckContainerName(template, check, runnerKey);
   return [
     "run", "--rm", "--pull=never",
+    ...(template.runtime === "podman" ? ["--http-proxy=false"] : []),
     "--name", containerName,
     ...containerLabelArgs(runnerKey, template.id),
     "--network", "none",
@@ -443,6 +444,7 @@ export class ContainerTargetRegistry {
       }
       const result = await this.deps.run(runtime.launch.command, [
         ...runtime.launch.args, "run", "--rm", "--name", name,
+        ...(template.runtime === "podman" ? ["--http-proxy=false"] : []),
         ...containerLabelArgs(this.runnerKey, template.id),
         "--network", "none", "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--pids-limit", "128",
@@ -683,6 +685,7 @@ export class ContainerTargetRegistry {
     if (!agent) throw new Error(`container target does not configure agent '${agentId}'`);
     return {
       backend: "container",
+      runtime: prepared.config.runtime,
       command: prepared.runtime.launch.command,
       args: prepared.runtime.launch.args,
       image: prepared.config.image,

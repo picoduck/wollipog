@@ -61,7 +61,7 @@ function journalRecords(home: string): Array<Record<string, unknown>> {
 test("container and cloud launches never lease the host provider HOME", () => {
   const remote: SpawnIsolation[] = [
     {
-      backend: "container", command: "docker", args: [], image: `x@sha256:${"a".repeat(64)}`,
+      backend: "container", runtime: "docker", command: "docker", args: [], image: `x@sha256:${"a".repeat(64)}`,
       network: "deny", templateId: "tools", runnerKey: "runner-key", containerName: "session",
       hostAgentCommand: "claude", hostAgentArgs: [], agentCommand: "claude", agentArgs: [],
     },
@@ -512,7 +512,7 @@ test("provider-home leases fail closed for both WSL Direct isolation modes", (t)
     ...request(home),
     context: { kind: "wsl", distro: "Ubuntu" },
     isolation: {
-      backend: "container", command: "docker", args: [], image: "image@sha256:test",
+      backend: "container", runtime: "docker", command: "docker", args: [], image: "image@sha256:test",
       network: "deny", templateId: "test", runnerKey: "runner", containerName: "test",
       hostAgentCommand: "agent", hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
     },
