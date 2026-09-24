@@ -92,9 +92,11 @@ jobs:
         if: matrix.os == 'macos-latest'
         shell: bash
         run: |
-          set -euo pipefail
-          output=$(node --import tsx --test --test-reporter=tap apps/runner/src/macos-skill-adoption.test.ts apps/runner/src/skill-adoption-platform.test.ts < /dev/null)
+          set -uo pipefail
+          status=0
+          output=$(node --import tsx --test --test-reporter=tap apps/runner/src/macos-skill-adoption.test.ts apps/runner/src/skill-adoption-platform.test.ts < /dev/null) || status=$?
           printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
           if printf '%s' "$output" | grep -q '^# skipped 0$'; then exit 0; fi
           echo "the native macOS adoption tests must run rather than skip on this job" >&2
           exit 1
@@ -117,9 +119,11 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: bash
         run: |
-          set -euo pipefail
-          output=$(node --import tsx --test --test-reporter=tap apps/runner/src/windows-skill-adoption.test.ts apps/runner/src/skill-adoption-platform.test.ts < /dev/null)
+          set -uo pipefail
+          status=0
+          output=$(node --import tsx --test --test-reporter=tap apps/runner/src/windows-skill-adoption.test.ts apps/runner/src/skill-adoption-platform.test.ts < /dev/null) || status=$?
           printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
           if printf '%s' "$output" | grep -q '^# skipped 0$'; then exit 0; fi
           echo "the native Windows adoption tests must run rather than skip on this job" >&2
           exit 1

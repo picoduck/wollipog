@@ -59,7 +59,7 @@ public static class WollipogWindowsSkillAdoption {
     RegexOptions.CultureInvariant);
   static readonly Regex Hex64 = new Regex("^[0-9a-f]{64}$", RegexOptions.CultureInvariant);
   static readonly Regex IdentityPattern = new Regex("^[0-9]+:[0-9]+$", RegexOptions.CultureInvariant);
-  static readonly Regex RelativeDirectory = new Regex("^[A-Za-z0-9_-][A-Za-z0-9._-]*(/[A-Za-z0-9_-][A-Za-z0-9._-]*)*$",
+  static readonly Regex RelativePattern = new Regex("^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$",
     RegexOptions.CultureInvariant);
   static readonly Regex Account = new Regex("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$", RegexOptions.CultureInvariant);
   static readonly Regex NameField = new Regex("\"name\":\"([a-z0-9][a-z0-9._-]{0,63})\"", RegexOptions.CultureInvariant);
@@ -140,6 +140,13 @@ public static class WollipogWindowsSkillAdoption {
 
   static void Require(bool condition, string message) {
     if (!condition) throw new InvalidOperationException(message);
+  }
+
+  // A fixed harness-relative directory such as ".codex/skills": plain segments, never "." or "..".
+  static bool ValidRelative(string value) {
+    if (String.IsNullOrEmpty(value) || value.Length > 64 || !RelativePattern.IsMatch(value)) return false;
+    foreach (var part in value.Split('/')) if (part == "." || part == "..") return false;
+    return true;
   }
 
   static SafeFileHandle OpenRaw(string path, uint access, uint share, uint flags) {
@@ -421,7 +428,7 @@ public static class WollipogWindowsSkillAdoption {
 
   public static void Adopt(string home, string local, string sourceDirectory, string name, string generation,
       string digest, string dataDir, string operation, string account, string managedLink) {
-    Require(RelativeDirectory.IsMatch(local) && RelativeDirectory.IsMatch(sourceDirectory) &&
+    Require(ValidRelative(local) && ValidRelative(sourceDirectory) &&
       WollipogWindowsSkillSnapshots.SkillName.IsMatch(name) && Hex64.IsMatch(generation) && Hex64.IsMatch(digest) &&
       Uuid.IsMatch(operation) && (String.IsNullOrEmpty(account) || Account.IsMatch(account)) &&
       !String.IsNullOrEmpty(managedLink), "invalid adoption request");
@@ -501,7 +508,7 @@ public static class WollipogWindowsSkillAdoption {
   }
 
   public static Inspection Inspect(string home, string local, string homeLink, string storeLink, string only) {
-    Require(RelativeDirectory.IsMatch(local) && (String.IsNullOrEmpty(only) || Uuid.IsMatch(only)), "invalid inspection");
+    Require(ValidRelative(local) && (String.IsNullOrEmpty(only) || Uuid.IsMatch(only)), "invalid inspection");
     var result = new Inspection { ParentIdentity = "", Journals = new List<Journal>(), Truncated = false };
     SafeFileHandle homeHandle;
     try { homeHandle = WollipogWindowsSkillSnapshots.OpenHome(home); } catch { return result; }
@@ -575,7 +582,7 @@ public static class WollipogWindowsSkillAdoption {
 
   public static void Restore(string home, string local, string operation, string name, string digest,
       string parentExpected, string sourceExpected, string managedLink, string recoveryLink) {
-    Require(RelativeDirectory.IsMatch(local) && Uuid.IsMatch(operation) &&
+    Require(ValidRelative(local) && Uuid.IsMatch(operation) &&
       WollipogWindowsSkillSnapshots.SkillName.IsMatch(name) && Hex64.IsMatch(digest) &&
       IdentityPattern.IsMatch(parentExpected) && IdentityPattern.IsMatch(sourceExpected) &&
       !String.IsNullOrEmpty(managedLink) && !String.IsNullOrEmpty(recoveryLink), "invalid restore request");
