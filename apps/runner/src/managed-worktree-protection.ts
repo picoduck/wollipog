@@ -1522,6 +1522,9 @@ function tokenText(token: ShellToken): string | null {
  *   beneath it: `~/.wollipog-data/$X` still names an ancestor of the hook directory.
  * - The reading with every variable empty is judged in full, because an unset variable IS empty:
  *   `rm -rf $A/$B` can be `rm -rf /`.
+ * - The reading with every variable as one path component is judged in full, because a `..` after it
+ *   climbs back out: `$X/../../<data>/hooks/*` reaches the hook directory for any one-component `$X`.
+ *   The old tokenizer kept a variable in a glob as literal text, which read it exactly this way.
  * - Each literal piece after a variable is judged in full, as a location of its own, exactly as the
  *   split tokens were: `$X..`, `$X/home/<user>`, `$X/<hook directory>/file`, and a trailing `$X/`
  *   stay refused. The one exception is a piece of nothing but separators BETWEEN two variables. The
@@ -1530,14 +1533,19 @@ function tokenText(token: ShellToken): string | null {
  */
 type GuardStateReading = { path: string; insideOnly: boolean };
 
+/** A path component no real directory is named, standing in for an unknown variable. */
+const VARIABLE_COMPONENT = "␀wollipog-variable␀";
+
 function guardStateReadings(text: string): GuardStateReading[] {
   if (!text.includes("\0")) return [{ path: text, insideOnly: false }];
   const pieces = text.split(/\0[^\0]*\0/u);
   const readings: GuardStateReading[] = [];
   const head = pieces[0] ?? "";
   const unset = pieces.join("");
+  const component = pieces.join(VARIABLE_COMPONENT);
   if (head) readings.push({ path: head, insideOnly: false });
   if (unset && unset !== head) readings.push({ path: unset, insideOnly: false });
+  readings.push({ path: component, insideOnly: false });
   pieces.forEach((piece, index) => {
     if (index === 0 || !piece) return;
     const joinsVariables = index < pieces.length - 1 && /^[\\/]+$/u.test(piece);
@@ -1738,9 +1746,11 @@ export function commandTargetsGuardState(
     const assignment = text === null ? null : /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/su.exec(text);
     if (!assignment) continue;
     const [, name, value] = assignment as unknown as [string, string, string];
-    const values = assignedValues.get(name) ?? [];
-    if (values.length < MAX_ASSIGNED_VALUES && !values.includes(value)) values.push(value);
-    assignedValues.set(name, values);
+    // The most recent values are kept: a flood of harmless assignments cannot push out the one that
+    // is in effect when the word runs.
+    const values = (assignedValues.get(name) ?? []).filter((kept) => kept !== value);
+    values.push(value);
+    assignedValues.set(name, values.slice(-MAX_ASSIGNED_VALUES));
   }
   /** The word as written, then with assigned values substituted, bounded to a few combinations. */
   const spellings = (value: string): string[] => {

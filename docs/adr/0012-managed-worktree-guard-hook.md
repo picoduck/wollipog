@@ -734,6 +734,9 @@ What is done instead:
   - the static prefix before the first variable, judged in full;
   - the reading with every variable empty (an unset one is), judged in full, which keeps
     `rm -rf $A/$B` refused;
+  - the reading with every variable as one opaque path component, judged in full. A `..` after it
+    climbs back out, so `$X/../../<data>/hooks/*` stays refused. The old tokenizer read a variable
+    in a glob exactly this way;
   - each literal piece after a variable, judged in full as the split tokens were. A piece of nothing
     but separators BETWEEN two variables is the exception. It joins two components rather than naming
     a location, so it is judged only for landing inside.
@@ -742,8 +745,9 @@ What is done instead:
     and an assignment the shell never keeps (a prefix, a subshell, a background job) cannot hide
     anything.
 
-  Against the old tokenization, a fuzz of about 25,000 variable-bearing commands found three that
-  are now allowed. All three are the `$X/$Y` join itself.
+  A base-versus-head fuzz ran 41,000 variable-bearing commands, with globs, `..` climbs, and three
+  working directories. Every command it found that the old tokenization refused and the new one
+  allows contains the `$X/$Y` join itself.
 
   The refusal also says why it fired. When a command names the guard state itself, it gets the
   guard-state message. When the tokenizer rejects a command, the refusal names the tokenizer's

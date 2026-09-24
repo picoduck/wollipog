@@ -1223,6 +1223,15 @@ test("a variable the command itself assigns is judged by its value (#1632 review
   }
   // With `$Y` unknown, a trailing `$Y/` is still judged as the old split tokens judged it.
   assert.equal(commandTargetsGuardState(`rm -rf "${home}/foo/bar/$Y/"`, project, directory), GUARD_STATE_REFUSAL);
+  // Found in review: any one-component `$X` climbs back out with `..`, so the word reaches the hook
+  // directory whatever `$X` holds. The old tokenizer read a variable in a glob exactly this way.
+  mkdirSync(join(project, "subdir"));
+  for (const command of ["cat $X/../../.wollipog-data/hooks/*", "cat $X/../../.wollipog-data/hooks/s1.protections.json",
+    "rm -rf \"$X/../../.wollipog-data\"",
+    // A flood of harmless assignments cannot push out the value in effect when the word runs.
+    "X=1; X=2; X=3; X=4; X=5; X=../.wollipog-data/hooks; cat $X/s1.protections.json"]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
+  }
   // A prefix assignment binds the command's environment, not the words the shell already expanded.
   assert.equal(commandTargetsGuardState("S=/tmp/x cat $S/a/outdated.txt", project, directory), null);
   // An assigned scratch directory is still allowed, however its loop variable varies.
