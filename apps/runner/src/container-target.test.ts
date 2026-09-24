@@ -143,20 +143,19 @@ test("setup checks launch the runtime without inherited host values or credentia
   }
 });
 
-test("rootless Podman checks retain local storage and runtime paths without host credentials", {
+test("rootless local Podman checks retain storage and runtime paths without host credentials", {
   skip: process.platform !== "linux",
 }, async () => {
   const previousData = process.env.XDG_DATA_HOME;
   const previousRuntime = process.env.XDG_RUNTIME_DIR;
-  const previousHost = process.env.CONTAINER_HOST;
   process.env.XDG_DATA_HOME = "/tmp/wollipog-fixture-podman-data";
   process.env.XDG_RUNTIME_DIR = "/run/user/1000";
-  process.env.CONTAINER_HOST = "unix:///run/user/1000/podman/podman.sock";
   try {
     let checkEnv: Record<string, string> | undefined;
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
+        if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
         if (args[0] === "run" && args.includes("git")) {
           checkEnv = opts.env;
           assert.equal(existsSync(opts.env?.CONTAINERS_CONF ?? ""), true);
@@ -168,7 +167,7 @@ test("rootless Podman checks retain local storage and runtime paths without host
     assert.equal(registry.definitions()[0]!.available, true);
     assert.equal(checkEnv?.XDG_DATA_HOME, "/tmp/wollipog-fixture-podman-data");
     assert.equal(checkEnv?.XDG_RUNTIME_DIR, "/run/user/1000");
-    assert.equal(checkEnv?.CONTAINER_HOST, "unix:///run/user/1000/podman/podman.sock");
+    assert.equal(checkEnv?.CONTAINER_HOST, undefined);
     assert.equal(existsSync(checkEnv?.CONTAINERS_CONF ?? ""), false, "private config is removed after the check");
     assert.notEqual(checkEnv?.HOME, checkEnv?.XDG_CONFIG_HOME);
     assert.equal(checkEnv?.DOCKER_CONFIG, checkEnv?.XDG_CONFIG_HOME);
@@ -178,8 +177,118 @@ test("rootless Podman checks retain local storage and runtime paths without host
     else process.env.XDG_DATA_HOME = previousData;
     if (previousRuntime === undefined) delete process.env.XDG_RUNTIME_DIR;
     else process.env.XDG_RUNTIME_DIR = previousRuntime;
-    if (previousHost === undefined) delete process.env.CONTAINER_HOST;
-    else process.env.CONTAINER_HOST = previousHost;
+  }
+});
+
+test("Podman socket engines cannot claim a secret-free local mount boundary", {
+  skip: process.platform !== "linux",
+}, async () => {
+  process.env.CONTAINER_HOST = "unix:///run/user/1000/podman/podman.sock";
+  const calls: string[][] = [];
+  const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+    resolveRuntime: async () => runtime(),
+    run: async (_file, args) => { calls.push(args); return { code: 0, stdout: "", stderr: "" }; },
+  });
+  await registry.initialize();
+  assert.equal(registry.definitions()[0]!.available, false);
+  assert.match(registry.definitions()[0]!.unavailableReason ?? "", /default mounts/u);
+  assert.equal(calls.length, 0);
+});
+
+test("Podman rejects host binds configured in containers.conf", {
+  skip: process.platform !== "linux" || process.getuid?.() === 0,
+}, async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-podman-conf-mount-test-"));
+  mkdirSync(join(config, "containers"));
+  writeFileSync(join(config, "containers", "containers.conf"),
+    '[containers]\nvolumes = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
+  const previousConfigHome = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = config;
+  try {
+    let setupRan = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        if (args[0] === "run") setupRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.equal(setupRan, false);
+    assert.doesNotMatch(JSON.stringify(registry.definitions()), /synthetic-host-credentials/u);
+  } finally {
+    if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousConfigHome;
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Podman does not advertise or launch a secret-free target when host default mounts are configured", {
+  skip: process.platform !== "linux" || process.getuid?.() === 0,
+}, async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-podman-mounts-test-"));
+  const mounts = join(config, "containers", "mounts.conf");
+  mkdirSync(join(config, "containers"));
+  writeFileSync(mounts, "/synthetic-host-credentials:/run/secrets/host:ro\n");
+  const previousConfigHome = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = config;
+  try {
+    const calls: string[][] = [];
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        calls.push(args);
+        if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    const definition = registry.definitions()[0]!;
+    assert.equal(definition.available, false);
+    assert.match(definition.unavailableReason ?? "", /default mounts/u);
+    assert.equal(calls.some((args) => args[0] === "run"), false);
+    assert.doesNotMatch(JSON.stringify(definition), /synthetic-host-credentials/u);
+  } finally {
+    if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousConfigHome;
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Podman rejects a default mount added after registration before session launch", {
+  skip: process.platform !== "linux" || process.getuid?.() === 0,
+}, async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-podman-late-mount-test-"));
+  const mounts = join(config, "containers", "mounts.conf");
+  mkdirSync(join(config, "containers"));
+  writeFileSync(mounts, "# no implicit host mounts\n");
+  const previousConfigHome = process.env.XDG_CONFIG_HOME;
+  process.env.XDG_CONFIG_HOME = config;
+  try {
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => args[0] === "info"
+        ? { code: 0, stdout: "false\n", stderr: "" }
+        : { code: 0, stdout: "", stderr: "" },
+    });
+    await registry.initialize();
+    const definition = registry.definitions()[0]!;
+    assert.equal(definition.available, true);
+    const ref: ExecutionTargetRef = {
+      id: definition.id, runnerId: definition.runnerId, kind: definition.kind,
+      workspaceStrategy: definition.workspaceStrategy, adapter: definition.adapter,
+      boundaries: definition.boundaries, environment: definition.environment,
+    };
+    writeFileSync(mounts, "/synthetic-host-credentials:/run/secrets/host:ro\n");
+    assert.match(registry.validationError(ref, true, { kind: "native" }, "codex") ?? "", /default mounts/u);
+    assert.throws(() => registry.isolation(ref, "codex", "codex", [], "session-1"), /default mounts/u);
+    await registry.refreshInstallations();
+    assert.equal(registry.definitions()[0]!.available, false);
+  } finally {
+    if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
+    else process.env.XDG_CONFIG_HOME = previousConfigHome;
+    rmSync(config, { recursive: true, force: true });
   }
 });
 
@@ -687,7 +796,9 @@ test("canonical and legacy inventories start concurrently within one timeout env
   assert.equal(registry.definitions()[0]!.available, true);
 });
 
-test("Docker and Podman discover both generations and produce exact dual-label Wollipog identities", async () => {
+test("Docker and Podman discover both generations and produce exact dual-label Wollipog identities", {
+  skip: process.platform !== "linux",
+}, async () => {
   for (const runtimeName of ["docker", "podman"] as const) {
     const calls: Array<{ file: string; args: string[] }> = [];
     const runtimeTemplate = { ...template, runtime: runtimeName };
@@ -767,7 +878,9 @@ test("Docker and Podman discover both generations and produce exact dual-label W
   }
 });
 
-test("legacy-only container discovery emits one value-free warning across Docker and Podman", async () => {
+test("legacy-only container discovery emits one value-free warning across Docker and Podman", {
+  skip: process.platform !== "linux",
+}, async () => {
   const warnings: string[] = [];
   const registry = new ContainerTargetRegistry("runner-warning-secret", "host", [
     { ...template, id: "docker-tools", runtime: "docker" },

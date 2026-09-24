@@ -82,6 +82,11 @@ Rootless Podman keeps its home, local image/runtime directories, and storage con
 its existing image store remains usable. The runner verifies that the configured Podman client is local
 before isolating general Podman container config. Docker client config is isolated. Other
 host variables and credentials are not inherited by the setup-check client or container.
+Podman's independent `mounts.conf` files and `containers.conf` mount or volume defaults can add
+host binds without a Wollipog mount argument. A Podman target stays unavailable if local system or
+user defaults contain such entries or cannot be safely read. The runner checks again before each
+session launch and on Rediscover. Socket-backed Podman engines and Podman on non-Linux hosts remain
+unavailable because their engine's default mounts cannot be checked locally.
 Check output is never included in an unavailable reason. A runtime that needs a credential or a
 remote client configuration for these checks fails closed.
 
