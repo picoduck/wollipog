@@ -133,7 +133,7 @@ function AgentDetailsDialog({ a, os, online, onClose }: { a: AgentDefinition; os
         <h3>Launch Command</h3>
         {launch.batchWrapper ? (
           <>
-            <p>This Windows batch wrapper passes arguments through cmd.exe, which can change quotes or expand percent signs. A copyable launch command is unavailable; inspect the exact executable and arguments below.</p>
+            <p>This Windows launch is or may resolve to a batch wrapper. Such wrappers pass arguments through cmd.exe, which can change quotes or expand percent signs. A copyable launch command is unavailable; inspect the configured executable and arguments below.</p>
             <dl className="agent-details-grid">
               <div><dt>Executable</dt><dd><code>{a.command}</code></dd></div>
               <div><dt>Arguments</dt><dd><code>{JSON.stringify(a.args)}</code></dd></div>

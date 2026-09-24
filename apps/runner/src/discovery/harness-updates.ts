@@ -34,9 +34,10 @@ export function manualCodexUpdateCommand(
     command: words.map(posixWord).join(" "),
     shell: `a POSIX shell inside WSL: ${context.distro}`,
   };
-  // A batch wrapper adds cmd.exe and the wrapper's own parsing after PowerShell. Neither
-  // embedded quotes nor percent signs can be promised intact for an arbitrary wrapper.
-  if (platform === "win32" && /\.(?:cmd|bat)$/i.test(binary.launch.command)) return null;
+  // An extensionless Windows command may resolve through PATHEXT to a batch wrapper. Neither
+  // its target nor the wrapper's cmd.exe argument parsing can be reconstructed safely.
+  if (platform === "win32" && (/\.(?:cmd|bat)$/i.test(binary.launch.command) ||
+    !/(?:^|[\\/])[^\\/]+\.[^./\\]+$/.test(binary.launch.command))) return null;
   if (platform === "win32") return {
     command: `& ${words.map(powerShellWord).join(" ")}`,
     shell: "PowerShell 7.3 or later on this Machine",
@@ -68,7 +69,7 @@ function originalManagerGuidance(
 ): string {
   if (codexSelfUpdate && binary && context) {
     const manual = manualCodexUpdateCommand(binary, context);
-    if (!manual) return `This installation advertises its built-in \`codex update\` command, but its selected launch is a Windows batch wrapper. PowerShell passes batch arguments through cmd.exe, which can change quotes or expand percent signs. No copyable update command is available for this wrapper; use the package or version manager that installed this exact copy after stopping sessions using it. A bare \`codex\` on PATH may be another installation. Restart and Rediscover before treating the new version as ready.`;
+    if (!manual) return `This installation advertises its built-in \`codex update\` command, but its selected Windows launch is or may resolve to a batch wrapper. PowerShell passes batch arguments through cmd.exe, which can change quotes or expand percent signs. No copyable update command is available for this launch; use the package or version manager that installed this exact copy after stopping sessions using it. A bare \`codex\` on PATH may be another installation. Restart and Rediscover before treating the new version as ready.`;
     return `This installation advertises its built-in \`codex update\` command. Run \`${manual.command}\` in ${manual.shell} after stopping sessions using this executable. A bare \`codex\` on PATH may be another installation. Restart and Rediscover before treating the new version as ready.`;
   }
   if (packageName) return `This launch target is inside the ${packageName} package tree. Use the package or version manager that installed this exact copy in the same execution context. ${REDISCOVER}`;

@@ -372,7 +372,7 @@ declare global {
       lastAddBoxRequest(): AddBoxRequest | null;
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
         "multiple-installations" | "harness-states" | "harness-states-ssh" |
-        "target-installations" | "batch-wrapper"): void;
+        "target-installations" | "batch-wrapper" | "extensionless-batch-wrapper"): void;
       setRunnerStatus(status: RunnerView["status"]): void;
     };
   }
@@ -451,10 +451,11 @@ window.__WOLLIPOG_MACHINE_E2E__ = {
       ];
       runner.harnessSelections = [{ family: "codex", context: { kind: "native" },
         installationId: "system", path: "/usr/bin/codex", via: "path", version: "0.199.0", agentId: "codex" }];
-    } else if (scenario === "batch-wrapper") {
+    } else if (scenario === "batch-wrapper" || scenario === "extensionless-batch-wrapper") {
       runner.protocolVersion = PROTOCOL_VERSION;
       runner.agents = [{
-        id: "batch-codex", name: "Batch Codex", command: "C:\\Program Files\\Codex Tools\\codex.cmd",
+        id: "batch-codex", name: "Batch Codex", command: scenario === "batch-wrapper"
+          ? "C:\\Program Files\\Codex Tools\\codex.cmd" : "codex",
         args: ["--profile", 'Team "Research"', "%PATH%"], env: {}, driver: "codex-app-server",
         context: { kind: "native" }, source: "discovered", available: true,
         installation: { id: "batch", path: "C:\\Program Files\\Codex Tools\\codex.cmd", via: "path" },
