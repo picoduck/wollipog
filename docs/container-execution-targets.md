@@ -94,7 +94,8 @@ engines and Podman on non-Linux hosts remain unavailable because their engine's 
 be checked locally.
 Repository worktree setup cannot override Podman client config, connection, helper-binary, or storage
 environment variables; those values could otherwise change the engine, its default mounts, or host
-executables selected by the Podman client after the runner's check.
+executables selected by the Podman client after the runner's check. Internal `_CONTAINERS_`
+variables are reserved because they can change which per-UID Podman configuration is loaded.
 Check output is never included in an unavailable reason. A runtime that needs a credential or a
 remote client configuration for these checks fails closed.
 
