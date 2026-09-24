@@ -207,10 +207,12 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 182", () => {
-  assert.equal(PROTOCOL_VERSION, 182);
+test("PROTOCOL_VERSION is 183", () => {
+  assert.equal(PROTOCOL_VERSION, 183);
   assert.equal(runnerSupportsProtocol(181, "nativeWindowsMachineSkillAdoption"), false);
   assert.equal(runnerSupportsProtocol(182, "nativeWindowsMachineSkillAdoption"), true);
+  assert.equal(runnerSupportsProtocol(182, "skillDrift"), false);
+  assert.equal(runnerSupportsProtocol(183, "skillDrift"), true);
   assert.equal(runnerSupportsProtocol(180, "nativeMacosMachineSkillAdoption"), false);
   assert.equal(runnerSupportsProtocol(181, "nativeMacosMachineSkillAdoption"), true);
   assert.equal(runnerSupportsProtocol(179, "providerAuthenticationAccountRecovery"), false);

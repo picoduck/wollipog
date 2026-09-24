@@ -10,6 +10,7 @@ import type {
   SkillsSyncMessage,
 } from "@wollipog/protocol";
 import Fastify from "fastify";
+import { RUNNER_CAPABILITY_MIN_PROTOCOL } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub, RunnerRequestTimeoutError, type RunnerRequestResult, type Socket } from "./hub.js";
 import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
@@ -535,6 +536,11 @@ test("POST /api/runners/:id/skills/sync gates offline and capability, persists t
   assert.equal(compatibleEmpty.json().removalReporting, "supported");
   assert.equal(compatibleEmpty.json().reported, null,
     "support is visible even before the runner records its first removal event");
+  assert.equal(compatibleEmpty.json().driftReporting, "unsupported",
+    "an empty drift list from a pre-v183 runner is never presented as verified");
+  db.registerRunner(runnerMeta("runner-drift"), 30, RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift);
+  assert.equal((await app.inject({ method: "GET", url: "/api/runners/runner-drift/skills" })).json().driftReporting,
+    "supported");
 
   stubRequest(async () => { throw new RunnerRequestTimeoutError(); });
   const timedOut = await app.inject({ method: "POST", url: "/api/runners/runner-1/skills/sync" });

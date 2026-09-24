@@ -11,6 +11,7 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import type { RunnerSkillsResponse } from "../skills.js";
 import { SkillsView } from "./SkillsView.js";
+import { FeedbackContext } from "./FeedbackProvider.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -251,6 +252,137 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   assert.ok(dialog, "New Skill opens a dialog");
   assert.match(dialog!.textContent ?? "", /SKILL\.md/);
   assert.match((dialog!.querySelector("textarea") as HTMLTextAreaElement).value, /^---\nname: /);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("SkillsView shows Drift for an edited deployed copy and resolves it by import or confirmed restore", async () => {
+  const digest = "d".repeat(64);
+  const observedDigest = "e".repeat(64);
+  const drifted: RunnerSkillsResponse = {
+    removalReporting: "supported",
+    driftReporting: "supported",
+    desired: [{ name: "code-review", versionDigest: digest, targets: [{ agentId: "claude", invocation: "agent" }] }],
+    reported: {
+      deployed: [{ name: "code-review", digest, links: [{ agentId: "claude", status: "conflict", detail: "Held." }] }],
+      unmanaged: [],
+      drift: [{ name: "code-review", digest, variant: "agent", observedDigest, held: true,
+        detail: "Updates and removals for this skill are held until the edit is imported as a new version or the library version is restored." }],
+      updatedAt: 1_700_000_000_000,
+    },
+  };
+  let current = drifted;
+  const calls: string[] = [];
+  const confirmations: string[] = [];
+  const skillMd = "---\nname: code-review\n---\nReview.\n";
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [{ id: "skill-1", name: "code-review", latestVersion: { id: "v1", digest } }] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async () => ({ skill: { id: "skill-1", name: "code-review", latestVersion: { id: "v1", digest } },
+      latestVersion: { id: "v1", digest, files: [{ path: "SKILL.md", content: skillMd, encoding: "utf8" as const }] } }),
+    listSkillAssignments: async () => ({ assignments: [] }),
+    listSkillVersions: async () => ({ versions: [], nextCursor: null }),
+    getMachineSkillVersionPolicy: async () => ({ policy: null }),
+    runnerSkills: async () => current,
+    syncRunnerSkills: async () => current.reported!,
+    previewSkillDrift: async (runnerId: string, copy: { name: string; digest: string; variant: string }) => {
+      calls.push(`preview:${runnerId}:${copy.name}:${copy.variant}`);
+      return {
+        previewId: "review-1", drift: { ...copy, observedDigest },
+        files: [{ path: "SKILL.md", content: `${skillMd}Hand edit.\n`, encoding: "utf8" }],
+        previousFiles: [{ path: "SKILL.md", content: skillMd, encoding: "utf8" }],
+        digest: "f".repeat(64), importable: true, disposition: "update", publishedFromLatest: true,
+        pinned: false, assignmentCount: 1,
+      };
+    },
+    discardSkillDriftPreview: async () => { calls.push("discard"); },
+    importSkillDrift: async (previewId: string, acceptUpdate: boolean) => {
+      calls.push(`import:${previewId}:${acceptUpdate}`);
+      current = { ...drifted, reported: { ...drifted.reported!, drift: [] } };
+      return { released: false, pinMoved: false, state: current.reported };
+    },
+    restoreSkillDrift: async (runnerId: string, copy: { digest: string }, fence: string | null) => {
+      calls.push(`restore:${runnerId}:${copy.digest === digest}:${fence === observedDigest}`);
+      current = { ...drifted, reported: { ...drifted.reported!, drift: [] } };
+      return { status: "restored", state: current.reported };
+    },
+  } as unknown as ApiClient;
+  const feedback = {
+    confirm: async (options: { title: string; confirmLabel?: string }) => {
+      confirmations.push(`${options.title}|${options.confirmLabel}`);
+      return true;
+    },
+    showToast: () => -1,
+    showUndo: () => -1,
+    dismissToast: () => undefined,
+  };
+
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "skills-drift", runtimeKey: "skills-drift:1", createSocket: () => socket, close() {},
+  };
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <FeedbackContext.Provider value={feedback as never}>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <SkillsWhenReady />
+          </StoreProvider>
+        </FeedbackContext.Provider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+    });
+  });
+  await act(settle);
+  const item = container.querySelector<HTMLButtonElement>(".skills-item");
+  assert.match(item?.textContent ?? "", /Drift/, "the skill list marks a skill with an edited copy");
+  await act(async () => { item!.click(); });
+  await act(settle);
+  const machine = container.querySelector(".skills-machine");
+  assert.match(machine?.querySelector(".status-badge")?.textContent ?? "", /^Drift$/);
+  assert.match(machine?.textContent ?? "", /Edited Copies/);
+  assert.match(machine?.textContent ?? "", /Agent Invocable Copy/);
+  const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((candidate) => candidate.textContent?.trim() === label);
+
+  await act(async () => { button("Import Edit as New Version")!.click(); });
+  await act(settle);
+  const dialog = container.querySelector('[role="dialog"]');
+  assert.ok(dialog, "Import Edit as New Version opens a review dialog");
+  assert.match(dialog!.textContent ?? "", /Hand edit\./);
+  const importButton = [...dialog!.querySelectorAll<HTMLButtonElement>("button")]
+    .find((candidate) => candidate.textContent?.trim() === "Import Edit as New Version");
+  assert.equal(importButton!.disabled, true, "the version diff must be accepted first");
+  await act(async () => { dialog!.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(); });
+  assert.equal(importButton!.disabled, false);
+  await act(async () => { importButton!.click(); });
+  await act(settle);
+  assert.equal(container.querySelector('[role="dialog"]'), null);
+  assert.doesNotMatch(container.querySelector(".skills-machine")?.textContent ?? "", /Edited Copies/);
+
+  current = drifted;
+  await act(async () => { button("Sync Now")?.click(); });
+  await act(settle);
+  await act(async () => { button("Restore Library Version")!.click(); });
+  await act(settle);
+  assert.deepEqual(confirmations, ["Restore the library version of “code-review”?|Restore Library Version"]);
+  assert.deepEqual(calls, [
+    "preview:runner-1:code-review:agent",
+    "import:review-1:true",
+    "restore:runner-1:true:true",
+  ]);
+  assert.doesNotMatch(container.querySelector(".skills-machine")?.textContent ?? "", /Edited Copies/);
 
   await act(async () => root.unmount());
   container.remove();

@@ -575,6 +575,20 @@ export function createApiClient(transport: ApiTransport) {
   importMachineSkill: (id: string, previewId: string, acceptUpdate: boolean) => req<SkillDetailPayload>(`/api/skill-machine/${encodeURIComponent(id)}/import`, { method: "POST", body: JSON.stringify({ previewId, acceptUpdate }) }),
   discardMachineSkillDiscovery: (id: string) => req<void>(`/api/skill-machine/${encodeURIComponent(id)}`, { method: "DELETE" }),
 
+  previewSkillDrift: (runnerId: string, copy: import("./skills.js").SkillDriftCopy) =>
+    req<import("./skills.js").SkillDriftPreview>(`/api/runners/${encodeURIComponent(runnerId)}/skill-drift/preview`, {
+      method: "POST", body: JSON.stringify(copy),
+    }),
+  importSkillDrift: (previewId: string, acceptUpdate: boolean) =>
+    req<import("./skills.js").SkillDriftResolution>(`/api/skill-drift/${encodeURIComponent(previewId)}/import`, {
+      method: "POST", body: JSON.stringify({ acceptUpdate }),
+    }),
+  discardSkillDriftPreview: (previewId: string) => req<void>(`/api/skill-drift/${encodeURIComponent(previewId)}`, { method: "DELETE" }),
+  restoreSkillDrift: (runnerId: string, copy: import("./skills.js").SkillDriftCopy, observedDigest: string | null) =>
+    req<import("./skills.js").SkillDriftResolution>(`/api/runners/${encodeURIComponent(runnerId)}/skill-drift/restore`, {
+      method: "POST", body: JSON.stringify({ ...copy, observedDigest, confirmation: "explicit" }),
+    }),
+
   previewGitSkills: (source: import("./skills.js").SkillGitSource) =>
     req<import("./skills.js").SkillGitPreview>("/api/skill-git/preview", { method: "POST", body: JSON.stringify(source) }),
   discardGitSkillPreview: (id: string) => req<void>(`/api/skill-git/preview/${encodeURIComponent(id)}`, { method: "DELETE" }),

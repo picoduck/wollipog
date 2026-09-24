@@ -12,6 +12,11 @@ import {
   type SkillFile,
 } from "./index.js";
 import { skillVersionDigest } from "./skills-digest.js";
+import {
+  manualInvocationVariantFiles,
+  withManualInvocationFrontmatter,
+  withoutManualInvocationFrontmatter,
+} from "./skill-invocation.js";
 
 test("skill limits stay at their contract values", () => {
   assert.equal(SKILL_MAX_FILES, 64);
@@ -133,4 +138,34 @@ test("skill version digest sizes count decoded bytes, not source characters", ()
   };
   const expected = createHash("sha256").update(JSON.stringify(manifest)).digest("hex");
   assert.equal(skillVersionDigest([multibyte]), expected);
+});
+
+test("the Manual Only transform reverses only its exact injected line", () => {
+  for (const source of [
+    "---\nname: alpha\n---\n\nBody\n",
+    "Just a body\n",
+    "﻿---\r\nname: alpha\r\n---\r\nBody\r\n",
+    "---\nname: alpha\nunterminated\n",
+  ]) {
+    const manual = withManualInvocationFrontmatter(source);
+    const edited = `${manual}Edited on the machine.\n`;
+    const recovered = withoutManualInvocationFrontmatter(edited);
+    assert.equal(recovered, `${source}Edited on the machine.\n`);
+    assert.equal(withManualInvocationFrontmatter(recovered!), edited);
+  }
+  // A source key the transform replaced cannot be recovered; the result round-trips without it.
+  const replaced = withManualInvocationFrontmatter("---\nname: alpha\ndisable-model-invocation: false\n---\nBody\n");
+  assert.equal(withoutManualInvocationFrontmatter(replaced), "---\nname: alpha\n---\nBody\n");
+  // Editing the injected key itself is never silently folded into library content.
+  assert.equal(withoutManualInvocationFrontmatter("---\ndisable-model-invocation: false\nname: alpha\n---\n"), null);
+  assert.equal(withoutManualInvocationFrontmatter("---\nname: alpha\ndisable-model-invocation: true\n---\n"), null);
+
+  const files: SkillFile[] = [
+    { path: "SKILL.md", content: Buffer.from("---\nname: alpha\n---\n").toString("base64"), encoding: "base64" },
+    { path: "notes.md", content: "Notes\n", encoding: "utf8" },
+  ];
+  assert.deepEqual(manualInvocationVariantFiles(files), [
+    { path: "SKILL.md", content: "---\ndisable-model-invocation: true\nname: alpha\n---\n", encoding: "utf8" },
+    files[1],
+  ]);
 });

@@ -13081,6 +13081,11 @@ body.shell-dock-dragging * {
 .skills-unmanaged ul { margin: 4px 0; padding-left: 18px; display: grid; gap: 3px; }
 .skills-removals ul { margin: 4px 0; padding-left: 18px; display: grid; gap: 5px; }
 .skills-removals li { overflow-wrap: anywhere; }
+.skills-item-drift { margin-left: 8px; vertical-align: middle; }
+.skills-drift ul { margin: 4px 0; padding-left: 18px; display: grid; gap: 8px; }
+.skills-drift li { overflow-wrap: anywhere; }
+.skills-drift-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
+.skills-drift-actions .btn { white-space: normal; }
 .skills-hint { color: var(--text-dim); font-size: var(--text-sm); line-height: 1.5; margin: 0; }
 
 @media (max-width: 760px) {

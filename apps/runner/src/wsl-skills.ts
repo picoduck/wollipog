@@ -2,17 +2,19 @@ import { realpathSync } from "node:fs";
 import type {
   AgentDefinition,
   DeployedSkillState,
+  SkillDriftState,
   SkillLinkRemoval,
   UnmanagedSkillInfo,
 } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
-import { SKILL_DIRS, skillsStoreRoot, type ReconcileSkillEntry, type ReconcileSkillsResult } from "./skills.js";
+import { holdSkillDrift, SKILL_DIRS, skillsStoreRoot, type ReconcileSkillEntry, type ReconcileSkillsResult } from "./skills.js";
 import { validWslDistroName } from "./wsl-context.js";
 import { WSL_SKILLS_HELPER } from "./wsl-skills-helper.js";
 
 const OWNER = /^[0-9a-f]{64}$/u;
 const NAME = /^[a-z0-9][a-z0-9._-]{0,63}$/u;
 const DIGEST = /^[0-9a-f]{64}$/u;
+const DRIFTED_VERSION = /^[a-z0-9][a-z0-9._-]{0,63}\/[0-9a-f]{64}(?:-manual)?$/u;
 const VALID_STATUS = new Set(["linked", "conflict", "unsupported", "error"]);
 const BOOTSTRAP = String.raw`
 import os,stat,sys,uuid
@@ -50,13 +52,27 @@ interface HelperOutput {
   removedLinks?: unknown;
   error?: unknown;
   warnings?: unknown;
+  held?: unknown;
+  lateDrift?: unknown;
 }
+
+/** One or more distro passes, plus the names a distro held because its own links serve an edited
+ * native store copy. */
+export type WslReconcileResult = ReconcileSkillsResult & { heldSkillNames: string[]; lateDrift: SkillDriftState[] };
 
 export interface ReconcileWslSkillsOptions {
   dataDir: string;
   ownerHash: string;
   agents: AgentDefinition[];
   desired: ReconcileSkillEntry[];
+  /** Names the native pass holds on an edited store copy. Their WSL links are left untouched. */
+  heldSkillNames?: ReadonlySet<string>;
+  /** Every edited native store copy as `<name>/<store directory>`. The helper also holds any name
+   * whose own WSL links still serve one, which the native pass cannot observe. */
+  driftedVersions?: readonly string[];
+  /** Scan-time digests of unedited native copies (`<name>/<version>`). The helper re-hashes a served
+   * copy before moving or removing its link and holds the skill if it changed since. */
+  movableCopies?: Readonly<Record<string, string>>;
   allowRemovals?: boolean;
   log?: (message: string) => void;
   run?: Run;
@@ -94,12 +110,31 @@ async function translatedStoreRoot(dataDir: string, distro: string, run: Run): P
   return path;
 }
 
-function parseOutput(value: HelperOutput, knownAgents: ReadonlySet<string>, log?: (message: string) => void): ReconcileSkillsResult {
+function parseOutput(value: HelperOutput, knownAgents: ReadonlySet<string>, log?: (message: string) => void): WslReconcileResult {
   if (typeof value.error === "string") throw new Error(clean(value.error));
   if (!Array.isArray(value.deployed) || !Array.isArray(value.unmanaged) || !Array.isArray(value.removedLinks) ||
       value.deployed.length > 4096 || value.unmanaged.length > 4096 || value.removedLinks.length > 4096) throw new Error();
   if (value.warnings !== undefined && (!Array.isArray(value.warnings) || value.warnings.length > 16 ||
       value.warnings.some((warning) => typeof warning !== "string"))) throw new Error();
+  if (value.held !== undefined && (!Array.isArray(value.held) || value.held.length > 4096 ||
+      value.held.some((name) => typeof name !== "string" || !NAME.test(name)))) throw new Error();
+  if (value.lateDrift !== undefined && (!Array.isArray(value.lateDrift) || value.lateDrift.length > 4096)) throw new Error();
+  const lateDrift: SkillDriftState[] = ((value.lateDrift ?? []) as unknown[]).map((item) => {
+    const row = item as { name?: unknown; version?: unknown; observedDigest?: unknown };
+    if (!row || typeof row.name !== "string" || typeof row.version !== "string" ||
+        !DRIFTED_VERSION.test(`${row.name}/${row.version}`) ||
+        (row.observedDigest !== undefined && (typeof row.observedDigest !== "string" || !DIGEST.test(row.observedDigest)))) {
+      throw new Error();
+    }
+    return {
+      name: row.name,
+      digest: row.version.slice(0, 64),
+      variant: row.version.endsWith("-manual") ? "manual" as const : "agent" as const,
+      ...(typeof row.observedDigest === "string" ? { observedDigest: row.observedDigest } : {}),
+      held: true,
+      detail: "A copy served inside WSL was edited during reconciliation. Updates and removals for this skill are held until the edit is imported as a new version or the library version is restored.",
+    };
+  });
   for (const warning of value.warnings ?? []) {
     const message = clean(warning);
     if (message) log?.(`WSL skill helper: ${message}`);
@@ -126,11 +161,11 @@ function parseOutput(value: HelperOutput, knownAgents: ReadonlySet<string>, log?
     if (!row || typeof row.path !== "string" || typeof row.reason !== "string") throw new Error();
     return { path: clean(row.path), reason: clean(row.reason) };
   });
-  return { deployed, unmanaged, removedLinks };
+  return { deployed, unmanaged, removedLinks, heldSkillNames: (value.held as string[] | undefined) ?? [], lateDrift };
 }
 
 function failedForDistro(distro: string, desired: ReconcileSkillEntry[], agentIds: ReadonlySet<string>,
-  detail: string): ReconcileSkillsResult {
+  detail: string): WslReconcileResult {
   return {
     deployed: desired.flatMap((entry) => {
       const targets = Array.isArray(entry.targets)
@@ -140,11 +175,11 @@ function failedForDistro(distro: string, desired: ReconcileSkillEntry[], agentId
         links: targets.map((target) => ({ agentId: target.agentId, status: "error" as const,
           detail: `Skill deployment is unavailable inside WSL distro ${distro}.` })), error: detail }] : [];
     }),
-    unmanaged: [], removedLinks: [], error: detail,
+    unmanaged: [], removedLinks: [], error: detail, heldSkillNames: [], lateDrift: [],
   };
 }
 
-function mergeResults(results: ReconcileSkillsResult[]): ReconcileSkillsResult {
+function mergeResults(results: WslReconcileResult[]): WslReconcileResult {
   const deployed = new Map<string, DeployedSkillState>();
   for (const result of results) for (const row of result.deployed) {
     const prior = deployed.get(row.name);
@@ -157,17 +192,19 @@ function mergeResults(results: ReconcileSkillsResult[]): ReconcileSkillsResult {
   const errors = results.flatMap((result) => result.error ? [result.error] : []);
   return { deployed: [...deployed.values()], unmanaged: results.flatMap((result) => result.unmanaged),
     removedLinks: results.flatMap((result) => result.removedLinks),
+    heldSkillNames: [...new Set(results.flatMap((result) => result.heldSkillNames))],
+    lateDrift: results.flatMap((result) => result.lateDrift),
     ...(errors.length ? { error: errors.join(" ") } : {}) };
 }
 
 /** Reconcile every advertised WSL distro serially. One helper process owns each complete link pass,
  * so no host-side path API ever mutates Linux symlinks. */
-export async function reconcileWslSkills(options: ReconcileWslSkillsOptions): Promise<ReconcileSkillsResult> {
+export async function reconcileWslSkills(options: ReconcileWslSkillsOptions): Promise<WslReconcileResult> {
   if (!OWNER.test(options.ownerHash)) throw new Error("WSL skills require an attested owner hash");
   const run = options.run ?? runContextCommand;
   const distros = [...new Set(options.agents.flatMap((agent) =>
     agent.context?.kind === "wsl" && validWslDistroName(agent.context.distro) ? [agent.context.distro] : []))];
-  const results: ReconcileSkillsResult[] = [];
+  const results: WslReconcileResult[] = [];
   for (const distro of distros) {
     const bindings = wslBindings(options.agents, distro);
     if (!bindings.length) continue;
@@ -183,26 +220,36 @@ export async function reconcileWslSkills(options: ReconcileWslSkillsOptions): Pr
         options.storeRoot ? options.storeRoot(distro) : translatedStoreRoot(options.dataDir, distro, run),
       ]);
       const rejected: DeployedSkillState[] = [];
-      const skills = options.desired.flatMap((entry) => {
-        const targets = Array.isArray(entry.targets)
-          ? entry.targets.filter((target) => target && typeof target.agentId === "string" && agentIds.has(target.agentId))
-          : [];
-        if (!targets.length) return [];
-        if (!NAME.test(String(entry.name)) || !DIGEST.test(String(entry.versionDigest))) {
-          rejected.push({ name: String(entry.name), digest: String(entry.versionDigest), links: [],
-            error: "invalid WSL skill manifest" });
-          return [];
-        }
-        return [{ name: entry.name, versionDigest: entry.versionDigest, targets }];
-      });
+      const held = options.heldSkillNames ?? new Set<string>();
+      const skills: Array<{ name: string; versionDigest?: string; targets: ReconcileSkillEntry["targets"]; held?: true }> =
+        options.desired.flatMap((entry) => {
+          const targets = Array.isArray(entry.targets)
+            ? entry.targets.filter((target) => target && typeof target.agentId === "string" && agentIds.has(target.agentId))
+            : [];
+          if (!targets.length && !held.has(entry.name)) return [];
+          if (!NAME.test(String(entry.name)) || !DIGEST.test(String(entry.versionDigest))) {
+            rejected.push({ name: String(entry.name), digest: String(entry.versionDigest), links: [],
+              error: "invalid WSL skill manifest" });
+            return [];
+          }
+          return [{ name: entry.name, versionDigest: entry.versionDigest, targets,
+            ...(held.has(entry.name) ? { held: true as const } : {}) }];
+        });
+      // A held name that is no longer desired keeps its WSL links too.
+      for (const name of held) {
+        if (NAME.test(name) && !skills.some((skill) => skill.name === name)) skills.push({ name, targets: [], held: true });
+      }
       const response = await run({ kind: "wsl", distro }, "python3", [helper], {
         cwd: "/", timeoutMs: 60_000, maxBuffer: 4 * 1024 * 1024,
         stdin: JSON.stringify({ ownerHash: options.ownerHash, distro, storeRoot, bindings, skills,
+          drifted: (options.driftedVersions ?? []).filter((version) => DRIFTED_VERSION.test(version)),
+          ...(options.movableCopies ? { movable: Object.fromEntries(Object.entries(options.movableCopies)
+            .filter(([version, copyDigest]) => DRIFTED_VERSION.test(version) && DIGEST.test(copyDigest))) } : {}),
           allowRemovals: options.allowRemovals === true }),
       });
       const parsed = parseOutput(JSON.parse(response.stdout) as HelperOutput, agentIds, options.log);
       results.push(rejected.length
-        ? mergeResults([parsed, { deployed: rejected, unmanaged: [], removedLinks: [] }])
+        ? mergeResults([parsed, { deployed: rejected, unmanaged: [], removedLinks: [], heldSkillNames: [], lateDrift: [] }])
         : parsed);
     } catch (error) {
       const detail = `WSL skill reconciliation failed in ${distro}.`;
@@ -216,7 +263,7 @@ export async function reconcileWslSkills(options: ReconcileWslSkillsOptions): Pr
 /** Replace native placeholder states for WSL agents with authoritative in-distro results. */
 export function mergeWslSkillsResult(
   native: ReconcileSkillsResult,
-  wsl: ReconcileSkillsResult,
+  wsl: ReconcileSkillsResult & { heldSkillNames?: readonly string[]; lateDrift?: readonly SkillDriftState[] },
   agents: AgentDefinition[],
 ): ReconcileSkillsResult {
   const wslAgents = new Set(agents.flatMap((agent) => {
@@ -247,5 +294,12 @@ export function mergeWslSkillsResult(
     unmanaged: [...native.unmanaged, ...wsl.unmanaged],
     removedLinks: [...native.removedLinks, ...wsl.removedLinks],
     ...(errors.length ? { error: errors.join(" ") } : {}),
+    // WSL links resolve into the same native store, whose copies the native pass verified; a distro
+    // whose own links still serve an edited copy holds that skill as well.
+    ...(native.drift || wsl.lateDrift?.length ? { drift: [
+      ...holdSkillDrift(native.drift ?? [], new Set(wsl.heldSkillNames ?? [])),
+      ...(wsl.lateDrift ?? []).filter((late) => !native.drift?.some((entry) => entry.name === late.name &&
+        entry.digest === late.digest && entry.variant === late.variant)),
+    ] } : {}),
   };
 }

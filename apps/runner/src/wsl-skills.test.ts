@@ -36,6 +36,72 @@ test("WSL reconciliation sends only distro-local targets through the fixed helpe
   assert.deepEqual(result.deployed[0]?.links, [{ agentId: "codex-wsl-Ubuntu", status: "linked" }]);
 });
 
+test("held skills reach the WSL helper even when no distro target remains", async () => {
+  let skills: unknown;
+  await reconcileWslSkills({
+    dataDir: "C:\\data", ownerHash, agents,
+    desired: [{ name: "review", versionDigest: digest, targets: [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }] }],
+    heldSkillNames: new Set(["review", "retired"]),
+    allowRemovals: true,
+    storeRoot: async () => "/mnt/c/data/skills/store",
+    run: async (_context, _command, args, options) => {
+      if (args[0] === "-c") return { stdout: `/home/me/.agent-manager/runner-instances/${ownerHash}/native/wollipog-skills.py\n`, stderr: "" };
+      skills = JSON.parse(options.stdin!).skills;
+      return { stdout: JSON.stringify({ deployed: [], unmanaged: [], removedLinks: [] }), stderr: "" };
+    },
+  });
+  assert.deepEqual(skills, [
+    { name: "review", versionDigest: digest, targets: [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }], held: true },
+    { name: "retired", targets: [], held: true },
+  ]);
+});
+
+test("a distro that serves an edited copy marks the native drift report held", async () => {
+  let drifted: unknown;
+  const wsl = await reconcileWslSkills({
+    dataDir: "C:\\data", ownerHash, agents,
+    desired: [{ name: "review", versionDigest: digest, targets: [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }] }],
+    driftedVersions: [`review/${"c".repeat(64)}`, "../bad/version"],
+    allowRemovals: true,
+    storeRoot: async () => "/mnt/c/data/skills/store",
+    run: async (_context, _command, args, options) => {
+      if (args[0] === "-c") return { stdout: `/home/me/.agent-manager/runner-instances/${ownerHash}/native/wollipog-skills.py\n`, stderr: "" };
+      drifted = JSON.parse(options.stdin!).drifted;
+      return { stdout: JSON.stringify({ deployed: [], unmanaged: [], removedLinks: [], held: ["review"] }), stderr: "" };
+    },
+  });
+  assert.deepEqual(drifted, [`review/${"c".repeat(64)}`], "only well-formed store versions reach the helper");
+  assert.deepEqual(wsl.heldSkillNames, ["review"]);
+  const merged = mergeWslSkillsResult({ deployed: [], unmanaged: [], removedLinks: [], drift: [{
+    name: "review", digest: "c".repeat(64), variant: "agent", observedDigest: "d".repeat(64), held: false,
+    detail: "This edited copy is no longer deployed. It is retained until the edit is imported as a new version or the library version is restored.",
+  }] }, wsl, agents);
+  assert.equal(merged.drift?.[0]?.held, true);
+  assert.match(merged.drift?.[0]?.detail ?? "", /^Updates and removals for this skill are held/);
+});
+
+test("scan-time copy digests reach the helper and its late drift joins the report", async () => {
+  let movable: unknown;
+  const late = "d".repeat(64);
+  const wsl = await reconcileWslSkills({
+    dataDir: "C:\\data", ownerHash, agents,
+    desired: [{ name: "review", versionDigest: digest, targets: [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }] }],
+    movableCopies: { [`review/${late}`]: "e".repeat(64), "bad/key": "e".repeat(64) },
+    allowRemovals: true,
+    storeRoot: async () => "/mnt/c/data/skills/store",
+    run: async (_context, _command, args, options) => {
+      if (args[0] === "-c") return { stdout: `/home/me/.agent-manager/runner-instances/${ownerHash}/native/wollipog-skills.py\n`, stderr: "" };
+      movable = JSON.parse(options.stdin!).movable;
+      return { stdout: JSON.stringify({ deployed: [], unmanaged: [], removedLinks: [], held: ["review"],
+        lateDrift: [{ name: "review", version: `${late}-manual`, observedDigest: "f".repeat(64) }] }), stderr: "" };
+    },
+  });
+  assert.deepEqual(movable, { [`review/${late}`]: "e".repeat(64) });
+  const merged = mergeWslSkillsResult({ deployed: [], unmanaged: [], removedLinks: [], drift: [] }, wsl, agents);
+  assert.deepEqual(merged.drift?.map((entry) => [entry.name, entry.digest, entry.variant, entry.held, entry.observedDigest]),
+    [["review", late, "manual", true, "f".repeat(64)]]);
+});
+
 test("WSL helper failures are sanitized into per-target error state", async () => {
   const logs: string[] = [];
   const result = await reconcileWslSkills({
@@ -89,7 +155,7 @@ test("bounded helper diagnostics are sanitized into runner logs", async () => {
           warnings: [`journal\n${"x".repeat(600)}`] }), stderr: "" },
     log: (message) => logs.push(message),
   });
-  assert.deepEqual(result, { deployed: [], unmanaged: [], removedLinks: [] });
+  assert.deepEqual(result, { deployed: [], unmanaged: [], removedLinks: [], heldSkillNames: [], lateDrift: [] });
   assert.equal(logs.length, 1);
   assert.match(logs[0]!, /^WSL skill helper: journal x+$/u);
   assert.ok(logs[0]!.length <= 518);
@@ -165,7 +231,7 @@ test("non-authoritative untargeted passes do not boot a WSL distro", async () =>
     run: async () => { calls += 1; throw new Error("should not run"); },
   });
   assert.equal(calls, 0);
-  assert.deepEqual(result, { deployed: [], unmanaged: [], removedLinks: [] });
+  assert.deepEqual(result, { deployed: [], unmanaged: [], removedLinks: [], heldSkillNames: [], lateDrift: [] });
 });
 
 test("an invalid WSL skill row does not collapse valid distro results", async () => {

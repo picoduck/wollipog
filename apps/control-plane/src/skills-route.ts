@@ -10,6 +10,7 @@ import { SkillImportConflictError } from "./db.js";
 import { registerSkillVersionPolicyRoutes } from "./skill-version-policy-route.js";
 import { registerSkillGitRoutes } from "./skill-git-route.js";
 import { registerMachineSkillRoutes } from "./skill-machine-route.js";
+import { registerSkillDriftRoutes } from "./skill-drift-route.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   SKILL_MAX_TOTAL_BYTES,
@@ -322,6 +323,7 @@ function parseNote(value: unknown): string | null | undefined {
 export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps): void {
   registerSkillGitRoutes(app, deps);
   registerMachineSkillRoutes(app, deps);
+  registerSkillDriftRoutes(app, deps);
   registerSkillVersionPolicyRoutes(app, deps);
   const { db, hub, pushSkillsSync } = deps;
 
@@ -737,6 +739,8 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
         runner.protocolVersion,
         "skillLinkRemovalReporting",
       ) ? "supported" : "unsupported",
+      // An older runner never reports drift, so an empty list from it proves nothing.
+      driftReporting: runnerSupportsProtocol(runner.protocolVersion, "skillDrift") ? "supported" : "unsupported",
     };
   });
 

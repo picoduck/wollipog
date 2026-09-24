@@ -7,6 +7,7 @@ import {
   groupSkillList,
   invocationLabel,
   normalizeRemovalReporting,
+  reportedSkillDrift,
   reportedSkillLinkRemovals,
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
@@ -130,6 +131,17 @@ test("deploy badges rank offline, conflict, error, digest and link gaps, then de
   const conflictBadge = skillDeployBadge({ runnerOnline: true, desired, reported: conflicted, skillName: "code-review" });
   assert.equal(conflictBadge.status, "conflict");
   assert.equal(conflictBadge.detail, "A real directory is in the way.");
+
+  const drift = [{ name: "code-review", digest: "a".repeat(64), variant: "agent" as const, held: true }];
+  const driftBadge = skillDeployBadge({ runnerOnline: true, desired, reported: { ...conflicted, drift }, skillName: "code-review" });
+  assert.equal(driftBadge.status, "drift", "an edited copy outranks the held links it causes");
+  assert.equal(driftBadge.label, "Drift");
+  assert.match(driftBadge.detail ?? "", /held until you import the edit or restore the library version/);
+  assert.equal(skillDeployBadge({ runnerOnline: true, desired: undefined, skillName: "code-review",
+    reported: { drift: [{ ...drift[0]!, held: false }] } }).status, "drift", "a retained edit is shown without an assignment");
+  assert.equal(skillDeployBadge({ runnerOnline: false, desired, reported: { drift }, skillName: "code-review" }).status, "offline");
+  assert.equal(skillDeployBadge({ runnerOnline: true, desired, reported: { ...linked, drift }, skillName: "other" }).status, "pending");
+  assert.deepEqual(reportedSkillDrift({ drift: [...drift, { name: "code-review", variant: "bogus" } as never] }, "code-review"), drift);
 
   const accountConflict = skillDeployBadge({
     runnerOnline: true,

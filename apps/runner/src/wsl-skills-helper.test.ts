@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
+import type { SkillFile } from "@wollipog/protocol";
+import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { ProviderHomeLeaseRegistry } from "./provider-home-lease.js";
 import { WSL_SKILLS_HELPER } from "./wsl-skills-helper.js";
 
@@ -105,6 +107,122 @@ test("the fixed WSL helper atomically deploys, switches, and removes owned links
     "~/.agents/skills/review (WSL Ubuntu)",
     "~/.codex/skills/review (WSL Ubuntu)",
   ]);
+});
+
+test("the fixed WSL helper leaves a held skill's links in place while it is updated or removed", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-held-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  for (const digest of [firstDigest, secondDigest]) {
+    const version = join(store, "review", digest);
+    mkdirSync(version, { recursive: true });
+    writeFileSync(join(version, "SKILL.md"), `---\nname: review\n---\n${digest}\n`);
+  }
+  const bindings = [{ agentId: "codex-wsl-Ubuntu", driver: "codex", relDir: ".codex/skills" }];
+  const targets = [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }];
+  const spec = (skills: unknown[]) => ({ ownerHash: owner, distro: "Ubuntu", storeRoot: resolve(store), bindings, skills, allowRemovals: true });
+  const deployed = await invoke(home, spec([{ name: "review", versionDigest: firstDigest, targets }]));
+  assert.equal(deployed.status, 0, deployed.stderr || deployed.stdout);
+
+  const updated = await invoke(home, spec([{ name: "review", versionDigest: secondDigest, targets, held: true }]));
+  assert.equal(updated.status, 0, updated.stderr || updated.stdout);
+  const output = JSON.parse(updated.stdout);
+  assert.equal(output.deployed[0].links[0].status, "conflict");
+  assert.match(output.deployed[0].links[0].detail, /edited on this machine/);
+  assert.equal(readlinkSync(join(home, ".agents/skills/review")), resolve(store, "review", firstDigest));
+
+  const removed = await invoke(home, spec([{ name: "review", targets: [], held: true }]));
+  assert.equal(removed.status, 0, removed.stderr || removed.stdout);
+  assert.deepEqual(JSON.parse(removed.stdout).removedLinks, []);
+  assert.equal(readlinkSync(join(home, ".codex/skills/review")), resolve(home, ".agents/skills/review"));
+});
+
+test("the fixed WSL helper holds a skill whose own links serve an edited native store copy", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-drift-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  for (const digest of [firstDigest, secondDigest]) {
+    const version = join(store, "review", digest);
+    mkdirSync(version, { recursive: true });
+    writeFileSync(join(version, "SKILL.md"), `---\nname: review\n---\n${digest}\n`);
+  }
+  const bindings = [{ agentId: "codex-wsl-Ubuntu", driver: "codex", relDir: ".codex/skills" }];
+  const targets = [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }];
+  const spec = (digest: string, drifted: string[], skills?: unknown[]) => ({ ownerHash: owner, distro: "Ubuntu",
+    storeRoot: resolve(store), bindings, skills: skills ?? [{ name: "review", versionDigest: digest, targets }], drifted,
+    allowRemovals: true });
+  const deployed = await invoke(home, spec(firstDigest, []));
+  assert.equal(deployed.status, 0, deployed.stderr || deployed.stdout);
+  assert.deepEqual(JSON.parse(deployed.stdout).held, []);
+
+  // An unrelated edited copy holds nothing; the one this distro's link serves holds the skill.
+  const unrelated = await invoke(home, spec(secondDigest, [`review/${secondDigest}-manual`]));
+  assert.equal(unrelated.status, 0, unrelated.stderr || unrelated.stdout);
+  assert.equal(readlinkSync(join(home, ".agents/skills/review")), resolve(store, "review", secondDigest));
+  // A lost ownership record must not let a link that serves an edited copy be repointed.
+  rmSync(join(home, ".agent-manager", "runner-instances", owner, "skills", "links.json"));
+  const held = await invoke(home, spec(firstDigest, [`review/${secondDigest}`]));
+  assert.equal(held.status, 0, held.stderr || held.stdout);
+  const output = JSON.parse(held.stdout);
+  assert.deepEqual(output.held, ["review"]);
+  assert.equal(output.deployed[0].links[0].status, "conflict");
+  assert.equal(readlinkSync(join(home, ".agents/skills/review")), resolve(store, "review", secondDigest),
+    "the edited copy stays served instead of being repointed to the desired version");
+  const removed = await invoke(home, spec(firstDigest, [`review/${secondDigest}`], []));
+  assert.equal(removed.status, 0, removed.stderr || removed.stdout);
+  assert.deepEqual(JSON.parse(removed.stdout).removedLinks, []);
+
+  const invalid = await invoke(home, spec(firstDigest, ["../escape/" + firstDigest]));
+  assert.notEqual(invalid.status, 0);
+  assert.match(invalid.stdout, /invalid WSL drift list/);
+});
+
+test("the fixed WSL helper re-hashes a served copy and holds it when edited after the native scan", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-wsl-skills-late-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const home = join(root, "home");
+  const store = join(root, "store");
+  mkdirSync(home, { mode: 0o700 });
+  const filesFor = (digest: string): SkillFile[] => [
+    { path: "SKILL.md", content: `---\nname: review\n---\n${digest}\n`, encoding: "utf8" },
+    { path: "reference/ñotes.md", content: "Accented path.\n", encoding: "utf8" },
+    { path: "Z.md", content: "Upper case sorts first.\n", encoding: "utf8" },
+    { path: "reference/__pycache__/helper.pyc", content: "ignored", encoding: "utf8" },
+  ];
+  for (const digest of [firstDigest, secondDigest]) {
+    for (const file of filesFor(digest)) {
+      mkdirSync(dirname(join(store, "review", digest, file.path)), { recursive: true });
+      writeFileSync(join(store, "review", digest, file.path), file.content);
+    }
+  }
+  const scanDigest = (digest: string) => skillVersionDigest(filesFor(digest).filter((file) => !file.path.includes("__pycache__")));
+  const bindings = [{ agentId: "codex-wsl-Ubuntu", driver: "codex", relDir: ".codex/skills" }];
+  const targets = [{ agentId: "codex-wsl-Ubuntu", invocation: "agent" }];
+  const spec = (digest: string, movable: Record<string, string>) => ({ ownerHash: owner, distro: "Ubuntu",
+    storeRoot: resolve(store), bindings, skills: [{ name: "review", versionDigest: digest, targets }], drifted: [], movable,
+    allowRemovals: true });
+  assert.equal((await invoke(home, spec(firstDigest, {}))).status, 0);
+
+  // An unedited copy with its scan-time digest moves normally: the helper's digest matches the runner's.
+  const moved = await invoke(home, spec(secondDigest, { [`review/${firstDigest}`]: scanDigest(firstDigest) }));
+  assert.equal(moved.status, 0, moved.stderr || moved.stdout);
+  assert.deepEqual(JSON.parse(moved.stdout).lateDrift, []);
+  assert.equal(readlinkSync(join(home, ".agents/skills/review")), resolve(store, "review", secondDigest));
+
+  // The copy the link now serves is edited after the native scan recorded its digest.
+  writeFileSync(join(store, "review", secondDigest, "SKILL.md"), "edited after the scan\n");
+  const held = await invoke(home, spec(firstDigest, { [`review/${secondDigest}`]: scanDigest(secondDigest) }));
+  assert.equal(held.status, 0, held.stderr || held.stdout);
+  const output = JSON.parse(held.stdout);
+  assert.deepEqual(output.held, ["review"]);
+  assert.equal(output.lateDrift[0].version, secondDigest);
+  assert.match(output.lateDrift[0].observedDigest, /^[0-9a-f]{64}$/);
+  assert.equal(output.deployed[0].links[0].status, "conflict");
+  assert.equal(readlinkSync(join(home, ".agents/skills/review")), resolve(store, "review", secondDigest));
 });
 
 test("the WSL helper releases its lease for a distinct native distro runner", async (t) => {
