@@ -110,6 +110,13 @@ value. The image operator must keep proxy values free of credentials to maintain
 secret-free claim. Repository setup reserves HTTP, HTTPS, ALL, and NO proxy variable names, so
 configure an intentional container proxy in the reviewed image rather than in the operator's Docker
 CLI config. FTP proxy names remain trust-gated setup variables.
+If the private Docker CLI config cannot be recreated, the affected target stays unavailable and
+its installation list is cleared. After the config location becomes writable again, Rediscover
+retries only that target. A failure before startup readiness repeats its image and setup checks,
+but does not rerun startup orphan cleanup while the runner may have live containers;
+a failure during installation discovery retries those probes against the previously checked
+endpoint. Every Docker probe still verifies the engine immediately before launching. Other
+unavailable reasons retain the runner-restart recovery path.
 Podman's independent `mounts.conf` files and `containers.conf` mount or volume defaults can add
 host binds without a Wollipog mount argument. A Podman target stays unavailable if local system or
 user defaults contain such entries or cannot be safely read. Podman configuration that selects a
@@ -142,8 +149,8 @@ remote client configuration for these checks fails closed.
 The environment reference contains the template id/revision, image digest, and a SHA-256 digest over
 the revision, image, sorted agent-command map, and ordered checks. Check output is not provenance and
 is not sent to the control plane. A missing runtime/image, failed check, failed orphan cleanup, or
-malformed inventory leaves the target visible but unavailable with a bounded diagnostic. Readiness is
-refreshed on runner restart, not by agent Rediscover.
+malformed inventory leaves the target visible but unavailable with a bounded diagnostic. Apart from
+private Docker CLI config recovery, readiness is refreshed on runner restart, not by agent Rediscover.
 
 ## Container Identity Compatibility
 
