@@ -11,6 +11,9 @@ import {
   LEGACY_CONTAINER_LABELS,
   containerLabelArgs,
 } from "./container-identity.js";
+import {
+  containerRuntimeIdentityReason, dockerVersionBanner, verifyContainerRuntimeIdentity,
+} from "./container-runtime-identity.js";
 import { dockerTargetClientConfig } from "./docker-client-config.js";
 import { resolveNative, run, type ExecResult, type ResolvedBinary } from "./discovery/resolve.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
@@ -30,8 +33,6 @@ interface ResolvedContainerRuntime extends ResolvedBinary {
   unavailableReason?: string;
 }
 
-const RUNTIME_IDENTITY_UNKNOWN_REASON = "container runtime identity could not be verified";
-
 /** Probe the selected command, not its basename: `docker` may exec Podman or use a
  * Podman Docker-compatible API endpoint. No container is launched by these probes. */
 export async function resolveContainerRuntime(
@@ -45,42 +46,12 @@ export async function resolveContainerRuntime(
   const version = await execute(runtime.launch.command, [...prefix, "--version"], {
     timeoutMs: 5_000, maxBuffer: 4_096,
   });
-  if (version.code !== 0 || version.timedOut || version.errorCode) {
-    return { ...runtime, unavailableReason: RUNTIME_IDENTITY_UNKNOWN_REASON };
-  }
-  const banner = version.stdout.trim();
-  if (/^podman version\s+\S+/iu.test(banner)) {
-    return configured === "podman" ? runtime : {
-      ...runtime, unavailableReason: "Docker command resolves to Podman; configure a Podman target",
-    };
-  }
-  if (!/^Docker version\s+\S+/iu.test(banner)) {
-    return { ...runtime, unavailableReason: RUNTIME_IDENTITY_UNKNOWN_REASON };
-  }
-  if (configured === "podman") {
-    return { ...runtime, unavailableReason: "Podman command resolves to Docker; configure a Docker target" };
-  }
-  const details = await execute(runtime.launch.command, [...prefix, "version", "--format", "{{json .}}"], {
-    timeoutMs: 5_000, maxBuffer: 64 * 1024,
-  });
-  if (details.code !== 0 || details.timedOut || details.errorCode) {
-    return { ...runtime, unavailableReason: RUNTIME_IDENTITY_UNKNOWN_REASON };
-  }
-  try {
-    const report = JSON.parse(details.stdout) as {
-      Server?: { Platform?: { Name?: unknown }; Components?: Array<{ Name?: unknown }> };
-    };
-    const names = [report.Server?.Platform?.Name,
-      ...(Array.isArray(report.Server?.Components) ? report.Server.Components.map((component) => component.Name) : [])]
-      .filter((name): name is string => typeof name === "string");
-    if (names.some((name) => /\bPodman\b/iu.test(name))) {
-      return { ...runtime, unavailableReason: "Docker command uses a Podman engine; configure a Podman target" };
-    }
-    if (names.some((name) => name === "Engine" || /^Docker Engine\b/iu.test(name))) return runtime;
-  } catch {
-    // An unknown or malformed version report cannot substantiate a secret-free target.
-  }
-  return { ...runtime, unavailableReason: RUNTIME_IDENTITY_UNKNOWN_REASON };
+  const details = configured === "docker" && dockerVersionBanner(version)
+    ? await execute(runtime.launch.command, [...prefix, "version", "--format", "{{json .}}"], {
+      timeoutMs: 5_000, maxBuffer: 64 * 1024,
+    }) : undefined;
+  const unavailableReason = containerRuntimeIdentityReason(configured, version, details);
+  return unavailableReason ? { ...runtime, unavailableReason } : runtime;
 }
 
 const defaultDeps: ContainerTargetDeps = {
@@ -776,6 +747,7 @@ export class ContainerTargetRegistry {
   ): ContainerSpawnIsolation {
     const prepared = this.prepared.get(target.id);
     if (!prepared?.runtime || !prepared.definition.available) throw new Error("container target is unavailable");
+    const runtime = prepared.runtime;
     if (prepared.config.runtime === "podman" && !this.podmanDefaultsSafe()) throw new Error(PODMAN_UNSAFE_DEFAULTS_REASON);
     const selected = target.harnessInstallationId
       ? prepared.installations?.get(target.harnessInstallationId)
@@ -788,8 +760,8 @@ export class ContainerTargetRegistry {
     return {
       backend: "container",
       runtime: prepared.config.runtime,
-      command: prepared.runtime.launch.command,
-      args: prepared.runtime.launch.args,
+      command: runtime.launch.command,
+      args: runtime.launch.args,
       image: prepared.config.image,
       network: prepared.config.network,
       templateId: prepared.config.id,
@@ -799,6 +771,7 @@ export class ContainerTargetRegistry {
       hostAgentArgs: [...hostAgentArgs],
       agentCommand: agent.command,
       agentArgs: agent.args ?? [],
+      verifyRuntimeIdentity: (env) => verifyContainerRuntimeIdentity(prepared.config.runtime, runtime.launch, env),
       ...(prepared.config.runtime === "docker" && prepared.dockerHost ? { dockerHost: prepared.dockerHost } : {}),
       ...(prepared.config.runtime === "podman" ? { verifyDefaults: () => {
         if (!this.podmanDefaultsSafe()) throw new Error(PODMAN_UNSAFE_DEFAULTS_REASON);

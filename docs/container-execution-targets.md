@@ -82,8 +82,12 @@ The runner probes the resolved command rather than trusting its filename. A `doc
 executes Podman, or a Docker CLI connected to a Podman API engine, is unavailable as a Docker target;
 configure a Podman target so its defaults and proxy guards apply. Unrecognized engine identities
 remain unavailable before any container launch.
-Engine identity is checked during runner startup; restart the runner after changing the runtime
-command or Docker endpoint so readiness is checked against the new engine.
+Immediately before each session container client spawn, including later setup commands and terminals,
+the runner checks that the effective command still identifies the configured runtime. For Docker it
+also checks the engine behind the pinned local endpoint, using the same private client config and
+environment as the pending launch. A command reporting the wrong runtime, a Podman or unrecognized
+Docker server, or a failed identity probe blocks the launch without exposing probe output. Restart
+the runner after changing the runtime command or endpoint to repeat the full readiness checks.
 Rootless Podman keeps its home, local image/runtime directories, and storage configuration file so
 its existing image store remains usable. The runner verifies that the configured Podman client is local
 before isolating general Podman container config. Docker client config is isolated. Other

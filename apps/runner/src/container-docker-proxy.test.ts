@@ -108,6 +108,7 @@ test("Docker provider clients use the checked socket and private config without 
         image, network: "deny", templateId: "approved-image-proxy",
         runnerKey: "runner", containerName: "wollipog-test", hostAgentCommand: "agent",
         hostAgentArgs: [], agentCommand: "agent", agentArgs: [], dockerHost: socket,
+        verifyRuntimeIdentity: () => {},
       },
     });
     child.stdin.end();
@@ -146,7 +147,7 @@ test("Docker client selectors cannot be forwarded as container environment", () 
       backend: "container", runtime: "docker", command: process.execPath, args: [],
       image, network: "deny", templateId: "approved-image-proxy",
       runnerKey: "runner", containerName: "wollipog-test", hostAgentCommand: "agent",
-      hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
+      hostAgentArgs: [], agentCommand: "agent", agentArgs: [], verifyRuntimeIdentity: () => {},
     },
   }), /Docker client control environment cannot be forwarded/);
 });
@@ -169,7 +170,7 @@ test("a replaced private config path cannot inject proxies into a later Docker l
         args: ["-e", "process.stdout.write(process.env.DOCKER_CONFIG ?? '')"],
         image, network: "deny", templateId: "approved-image-proxy",
         runnerKey: "runner", containerName: "wollipog-test", hostAgentCommand: "agent",
-        hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
+        hostAgentArgs: [], agentCommand: "agent", agentArgs: [], verifyRuntimeIdentity: () => {},
       },
     });
     child.stdin.end();

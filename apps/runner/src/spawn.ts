@@ -217,6 +217,8 @@ export interface ContainerSpawnIsolation {
   hostAgentArgs: string[];
   /** Local Docker socket or named pipe established by setup checks, independent of operator config. */
   dockerHost?: string;
+  /** Recheck the effective client and engine with the launch's exact native environment. */
+  verifyRuntimeIdentity: (env: NodeJS.ProcessEnv) => void;
   /** Recheck mutable Podman defaults immediately before every client spawn, including later terminals. */
   verifyDefaults?: () => void;
   /** Trust-gated repository setup names forwarded without putting values in argv. */
@@ -666,20 +668,24 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
     disposeBridge = attachWslAgentControlBroker(bridgeRelay.stdout, bridgeRelay.stdin, bridge);
   }
 
+  const launchEnv: NodeJS.ProcessEnv = {
+    ...inherited,
+    ...explicitEnv,
+    ...isolationEnv,
+    ...(descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {}),
+    ...(worktreeDescendantMarker
+      ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker }
+      : {}),
+  };
   let child: AgentProcess;
   try {
-    if (opts.isolation?.backend === "container") opts.isolation.verifyDefaults?.();
+    if (opts.isolation?.backend === "container") {
+      opts.isolation.verifyDefaults?.();
+      opts.isolation.verifyRuntimeIdentity(launchEnv);
+    }
     child = spawn(file, args, {
       cwd,
-      env: {
-        ...inherited,
-        ...explicitEnv,
-        ...isolationEnv,
-        ...(descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {}),
-        ...(worktreeDescendantMarker
-          ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker }
-          : {}),
-      },
+      env: launchEnv,
       // Resolve .cmd/.bat shims on Windows; harmless on POSIX for our commands.
       shell,
       stdio: ["pipe", "pipe", "pipe"],

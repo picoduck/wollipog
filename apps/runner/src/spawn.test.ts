@@ -218,6 +218,7 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
         runnerKey: "runnerkey", containerName: "wollipog-session",
         hostAgentCommand: "C:\\host\\codex.cmd", hostAgentArgs: ["--host-config"],
         agentCommand: "codex", agentArgs: ["app-server"],
+        verifyRuntimeIdentity: () => {},
       },
     );
     assert.deepEqual(args, [
@@ -238,6 +239,7 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
     backend: "container", runtime: "docker", command: "docker", args: [], image: `x@sha256:${"c".repeat(64)}`,
     network: "bridge", templateId: "x", runnerKey: "runnerkey", containerName: "wollipog-x",
     hostAgentCommand: "agent", hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
+    verifyRuntimeIdentity: () => {},
   }), /mount character/);
   assert.deepEqual(buildContainerArgs(
     {
@@ -250,6 +252,7 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
       backend: "container", runtime: "docker", command: "docker", args: [], image: `x@sha256:${"c".repeat(64)}`,
       network: "bridge", templateId: "x", runnerKey: "runnerkey", containerName: "wollipog-x",
       hostAgentCommand: "agent", hostAgentArgs: [], agentCommand: "agent", agentArgs: ["host-only"],
+      verifyRuntimeIdentity: () => {},
     },
   ).slice(-7), ["--env", "PROJECT_ROOT", "--env", "HTTP_PROXY",
     `x@sha256:${"c".repeat(64)}`, "git", "status"]);
@@ -259,6 +262,7 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
       backend: "container", runtime: "docker", command: "docker", args: [], image: `x@sha256:${"c".repeat(64)}`,
       network: "bridge", templateId: "x", runnerKey: "runnerkey", containerName: "wollipog-x",
       hostAgentCommand: "agent", hostAgentArgs: ["--configured"], agentCommand: "agent", agentArgs: [],
+      verifyRuntimeIdentity: () => {},
     },
   ), /arguments do not match/);
 });
@@ -281,7 +285,7 @@ test("container launches exclude provider values while forwarding trust-gated se
         backend: "container", runtime: "docker", command: process.execPath, args: [script],
         image: `x@sha256:${"d".repeat(64)}`, network: "deny", templateId: "x",
         runnerKey: "runnerkey", containerName: "wollipog-x", hostAgentCommand: "agent",
-        hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
+        hostAgentArgs: [], agentCommand: "agent", agentArgs: [], verifyRuntimeIdentity: () => {},
       },
     });
     assert.equal(child.posixBoundary, undefined, "the native runtime client keeps its remote lifecycle boundary");
