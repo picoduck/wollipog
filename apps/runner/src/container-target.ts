@@ -223,7 +223,7 @@ interface PreparedContainerTarget {
   definition: ExecutionTargetDefinition;
   runtime?: ResolvedBinary;
   dockerHost?: string;
-  /** Only private Docker config loss can be retried on Rediscover. */
+  /** Retry private-config recovery and any safe-reconciliation failure on Rediscover. */
   dockerConfigRecovery?: "readiness" | "installations";
   installations?: Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>;
 }
@@ -438,48 +438,65 @@ export class ContainerTargetRegistry {
     const existing = this.runtimeCleanup.get(key);
     if (existing) return existing;
     const cleanup = (async () => {
-      const inventory = new Set<string>();
-      const generationInventories = new Map<string, Set<string>>();
-      const listings = await Promise.all(CONTAINER_LABEL_GENERATIONS.map(async (labels) => ({
-        labels,
-        listed: await this.deps.run(runtime.launch.command, [
-          ...runtime.launch.args, "ps", "-aq", "--filter", `label=${labels.runner}=${this.runnerKey}`,
-          ...(mode === "exited" ? ["--filter", "status=exited"] : []),
-        ], { ...opts, timeoutMs: 15_000 }),
-      })));
-      let inventoryError: string | null = null;
-      for (const { labels, listed } of listings) {
-        if (listed.code !== 0) {
-          inventoryError ??= unavailableReason(listed.stderr || "could not list runner-owned containers");
-          continue;
+      const listInventory = async () => {
+        const inventory = new Set<string>();
+        const generationInventories = new Map<string, Set<string>>();
+        const listings = await Promise.all(CONTAINER_LABEL_GENERATIONS.map(async (labels) => ({
+          labels,
+          listed: await this.deps.run(runtime.launch.command, [
+            ...runtime.launch.args, "ps", "-aq", "--filter", `label=${labels.runner}=${this.runnerKey}`,
+            ...(mode === "exited" ? ["--filter", "status=exited"] : []),
+          ], { ...opts, timeoutMs: 15_000 }),
+        })));
+        let error: string | null = null;
+        for (const { labels, listed } of listings) {
+          if (listed.code !== 0) {
+            error ??= unavailableReason(listed.stderr || "could not list runner-owned containers");
+            continue;
+          }
+          const ids = listed.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+          if (ids.length > MAX_RUNNER_CONTAINER_INVENTORY || ids.some((id) => !/^[a-f0-9]{12,64}$/i.test(id))) {
+            error ??= "container runtime returned an invalid runner-owned container inventory";
+            continue;
+          }
+          generationInventories.set(labels.runner, new Set(ids));
+          for (const id of ids) inventory.add(id);
         }
-        const ids = listed.stdout.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-        if (ids.length > MAX_RUNNER_CONTAINER_INVENTORY || ids.some((id) => !/^[a-f0-9]{12,64}$/i.test(id))) {
-          inventoryError ??= "container runtime returned an invalid runner-owned container inventory";
-          continue;
+        if (inventory.size > MAX_RUNNER_CONTAINER_INVENTORY) {
+          error ??= "container runtime returned an invalid runner-owned container inventory";
         }
-        generationInventories.set(labels.runner, new Set(ids));
-        for (const id of ids) inventory.add(id);
-      }
-      if (inventory.size > MAX_RUNNER_CONTAINER_INVENTORY) {
-        inventoryError ??= "container runtime returned an invalid runner-owned container inventory";
-      }
-      if (inventoryError) return inventoryError;
-      const canonical = generationInventories.get(CANONICAL_CONTAINER_LABELS.runner) ?? new Set<string>();
-      const legacy = generationInventories.get(LEGACY_CONTAINER_LABELS.runner) ?? new Set<string>();
+        return { inventory, generationInventories, error };
+      };
+      const first = await listInventory();
+      if (first.error) return first.error;
+      const canonical = first.generationInventories.get(CANONICAL_CONTAINER_LABELS.runner) ?? new Set<string>();
+      const legacy = first.generationInventories.get(LEGACY_CONTAINER_LABELS.runner) ?? new Set<string>();
       if (!this.warnedLegacyContainerLabels && [...legacy].some((id) => !canonical.has(id))) {
         this.warnedLegacyContainerLabels = true;
         this.warnLegacyContainerLabels(LEGACY_CONTAINER_LABEL_WARNING);
       }
-      if (!inventory.size) return null;
+      if (!first.inventory.size) return null;
       const removed = await this.deps.run(
         runtime.launch.command,
-        [...runtime.launch.args, "rm", ...(mode === "startup" ? ["-f"] : []), ...inventory],
+        [...runtime.launch.args, "rm", ...(mode === "startup" ? ["-f"] : []), ...first.inventory],
         { ...opts, timeoutMs: 30_000 },
       );
-      return removed.code === 0 ? null : unavailableReason(removed.stderr || "could not remove orphaned runner containers");
+      if (removed.code === 0) return null;
+      if (mode === "exited") {
+        // --rm containers can disappear during Docker's own post-exit teardown.
+        // Recheck the exact candidates; a started container is no longer eligible either.
+        const remaining = await listInventory();
+        if (remaining.error) return remaining.error;
+        if (![...first.inventory].some((id) => remaining.inventory.has(id))) return null;
+      }
+      return unavailableReason(removed.stderr || "could not remove orphaned runner containers");
     })();
     this.runtimeCleanup.set(key, cleanup);
+    if (mode === "exited") {
+      // A failed recovery must be retryable on the next Rediscover.
+      void cleanup.then((error) => { if (error) this.runtimeCleanup.delete(key); },
+        () => { this.runtimeCleanup.delete(key); });
+    }
     return cleanup;
   }
 
@@ -692,6 +709,9 @@ export class ContainerTargetRegistry {
           config: template,
           runtime,
           definition: { ...base, unavailableReason: `orphan reconciliation failed: ${cleanupError}` },
+          ...(cleanupMode === "exited" && template.runtime === "docker" ? {
+            dockerConfigRecovery: "readiness" as const,
+          } : {}),
         });
         continue;
       }
