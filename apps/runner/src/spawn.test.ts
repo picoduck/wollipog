@@ -11,7 +11,7 @@ import { after, test } from "node:test";
 import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_CACHE_HELPERS, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
-import { extendOwnedProcessTree, ownsPosixRootProcessGroup, parsePosixProcessTable, terminatePosixProcessesByMarker } from "./posix-process-tree.js";
+import { extendOwnedProcessTree, listPosixProcesses, ownsPosixRootProcessGroup, parsePosixProcessTable, terminatePosixProcessesByMarker, type PosixProcessIdentity } from "./posix-process-tree.js";
 
 const windowsJobTestCacheRoot = mkdtempSync(path.join(os.tmpdir(), "wollipog-windows-job-suite-"));
 const windowsJobLauncherPath = materializeWindowsJobLauncher(windowsJobTestCacheRoot);
@@ -45,6 +45,19 @@ async function waitForProcessGone(pid: number, timeoutMs = 3_000): Promise<boole
       throw error;
     }
     if (Date.now() >= deadline) return false;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+/** The detached child is reparented when its provider exits. Its new parent can leave a killed
+ * child as a zombie after boundary cleanup succeeds, so wait for the original process to stop
+ * running rather than for the unrelated OS reaper to remove its PID. */
+async function waitForProcessNotLive(expected: PosixProcessIdentity, timeoutMs = 3_000): Promise<PosixProcessIdentity | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const current = (await listPosixProcesses()).get(expected.pid);
+    if (!current || current.startedAt !== expected.startedAt || current.state?.startsWith("Z")) return undefined;
+    if (Date.now() >= deadline) return current;
     await new Promise((resolve) => setTimeout(resolve, 25));
   }
 }
@@ -885,6 +898,8 @@ test("normal provider exit preserves owned background work until session disposa
     });
   }
   assert.doesNotThrow(() => process.kill(escapedPid!, 0), "normal provider exit preserves background work");
+  const escapedIdentity = (await listPosixProcesses()).get(escapedPid!);
+  assert.ok(escapedIdentity && !escapedIdentity.state?.startsWith("Z"), "retained background work is running before disposal");
 
   let finishGracefulStop!: () => void;
   trackPendingKill(new Promise<void>((resolve) => { finishGracefulStop = resolve; }));
@@ -896,7 +911,7 @@ test("normal provider exit preserves owned background work until session disposa
   );
   finishGracefulStop();
   assert.equal(await waitForPendingKills(8_000), true);
-  assert.equal(await waitForProcessGone(escapedPid!), true, "session disposal reaps retained work");
+  assert.equal(await waitForProcessNotLive(escapedIdentity), undefined, "session disposal stops retained work");
 });
 
 test("a durable worktree marker reclaims an escaped descendant after its provider exits", {
