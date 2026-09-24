@@ -100,6 +100,7 @@ import type {
   StopReason,
 } from "./drivers/driver.js";
 import { CodexAppServerResumeError } from "./drivers/codex-app-server.js";
+import type { CodexPromptTemplate } from "./discovery/codex-prompts.js";
 import { BoxAdmission, type AdmissionObservation, type AdmissionRequest } from "./box-admission.js";
 import { discoverIncompleteClaudeTasks, discoverIncompleteClaudeTasksInContext, inspectClaudeBackgroundWorkInContext } from "./claude-background-work.js";
 import { DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_WORKTREE_PORTS } from "./config.js";
@@ -280,6 +281,18 @@ export interface SessionLaunchPreparation {
   sessionCommandCatalogFresh?: boolean;
   /** Exact runner-local discovery boundary used to decide whether a live catalog may reuse IDs. */
   sessionCommandCatalogProvenance?: string;
+  /** Codex App Server custom prompts read for this launch. Bodies never enter session metadata. */
+  codexPrompts?: CodexPromptTemplate[];
+}
+
+/** Transcript text for an invoked provider command, spelled the way the harness expects: a
+ * skill is `$name`, every other command `/name`. */
+export function sessionCommandDisplayText(
+  commandName: string,
+  source: AgentSlashCommand["source"] | undefined,
+  argumentText: string,
+): string {
+  return `${source === "skill" ? "$" : "/"}${commandName}${argumentText ? ` ${argumentText}` : ""}`;
 }
 
 function sameSlashCommandCatalog(
@@ -5909,6 +5922,33 @@ export class SessionManager {
     return true;
   }
 
+  /** Persist a Codex launch's display catalog and, once its thread is ready, authorize it. An
+   * unchanged catalog keeps its command IDs, so an open composer menu stays valid. */
+  private publishCodexSessionCommands(
+    sessionId: string,
+    client: Driver,
+    commands: readonly AgentSlashCommand[],
+    launchGeneration: number,
+  ): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current || current.driver !== "codex-app-server") return;
+    const unchanged = sameSlashCommandCatalog(current.sessionSlashCommands, commands);
+    const catalog = unchanged ? current.sessionSlashCommands ?? [] : [...commands];
+    const entry = this.active.get(sessionId);
+    const authorized = entry?.client === client && entry.providerReady === true;
+    if (authorized) {
+      this.sessionCommandAuthority.refresh(
+        sessionId,
+        catalog,
+        `${this.runnerId}:${process.pid}:codex-app-server:${launchGeneration}`,
+      );
+    }
+    const updated = unchanged ? current : this.store.patchMeta(sessionId, { sessionSlashCommands: catalog });
+    if (updated && (authorized || !unchanged)) {
+      this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    }
+  }
+
   private launchIsCurrent(sessionId: string, generation: number): boolean {
     return !this.shuttingDown &&
       !this.deleted.has(sessionId) &&
@@ -7036,6 +7076,7 @@ export class SessionManager {
             this.store.readMeta(sessionId) ?? meta,
           ),
           hookStateDir: this.guardStateSandbox?.hookStateDir,
+          ...(launchPreparation?.codexPrompts ? { codexPrompts: launchPreparation.codexPrompts } : {}),
         },
         {
         supportsWorkerAttention: () => runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "workerAttention"),
@@ -7152,6 +7193,12 @@ export class SessionManager {
           });
           const updated = this.store.readMeta(sessionId);
           if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+        },
+        onSessionCommands: (commands) => {
+          // Only the exact live Codex launch may publish its catalog; a retiring client may flush late.
+          const live = this.active.get(sessionId);
+          if (live?.client !== client) return;
+          this.publishCodexSessionCommands(sessionId, client, commands, launchGeneration);
         },
         onAcpUsage: (usage) => {
           const current = this.store.readMeta(sessionId);
@@ -7313,6 +7360,16 @@ export class SessionManager {
           );
           this.send({ type: "session_runtime_updated", snapshot: this.snapshot(current) });
         }
+      }
+      if (meta.driver === "codex-app-server" && client.prepareCommand && client.invokeCommand) {
+        // Prompts were read during launch preparation and skills arrive asynchronously from the
+        // new thread; authorize whichever catalog is current now, and every later change on arrival.
+        this.publishCodexSessionCommands(
+          sessionId,
+          client,
+          this.store.readMeta(sessionId)?.sessionSlashCommands ?? [],
+          launchGeneration,
+        );
       }
       if (launchPreparation?.sessionCommandCatalogFresh && meta.driver === "claude-code" &&
           client.prepareCommand && client.invokeCommand) {
@@ -11821,6 +11878,7 @@ export class SessionManager {
         commandName: authorized.commandName,
         argumentText: queued.text,
         executionMode: authorized.executionMode,
+        commandSource: authorized.command.source,
       });
     } catch (error) {
       await this.rollbackPreparedCommandCheckpoint(sessionId, entry, checkpoint);
@@ -11829,7 +11887,7 @@ export class SessionManager {
     }
 
     // No suspension is permitted from this boundary until invokeCommand has returned its promise.
-    const displayText = `/${authorized.commandName}${queued.text ? ` ${queued.text}` : ""}`;
+    const displayText = sessionCommandDisplayText(authorized.commandName, authorized.command.source, queued.text);
     const userEvent = this.emitEvent(sessionId, {
       kind: "user_message",
       text: displayText,

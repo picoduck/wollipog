@@ -184,6 +184,8 @@ import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, Inf
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
+  composerCommandsForTrigger,
+  composerCommandsIncludeSkills,
   durableCommandPreservesAttachments,
   findComposerCommandTrigger,
   mapProviderComposerCommands,
@@ -3609,11 +3611,14 @@ function SessionDetailLoaded({
       providerCommandAttachmentPolicy,
     ),
   }), [agentCaps?.slashCommands, canAnswerPendingQuestion, canStopTurn, planSupported, providerCommandAttachmentPolicy]);
+  const composerSkillSigil = useMemo(() => composerCommandsIncludeSkills(composerCommands), [composerCommands]);
+  const skillCommandIds = useMemo(() => new Set((agentCaps?.slashCommands ?? []).flatMap((command) =>
+    command.source === "skill" && command.invocation ? [command.invocation.id] : [])), [agentCaps?.slashCommands]);
   const slashTrigger = useMemo(
     () => composerSelection.start === composerSelection.end
-      ? findComposerCommandTrigger(text, composerSelection.start)
+      ? findComposerCommandTrigger(text, composerSelection.start, { skillSigil: composerSkillSigil })
       : null,
-    [composerSelection.end, composerSelection.start, text],
+    [composerSelection.end, composerSelection.start, composerSkillSigil, text],
   );
   const workspaceReferencesSupported = runnerSupportsProtocol(runner?.protocolVersion, "workspaceReferences");
   const workspaceTrigger = useMemo(
@@ -3686,7 +3691,8 @@ function SessionDetailLoaded({
   };
   const slashMatches = useMemo(() => {
     if (!slashTrigger) return [];
-    const ranked = rankComposerCommands(composerCommands, slashTrigger.query).map((match) => match.command);
+    const ranked = rankComposerCommands(composerCommandsForTrigger(composerCommands, slashTrigger), slashTrigger.query)
+      .map((match) => match.command);
     return slashTrigger.query ? ranked : ranked.filter((command) => command.available);
   }, [composerCommands, slashTrigger]);
   const slashDismissKey = slashTrigger ? `${text}\u0000${composerSelection.start}` : null;
@@ -5166,6 +5172,7 @@ function SessionDetailLoaded({
               invocations={session.commandInvocations ?? []}
               timelineItems={items}
               historyPartial={isPartialHistory(eventWindow)}
+              skillCommandIds={skillCommandIds}
             />
             <SteeringReceipts
               attempts={session.steeringAttempts ?? []}

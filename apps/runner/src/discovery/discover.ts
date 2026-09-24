@@ -244,8 +244,9 @@ const COMMAND_DIRS: Partial<Record<AgentDriverKind, { dir: string; source: Agent
   "claude-code": [{ dir: ".claude/commands", source: "user" }],
 };
 
-/** Filesystem command sources actually supported by the provider. Codex prompts/skills are not
- * slash commands and must not be advertised as such. Exported to keep that boundary regression-tested. */
+/** Filesystem command sources for the agent-level catalog. Codex custom prompts and skills are
+ * not part of it: they are session-scoped (`$CODEX_HOME` and the thread's `skills/list`) and are
+ * advertised per session by the Codex App Server launch. Exported to keep that boundary tested. */
 export function commandDirectoriesForDriver(
   driver: AgentDriverKind,
 ): readonly { dir: string; source: AgentSlashCommand["source"] }[] {

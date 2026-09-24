@@ -1,4 +1,5 @@
 import { realpathSync } from "node:fs";
+import type { AgentSlashCommand } from "@wollipog/protocol";
 import { posix, win32 } from "node:path";
 
 /**
@@ -15,6 +16,23 @@ import { posix, win32 } from "node:path";
 export interface CodexSkill {
   name: string;
   path: string;
+  description?: string;
+}
+
+const SKILL_DESCRIPTION_MAX = 280;
+
+function skillDescription(skill: {
+  description?: unknown;
+  shortDescription?: unknown;
+  interface?: unknown;
+}): string | undefined {
+  const preferred = (skill.interface as { shortDescription?: unknown } | null | undefined)?.shortDescription;
+  for (const candidate of [preferred, skill.shortDescription, skill.description]) {
+    if (typeof candidate !== "string") continue;
+    const normalized = candidate.replace(/\s+/gu, " ").trim();
+    if (normalized) return [...normalized].slice(0, SKILL_DESCRIPTION_MAX).join("");
+  }
+  return undefined;
 }
 
 /** Enabled skills from a `skills/list` response, first registration winning per path. */
@@ -31,10 +49,36 @@ export function codexSkillsFromList(response: unknown): CodexSkill[] {
       if (typeof name !== "string" || !name || typeof path !== "string" || !path || enabled === false) continue;
       if (seen.has(path)) continue;
       seen.add(path);
-      skills.push({ name, path });
+      const description = skillDescription((skill ?? {}) as Parameters<typeof skillDescription>[0]);
+      skills.push({ name, path, ...(description ? { description } : {}) });
     }
   }
   return skills;
+}
+
+const SKILL_COMMAND_NAME = /^[\p{L}\p{N}_][\p{L}\p{N}_.:-]*$/u;
+
+/**
+ * One invocable skill per name, in `skills/list` order, so `$name` and `/name` are unambiguous.
+ * Names Codex cannot receive as a command token are omitted.
+ */
+export function codexInvocableSkills(skills: readonly CodexSkill[]): CodexSkill[] {
+  const byName = new Map<string, CodexSkill>();
+  for (const skill of skills) {
+    if (!SKILL_COMMAND_NAME.test(skill.name)) continue;
+    const key = skill.name.toLowerCase();
+    if (!byName.has(key)) byName.set(key, skill);
+  }
+  return [...byName.values()];
+}
+
+/** Advertised catalog entry for one invocable skill. */
+export function codexSkillCommand(skill: CodexSkill): AgentSlashCommand {
+  return {
+    name: skill.name,
+    source: "skill",
+    ...(skill.description ? { description: skill.description } : {}),
+  };
 }
 
 /** Skill name keyed by its exact `SKILL.md` path. */

@@ -74,11 +74,14 @@ export function SessionCommandReceipts({
   invocations,
   timelineItems,
   historyPartial = false,
+  skillCommandIds,
 }: {
   invocations: readonly SessionCommandInvocationView[];
   timelineItems: readonly TimelineItem[];
   /** The transcript is a bounded window, so a canonical message may sit in an unloaded turn. */
   historyPartial?: boolean;
+  /** Provider command ids that invoke skills, spelled `$name` like the canonical transcript. */
+  skillCommandIds?: ReadonlySet<string>;
 }) {
   const visible = visibleSessionCommandReceipts(invocations, timelineItems, historyPartial);
   if (!visible.length) return null;
@@ -99,7 +102,8 @@ export function SessionCommandReceipts({
           </div>
           <div className="steering-receipt-content">
             <span className="steering-receipt-text">
-              /{invocation.commandName}{invocation.argumentText ? ` ${invocation.argumentText}` : ""}
+              {skillCommandIds?.has(invocation.providerCommandId) ? "$" : "/"}{invocation.commandName}
+              {invocation.argumentText ? ` ${invocation.argumentText}` : ""}
             </span>
           </div>
           {(invocation.error || invocation.state === "uncertain") && (

@@ -3,6 +3,8 @@ import { test } from "node:test";
 import {
   COMPOSER_COMMAND_GROUPS,
   buildComposerCommandRegistry,
+  composerCommandsForTrigger,
+  composerCommandsIncludeSkills,
   findComposerCommandTrigger,
   groupComposerCommands,
   mapProviderComposerCommands,
@@ -569,4 +571,74 @@ test("invalid command names are excluded before they can become path-like aliase
       { name: "_scratch", invocationAlias: "_scratch" },
     ],
   );
+});
+
+function codexRegistry() {
+  return registry(mapProviderComposerCommands([
+    { name: "summarize", source: "user", description: "Summarize the branch" },
+    { name: "review", source: "user", description: "Review prompt" },
+    { name: "review", source: "skill", description: "Review skill" },
+    { name: "deploy-check", source: "skill", description: "Check a deploy" },
+  ]));
+}
+
+test("Codex prompts are labeled User and skills Skill, with source-qualified aliases on collision", () => {
+  const commands = codexRegistry().filter((candidate) => candidate.source === "provider");
+  assert.deepEqual(commands.map(({ label, sourceLabel }) => [label, sourceLabel]), [
+    ["/deploy-check", "Skill"],
+    ["/skill:review", "Skill"],
+    ["/user:review", "User"],
+    ["/summarize", "User"],
+  ]);
+  const resolved = (text: string) => {
+    const resolution = resolveComposerCommandInvocation(text, codexRegistry());
+    return resolution.kind === "command"
+      ? [resolution.command.providerSource, resolution.command.name, resolution.arguments]
+      : resolution.text;
+  };
+  assert.deepEqual(resolved("/skill:review pr 42"), ["skill", "review", "pr 42"]);
+  assert.deepEqual(resolved("/review a.ts"), ["user", "review", "a.ts"], "a bare collided alias prefers the user prompt");
+  assert.equal(
+    registry(mapProviderComposerCommands([{ name: "future", source: "workflow" as never }]))
+      .find((candidate) => candidate.name === "future")?.sourceLabel,
+    "Harness",
+    "an unknown future source still renders a label",
+  );
+});
+
+test("$name resolves to the same skill command as /name and leaves other $ text alone", () => {
+  const skillOnly = registry(mapProviderComposerCommands([{ name: "review", source: "skill", description: "Review skill" }]));
+  const dollar = resolveComposerCommandInvocation("$review pr 42", skillOnly);
+  const slash = resolveComposerCommandInvocation("/review pr 42", skillOnly);
+  assert.equal(dollar.kind, "command");
+  assert.equal(slash.kind, "command");
+  assert.equal(dollar.kind === "command" && slash.kind === "command" && dollar.command.id, slash.kind === "command" && slash.command.id);
+  assert.equal(dollar.kind === "command" && dollar.arguments, "pr 42");
+  assert.equal(resolveComposerCommandInvocation("$REVIEW", skillOnly).kind, "command", "matching is case-insensitive");
+  assert.deepEqual(resolveComposerCommandInvocation("$HOME is set", skillOnly), { kind: "plaintext", text: "$HOME is set" });
+  const collided = resolveComposerCommandInvocation("$review now", codexRegistry());
+  assert.equal(collided.kind === "command" && collided.command.providerSource, "skill",
+    "$name names the skill even when a same-named prompt exists");
+  const promptOnly = registry(mapProviderComposerCommands([{ name: "summarize", source: "user" }]));
+  assert.deepEqual(resolveComposerCommandInvocation("$summarize", promptOnly), { kind: "plaintext", text: "$summarize" });
+});
+
+test("a $ trigger opens only when skills exist, offers only skills, and inserts $name", () => {
+  const commands = codexRegistry();
+  assert.equal(composerCommandsIncludeSkills(commands), true);
+  assert.equal(composerCommandsIncludeSkills(registry()), false);
+  assert.equal(findComposerCommandTrigger("$re", 3), null, "without skills a $ stays text");
+  const trigger = findComposerCommandTrigger("$re", 3, { skillSigil: true });
+  assert.deepEqual(trigger, { start: 0, end: 3, query: "re", raw: "$re", sigil: "$" });
+  assert.equal(findComposerCommandTrigger("say $re", 7, { skillSigil: true }), null, "only a leading token triggers");
+  const slash = findComposerCommandTrigger("/re", 3, { skillSigil: true });
+  assert.equal(slash?.sigil, undefined, "slash triggers are unchanged");
+  const offered = composerCommandsForTrigger(commands, trigger!);
+  assert.deepEqual(offered.map(({ label, sourceLabel }) => [label, sourceLabel]), [
+    ["$deploy-check", "Skill"],
+    ["$review", "Skill"],
+  ]);
+  assert.equal(composerCommandsForTrigger(commands, slash!).length, commands.length);
+  const review = offered.find((candidate) => candidate.name === "review")!;
+  assert.deepEqual(replaceComposerCommandTrigger("$re  rest", trigger!, review), { text: "$review rest", caret: 8 });
 });

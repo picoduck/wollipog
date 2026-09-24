@@ -7,6 +7,7 @@
 
 import type {
   AgentCapabilities,
+  AgentSlashCommand,
   AcpRuntimeCapabilities,
   AgentContext,
   PromptImage,
@@ -18,6 +19,7 @@ import type { SpawnIsolation } from "../spawn.js";
 import type { ManagedWorktreeProtection } from "../managed-worktree-protection.js";
 import type { PoisonedProviderHistory } from "./poisoned-provider-history.js";
 import type { ProviderRejectionShape } from "./provider-rejection-shape.js";
+import type { CodexPromptTemplate } from "../discovery/codex-prompts.js";
 
 declare const preparedDriverCommandBrand: unique symbol;
 
@@ -32,6 +34,8 @@ export interface DriverCommandInput {
   commandName: string;
   argumentText: string;
   executionMode: "passthrough" | "structured";
+  /** Catalog source of the authorized command; distinguishes same-named prompts and skills. */
+  commandSource?: AgentSlashCommand["source"];
 }
 
 /** Opaque, single-use provider command prepared synchronously by the owning driver. The session
@@ -41,6 +45,7 @@ export interface PreparedDriverCommand {
   readonly commandName: string;
   readonly argumentText: string;
   readonly executionMode: "passthrough" | "structured";
+  readonly commandSource?: AgentSlashCommand["source"];
 }
 
 /** Content-safe identity for one exact admitted and successful command recovered from
@@ -153,6 +158,8 @@ export interface DriverCallbacks {
   /** Session-scoped ACP controls/config; never merge these onto the agent row because two live
    * sessions may advertise different modes or commands. */
   onAcpSessionState?: (state: { capabilities: AgentCapabilities; config: SessionConfig }) => void;
+  /** The driver's complete invocable session command catalog changed. */
+  onSessionCommands?: (commands: AgentSlashCommand[]) => void;
   /** Authoritative context gauge: the effective context window the provider is serving plus its
    * current occupancy when known (stable ACP usage; Claude's terminal `result.modelUsage` and last
    * request size), with optional cumulative USD cost. Omitted occupancy leaves the prior gauge. */
@@ -200,6 +207,8 @@ export interface DriverOptions {
    * sandboxes nothing. Absent on runners that provision no hook state.
    */
   hookStateDir?: string;
+  /** Codex App Server: custom prompts discovered for this launch, bodies included. */
+  codexPrompts?: readonly CodexPromptTemplate[];
 }
 
 export interface Driver {

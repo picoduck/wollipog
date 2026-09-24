@@ -1770,6 +1770,108 @@ test("skills/list keeps one bounded lookup in flight and coalesces skills/change
     "a replaced server's response is dropped");
 });
 
+function commandHarness() {
+  const h = makeHarness({
+    codexPrompts: [
+      { name: "review", description: "Review a change", argumentHint: "<file>", body: "Review $1 carefully." },
+      { name: "summarize", body: "Summarize the branch." },
+    ],
+  });
+  const reported: unknown[] = [];
+  (h.driver as any).cb.onSessionCommands = (commands: unknown) => reported.push(commands);
+  const turns: any[] = [];
+  const skills = [
+    { name: "review", path: "/u/.codex/skills/review/SKILL.md", enabled: true, description: "Review skill" },
+    { name: "deploy-check", path: "/u/.codex/skills/deploy-check/SKILL.md", enabled: true, description: "Check a deploy" },
+  ];
+  (h.driver as any).threadId = "thread-commands";
+  (h.driver as any).peer = {
+    requestWithDeadline: async () => ({ data: [{ cwd: "/tmp/work", errors: [], skills }] }),
+    request: async (method: string, params: any) => {
+      if (method === "turn/start") turns.push(params.input);
+      return { turn: { id: `turn-${turns.length}` } };
+    },
+  };
+  const run = async (turn: Promise<unknown>) => {
+    await nextTask();
+    (h.driver as any).settleTurn("end_turn");
+    return turn;
+  };
+  return { ...h, reported, turns, run };
+}
+
+test("the command catalog lists prompts as User and skills as Skill, reporting only changes", async () => {
+  const h = commandHarness();
+  (h.driver as any).refreshSkillCatalog();
+  await nextTask();
+  await nextTask();
+  const expected = [
+    { name: "review", source: "user", description: "Review a change", argumentHint: "<file>" },
+    { name: "summarize", source: "user" },
+    { name: "review", source: "skill", description: "Review skill" },
+    { name: "deploy-check", source: "skill", description: "Check a deploy" },
+  ];
+  assert.deepEqual(h.reported, [expected]);
+  assert.deepEqual(h.driver.sessionCommands(), expected);
+  notificationHandlers(h.driver).get("skills/changed")!({});
+  await nextTask();
+  await nextTask();
+  assert.equal(h.reported.length, 1, "an unchanged catalog is not reported again");
+});
+
+test("invoked prompts send expanded text and skills send $name text with the skill item", async () => {
+  const h = commandHarness();
+  (h.driver as any).refreshSkillCatalog();
+  await nextTask();
+  await nextTask();
+  const prompt = h.driver.prepareCommand!({
+    commandName: "review", argumentText: "src/app.ts", executionMode: "passthrough", commandSource: "user",
+  });
+  assert.equal(await h.run(h.driver.invokeCommand!(prompt)), "end_turn");
+  const skill = h.driver.prepareCommand!({
+    commandName: "review", argumentText: " pr 42 ", executionMode: "passthrough", commandSource: "skill",
+  });
+  assert.equal(await h.run(h.driver.invokeCommand!(skill)), "end_turn");
+  const bareSkill = h.driver.prepareCommand!({
+    commandName: "deploy-check", argumentText: "", executionMode: "passthrough", commandSource: "skill",
+  });
+  assert.equal(await h.run(h.driver.invokeCommand!(bareSkill)), "end_turn");
+  assert.deepEqual(h.turns, [
+    [{ type: "text", text: "Review src/app.ts carefully." }],
+    [{ type: "text", text: "$review pr 42" }, { type: "skill", name: "review", path: "/u/.codex/skills/review/SKILL.md" }],
+    [{ type: "text", text: "$deploy-check" }, { type: "skill", name: "deploy-check", path: "/u/.codex/skills/deploy-check/SKILL.md" }],
+  ]);
+  assert.throws(() => h.driver.invokeCommand!(prompt), /not prepared/, "a prepared command is single-use");
+});
+
+test("command preparation rejects unknown, mismatched, and structured commands", async () => {
+  const h = commandHarness();
+  (h.driver as any).refreshSkillCatalog();
+  await nextTask();
+  await nextTask();
+  const prepare = (commandName: string, commandSource?: any, executionMode: any = "passthrough") =>
+    () => h.driver.prepareCommand!({ commandName, argumentText: "", executionMode, commandSource });
+  assert.throws(prepare("missing"), /unknown Codex command/);
+  assert.throws(prepare("deploy-check", "user"), /unknown Codex command/, "a skill is not a user prompt");
+  assert.throws(prepare("summarize", "skill"), /unknown Codex command/, "a prompt is not a skill");
+  assert.throws(prepare("review", "user", "structured"), /does not support structured/);
+});
+
+test("a legacy slash prompt resolves prompts before same-named skills and leaves unknown names literal", async () => {
+  const h = commandHarness();
+  (h.driver as any).refreshSkillCatalog();
+  await nextTask();
+  await nextTask();
+  await h.run(h.driver.prompt("a.ts", [], "review"));
+  await h.run(h.driver.prompt("now", [], "deploy-check"));
+  await h.run(h.driver.prompt("x", [], "unknown"));
+  assert.deepEqual(h.turns, [
+    [{ type: "text", text: "Review a.ts carefully." }],
+    [{ type: "text", text: "$deploy-check now" }, { type: "skill", name: "deploy-check", path: "/u/.codex/skills/deploy-check/SKILL.md" }],
+    [{ type: "text", text: "/unknown x" }],
+  ]);
+});
+
 test("a skills/list transport that throws synchronously never fails thread start", async () => {
   const h = makeHarness();
   (h.driver as any).peer = {
