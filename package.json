@@ -35,6 +35,7 @@
     "test:e2e": "playwright test",
     "test:e2e:production": "playwright test --config playwright.production.config.ts",
     "benchmark:admission": "node --import tsx apps/runner/scripts/admission-diagnostics-benchmark.ts",
+    "probe:claude-mcp-image": "node --import tsx apps/runner/scripts/claude-mcp-image-probe.ts",
     "probe:codex-escalation": "node --import tsx apps/runner/scripts/codex-escalation-probe.ts",
     "probe:codex-guard-hook": "node --import tsx apps/runner/scripts/codex-guard-hook-probe.ts",
     "test:watch": "node --import tsx --test --test-timeout=300000 --watch \"apps/**/src/**/*.test.ts\" \"apps/**/src/**/*.test.tsx\"",

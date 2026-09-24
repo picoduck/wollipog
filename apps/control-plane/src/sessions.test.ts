@@ -19572,13 +19572,17 @@ test("Integration Isolation is its own policy, gated separately and fixed at cre
   }
 });
 
-function uiEvidenceReviewHarness(protocolVersion = PROTOCOL_VERSION, imageModel = true) {
+function uiEvidenceReviewHarness(
+  protocolVersion = PROTOCOL_VERSION,
+  imageModel = true,
+  capabilities?: NonNullable<RunnerMetadata["agents"][number]["capabilities"]>,
+) {
   const { db, hub } = makeHarness();
   const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
   const meta = runnerMeta();
-  meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = {
+  meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = capabilities ?? {
     models: [{ id: "vision", name: "Vision", default: true, inputModalities: imageModel ? ["text", "image"] : ["text"] }],
-    effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+    effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true, imageToolResults: true,
     permissionModes: ["default", "orchestrator"],
   };
   db.registerRunner(meta, Date.now(), protocolVersion);
@@ -19842,14 +19846,22 @@ test("delegated UI evidence review fails closed on tampering, policy change, sup
   }
 });
 
-test("older runners and text-only models keep UI evidence human-owned with an explanation", () => {
+test("older runners, unattested installations, and text-only models keep UI evidence human-owned with an explanation", () => {
   for (const [protocol, imageModel, code] of [
     [RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorUiEvidenceReview - 1, true, "runner_unsupported"],
+    // A v167 runner has the evidence reader but attests nothing about image tool results.
+    [RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorImageToolResults - 1, true, "runner_unsupported"],
+    // Prompt images alone, with an image-capable model, no longer stand in for the attestation.
+    [PROTOCOL_VERSION, "unattested", "harness_unsupported"],
     [PROTOCOL_VERSION, false, "model_unsupported"],
     // A selected model the catalog does not know must not inherit the default's image capability.
     [PROTOCOL_VERSION, "unknown", "model_unsupported"],
   ] as const) {
-    const h = uiEvidenceReviewHarness(protocol, imageModel !== false);
+    const h = uiEvidenceReviewHarness(protocol, imageModel !== false, imageModel === "unattested" ? {
+      models: [{ id: "vision", default: true, inputModalities: ["text", "image"] }],
+      effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    } : undefined);
     try {
       if (imageModel === "unknown") h.db.updateSessionConfig(h.parent.id, { model: "uncatalogued-model", permissionMode: "orchestrator" }, Date.now());
       const child = h.createChild("UI Child");
@@ -19865,6 +19877,40 @@ test("older runners and text-only models keep UI evidence human-owned with an ex
     } finally {
       h.db.close();
     }
+  }
+});
+
+test("a Claude Code Orchestrator owns UI evidence review on its runner's attestation (#1492)", () => {
+  // Claude Code's live catalog lists no input modalities for any model, and its prompt-image flag is
+  // stream-json transport; neither may keep a Claude Orchestrator from the gate any more.
+  const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, {
+    models: [
+      { id: "default", displayName: "Default (Opus 5.5)", default: true },
+      { id: "opus[1m]", displayName: "Opus 5.5 (1M Context)", baseModelId: "opus" },
+    ],
+    modelSource: "live",
+    effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, imageToolResults: true,
+    permissionModes: ["default", "orchestrator"],
+  });
+  try {
+    assert.equal(h.db.getSession(h.parent.id)?.driver, "claude-code");
+    for (const model of [undefined, "opus[1m]"]) {
+      if (model) h.db.updateSessionConfig(h.parent.id, { model, permissionMode: "orchestrator" }, Date.now());
+      const projection = h.db.campaignProjection(h.parent.id)!;
+      assert.deepEqual(projection.uiEvidenceReview, { status: "available", effectiveOwner: "orchestrator" }, String(model));
+      assert.equal(projection.decisionOwners.ui_evidence_approval, "orchestrator");
+    }
+    const child = h.createChild("UI Child");
+    const shot = h.screenshot(child.id, "after");
+    const decision = h.request(child.id, "ui-claude", [shot.item]);
+    assert.ok(decision.ok && decision.data, decision.error);
+    assert.equal(decision.data.authority, "orchestrator");
+    assert.equal(decision.data.humanFallback, undefined);
+    const delivered = h.review(child.id, decision.data.occurrenceId, "after");
+    assert.ok(delivered.ok && delivered.data, delivered.error);
+    assert.ok(Buffer.from(delivered.data.data, "base64").equals(shot.bytes), "the Orchestrator is handed the exact artifact bytes");
+  } finally {
+    h.db.close();
   }
 });
 

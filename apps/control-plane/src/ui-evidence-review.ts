@@ -22,7 +22,8 @@ export type UiEvidenceItem = Extract<
   { category: "ui_evidence_approval" }
 >["evidence"][number];
 
-/** Harnesses whose MCP client is known to hand MCP image content to the model as image input. */
+/** Harnesses whose MCP image tool-result path has been audited end to end. A runner's
+ * `imageToolResults` attestation for any other harness is not trusted. */
 const IMAGE_TOOL_RESULT_DRIVERS: ReadonlySet<string> = new Set(["claude-code", "codex-app-server"]);
 
 export const MAX_UI_EVIDENCE_REVIEW_BYTES = MAX_PROMPT_IMAGE_BYTES;
@@ -44,10 +45,11 @@ function human(code: UiEvidenceReviewUnavailableCode, reason: string): UiEvidenc
 /** Campaign-scoped half: the reviewing harness, model, client, and runner. */
 export function evaluateUiEvidenceReviewClient(client: UiEvidenceReviewClient): UiEvidenceReviewEvaluation {
   if (client.savedOwner !== "orchestrator") return { effectiveOwner: "human" };
-  if (!runnerSupportsProtocol(client.runnerProtocolVersion, "orchestratorUiEvidenceReview")) {
+  // v179 attests image tool results, and implies the v167 evidence reader.
+  if (!runnerSupportsProtocol(client.runnerProtocolVersion, "orchestratorImageToolResults")) {
     return human("runner_unsupported", runnerCapabilityRequirement(
       client.runnerProtocolVersion,
-      "orchestratorUiEvidenceReview",
+      "orchestratorImageToolResults",
       "Orchestrator UI evidence review",
     ));
   }
@@ -57,21 +59,33 @@ export function evaluateUiEvidenceReviewClient(client: UiEvidenceReviewClient): 
       `The ${client.driver ?? "unknown"} harness has no audited way to show evidence images to the Orchestrator.`,
     );
   }
-  // Unlike prompt images, absent capabilities are not permissive here: delegated review must be
-  // positively supported, never assumed.
+  // Evidence reaches the model as an image in a tool result, so that is what the installation must
+  // attest. Prompt-image transport (`supportsImages`) is a different path and decides nothing here.
+  // Unlike prompt images, unknown is not permissive: delegated review must be positively supported.
   const capabilities = client.capabilities;
-  if (!capabilities?.supportsImages) {
-    return human("harness_unsupported", "This Orchestrator's agent installation does not support image input.");
+  if (capabilities?.imageToolResults !== true) {
+    return human(
+      "harness_unsupported",
+      "This Orchestrator's agent installation does not attest that images returned by its tools reach the model.",
+    );
   }
   // The default model stands in only when no model was selected. A selected model the catalog does
-  // not know has advertised nothing, so it must not inherit the default's image capability.
+  // not know has advertised nothing, so it must not inherit the installation's attestation.
   const model = client.modelId
     ? capabilities.models.find((candidate) => candidate.id === client.modelId)
     : capabilities.models.find((candidate) => candidate.default && !candidate.hidden);
-  if (!model?.inputModalities?.includes("image")) {
+  if (!model) {
     return human(
       "model_unsupported",
-      `The Orchestrator model ${JSON.stringify(model?.id ?? client.modelId ?? "unknown")} does not advertise image input.`,
+      `The Orchestrator model ${JSON.stringify(client.modelId ?? "default")} is not in its installation's model catalog, so whether it accepts images is unknown.`,
+    );
+  }
+  // A model that lists its input types must list images. One that lists none is covered by the
+  // installation's attestation, as it is for prompt images; Claude Code's catalog never lists them.
+  if (model.inputModalities && !model.inputModalities.includes("image")) {
+    return human(
+      "model_unsupported",
+      `The Orchestrator model ${JSON.stringify(model.id)} does not accept image input.`,
     );
   }
   return { effectiveOwner: "orchestrator" };

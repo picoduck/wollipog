@@ -17,6 +17,9 @@ const MAX_ACCOUNT_LABEL_LENGTH = 160;
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 const PERMISSION_MODES = ["acceptEdits", "auto", "bypassPermissions", "dontAsk", "plan"];
 export const CLAUDE_STEERING_MIN_VERSION = "2.1.241";
+/** Earliest release live-verified to show the model an image returned by an MCP tool (#1492):
+ * `pnpm probe:claude-mcp-image` passed on 2.1.277, 2.1.278, 2.1.280, and 2.1.281. */
+export const CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION = "2.1.277";
 
 /** Candidate Git-for-Windows Bash paths, ordered from explicit provider configuration through
  * resolved Git installations and standard per-user/system installs. WSL bash.exe is deliberately
@@ -102,11 +105,15 @@ function parseVersion(s: string): string | undefined {
 
 function versionAtLeast(version: string, floor: string): boolean {
   const parts = (value: string) => value.split(".").slice(0, 3).map((part) => Number.parseInt(part, 10));
+  const prerelease = (value: string) => /^\d+\.\d+\.\d+-/.test(value);
   const a = parts(version);
   const b = parts(floor);
   return (a[0] ?? 0) > (b[0] ?? 0)
     || ((a[0] ?? 0) === (b[0] ?? 0) && (a[1] ?? 0) > (b[1] ?? 0))
-    || ((a[0] ?? 0) === (b[0] ?? 0) && (a[1] ?? 0) === (b[1] ?? 0) && (a[2] ?? 0) >= (b[2] ?? 0));
+    || ((a[0] ?? 0) === (b[0] ?? 0) && (a[1] ?? 0) === (b[1] ?? 0) && (a[2] ?? 0) > (b[2] ?? 0))
+    // A prerelease (`2.1.277-rc.1`) precedes the release it names, so it does not meet that floor.
+    || ((a[0] ?? 0) === (b[0] ?? 0) && (a[1] ?? 0) === (b[1] ?? 0) && (a[2] ?? 0) === (b[2] ?? 0) &&
+      (!prerelease(version) || prerelease(floor)));
 }
 
 function optionBlock(help: string, option: string): string {
@@ -264,6 +271,13 @@ export function claudeCapabilitiesFromProbe(
       ? { supportsSteering: true as const }
       : {}),
     supportsConversationFork: probe.status === "ready" && probe.forkSession,
+    // Not `streamJsonImages`: that is the prompt-input contract. This is the MCP client handing a
+    // tool's image content to the model, which help output cannot show, so it rests on the releases
+    // `pnpm probe:claude-mcp-image` verified against a real session. A property of the installed
+    // CLI, so signing out does not withdraw it; a CLI that failed its core probe attests nothing.
+    imageToolResults: (probe.status === "ready" || probe.status === "unauthenticated") &&
+      probe.installedVersion !== undefined &&
+      versionAtLeast(probe.installedVersion, CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION),
     ...(permissionModes.length ? { elicitation } : { elicitation: undefined }),
   };
 }
