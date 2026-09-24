@@ -25,10 +25,11 @@ since an upgrade may be the way to restore compatibility.
 Agent Details quotes the launch command for the
 stated Machine PowerShell 7.3 or later or POSIX shell, or for a POSIX shell inside the named WSL distribution.
 Any displayed Codex self-update command uses the discovered launch target and the same shell context.
-For a native Windows `.cmd` or `.bat` launch, Agent Details lists the executable and argument array
+For a native Windows `.cmd`, `.bat`, or extensionless launch, Agent Details lists the executable and argument array
 as reference data instead of a copyable command. PowerShell routes these wrappers through `cmd.exe`,
 which can expand percent signs or alter embedded quotes; arbitrary wrapper behavior cannot be
-verified from the path alone. Built-in Codex update guidance likewise sends the operator to the
+verified from the path alone, and an extensionless command can resolve to one through `PATHEXT`.
+Built-in Codex update guidance likewise sends the operator to the
 original manager for that exact installation instead of promising a safe copied command. Direct
 `.exe` launches and POSIX commands inside WSL retain their shell-specific command guidance.
 

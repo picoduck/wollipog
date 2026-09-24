@@ -115,6 +115,14 @@ test("native Windows batch update commands are excluded, including embedded quot
   });
 });
 
+test("extensionless native Windows update commands cannot promise batch-safe arguments", () => {
+  for (const command of ["codex", "C:\\Tools\\codex"]) {
+    const binary = { path: "C:\\Tools\\codex.cmd", via: "path" as const,
+      launch: { command, args: ['embedded"quote', "%PATH%"] } };
+    assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+  }
+});
+
 test("a Windows batch shim advertising Codex update produces manager guidance, not a command",
   { skip: process.platform !== "win32" }, async () => {
     const dir = mkdtempSync(join(tmpdir(), "wollipog codex update "));

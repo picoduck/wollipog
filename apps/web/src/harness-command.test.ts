@@ -37,3 +37,12 @@ test("native Windows batch wrappers never offer a copyable command for quotes or
     batchWrapper: false,
   });
 });
+
+test("extensionless native Windows launches cannot promise batch-safe copyable arguments", () => {
+  for (const command of ["codex", "C:\\Tools\\codex"]) {
+    assert.deepEqual(formatHarnessLaunchCommand(command, ['embedded"quote', "%PATH%"],
+      { kind: "native" }, "windows"), {
+      command: null, shell: null, batchWrapper: true,
+    });
+  }
+});

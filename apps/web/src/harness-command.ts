@@ -24,9 +24,11 @@ export function formatHarnessLaunchCommand(
     };
   }
   if (os === "windows") {
-    // PowerShell routes batch files through cmd.exe, where % expansion and wrapper-specific
-    // parsing can change argv. Keep the exact target visible as data, never as a copyable command.
-    if (/\.(?:cmd|bat)$/i.test(command)) return { command: null, shell: null, batchWrapper: true };
+    // An extensionless command may resolve through PATHEXT to a batch wrapper. The browser
+    // cannot prove the selected target or preserve its cmd.exe argument parsing.
+    if (/\.(?:cmd|bat)$/i.test(command) || !/(?:^|[\\/])[^\\/]+\.[^./\\]+$/.test(command)) {
+      return { command: null, shell: null, batchWrapper: true };
+    }
     return {
       command: `& ${[command, ...args].map(powerShellWord).join(" ")}`,
       shell: "PowerShell 7.3 or later on this Machine",
