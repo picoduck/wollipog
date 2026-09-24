@@ -20,10 +20,53 @@ export function childSessionDefaultsError(value: unknown): string | null {
   return null;
 }
 
+type ParentAllowance = Pick<SessionView, "costBudgetUsd" | "costUsd" | "maxToolCalls" | "toolCallCount">;
+
+/** Name each finite dimension's remaining allowance. `costUsd` and `toolCallCount` already include
+ * the children's charges. */
+function remainingAllowance(parent: ParentAllowance): string {
+  const parts: string[] = [];
+  if (parent.costBudgetUsd != null) {
+    const remaining = Math.max(0, parent.costBudgetUsd - (parent.costUsd ?? 0));
+    parts.push(`$${remaining.toFixed(2)} of its $${parent.costBudgetUsd.toFixed(2)} cost budget`);
+  }
+  if (parent.maxToolCalls != null) {
+    const remaining = Math.max(0, parent.maxToolCalls - (parent.toolCallCount ?? 0));
+    parts.push(`${remaining} of its ${parent.maxToolCalls} tool calls`);
+  }
+  return parts.join(" and ");
+}
+
+/** Restarting a terminal child re-reserves the unspent limits its settlement released, which may
+ * already back a sibling. Refuse when a finite parent no longer has that much allowance left. */
+export function childRestartAllowanceError(
+  parent: ParentAllowance,
+  charged: { costBudgetUsd: number; maxToolCalls: number },
+  reservation: { costBudgetUsd: number; maxToolCalls: number },
+): string | null {
+  const allowance = {
+    ...parent,
+    costUsd: (parent.costUsd ?? 0) + charged.costBudgetUsd,
+    toolCallCount: (parent.toolCallCount ?? 0) + charged.maxToolCalls,
+  };
+  // Charges accumulate as floating-point sums; ignore sub-nanodollar drift.
+  const costShort = parent.costBudgetUsd != null && reservation.costBudgetUsd > 0 &&
+    reservation.costBudgetUsd - (parent.costBudgetUsd - allowance.costUsd) > 1e-9;
+  const toolsShort = parent.maxToolCalls != null && reservation.maxToolCalls > 0 &&
+    reservation.maxToolCalls > parent.maxToolCalls - allowance.toolCallCount;
+  if (!costShort && !toolsShort) return null;
+  const needed = [
+    ...(costShort ? [`$${reservation.costBudgetUsd.toFixed(2)}`] : []),
+    ...(toolsShort ? [`${reservation.maxToolCalls} tool calls`] : []),
+  ].join(" and ");
+  return `the parent session has ${remainingAllowance(allowance)} remaining, but restarting this child ` +
+    `re-reserves ${needed} of its unspent limits; raise the parent's limits before restarting this child`;
+}
+
 /** Resolve caller and Project defaults, then divide a finite parent's remaining capacity over
  * live spawn slots as the hard ceiling. Without any of those sources, the dimension is unlimited. */
 export function childSessionGuardrails(
-  parent: Pick<SessionView, "costBudgetUsd" | "costUsd" | "maxToolCalls" | "toolCallCount">,
+  parent: ParentAllowance,
   requested: SessionConfig | undefined,
   remainingSlots: number,
   defaults?: ChildSessionDefaults | null,
@@ -48,7 +91,11 @@ export function childSessionGuardrails(
     : Math.floor((parent.maxToolCalls - (parent.toolCallCount ?? 0)) / remainingSlots);
   if ((costRemaining != null && (!Number.isFinite(costRemaining) || costRemaining <= 0)) ||
       (toolsRemaining != null && (!Number.isFinite(toolsRemaining) || toolsRemaining < 1))) {
-    return { error: "the parent session has insufficient remaining budget to create a child" };
+    return {
+      error: `the parent session has insufficient remaining budget to create a child: ${
+        remainingAllowance(parent)} remain after its own usage and its children's charges${
+        remainingSlots > 1 ? `, shared across ${remainingSlots} open child slots` : ""}`,
+    };
   }
   if ((costRemaining != null && requestedCost === 0) || (toolsRemaining != null && requestedTools === 0)) {
     return { error: "a child cannot clear a finite parent guardrail" };

@@ -42,8 +42,13 @@ A bounded parent divides its
 remaining, unreserved allowance across its remaining spawn slots; explicit child limits can narrow
 that allocation. The default concurrent live-child cap is four, configurable at creation or on a
 live session with `config.maxChildSessions` from zero through 64. Completed, failed, stopped, and
-archived children free live slots. Lifetime usage reservations survive terminal states and deletion,
-so a finite parent's already-allocated spend cannot be reused.
+archived children free live slots. A live child is charged against its parent for at least its full
+cost and tool-call limits. When it reaches a terminal state, its
+charge settles to what it actually spent and used, and late-reported usage can only raise that
+charge. A child's usage includes the charges of its own children, since their allowance came out of
+its limits. Restarting a terminal child re-reserves its unspent limits, and the restart is refused when
+the parent no longer has that much allowance left. Deleting a child never reduces what its parent is
+charged, so deleting history cannot replenish an allowance.
 These are admission allowances; existing runtime cost and tool-call enforcement remains responsible
 for stopping a child when it reaches its limit.
 

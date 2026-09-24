@@ -4522,6 +4522,169 @@ test("legacy session rows add event_epoch at zero before the first replacement",
   }
 });
 
+test("child charges settle to actual usage at terminal transitions and survive deletion", () => {
+  const db = withRunner();
+  try {
+    const charged = () => {
+      const { costBudgetUsd, maxToolCalls } = db.childSessionAllocations("parent");
+      return { costBudgetUsd: Math.round(costBudgetUsd * 1e6) / 1e6, maxToolCalls };
+    };
+    const toolCall = (sessionId: string, toolCallId: string) =>
+      db.appendEvent(sessionId, { kind: "tool_call", toolCallId, title: "Read", status: "completed" }, 2_000);
+    db.createSession(newSession({ id: "parent" }));
+    db.createSession(newSession({ id: "child", parentSessionId: "parent", config: { costBudgetUsd: 5, maxToolCalls: 50 } }));
+    toolCall("child", "t1");
+    toolCall("child", "t1");
+    toolCall("child", "t2");
+    db.addSessionUsage("child", { costUsd: 0.4 }, 2_000);
+    assert.deepEqual(charged(), { costBudgetUsd: 5, maxToolCalls: 50 }, "a live child holds its full limits");
+    db.updateSessionStatus("child", "running", 2_000);
+    assert.deepEqual(charged(), { costBudgetUsd: 5, maxToolCalls: 50 }, "live-to-live transitions do not settle");
+
+    db.updateSessionStatus("child", "completed", 3_000);
+    assert.deepEqual(charged(), { costBudgetUsd: 0.4, maxToolCalls: 2 });
+    db.updateSessionStatus("child", "failed", 3_000);
+    assert.deepEqual(charged(), { costBudgetUsd: 0.4, maxToolCalls: 2 }, "terminal-to-terminal transitions are stable");
+    db.addSessionUsage("child", { costUsd: 0.1 }, 3_000);
+    toolCall("child", "t3");
+    assert.deepEqual(charged(), { costBudgetUsd: 0.5, maxToolCalls: 3 }, "late usage raises a settled charge");
+    db.clearSessionEvents("child");
+    toolCall("child", "t1");
+    assert.deepEqual(charged(), { costBudgetUsd: 0.5, maxToolCalls: 3 }, "replaying history never lowers a settled charge");
+    toolCall("child", "t2");
+    toolCall("child", "t3");
+
+    db.updateSessionStatus("child", "starting", 4_000);
+    assert.deepEqual(charged(), { costBudgetUsd: 5, maxToolCalls: 50 }, "a resumed child re-reserves its limits");
+    assert.deepEqual(db.childSessionRestartReservation("child"), { costBudgetUsd: 0, maxToolCalls: 0 });
+    db.updateSessionStatus("child", "stopped", 5_000);
+    assert.deepEqual(charged(), { costBudgetUsd: 0.5, maxToolCalls: 3 });
+    assert.deepEqual(db.childSessionRestartReservation("child"), { costBudgetUsd: 4.5, maxToolCalls: 47 });
+    db.deleteSession("child");
+    assert.deepEqual(charged(), { costBudgetUsd: 0.5, maxToolCalls: 3 }, "deletion never replenishes the allowance");
+
+    db.createSession(newSession({ id: "overrun", parentSessionId: "parent", config: { costBudgetUsd: 1, maxToolCalls: 1 } }));
+    db.addSessionUsage("overrun", { costUsd: 1.5 }, 6_000);
+    toolCall("overrun", "o1");
+    toolCall("overrun", "o2");
+    assert.deepEqual(charged(), { costBudgetUsd: 2, maxToolCalls: 4 },
+      "live spend beyond the limit is charged at once; live tool calls are held at the limit");
+    db.updateSessionStatus("overrun", "completed", 7_000);
+    assert.deepEqual(charged(), { costBudgetUsd: 2, maxToolCalls: 5 }, "settlement charges the actual overrun");
+    assert.equal(db.childSessionAllocations("parent").count, 2);
+  } finally {
+    db.close();
+  }
+});
+
+test("a child's charge covers its own children and reaches its parent when they settle", () => {
+  const db = withRunner();
+  try {
+    const charged = () => {
+      const { costBudgetUsd, maxToolCalls } = db.childSessionAllocations("root");
+      return { costBudgetUsd: Math.round(costBudgetUsd * 1e6) / 1e6, maxToolCalls };
+    };
+    db.createSession(newSession({ id: "root" }));
+    db.createSession(newSession({ id: "lead", parentSessionId: "root", config: { costBudgetUsd: 5, maxToolCalls: 50 } }));
+    db.createSession(newSession({ id: "helper", parentSessionId: "lead", config: { costBudgetUsd: 2, maxToolCalls: 20 } }));
+    assert.deepEqual(charged(), { costBudgetUsd: 5, maxToolCalls: 50 }, "a helper is carved out of its lead's limits");
+
+    db.addSessionUsage("lead", { costUsd: 0.25 }, 2_000);
+    db.appendEvent("lead", { kind: "tool_call", toolCallId: "l1", title: "Read", status: "completed" }, 2_000);
+    db.updateSessionStatus("lead", "stopped", 3_000);
+    assert.deepEqual(charged(), { costBudgetUsd: 2.25, maxToolCalls: 21 },
+      "a stopped lead stays charged for its still-live helper");
+    db.addSessionUsage("helper", { costUsd: 0.5 }, 4_000);
+    for (const toolCallId of ["h1", "h2", "h3", "h4"]) {
+      db.appendEvent("helper", { kind: "tool_call", toolCallId, title: "Read", status: "completed" }, 4_000);
+    }
+    db.updateSessionStatus("helper", "completed", 5_000);
+    assert.deepEqual(charged(), { costBudgetUsd: 0.75, maxToolCalls: 5 }, "the helper's settlement reaches the root");
+    db.addSessionUsage("helper", { costUsd: 0.125 }, 6_000);
+    db.appendEvent("helper", { kind: "tool_call", toolCallId: "h5", title: "Read", status: "completed" }, 6_000);
+    assert.deepEqual(charged(), { costBudgetUsd: 0.875, maxToolCalls: 6 }, "late helper usage reaches the root");
+    db.deleteSession("helper");
+    assert.deepEqual(charged(), { costBudgetUsd: 0.875, maxToolCalls: 6 });
+    db.updateSessionStatus("lead", "starting", 7_000);
+    assert.deepEqual(charged(), { costBudgetUsd: 5, maxToolCalls: 50 });
+  } finally {
+    db.close();
+  }
+});
+
+test("legacy lifetime child reservations are settled once and keep deleted children's charges", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-child-charge-migration-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession({ id: "parent" }));
+    const createChild = (id: string, parentSessionId: string, costBudgetUsd: number, maxToolCalls: number) => {
+      initial.createSession(newSession({ id, parentSessionId, config: { costBudgetUsd, maxToolCalls } }));
+      initial.updateSessionCostBudget(id, costBudgetUsd, 1_000);
+      initial.updateSessionMaxToolCalls(id, maxToolCalls, 1_000);
+    };
+    const toolCalls = (id: string, count: number) => {
+      for (let call = 0; call < count; call++) {
+        initial.appendEvent(id, { kind: "tool_call", toolCallId: `${id}-${call}`, title: "Read", status: "completed" }, 1_000);
+      }
+    };
+    for (const id of ["live", "done", "gone", "lead"]) createChild(id, "parent", 5, 50);
+    createChild("helper", "lead", 2, 20);
+    createChild("helper-gone", "lead", 1, 10);
+    initial.updateSessionCostBudget("live", 7, 1_000, 5);
+    initial.addSessionUsage("live", { costUsd: 1 }, 1_000);
+    initial.updateSessionStatus("live", "running", 1_000);
+    initial.addSessionUsage("done", { costUsd: 0.4 }, 1_000);
+    toolCalls("done", 2);
+    initial.updateSessionStatus("done", "completed", 1_000);
+    initial.addSessionUsage("helper", { costUsd: 0.2 }, 1_000);
+    toolCalls("helper", 3);
+    initial.updateSessionStatus("helper", "completed", 1_000);
+    initial.addSessionUsage("lead", { costUsd: 0.3 }, 1_000);
+    toolCalls("lead", 1);
+    initial.updateSessionStatus("lead", "completed", 1_000);
+    initial.close();
+
+    const legacy = new DatabaseSync(path);
+    for (const trigger of [
+      "sessions_settle_child_charge",
+      "sessions_raise_child_cost_charge",
+      "sessions_settle_grandchild_cost_charge",
+      "sessions_settle_grandchild_tool_call_charge",
+    ]) legacy.exec(`DROP TRIGGER ${trigger}`);
+    for (const column of [
+      "parent_reserved_cost_usd",
+      "parent_reserved_tool_calls",
+      "parent_charged_cost_usd",
+      "parent_charged_tool_calls",
+    ]) legacy.exec(`ALTER TABLE sessions DROP COLUMN ${column}`);
+    legacy.exec("UPDATE sessions SET child_cost_reserved_usd=20, child_tool_calls_reserved=200 WHERE id='parent'");
+    legacy.exec("UPDATE sessions SET child_cost_reserved_usd=3, child_tool_calls_reserved=30 WHERE id='lead'");
+    legacy.exec("DELETE FROM sessions WHERE id IN ('gone', 'helper-gone')");
+    legacy.close();
+
+    const upgraded = ControlPlaneDb.open(path);
+    const charged = (db: ControlPlaneDb, id = "parent") => {
+      const { costBudgetUsd, maxToolCalls } = db.childSessionAllocations(id);
+      return { costBudgetUsd: Math.round(costBudgetUsd * 1e6) / 1e6, maxToolCalls };
+    };
+    assert.deepEqual(charged(upgraded, "lead"), { costBudgetUsd: 1.2, maxToolCalls: 13 },
+      "a deleted helper keeps its full reservation and a finished helper settles");
+    assert.deepEqual(charged(upgraded), { costBudgetUsd: 11.9, maxToolCalls: 116 },
+      "the deleted child keeps its reservation, the live child its original window, and finished subtrees settle");
+    upgraded.close();
+
+    const reopened = ControlPlaneDb.open(path);
+    assert.deepEqual(charged(reopened), { costBudgetUsd: 11.9, maxToolCalls: 116 }, "the backfill runs once");
+    reopened.updateSessionStatus("live", "stopped", 2_000);
+    assert.deepEqual(charged(reopened), { costBudgetUsd: 7.9, maxToolCalls: 66 });
+    reopened.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("Parent Control defaults off and persists opt-in across restart", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-parent-control-"));
   const path = join(root, "control-plane.db");

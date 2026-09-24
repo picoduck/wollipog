@@ -147,8 +147,11 @@ Creation results report the effective limits, including `null` for none. `maxChi
 concurrent live children and accepts zero through 64. New Orchestrator sessions expose and persist
 that initial limit before their first turn. Session views report the effective limit, occupied live
 slots, and remaining capacity. Completed, failed, stopped, and archived
-children release live slots, while their lifetime usage reservations remain charged to a finite
-parent. Live cost/tool edits require delivery to an online current runner and fail closed rather
+children release live slots. A finite parent is charged each live child's full limits, and each
+terminal child's actual cost and tool calls, including those of the child's own children; deleting
+a child never reduces that charge, and
+restarting a terminal child re-reserves its unspent limits. A refused creation reports the parent's
+remaining allowance. Live cost/tool edits require delivery to an online current runner and fail closed rather
 than leaving control-plane and runner thresholds out of sync.
 
 `create_session` and `wollipog session create` accept an optional reasoning effort alongside the
