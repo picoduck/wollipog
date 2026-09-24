@@ -37,6 +37,9 @@ const fixtureParams = new URLSearchParams(window.location.search);
 /** The runner decides which presets are offered, which is the whole subject of the spec. */
 const orchestratorCapable = fixtureParams.get("orchestrator") !== "0";
 
+/** #1648: accounts people named after their email, which the picker must mask by default. */
+const emailAccounts = fixtureParams.get("emailAccounts") === "1";
+
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "fixture-runner",
@@ -104,13 +107,13 @@ const runner: RunnerView = {
   providerAccounts: [
     {
       id: "claude-work",
-      label: "Work",
+      label: emailAccounts ? "work.me@example.com" : "Work",
       provider: "claude",
       authStatus: "authenticated",
     },
     {
       id: "claude-personal",
-      label: "Personal",
+      label: emailAccounts ? "work.me@example.org" : "Personal",
       provider: "claude",
       authStatus: "unauthenticated",
     },

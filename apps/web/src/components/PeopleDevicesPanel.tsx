@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import type {
   DeviceView,
@@ -11,9 +11,16 @@ import type {
 import { useApi } from "../api-context.js";
 import { pairingLinks } from "../device-token.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
+import { accountLabelText, isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { CopyButton, Modal } from "./common.js";
 import { DeviceIcon, EditIcon, PlusIcon, TeamIcon, UserPlusIcon } from "./Icons.js";
 import { useFeedback } from "./FeedbackProvider.js";
+import {
+  PersonalIdentifier,
+  PersonalIdentifierMask,
+  PersonalIdentifierRevealButton,
+  usePersonalIdentifierReveal,
+} from "./PersonalIdentifier.js";
 
 type AccessDialog =
   | { kind: "add-person" }
@@ -107,7 +114,7 @@ function AddPersonDialog({
   );
 }
 
-function ManagePersonDialog({
+export function ManagePersonDialog({
   actorRole,
   member,
   onClose,
@@ -120,6 +127,10 @@ function ManagePersonDialog({
 }) {
   const api = useApi();
   const [displayName, setDisplayName] = useState(member.userName);
+  // An email-shaped name stays out of the editable field until the admin deliberately shows it.
+  const nameIsPersonal = isPersonalIdentifier(member.userName);
+  const [nameShown, setNameShown] = useState(!nameIsPersonal);
+  const nameId = useId();
   const [role, setRole] = useState(member.role);
   const [status, setStatus] = useState<UserStatus>(member.userStatus);
   const [busy, setBusy] = useState(false);
@@ -144,7 +155,7 @@ function ManagePersonDialog({
   };
   return (
     <Modal
-      title={`Manage ${member.userName}`}
+      title={`Manage ${accountLabelText(member.userName, "Person")}`}
       onClose={onClose}
       footer={
         <>
@@ -156,10 +167,29 @@ function ManagePersonDialog({
       }
     >
       <div className="access-form">
-        <label>
-          <span>Name</span>
-          <input autoFocus value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
-        </label>
+        {nameIsPersonal ? (
+          <div className="access-form-field">
+            <div className="personal-identifier-field-head">
+              {nameShown ? <label htmlFor={nameId}>Name</label> : <span>Name</span>}
+              <PersonalIdentifierRevealButton
+                label="Person Name"
+                revealed={nameShown}
+                onToggle={() => setNameShown((shown) => !shown)}
+                controls={nameShown ? nameId : undefined}
+                withText
+              />
+            </div>
+            {nameShown
+              // No autofocus: a keyboard reveal keeps focus on the toggle so Enter can hide it again.
+              ? <input id={nameId} value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
+              : <PersonalIdentifierMask />}
+          </div>
+        ) : (
+          <label>
+            <span>Name</span>
+            <input autoFocus value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
+          </label>
+        )}
         <label>
           <span>Access Level</span>
           <select value={role} onChange={(event) => setRole(event.target.value as OrganizationRole)}>
@@ -212,6 +242,10 @@ export function PairDeviceDialog({
     mountedRef.current = false;
   }, []);
   const person = activeMembers.find((member) => member.userId === userId);
+  const memberTitles = maskedAccountTitles(activeMembers.map((member) => member.userName), "Hidden Name");
+  const [namesRevealed, toggleNames] = usePersonalIdentifierReveal(
+    activeMembers.map((member) => member.userName).join("\n"),
+  );
   const requestClose = () => {
     if (!busy) onClose();
   };
@@ -255,7 +289,8 @@ export function PairDeviceDialog({
         footer={<button type="button" className="btn primary" onClick={onClose}>Done</button>}
       >
         <div className="access-success" role="status">
-          <strong>{name}</strong> is ready for {person?.userName ?? "this person"}. This credential is shown once.
+          <strong>{name}</strong> is ready for{" "}
+          {person ? <PersonalIdentifier value={person.userName} label="Person Name" /> : "this person"}. This credential is shown once.
         </div>
         {primaryLink ? (
           <section className="access-pairing-qr" aria-labelledby="pair-device-qr-heading">
@@ -329,28 +364,41 @@ export function PairDeviceDialog({
         )}
     >
       {step === "person" ? (
-        <div className="access-choice-list" role="radiogroup" aria-label="Person">
-          {activeMembers.map((member) => (
-            <label className={`access-choice${userId === member.userId ? " selected" : ""}`} key={member.userId}>
-              <input
-                type="radio"
-                name="pair-person"
-                value={member.userId}
-                checked={userId === member.userId}
-                onChange={() => setUserId(member.userId)}
+        <>
+          {activeMembers.some((member) => isPersonalIdentifier(member.userName)) && (
+            <div className="personal-identifier-field-head">
+              <PersonalIdentifierRevealButton
+                label="Person Names"
+                revealed={namesRevealed}
+                onToggle={toggleNames}
+                controls="pair-person-choices"
+                withText
               />
-              <span>
-                <strong>{member.userName}</strong>
-                <small>{titleCaseLabel(member.role)} Access</small>
-              </span>
-            </label>
-          ))}
-          {activeMembers.length === 0 && <div className="access-empty-copy">Add an active person before pairing a device.</div>}
-        </div>
+            </div>
+          )}
+          <div className="access-choice-list" id="pair-person-choices" role="radiogroup" aria-label="Person">
+            {activeMembers.map((member, index) => (
+              <label className={`access-choice${userId === member.userId ? " selected" : ""}`} key={member.userId}>
+                <input
+                  type="radio"
+                  name="pair-person"
+                  value={member.userId}
+                  checked={userId === member.userId}
+                  onChange={() => setUserId(member.userId)}
+                />
+                <span>
+                  <strong>{namesRevealed ? member.userName : memberTitles[index]}</strong>
+                  <small>{titleCaseLabel(member.role)} Access</small>
+                </span>
+              </label>
+            ))}
+            {activeMembers.length === 0 && <div className="access-empty-copy">Add an active person before pairing a device.</div>}
+          </div>
+        </>
       ) : (
         <div className="access-form">
           <p className="access-dialog-intro">
-            Pairing for <strong>{person?.userName}</strong>. Use a name they will recognize later.
+            Pairing for <strong>{person && <PersonalIdentifier value={person.userName} label="Person Name" />}</strong>. Use a name they will recognize later.
           </p>
           <label>
             <span>Device Name</span>
@@ -384,6 +432,10 @@ function TeamDialog({
   const activeMembers = identity.memberships.filter((member) => member.userStatus === "active");
   const [name, setName] = useState(team?.name ?? "");
   const [memberIds, setMemberIds] = useState<string[]>(team?.memberUserIds ?? []);
+  const memberTitles = maskedAccountTitles(activeMembers.map((member) => member.userName), "Hidden Name");
+  const [namesRevealed, toggleNames] = usePersonalIdentifierReveal(
+    activeMembers.map((member) => member.userName).join("\n"),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const toggle = (userId: string) => {
@@ -455,14 +507,22 @@ function TeamDialog({
         )}
         <fieldset className="access-member-picker">
           <legend>Members</legend>
-          {activeMembers.map((member) => (
+          {activeMembers.some((member) => isPersonalIdentifier(member.userName)) && (
+            <PersonalIdentifierRevealButton
+              label="Person Names"
+              revealed={namesRevealed}
+              onToggle={toggleNames}
+              withText
+            />
+          )}
+          {activeMembers.map((member, index) => (
             <label key={member.userId}>
               <input
                 type="checkbox"
                 checked={memberIds.includes(member.userId)}
                 onChange={() => toggle(member.userId)}
               />
-              <span>{member.userName}</span>
+              <span>{namesRevealed ? member.userName : memberTitles[index]}</span>
               <small>{member.role}</small>
             </label>
           ))}
@@ -540,7 +600,7 @@ export function PeopleDevicesPanel({
           </p>
         </div>
         <span className="access-context">
-          {identity.context.userName} · {identity.context.role}
+          <PersonalIdentifier value={identity.context.userName} label="Your Name" /> · {identity.context.role}
         </span>
       </div>
       {error && <div className="connection-access-error" role="alert">{error}</div>}
@@ -567,7 +627,7 @@ export function PeopleDevicesPanel({
             return (
               <div className="access-row" key={member.userId}>
                 <div className="access-row-main">
-                  <strong>{member.userName}</strong>
+                  <strong><PersonalIdentifier value={member.userName} label="Person Name" /></strong>
                   <span className="access-row-meta">
                     <span className="access-role-badge">{titleCaseLabel(member.role)}</span>
                     <span className={`access-status access-status-${member.userStatus}`}>{titleCaseLabel(member.userStatus)}</span>
@@ -624,7 +684,7 @@ export function PeopleDevicesPanel({
               <div className="access-row" key={device.deviceId}>
                 <div className="access-row-main">
                   <strong>{device.name}</strong>
-                  <span>{device.userName} · {titleCaseLabel(device.role)}</span>
+                  <span><PersonalIdentifier value={device.userName} label="Person Name" /> · {titleCaseLabel(device.role)}</span>
                   <small>
                     Paired {relativeTime(device.createdAt)}
                     {device.lastSeenAt == null ? " · never used" : ` · last seen ${relativeTime(device.lastSeenAt)}`}

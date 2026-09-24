@@ -4,6 +4,7 @@ import {
   type ResourceOwner,
   type ResourceScope,
 } from "@wollipog/protocol";
+import { accountLabelText } from "./personal-identifiers.js";
 
 export interface AccessScopeChoice {
   key: string;
@@ -42,7 +43,10 @@ export function accessScopeLabel(scope: ResourceScope, identity?: IdentityAdmini
     const userId = scope.owner.userId;
     return userId === identity?.context.userId
       ? "Private to Me"
-      : `Private to ${identity?.memberships.find((member) => member.userId === userId)?.userName ?? "Another Member"}`;
+      : `Private to ${accountLabelText(
+        identity?.memberships.find((member) => member.userId === userId)?.userName ?? "Another Member",
+        "Another Member",
+      )}`;
   }
   const teamId = scope.owner.teamId;
   return `Team: ${identity?.teams.find((team) => team.teamId === teamId)?.name ?? "Unknown Team"}`;

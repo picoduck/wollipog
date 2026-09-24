@@ -9,12 +9,13 @@ import type {
   MachineSkillRecovery,
 } from "../skills.js";
 import { Modal } from "./common.js";
+import { accountLabelText } from "../personal-identifiers.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
 
 const contents = (file?: SkillFile) => !file ? "(File absent)" : file.encoding === "utf8" ? file.content : `Binary content (base64):\n${file.content}`;
 const accountLabel = (runner: RunnerView | undefined, providerAccountId: string | undefined) =>
   providerAccountId
-    ? runner?.providerAccounts?.find((account) => account.id === providerAccountId)?.label ?? "Provider Account"
+    ? accountLabelText(runner?.providerAccounts?.find((account) => account.id === providerAccountId)?.label ?? "Provider Account")
     : null;
 const candidateLocation = (candidate: MachineSkillDiscovery["candidates"][number], runner?: RunnerView) => {
   const account = accountLabel(runner, candidate.providerAccountId);

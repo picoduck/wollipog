@@ -64,6 +64,8 @@ import {
 } from "./agent-options.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { Modal } from "./common.js";
+import { PersonalIdentifierRevealButton, usePersonalIdentifierReveal } from "./PersonalIdentifier.js";
+import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
@@ -380,6 +382,11 @@ export function NewSessionDialog({
   const providerAccounts = (runner?.providerAccounts ?? []).filter((account) =>
     account.provider === provider &&
     ((agent?.context?.kind ?? "native") === "native" || account.id === agent?.defaultProviderAccountId));
+  const providerAccountTitles = maskedAccountTitles(providerAccounts.map((account) => account.label));
+  // Bound to this exact account list: another Machine or Agent offers other accounts, hidden again.
+  const [accountIdentifiersRevealed, toggleAccountIdentifiers] = usePersonalIdentifierReveal(
+    providerAccounts.map((account) => account.label).join("\n"),
+  );
   useEffect(() => {
     const preferred = agent?.defaultProviderAccountId;
     setProviderAccountId((current) => providerAccounts.some((account) => account.id === current)
@@ -1500,15 +1507,25 @@ export function NewSessionDialog({
 
           {hostExecutionTarget && providerAccounts.length > 1 && (
             <div className="field">
-              <label className="new-session-field-label">Account</label>
+              <div className="personal-identifier-field-head">
+                <label className="new-session-field-label">Account</label>
+                {providerAccounts.some((account) => isPersonalIdentifier(account.label)) && (
+                  <PersonalIdentifierRevealButton
+                    label="Account Emails"
+                    revealed={accountIdentifiersRevealed}
+                    onToggle={toggleAccountIdentifiers}
+                    withText
+                  />
+                )}
+              </div>
               <Select<string>
                 className="new-session-choice-control"
                 label="Account"
                 value={providerAccountId || null}
                 onChange={setProviderAccountId}
-                options={providerAccounts.map((account) => ({
+                options={providerAccounts.map((account, index) => ({
                   value: account.id,
-                  label: account.label,
+                  label: accountIdentifiersRevealed ? account.label : providerAccountTitles[index]!,
                   description: account.authStatus === "authenticated" ? "Logged In" :
                     account.authStatus === "unauthenticated" ? "Login Required" : "Login Unknown",
                 }))}

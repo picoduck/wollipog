@@ -6,7 +6,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { IdentityAdministrationView } from "@wollipog/protocol";
 import { api } from "../api.js";
-import { PairDeviceDialog } from "./PeopleDevicesPanel.js";
+import { ManagePersonDialog, PairDeviceDialog } from "./PeopleDevicesPanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -105,6 +105,96 @@ test("pairing reveals the one-time credential even when the follow-up refresh fa
   } finally {
     await act(async () => { root.unmount(); });
     api.pairDevice = priorPairDevice;
+    container.remove();
+  }
+});
+
+test("managing an email-named person keeps the stored name out of the form until shown", async () => {
+  const priorUpdate = api.updateIdentityMember;
+  const updates: Array<{ displayName?: string }> = [];
+  api.updateIdentityMember = (async (_userId: string, body: { displayName?: string }) => {
+    updates.push(body);
+    return {} as never;
+  }) as typeof api.updateIdentityMember;
+  const member = { userId: "user-2", userName: "pat@example.com", role: "operator", userStatus: "active" } as never;
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const button = (text: string) => Array.from(container.querySelectorAll("button"))
+    .find((candidate) => candidate.textContent === text) as unknown as HTMLButtonElement | undefined;
+  const nameInput = () => Array.from(container.querySelectorAll("input"))
+    .find((input) => (input as unknown as HTMLInputElement).value.includes("@")) as unknown as HTMLInputElement | undefined;
+  try {
+    await act(async () => {
+      root.render(<ManagePersonDialog actorRole="owner" member={member} onClose={() => {}} onSaved={async () => {}} />);
+    });
+    assert.equal(container.innerHTML.includes("@example."), false, "neither the title nor the field shows the name");
+    assert.equal(nameInput(), undefined);
+
+    const show = button("Show Person Name")!;
+    show.focus();
+    await act(async () => { show.click(); });
+    assert.equal(nameInput()?.value, "pat@example.com");
+    // A keyboard reveal keeps focus on the same control, so the next Enter hides it again.
+    assert.equal(domWindow.document.activeElement, button("Hide Person Name") as unknown as Element);
+    await act(async () => { button("Hide Person Name")!.click(); });
+    assert.equal(container.innerHTML.includes("@example."), false, "the name can be hidden again while the dialog is open");
+
+    // Changing only the role never needs the name revealed, and saves it unchanged.
+    await act(async () => {
+      button("Save Changes")!.click();
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+    assert.equal(updates[0]?.displayName, "pat@example.com");
+  } finally {
+    await act(async () => { root.unmount(); });
+    api.updateIdentityMember = priorUpdate;
+    container.remove();
+  }
+});
+
+test("the pairing person picker masks email-named people until one deliberate reveal", async () => {
+  const emailIdentity = {
+    ...identity,
+    memberships: [
+      { userId: "user-1", userName: "Misko", role: "owner", userStatus: "active" },
+      { userId: "user-2", userName: "pat@example.com", role: "operator", userStatus: "active" },
+      { userId: "user-3", userName: "pat@example.org", role: "viewer", userStatus: "active" },
+    ],
+  } as unknown as IdentityAdministrationView;
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<PairDeviceDialog identity={emailIdentity} onClose={() => {}} onSaved={async () => {}} />);
+    });
+    const names = () => Array.from(container.querySelectorAll(".access-choice strong")).map((node) => node.textContent);
+    assert.equal(container.innerHTML.includes("@example."), false);
+    assert.deepEqual(names(), ["Misko", "Hidden Name 1", "Hidden Name 2"]);
+    const reveal = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Show Person Names") as unknown as HTMLButtonElement;
+    assert.ok(reveal);
+    await act(async () => { reveal.click(); });
+    assert.deepEqual(names(), ["Misko", "pat@example.com", "pat@example.org"]);
+
+    // A refreshed membership list is a different set of values: the earlier reveal does not carry over.
+    const refreshed = {
+      ...emailIdentity,
+      memberships: [
+        ...emailIdentity.memberships,
+        { userId: "user-4", userName: "sam@example.net", role: "viewer", userStatus: "active" },
+      ],
+    } as unknown as IdentityAdministrationView;
+    await act(async () => {
+      root.render(<PairDeviceDialog identity={refreshed} onClose={() => {}} onSaved={async () => {}} />);
+    });
+    assert.equal(container.innerHTML.includes("@example."), false);
+    assert.deepEqual(names(), ["Misko", "Hidden Name 1", "Hidden Name 2", "Hidden Name 3"]);
+  } finally {
+    await act(async () => { root.unmount(); });
     container.remove();
   }
 });

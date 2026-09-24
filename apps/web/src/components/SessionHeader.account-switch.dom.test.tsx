@@ -39,7 +39,7 @@ const session = {
   providerAccountLabel: "Work",
 } as SessionView;
 
-async function renderHeader(protocolVersion: number, client: ApiClient) {
+async function renderHeader(protocolVersion: number, client: ApiClient, current: SessionView = session) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -53,7 +53,7 @@ async function renderHeader(protocolVersion: number, client: ApiClient) {
           dismissToast: () => undefined,
         }}>
           <SessionHeader
-            session={session}
+            session={current}
             onBack={() => undefined}
             runnerOnline
             runnerProtocolVersion={protocolVersion}
@@ -121,4 +121,60 @@ test("an older runner exposes the action as disabled with an update requirement"
   assert.match(action.title, /requires protocol v171/i);
   await act(async () => root.unmount());
   container.remove();
+});
+
+test("email-shaped account labels stay masked in the header and the Switch Account picker", async () => {
+  const accounts = ["work.me@example.com", "work.me@example.org"].map((label, index) => ({
+    id: `account-${index}`,
+    label,
+    authStatus: "authenticated" as const,
+    usageState: "available" as const,
+    freshness: "fresh" as const,
+    buckets: [],
+  }));
+  const client = {
+    ...api,
+    sessionProviderAccounts: async () => ({ accounts }),
+    switchSessionProviderAccount: async () => ({ accepted: true as const, scheduled: false }),
+  } as ApiClient;
+  const { container, root } = await renderHeader(
+    RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch,
+    client,
+    { ...session, providerAccountLabel: "current.me@example.com" },
+  );
+  const html = () => domWindow.document.body.innerHTML;
+  const buttonNamed = (name: string) => [...domWindow.document.querySelectorAll("button")]
+    .find((button) => button.getAttribute("aria-label") === name || button.textContent?.trim() === name) as
+      HTMLButtonElement | undefined;
+  const openSwitch = async () => {
+    const action = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((button) => button.textContent?.trim() === "Switch Account…");
+    assert.ok(action);
+    await act(async () => { action.click(); await tick(); await tick(); });
+  };
+  try {
+    await openSwitch();
+    assert.equal(html().includes("@example."), false, "no account email is in the DOM before a reveal");
+    const titles = [...domWindow.document.querySelectorAll(".ui-choice-card-title")].map((node) => node.textContent);
+    assert.deepEqual(titles, ["Hidden Account 1", "Hidden Account 2"]);
+
+    const revealAll = buttonNamed("Show Account Emails");
+    assert.ok(revealAll, "the picker offers one deliberate reveal");
+    await act(async () => { revealAll.click(); });
+    assert.deepEqual(
+      [...domWindow.document.querySelectorAll(".ui-choice-card-title")].map((node) => node.textContent),
+      ["work.me@example.com", "work.me@example.org"],
+    );
+    assert.equal(html().includes("current.me@example.com"), false, "the picker reveal does not reveal other values");
+
+    const cancel = buttonNamed("Cancel");
+    assert.ok(cancel);
+    await act(async () => { cancel.click(); await tick(); });
+    await act(async () => { (container.querySelector('[aria-label="More Actions"]') as HTMLButtonElement).click(); await tick(); });
+    await openSwitch();
+    assert.equal(html().includes("@example."), false, "reopening the dialog starts hidden again");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });

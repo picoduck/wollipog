@@ -1,4 +1,5 @@
 import { runnerSupportsProtocol, type AgentDefinition, type RunnerView } from "@wollipog/protocol";
+import { accountLabelText } from "./personal-identifiers.js";
 import { invocationLabel, skillEligibleAgents, type RunnerSkillsResponse } from "./skills.js";
 
 /** Display configuration separately from the last reported link; a shared harness may expose a
@@ -22,7 +23,7 @@ export function skillAgentMatrixCell(runner: RunnerView, agent: AgentDefinition,
       : Boolean(row.error)));
   const scopedDetail = (row: (typeof deployed)[number], detail: string | undefined) => {
     if (!row.providerAccountId) return detail;
-    const label = account(row.providerAccountId)?.label ?? "Provider Account";
+    const label = accountLabelText(account(row.providerAccountId)?.label ?? "Provider Account");
     return `${label}: ${detail ?? "deployment did not succeed"}`;
   };
   const linkedRows = relevant.flatMap(row => row.links

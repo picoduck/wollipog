@@ -10151,7 +10151,9 @@ export class SessionManager {
     };
     this.emitEvent(sessionId, {
       kind: "error",
-      message: `Account switch to ${target.label} failed: ${boundedReason}`,
+      // The label may be an email-shaped alias; the transcript names no account, and the failure
+      // banner renders it through the dashboard's masked-identifier treatment.
+      message: `Account switch failed: ${boundedReason}`,
     });
     const updated = this.store.patchMeta(sessionId, {
       pendingProviderAccountId: undefined,

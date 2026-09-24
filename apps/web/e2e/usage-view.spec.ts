@@ -155,7 +155,10 @@ test("subscription cards show provider allowances in presentation order (#223, #
   // rather than the bare "Allowance Reported" fallback.
   const current = cards.filter({ hasText: "Claude Code on build-box" }).first();
   await expect(current.locator("h4")).toHaveText("Claude — Max");
-  await expect(current.locator(".subscription-account")).toHaveText("Account: primary@example.com");
+  // #1648: account emails are masked by default and revealed only by an explicit action.
+  await expect(current.locator(".subscription-account")).not.toContainText("primary@example.com");
+  await current.getByRole("button", { name: "Show Account Email" }).click();
+  await expect(current.locator(".subscription-account .personal-identifier-value")).toHaveText("primary@example.com");
   await expect(current.getByRole("button", { name: "Refresh Account" })).toHaveCount(0);
   const buckets = current.locator(".subscription-bucket");
   await expect(buckets).toHaveCount(3);
@@ -172,7 +175,8 @@ test("subscription cards show provider allowances in presentation order (#223, #
   // A build that reports resets but no utilization says so, instead of reading as a source that
   // has not answered yet.
   const resetOnly = cards.filter({ hasText: "Claude Code (Ubuntu)" }).first();
-  await expect(resetOnly.locator(".subscription-account")).toHaveText("Account: alternate@example.com");
+  await expect(resetOnly.locator(".subscription-account")).not.toContainText("alternate@example.com");
+  await expect(resetOnly.getByRole("button", { name: "Show Account Email" })).toBeVisible();
   await expect(resetOnly.getByRole("button", { name: "Refresh Account" })).toHaveCount(0);
   await expect(resetOnly).toContainText("without utilization percentages");
   await expect(resetOnly).not.toContainText("after the first provider response");
@@ -211,7 +215,10 @@ test("subscription cards show provider allowances in presentation order (#223, #
 
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/usage-view-e2e.html?subscriptions=1");
-  const mobileCurrent = page.locator(".subscription-source").filter({ hasText: "primary@example.com" });
+  const mobileCurrent = page.locator(".subscription-source").filter({ hasText: "Claude Code on build-box" }).first();
+  // A reload starts hidden again, including on the mobile layout.
+  await expect(mobileCurrent.locator(".subscription-account")).not.toContainText("primary@example.com");
+  await expect(mobileCurrent.getByRole("button", { name: "Show Account Email" })).toBeVisible();
   await expect(mobileCurrent.locator("h4")).toHaveText("Claude — Max");
   await expect(mobileCurrent).toBeVisible();
   await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-mobile.png` });
