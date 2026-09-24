@@ -13,7 +13,7 @@
     "typecheck": "tsc --noEmit && tsc -p tsconfig.test.json"
   },
   "dependencies": {
-    "@tanstack/react-virtual": "3.14.10",
+    "@tanstack/react-virtual": "3.14.13",
     "@tauri-apps/api": "^2.1.0",
     "@wollipog/protocol": "workspace:*",
     "@xterm/addon-fit": "^0.11.0",
