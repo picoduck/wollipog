@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { createHash } from "node:crypto";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { existsSync, mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -36,39 +36,59 @@ async function stopChild(child: ChildProcess): Promise<void> {
     new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise())),
     delay(5_000),
   ]);
-  if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await Promise.race([
+      new Promise<void>((resolvePromise) => child.once("exit", () => resolvePromise())),
+      delay(3_000),
+    ]);
+  }
 }
 
 test("a browser sees delegated image review complete through live scoped routes and receipts", async ({ page }) => {
   test.setTimeout(120_000);
-  const temp = mkdtempSync(join(tmpdir(), "wollipog-delegated-ui-evidence-"));
-  const databasePath = join(temp, "control-plane.db");
-  const workspacePath = join(temp, "workspace");
-  mkdirSync(workspacePath);
-  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
-  const seeded = seedDelegatedUiEvidence(databasePath, workspacePath);
-  const port = await reservePort();
-  const base = `http://127.0.0.1:${port}`;
+  let temp: string | null = null;
   let output = "";
+  const evidenceBase64 = readFileSync(fileURLToPath(new URL("../public/icons/icon-192.png", import.meta.url)))
+    .toString("base64");
+  const evidenceMarker = evidenceBase64.slice(1_000, 1_200);
+  let logTail = "";
+  let mediaLogged = false;
   let controlPlane: ChildProcess | null = null;
   try {
+    temp = mkdtempSync(join(tmpdir(), "wollipog-delegated-ui-evidence-"));
+    const databasePath = join(temp, "control-plane.db");
+    const workspacePath = join(temp, "workspace");
+    const webDist = join(temp, "web-dist");
+    mkdirSync(workspacePath);
+    const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+    const seeded = seedDelegatedUiEvidence(databasePath, workspacePath);
     // Serve the exact source build in the browser, not a bundle left by another test run.
-    const built = spawnSync("pnpm", ["--filter", "@wollipog/web", "build"], {
-      cwd: REPO_ROOT, encoding: "utf8", timeout: 60_000,
+    const built = spawnSync("pnpm", ["--dir", "apps/web", "exec", "vite", "build", "--outDir", webDist], {
+      cwd: REPO_ROOT, encoding: "utf8", timeout: 60_000, shell: process.platform === "win32",
     });
-    if (built.status !== 0 || !existsSync(join(REPO_ROOT, "apps/web/dist/index.html"))) {
-      throw new Error(`web build failed: ${built.stderr.slice(-2000)} ${built.stdout.slice(-2000)}`);
+    if (built.status !== 0 || !existsSync(join(webDist, "index.html"))) {
+      throw new Error(`web build failed: ${built.error?.message ?? ""} ${(built.stderr ?? "").slice(-2000)} ${(built.stdout ?? "").slice(-2000)}`);
     }
+    const port = await reservePort();
+    const base = `http://127.0.0.1:${port}`;
     const env = { ...process.env };
     for (const key of Object.keys(env)) if (/^(RUNNER_|CONTROL_PLANE_)/u.test(key)) delete env[key];
     controlPlane = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
       cwd: REPO_ROOT,
       env: { ...env, CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT: String(port),
-        CONTROL_PLANE_DB: databasePath },
+        CONTROL_PLANE_DB: databasePath, WOLLIPOG_WEB_DIST: webDist },
       stdio: ["ignore", "pipe", "pipe"],
     });
-    controlPlane.stdout?.on("data", (chunk) => { output = (output + String(chunk)).slice(-8_192); });
-    controlPlane.stderr?.on("data", (chunk) => { output = (output + String(chunk)).slice(-8_192); });
+    const captureLog = (chunk: unknown) => {
+      const text = String(chunk);
+      const scanned = logTail + text;
+      if (scanned.includes(evidenceMarker)) mediaLogged = true;
+      logTail = scanned.slice(1 - evidenceMarker.length);
+      output = (output + text).slice(-8_192);
+    };
+    controlPlane.stdout?.on("data", captureLog);
+    controlPlane.stderr?.on("data", captureLog);
     let ready = false;
     for (let attempt = 0; attempt < 400; attempt += 1) {
       if (controlPlane.exitCode !== null) throw new Error(`control plane exited early: ${output}`);
@@ -100,7 +120,7 @@ test("a browser sees delegated image review complete through live scoped routes 
       method: "POST", headers: agentHeaders,
       body: JSON.stringify({ sessionId: seeded.parentId, occurrenceId: seeded.occurrenceId, evidenceId: "capture" }),
     });
-    expect(crossSession.status, "the receipt route is scoped to the exact descendant").toBe(404);
+    expect(crossSession.status, "the receipt route binds the child and occurrence").toBe(404);
     const review = await fetch(`${route}/review-ui-evidence`, {
       method: "POST", headers: agentHeaders,
       body: JSON.stringify({ sessionId: seeded.childId, occurrenceId: seeded.occurrenceId, evidenceId: "capture" }),
@@ -125,6 +145,8 @@ test("a browser sees delegated image review complete through live scoped routes 
       body: JSON.stringify({ sessionId: seeded.childId, occurrenceId: seeded.occurrenceId, evidenceId: "capture" }),
     });
     expect(staleReview.status).toBe(409);
+    expect((await acknowledge(seeded.evidence.sha256)).status, "spent receipts cannot be acknowledged again").toBe(409);
+    expect((await resolveDecision()).status, "resolved decisions cannot be approved again").toBe(409);
 
     const decisionResponse = await fetch(
       `${base}/api/sessions/${seeded.childId}/workflow-decisions/${seeded.occurrenceId}`,
@@ -140,11 +162,12 @@ test("a browser sees delegated image review complete through live scoped routes 
     expect(auditText).toContain(delivered.receipt.receiptId);
     expect(auditText).not.toContain(delivered.data);
     expect(auditText).not.toContain(seeded.parentToken);
-    expect(output).not.toContain(delivered.data);
+    expect(mediaLogged, "control-plane logs must not contain the delivered image").toBe(false);
   } catch (error) {
-    throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${output}`);
+    const safeOutput = output.replace(/[A-Za-z0-9+/]{120,}={0,2}/gu, "[redacted media]");
+    throw new Error(`${error instanceof Error ? error.stack : String(error)}\n${safeOutput}`);
   } finally {
     if (controlPlane) await stopChild(controlPlane);
-    rmSync(temp, { recursive: true, force: true });
+    if (temp) rmSync(temp, { recursive: true, force: true });
   }
 });
