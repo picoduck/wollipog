@@ -186,3 +186,80 @@ test("a replaced private config path cannot inject proxies into a later Docker l
     rmSync(previousPath, { recursive: true, force: true });
   }
 });
+
+test("a missing private Docker config with no writable replacement makes only its target unavailable on refresh", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-docker-config-loss-"));
+  const previousTmpdir = process.env.TMPDIR;
+  const previousHost = process.env.DOCKER_HOST;
+  process.env.DOCKER_HOST = "unix:///var/run/docker.sock";
+  try {
+    const registry = new ContainerTargetRegistry("runner", "host", [template,
+      { ...template, id: "podman-control", runtime: "podman" }], {
+      podmanDefaultsSafe: () => true,
+      resolveRuntime: async (name) => ({ path: `/usr/bin/${name}`, via: "path",
+        launch: { command: `/usr/bin/${name}`, args: [] } }),
+      run: async (_file, args) => {
+        if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
+        if (args.includes("/bin/sh")) return { code: 0, stdout: "/usr/bin/codex\n", stderr: "" };
+        if (args.at(-1) === "--version" && args.includes("/usr/bin/codex")) {
+          return { code: 0, stdout: "codex 1.0.0\n", stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(registry.definitions()[0]!.harnessInstallations?.length, 1);
+    assert.equal(registry.definitions()[1]!.available, true);
+
+    rmSync(dockerTargetClientConfig(), { recursive: true, force: true });
+    process.env.TMPDIR = join(root, "missing");
+    await registry.refreshInstallations();
+    const definition = registry.definitions()[0]!;
+    assert.equal(definition.available, false);
+    assert.equal(definition.harnessInstallations?.length ?? 0, 0);
+    assert.equal(definition.unavailableReason, "Docker client configuration could not be isolated");
+    assert.equal(registry.definitions()[1]!.available, true);
+    assert.equal(registry.definitions()[1]!.harnessInstallations?.length, 1);
+  } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmpdir;
+    if (previousHost === undefined) delete process.env.DOCKER_HOST;
+    else process.env.DOCKER_HOST = previousHost;
+    dockerTargetClientConfig();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Rediscover marks Docker unavailable if its private config disappears after the initial check", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-docker-config-rediscover-"));
+  const previousTmpdir = process.env.TMPDIR;
+  const previousHost = process.env.DOCKER_HOST;
+  process.env.DOCKER_HOST = "unix:///var/run/docker.sock";
+  try {
+    let removed = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => ({ path: "/usr/bin/docker", via: "path",
+        launch: { command: "/usr/bin/docker", args: [] } }),
+      run: async (_file, args) => {
+        if (args[0] === "run" && args.includes("git") && !removed) {
+          rmSync(dockerTargetClientConfig(), { recursive: true, force: true });
+          process.env.TMPDIR = join(root, "missing");
+          removed = true;
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(removed, true);
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.equal(registry.definitions()[0]!.unavailableReason, "Docker client configuration could not be isolated");
+  } finally {
+    if (previousTmpdir === undefined) delete process.env.TMPDIR;
+    else process.env.TMPDIR = previousTmpdir;
+    if (previousHost === undefined) delete process.env.DOCKER_HOST;
+    else process.env.DOCKER_HOST = previousHost;
+    dockerTargetClientConfig();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

@@ -64,6 +64,9 @@ const LEGACY_CONTAINER_LABEL_WARNING =
   "legacy-only com.misko-agent-manager.* container state was found during orphan cleanup; " +
   "compatibility remains active for this migration window";
 const PODMAN_UNSAFE_DEFAULTS_REASON = "Podman defaults prevent a secret-free container target";
+const DOCKER_CLIENT_CONFIG_UNAVAILABLE_REASON = "Docker client configuration could not be isolated";
+
+class DockerClientConfigUnavailableError extends Error {}
 
 function podmanLiteralEnvironmentSafe(value: string): boolean {
   const array = /^\[(.*)\]\s*(?:#.*)?$/u.exec(value);
@@ -202,7 +205,8 @@ function dockerProbeEnvironment(source: NodeJS.ProcessEnv, dockerHost?: string):
   // A private config is useful only if no inherited Docker selector can redirect the client
   // back to an operator context. The setup check has already verified this local endpoint.
   for (const name of Object.keys(env)) if (/^DOCKER_/iu.test(name)) delete env[name];
-  env.DOCKER_CONFIG = dockerTargetClientConfig();
+  try { env.DOCKER_CONFIG = dockerTargetClientConfig(); }
+  catch { throw new DockerClientConfigUnavailableError(); }
   if (dockerHost) env.DOCKER_HOST = dockerHost;
   return env;
 }
@@ -590,7 +594,7 @@ export class ContainerTargetRegistry {
         catch {
           this.prepared.set(id, {
             config: template, runtime,
-            definition: { ...base, unavailableReason: "Docker client configuration could not be isolated" },
+            definition: { ...base, unavailableReason: DOCKER_CLIENT_CONFIG_UNAVAILABLE_REASON },
           });
           continue;
         }
@@ -662,7 +666,14 @@ export class ContainerTargetRegistry {
         }
         if (failed) break;
       }
-      const installations = failed ? new Map() : await this.discoverInstallations(template, runtime, id, dockerHost);
+      let installations = new Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>();
+      if (!failed) {
+        try { installations = await this.discoverInstallations(template, runtime, id, dockerHost); }
+        catch (error) {
+          if (!(error instanceof DockerClientConfigUnavailableError)) throw error;
+          failed = DOCKER_CLIENT_CONFIG_UNAVAILABLE_REASON;
+        }
+      }
       const defaultsUnsafe = template.runtime === "podman" && !this.podmanDefaultsSafe();
       this.prepared.set(id, {
         config: template,
@@ -690,7 +701,17 @@ export class ContainerTargetRegistry {
         item.installations = undefined;
         continue;
       }
-      const installations = await this.discoverInstallations(item.config, item.runtime, id, item.dockerHost);
+      let installations: Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>;
+      try { installations = await this.discoverInstallations(item.config, item.runtime, id, item.dockerHost); }
+      catch (error) {
+        if (!(error instanceof DockerClientConfigUnavailableError)) throw error;
+        item.installations = undefined;
+        item.definition = {
+          ...item.definition, available: false, harnessInstallations: undefined,
+          unavailableReason: DOCKER_CLIENT_CONFIG_UNAVAILABLE_REASON,
+        };
+        continue;
+      }
       if (item.config.runtime === "podman" && !this.podmanDefaultsSafe()) {
         item.definition = { ...item.definition, available: false, unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON };
         item.installations = undefined;
