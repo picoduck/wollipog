@@ -1115,6 +1115,75 @@ test("scheduled sessions follow the saved installation through rediscovery and r
   assert.equal(db.getAutomation(automation.automationId)?.action.kind, "create_session");
 });
 
+test("changing a create-session Machine drops stale Orchestrator metadata without replacing its Agent pin", () => {
+  const installedRunner = (runnerId: string, installationId: string): RunnerMetadata => {
+    const base = runner(runnerId, undefined, "codex-app-server");
+    return { ...base, agents: [{ ...base.agents[0]!, installation: {
+      id: installationId, path: `/bin/${installationId}/codex`, via: "path" as const,
+    } }] };
+  };
+  const { db, online, service, created } = harness(175, [
+    installedRunner("runner-1", "old"), installedRunner("runner-2", "selected"),
+  ]);
+  db.selectHarnessInstallation("runner-1", "agent-1", "old");
+  db.selectHarnessInstallation("runner-2", "agent-1", "selected");
+  const actor = { kind: "human" as const, id: "device" };
+  const original = service.create(baseSpec({ concurrencyPolicy: "parallel" }), actor, 0).data!;
+  assert.equal(original.action.kind, "create_session");
+  if (original.action.kind !== "create_session") throw new Error("expected create-session action");
+  const oldPin = original.action.installationBindings!.agent!;
+  const changed = service.update(original.automationId, baseSpec({ concurrencyPolicy: "parallel", action: {
+    ...original.action,
+    request: { ...original.action.request, runnerId: "runner-2" },
+    installationBindings: { agent: oldPin, orchestrator: oldPin },
+  } }), actor, 1_000).data!;
+  assert.equal(changed.action.kind, "create_session");
+  if (changed.action.kind !== "create_session") throw new Error("expected create-session action");
+  assert.deepEqual(changed.action.installationBindings, { agent: {
+    ...oldPin, installationId: "selected",
+  } });
+  online.clear();
+  online.add("runner-2");
+  service.tick(60_000);
+  assert.equal(created[0]?.runnerId, "runner-2");
+  assert.equal(created[0]?.agentId, "agent-1");
+
+  db.updateRunnerAgents("runner-2", [installedRunner("runner-2", "replacement").agents[0]!], 61_000);
+  service.tick(120_000);
+  assert.equal(created.length, 1, "an unavailable saved installation must not fall back to another executable");
+});
+
+test("create-session edits remove stale installation keys when the new Machine has a plain Agent", () => {
+  const old = { ...runner("runner-1", undefined, "codex-app-server").agents[0]!, installation: {
+    id: "old", path: "/usr/bin/codex", via: "path" as const,
+  } };
+  const { db, service } = harness(175, [
+    { ...runner("runner-1"), agents: [old] }, runner("runner-2"),
+  ]);
+  db.selectHarnessInstallation("runner-1", "agent-1", "old");
+  const actor = { kind: "human" as const, id: "device" };
+  const original = service.create(baseSpec(), actor, 0).data!;
+  if (original.action.kind !== "create_session") throw new Error("expected create-session action");
+  const oldPin = original.action.installationBindings!.agent!;
+  const changed = service.update(original.automationId, baseSpec({
+    action: { ...original.action,
+      request: { ...original.action.request, runnerId: "runner-2" },
+      installationBindings: { agent: oldPin, orchestrator: oldPin },
+    },
+    runnerPolicy: { kind: "alternate", targets: [{
+      runnerId: "runner-1", workspaceId: "ws-1", agentId: "agent-1",
+      installationBindings: { agent: oldPin, orchestrator: oldPin },
+    }] },
+  }), actor, 1_000).data!;
+  if (changed.action.kind !== "create_session" || changed.runnerPolicy.kind !== "alternate") {
+    throw new Error("expected create-session action with alternate policy");
+  }
+  assert.deepEqual(changed.action.installationBindings, {},
+    "an API client's old pin must not be retained when the selected Machine has no installation");
+  assert.deepEqual(changed.runnerPolicy.targets[0]?.installationBindings, { agent: oldPin },
+    "an active exact Agent pin on an alternate Machine survives while its Orchestrator pin is removed");
+});
+
 test("reordering alternate targets preserves each runner's explicit installation binding", () => {
   const discovered = (runnerId: string): RunnerMetadata => {
     const base = runner(runnerId, undefined, "codex-app-server");
