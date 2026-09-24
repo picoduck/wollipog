@@ -1128,11 +1128,11 @@ test("changing a create-session Machine drops stale Orchestrator metadata withou
   db.selectHarnessInstallation("runner-1", "agent-1", "old");
   db.selectHarnessInstallation("runner-2", "agent-1", "selected");
   const actor = { kind: "human" as const, id: "device" };
-  const original = service.create(baseSpec(), actor, 0).data!;
+  const original = service.create(baseSpec({ concurrencyPolicy: "parallel" }), actor, 0).data!;
   assert.equal(original.action.kind, "create_session");
   if (original.action.kind !== "create_session") throw new Error("expected create-session action");
   const oldPin = original.action.installationBindings!.agent!;
-  const changed = service.update(original.automationId, baseSpec({ action: {
+  const changed = service.update(original.automationId, baseSpec({ concurrencyPolicy: "parallel", action: {
     ...original.action,
     request: { ...original.action.request, runnerId: "runner-2" },
     installationBindings: { agent: oldPin, orchestrator: oldPin },
