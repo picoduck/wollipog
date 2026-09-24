@@ -9,7 +9,12 @@ import {
 } from "./personal-identifiers.js";
 
 test("email-shaped values are personal identifiers and aliases are not", () => {
-  for (const value of ["person@example.com", " first.last+tag@mail.example.co.uk ", "Work (me@example.org)"]) {
+  for (const value of [
+    "person@example.com",
+    " first.last+tag@mail.example.co.uk ",
+    "Work (me@example.org)",
+    "\"john doe\"@example.com",
+  ]) {
     assert.equal(isPersonalIdentifier(value), true, value);
   }
   for (const value of ["Work", "Personal", "Claude Max", "user@localhost", "@handle", "", undefined, null]) {
@@ -28,6 +33,7 @@ test("status text redaction removes every address and leaves other words", () =>
     redactPersonalIdentifiers("a@example.com is not signed in; b@example.com is fine."),
     `${HIDDEN_ACCOUNT} is not signed in; ${HIDDEN_ACCOUNT} is fine.`,
   );
+  assert.equal(redactPersonalIdentifiers("\"john doe\"@example.com is not signed in."), `${HIDDEN_ACCOUNT} is not signed in.`);
   assert.equal(redactPersonalIdentifiers("Usage appears after a provider response."), "Usage appears after a provider response.");
 });
 
