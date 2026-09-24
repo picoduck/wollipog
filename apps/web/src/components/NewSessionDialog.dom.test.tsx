@@ -24,6 +24,8 @@ import { NewSessionDialog, type NewSessionPreset } from "./NewSessionDialog.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { fireDomEvent } from "./test-dom-events.js";
 
+const SKILLS_UNAVAILABLE = /Managed skills from this Machine are unavailable on container and cloud targets/u;
+
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
@@ -1372,6 +1374,42 @@ test("container targets hide and omit runner-local provider accounts", async () 
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.executionTargetId, "container");
     assert.equal(fixture.requests[0]?.providerAccountId, undefined);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("container targets say the Machine's managed skills are unavailable; host targets do not", async () => {
+  const targetRunner: RunnerView = {
+    ...runner,
+    executionTargets: [
+      {
+        id: "host-in-place", runnerId: runner.runnerId, name: "Runner Host · in place",
+        kind: "local", workspaceStrategy: "in_place", adapter: "host",
+        boundaries: { filesystem: "host", network: "inherit", secrets: "runner_local", billing: "agent_account" },
+        available: true,
+      },
+      {
+        id: "host-worktree", runnerId: runner.runnerId, name: "Runner Host · worktree",
+        kind: "local", workspaceStrategy: "worktree", adapter: "host",
+        boundaries: { filesystem: "worktree", network: "inherit", secrets: "runner_local", billing: "agent_account" },
+        available: true,
+      },
+      {
+        id: "container", runnerId: runner.runnerId, name: "Offline Container",
+        kind: "container", workspaceStrategy: "worktree", adapter: "container",
+        boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+        available: true,
+      },
+    ],
+  };
+  const fixture = await mountFixture({ runners: [targetRunner] }, { projectId: null });
+  try {
+    assert.doesNotMatch(fixture.container.textContent ?? "", SKILLS_UNAVAILABLE);
+    await chooseSelectOption(fixture.container, "Execution Target", "Offline Container");
+    assert.match(fixture.container.textContent ?? "", SKILLS_UNAVAILABLE);
+    await chooseSelectOption(fixture.container, "Execution Target", "Runner Host · worktree");
+    assert.doesNotMatch(fixture.container.textContent ?? "", SKILLS_UNAVAILABLE);
   } finally {
     await unmountFixture(fixture);
   }

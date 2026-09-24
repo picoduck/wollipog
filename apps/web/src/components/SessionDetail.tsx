@@ -45,6 +45,7 @@ import {
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import { SessionSkillsUnavailableNotice } from "./SkillsUnavailableNotice.js";
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
 import { accountLabelText } from "../personal-identifiers.js";
@@ -4630,6 +4631,11 @@ function SessionDetailLoaded({
             onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
           />
         )}
+        <SessionSkillsUnavailableNotice
+          runnerId={session.runnerId}
+          agentId={session.agentId}
+          adapter={session.executionTarget?.adapter}
+        />
         {activeWorktreeSetupConfig?.status === "invalid" && (
           <div className="worktree-setup-config-error" role="alert">
             <strong>Invalid Worktree Setup Configuration</strong>
@@ -4638,6 +4644,7 @@ function SessionDetailLoaded({
         )}
         </>
       ) : (
+        <>
         <header className="session-preview-head">
           <div className="session-preview-heading">
             <h2 className="session-preview-title">{session.title}</h2>
@@ -4690,6 +4697,12 @@ function SessionDetailLoaded({
             Expand <kbd className="inbox-key-hint">Enter</kbd>
           </button>
         </header>
+        <SessionSkillsUnavailableNotice
+          runnerId={session.runnerId}
+          agentId={session.agentId}
+          adapter={session.executionTarget?.adapter}
+        />
+        </>
       )}
 
       {/* Chat column + the Codex-style right side panel. The panel's open/mode/width state

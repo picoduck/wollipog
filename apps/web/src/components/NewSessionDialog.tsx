@@ -28,6 +28,7 @@ import {
 } from "@wollipog/protocol";
 import { agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
+import { managedSkillsAvailableForTarget, SKILLS_UNAVAILABLE_ON_TARGET } from "./SkillsUnavailableNotice.js";
 import { ApiError } from "../api.js";
 import { useStore } from "../store.js";
 import { legacyWorkspaceLocationsByName, workspaceLocationKey } from "../projects.js";
@@ -1581,7 +1582,7 @@ export function NewSessionDialog({
                     ? "This target cannot host Pi's approval bridge, so commands run without interactive approvals."
                     : orchestrator
                       ? effectiveIntegrationIsolation
-                        ? `The same permission modes and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Integration Isolation is enabled: ${integrationIsolationCopy.removed.charAt(0).toLowerCase()}${integrationIsolationCopy.removed.slice(1)} ${integrationIsolationCopy.kept} Change the mode in the composer after creation.`
+                        ? `The same permission modes and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Integration Isolation is enabled: ${integrationIsolationCopy.removed.charAt(0).toLowerCase()}${integrationIsolationCopy.removed.slice(1)} ${integrationIsolationCopy.kept}${hostExecutionTarget ? "" : ` ${SKILLS_UNAVAILABLE_ON_TARGET}`} Change the mode in the composer after creation.`
                         : "The same permission modes, integrations, and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Typed workflow decisions do not govern integrations they cannot intercept. Change the mode in the composer after creation."
                       : "Use the approval behavior saved for this agent harness. Change it in the composer after creation."}
               </span>
@@ -1778,8 +1779,10 @@ export function NewSessionDialog({
                     : !integrationIsolationControlPlane
                       ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
                       : effectiveIntegrationIsolation
-                      ? `${integrationIsolationCopy.removed} ${integrationIsolationCopy.kept} ${INTEGRATION_ISOLATION_PRESERVED}`
-                      : "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session with this harness."}
+                      ? `${integrationIsolationCopy.removed} ${integrationIsolationCopy.kept} ${INTEGRATION_ISOLATION_PRESERVED}${hostExecutionTarget ? "" : ` ${SKILLS_UNAVAILABLE_ON_TARGET}`}`
+                      : hostExecutionTarget
+                      ? "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session with this harness."
+                      : `Hooks, plugins, extensions, and configured MCP servers load exactly as they would for a normal session with this harness. ${SKILLS_UNAVAILABLE_ON_TARGET}`}
                 </p>
                 {!orchestratorExecutionValid && <p className="form-error" role="alert">
                   {effectiveIntegrationIsolation && !integrationIsolationSupported
@@ -1911,6 +1914,9 @@ export function NewSessionDialog({
               <span className="muted">
                 Target: {executionTarget.name} · Network {executionTarget.boundaries.network} · Secrets {executionTarget.boundaries.secrets} · Billing {executionTarget.boundaries.billing}
               </span>
+            )}
+            {!managedSkillsAvailableForTarget(executionTarget?.adapter) && (
+              <span className="muted">{SKILLS_UNAVAILABLE_ON_TARGET}</span>
             )}
             {executionTarget?.adapter === "cloud" && executionTarget.policy && (
               <label>
