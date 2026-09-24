@@ -31,13 +31,17 @@ const agents: AgentDefinition[] = [
 type Checkpoint = { stage: string; command: "c" | "f" | "k"; action?: () => void };
 
 /** Run a "WSL" command locally with a private HOME, streaming stdout so a test-only checkpoint can
- * act on the filesystem before releasing the helper. Rejections carry stdout like runContextCommand. */
-function localRun(home: string, checkpoint?: Checkpoint): WslRun {
+ * act on the filesystem before releasing the helper. The checkpoint rides in the helper's stdin
+ * specification, which production never writes. Rejections carry stdout like runContextCommand. */
+function localRun(home: string, checkpoint?: Checkpoint, env: Record<string, string> = {}): WslRun {
   return (_context, command, args, options) => new Promise((resolve, reject) => {
     const control = checkpoint ? join(fs.mkdtempSync(join(tmpdir(), "wsl-adoption-control-")), "command") : "";
-    const child = spawn(command, args, { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], env: { ...process.env,
-      HOME: home, ...(checkpoint ? { WOLLIPOG_SKILL_ADOPTION_TEST_CHECKPOINT: checkpoint.stage,
-        WOLLIPOG_SKILL_ADOPTION_TEST_CONTROL: control } : {}) } });
+    // The bootstrap passes the helper source with `-c`; a helper operation passes its script path.
+    const stdin = checkpoint && command === "python3" && args[0] !== "-c" && options.stdin
+      ? JSON.stringify({ ...JSON.parse(options.stdin), testCheckpoint: { stage: checkpoint.stage, control } })
+      : options.stdin;
+    const child = spawn(command, args, { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"],
+      env: { ...process.env, ...env, HOME: home } });
     const timer = setTimeout(() => child.kill("SIGKILL"), 60_000);
     let stdout = "", stderr = "", released = false;
     child.stdout.setEncoding("utf8");
@@ -57,7 +61,7 @@ function localRun(home: string, checkpoint?: Checkpoint): WslRun {
       else reject(Object.assign(new Error(stderr || `exit ${code ?? signal}`), { stdout, stderr }));
     });
     child.stdin.on("error", () => {});
-    child.stdin.end(options.stdin ?? "");
+    child.stdin.end(stdin ?? "");
   });
 }
 
@@ -282,5 +286,54 @@ test("the runner command adopts a WSL candidate only after rereading it through 
     const adopted = await handleSkillAdoption({ ...options, wsl: f.environment() });
     assert.equal(adopted.status, "adopted", JSON.stringify(adopted));
     assert.equal(reads, 2);
+    assert.equal(fs.readlinkSync(f.source), f.target);
+  });
+
+test("inherited or WSLENV-forwarded environment variables cannot reach the helper's test checkpoint", local,
+  async (t) => {
+    const f = fixture(t);
+    const control = join(f.root, "control");
+    fs.writeFileSync(control, "k");
+    const run = (stage: string) => localRun(f.home, undefined, {
+      WOLLIPOG_SKILL_ADOPTION_TEST_CHECKPOINT: stage, WOLLIPOG_SKILL_ADOPTION_TEST_CONTROL: control,
+      WSLENV: "WOLLIPOG_SKILL_ADOPTION_TEST_CHECKPOINT:WOLLIPOG_SKILL_ADOPTION_TEST_CONTROL" });
+    const adopted = await f.adopt(undefined, { run: run("source_preserved") });
+    assert.equal(adopted.status, "adopted", JSON.stringify(adopted));
+    if (adopted.status !== "adopted") return;
+    const restored = await restoreSkillAdoptionRecoveryWithWsl({ home: join(f.root, "native"), dataDir: f.dataDir,
+      agents, operationId: adopted.operationId, acquireProviderHomeLease: () => assert.fail("WSL leases in-distro"),
+    }, { ...f.environment(), run: run("restore_intent_durable") });
+    assert.equal(restored.status, "restored", JSON.stringify(restored));
+  });
+
+test("a same-distro reader discovered while the helper is prepared still needs shared-impact consent", local,
+  async (t) => {
+    const f = fixture(t);
+    const snapshots = new MachineSkillSnapshots({ home: "C:\\Users\\me", agents: () => agents, platform: "win32",
+      windowsList: () => [], wslHome: () => "\\\\wsl.localhost\\Ubuntu\\home\\me", windowsRead: () => files });
+    const adopt = async (acceptSharedImpact: boolean) => {
+      snapshots["candidates"].set(f.candidate.id, { candidate: f.candidate, expires: Date.now() + 60_000,
+        home: "\\\\wsl.localhost\\Ubuntu\\home\\me" });
+      let live = agents;
+      const environment = f.environment();
+      return handleSkillAdoption({
+        message: { type: "skill_adoption", runnerId: "runner", requestId: "adopt", candidate: f.candidate,
+          digest: f.digest, confirmation: "explicit", acceptSharedImpact },
+        runnerId: "runner", home: "C:\\Users\\me", dataDir: f.dataDir, agents, currentAgents: () => live, snapshots,
+        desired: [f.entry], acquireProviderHomeLease: () => assert.fail("WSL leases in-distro"),
+        // Discovery adds another Codex agent in the same distro while the helper is bootstrapped.
+        wsl: { ...environment, storeRoot: async (name) => {
+          live = [...agents, { id: "codex-wsl-2", name: "Codex WSL 2", command: "codex", args: [], env: {},
+            driver: "codex", context: { kind: "wsl", distro } }];
+          return environment.storeRoot!(name);
+        } },
+      });
+    };
+    const refused = await adopt(false);
+    assert.equal(refused.status, "rejected", JSON.stringify(refused));
+    assert.deepEqual(f.backups(), []);
+    assert.ok(fs.lstatSync(f.source).isDirectory(), "the source stays in place");
+    const adopted = await adopt(true);
+    assert.equal(adopted.status, "adopted", JSON.stringify(adopted));
     assert.equal(fs.readlinkSync(f.source), f.target);
   });

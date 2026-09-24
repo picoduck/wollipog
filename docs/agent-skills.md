@@ -332,10 +332,16 @@ manifest. It refuses executable files, hard links, and links, and creates the pr
 original moves with `renameat2(RENAME_NOREPLACE)`, and the managed link is published with an exclusive
 `symlink` to the store path as the distro sees it, so reconciliation later routes a harness link
 through the canonical link as usual. The journal, parent, and original paths are verified before each
-move and before and after publication. Recovery operations from a distro carry a `context` naming it,
-which the control plane accepts only from a protocol-184 runner and displays next to the location.
-Account-scoped WSL locations remain import-only, because WSL deployment manages only the distro's own
-HOME.
+move and before and after publication. Because the helper runs after asynchronous preparation, the
+runner rechecks the live agent list before the transaction, so a same-distro reader discovered in the
+meantime still needs shared-impact confirmation. The helper's test-only checkpoint is read only from
+the stdin specification the runner writes, never from the environment, so a forwarded `WSLENV` cannot
+enable it. Recovery operations from a distro carry a `context` naming it, which the control plane
+accepts only from a protocol-184 runner and displays next to the location. Like native harness
+directories, recovery inspects only distros that currently have a configured agent. If the last agent
+in a distro is removed, its journals stay on disk untouched and are listed again once an agent in that
+distro is configured. Account-scoped WSL locations remain import-only, because WSL deployment manages
+only the distro's own HOME.
 
 ### Adoption recovery inspection and restore
 

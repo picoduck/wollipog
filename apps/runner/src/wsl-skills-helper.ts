@@ -905,12 +905,14 @@ def valid_relative(value):
 def emit(line):
     sys.stdout.write(line + "\n"); sys.stdout.flush()
 
+TEST_CHECKPOINT = {}
+
 def checkpoint(stage):
-    # Test-only fault injection. Windows does not forward these variables into WSL unless WSLENV
-    # names them, and the runner never does.
-    if os.environ.get("WOLLIPOG_SKILL_ADOPTION_TEST_CHECKPOINT") != stage: return
-    control = os.environ.get("WOLLIPOG_SKILL_ADOPTION_TEST_CONTROL", "")
-    if not control: return
+    # Test-only fault injection, read only from the stdin specification the runner writes. The
+    # runner never sets it, and no inherited or WSLENV-forwarded environment variable can enable it.
+    if TEST_CHECKPOINT.get("stage") != stage: return
+    control = TEST_CHECKPOINT.get("control")
+    if not isinstance(control, str) or not control: return
     emit("checkpoint")
     deadline = time.time() + 60
     while not os.path.exists(control):
@@ -1299,6 +1301,8 @@ def restore(spec):
 
 def main(spec):
     operation = spec.get("operation", "reconcile") if isinstance(spec, dict) else None
+    if operation in ("adopt", "restore") and isinstance(spec.get("testCheckpoint"), dict):
+        TEST_CHECKPOINT.update(spec["testCheckpoint"])
     if operation == "reconcile": print(json.dumps(reconcile(spec), separators=(",", ":")))
     elif operation == "adopt": adopt(spec)
     elif operation == "inspect": print(json.dumps(inspect(spec), separators=(",", ":")))

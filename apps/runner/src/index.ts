@@ -1516,6 +1516,7 @@ function queueSkillAdoption(msg: SkillAdoptionMessage): void {
       home: homedir(),
       dataDir: config.dataDir,
       agents: metadata.agents,
+      currentAgents: () => metadata.agents,
       providerAccounts: () => config.providerAccounts,
       snapshots: machineSkillSnapshots,
       desired: lastDesiredSkills,

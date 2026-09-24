@@ -16,6 +16,9 @@ export interface SkillAdoptionCommandOptions {
   home: string;
   dataDir: string;
   agents: AgentDefinition[];
+  /** Live agents, read again after any asynchronous boundary so a newly discovered reader still
+   * needs shared-impact consent. */
+  currentAgents?: () => AgentDefinition[];
   providerAccounts?: () => RunnerProviderAccount[];
   snapshots: MachineSkillSnapshots;
   desired: ReconcileSkillEntry[] | null;
@@ -67,13 +70,14 @@ export async function handleSkillAdoption(options: SkillAdoptionCommandOptions):
   const sameContext = (agent: AgentDefinition) => candidate.context?.kind === "wsl"
     ? agent.context?.kind === "wsl" && agent.context.distro === candidate.context.distro
     : (agent.context?.kind ?? "native") === "native";
-  const readers = agents.filter((agent) => {
+  const readersOf = (list: AgentDefinition[]) => list.filter((agent) => {
     if (!sameContext(agent)) return false;
     if (account && (providerForDriver(agent.driver ?? "acp") !== account.provider ||
         !providerAccountAgentContextCompatible(account, agent))) return false;
     const directory = SKILL_DIRS[agent.driver ?? "acp"];
     return directory && (candidate.sourceDirectory === ".agents/skills" || directory === candidate.sourceDirectory);
   });
+  const readers = readersOf(agents);
   const targets = desired.targets.filter((target) => readers.some((reader) => reader.id === target.agentId));
   if (!targets.length) return rejected(message, runnerId, "The source is no longer targeted at an agent that reads it.");
   // The current transaction publishes the byte-identical base version. A manual Claude variant
@@ -95,9 +99,12 @@ export async function handleSkillAdoption(options: SkillAdoptionCommandOptions):
     const current = (options.currentDesired ? options.currentDesired() : options.desired)
       ?.find((entry) => entry.name === candidate.name);
     if (!current || current.versionDigest !== message.digest) throw new Error();
-    const currentTargets = current.targets.filter((target) => readers.some((reader) => reader.id === target.agentId));
+    const currentReaders = options.currentAgents ? readersOf(options.currentAgents()) : readers;
+    const currentTargets = current.targets.filter((target) =>
+      currentReaders.some((reader) => reader.id === target.agentId));
     if (!currentTargets.length || currentTargets.some((target) => target.invocation !== "agent")) throw new Error();
-    const currentShared = readers.some((reader) => !currentTargets.some((target) => target.agentId === reader.id));
+    const currentShared = currentReaders.some((reader) =>
+      !currentTargets.some((target) => target.agentId === reader.id));
     if (currentShared && message.acceptSharedImpact !== true) throw new Error();
     return undefined;
   };
