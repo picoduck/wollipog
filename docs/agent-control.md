@@ -769,7 +769,8 @@ The merge snapshot binds the repository, pull request, exact head SHA, cross-mod
 and passing required checks from that same head. Branch deletion binds the merged branch and merge
 commit and requires an explicit empty dependent-pull-request check. Follow-up publication binds the
 sanitized repository, title, body, and labels. UI approval binds immutable evidence identifiers,
-URIs, and SHA-256 digests, and resolution records which evidence was actually inspected.
+optional HTTPS URIs, artifact identities, and SHA-256 digests, and resolution records which evidence
+was actually inspected.
 
 ### Orchestrator Review of UI Evidence
 
@@ -796,7 +797,9 @@ human-owned with a `humanFallback` code and reason shown on the request card:
 
 Video (`media_video_unsupported`), unknown or non-raster media (`media_unsupported`), and evidence
 that lives only behind a URI (`provider_untrusted`) always go to the human. The control plane never
-fetches a child-supplied URL; the URI is display material for the human reviewer only. Campaign-level
+fetches a child-supplied URL; the URI is display material for the human reviewer only. A screenshot
+Session artifact can be submitted without a URI when it names its `artifactId`, raster `mediaType`,
+and SHA-256. URI-only evidence still requires a safe HTTPS link. Campaign-level
 unavailability is reported as `uiEvidenceReview.reasonCode` and `reason` on the campaign projection.
 A human fallback is scoped to that one decision: other children and other assigned categories are
 unaffected.
@@ -813,10 +816,14 @@ possible; a reviewed mark saved on an earlier visit does not survive the artifac
 Images load as they approach the viewport, a few at a time, and are held only as short-lived object
 URLs that are released when the card closes.
 
-The `uri` remains the reviewer's route only for an item with no artifact, for video or any
-non-raster media type, and in a browser context without SubtleCrypto (plain HTTP on a non-localhost
-origin), where unverifiable bytes are not shown as the evidence the request names. Those links are
-labelled as external.
+When supplied, the `uri` remains the reviewer's route for an item with no artifact, for video or
+any non-raster media type, and in a browser context without SubtleCrypto (plain HTTP on a
+non-localhost origin), where unverifiable bytes are not shown as the evidence the request names.
+Those links are labelled as external. An artifact-only item with no SubtleCrypto cannot be marked
+reviewed or approved from that browser; the reviewer must use HTTPS or localhost.
+An artifact-only human approval also carries the exact decision digest from the updated review
+card. A tab kept open from an older web build lacks that field and is refused with a reload prompt
+instead of approving evidence it may not have shown.
 
 #### Attaching Evidence From a File
 
@@ -825,6 +832,11 @@ A child makes an item reviewable by attaching the capture to its own session wit
 `wollipog artifact attach --file <path>`. Protocol v169. The file is read on the runner host and
 uploaded directly, so its bytes never enter the model's context; passing an image as base64 through
 `create_workflow_artifact` costs tens of thousands of tokens per capture and is not a usable path.
+
+Use the returned `artifactId`, `mediaType`, and `sha256` in a `ui_evidence_approval` item's
+snapshot. For a raster screenshot artifact, the item does not need a `uri` or an evidence-bucket
+upload. Older runners whose tool schema still requires `uri` continue to use the existing linked
+form, and an older control plane rejects the new shape rather than accepting an unverifiable item.
 
 The tool takes an absolute path because the management server's working directory is the provider's
 launch directory, not the agent's; the CLI resolves a relative `--file` against its own. It accepts a

@@ -92,12 +92,17 @@ function evidenceSession(): SessionView {
     if (artifactMode === "mixed" && index === 2) {
       return { ...base, evidenceId: "interaction-clip", artifactId: "art_clip", mediaType: "video/webm" };
     }
-    return {
+    const artifact = {
       ...base,
       artifactId: `art_${index + 1}`,
       mediaType: "image/png",
       sha256: artifactMode === "mismatch" && index === 1 ? "f".repeat(64) : artifactDigests.get(`art_${index + 1}`)!,
     };
+    if (artifactMode === "artifact-only") {
+      const { uri: _externalCopy, ...withoutUri } = artifact;
+      return withoutUri;
+    }
+    return artifact;
   });
   return {
     id: "evidence-session",

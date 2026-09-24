@@ -108,6 +108,28 @@ test("an artifact that matches its digest but cannot be drawn is never shown and
   await page.screenshot({ path: `${SHOT}/desktop-undecodable.png` });
 });
 
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "mobile", width: 390, height: 844 },
+]) {
+  test(`${viewport.name}: an artifact-only capture completes human review without an external URL`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await openReview(page, "items=1&artifacts=artifact-only");
+    const item = page.locator(".evidence-review-item");
+    await expect(item.getByRole("img", { name: "Evidence: viewport-1" })).toBeVisible();
+    await expect(item.getByRole("link")).toHaveCount(0);
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.screenshot({ path: testInfo.outputPath(`artifact-only-${theme}.png`) });
+    }
+    await item.getByRole("checkbox", { name: "Mark viewport-1 as Reviewed" }).check();
+    await page.getByRole("button", { name: "Approve" }).click();
+    expect(await page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions()))
+      .toEqual([{ requestId: "evidence-occurrence", optionId: "approve", evidenceReviewed: ["viewport-1"],
+        evidenceReviewDigest: "a".repeat(64) }]);
+  });
+}
+
 test("mixed decisions show artifacts in place and keep a labelled external link for everything else", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openReview(page, "items=4&artifacts=mixed");

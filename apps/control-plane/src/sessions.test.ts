@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import fc from "fast-check";
 import type {
   ControlPlaneToRunner,
   DurableSessionCommand,
@@ -62,6 +63,7 @@ import {
   claudeModelConfigForValidation,
   defaultPermissionModeForNewSession,
   normalizeClaudePersistedConfig,
+  normalizeWorkflowDecisionSnapshot,
   normalizeWorkflowDecisionAction,
   parentControlRequestEligible,
   resolveEffectiveModelEffort,
@@ -19675,6 +19677,36 @@ test("campaign policy delivered to a child names no manager tool the child tools
   }
 });
 
+test("artifact-only UI evidence snapshots retain their identity through canonicalization", () => {
+  const alphabet = "0123456789abcdef".split("");
+  fc.assert(fc.property(
+    fc.array(fc.constantFrom(..."abcdefghijklmnopqrstuvwxyz0123456789_-"), { minLength: 1, maxLength: 32 })
+      .map((parts) => parts.join("")),
+    fc.array(fc.constantFrom(...alphabet), { minLength: 64, maxLength: 64 })
+      .map((parts) => parts.join("")),
+    (evidenceId, sha256) => {
+      const artifact = { evidenceId, sha256, artifactId: `art_${evidenceId}`, mediaType: "image/png" };
+      const bare = normalizeWorkflowDecisionSnapshot({ category: "ui_evidence_approval", evidence: [artifact] });
+      assert.ok(bare.ok && bare.data, bare.error);
+      assert.deepEqual(bare.data, { category: "ui_evidence_approval", evidence: [artifact] });
+      assert.deepEqual(normalizeWorkflowDecisionSnapshot(bare.data).data, bare.data, "normalization is idempotent");
+      const linked = normalizeWorkflowDecisionSnapshot({ category: "ui_evidence_approval", evidence: [
+        { ...artifact, uri: `https://evidence.example/${evidenceId}.png` },
+      ] });
+      assert.ok(linked.ok && linked.data, linked.error);
+      assert.deepEqual(linked.data.evidence[0], { ...artifact, uri: `https://evidence.example/${evidenceId}.png` });
+      for (const invalid of [
+        { evidenceId, sha256 },
+        { evidenceId, sha256, artifactId: artifact.artifactId },
+        { ...artifact, mediaType: "video/webm" },
+        { ...artifact, uri: "http://evidence.example/capture.png" },
+      ]) {
+        assert.equal(normalizeWorkflowDecisionSnapshot({ category: "ui_evidence_approval", evidence: [invalid] }).ok, false);
+      }
+    },
+  ), { numRuns: 150 });
+});
+
 test("an assigned Orchestrator reviews exact image evidence and resolves it only with server receipts", () => {
   const h = uiEvidenceReviewHarness();
   try {
@@ -19683,10 +19715,14 @@ test("an assigned Orchestrator reviews exact image evidence and resolves it only
     const after = h.screenshot(child.id, "after");
     assert.deepEqual(h.db.campaignProjection(h.parent.id)?.uiEvidenceReview,
       { status: "available", effectiveOwner: "orchestrator" });
-    const decision = h.request(child.id, "ui-approve", [before.item, after.item]);
+    const { uri: _externalCopy, ...artifactOnlyBefore } = before.item;
+    const decision = h.request(child.id, "ui-approve", [artifactOnlyBefore, after.item]);
     assert.ok(decision.ok && decision.data, decision.error);
     assert.equal(decision.data.authority, "orchestrator");
     assert.equal(decision.data.humanFallback, undefined);
+    assert.deepEqual(decision.data.resourceSnapshot.category === "ui_evidence_approval"
+      ? decision.data.resourceSnapshot.evidence[0] : null, artifactOnlyBefore,
+    "the exact artifact-only item is bound to the decision without an external URL");
     const resolve = (occurrenceId: string, outcome: "approve" | "deny", evidenceReviewed?: string[]) =>
       h.svc.resolveDescendantRequest(h.parent.id, child.id, occurrenceId,
         { action: "resolve_workflow_decision", outcome, ...(evidenceReviewed ? { evidenceReviewed } : {}) }, () => true);
@@ -19744,6 +19780,29 @@ test("an assigned Orchestrator reviews exact image evidence and resolves it only
     assert.ok(resolve(rejected.data.occurrenceId, "deny").ok);
     assert.equal(h.db.workflowDecisionByOccurrence(rejected.data.occurrenceId)?.status, "denied");
     assert.notEqual(h.db.campaignProjection(h.parent.id)?.status, "waiting_human", "the campaign continues without a human");
+  } finally {
+    h.db.close();
+  }
+});
+
+test("a stale human review card cannot approve URI-free evidence without the exact decision digest", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    assert.ok(h.svc.setParentControlPolicy(h.parent.id,
+      { ...h.decisions, ui_evidence_approval: "human" }, 1, { kind: "human", id: "owner" }).ok);
+    const child = h.createChild("Human UI Review");
+    const { uri: _externalCopy, ...artifactOnly } = h.screenshot(child.id, "after").item;
+    const decision = h.request(child.id, "human-artifact-only", [artifactOnly]);
+    assert.ok(decision.ok && decision.data, decision.error);
+    assert.equal(decision.data.authority, "human");
+    const approve = (digest?: string) => h.svc.approve(child.id, decision.data!.occurrenceId,
+      "approve", { kind: "human", id: "owner" }, undefined, () => true, ["after"], digest);
+    assert.match(approve().error ?? "", /Reload the page/u,
+      "an old tab cannot claim to have seen an artifact-only image");
+    assert.equal(approve("0".repeat(64)).status, 409, "the marker must name this exact snapshot");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "pending");
+    assert.ok(approve(decision.data.resourceDigest).ok,
+      "the updated card may approve after displaying and marking the image reviewed");
   } finally {
     h.db.close();
   }

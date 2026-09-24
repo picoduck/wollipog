@@ -17,8 +17,8 @@ export function evidenceStatusBlocksReview(status: EvidenceArtifactStatus): bool
   return status === "pending" || status === "loading" || status === "mismatch" || status === "unavailable";
 }
 
-/** Only an artifact-backed raster image is shown in place. Anything else — no artifact, video, an
- * unknown or non-raster type — keeps the external link, because there is nothing safe to render. */
+/** Only an artifact-backed raster image is shown in place. Other evidence needs an external link
+ * to be reviewable; an item with neither a renderable artifact nor a link is blocked. */
 export function isRenderableEvidence(item: EvidenceItem): item is EvidenceItem & { artifactId: string; mediaType: string } {
   return typeof item.artifactId === "string" && item.artifactId.length > 0 &&
     typeof item.mediaType === "string" &&
@@ -213,10 +213,10 @@ export function EvidenceArtifactView({
       {state.status === "unverifiable" && (
         <div className="evidence-artifact-state muted" role="status">
           <p>Evidence integrity checks require HTTPS or localhost, so the artifact is not shown here.</p>
-          <a className="btn ghost sm" href={item.uri} target="_blank" rel="noreferrer"
+          {item.uri && <a className="btn ghost sm" href={item.uri} target="_blank" rel="noreferrer"
             aria-label={`View External Evidence: ${item.evidenceId}`}>
             View External Evidence
-          </a>
+          </a>}
         </div>
       )}
     </div>

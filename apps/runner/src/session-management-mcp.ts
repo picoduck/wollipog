@@ -682,11 +682,12 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
       properties: {
         category: { const: "ui_evidence_approval" },
         evidence: { type: "array", minItems: 1, maxItems: 32, items: { type: "object", properties: {
-          evidenceId: { type: "string" }, uri: { type: "string" },
+          evidenceId: { type: "string" },
+          uri: { type: "string", description: "HTTPS link for external evidence. Optional for a screenshot Session artifact with artifactId and mediaType." },
           sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
           artifactId: { type: "string", description: "Screenshot Session artifact of this session holding the exact bytes. Required for an Orchestrator to review the item; without it the decision goes to a human." },
           mediaType: { type: "string", description: "Exact media type of the artifact, such as image/png. Video and unknown types go to a human." },
-        }, required: ["evidenceId", "uri", "sha256"], additionalProperties: false } },
+        }, required: ["evidenceId", "sha256"], additionalProperties: false } },
       },
       required: ["category", "evidence"], additionalProperties: false,
     },
