@@ -10,7 +10,7 @@ import {
 } from "./acp-client-services.js";
 import { terminalOutputDelta } from "./acp.js";
 import { waitForPendingKills } from "./spawn.js";
-import { captureLiveProcess, waitForOriginalProcessToStop } from "../test-support/posix-process.js";
+import { captureLiveProcess, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
 
 const NATIVE = { kind: "native" } as const;
 
@@ -152,11 +152,10 @@ test("ACP terminal preserves daemonized work until that terminal is released", {
   const fs = new AcpFilesystemService(root, NATIVE);
   const terminals = new AcpTerminalService(fs, NATIVE);
   let daemonPid: number | undefined;
+  let daemonIdentity: PosixProcessIdentity | undefined;
   t.after(async () => {
     terminals.dispose();
-    if (daemonPid) {
-      try { process.kill(daemonPid, "SIGKILL"); } catch { /* already reaped */ }
-    }
+    await terminateOriginalProcess(daemonIdentity);
     await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
   });
   await writeFile(daemon, [
@@ -183,7 +182,7 @@ test("ACP terminal preserves daemonized work until that terminal is released", {
   }
   assert.ok(daemonPid, "daemonized terminal work became ready");
   assert.doesNotThrow(() => process.kill(daemonPid!, 0), "natural command exit preserves its daemon");
-  const daemonIdentity = await captureLiveProcess(daemonPid!);
+  daemonIdentity = await captureLiveProcess(daemonPid!);
   assert.ok(daemonIdentity, "daemon is running before terminal release");
   assert.ok(await waitForOriginalProcessToStop(daemonIdentity, 0),
     "a still-running daemon fails the post-release check");
