@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
+import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -96,7 +97,7 @@ test("the Windows runner deploys and removes a managed skill through real WSL", 
 test("the Windows runner adopts and restores a WSL skill inside the distro", { skip: !enabled }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-real-wsl-adoption-"));
   const nativeHome = mkdtempSync(join(tmpdir(), "wollipog-real-wsl-native-home-"));
-  const name = `wollipog-adopt-${process.pid}`;
+  const name = `wollipog-adopt-${process.pid}-${randomBytes(4).toString("hex")}`;
   const content = `---\nname: ${name}\n---\nAdopted inside WSL\n`;
   const files: SkillFile[] = [{ path: "SKILL.md", encoding: "utf8", content }];
   const digest = skillVersionDigest(files);
@@ -105,27 +106,35 @@ test("the Windows runner adopts and restores a WSL skill inside the distro", { s
   cacheSkillSyncEntry(root, [agent], { name, files, versionDigest: digest,
     targets: [{ agentId: agent.id, invocation: "agent" }] });
   let operationId = "";
-  let modes = ["", ""];
+  let created = false;
+  // Record the harness directory modes before anything changes, so cleanup can restore them even
+  // when setup fails part-way.
+  const modes = (await wslExec(["sh", "-c",
+    "for d in \"$HOME/.codex\" \"$HOME/.codex/skills\"; do if [ -d \"$d\" ]; then stat -c %a \"$d\"; else echo absent; fi; done",
+  ])).trim().split(/\s+/u);
+  assert.equal(modes.length, 2);
   t.after(async () => {
-    // Remove only this test's skill and journal, then put the harness directories back as found:
-    // a developer's distro may hold unrelated journals or deliberately private directories.
+    // Remove only the skill this run created and its own journal, then put the harness directories
+    // back as found: a developer's distro may hold unrelated skills, journals, or private directories.
     await wslExec(["sh", "-c", [
-      "rm -rf -- \"$HOME/.codex/skills/$1\"",
-      "if [ -n \"$2\" ]; then rm -rf -- \"$HOME/.codex/skills/.wollipog-adoption-$2\"; fi",
-      "if [ \"$4\" = absent ]; then rmdir \"$HOME/.codex/skills\" 2>/dev/null || true; elif [ -n \"$4\" ]; then chmod \"$4\" \"$HOME/.codex/skills\"; fi",
-      "if [ \"$3\" = absent ]; then rmdir \"$HOME/.codex\" 2>/dev/null || true; elif [ -n \"$3\" ]; then chmod \"$3\" \"$HOME/.codex\"; fi",
-    ].join("; "), "sh", name, /^[0-9a-f-]{36}$/u.test(operationId) ? operationId : "", modes[0]!, modes[1]!]);
+      "if [ \"$1\" = yes ]; then rm -rf -- \"$HOME/.codex/skills/$2\"; fi",
+      "if [ -n \"$3\" ]; then rm -rf -- \"$HOME/.codex/skills/.wollipog-adoption-$3\"; fi",
+      "if [ \"$5\" = absent ]; then rmdir \"$HOME/.codex/skills\" 2>/dev/null || true; elif [ -n \"$5\" ]; then chmod \"$5\" \"$HOME/.codex/skills\"; fi",
+      "if [ \"$4\" = absent ]; then rmdir \"$HOME/.codex\" 2>/dev/null || true; elif [ -n \"$4\" ]; then chmod \"$4\" \"$HOME/.codex\"; fi",
+    ].join("; "), "sh", created ? "yes" : "no", name, /^[0-9a-f-]{36}$/u.test(operationId) ? operationId : "",
+    modes[0]!, modes[1]!]);
     rmSync(root, { recursive: true, force: true });
     rmSync(nativeHome, { recursive: true, force: true });
   });
   // WSL reconciliation refuses group- or world-writable harness directories; drop only those bits.
-  modes = (await wslExec(["sh", "-c", [
-    "set -eu",
-    "for d in \"$HOME/.codex\" \"$HOME/.codex/skills\"; do if [ -d \"$d\" ]; then stat -c %a \"$d\"; else echo absent; fi; done",
-    "mkdir -p -- \"$HOME/.codex/skills/$1\"",
-    "chmod go-w \"$HOME/.codex\" \"$HOME/.codex/skills\"",
+  await wslExec(["sh", "-c", "set -eu; mkdir -p -- \"$HOME/.codex/skills\"; chmod go-w \"$HOME/.codex\" \"$HOME/.codex/skills\""]);
+  // The source is created exclusively: an existing path of the same name is never reused or removed.
+  await wslExec(["sh", "-c", "mkdir -- \"$HOME/.codex/skills/$1\"", "sh", name]);
+  created = true;
+  await wslExec(["sh", "-c", [
+    "set -euC",
     "printf '%s\\n' '---' \"name: $1\" '---' 'Adopted inside WSL' > \"$HOME/.codex/skills/$1/SKILL.md\"",
-  ].join("; "), "sh", name])).trim().split(/\s+/u);
+  ].join("; "), "sh", name]);
   const environment = { ownerHash: "d".repeat(64), dataDir: root };
   const candidate: MachineSkillCandidate = { id: "real-wsl", name, sourceDirectory: ".codex/skills",
     generation: "a".repeat(64), context: { kind: "wsl", distro: distro! } };
