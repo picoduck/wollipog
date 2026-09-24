@@ -5,6 +5,7 @@ import { useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { Empty, Modal, Skeleton } from "./common.js";
+import { accountLabelText } from "../personal-identifiers.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SkillsIcon } from "./Icons.js";
 import { Markdown } from "./Markdown.js";
@@ -569,10 +570,10 @@ export function SkillsView() {
                             {unmanaged.map((entry) => (
                               <li key={`${entry.providerAccountId ?? "legacy"}:${entry.agentId}:${entry.name}`}>
                                 <strong>{entry.name}</strong>
-                                {entry.providerAccountId && <span className="muted"> · {
+                                {entry.providerAccountId && <span className="muted"> · {accountLabelText(
                                   runner.providerAccounts?.find((account) => account.id === entry.providerAccountId)?.label ??
-                                    "Provider Account"
-                                }</span>}
+                                    "Provider Account",
+                                )}</span>}
                                 <span className="muted"> · {entry.agentId}</span>
                                 {entry.description && <span className="muted"> — {entry.description}</span>}
                               </li>
@@ -603,10 +604,10 @@ export function SkillsView() {
                                 {removals.map((entry, index) => (
                                   <li key={`${entry.path}:${entry.reason}:${index}`}>
                                     <strong>{entry.path}</strong>
-                                    {entry.providerAccountId && <span className="muted"> · {
+                                    {entry.providerAccountId && <span className="muted"> · {accountLabelText(
                                       runner.providerAccounts?.find((account) => account.id === entry.providerAccountId)?.label ??
-                                        "Provider Account"
-                                    }</span>}
+                                        "Provider Account",
+                                    )}</span>}
                                     <span className="muted"> — {entry.reason}</span>
                                   </li>
                                 ))}

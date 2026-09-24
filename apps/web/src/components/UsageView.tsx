@@ -12,6 +12,7 @@ import type {
 import { CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import { redactPersonalIdentifiers } from "../personal-identifiers.js";
 import { useHasStore, useStoreSelector } from "../store.js";
 import {
   DRIVER_PRESENTATION,
@@ -33,6 +34,7 @@ import {
   type UsageBreakdownMode,
   type UsageMetric,
 } from "../usage-view-model.js";
+import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import { SegmentedControl, Select } from "./ui/ChoiceControls.js";
 import { UsageChart } from "./UsageChart.js";
 
@@ -439,7 +441,17 @@ export function UsageView() {
                   <div>
                     <h4>{source.provider === "codex" ? "Codex" : "Claude"}{source.plan ? ` — ${subscriptionPlanLabel(source.plan)}` : ""}</h4>
                     <p>{source.agentName} on {source.runnerName}</p>
-                    {source.accountLabel && <p className="subscription-account"><strong>Account:</strong> {source.accountLabel}</p>}
+                    {source.accountLabel && (
+                      <p className="subscription-account">
+                        <strong>Account:</strong>{" "}
+                        {/* Without an account binding the label is the provider-reported email. */}
+                        <PersonalIdentifier
+                          value={source.accountLabel}
+                          label="Account Email"
+                          {...(source.providerAccountId ? {} : { sensitive: true })}
+                        />
+                      </p>
+                    )}
                   </div>
                   <span
                     className="subscription-state"
@@ -462,7 +474,7 @@ export function UsageView() {
                     </button>
                   )}
                 </header>
-                {source.detail && <p className="subscription-detail">{source.detail}</p>}
+                {source.detail && <p className="subscription-detail">{redactPersonalIdentifiers(source.detail)}</p>}
                 {source.buckets.length > 0 && (
                   <dl className="subscription-buckets">
                     {source.buckets.map((bucket) => {
@@ -834,7 +846,7 @@ export function UsageView() {
                       const over = row.dailyBudgetUsd != null && row.todayUsd >= row.dailyBudgetUsd;
                       return (
                         <tr key={row.userId}>
-                          <th scope="row">{row.userName}{over ? " · paused by daily budget" : ""}</th>
+                          <th scope="row"><PersonalIdentifier value={row.userName} label="User Name" />{over ? " · paused by daily budget" : ""}</th>
                           <td>
                             {formatMoney(row.todayUsd)}
                             {row.dailyBudgetUsd != null && (

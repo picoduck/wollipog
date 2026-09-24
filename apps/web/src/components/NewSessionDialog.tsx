@@ -64,6 +64,8 @@ import {
 } from "./agent-options.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { Modal } from "./common.js";
+import { PersonalIdentifierRevealButton } from "./PersonalIdentifier.js";
+import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
@@ -229,6 +231,7 @@ export function NewSessionDialog({
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [providerAccountId, setProviderAccountId] = useState("");
+  const [accountIdentifiersRevealed, setAccountIdentifiersRevealed] = useState(false);
   // `undefined` until the user chooses: a saved Orchestrator harness default then selects the role
   // on the user's behalf, exactly as the saved preset did before the role became independent.
   const [roleOverride, setRoleOverride] = useState<"normal" | "orchestrator" | undefined>(undefined);
@@ -380,6 +383,7 @@ export function NewSessionDialog({
   const providerAccounts = (runner?.providerAccounts ?? []).filter((account) =>
     account.provider === provider &&
     ((agent?.context?.kind ?? "native") === "native" || account.id === agent?.defaultProviderAccountId));
+  const providerAccountTitles = maskedAccountTitles(providerAccounts.map((account) => account.label));
   useEffect(() => {
     const preferred = agent?.defaultProviderAccountId;
     setProviderAccountId((current) => providerAccounts.some((account) => account.id === current)
@@ -1500,15 +1504,25 @@ export function NewSessionDialog({
 
           {hostExecutionTarget && providerAccounts.length > 1 && (
             <div className="field">
-              <label className="new-session-field-label">Account</label>
+              <div className="personal-identifier-field-head">
+                <label className="new-session-field-label">Account</label>
+                {providerAccounts.some((account) => isPersonalIdentifier(account.label)) && (
+                  <PersonalIdentifierRevealButton
+                    label="Account Emails"
+                    revealed={accountIdentifiersRevealed}
+                    onToggle={() => setAccountIdentifiersRevealed((revealed) => !revealed)}
+                    withText
+                  />
+                )}
+              </div>
               <Select<string>
                 className="new-session-choice-control"
                 label="Account"
                 value={providerAccountId || null}
                 onChange={setProviderAccountId}
-                options={providerAccounts.map((account) => ({
+                options={providerAccounts.map((account, index) => ({
                   value: account.id,
-                  label: account.label,
+                  label: accountIdentifiersRevealed ? account.label : providerAccountTitles[index]!,
                   description: account.authStatus === "authenticated" ? "Logged In" :
                     account.authStatus === "unauthenticated" ? "Login Required" : "Login Unknown",
                 }))}

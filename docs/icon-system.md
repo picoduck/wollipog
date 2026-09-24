@@ -51,6 +51,8 @@ exports.
 | `InfoIcon` | Lucide | `Info` | Generic information state. |
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts. |
 | `LockIcon` | Lucide | `Lock` | Locked or restricted state. |
+| `EyeIcon` | Lucide | `Eye` | Reveal a masked personal identifier. |
+| `EyeOffIcon` | Lucide | `EyeOff` | Hide a revealed personal identifier. |
 | `WarningTriangleIcon` | Lucide | `TriangleAlert` | Generic warning banner. |
 | `PinnedPanelIcon` | Lucide | `List` | Pinned summary list. |
 | `DockBottomIcon` | Lucide | `PanelBottom` | Bottom dock placement. |

@@ -3,6 +3,7 @@ import { runnerSupportsProtocol, type RunnerView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { ChevronRightIcon, PlusIcon } from "./Icons.js";
 import { Modal } from "./common.js";
+import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
 import { Select } from "./ui/ChoiceControls.js";
 
@@ -66,7 +67,7 @@ export function ProviderAccountsSection({ runner, online }: { runner: RunnerView
             {(runner.providerAccounts ?? []).map((account) => (
               <div className="agent-row" key={account.id}>
                 <div className="agent-row-head">
-                  <span className="agent-name">{account.label}</span>
+                  <PersonalIdentifier className="agent-name" value={account.label} label="Account Email" />
                   {supported && canManage && account.authStatus !== "authenticated" && (
                     <button
                       type="button"
@@ -125,7 +126,16 @@ export function ProviderAccountsSection({ runner, online }: { runner: RunnerView
             </label>
             <label>
               <span>Account Label</span>
-              <input autoFocus maxLength={100} value={label} onChange={(event) => setLabel(event.target.value)} />
+              <input
+                autoFocus
+                maxLength={100}
+                value={label}
+                aria-describedby="provider-account-label-hint"
+                onChange={(event) => setLabel(event.target.value)}
+              />
+              <small id="provider-account-label-hint" className="muted">
+                A name such as Work or Personal stays visible. An email address is hidden until revealed.
+              </small>
             </label>
             {error && <div className="form-error" role="alert">{error}</div>}
           </form>

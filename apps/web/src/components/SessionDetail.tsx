@@ -47,6 +47,8 @@ import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
+import { accountLabelText } from "../personal-identifiers.js";
+import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
 import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
@@ -2522,7 +2524,7 @@ function SessionDetailLoaded({
     });
     automaticAccountSwitchNotice.current = update.state;
     if (update.providerAccountLabel) {
-      showToast(`Moved this session to ${update.providerAccountLabel} after its prior account exhausted a usage window.`);
+      showToast(`Moved this session to ${accountLabelText(update.providerAccountLabel, "another account")} after its prior account exhausted a usage window.`);
     }
   }, [eventHistory?.everComplete, evs, session.id, showToast, timelineItems]);
   const observedLastEventAt = Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || undefined;
@@ -5086,7 +5088,8 @@ function SessionDetailLoaded({
                 <div className="quarantine-copy">
                   <span className="quarantine-title">Account Switch Failed</span>
                   <p>
-                    Wollipog could not resume this conversation with {accountSwitchFailure.providerAccountLabel}.
+                    Wollipog could not resume this conversation with{" "}
+                    <PersonalIdentifier value={accountSwitchFailure.providerAccountLabel} label="Account Email" />.
                     {" "}{accountSwitchFailure.reason}
                   </p>
                   <p>

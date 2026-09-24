@@ -10,15 +10,21 @@ test("account labels and controls remain readable on narrow usage cards", async 
     const card = page.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" });
     const account = card.locator(".subscription-account");
     const refresh = card.getByRole("button", { name: "Refresh Account" });
-    await expect(account).toHaveText("Account: codex@example.com");
+    // #1648: the email is masked on every layout until the person reveals it.
+    await expect(account).not.toContainText("codex@example.com");
+    expect(await card.innerHTML()).not.toContain("codex@example.com");
+    const reveal = account.getByRole("button", { name: "Show Account Email" });
+    await expect(reveal).toBeVisible();
+    await reveal.click();
+    const value = account.locator(".personal-identifier-value");
+    await expect(value).toHaveText("codex@example.com");
+    await expect(account.getByRole("button", { name: "Hide Account Email" })).toBeVisible();
     await expect(card.locator(".subscription-state")).toBeVisible();
     await expect(refresh).toBeVisible();
 
-    const emailLines = await account.evaluate((element) => {
-      const label = element.lastChild!;
+    const emailLines = await value.evaluate((element) => {
       const range = document.createRange();
-      range.setStart(label, 0);
-      range.setEnd(label, label.textContent!.length);
+      range.selectNodeContents(element);
       return range.getClientRects().length;
     });
     expect(emailLines, `email should fit on one line at ${width}px`).toBe(1);
@@ -38,28 +44,30 @@ test("account labels and controls remain readable on narrow usage cards", async 
       await card.locator(".subscription-state").evaluate((element) => {
         element.textContent = "Temporarily Unavailable";
       });
-      const linesWithLongStatus = await account.evaluate((element) => {
+      const linesWithLongStatus = await value.evaluate((element) => {
         const range = document.createRange();
-        range.selectNodeContents(element.lastChild!);
+        range.selectNodeContents(element);
         return range.getClientRects().length;
       });
       expect(linesWithLongStatus).toBe(1);
     }
 
-    await account.evaluate((element, label) => {
-      element.lastChild!.textContent = ` ${label}`;
+    await value.evaluate((element, label) => {
+      element.textContent = label;
     }, longLabel);
-    await expect(account).toHaveText(`Account: ${longLabel}`);
+    await expect(value).toHaveText(longLabel);
     await expect(refresh).toBeVisible();
     await expect(card.locator(".subscription-state")).toBeVisible();
-    const geometry = await account.evaluate((element) => {
+    const geometry = await value.evaluate((element) => {
       const card = element.closest(".subscription-source")!.getBoundingClientRect();
       const range = document.createRange();
-      range.selectNodeContents(element.lastChild!);
+      range.selectNodeContents(element);
       return {
         linesInsideCard: [...range.getClientRects()].every((line) =>
           line.left >= card.left && line.right <= card.right),
-        controlsInsideCard: [...element.closest(".subscription-source")!.querySelectorAll(".subscription-state, header > .btn")]
+        controlsInsideCard: [...element.closest(".subscription-source")!.querySelectorAll(
+          ".subscription-state, header > .btn, .personal-identifier-toggle",
+        )]
           .every((control) => {
             const bounds = control.getBoundingClientRect();
             return bounds.left >= card.left && bounds.right <= card.right;

@@ -1,7 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 import type { SessionProviderAccountOption, SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { Modal } from "./common.js";
+import { PersonalIdentifier, PersonalIdentifierRevealButton } from "./PersonalIdentifier.js";
 import { ChoiceCards } from "./ui/ChoiceControls.js";
 
 function usageSummary(account: SessionProviderAccountOption): string {
@@ -30,6 +32,9 @@ export function SwitchAccountDialog({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
+  // One deliberate reveal for the whole picker: cards are buttons and cannot nest a control.
+  const [identifiersRevealed, setIdentifiersRevealed] = useState(false);
+  const pickerId = useId();
 
   useEffect(() => {
     let cancelled = false;
@@ -64,6 +69,8 @@ export function SwitchAccountDialog({
     }
   };
 
+  const titles = maskedAccountTitles(accounts?.map((account) => account.label) ?? []);
+
   return (
     <Modal
       title="Switch Account"
@@ -85,7 +92,12 @@ export function SwitchAccountDialog({
     >
       <p>
         Continue this provider conversation using another subscription account on this Machine.
-        {session.providerAccountLabel ? ` The current account is ${session.providerAccountLabel}.` : ""}
+        {session.providerAccountLabel && (
+          <>
+            {" "}The current account is{" "}
+            <PersonalIdentifier value={session.providerAccountLabel} label="Current Account Email" />.
+          </>
+        )}
       </p>
       {accounts === null && !error && <p role="status">Loading accounts…</p>}
       {accounts?.length === 0 && (
@@ -93,14 +105,26 @@ export function SwitchAccountDialog({
       )}
       {accounts && accounts.length > 0 && (
         <div className="switch-account-picker">
-          <span className="field-label">Account</span>
+          <div className="personal-identifier-field-head">
+            <span className="field-label">Account</span>
+            {accounts.some((account) => isPersonalIdentifier(account.label)) && (
+              <PersonalIdentifierRevealButton
+                label="Account Emails"
+                revealed={identifiersRevealed}
+                onToggle={() => setIdentifiersRevealed((revealed) => !revealed)}
+                controls={pickerId}
+                withText
+              />
+            )}
+          </div>
           <ChoiceCards<string>
+            id={pickerId}
             label="Account"
             value={selectedId || null}
             onChange={setSelectedId}
-            options={accounts.map((account) => ({
+            options={accounts.map((account, index) => ({
               value: account.id,
-              title: account.label,
+              title: identifiersRevealed ? account.label : titles[index]!,
               description: `${usageSummary(account)}${account.freshness === "stale" ? " · Last Known" : ""}`,
               disabled: submitting,
             }))}

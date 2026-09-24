@@ -18,6 +18,7 @@ import {
   type SkillSyncTarget,
   type UnmanagedSkillInfo,
 } from "@wollipog/protocol";
+import { accountLabelText } from "./personal-identifiers.js";
 import { driverKindLabel } from "./agent-presentation.js";
 
 /* --- Response DTOs. Every field beyond identity is optional on purpose: the control-plane routes
@@ -316,8 +317,8 @@ export function skillDeployBadge(input: {
   }
   const scopedDetail = (row: DeployedSkillState, detail: string | undefined) => {
     if (!row.providerAccountId) return detail;
-    const label = input.providerAccounts?.find((account) => account.id === row.providerAccountId)?.label ??
-      "Provider Account";
+    const label = accountLabelText(input.providerAccounts?.find((account) => account.id === row.providerAccountId)?.label ??
+      "Provider Account");
     return `${label}: ${detail ?? "deployment did not succeed"}`;
   };
   for (const row of deployed) {
@@ -353,7 +354,7 @@ export function skillDeployBadge(input: {
         for (const account of applicableAccounts) {
           const linked = deployed.some((row) => row.providerAccountId === account.id &&
             row.links?.some((link) => link.agentId === target.agentId && link.status === "linked"));
-          if (!linked) return badge("pending", `${account.label}: Awaiting link for ${target.agentId}.`);
+          if (!linked) return badge("pending", `${accountLabelText(account.label)}: Awaiting link for ${target.agentId}.`);
         }
         continue;
       }

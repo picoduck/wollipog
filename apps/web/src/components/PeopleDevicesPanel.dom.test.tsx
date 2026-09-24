@@ -108,3 +108,34 @@ test("pairing reveals the one-time credential even when the follow-up refresh fa
     container.remove();
   }
 });
+
+test("the pairing person picker masks email-named people until one deliberate reveal", async () => {
+  const emailIdentity = {
+    ...identity,
+    memberships: [
+      { userId: "user-1", userName: "Misko", role: "owner", userStatus: "active" },
+      { userId: "user-2", userName: "pat@example.com", role: "operator", userStatus: "active" },
+      { userId: "user-3", userName: "pat@example.org", role: "viewer", userStatus: "active" },
+    ],
+  } as unknown as IdentityAdministrationView;
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(<PairDeviceDialog identity={emailIdentity} onClose={() => {}} onSaved={async () => {}} />);
+    });
+    const names = () => Array.from(container.querySelectorAll(".access-choice strong")).map((node) => node.textContent);
+    assert.equal(container.innerHTML.includes("@example."), false);
+    assert.deepEqual(names(), ["Misko", "Hidden Name 1", "Hidden Name 2"]);
+    const reveal = Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent === "Show Person Names") as unknown as HTMLButtonElement;
+    assert.ok(reveal);
+    await act(async () => { reveal.click(); });
+    assert.deepEqual(names(), ["Misko", "pat@example.com", "pat@example.org"]);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});

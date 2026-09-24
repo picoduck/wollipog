@@ -65,6 +65,40 @@ test("selects a provider account and submits its opaque id", async ({ page }) =>
     .toContain('"providerAccountId":"claude-personal"');
 });
 
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 900 },
+  { name: "phone", width: 390, height: 780 },
+] as const) {
+  test(`email-named accounts stay masked until a deliberate reveal on ${viewport.name} (#1648)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await openDialog(page, "?emailAccounts=1");
+
+    const account = page.getByRole("button", { name: /Account:/ });
+    await expect(account).toHaveAccessibleName(/Account: Hidden Account 1/);
+    expect(await page.content()).not.toContain("@example.");
+    await account.click();
+    await expect(page.getByRole("option")).toHaveText([/Hidden Account 1/, /Hidden Account 2/]);
+    await page.keyboard.press("Escape");
+    await page.screenshot({ path: `test-results/personal-identifiers/new-session-masked-${viewport.name}.png` });
+
+    // Keyboard reveal and hide: the control names the action, never the value.
+    const reveal = page.getByRole("button", { name: "Show Account Emails" });
+    await reveal.focus();
+    await page.keyboard.press("Enter");
+    await expect(account).toHaveAccessibleName(/Account: work\.me@example\.com/);
+    const hide = page.getByRole("button", { name: "Hide Account Emails" });
+    await expect(hide).toBeFocused();
+    await page.screenshot({ path: `test-results/personal-identifiers/new-session-revealed-${viewport.name}.png` });
+    await page.keyboard.press("Space");
+    await expect(account).toHaveAccessibleName(/Account: Hidden Account 1/);
+    expect(await page.content()).not.toContain("@example.");
+
+    // Reopening the surface never inherits the earlier reveal.
+    await openDialog(page, "?emailAccounts=1");
+    await expect(page.getByRole("button", { name: /Account:/ })).toHaveAccessibleName(/Hidden Account 1/);
+  });
+}
+
 async function openDialogWithoutPointer(page: Page, query = "") {
   await page.goto(`/new-session-choices-e2e.html?keyboard=1${query}`);
   const opener = page.getByRole("button", { name: "New Session" });

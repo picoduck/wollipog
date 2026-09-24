@@ -21,6 +21,7 @@ import {
   type VirtualScrollAnchor,
 } from "./MeasuredVirtualList.js";
 import { CopyButton } from "./common.js";
+import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
 import { EditIcon, FolderUpIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
@@ -1762,13 +1763,15 @@ const TimelineRow = memo(function TimelineRow({
       );
     }
     case "provider_account_switched": {
-      const label = `${item.automatic ? "Automatically Switched" : "Switched"} Account to ${item.providerAccountLabel}`;
+      // A separator cannot hold a reveal control, so an email-shaped label is named only generically.
+      const account = accountLabelText(item.providerAccountLabel);
+      const label = `${item.automatic ? "Automatically Switched" : "Switched"} Account to ${account}`;
       return (
         <div
           className="tl-checkpoint restored"
           role="separator"
           aria-label={label}
-          title={`Provider conversation resumed with ${item.providerAccountLabel}`}
+          title={`Provider conversation resumed with ${account}`}
         >
           <span className="checkpoint-line" />
           <span className="checkpoint-label">{label}</span>

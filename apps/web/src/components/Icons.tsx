@@ -15,6 +15,8 @@ import {
   CornerUpLeft as LucideCornerUpLeft,
   Ellipsis as LucideEllipsis,
   EllipsisVertical as LucideEllipsisVertical,
+  Eye as LucideEye,
+  EyeOff as LucideEyeOff,
   FileDiff as LucideFileDiff,
   Folder as LucideFolder,
   FolderKanban as LucideFolderKanban,
@@ -244,6 +246,14 @@ export function KeyboardIcon(props: IconProps) {
 
 export function LockIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideLock} {...props} />;
+}
+
+export function EyeIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideEye} {...props} />;
+}
+
+export function EyeOffIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideEyeOff} {...props} />;
 }
 
 export function WarningTriangleIcon(props: IconProps) {

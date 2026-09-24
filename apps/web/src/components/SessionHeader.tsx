@@ -10,6 +10,7 @@ import {
 import { useApi } from "../api-context.js";
 import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import { SwitchAccountDialog } from "./SwitchAccountDialog.js";
+import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import {
   sessionArchiveActionLabel,
   sessionArchiveRequiresStop,
@@ -508,7 +509,8 @@ export function SessionHeader({
           <span className="tag" title={session.providerAccountAutomaticallySelected
             ? "Automatically selected provider account"
             : "Provider account"}>
-            {session.providerAccountAutomaticallySelected ? "Auto: " : ""}{session.providerAccountLabel}
+            {session.providerAccountAutomaticallySelected ? "Auto: " : ""}
+            <PersonalIdentifier value={session.providerAccountLabel} label="Account Email" />
           </span>
         )}
         {renderNoninteractiveStatuses()}

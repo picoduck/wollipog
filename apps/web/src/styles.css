@@ -8793,6 +8793,51 @@ code {
   clip: rect(0, 0, 0, 0) !important; white-space: nowrap !important; border: 0 !important;
 }
 
+/* ---- Masked personal identifiers ---- */
+.personal-identifier {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  max-width: 100%;
+  vertical-align: middle;
+}
+.personal-identifier-value { min-width: 0; overflow-wrap: anywhere; }
+.personal-identifier-mask { letter-spacing: 1px; color: var(--text-dim); user-select: none; }
+.personal-identifier-toggle {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 22px;
+  height: 22px;
+  padding: 0 4px;
+  border: 1px solid transparent;
+  border-radius: var(--radius-xs);
+  background: transparent;
+  color: var(--text-dim);
+  font: inherit;
+  cursor: pointer;
+}
+.personal-identifier-toggle.with-text { padding: 0 8px; border-color: var(--border); font-size: var(--text-sm); }
+.personal-identifier-toggle:hover { color: var(--text); background: var(--bg-elev-3); }
+.personal-identifier-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+/* Inside a compact tag the control keeps the tag's height and only borrows its padding box. */
+.tag .personal-identifier-toggle { min-width: 16px; height: 16px; margin-top: -2px; margin-bottom: -2px; padding: 0 2px; }
+.personal-identifier-field-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+}
+.personal-identifier-field-head > .personal-identifier-toggle,
+.access-member-picker > .personal-identifier-toggle { margin-inline-start: auto; }
+@media (pointer: coarse) {
+  .personal-identifier-toggle { min-width: 32px; height: 32px; }
+  .tag .personal-identifier-toggle { min-width: 24px; height: 24px; margin-top: -6px; margin-bottom: -6px; }
+}
+
 /* ---- Onboarding dialog ---- */
 .onboard {
   display: flex;
@@ -11247,8 +11292,7 @@ body.shell-dock-dragging * {
 .switch-account-picker {
   margin: 16px 0;
 }
-.switch-account-picker > .field-label {
-  display: block;
+.switch-account-picker > .personal-identifier-field-head {
   margin-bottom: 9px;
 }
 .agent-session-agent-name {
