@@ -69,7 +69,7 @@ network, including for a bridge-enabled target.
 
 Before its first control-plane registration, the runner:
 
-1. resolves the selected Docker or Podman client natively;
+1. resolves the selected Docker or Podman client natively and verifies its actual engine identity;
 2. removes bounded, validated container ids carrying that runner's ownership label from a previous
    crashed process;
 3. runs `image inspect` on the exact digest without pulling;
@@ -78,6 +78,12 @@ Before its first control-plane registration, the runner:
 
 Setup checks launch the runtime client with an explicit minimal environment and a temporary client
 config directory. Local Docker contexts are reduced to Unix socket or Windows named-pipe endpoints.
+The runner probes the resolved command rather than trusting its filename. A `docker` wrapper that
+executes Podman, or a Docker CLI connected to a Podman API engine, is unavailable as a Docker target;
+configure a Podman target so its defaults and proxy guards apply. Unrecognized engine identities
+remain unavailable before any container launch.
+Engine identity is checked during runner startup; restart the runner after changing the runtime
+command or Docker endpoint so readiness is checked against the new engine.
 Rootless Podman keeps its home, local image/runtime directories, and storage configuration file so
 its existing image store remains usable. The runner verifies that the configured Podman client is local
 before isolating general Podman container config. Docker client config is isolated. Other

@@ -18,7 +18,7 @@ import type { ContainerSpawnIsolation } from "./spawn.js";
 import { probeTargetHarness } from "./target-harness-probe.js";
 
 interface ContainerTargetDeps {
-  resolveRuntime(name: string): Promise<ResolvedBinary | null>;
+  resolveRuntime(name: RunnerContainerTarget["runtime"]): Promise<ResolvedContainerRuntime | null>;
   run(file: string, args: string[], opts: {
     timeoutMs?: number; maxBuffer?: number; env?: Record<string, string>; replaceEnv?: boolean;
   }): Promise<ExecResult>;
@@ -26,8 +26,65 @@ interface ContainerTargetDeps {
   podmanDefaultsSafe?(): boolean;
 }
 
+interface ResolvedContainerRuntime extends ResolvedBinary {
+  unavailableReason?: string;
+}
+
+const RUNTIME_IDENTITY_UNKNOWN_REASON = "container runtime identity could not be verified";
+
+/** Probe the selected command, not its basename: `docker` may exec Podman or use a
+ * Podman Docker-compatible API endpoint. No container is launched by these probes. */
+export async function resolveContainerRuntime(
+  configured: RunnerContainerTarget["runtime"],
+  resolve: (name: string) => Promise<ResolvedBinary | null> = resolveNative,
+  execute: ContainerTargetDeps["run"] = run,
+): Promise<ResolvedContainerRuntime | null> {
+  const runtime = await resolve(configured);
+  if (!runtime) return null;
+  const prefix = runtime.launch.args;
+  const version = await execute(runtime.launch.command, [...prefix, "--version"], {
+    timeoutMs: 5_000, maxBuffer: 4_096,
+  });
+  if (version.code !== 0 || version.timedOut || version.errorCode) {
+    return { ...runtime, unavailableReason: RUNTIME_IDENTITY_UNKNOWN_REASON };
+  }
+  const banner = version.stdout.trim();
+  if (/^podman version\s+\S+/iu.test(banner)) {
+    return configured === "podman" ? runtime : {
+      ...runtime, unavailableReason: "Docker command resolves to Podman; configure a Podman target",
+    };
+  }
+  if (!/^Docker version\s+\S+/iu.test(banner)) {
+    return { ...runtime, unavailableReason: RUNTIME_IDENTITY_UNKNOWN_REASON };
+  }
+  if (configured === "podman") {
+    return { ...runtime, unavailableReason: "Podman command resolves to Docker; configure a Docker target" };
+  }
+  const details = await execute(runtime.launch.command, [...prefix, "version", "--format", "{{json .}}"], {
+    timeoutMs: 5_000, maxBuffer: 64 * 1024,
+  });
+  if (details.code !== 0 || details.timedOut || details.errorCode) {
+    return { ...runtime, unavailableReason: RUNTIME_IDENTITY_UNKNOWN_REASON };
+  }
+  try {
+    const report = JSON.parse(details.stdout) as {
+      Server?: { Platform?: { Name?: unknown }; Components?: Array<{ Name?: unknown }> };
+    };
+    const names = [report.Server?.Platform?.Name,
+      ...(Array.isArray(report.Server?.Components) ? report.Server.Components.map((component) => component.Name) : [])]
+      .filter((name): name is string => typeof name === "string");
+    if (names.some((name) => /\bPodman\b/iu.test(name))) {
+      return { ...runtime, unavailableReason: "Docker command uses a Podman engine; configure a Podman target" };
+    }
+    if (names.some((name) => name === "Engine" || /^Docker Engine\b/iu.test(name))) return runtime;
+  } catch {
+    // An unknown or malformed version report cannot substantiate a secret-free target.
+  }
+  return { ...runtime, unavailableReason: RUNTIME_IDENTITY_UNKNOWN_REASON };
+}
+
 const defaultDeps: ContainerTargetDeps = {
-  resolveRuntime: resolveNative,
+  resolveRuntime: (name) => resolveContainerRuntime(name),
   run,
   warnLegacyContainerLabels: (message) => console.warn(`[runner] ${message}`),
 };
@@ -527,6 +584,14 @@ export class ContainerTargetRegistry {
         this.prepared.set(id, {
           config: template,
           definition: { ...base, unavailableReason: `${template.runtime} runtime is not installed` },
+        });
+        continue;
+      }
+      if (runtime.unavailableReason) {
+        this.prepared.set(id, {
+          config: template,
+          runtime,
+          definition: { ...base, unavailableReason: runtime.unavailableReason },
         });
         continue;
       }
