@@ -155,8 +155,11 @@ test("ACP terminal preserves daemonized work until that terminal is released", {
   let daemonIdentity: PosixProcessIdentity | undefined;
   t.after(async () => {
     terminals.dispose();
-    await terminateOriginalProcess(daemonIdentity);
-    await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    try {
+      await terminateOriginalProcess(daemonIdentity);
+    } finally {
+      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+    }
   });
   await writeFile(daemon, [
     'const fs = require("node:fs");',

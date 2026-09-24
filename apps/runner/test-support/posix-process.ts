@@ -33,16 +33,20 @@ export async function waitForLiveProcessPidFile(
 }
 
 /** Best-effort test teardown: never signal a PID whose observed owner has changed. */
-export async function terminateOriginalProcess(expected: PosixProcessIdentity | undefined): Promise<boolean> {
+export async function terminateOriginalProcess(
+  expected: PosixProcessIdentity | undefined,
+  lookup: (pid: number) => Promise<PosixProcessIdentity | undefined> = captureLiveProcess,
+): Promise<boolean> {
   if (!expected) return false;
-  const current = await captureLiveProcess(expected.pid);
-  if (!current || current.startedAt !== expected.startedAt) return false;
   try {
+    const current = await lookup(expected.pid);
+    if (!current || current.startedAt !== expected.startedAt) return false;
     process.kill(expected.pid, "SIGKILL");
     return true;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
-    throw error;
+  } catch {
+    // Process enumeration and signalling can fail during teardown. Preserve the test's
+    // original result and let callers continue removing their temporary files.
+    return false;
   }
 }
 

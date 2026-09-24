@@ -830,8 +830,11 @@ test("normal provider exit preserves owned background work until session disposa
   let escapedPid: number | undefined;
   let escapedIdentity: PosixProcessIdentity | undefined;
   t.after(async () => {
-    await terminateOriginalProcess(escapedIdentity);
-    await fs.rm(dir, { recursive: true, force: true });
+    try {
+      await terminateOriginalProcess(escapedIdentity);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
   await fs.writeFile(escapedScript, [
     'const fs = require("node:fs");',
@@ -895,8 +898,11 @@ test("a durable worktree marker reclaims an escaped descendant after its provide
   let escapedPid: number | undefined;
   let escapedIdentity: PosixProcessIdentity | undefined;
   t.after(async () => {
-    await terminateOriginalProcess(escapedIdentity);
-    await fs.rm(dir, { recursive: true, force: true });
+    try {
+      await terminateOriginalProcess(escapedIdentity);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
+    }
   });
   await fs.writeFile(escapedScript, [
     'const fs = require("node:fs");',
@@ -987,12 +993,15 @@ test("termination rescans the exact marker for a helper forked by a SIGTERM hand
   let helperIdentity: PosixProcessIdentity | undefined;
   let child: AgentProcess | undefined;
   t.after(async () => {
-    if (child) {
-      killTree(child);
-      await waitForPendingKills(8_000);
+    try {
+      if (child) {
+        killTree(child);
+        await waitForPendingKills(8_000);
+      }
+      await terminateOriginalProcess(helperIdentity);
+    } finally {
+      await fs.rm(dir, { recursive: true, force: true });
     }
-    await terminateOriginalProcess(helperIdentity);
-    await fs.rm(dir, { recursive: true, force: true });
   });
   await fs.writeFile(helperScript, [
     'const fs = require("node:fs");',
