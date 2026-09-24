@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
-import { captureLiveProcess, waitForOriginalProcessToStop } from "../test-support/posix-process.js";
+import { captureLiveProcess, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_CACHE_HELPERS, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
 import { extendOwnedProcessTree, listPosixProcesses, ownsPosixRootProcessGroup, parsePosixProcessTable, terminatePosixProcessesByMarker } from "./posix-process-tree.js";
 
@@ -828,10 +828,9 @@ test("normal provider exit preserves owned background work until session disposa
   const escapedScript = path.join(dir, "escaped.cjs");
   const providerScript = path.join(dir, "provider.cjs");
   let escapedPid: number | undefined;
+  let escapedIdentity: PosixProcessIdentity | undefined;
   t.after(async () => {
-    if (escapedPid) {
-      try { process.kill(escapedPid, "SIGKILL"); } catch { /* already reaped */ }
-    }
+    await terminateOriginalProcess(escapedIdentity);
     await fs.rm(dir, { recursive: true, force: true });
   });
   await fs.writeFile(escapedScript, [
@@ -866,7 +865,7 @@ test("normal provider exit preserves owned background work until session disposa
     });
   }
   assert.doesNotThrow(() => process.kill(escapedPid!, 0), "normal provider exit preserves background work");
-  const escapedIdentity = await captureLiveProcess(escapedPid!);
+  escapedIdentity = await captureLiveProcess(escapedPid!);
   assert.ok(escapedIdentity, "retained background work is running before disposal");
 
   let finishGracefulStop!: () => void;
@@ -894,10 +893,9 @@ test("a durable worktree marker reclaims an escaped descendant after its provide
   const providerScript = path.join(dir, "provider.cjs");
   const marker = randomUUID();
   let escapedPid: number | undefined;
+  let escapedIdentity: PosixProcessIdentity | undefined;
   t.after(async () => {
-    if (escapedPid) {
-      try { process.kill(escapedPid, "SIGKILL"); } catch { /* already reaped */ }
-    }
+    await terminateOriginalProcess(escapedIdentity);
     await fs.rm(dir, { recursive: true, force: true });
   });
   await fs.writeFile(escapedScript, [
@@ -927,7 +925,7 @@ test("a durable worktree marker reclaims an escaped descendant after its provide
   assert.ok(escapedPid, "background process became ready");
   if (!child.closeObserved) await new Promise<void>((resolve) => child.once("close", () => resolve()));
   assert.doesNotThrow(() => process.kill(escapedPid!, 0), "escaped process survives provider exit");
-  const escapedIdentity = await captureLiveProcess(escapedPid!);
+  escapedIdentity = await captureLiveProcess(escapedPid!);
   assert.ok(escapedIdentity, "escaped process is running before marker recovery");
 
   assert.equal(await terminatePosixProcessesByMarker(marker), true);
@@ -986,15 +984,14 @@ test("termination rescans the exact marker for a helper forked by a SIGTERM hand
   const helperScript = path.join(dir, "helper.cjs");
   const providerScript = path.join(dir, "provider.cjs");
   let helperPid: number | undefined;
+  let helperIdentity: PosixProcessIdentity | undefined;
   let child: AgentProcess | undefined;
   t.after(async () => {
     if (child) {
       killTree(child);
       await waitForPendingKills(8_000);
     }
-    if (helperPid) {
-      try { process.kill(helperPid, "SIGKILL"); } catch { /* already reaped */ }
-    }
+    await terminateOriginalProcess(helperIdentity);
     await fs.rm(dir, { recursive: true, force: true });
   });
   await fs.writeFile(helperScript, [
@@ -1050,7 +1047,7 @@ test("termination rescans the exact marker for a helper forked by a SIGTERM hand
   assert.ok(Number.isSafeInteger(helperPid) && helperPid! > 0,
     `SIGTERM handler did not report a successful detached spawn; provider=${child.pid}; stderr=${providerOutput}`);
   // The marker rescan may stop this helper before the test can capture its identity.
-  const helperIdentity = await captureLiveProcess(helperPid!);
+  helperIdentity = await captureLiveProcess(helperPid!);
   assert.equal(await waitForPendingKills(8_000), true);
   if (helperIdentity) {
     assert.equal(await waitForOriginalProcessToStop(helperIdentity), undefined, "final marker rescan stops the helper");

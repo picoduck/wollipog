@@ -12,7 +12,7 @@ import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ShellManager } from "./shell-manager.js";
 import { createWorktree } from "./worktree.js";
-import { captureLiveProcess, waitForOriginalProcessToStop } from "../test-support/posix-process.js";
+import { terminateOriginalProcess, waitForLiveProcessPidFile, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -24,15 +24,6 @@ async function waitFor(predicate: () => boolean, message: string): Promise<void>
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
   assert.fail(message);
-}
-
-function processExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
@@ -310,13 +301,13 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
     if (process.platform !== "win32") {
       const shellManager = new ShellManager({ onOutput: () => {}, onExit: () => {} });
       const pidFile = join(storeRoot, "fork-shell-descendant.pid");
-      let detachedPid = 0;
+      let detachedIdentity: PosixProcessIdentity | undefined;
       try {
         const childSource = [
           "const { spawn } = require('node:child_process');",
           "const { writeFileSync } = require('node:fs');",
           "const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], { detached: true, stdio: 'ignore' });",
-          "writeFileSync(process.argv[1], String(child.pid));",
+          "writeFileSync(process.argv[1], String(child.pid) + '\\n');",
           "child.unref();",
           "setInterval(() => {}, 1000);",
         ].join(" ");
@@ -329,22 +320,18 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
           launch: { command: process.execPath, args: ["-e", childSource, pidFile] },
           ...cleanupBoundary,
         });
-        await waitFor(() => existsSync(pidFile), "fork shell did not record its detached descendant");
-        detachedPid = Number(readFileSync(pidFile, "utf8"));
-        assert.ok(Number.isSafeInteger(detachedPid) && detachedPid > 1);
+        detachedIdentity = await waitForLiveProcessPidFile(pidFile);
+        assert.ok(detachedIdentity, "fork shell did not publish a live descendant PID");
         assert.equal(shellManager.snapshots().find((shell) => shell.shellId === "fork-shell")?.status, "running",
           "the fork shell remains active until worktree cleanup");
-        assert.equal(processExists(detachedPid), true, "the detached descendant runs before worktree cleanup");
-        const detachedIdentity = await captureLiveProcess(detachedPid);
-        assert.ok(detachedIdentity, "the detached descendant is running before worktree cleanup");
+        assert.ok(await waitForOriginalProcessToStop(detachedIdentity, 0),
+          "the detached descendant runs before worktree cleanup");
         await shellManager.closeForWorktree(target.sessionId, { kind: "native" }, target.worktreePath!);
         assert.equal(await waitForOriginalProcessToStop(detachedIdentity), undefined,
           "worktree cleanup stopped the no-config fork shell descendant");
       } finally {
         shellManager.dispose();
-        if (detachedPid > 1 && processExists(detachedPid)) {
-          try { process.kill(detachedPid, "SIGKILL"); } catch { /* already exited */ }
-        }
+        await terminateOriginalProcess(detachedIdentity);
       }
     }
     assert.equal(target.forkPoints?.["1"]?.eventSeq, 2, "fork point is re-based to the child's event seq space");
