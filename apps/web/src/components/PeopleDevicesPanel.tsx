@@ -180,7 +180,8 @@ export function ManagePersonDialog({
               />
             </div>
             {nameShown
-              ? <input id={nameId} autoFocus value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
+              // No autofocus: a keyboard reveal keeps focus on the toggle so Enter can hide it again.
+              ? <input id={nameId} value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
               : <PersonalIdentifierMask />}
           </div>
         ) : (

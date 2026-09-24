@@ -80,3 +80,24 @@ test("account labels and controls remain readable on narrow usage cards", async 
     expect(geometry.documentWidth).toBeLessThanOrEqual(width);
   }
 });
+
+test.describe("touch", () => {
+  // `isMobile` makes Chromium report `(pointer: coarse)`, which the touch-target rule targets.
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("the account email reveal keeps a 44px touch target around its compact glyph (#1648)", async ({ page }) => {
+    await page.goto("/usage-view-e2e.html?subscriptions=1");
+    const card = page.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" });
+    const reveal = card.getByRole("button", { name: "Show Account Email" });
+    await expect(reveal).toBeVisible();
+    const box = (await reveal.boundingBox())!;
+    const cx = box.x + box.width / 2;
+    const cy = box.y + box.height / 2;
+    // Probe 20px from the glyph's centre on every side: all still land on the reveal control.
+    const hits = await page.evaluate(([x, y]) => [[x, y - 20], [x, y + 20], [x - 20, y], [x + 20, y]]
+      .map(([px, py]) => Boolean(document.elementFromPoint(px!, py!)?.closest(".personal-identifier-toggle"))), [cx, cy]);
+    expect(hits).toEqual([true, true, true, true]);
+    await page.touchscreen.tap(cx + 18, cy);
+    await expect(card.locator(".personal-identifier-value")).toHaveText("codex@example.com");
+  });
+});

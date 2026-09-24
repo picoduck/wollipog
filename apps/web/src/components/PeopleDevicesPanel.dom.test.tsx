@@ -132,8 +132,12 @@ test("managing an email-named person keeps the stored name out of the form until
     assert.equal(container.innerHTML.includes("@example."), false, "neither the title nor the field shows the name");
     assert.equal(nameInput(), undefined);
 
-    await act(async () => { button("Show Person Name")!.click(); });
+    const show = button("Show Person Name")!;
+    show.focus();
+    await act(async () => { show.click(); });
     assert.equal(nameInput()?.value, "pat@example.com");
+    // A keyboard reveal keeps focus on the same control, so the next Enter hides it again.
+    assert.equal(domWindow.document.activeElement, button("Hide Person Name") as unknown as Element);
     await act(async () => { button("Hide Person Name")!.click(); });
     assert.equal(container.innerHTML.includes("@example."), false, "the name can be hidden again while the dialog is open");
 
