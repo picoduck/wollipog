@@ -83,6 +83,7 @@ test("worktree setup parser rejects shell strings, traversal, unsafe env, placeh
     "NODE_PATH", "JAVA_TOOL_OPTIONS", "DOTNET_STARTUP_HOOKS", "RUSTC_WRAPPER",
     "CONTAINERS_CONF", "containers_conf_override", "CONTAINER_HOST", "container_connection",
     "PODMAN_CONNECTIONS_CONF", "CONTAINER_SSHKEY",
+    "CONTAINERS_HELPER_BINARY_DIR", "containers_storage_conf", "STORAGE_DRIVER", "storage_opts",
   ]) {
     assert.throws(
       () => parseWorktreeSetupConfig(JSON.stringify({ version: 1, environment: { [name]: "redirect" } })),

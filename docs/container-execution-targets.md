@@ -92,8 +92,9 @@ If the target becomes unavailable,
 remove the unsafe default and restart the runner to repeat readiness checks. Socket-backed Podman
 engines and Podman on non-Linux hosts remain unavailable because their engine's default mounts cannot
 be checked locally.
-Repository worktree setup cannot override Podman client config or connection environment variables;
-those values could otherwise change the engine or its default mounts after the runner's check.
+Repository worktree setup cannot override Podman client config, connection, helper-binary, or storage
+environment variables; those values could otherwise change the engine, its default mounts, or host
+executables selected by the Podman client after the runner's check.
 Check output is never included in an unavailable reason. A runtime that needs a credential or a
 remote client configuration for these checks fails closed.
 
