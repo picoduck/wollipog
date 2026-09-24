@@ -745,7 +745,7 @@ What is done instead:
     and an assignment the shell never keeps (a prefix, a subshell, a background job) cannot hide
     anything.
 
-  A base-versus-head fuzz ran 41,000 variable-bearing commands, with globs, `..` climbs, and three
+  A base-versus-head fuzz ran 78,912 commands with variables and backticks, globs, `..` climbs, and three
   working directories. Every command it found that the old tokenization refused and the new one
   allows contains the `$X/$Y` join itself.
 

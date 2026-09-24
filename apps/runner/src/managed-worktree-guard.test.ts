@@ -1293,6 +1293,9 @@ test("an unmodelled command naming a directory that holds the guard state stays 
     `python3 - <<'EOF'\nopen('../.wollipog-data/hooks/s1.protections.json', 'w').write('{}')\nEOF`,
     `ls | cat ${directory}/s1.protections.json`,
     `(cat ../.wollipog-data/hooks/s1.protections.json)`,
+    // Found in review: an empty backtick substitution joins its neighbours into one path.
+    `cat ${project}\`\`/../.wollipog-data/hooks/s1.protections.json`,
+    `cat ${project}\`true\`/../.wollipog-data/hooks/s1.protections.json`,
   ]) {
     assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
   }

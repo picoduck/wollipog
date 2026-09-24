@@ -1791,8 +1791,11 @@ export function commandTargetsGuardState(
     for (const token of tokens) {
       const value = tokenText(token);
       // The tokenizer leaves a backtick glued to its neighbours (`echo` and `<dir>`), so each piece
-      // between backticks is a word of its own: `rm -rf \`echo <dir>\`` names `<dir>`.
-      for (const piece of value === null ? [] : value.split("`")) {
+      // between backticks is a word of its own: `rm -rf \`echo <dir>\`` names `<dir>`. The whole word
+      // is still judged too, as written and with every substitution empty, since `<dir>\`\`/../x`
+      // joins its pieces into one path.
+      const readings = value === null ? [] : [value, value.replaceAll("`", ""), ...value.split("`")];
+      for (const piece of new Set(readings)) {
         const relation = piece ? wordRelation(piece) : null;
         if (relation === "inside") return GUARD_STATE_REFUSAL;
         if (relation === "ancestor") enclosing = true;
