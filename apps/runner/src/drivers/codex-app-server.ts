@@ -2075,7 +2075,9 @@ export class CodexAppServerDriver implements Driver {
       this.skillCatalogPeer = null;
       if (this.skillCatalogStale) this.refreshSkillCatalog();
     };
-    peer.requestWithDeadline<Json>("skills/list", { cwds: [this.cwd] }, Date.now() + SKILL_CATALOG_TIMEOUT_MS)
+    // Deferred so even a synchronous transport throw becomes an ignored rejection, not a failed thread start.
+    Promise.resolve()
+      .then(() => peer.requestWithDeadline<Json>("skills/list", { cwds: [this.cwd] }, Date.now() + SKILL_CATALOG_TIMEOUT_MS))
       .then((response) => {
         if (this.peer === peer && !this.disposed) this.skillPaths = codexSkillPathIndex(codexSkillsFromList(response));
       }, () => {})

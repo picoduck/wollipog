@@ -1727,6 +1727,7 @@ test("skills/list keeps one bounded lookup in flight and coalesces skills/change
   (h.driver as any).peer = peer;
   const before = Date.now();
   (h.driver as any).refreshSkillCatalog();
+  await nextTask();
   assert.deepEqual(requests.map(({ method, params }) => [method, params]), [["skills/list", { cwds: ["/tmp/work"] }]]);
   assert.ok(requests[0]!.deadlineAt > before && requests[0]!.deadlineAt <= Date.now() + 30_000,
     "an unanswered lookup cannot stay pending forever");
@@ -1736,6 +1737,7 @@ test("skills/list keeps one bounded lookup in flight and coalesces skills/change
 
   const changed = notificationHandlers(h.driver).get("skills/changed")!;
   for (let i = 0; i < 50; i++) changed({});
+  await nextTask();
   assert.equal(requests.length, 1, "a notification storm does not stack requests");
   requests[0]!.resolve(listed("first"));
   await nextTask();
@@ -1747,22 +1749,36 @@ test("skills/list keeps one bounded lookup in flight and coalesces skills/change
   assert.equal(requests.length, 2);
 
   (h.driver as any).refreshSkillCatalog();
+  await nextTask();
   requests[2]!.reject({ code: -32002, message: "request deadline exceeded (skills/list)", requestTimeout: true });
   await nextTask();
   assert.deepEqual([...(h.driver as any).skillPaths], [["/s/fresh/SKILL.md", "fresh"]],
     "a failed or timed-out lookup keeps the last known catalog");
   (h.driver as any).refreshSkillCatalog();
+  await nextTask();
   assert.equal(requests.length, 4, "a settled failure does not block later lookups");
 
   const replacement = { requestWithDeadline: peer.requestWithDeadline };
   (h.driver as any).peer = replacement;
   (h.driver as any).refreshSkillCatalog();
+  await nextTask();
   assert.equal(requests.length, 5, "a restarted server gets its own lookup");
   requests[3]!.resolve(listed("old-server"));
   requests[4]!.resolve(listed("new-server"));
   await nextTask();
   assert.deepEqual([...(h.driver as any).skillPaths], [["/s/new-server/SKILL.md", "new-server"]],
     "a replaced server's response is dropped");
+});
+
+test("a skills/list transport that throws synchronously never fails thread start", async () => {
+  const h = makeHarness();
+  (h.driver as any).peer = {
+    request: async () => ({ thread: { id: "fresh-1" } }),
+    requestWithDeadline: () => { throw new Error("transport closed"); },
+  };
+  assert.equal(await h.driver.newSession("/fresh"), "fresh-1");
+  await nextTask();
+  assert.equal((h.driver as any).skillCatalogPeer, null, "the failed lookup settles so later ones can run");
 });
 
 test("commandExecution: a catalog arriving mid-command retitles the row as the skill", () => {
