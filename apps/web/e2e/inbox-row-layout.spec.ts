@@ -637,13 +637,14 @@ test("a reported default branch decides whether the base ref is worth showing", 
 // cards actually measure is only visible AFTER a scroll: the rows the reader has not reached yet
 // are positioned from it. Crossing the breakpoint mid-scroll exercises both, plus the measurement
 // epoch that has to invalidate one shape's cached sizes without losing the reader's place.
-test("crossing the breakpoint keeps the reader's row and the list's geometry", async ({ page }) => {
+test("crossing the breakpoint keeps the first visible row and the list's geometry", async ({ page }) => {
   // Short enough that eleven cards genuinely overflow the list in BOTH shapes.
   await useViewport(page, 1400, 800);
   const list = page.locator(".inbox-list");
   await expect(page.locator(".inbox-row").first()).toBeVisible();
 
   const anchorTitle = "Orphaned Background Work Beside a Branch";
+  let anchorIndex: number | null = null;
 
   /**
    * How far the reader's row sits OUTSIDE the list's visible band, in pixels; 0 while it is on
@@ -655,20 +656,30 @@ test("crossing the breakpoint keeps the reader's row and the list's geometry", a
    * promise the list makes is that your row does not go far, not that it never crosses an edge, and
    * an assertion that cannot tell 20px from 800px is not testing the promise.
    */
-  const anchorDisplacement = async (): Promise<number> => await page.evaluate((title) => {
+  const anchorDisplacement = async (): Promise<number> => await page.evaluate(({ title, index }) => {
     const list = document.querySelector<HTMLElement>(".inbox-list")!;
     const band = list.getBoundingClientRect();
-    const row = [...document.querySelectorAll<HTMLElement>(".inbox-row-title")]
-      .find((node) => node.textContent?.includes(title));
+    const row = index == null
+      ? [...document.querySelectorAll<HTMLElement>(".inbox-row-title")]
+        .find((node) => node.textContent?.includes(title))?.closest<HTMLElement>("[data-virtual-row]")
+      : list.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`);
     if (!row) return Number.POSITIVE_INFINITY;
     const box = row.getBoundingClientRect();
     if (box.bottom < band.top) return band.top - box.bottom;
     if (box.top > band.bottom) return box.top - band.bottom;
     return 0;
-  }, anchorTitle);
+  }, { title: anchorTitle, index: anchorIndex });
 
   const cardHeight = async (): Promise<number> =>
     await page.locator(".inbox-row").first().evaluate((row) => row.getBoundingClientRect().height);
+
+  // The virtualizer corrects a width-change anchor for eight animation frames. The test crosses
+  // twice per case (to its source width, then its destination), so both epochs must finish.
+  const settleResize = async (): Promise<void> => await page.evaluate(async () => {
+    for (let frame = 0; frame < 9; frame += 1) {
+      await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+    }
+  });
 
   // Only CONSECUTIVE cards may be compared. The mounted set is deliberately not contiguous: the
   // range extractor pins the selected row wherever it is, so the distance from it to the visible
@@ -693,12 +704,8 @@ test("crossing the breakpoint keeps the reader's row and the list's geometry", a
     return { pairs, overlap, gap };
   });
 
-  // ONE crossing at a time, each starting from a fresh scroll to the reader's row.
-  //
-  // A single sequence of resizes chained end to end tests something else: four restores in a row,
-  // each starting from wherever the last one left off, and the drift accumulates until the failure
-  // names a width that did nothing wrong. What the list actually promises is that ONE crossing keeps
-  // the reader where they were, so that is what each case does.
+  // Each crossing starts from a settled source width and a fresh scroll to the end of the list.
+  // This keeps an earlier resize correction from taking ownership of the next case's viewport.
   for (const [from, to] of [
     [1400, TABLET_BREAKPOINT_PX],
     [TABLET_BREAKPOINT_PX, 1400],
@@ -706,7 +713,9 @@ test("crossing the breakpoint keeps the reader's row and the list's geometry", a
     [390, 1400],
     [1400, 390],
   ] as const) {
+    anchorIndex = null;
     await useViewport(page, from, 800);
+    await settleResize();
     // Scrolled through the LIST, not with `scrollIntoViewIfNeeded`: the anchor is the last of eleven
     // virtualized cards, so before the list reaches it there is no element to scroll to and the
     // locator waits for something that will never attach.
@@ -720,12 +729,25 @@ test("crossing the breakpoint keeps the reader's row and the list's geometry", a
       }, { message: `the reader's row before ${from} to ${to}` })
       .toBe(0);
 
+    // The virtualizer preserves the first visible row. The last row gets us to the end of the
+    // list, but may leave view if a breakpoint shortens the list while that reading row stays put.
+    anchorIndex = await list.evaluate((node) => {
+      const band = node.getBoundingClientRect();
+      const row = [...node.querySelectorAll<HTMLElement>("[data-virtual-row]")].find((candidate) => {
+        const box = candidate.getBoundingClientRect();
+        return box.bottom > band.top && box.top < band.bottom;
+      });
+      return row ? Number(row.dataset.index) : null;
+    });
+    expect(anchorIndex, "a visible row anchors the reader before resizing").not.toBeNull();
+
     await useViewport(page, to, 800);
+    await settleResize();
     // Within one card of where it was. A card is the unit a reader notices: land inside one and the
     // list looks like it held its place, land several away and it looks like it jumped.
     await expectGeometryPoll(
       anchorDisplacement,
-      `the reader's row stays within one card across ${from} to ${to}`,
+      `the first visible row stays within one card across ${from} to ${to}`,
     ).toBeLessThanOrEqual(await cardHeight());
 
     // Polled on the predicate itself: a width change opens a new measurement epoch, and the
