@@ -16,6 +16,14 @@ const template: RunnerContainerTarget = {
   agentCommands: { codex: { command: "codex", args: ["app-server"] } },
   setupChecks: [{ name: "git", command: "git", args: ["--version"] }],
 };
+const DOCKER_PROXY_CLEAR_VALUES = [
+  "HTTP_PROXY=", "http_proxy=", "HTTPS_PROXY=", "https_proxy=", "FTP_PROXY=", "ftp_proxy=",
+  "NO_PROXY=", "no_proxy=", "ALL_PROXY=", "all_proxy=",
+];
+
+function containerEnvironmentArguments(args: string[]): string[] {
+  return args.flatMap((arg, index) => arg === "--env" ? [args[index + 1]!] : []);
+}
 
 const HOST_RUNTIME_ENV = ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "CONTAINER_HOST",
   "CONTAINER_CONNECTION", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "CONTAINERS_STORAGE_CONF",
@@ -100,7 +108,9 @@ test("digest-pinned templates pass argv-native checks and produce an exact immut
     "--label", "com.misko-agent-manager.template=offline-tools",
     "--network", "none", "--read-only", "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges", "--pids-limit", "128",
-    "--tmpfs", "/tmp:rw,nosuid,nodev", "--entrypoint", "git", image, "--version",
+    "--tmpfs", "/tmp:rw,nosuid,nodev",
+    ...DOCKER_PROXY_CLEAR_VALUES.flatMap((value) => ["--env", value]),
+    "--entrypoint", "git", image, "--version",
   ]);
 
   const ref: ExecutionTargetRef = {
@@ -872,7 +882,7 @@ test("target-local probes use the selected image executable without mounts, host
     assert.equal(args[args.indexOf("--entrypoint") + 1], candidate.path);
     assert.ok(args.includes("--network") && args.includes("none"));
     assert.equal(args.includes("--mount"), false);
-    assert.equal(args.includes("--env"), false);
+    assert.deepEqual(containerEnvironmentArguments(args), DOCKER_PROXY_CLEAR_VALUES);
     assert.equal(args.includes("--interactive"), false);
     assert.equal(timeoutMs, 5_000);
     assert.equal(maxBuffer, 64 * 1024);
@@ -889,6 +899,47 @@ test("probe client environment strips sensitive host names even when a runtime f
     RUNNER_TOKEN_FILE: "/secret/path", PODMAN_AUTHORIZATION: "host-secret",
     HTTP_PROXY: "http://proxy.example.invalid:8080",
   }), { PATH: "/usr/bin", HOME: "/home/runner", HTTP_PROXY: "http://proxy.example.invalid:8080" });
+});
+
+test("Docker client proxy configuration is cleared for setup checks and installation probes", async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-docker-proxy-test-"));
+  const previousConfig = process.env.DOCKER_CONFIG;
+  writeFileSync(join(config, "config.json"), JSON.stringify({
+    proxies: { default: { httpProxy: "http://synthetic-user:synthetic-password@proxy.example.invalid:8080" } },
+  }));
+  process.env.DOCKER_CONFIG = config;
+  try {
+    const runs: Array<{ args: string[]; env?: Record<string, string> }> = [];
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        if (args[0] === "context") return { code: 0, stdout: '"unix:///var/run/docker.sock"\n', stderr: "" };
+        if (args[0] === "run") {
+          runs.push({ args, env: opts.env });
+          if (args.includes("/bin/sh")) return { code: 0, stdout: "/usr/bin/codex\n", stderr: "" };
+          if (args.at(-1) === "--version") return { code: 0, stdout: "codex 1.0.0\n", stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, true);
+    const setup = runs.filter(({ args }) => args[args.indexOf("--name") + 1]?.startsWith("wollipog-check-"));
+    const probes = runs.filter(({ args }) => args[args.indexOf("--name") + 1]?.startsWith("wollipog-probe-"));
+    assert.equal(setup.length, 1);
+    assert.ok(probes.length >= 2, "resolution and version both create probe containers");
+    assert.notEqual(setup[0]!.env?.DOCKER_CONFIG, config, "setup uses its private client config");
+    for (const call of [...setup, ...probes]) {
+      assert.deepEqual(containerEnvironmentArguments(call.args), DOCKER_PROXY_CLEAR_VALUES);
+    }
+    for (const probe of probes) {
+      assert.equal(probe.env?.DOCKER_CONFIG, config, "the probe client can read operator config");
+    }
+  } finally {
+    if (previousConfig === undefined) delete process.env.DOCKER_CONFIG;
+    else process.env.DOCKER_CONFIG = previousConfig;
+    rmSync(config, { recursive: true, force: true });
+  }
 });
 
 test("Podman installation probes disable default forwarding of client proxy variables", {
@@ -1133,7 +1184,9 @@ test("Docker and Podman discover both generations and produce exact dual-label W
         "--label", `com.misko-agent-manager.template=${template.id}`,
         "--network", "none", "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--pids-limit", "128",
-        "--tmpfs", "/tmp:rw,nosuid,nodev", "--entrypoint", "git", image, "--version",
+        "--tmpfs", "/tmp:rw,nosuid,nodev",
+        ...(runtimeName === "docker" ? DOCKER_PROXY_CLEAR_VALUES.flatMap((value) => ["--env", value]) : []),
+        "--entrypoint", "git", image, "--version",
       ],
     });
     assert.equal(registry.definitions()[0]!.available, true);

@@ -86,6 +86,10 @@ Podman ordinarily copies its client's proxy variables into every container. Woll
 `--http-proxy=false` on Podman setup checks, installation probes, and session launches so
 those host values do not enter a target advertising `secrets: "none"`. A trust-gated repository
 setup variable explicitly forwarded with `--env NAME` remains an intentional exception.
+Docker CLI `config.json` can also inject proxy variables, including credentials in proxy URLs,
+into new containers. Docker setup checks, installation probes, providers, and terminals explicitly
+clear all five documented uppercase/lowercase proxy pairs. A trust-gated `--env NAME` forwarded
+after those defaults can intentionally set a proxy for the target.
 Podman's independent `mounts.conf` files and `containers.conf` mount or volume defaults can add
 host binds without a Wollipog mount argument. A Podman target stays unavailable if local system or
 user defaults contain such entries or cannot be safely read. Podman configuration that selects a

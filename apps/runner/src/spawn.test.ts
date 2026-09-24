@@ -231,6 +231,11 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
       "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
       "--tmpfs", "/tmp:rw,nosuid,nodev",
       "--mount", "type=bind,src=C:\\worktrees\\session-1,dst=/workspace", "--workdir", "/workspace",
+      ...(runtime === "docker" ? [
+        "--env", "HTTP_PROXY=", "--env", "http_proxy=", "--env", "HTTPS_PROXY=", "--env", "https_proxy=",
+        "--env", "FTP_PROXY=", "--env", "ftp_proxy=", "--env", "NO_PROXY=", "--env", "no_proxy=",
+        "--env", "ALL_PROXY=", "--env", "all_proxy=",
+      ] : []),
       `example/agent@sha256:${"b".repeat(64)}`, "codex", "app-server", "--json",
     ]);
   }
@@ -244,14 +249,15 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
       command: "C:\\host-tools\\git.exe",
       args: ["status"],
       cwd: "C:\\worktrees\\session-1",
-      containerEnvironmentKeys: ["PROJECT_ROOT"],
+      containerEnvironmentKeys: ["PROJECT_ROOT", "HTTP_PROXY"],
     },
     {
       backend: "container", runtime: "docker", command: "docker", args: [], image: `x@sha256:${"c".repeat(64)}`,
       network: "bridge", templateId: "x", runnerKey: "runnerkey", containerName: "wollipog-x",
       hostAgentCommand: "agent", hostAgentArgs: [], agentCommand: "agent", agentArgs: ["host-only"],
     },
-  ).slice(-5), ["--env", "PROJECT_ROOT", `x@sha256:${"c".repeat(64)}`, "git", "status"]);
+  ).slice(-7), ["--env", "PROJECT_ROOT", "--env", "HTTP_PROXY",
+    `x@sha256:${"c".repeat(64)}`, "git", "status"]);
   assert.throws(() => buildContainerArgs(
     { command: "agent", args: ["--unexpected"], cwd: "C:\\worktrees\\session-1", containerAgentLaunch: true },
     {
