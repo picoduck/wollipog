@@ -125,19 +125,15 @@ export function TranscriptErrorAlert({
   );
 }
 
-/** Runner-initiated authentication outcomes that were never offered as a card button. */
+/** Runner-initiated authentication outcomes that were never offered as a card button. Every other
+ * resolution keeps its established option-id display. */
 const RUNNER_RESOLUTION_LABELS: Record<string, string> = {
   "auth:automatic-retry": "Rechecked Automatically",
   "auth:select-account": "Another Account Selected",
 };
 
-/** Name a resolved request by its offered button when possible, rather than an internal id. */
-export function permissionResolutionLabel(
-  options: ReadonlyArray<{ optionId: string; name: string }>,
-  optionId: string,
-): string {
-  return options.find((option) => option.optionId === optionId)?.name ??
-    RUNNER_RESOLUTION_LABELS[optionId] ?? optionId;
+export function permissionResolutionLabel(optionId: string): string {
+  return RUNNER_RESOLUTION_LABELS[optionId] ?? optionId;
 }
 
 export function timelineFileSourceLocation(path: string): SourceLocation | null {
@@ -2046,7 +2042,7 @@ const TimelineRow = memo(function TimelineRow({
                     : item.resolutionReason === "dismissed"
                       ? "→ Dismissed"
                       : item.resolvedOptionId
-                      ? `→ ${permissionResolutionLabel(item.options, item.resolvedOptionId)}`
+                      ? `→ ${permissionResolutionLabel(item.resolvedOptionId)}`
                       : "→ Dismissed"}
               </span>
             ) : (
