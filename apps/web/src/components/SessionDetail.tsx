@@ -3612,8 +3612,18 @@ function SessionDetailLoaded({
     ),
   }), [agentCaps?.slashCommands, canAnswerPendingQuestion, canStopTurn, planSupported, providerCommandAttachmentPolicy]);
   const composerSkillSigil = useMemo(() => composerCommandsIncludeSkills(composerCommands), [composerCommands]);
-  const skillCommandIds = useMemo(() => new Set((agentCaps?.slashCommands ?? []).flatMap((command) =>
-    command.source === "skill" && command.invocation ? [command.invocation.id] : [])), [agentCaps?.slashCommands]);
+  // A receipt outlives catalog rotation, so a stale command id falls back to a name only skills use.
+  const isSkillInvocation = useMemo(() => {
+    const commands = agentCaps?.slashCommands ?? [];
+    const skillIds = new Set(commands.flatMap((command) =>
+      command.source === "skill" && command.invocation ? [command.invocation.id] : []));
+    const skillOnlyNames = new Set(commands
+      .filter((command) => command.source === "skill")
+      .map((command) => command.name.toLowerCase())
+      .filter((name) => commands.every((command) => command.source === "skill" || command.name.toLowerCase() !== name)));
+    return (invocation: { providerCommandId: string; commandName: string }) =>
+      skillIds.has(invocation.providerCommandId) || skillOnlyNames.has(invocation.commandName.toLowerCase());
+  }, [agentCaps?.slashCommands]);
   const slashTrigger = useMemo(
     () => composerSelection.start === composerSelection.end
       ? findComposerCommandTrigger(text, composerSelection.start, { skillSigil: composerSkillSigil })
@@ -5172,7 +5182,7 @@ function SessionDetailLoaded({
               invocations={session.commandInvocations ?? []}
               timelineItems={items}
               historyPartial={isPartialHistory(eventWindow)}
-              skillCommandIds={skillCommandIds}
+              isSkillInvocation={isSkillInvocation}
             />
             <SteeringReceipts
               attempts={session.steeringAttempts ?? []}

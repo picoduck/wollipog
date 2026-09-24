@@ -61,7 +61,7 @@ test("discoverCodexPrompts reads top-level prompts with metadata from the sessio
   );
   assert.equal(result.ok, true);
   assert.deepEqual(result.ok && result.prompts, [
-    { name: "plain", description: "Plain prompt", body: "# Plain prompt\nDo the thing." },
+    { name: "plain", body: "# Plain prompt\nDo the thing." },
     { name: "review", description: "Review a change", argumentHint: "<file> [base]", body: "Review $1 against $2." },
   ]);
   assert.deepEqual(codexPromptCommand(result.ok ? result.prompts[1]! : { name: "", body: "" }), {

@@ -182,7 +182,10 @@ function frontmatterValue(
 
 /** Parse only the metadata Claude documents for command files. This is intentionally not a general
  * YAML parser: aliases, tags, objects, and executable extensions are never interpreted. */
-export function parseClaudeCommandMetadata(content: string): {
+export function parseClaudeCommandMetadata(content: string, options: {
+  /** Claude documents a first-body-line fallback; callers that must not expose body text omit it. */
+  descriptionFromBody?: boolean;
+} = {}): {
   description?: string;
   argumentHint?: string;
 } {
@@ -226,7 +229,7 @@ export function parseClaudeCommandMetadata(content: string): {
   }
 
   const description = boundedText(
-    frontmatterDescription ?? firstBodyLine ?? "",
+    frontmatterDescription ?? (options.descriptionFromBody === false ? undefined : firstBodyLine) ?? "",
     CLAUDE_COMMAND_LIMITS.maxDescriptionCharacters,
   );
   const hint = boundedText(argumentHint ?? "", CLAUDE_COMMAND_LIMITS.maxArgumentHintCharacters);

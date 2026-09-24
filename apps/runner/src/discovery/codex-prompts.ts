@@ -197,7 +197,13 @@ export async function discoverCodexPrompts(
         if (["ENOENT", "EACCES", "EPERM"].includes((error as NodeJS.ErrnoException).code ?? "")) continue;
         throw error;
       }
-      prompts.push({ name: file.name, ...parseClaudeCommandMetadata(content), body: codexPromptBody(content) });
+      // Only explicit frontmatter leaves the runner: the body stays launch-local, and Codex's own TUI
+      // never derives a description from prompt text either.
+      prompts.push({
+        name: file.name,
+        ...parseClaudeCommandMetadata(content, { descriptionFromBody: false }),
+        body: codexPromptBody(content),
+      });
     }
     if (discovery.binding) await validateCommandRootBinding(discovery.binding, deadline);
     // Codex prompt names are case-sensitive file stems; keep the first of any case-folded pair so
