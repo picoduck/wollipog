@@ -489,6 +489,8 @@ test("Podman rejects non-mount defaults that cross the secret-free boundary", ()
       ["inline host file", 'containers = { base_hosts_file = "/tmp/synthetic-hosts" }'],
       ["inline PID namespace", 'containers = { pidns = "host" }'],
       ["later unsafe inline value", 'containers = { env_host = false, pidns = "host" }'],
+      ["triple-quoted inline value", 'containers = { log_tag = """x"#""", env_host = true }'],
+      ["triple-literal inline value", "containers = { log_tag = '''x'#''', pidns = \"host\" }"],
       ["multiline string", '[containers]\nlog_tag = """\n[engine]\n"""\nenv_host = true'],
     ]) {
       writeFileSync(file, `${value}\n`);

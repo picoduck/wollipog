@@ -57,13 +57,15 @@ function podmanNonMountDefaultsSafe(lines: string[]): boolean {
     // spanning lines can make a line-by-line table tracker miss a real container default.
     let quote: "'" | '"' | undefined;
     let code = line;
-    for (let index = 0; index < line.length; index += 1) {
-      const char = line[index];
-      if (quote) {
-        if (char === "\\" && quote === '"') { index += 1; continue; }
-        if (char === quote) quote = undefined;
-      } else if (char === "'" || char === '"') quote = char;
-      else if (char === "#") { code = line.slice(0, index); break; }
+    if (!line.includes('"""') && !line.includes("'''")) {
+      for (let index = 0; index < line.length; index += 1) {
+        const char = line[index];
+        if (quote) {
+          if (char === "\\" && quote === '"') { index += 1; continue; }
+          if (char === quote) quote = undefined;
+        } else if (char === "'" || char === '"') quote = char;
+        else if (char === "#") { code = line.slice(0, index); break; }
+      }
     }
     const assignments = code.matchAll(/(?:^|[\s.{,])(?:"(env_host|pidns|base_hosts_file|env)"|'(env_host|pidns|base_hosts_file|env)'|(env_host|pidns|base_hosts_file|env))\s*=\s*/giu);
     for (const assignment of assignments) {
