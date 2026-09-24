@@ -1057,6 +1057,35 @@ test("image tool results are live discovery evidence, never configuration (#1492
     [discoveredClaude(true)])[0]!.capabilities?.imageToolResults, true);
 });
 
+test("a configured wrapper matched only by name never inherits the image tool-result attestation (#1492)", () => {
+  const capabilities = { models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true };
+  const discoveredClaude = cfg({
+    id: "discovered", driver: "claude-code", command: "/usr/bin/claude", source: "discovered",
+    capabilities: { ...capabilities, imageToolResults: true },
+  });
+  // Another executable, or the same one under custom argv, is not the launch discovery verified.
+  for (const launch of [{ command: "/opt/wrap/claude" }, { command: "claude", args: ["--wrapped"] }]) {
+    const [wrapper] = mergeAgents([cfg({ id: "wrapper", ...launch, capabilities })], [discoveredClaude]);
+    assert.equal(wrapper!.command, launch.command);
+    assert.equal(wrapper!.capabilities?.supportsImages, true, "other discovered diagnostics still enrich the wrapper");
+    assert.equal(wrapper!.capabilities?.imageToolResults, undefined, JSON.stringify(launch));
+  }
+  // A bare pointer adopts the discovered launch, so it is that installation and keeps the attestation.
+  assert.equal(mergeAgents([cfg({ id: "pointer", command: "claude", capabilities })], [discoveredClaude])[0]!
+    .capabilities?.imageToolResults, true);
+
+  const supported = codexAgentDefinitions(
+    cfg({ id: "codex", name: "Codex", driver: "codex", command: "/usr/bin/codex", bin: "codex", source: "discovered" }),
+    SUPPORTED_APP_SERVER,
+    [],
+  );
+  const [codexWrapper] = mergeAgents([cfg({
+    id: "codex-wrapper", driver: "codex-app-server", command: "/opt/wrap/codex", capabilities,
+  })], supported);
+  assert.equal(codexWrapper!.command, "/opt/wrap/codex");
+  assert.equal(codexWrapper!.capabilities?.imageToolResults, undefined);
+});
+
 test("explicit app-server config enriches from the primary without duplicating its launch", () => {
   const config = [cfg({ id: "my-interactive-codex", driver: "codex-app-server", command: "codex" })];
   const discovered = codexAgentDefinitions(

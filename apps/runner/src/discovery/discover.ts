@@ -1000,7 +1000,11 @@ export function mergeAgents(
               supportsApprovals: d.capabilities.supportsApprovals,
               supportsSteering: d.capabilities.supportsSteering,
               supportsConversationFork: d.capabilities.supportsConversationFork,
-              imageToolResults: d.capabilities.imageToolResults,
+              // Like `installation`, this decides who may approve UI evidence, so a basename match
+              // cannot lend it to a wrapper or custom argv that discovery never ran.
+              ...(sameInstallation && d.capabilities.imageToolResults !== undefined
+                ? { imageToolResults: d.capabilities.imageToolResults }
+                : {}),
               slashCommands: d.capabilities.slashCommands,
             }
           : c.driver === "codex-app-server"
@@ -1010,7 +1014,7 @@ export function mergeAgents(
                 ...(d.codexAppServer?.status === "supported" && d.capabilities?.supportsSteering
                   ? { supportsSteering: true as const }
                   : {}),
-                ...(d.codexAppServer?.status === "supported" && d.capabilities?.imageToolResults
+                ...(sameInstallation && d.codexAppServer?.status === "supported" && d.capabilities?.imageToolResults
                   ? { imageToolResults: true as const }
                   : {}),
               }

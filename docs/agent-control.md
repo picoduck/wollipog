@@ -780,7 +780,8 @@ human-owned with a `humanFallback` code and reason shown on the request card:
   Unknown is treated as unsupported (`harness_unsupported`). Prompt-image support (`supportsImages`)
   is a different path and decides nothing here. The runner attests it only from live discovery — a
   Claude Code release at or after the one `pnpm probe:claude-mcp-image` verified, or a Codex App
-  Server whose app-server contract is supported — and never from agent configuration;
+  Server whose app-server contract is supported — never from agent configuration, and never for a
+  configured wrapper or custom argv that matches a discovered installation only by name;
 - its exact model is in the installation's catalog, and does not list input types that exclude
   `image` (`model_unsupported`). A model that lists none, as every Claude Code model does, is covered
   by the installation's attestation; a selected model missing from the catalog never inherits it;
