@@ -85,3 +85,15 @@ test("a failed check is reported on the skill", async ({ page }, info) => {
   await expect(page.getByRole("button", { name: "Check for Updates" })).toBeVisible();
   await page.screenshot({ path: info.outputPath("git-auto-update-error-390.png"), fullPage: true });
 });
+
+test("an update over an import without recorded modes explains its one-time review", async ({ page }, info) => {
+  await page.setViewportSize({ width: 390, height: 900 });
+  await install(page, { ...off, enabled: true, checkedAt: at, checkedCommit: "e".repeat(40),
+    held: { commit: "e".repeat(40), reason: "untracked_modes", scriptPaths: ["SKILL.md", "tool"], heldAt: at } });
+  await page.goto("/skills-removals-e2e.html?groups=1");
+  await page.getByRole("button", { name: /code-review/i }).click();
+  await expect(page.getByRole("status").filter({ hasText: "held for review" }))
+    .toHaveText(`Update to commit ${"e".repeat(12)} is held for review because the last import predates executable-file tracking, so changed files need one review: SKILL.md, tool. Review it before it can deploy.`);
+  await expect(page.getByRole("button", { name: "Review Held Update" })).toBeVisible();
+  await page.screenshot({ path: info.outputPath("git-auto-update-untracked-390.png"), fullPage: true });
+});

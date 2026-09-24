@@ -3359,7 +3359,7 @@ export interface SkillVersionSummary {
 }
 
 /** Why an automatic Git update waits for a human to import it through the preview. */
-export type SkillGitUpdateHoldReason = "scripts" | "local_changes";
+export type SkillGitUpdateHoldReason = "scripts" | "local_changes" | "untracked_modes";
 
 export interface SkillGitAutoUpdateView {
   enabled: boolean;

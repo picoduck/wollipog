@@ -36,7 +36,15 @@ export function changedSkillScripts(previous: SkillFile[], previousExecutablePat
     .sort();
 }
 
-export type SkillGitAutoUpdateOutcome = "unchanged" | "imported" | "held" | "failed" | "skipped";
+function changedExistingFiles(previous: SkillFile[], candidate: SkillGitCandidate): string[] {
+  const before = new Map(previous.map((file) => [file.path, file]));
+  return candidate.files
+    .filter((file) => { const prior = before.get(file.path); return !!prior && !sameContent(prior, file); })
+    .map((file) => file.path)
+    .sort();
+}
+
+export type SkillGitAutoUpdateOutcome ="unchanged" | "imported" | "held" | "failed" | "skipped";
 
 export class SkillGitAutoUpdater {
   private active: Promise<void> | null = null;
@@ -115,9 +123,14 @@ export class SkillGitAutoUpdater {
     let held: SkillGitAutoUpdateView["held"] = null;
     if (latest.digest !== candidate.digest) {
       const scriptPaths = changedSkillScripts(latest.files, latest.gitSource?.executablePaths ?? [], candidate);
+      // Imports that predate executable tracking cannot prove a changed file was not executable,
+      // so their first changing update is reviewed once; that import then records the modes.
+      const untracked = latest.gitSource && !Array.isArray(latest.gitSource.executablePaths)
+        ? changedExistingFiles(latest.files, candidate) : [];
       // Edits made in the library since the last import would be overwritten; a human decides.
       if (!latest.gitSource) held = { commit: candidate.commit, reason: "local_changes", scriptPaths, heldAt: this.now() };
       else if (scriptPaths.length) held = { commit: candidate.commit, reason: "scripts", scriptPaths, heldAt: this.now() };
+      else if (untracked.length) held = { commit: candidate.commit, reason: "untracked_modes", scriptPaths: untracked, heldAt: this.now() };
     }
     if (held) {
       db.recordSkillGitAutoUpdateCheck(skillId, { kind: "handled", commit: candidate.commit, at: this.now(), held });

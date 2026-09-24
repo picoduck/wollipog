@@ -33,7 +33,9 @@ export function SkillGitAutoUpdateControls({ status, gitRef, busy, onChange }: {
     {held && <p className="skills-git-held" role="status">
       Update to commit {held.commit.slice(0, 12)} is held for review because {held.reason === "scripts"
         ? `it adds or changes scripts: ${held.scriptPaths.join(", ")}.`
-        : "the library has edits made since the last Git import."} Review it before it can deploy.
+        : held.reason === "untracked_modes"
+          ? `the last import predates executable-file tracking, so changed files need one review: ${held.scriptPaths.join(", ")}.`
+          : "the library has edits made since the last Git import."} Review it before it can deploy.
     </p>}
   </div>;
 }

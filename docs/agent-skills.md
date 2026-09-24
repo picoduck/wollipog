@@ -276,11 +276,18 @@ a preview. A check compares the fetched tip with the last commit handled for the
   Track-latest machines receive it and pinned machines keep their revision. Commits that land
   between two checks are not imported one by one; the tip is imported.
 - New commit that adds or changes a script: the update is held and no version is created. A
-  script is an executable file, a file with an interpreter or binary extension, a file under
-  `scripts/` or `bin/`, or content that starts with a shebang or is a native executable. A changed
-  file counts if either its old or its new version is a script, so dropping an executable bit
-  cannot hide a change; Git versions record their executable paths for this comparison. Removing
-  a script is not held. The update is also held when the library's latest version has local edits
+  script is any of the following:
+  - an executable file;
+  - a file with an interpreter, binary, or notebook extension;
+  - a command manifest (`package.json`, Makefile, justfile, Taskfile);
+  - a file under `scripts/` or `bin/`;
+  - content that starts with a shebang or is a native executable.
+
+  A changed file counts if either its old or its new version is a script, so dropping an
+  executable bit cannot hide a change. Git versions record their executable paths for this
+  comparison. For a version imported before that was recorded, the first update that changes an
+  existing file is held once. Removing a script is not held. Instruction and data changes, such
+  as `SKILL.md` text, apply automatically by design; opting in accepts them. The update is also held when the library's latest version has local edits
   without Git provenance, so an upstream commit cannot silently replace them. **Review Held
   Update** opens the same preview and diff acceptance as **Check for Updates**, and a reviewed
   import clears the hold. A later commit is compared with the current library version again, so

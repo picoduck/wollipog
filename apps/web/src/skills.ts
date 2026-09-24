@@ -45,7 +45,7 @@ export interface SkillGitAutoUpdate {
   checkedAt?: number | null;
   checkedCommit?: string | null;
   error?: { message: string; at: number } | null;
-  held?: { commit: string; reason: "scripts" | "local_changes"; scriptPaths: string[]; heldAt: number } | null;
+  held?: { commit: string; reason: "scripts" | "local_changes" | "untracked_modes"; scriptPaths: string[]; heldAt: number } | null;
 }
 export interface SkillVersionPreview { version: SkillVersionSummary; currentVersion: SkillVersionSummary | null }
 export interface MachineSkillVersionPreview {

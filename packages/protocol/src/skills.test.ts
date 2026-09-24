@@ -75,6 +75,8 @@ test("script-like skill files are recognized by mode, extension, or scripts dire
 
 test("script-like skill files are also recognized by shebang or native executable content", () => {
   assert.equal(isSkillScriptPath("run.lua"), true);
+  for (const manifest of ["package.json", "tools/Makefile", "justfile", "Taskfile.yml"]) assert.equal(isSkillScriptPath(manifest), true, manifest);
+  assert.equal(isSkillScriptPath("reference/package.json.md"), false);
   assert.equal(isSkillScriptFile({ path: "helper", encoding: "utf8", content: "#!/bin/sh\necho" }), true);
   assert.equal(isSkillScriptFile({ path: "notes", encoding: "utf8", content: "MZ is not a binary here" }), false);
   const binary = (bytes: string) => ({ path: "blob", encoding: "base64" as const, content: Buffer.from(bytes, "latin1").toString("base64") });

@@ -1404,12 +1404,14 @@ export function validSkillFilePath(p: string): boolean {
   return parts.every((part) => part !== "" && part !== "." && part !== "..");
 }
 
-/** Whether a skill file is script-like: executable in its source tree, named with an interpreter
- * extension, or kept under a scripts/bin directory. Previews label these files, and Git automatic
+/** Whether a skill file is script-like: executable in its source tree, named with an interpreter,
+ * binary, or notebook extension, a command manifest (package.json scripts, Makefile, justfile,
+ * Taskfile), or kept under a scripts/bin directory. Previews label these files, and Git automatic
  * updates hold any added or changed one for human review. */
 export function isSkillScriptPath(path: string, executable = false): boolean {
   return executable ||
-    /\.(sh|bash|zsh|fish|ksh|csh|tcsh|py|pyw|rb|pl|pm|php|js|mjs|cjs|ts|mts|cts|lua|tcl|r|jl|groovy|kts|awk|ps1|psm1|psd1|bat|cmd|vbs|wsf|applescript|scpt|exe|dll|so|dylib|jar)$/i.test(path) ||
+    /\.(sh|bash|zsh|fish|ksh|csh|tcsh|nu|command|py|pyw|pyc|pyz|ipynb|rb|pl|pm|php|js|mjs|cjs|jsx|ts|mts|cts|tsx|coffee|lua|tcl|r|jl|go|java|swift|groovy|kts|csx|exs|awk|mk|ps1|psm1|psd1|bat|cmd|com|vbs|wsf|hta|reg|scr|msi|applescript|scpt|exe|dll|so|dylib|jar|wasm)$/i.test(path) ||
+    /(^|\/)(package\.json|makefile|gnumakefile|justfile|taskfile\.ya?ml)$/i.test(path) ||
     /(^|\/)(scripts|bin)\//i.test(path);
 }
 

