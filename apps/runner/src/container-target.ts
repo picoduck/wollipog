@@ -223,6 +223,8 @@ interface PreparedContainerTarget {
   definition: ExecutionTargetDefinition;
   runtime?: ResolvedBinary;
   dockerHost?: string;
+  /** Only private Docker config loss can be retried on Rediscover. */
+  dockerConfigRecovery?: "readiness" | "installations";
   installations?: Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>;
 }
 
@@ -578,7 +580,11 @@ export class ContainerTargetRegistry {
 
   async initialize(): Promise<void> {
     this.prepared.clear();
-    for (const template of this.templates) {
+    await this.prepareTemplates(this.templates);
+  }
+
+  private async prepareTemplates(templates: RunnerContainerTarget[]): Promise<void> {
+    for (const template of templates) {
       const id = containerTargetId(this.runnerId, template.id);
       const environment = {
         id: template.id,
@@ -634,6 +640,7 @@ export class ContainerTargetRegistry {
           this.prepared.set(id, {
             config: template, runtime,
             definition: { ...base, unavailableReason: DOCKER_CLIENT_CONFIG_UNAVAILABLE_REASON },
+            dockerConfigRecovery: "readiness",
           });
           continue;
         }
@@ -706,12 +713,14 @@ export class ContainerTargetRegistry {
         if (failed) break;
       }
       let installations = new Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>();
+      let dockerConfigRecovery: PreparedContainerTarget["dockerConfigRecovery"];
       if (!failed) {
         try { installations = await this.discoverInstallations(template, runtime, id, dockerHost); }
         catch (error) {
           const reason = dockerDiscoveryFailureReason(error);
           if (!reason) throw error;
           failed = reason;
+          if (error instanceof DockerClientConfigUnavailableError) dockerConfigRecovery = "installations";
         }
       }
       const defaultsUnsafe = template.runtime === "podman" && !this.podmanDefaultsSafe();
@@ -719,6 +728,7 @@ export class ContainerTargetRegistry {
         config: template,
         runtime,
         dockerHost,
+        dockerConfigRecovery,
         installations,
         definition: defaultsUnsafe ? { ...base, unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON } :
           failed ? { ...base, unavailableReason: failed } : {
@@ -735,7 +745,19 @@ export class ContainerTargetRegistry {
 
   async refreshInstallations(): Promise<void> {
     for (const [id, item] of this.prepared) {
-      if (!item.runtime || !item.definition.available) continue;
+      if (item.dockerConfigRecovery) {
+        // Rediscover makes one bounded attempt per affected target. An unavailable private
+        // config never permits a container probe or fallback to the operator's CLI config.
+        try { dockerTargetClientConfig(); }
+        catch { continue; }
+        if (item.dockerConfigRecovery === "readiness") {
+          // Startup stopped before image and setup checks, so repeat that target's complete
+          // readiness path. Other unavailable targets keep their original restart boundary.
+          await this.prepareTemplates([item.config]);
+          continue;
+        }
+      }
+      if (!item.runtime || (!item.definition.available && item.dockerConfigRecovery !== "installations")) continue;
       if (item.config.runtime === "podman" && !this.podmanDefaultsSafe()) {
         item.definition = { ...item.definition, available: false, unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON };
         item.installations = undefined;
@@ -747,6 +769,7 @@ export class ContainerTargetRegistry {
         const reason = dockerDiscoveryFailureReason(error);
         if (!reason) throw error;
         item.installations = undefined;
+        item.dockerConfigRecovery = error instanceof DockerClientConfigUnavailableError ? "installations" : undefined;
         item.definition = {
           ...item.definition, available: false, harnessInstallations: undefined,
           unavailableReason: reason,
@@ -759,8 +782,9 @@ export class ContainerTargetRegistry {
         continue;
       }
       item.installations = installations;
+      item.dockerConfigRecovery = undefined;
       item.definition = {
-        ...item.definition,
+        ...item.definition, available: true, unavailableReason: undefined,
         ...(installations.size ? { harnessInstallations: [...installations.values()].map((entry) => entry.info) } :
           { harnessInstallations: undefined }),
       };
