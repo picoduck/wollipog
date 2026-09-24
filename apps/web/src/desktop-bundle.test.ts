@@ -81,6 +81,27 @@ test("desktop content security policies allow the Browser panel's supported exte
   }
 });
 
+test("desktop content security policies allow Tauri IPC without widening other sources", () => {
+  const conf = JSON.parse(readFileSync(fileURLToPath(new URL("../../desktop/src-tauri/tauri.conf.json", import.meta.url)), "utf8")) as {
+    app?: { security?: { csp?: string; devCsp?: string } };
+  };
+  for (const [name, policy] of Object.entries({
+    csp: conf.app?.security?.csp,
+    devCsp: conf.app?.security?.devCsp,
+  })) {
+    assert.ok(policy, `${name} must remain enabled`);
+    const directives = new Map(policy.split(";").map((part) => {
+      const [directive, ...sources] = part.trim().split(/\s+/u);
+      return [directive, sources] as const;
+    }));
+    const connect = directives.get("connect-src") ?? [];
+    assert.ok(connect.includes("ipc:"), `${name} must allow the Tauri IPC scheme`);
+    assert.ok(connect.includes("http://ipc.localhost"), `${name} must allow Windows WebView2 IPC`);
+    assert.deepEqual(directives.get("default-src"), ["'self'"], `${name} must retain its restrictive default`);
+    assert.equal(connect.includes("*"), false, `${name} must not allow arbitrary connections`);
+  }
+});
+
 test("the flag is read from the environment, exactly", () => {
   assert.equal(isDesktopBuild({ [DESKTOP_BUILD_ENV]: "1" }), true);
   assert.equal(isDesktopBuild({}), false, "an ordinary web build keeps its PWA assets");

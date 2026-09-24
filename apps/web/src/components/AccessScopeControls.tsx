@@ -28,7 +28,7 @@ export function useAccessScopeIdentity(enabled: boolean) {
     void api.getIdentity().then((value) => {
       if (current) setIdentity(value);
     }).catch((cause) => {
-      if (current) setError((cause as Error).message);
+      if (current) setError(cause instanceof Error ? cause.message : String(cause));
     });
     return () => { current = false; };
   }, [api, enabled]);
