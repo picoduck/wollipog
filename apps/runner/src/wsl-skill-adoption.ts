@@ -10,6 +10,7 @@ import { bootstrapWslSkillsHelper, type WslRun } from "./wsl-skills.js";
 
 const REJECTED = "Adoption authorization, source or stored version could not be validated. No source directory was replaced.";
 const RECOVERY = "Adoption stopped. Inspect the private journal and preserved original; no automatic restore or cleanup was attempted.";
+const UNCERTAIN = "The WSL helper returned no output, so the adoption outcome is unknown. Inspect recovery before retrying; no automatic restore or cleanup was attempted.";
 const OWNER = /^[0-9a-f]{64}$/u;
 
 /** Runner-owned inputs for the in-distro helper. The helper leases the distro HOME itself, exactly
@@ -109,9 +110,12 @@ export async function adoptWslSkill(options: WslAdoptionOptions): Promise<SkillA
   const output = lines(run.stdout);
   const recovery = { operationId, backupDirectory: `${candidate.sourceDirectory}/.wollipog-adoption-${operationId}` };
   if (run.succeeded && output.includes("adopted")) return { status: "adopted", ...recovery };
-  return output.includes("journal")
-    ? { status: "recovery_required", ...recovery, error: RECOVERY }
-    : { status: "rejected", error: REJECTED };
+  if (output.includes("journal")) return { status: "recovery_required", ...recovery, error: RECOVERY };
+  // The helper reports "journal" before its first mutation and prints an error record on every
+  // handled failure, so only a run that returned nothing at all (for example, wsl.exe or the
+  // distro dying with the output unread) cannot prove the source is untouched.
+  if (run.stdout.trim() === "") return { status: "recovery_required", ...recovery, error: UNCERTAIN };
+  return { status: "rejected", error: REJECTED };
 }
 
 export async function inspectWslSkillRecovery(environment: WslAdoptionEnvironment, distro: string,

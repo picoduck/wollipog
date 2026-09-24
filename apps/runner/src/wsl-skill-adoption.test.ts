@@ -289,6 +289,26 @@ test("the runner command adopts a WSL candidate only after rereading it through 
     assert.equal(fs.readlinkSync(f.source), f.target);
   });
 
+test("a WSL helper run that fails with no output is reported as needing recovery, never as untouched", local,
+  async (t) => {
+    const f = fixture(t);
+    const inner = localRun(f.home);
+    // The helper really adopts, then wsl.exe fails and its output is lost.
+    const lossy: WslRun = async (context, command, args, options) => {
+      const result = await inner(context, command, args, options);
+      if (command === "python3" && args[0] !== "-c") throw Object.assign(new Error("wsl.exe failed"), { stdout: "" });
+      return result;
+    };
+    const result = await f.adopt(undefined, { run: lossy });
+    assert.equal(result.status, "recovery_required", JSON.stringify(result));
+    if (result.status !== "recovery_required") return;
+    assert.match(result.error ?? "", /outcome is unknown/u);
+    assert.deepEqual(f.backups(), [`.wollipog-adoption-${result.operationId}`]);
+    const listed = await f.list();
+    assert.deepEqual(listed.operations.map((entry) => [entry.operationId, entry.state]),
+      [[result.operationId, "managed_linked"]]);
+  });
+
 test("inherited or WSLENV-forwarded environment variables cannot reach the helper's test checkpoint", local,
   async (t) => {
     const f = fixture(t);
