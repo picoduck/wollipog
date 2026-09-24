@@ -96,7 +96,7 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
     }
     try {
       const skill = deps.db.importGitSkill({ ...candidate,
-        source: { ...candidate.source, path: candidate.path, commit: candidate.commit },
+        source: { ...candidate.source, path: candidate.path, commit: candidate.commit, executablePaths: candidate.executablePaths },
         scope: { organizationId: principal.organizationId, owner: { kind: "organization", organizationId: principal.organizationId } },
         expectedVersionId: snapshot.versions.get(candidate.name) ?? null,
       });

@@ -3390,7 +3390,8 @@ export interface SkillVersionView extends SkillVersionSummary {
   manifest: string;
   files: SkillFile[];
   note: string | null;
-  gitSource?: { url: string; ref: string; subdirectory: string; path: string; commit: string };
+  /** executablePaths (100755 blobs) is recorded since automatic updates; absent on older imports. */
+  gitSource?: { url: string; ref: string; subdirectory: string; path: string; commit: string; executablePaths?: string[] };
   machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number;
     context?: AgentContext; providerAccountId?: string };
 }

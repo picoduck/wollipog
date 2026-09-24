@@ -275,9 +275,12 @@ a preview. A check compares the fetched tip with the last commit handled for the
 - New commit that changes content: the update becomes a library version that records the commit.
   Track-latest machines receive it and pinned machines keep their revision. Commits that land
   between two checks are not imported one by one; the tip is imported.
-- New commit that adds or changes a script (an executable file, an interpreter extension, or a
-  file under `scripts/` or `bin/`): the update is held and no version is created. Removing a
-  script is not held. The update is also held when the library's latest version has local edits
+- New commit that adds or changes a script: the update is held and no version is created. A
+  script is an executable file, a file with an interpreter or binary extension, a file under
+  `scripts/` or `bin/`, or content that starts with a shebang or is a native executable. A changed
+  file counts if either its old or its new version is a script, so dropping an executable bit
+  cannot hide a change; Git versions record their executable paths for this comparison. Removing
+  a script is not held. The update is also held when the library's latest version has local edits
   without Git provenance, so an upstream commit cannot silently replace them. **Review Held
   Update** opens the same preview and diff acceptance as **Check for Updates**, and a reviewed
   import clears the hold. A later commit is compared with the current library version again, so

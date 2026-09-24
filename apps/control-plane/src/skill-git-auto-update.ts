@@ -1,6 +1,6 @@
 /** Opt-in unattended Git skill updates. Each check reuses the preview importer's hardened fetch and
  * the library's latest-version fence; script changes and local edits wait for a reviewed import. */
-import { isSkillScriptPath, type SkillFile } from "@wollipog/protocol";
+import { isSkillScriptFile, type SkillFile } from "@wollipog/protocol";
 import { SkillImportConflictError, type ControlPlaneDb, type SkillGitAutoUpdateView } from "./db.js";
 import { discoverGitSkills, parseSkillGitSource, type SkillGitCandidate, type SkillGitSource } from "./skill-git.js";
 
@@ -20,12 +20,18 @@ function sameContent(a: SkillFile, b: SkillFile): boolean {
   return a.encoding === b.encoding && a.content === b.content;
 }
 
-/** Script-like paths the candidate adds or changes. Removals never execute anything new. */
-export function changedSkillScripts(previous: SkillFile[], candidate: SkillGitCandidate): string[] {
+/** Paths the candidate adds or changes that are script-like now or were before, so dropping an
+ * executable bit or shebang in the same commit cannot hide a changed script. Removals are not
+ * held: they never execute anything new. */
+export function changedSkillScripts(previous: SkillFile[], previousExecutablePaths: string[], candidate: SkillGitCandidate): string[] {
   const before = new Map(previous.map((file) => [file.path, file]));
   return candidate.files
-    .filter((file) => isSkillScriptPath(file.path, candidate.executablePaths.includes(file.path)))
-    .filter((file) => { const prior = before.get(file.path); return !prior || !sameContent(prior, file); })
+    .filter((file) => {
+      const prior = before.get(file.path);
+      if (prior && sameContent(prior, file)) return false;
+      return isSkillScriptFile(file, candidate.executablePaths.includes(file.path)) ||
+        (!!prior && isSkillScriptFile(prior, previousExecutablePaths.includes(file.path)));
+    })
     .map((file) => file.path)
     .sort();
 }
@@ -64,13 +70,15 @@ export class SkillGitAutoUpdater {
 
   async check(skillId: string): Promise<SkillGitAutoUpdateOutcome> {
     const { db } = this.options;
-    const fail = (error: string): SkillGitAutoUpdateOutcome => {
-      db.recordSkillGitAutoUpdateCheck(skillId, { kind: "failed", error, at: this.now() });
-      return "failed";
-    };
     const skill = db.getSkill(skillId);
     const state = db.getSkillGitAutoUpdate(skillId);
     const revision = db.getSkillGitAutoUpdateRevision(skillId);
+    const fail = (error: string): SkillGitAutoUpdateOutcome => {
+      // A failure from a fetch that outlived a setting change or reviewed import is stale too.
+      if (db.getSkillGitAutoUpdateRevision(skillId) !== revision) return "skipped";
+      db.recordSkillGitAutoUpdateCheck(skillId, { kind: "failed", error, at: this.now() });
+      return "failed";
+    };
     if (!skill || !state.enabled) return "skipped";
     const upstream = skill.gitSource;
     if (!upstream) return fail("The skill no longer records a Git source.");
@@ -103,10 +111,10 @@ export class SkillGitAutoUpdater {
       return "unchanged";
     }
 
-    const source = { ...upstream, path: candidate.path, commit: candidate.commit };
+    const source = { ...upstream, path: candidate.path, commit: candidate.commit, executablePaths: candidate.executablePaths };
     let held: SkillGitAutoUpdateView["held"] = null;
     if (latest.digest !== candidate.digest) {
-      const scriptPaths = changedSkillScripts(latest.files, candidate);
+      const scriptPaths = changedSkillScripts(latest.files, latest.gitSource?.executablePaths ?? [], candidate);
       // Edits made in the library since the last import would be overwritten; a human decides.
       if (!latest.gitSource) held = { commit: candidate.commit, reason: "local_changes", scriptPaths, heldAt: this.now() };
       else if (scriptPaths.length) held = { commit: candidate.commit, reason: "scripts", scriptPaths, heldAt: this.now() };

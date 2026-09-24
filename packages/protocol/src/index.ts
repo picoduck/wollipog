@@ -1408,8 +1408,21 @@ export function validSkillFilePath(p: string): boolean {
  * extension, or kept under a scripts/bin directory. Previews label these files, and Git automatic
  * updates hold any added or changed one for human review. */
 export function isSkillScriptPath(path: string, executable = false): boolean {
-  return executable || /\.(sh|bash|zsh|fish|py|rb|pl|php|js|mjs|cjs|ts|mts|cts|ps1|psm1|bat|cmd)$/i.test(path) ||
+  return executable ||
+    /\.(sh|bash|zsh|fish|ksh|csh|tcsh|py|pyw|rb|pl|pm|php|js|mjs|cjs|ts|mts|cts|lua|tcl|r|jl|groovy|kts|awk|ps1|psm1|psd1|bat|cmd|vbs|wsf|applescript|scpt|exe|dll|so|dylib|jar)$/i.test(path) ||
     /(^|\/)(scripts|bin)\//i.test(path);
+}
+
+/** A skill file that is script-like by path or mode, or whose content is a shebang script or a
+ * native executable (ELF, PE, Mach-O), whatever it is named. */
+export function isSkillScriptFile(file: SkillFile, executable = false): boolean {
+  if (isSkillScriptPath(file.path, executable)) return true;
+  if (file.encoding === "utf8") return file.content.startsWith("#!");
+  // Native executables are never valid UTF-8 text, so they arrive base64-encoded.
+  let head: string;
+  try { head = atob(file.content.slice(0, 8)); } catch { return false; }
+  return head.startsWith("#!") || head.startsWith("\x7fELF") || head.startsWith("MZ") ||
+    ["\xfe\xed\xfa\xce", "\xfe\xed\xfa\xcf", "\xce\xfa\xed\xfe", "\xcf\xfa\xed\xfe", "\xca\xfe\xba\xbe"].includes(head.slice(0, 4));
 }
 
 /** How an agent can deliver a permission decision for one permission mode. */
