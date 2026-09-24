@@ -186,6 +186,32 @@ test("Agent Details shows explicit Windows command hosts as reference data", asy
   await page.screenshot({ path: "test-results/explicit-interpreter-details-mobile.png", fullPage: true });
 });
 
+test("older Windows runner update instructions are suppressed in Details and Machine Settings", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("older-interpreter-guidance"));
+  await page.getByText("Agents", { exact: true }).click();
+  await page.getByRole("button", { name: "View Codex App Server Details" }).click();
+  const details = page.getByRole("dialog", { name: "Codex App Server Details" });
+  await expect(details.getByText(/No copyable update command is available/)).toBeVisible();
+  await expect(details).not.toContainText("Run `& 'C:\\Windows");
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await details.getByText(/No copyable update command is available/).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "test-results/older-runner-guidance-details-desktop.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await details.getByText(/No copyable update command is available/).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "test-results/older-runner-guidance-details-mobile.png", fullPage: true });
+  await details.getByRole("button", { name: "Close" }).last().click();
+  await page.getByRole("button", { name: "Manage", exact: true }).click();
+  const settings = page.getByRole("dialog", { name: "Manage Design Workstation" });
+  await expect(settings.getByText(/No copyable update command is available/)).toBeVisible();
+  await expect(settings).not.toContainText("Run `& 'C:\\Windows");
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await settings.getByText(/No copyable update command is available/).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "test-results/older-runner-guidance-settings-desktop.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await settings.getByText(/No copyable update command is available/).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: "test-results/older-runner-guidance-settings-mobile.png", fullPage: true });
+});
+
 test("offline Machines retain last-reported harness status without a fresh release notice", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
   await setOffline(page);

@@ -12,6 +12,7 @@ import {
   type RunnerRuntimeInfo,
 } from "@wollipog/protocol";
 import { driverKindLabel } from "./agent-presentation.js";
+import { formatHarnessLaunchCommand } from "./harness-command.js";
 
 export function machineSettingsMutationError(cause: unknown): string {
   if (cause instanceof Error &&
@@ -160,9 +161,28 @@ export interface InstallHint {
   command?: string;
 }
 
+/** An older runner can still send a PowerShell command for a launch that this client knows is
+ * unsafe to copy. Protocol v179 cannot attest the guard: both sides of the runner fix use v179. */
+export function harnessUpdateGuidance(
+  agent: Pick<AgentDefinition, "command" | "args" | "context" | "update">,
+  os: OS,
+): string | undefined {
+  const guidance = agent.update?.guidance;
+  if (!guidance) return guidance;
+  if (formatHarnessLaunchCommand(agent.command, agent.args, agent.context, os).referenceOnly &&
+      /\brun\s+`[^`]+`\s+in\s+PowerShell\b/i.test(guidance)) {
+    return "This Windows launch may resolve to a batch wrapper or use legacy PowerShell argument passing. No copyable update command is available for this launch; use the package or version manager that installed this exact copy after stopping sessions using it. Restart and Rediscover before treating the new version as ready.";
+  }
+  return guidance;
+}
+
 /** Shared neutral fallback for Codex remediation when discovery has no manager guidance. */
-export function codexUpgradeGuidance(agent: Pick<AgentDefinition, "installation" | "update">): string {
-  if (agent.update?.guidance) return agent.update.guidance;
+export function codexUpgradeGuidance(
+  agent: Pick<AgentDefinition, "command" | "args" | "context" | "installation" | "update">,
+  os: OS,
+): string {
+  const guidance = harnessUpdateGuidance(agent, os);
+  if (guidance) return guidance;
   return agent.installation
     ? "Inspect this installation in Machine settings and use the manager that installed this exact copy, then Rediscover."
     : "Install Codex using a supported method for this Machine, then Rediscover.";

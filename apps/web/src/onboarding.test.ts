@@ -155,6 +155,26 @@ test("Codex onboarding uses installation guidance without a universal npm comman
   assert.doesNotMatch(missing.detail, /selected installation|npm install/);
 });
 
+test("Codex onboarding suppresses an older Windows runner's unsafe update command", () => {
+  const legacy = "Run `& 'C:\\Windows\\System32\\cmd.exe' '/c' 'echo' '%PATH%' 'update'` in PowerShell.";
+  const machine = runner({ os: "windows", agents: [{
+    id: "codex", name: "Codex", command: "C:\\Windows\\System32\\cmd.exe",
+    args: ["/c", "echo", "%PATH%"], env: {}, driver: "codex-app-server",
+    context: { kind: "native" }, available: false,
+    codexAppServer: { status: "unsupported", appServerAvailable: false },
+    update: { status: "managed_externally", checkedAt: 1, channel: "stable",
+      evidenceSource: "Executable installation provenance", managedExternally: true,
+      guidance: legacy },
+  }] });
+  const health = onboardingHealth({ credentialAvailable: true, runnerId: "laptop", workspaceId: "repo",
+    runner: machine }).find((check) => check.id === "agents")!;
+  assert.match(health.detail, /No copyable update command is available/);
+  assert.doesNotMatch(health.detail, /Run `|%PATH%/);
+  const readiness = localRunnerReadiness(machine);
+  assert.equal(readiness.state, "needs-attention");
+  assert.doesNotMatch(readiness.detail, /Run `|%PATH%/);
+});
+
 test("onboarding health waits for current discovery even when registration carries stale ready rows", () => {
   const checks = onboardingHealth({
     credentialAvailable: true,

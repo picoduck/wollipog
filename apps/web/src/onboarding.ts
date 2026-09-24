@@ -70,7 +70,7 @@ export interface OnboardingHealthCheck {
   command?: string;
 }
 
-function agentProblem(agent: AgentDefinition): { detail: string; command?: string } | null {
+function agentProblem(agent: AgentDefinition, os: RunnerView["os"]): { detail: string; command?: string } | null {
   const label = agentDriverLabel(agent);
   if (agent.driver === "claude-code") {
     if (agent.authStatus === "unauthenticated" || agent.claudeCode?.status === "unauthenticated") {
@@ -87,10 +87,10 @@ function agentProblem(agent: AgentDefinition): { detail: string; command?: strin
       return { detail: `${label} is installed but not signed in.`, command: "codex login" };
     }
     if (agent.codexAppServer?.status === "unsupported") {
-      return { detail: `${label} needs a Codex version with interactive support. ${codexUpgradeGuidance(agent)}` };
+      return { detail: `${label} needs a Codex version with interactive support. ${codexUpgradeGuidance(agent, os)}` };
     }
     if (agent.codexAppServer?.status === "unavailable") {
-      return { detail: `${label} is unavailable or could not be launched. ${codexUpgradeGuidance(agent)}` };
+      return { detail: `${label} is unavailable or could not be launched. ${codexUpgradeGuidance(agent, os)}` };
     }
   } else if (agent.driver === "codex") {
     if (agent.authStatus === "unauthenticated") {
@@ -113,14 +113,14 @@ function agentProblem(agent: AgentDefinition): { detail: string; command?: strin
     return agent.driver === "claude-code"
       ? { detail: `${label} is not installed or could not be launched.`, command: "npm install -g @anthropic-ai/claude-code" }
       : agent.driver?.startsWith("codex")
-        ? { detail: `${label} is not installed or could not be launched. ${codexUpgradeGuidance(agent)}` }
+        ? { detail: `${label} is not installed or could not be launched. ${codexUpgradeGuidance(agent, os)}` }
         : { detail: `${label} is unavailable. Check its launch command on the runner.` };
   }
   return null;
 }
 
-function agentVerifiedReady(agent: AgentDefinition): boolean {
-  if (agentProblem(agent)) return false;
+function agentVerifiedReady(agent: AgentDefinition, os: RunnerView["os"]): boolean {
+  if (agentProblem(agent, os)) return false;
   if ((agent.driver ?? "acp") === "acp") {
     return agent.authStatus === "authenticated" || agent.acp != null;
   }
@@ -154,7 +154,7 @@ export function localRunnerReadiness(runner: RunnerView | undefined): LocalRunne
   }
   const agents = runner.agents;
   const labels = [...new Set(agents.map(agentDriverLabel))];
-  const ready = agents.filter(agentVerifiedReady);
+  const ready = agents.filter((agent) => agentVerifiedReady(agent, runner.os));
   if (ready.length) {
     return {
       state: "ready",
@@ -163,7 +163,8 @@ export function localRunnerReadiness(runner: RunnerView | undefined): LocalRunne
       agentLabels: labels,
     };
   }
-  const problem = agents.map(agentProblem).find((item): item is NonNullable<typeof item> => item != null);
+  const problem = agents.map((agent) => agentProblem(agent, runner.os))
+    .find((item): item is NonNullable<typeof item> => item != null);
   return {
     state: "needs-attention",
     title: agents.length ? "Agents Need Attention" : "No Supported Agents Found",
@@ -233,7 +234,7 @@ export function onboardingHealth(input: {
   if (runner.agentsRefreshed !== true) {
     checks.push({ id: "agents", label: "Agent Readiness", status: "pending", detail: "Waiting for this connection to finish live agent verification. Upgrade the runner if this does not complete." });
   } else {
-    const ready = runner.agents.find(agentVerifiedReady);
+    const ready = runner.agents.find((agent) => agentVerifiedReady(agent, runner.os));
     if (ready) {
       checks.push({
         id: "agents",
@@ -242,9 +243,10 @@ export function onboardingHealth(input: {
         detail: `${agentDriverLabel(ready)} ${online ? "is installed and ready" : "was ready when this runner was last online"}.`,
       });
     } else {
-      const problem = runner.agents.map(agentProblem).find((item): item is NonNullable<typeof item> => item != null);
+      const problem = runner.agents.map((agent) => agentProblem(agent, runner.os))
+        .find((item): item is NonNullable<typeof item> => item != null);
       const awaitingLive = runner.agents.find((agent) =>
-        (agent.driver ?? "acp") === "acp" && !agentProblem(agent) && !agentVerifiedReady(agent));
+        (agent.driver ?? "acp") === "acp" && !agentProblem(agent, runner.os) && !agentVerifiedReady(agent, runner.os));
       checks.push(problem
         ? {
             id: "agents",
