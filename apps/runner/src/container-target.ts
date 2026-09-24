@@ -432,8 +432,9 @@ export class ContainerTargetRegistry {
     return env;
   }
 
-  private cleanupOrphans(runtime: ResolvedBinary, opts: { env?: Record<string, string>; replaceEnv?: boolean } = {}): Promise<string | null> {
-    const key = `${runtime.launch.command}\0${runtime.launch.args.join("\0")}\0${opts.env?.DOCKER_HOST ?? ""}`;
+  private cleanupOrphans(runtime: ResolvedBinary, opts: { env?: Record<string, string>; replaceEnv?: boolean } = {},
+    mode: "startup" | "exited" = "startup"): Promise<string | null> {
+    const key = `${runtime.launch.command}\0${runtime.launch.args.join("\0")}\0${opts.env?.DOCKER_HOST ?? ""}\0${mode}`;
     const existing = this.runtimeCleanup.get(key);
     if (existing) return existing;
     const cleanup = (async () => {
@@ -443,6 +444,7 @@ export class ContainerTargetRegistry {
         labels,
         listed: await this.deps.run(runtime.launch.command, [
           ...runtime.launch.args, "ps", "-aq", "--filter", `label=${labels.runner}=${this.runnerKey}`,
+          ...(mode === "exited" ? ["--filter", "status=exited"] : []),
         ], { ...opts, timeoutMs: 15_000 }),
       })));
       let inventoryError: string | null = null;
@@ -472,7 +474,7 @@ export class ContainerTargetRegistry {
       if (!inventory.size) return null;
       const removed = await this.deps.run(
         runtime.launch.command,
-        [...runtime.launch.args, "rm", "-f", ...inventory],
+        [...runtime.launch.args, "rm", ...(mode === "startup" ? ["-f"] : []), ...inventory],
         { ...opts, timeoutMs: 30_000 },
       );
       return removed.code === 0 ? null : unavailableReason(removed.stderr || "could not remove orphaned runner containers");
@@ -583,7 +585,7 @@ export class ContainerTargetRegistry {
     await this.prepareTemplates(this.templates);
   }
 
-  private async prepareTemplates(templates: RunnerContainerTarget[], skipOrphanCleanup = false): Promise<void> {
+  private async prepareTemplates(templates: RunnerContainerTarget[], cleanupMode: "startup" | "exited" = "startup"): Promise<void> {
     for (const template of templates) {
       const id = containerTargetId(this.runnerId, template.id);
       const environment = {
@@ -682,9 +684,9 @@ export class ContainerTargetRegistry {
           continue;
         }
       }
-      // Orphan reconciliation is a startup-only operation. A Rediscover retry may run
-      // while another target has live sessions on this engine; never remove them here.
-      const cleanupError = skipOrphanCleanup ? null : await this.cleanupOrphans(runtime, dockerStartupOpts);
+      // Rediscover can share this engine with live sessions. Restrict recovery to exited
+      // containers and omit --force, so a container started after listing cannot be killed.
+      const cleanupError = await this.cleanupOrphans(runtime, dockerStartupOpts, cleanupMode);
       if (cleanupError) {
         this.prepared.set(id, {
           config: template,
@@ -807,9 +809,8 @@ export class ContainerTargetRegistry {
         try { dockerTargetClientConfig(); }
         catch { continue; }
         if (item.dockerConfigRecovery === "readiness") {
-          // Repeat image and setup checks, but never rerun startup orphan cleanup while
-          // other targets may have live sessions on the same engine.
-          await this.prepareTemplates([item.config], true);
+          // Repeat image and setup checks after reconciling only exited containers.
+          await this.prepareTemplates([item.config], "exited");
           continue;
         }
       }
