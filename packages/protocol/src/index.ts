@@ -3421,7 +3421,8 @@ export type WorkflowDecisionResourceSnapshot =
       category: "ui_evidence_approval";
       evidence: Array<{
         evidenceId: string;
-        uri: string;
+        /** HTTPS link for external evidence. An artifact-backed raster image may omit it. */
+        uri?: string;
         sha256: string;
         /** First-class Session artifact holding the exact bytes. Only artifact-backed evidence can
          * be delivered to an Orchestrator; a bare URI is never fetched by the control plane. */

@@ -581,14 +581,19 @@ export function normalizeWorkflowDecisionSnapshot(
   const evidence = value.evidence.flatMap((raw) => {
     if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
     const item = raw as Record<string, unknown>;
-    if (!boundedDecisionString(item.evidenceId, 256) || !safeHttpsUrl(item.uri) || !sha(item.sha256, 64)) return [];
+    if (!boundedDecisionString(item.evidenceId, 256) || !sha(item.sha256, 64)) return [];
+    if (item.uri !== undefined && !safeHttpsUrl(item.uri)) return [];
     if (item.artifactId !== undefined && !boundedDecisionString(item.artifactId, 256)) return [];
     if (item.mediaType !== undefined &&
         (typeof item.mediaType !== "string" || !/^[a-z0-9][a-z0-9.+-]{0,62}\/[a-z0-9][a-z0-9.+-]{0,62}$/u.test(item.mediaType))) return [];
+    // Without an external link, the human fallback must have an artifact the browser can display.
+    // The Orchestrator still applies its own stricter client and artifact checks before delivery.
+    if (item.uri === undefined && (!item.artifactId ||
+        !(PROMPT_IMAGE_MIME_TYPES as readonly string[]).includes(item.mediaType as string))) return [];
     // Optional fields are emitted only when present so a pre-v167 snapshot keeps its digest.
     return [{
       evidenceId: item.evidenceId,
-      uri: item.uri as string,
+      ...(item.uri !== undefined ? { uri: item.uri as string } : {}),
       sha256: item.sha256 as string,
       ...(item.artifactId !== undefined ? { artifactId: item.artifactId as string } : {}),
       ...(item.mediaType !== undefined ? { mediaType: item.mediaType as string } : {}),
@@ -596,7 +601,7 @@ export function normalizeWorkflowDecisionSnapshot(
   });
   if (evidence.length !== value.evidence.length ||
       new Set(evidence.map((item) => item.evidenceId)).size !== evidence.length) {
-    return fail("UI evidence references must be unique HTTPS resources with SHA-256 integrity");
+    return fail("UI evidence references must be unique HTTPS resources or renderable Session artifacts with SHA-256 integrity");
   }
   return ok({ category: "ui_evidence_approval", evidence });
 }

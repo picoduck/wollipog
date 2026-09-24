@@ -50,7 +50,7 @@ const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a
 const PNG_SHA = createHash("sha256").update(PNG).digest("hex");
 const RESOURCE_DIGEST = "b".repeat(64);
 
-type Evidence = { evidenceId: string; uri: string; sha256: string; artifactId?: string; mediaType?: string };
+type Evidence = { evidenceId: string; uri?: string; sha256: string; artifactId?: string; mediaType?: string };
 
 function sessionWith(evidence: Evidence[]): SessionView {
   return {
@@ -164,6 +164,23 @@ test("artifact-backed evidence is shown in place, verified against the decision 
       "Enlarge Evidence: desktop-after");
     assert.equal(view.checkbox("desktop-after").disabled, false, "a shown image can be marked reviewed");
     assert.equal(view.button("Approve").disabled, true, "showing is not reviewing");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("artifact-only evidence can be reviewed without creating an external link", async () => {
+  domWindow.localStorage.clear();
+  const { uri: _externalCopy, ...item } = artifactItem();
+  const view = await mount(sessionWith([item]), async () => new Blob([PNG]));
+  try {
+    assert.deepEqual(view.requests, ["art_desktop"]);
+    await view.decode("load");
+    assert.equal(view.container.querySelector(".evidence-artifact img")?.getAttribute("alt"), "Evidence: desktop-after");
+    assert.equal(view.container.querySelector(".evidence-review-item a"), null);
+    assert.equal(view.checkbox("desktop-after").disabled, false);
+    await act(async () => view.checkbox("desktop-after").click());
+    assert.equal(view.button("Approve").disabled, false);
   } finally {
     await view.unmount();
   }
@@ -291,6 +308,28 @@ test("without SubtleCrypto the artifact is not shown unverified and the reviewer
       assert.match(view.container.querySelector(".evidence-artifact")?.textContent ?? "", /require HTTPS or localhost/u);
       assert.ok(view.container.querySelector('a[aria-label="View External Evidence: desktop-after"]'));
       assert.equal(view.checkbox("desktop-after").disabled, false, "review stays possible through the external copy");
+    } finally {
+      await view.unmount();
+    }
+  } finally {
+    Object.defineProperty(globalThis.crypto, "subtle", subtle);
+  }
+});
+
+test("an artifact-only item without SubtleCrypto cannot be approved unseen", async () => {
+  domWindow.localStorage.clear();
+  const subtle = Object.getOwnPropertyDescriptor(globalThis.crypto, "subtle") ??
+    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(globalThis.crypto), "subtle")!;
+  Object.defineProperty(globalThis.crypto, "subtle", { configurable: true, value: undefined });
+  try {
+    const { uri: _externalCopy, ...item } = artifactItem();
+    const view = await mount(sessionWith([item]), async () => new Blob([PNG]));
+    try {
+      assert.equal(view.container.querySelector(".evidence-artifact img"), null);
+      assert.equal(view.container.querySelector(".evidence-artifact a"), null);
+      assert.equal(view.checkbox("desktop-after").disabled, true);
+      assert.equal(view.button("Approve").disabled, true);
+      assert.equal(view.button("Deny").disabled, false);
     } finally {
       await view.unmount();
     }
