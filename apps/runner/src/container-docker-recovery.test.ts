@@ -119,7 +119,7 @@ test("Docker target recovers from startup config failure through full readiness 
   }
 });
 
-test("Docker recovery fails closed if an exited container starts before removal", async () => {
+test("Docker recovery stays unavailable after a persistent non-forced removal failure", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-docker-recovery-race-"));
   const saved = {
     TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP,
@@ -140,7 +140,7 @@ test("Docker recovery fails closed if an exited container starts before removal"
     assert.equal(registry.definitions()[0]!.available, false);
     assert.match(registry.definitions()[0]!.unavailableReason ?? "", /orphan reconciliation failed/u);
     assert.deepEqual(launches.filter(({ args }) => args[0] === "rm").map(({ args }) => args),
-      [["rm", exitedContainerId]], "a race must never turn removal into a forced kill");
+      [["rm", exitedContainerId]], "a failed removal must never become a forced kill");
     assert.equal(launches.some(({ args }) => args[0] === "image" || args[0] === "run"), false,
       "readiness stops when safe reconciliation cannot complete");
   } finally {
