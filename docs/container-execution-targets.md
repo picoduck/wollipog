@@ -88,6 +88,11 @@ also checks the engine behind the pinned local endpoint, using the same private 
 environment as the pending launch. A command reporting the wrong runtime, a Podman or unrecognized
 Docker server, or a failed identity probe blocks the launch without exposing probe output. Restart
 the runner after changing the runtime command or endpoint to repeat the full readiness checks.
+Before each Docker installation probe, including probes during Rediscover, the runner also rechecks
+the command and engine through the same pinned endpoint and private client configuration that the
+probe will use. A changed or inaccessible engine stops further probes, clears previously advertised
+installations, and marks the target unavailable until the runner restarts and completes readiness
+checks again. The failure reason does not contain client output.
 Rootless Podman keeps its home, local image/runtime directories, and storage configuration file so
 its existing image store remains usable. The runner verifies that the configured Podman client is local
 before isolating general Podman container config. Docker client config is isolated. Other

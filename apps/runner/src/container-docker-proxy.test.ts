@@ -42,6 +42,9 @@ test("Docker probes keep image proxy values without loading operator client defa
       resolveRuntime: async () => ({ path: "/usr/bin/docker", via: "path",
         launch: { command: "/usr/bin/docker", args: [] } }),
       run: async (_file, args, opts) => {
+        if (args[0] === "--version") return { code: 0, stdout: "Docker version 27.0.0\n", stderr: "" };
+        if (args[0] === "version") return { code: 0,
+          stdout: '{"Server":{"Components":[{"Name":"Engine"}]}}', stderr: "" };
         if (args[0] === "context") return { code: 0, stdout: `${JSON.stringify(socket)}\n`, stderr: "" };
         if (args[0] === "run") {
           launches.push({ args, env: opts.env });
@@ -199,6 +202,9 @@ test("a missing private Docker config with no writable replacement makes only it
       resolveRuntime: async (name) => ({ path: `/usr/bin/${name}`, via: "path",
         launch: { command: `/usr/bin/${name}`, args: [] } }),
       run: async (_file, args) => {
+        if (args[0] === "--version") return { code: 0, stdout: "Docker version 27.0.0\n", stderr: "" };
+        if (args[0] === "version") return { code: 0,
+          stdout: '{"Server":{"Components":[{"Name":"Engine"}]}}', stderr: "" };
         if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
         if (args.includes("/bin/sh")) return { code: 0, stdout: "/usr/bin/codex\n", stderr: "" };
         if (args.at(-1) === "--version" && args.includes("/usr/bin/codex")) {
