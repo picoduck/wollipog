@@ -1154,10 +1154,25 @@ static void restore_recovery(int argc, char **argv) {
     checkpoint("managed_link_preserved");
   } else if (preserved_kind != PATH_ABSENT) fail();
   if (source_kind != PATH_ABSENT) fail();
+  /* The link text names the original by path, so the pinned parent and journal must still be where
+   * that path leads, before and after publication; a moved parent would otherwise leave a dangling
+   * link that the descriptor checks alone would accept. */
+  char *original_relative = join_path(local, backup_name);
+  char *original_path = join_path(original_relative, "original");
+  check_path(home_real, local, parent_expected);
+  check_path(home_real, original_path, source_expected);
   /* symlinkat() is the no-replace primitive: any last-instant occupant makes it fail untouched. */
   if (symlinkat(recovery, parent, name) != 0) fail();
   flush(parent);
   checkpoint("recovery_link_created");
+  check_path(home_real, local, parent_expected);
+  check_path(home_real, original_path, source_expected);
+  char *source_path = join_path(join_path(home_real, local), name);
+  int published = open(source_path, O_RDONLY | O_DIRECTORY);
+  if (published < 0) fail();
+  identity(published, actual);
+  close(published);
+  if (strcmp(actual, source_expected)) fail();
   identity(original, actual);
   tree_digest(original, 0, 1, current);
   if (!link_equals(parent, name, recovery) || strcmp(actual, source_expected) || strcmp(current, digest)) fail();

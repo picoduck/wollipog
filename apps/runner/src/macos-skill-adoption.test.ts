@@ -320,6 +320,24 @@ test("a retargeted data-directory symlink cannot separate the verified store fro
     assert.match(fs.readFileSync(join(f.source, "SKILL.md"), "utf8"), /Original instructions/u);
   });
 
+test("a macOS restore never reports a dangling recovery link after the harness directory moves", native, async (t) => {
+  const f = fixture(t);
+  const adopted = adoptMachineSkill(f.options);
+  assert.equal(adopted.status, "adopted");
+  if (adopted.status !== "adopted") return;
+  const intent = JSON.parse(fs.readFileSync(join(f.home, adopted.backupDirectory, "intent.json"), "utf8"));
+  const moved = join(f.home, ".codex/moved");
+  const run = await atCheckpoint(f.helper, macosRestoreArguments({ home: f.home, localSourceDirectory: ".codex/skills",
+    dataDir: f.dataDir, operationId: adopted.operationId, name: "alpha", digest: f.options.digest,
+    parentIdentity: intent.parentIdentity, sourceIdentity: intent.sourceIdentity }),
+  "restore_intent_durable", "c", () => { fs.renameSync(f.parent, moved); });
+  assert.equal(run.code, 1);
+  assert.equal(run.lines.includes("restored"), false);
+  assert.equal(fs.existsSync(join(moved, "alpha")), false, "no link was published inside the moved directory");
+  assert.match(fs.readFileSync(join(moved, `.wollipog-adoption-${adopted.operationId}`, "original/SKILL.md"), "utf8"),
+    /Original instructions/u);
+});
+
 for (const stage of ["restore_intent_durable", "managed_link_preserved", "recovery_link_created"] as const) {
   test(`macOS restore retries safely after interruption at ${stage}`, native, async (t) => {
     const f = fixture(t);
