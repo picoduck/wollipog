@@ -16,8 +16,8 @@ import type { Readable, Writable } from "node:stream";
 import { posix, win32 } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { containerLabelArgs } from "./container-identity.js";
+import { dockerTargetClientConfig } from "./docker-client-config.js";
 import { RUNNER_CREDENTIAL_ENVIRONMENT, sensitiveEnvironmentName } from "./env-security.js";
-import { dockerProxyClearArgs } from "./container-proxy-args.js";
 import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher } from "./windows-job.js";
 import {
@@ -215,6 +215,8 @@ export interface ContainerSpawnIsolation {
   agentArgs: string[];
   /** Host-only configured args replaced by agentArgs at the container boundary. */
   hostAgentArgs: string[];
+  /** Local Docker socket or named pipe established by setup checks, independent of operator config. */
+  dockerHost?: string;
   /** Recheck mutable Podman defaults immediately before every client spawn, including later terminals. */
   verifyDefaults?: () => void;
   /** Trust-gated repository setup names forwarded without putting values in argv. */
@@ -277,7 +279,6 @@ export function buildContainerArgs(
     "--tmpfs", "/tmp:rw,nosuid,nodev",
     "--mount", `type=bind,src=${opts.cwd},dst=/workspace`,
     "--workdir", "/workspace",
-    ...(isolation.runtime === "docker" ? dockerProxyClearArgs() : []),
     ...(opts.containerEnvironmentKeys ?? isolation.sessionEnvironmentKeys ?? []).flatMap((key) => ["--env", key]),
     isolation.image,
     command,
@@ -513,7 +514,19 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
       // setup runner is the sole reviewed exception and allowlists names explicitly; values stay
       // out of argv and are forwarded by the container runtime from its own environment.
       const allowedEnvironment = new Set(opts.containerEnvironmentKeys ?? opts.isolation.sessionEnvironmentKeys ?? []);
+      if (opts.isolation.runtime === "docker" && [...allowedEnvironment].some((name) => /^DOCKER_/iu.test(name))) {
+        throw new Error("Docker client control environment cannot be forwarded to a container target");
+      }
       explicitEnv = Object.fromEntries(Object.entries(explicitEnv).filter(([key]) => allowedEnvironment.has(key)));
+      if (opts.isolation.runtime === "docker") {
+        // Docker config.json proxy defaults are applied by the CLI, even when no --env flag is
+        // present. Keep its config private and pin the local endpoint verified at readiness.
+        scrubInheritedEnv.push(...Object.keys(process.env).filter((name) => /^DOCKER_/iu.test(name)));
+        isolationEnv = {
+          DOCKER_CONFIG: dockerTargetClientConfig(),
+          ...(opts.isolation.dockerHost ? { DOCKER_HOST: opts.isolation.dockerHost } : {}),
+        };
+      }
     } else if (opts.isolation.backend === "cloud") {
       const allowedEnvironment = new Set(opts.cloudEnvironmentKeys ?? opts.isolation.sessionEnvironmentKeys ?? []);
       const forwardedEnvironment = Object.fromEntries(Object.entries(explicitEnv).filter(([key]) => allowedEnvironment.has(key)));

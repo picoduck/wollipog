@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import test, { afterEach, beforeEach } from "node:test";
@@ -17,11 +17,6 @@ const template: RunnerContainerTarget = {
   agentCommands: { codex: { command: "codex", args: ["app-server"] } },
   setupChecks: [{ name: "git", command: "git", args: ["--version"] }],
 };
-const DOCKER_PROXY_CLEAR_VALUES = [
-  "HTTP_PROXY=", "http_proxy=", "HTTPS_PROXY=", "https_proxy=", "FTP_PROXY=", "ftp_proxy=",
-  "NO_PROXY=", "no_proxy=", "ALL_PROXY=", "all_proxy=",
-];
-
 function containerEnvironmentArguments(args: string[]): string[] {
   return args.flatMap((arg, index) => arg === "--env" ? [args[index + 1]!] : []);
 }
@@ -189,7 +184,6 @@ test("digest-pinned templates pass argv-native checks and produce an exact immut
     "--network", "none", "--read-only", "--cap-drop", "ALL",
     "--security-opt", "no-new-privileges", "--pids-limit", "128",
     "--tmpfs", "/tmp:rw,nosuid,nodev",
-    ...DOCKER_PROXY_CLEAR_VALUES.flatMap((value) => ["--env", value]),
     "--entrypoint", "git", image, "--version",
   ]);
 
@@ -962,7 +956,7 @@ test("target-local probes use the selected image executable without mounts, host
     assert.equal(args[args.indexOf("--entrypoint") + 1], candidate.path);
     assert.ok(args.includes("--network") && args.includes("none"));
     assert.equal(args.includes("--mount"), false);
-    assert.deepEqual(containerEnvironmentArguments(args), DOCKER_PROXY_CLEAR_VALUES);
+    assert.deepEqual(containerEnvironmentArguments(args), []);
     assert.equal(args.includes("--interactive"), false);
     assert.equal(timeoutMs, 5_000);
     assert.equal(maxBuffer, 64 * 1024);
@@ -981,7 +975,7 @@ test("probe client environment strips sensitive host names even when a runtime f
   }), { PATH: "/usr/bin", HOME: "/home/runner", HTTP_PROXY: "http://proxy.example.invalid:8080" });
 });
 
-test("Docker client proxy configuration is cleared for setup checks and installation probes", async () => {
+test("Docker setup checks and probes isolate client defaults without overriding image proxies", async () => {
   const config = mkdtempSync(join(tmpdir(), "wollipog-docker-proxy-test-"));
   const previousConfig = process.env.DOCKER_CONFIG;
   writeFileSync(join(config, "config.json"), JSON.stringify({
@@ -1010,10 +1004,13 @@ test("Docker client proxy configuration is cleared for setup checks and installa
     assert.ok(probes.length >= 2, "resolution and version both create probe containers");
     assert.notEqual(setup[0]!.env?.DOCKER_CONFIG, config, "setup uses its private client config");
     for (const call of [...setup, ...probes]) {
-      assert.deepEqual(containerEnvironmentArguments(call.args), DOCKER_PROXY_CLEAR_VALUES);
+      assert.deepEqual(containerEnvironmentArguments(call.args), []);
     }
     for (const probe of probes) {
-      assert.equal(probe.env?.DOCKER_CONFIG, config, "the probe client can read operator config");
+      assert.notEqual(probe.env?.DOCKER_CONFIG, config, "the probe client cannot read operator config");
+      assert.equal(probe.env?.DOCKER_HOST, "unix:///var/run/docker.sock");
+      assert.equal(probe.env?.DOCKER_CONTEXT, undefined);
+      assert.deepEqual(JSON.parse(readFileSync(join(probe.env!.DOCKER_CONFIG!, "config.json"), "utf8")), {});
     }
   } finally {
     if (previousConfig === undefined) delete process.env.DOCKER_CONFIG;
@@ -1265,7 +1262,6 @@ test("Docker and Podman discover both generations and produce exact dual-label W
         "--network", "none", "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--pids-limit", "128",
         "--tmpfs", "/tmp:rw,nosuid,nodev",
-        ...(runtimeName === "docker" ? DOCKER_PROXY_CLEAR_VALUES.flatMap((value) => ["--env", value]) : []),
         "--entrypoint", "git", image, "--version",
       ],
     });
