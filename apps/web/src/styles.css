@@ -8831,6 +8831,16 @@ code {
   flex-wrap: wrap;
   gap: 4px 8px;
 }
+/* People & Devices: a Name field whose stored value is masked until the admin shows it. */
+.access-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  color: var(--text);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.access-form-field > .personal-identifier-mask { min-height: 38px; display: flex; align-items: center; padding: 0 10px; }
 .personal-identifier-field-head > .personal-identifier-toggle,
 .access-member-picker > .personal-identifier-toggle { margin-inline-start: auto; }
 @media (pointer: coarse) {

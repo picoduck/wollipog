@@ -37,6 +37,30 @@ export function PersonalIdentifierRevealButton({
   );
 }
 
+/** The fixed-length mask; assistive technology hears "Hidden", never the value or its length. */
+export function PersonalIdentifierMask() {
+  return (
+    <span className="personal-identifier-mask">
+      <span aria-hidden="true">{MASKED_IDENTIFIER}</span>
+      <span className="sr-only">Hidden</span>
+    </span>
+  );
+}
+
+/**
+ * Reveal state granted for exactly one `key` — an identifier, or the joined labels of a picker.
+ *
+ * Any change of key hides again, including a return to an earlier key: revealing A, then showing B,
+ * then A again must not bring A back revealed. The reset happens during render (React's documented
+ * pattern for state derived from props), so no frame ever paints a newly arrived value unmasked.
+ */
+export function usePersonalIdentifierReveal(key: string): [revealed: boolean, toggle: () => void] {
+  const [grant, setGrant] = useState<{ key: string; revealed: boolean }>({ key, revealed: false });
+  if (grant.key !== key) setGrant({ key, revealed: false });
+  const revealed = grant.key === key && grant.revealed;
+  return [revealed, () => setGrant({ key, revealed: !revealed })];
+}
+
 /**
  * A structured personal identifier, masked until the person explicitly reveals it.
  *
@@ -60,24 +84,16 @@ export function PersonalIdentifier({
   sensitive?: boolean;
   className?: string;
 }) {
-  const [revealedValue, setRevealedValue] = useState<string | null>(null);
+  const [revealed, toggle] = usePersonalIdentifierReveal(value);
   const masked = sensitive ?? isPersonalIdentifier(value);
   if (!masked) return <span className={className}>{value}</span>;
-  const revealed = revealedValue === value;
   return (
     <span className={`personal-identifier${className ? ` ${className}` : ""}`} data-revealed={revealed}>
-      {revealed
-        ? <span className="personal-identifier-value">{value}</span>
-        : (
-          <span className="personal-identifier-mask">
-            <span aria-hidden="true">{MASKED_IDENTIFIER}</span>
-            <span className="sr-only">Hidden</span>
-          </span>
-        )}
+      {revealed ? <span className="personal-identifier-value">{value}</span> : <PersonalIdentifierMask />}
       <PersonalIdentifierRevealButton
         label={label}
         revealed={revealed}
-        onToggle={() => setRevealedValue(revealed ? null : value)}
+        onToggle={toggle}
       />
     </span>
   );

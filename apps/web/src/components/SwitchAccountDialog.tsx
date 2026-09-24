@@ -3,7 +3,7 @@ import type { SessionProviderAccountOption, SessionView } from "@wollipog/protoc
 import { useApi } from "../api-context.js";
 import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { Modal } from "./common.js";
-import { PersonalIdentifier, PersonalIdentifierRevealButton } from "./PersonalIdentifier.js";
+import { PersonalIdentifier, PersonalIdentifierRevealButton, usePersonalIdentifierReveal } from "./PersonalIdentifier.js";
 import { ChoiceCards } from "./ui/ChoiceControls.js";
 
 function usageSummary(account: SessionProviderAccountOption): string {
@@ -32,8 +32,6 @@ export function SwitchAccountDialog({
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const submittingRef = useRef(false);
-  // One deliberate reveal for the whole picker: cards are buttons and cannot nest a control.
-  const [identifiersRevealed, setIdentifiersRevealed] = useState(false);
   const pickerId = useId();
 
   useEffect(() => {
@@ -70,6 +68,11 @@ export function SwitchAccountDialog({
   };
 
   const titles = maskedAccountTitles(accounts?.map((account) => account.label) ?? []);
+  // One deliberate reveal for the whole picker (cards are buttons and cannot nest a control),
+  // bound to this exact account list.
+  const [identifiersRevealed, toggleIdentifiers] = usePersonalIdentifierReveal(
+    accounts?.map((account) => account.label).join("\n") ?? "",
+  );
 
   return (
     <Modal
@@ -111,7 +114,7 @@ export function SwitchAccountDialog({
               <PersonalIdentifierRevealButton
                 label="Account Emails"
                 revealed={identifiersRevealed}
-                onToggle={() => setIdentifiersRevealed((revealed) => !revealed)}
+                onToggle={toggleIdentifiers}
                 controls={pickerId}
                 withText
               />

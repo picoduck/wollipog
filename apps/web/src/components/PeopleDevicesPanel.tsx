@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { QRCodeSVG } from "qrcode.react";
 import type {
   DeviceView,
@@ -15,7 +15,12 @@ import { accountLabelText, isPersonalIdentifier, maskedAccountTitles } from "../
 import { CopyButton, Modal } from "./common.js";
 import { DeviceIcon, EditIcon, PlusIcon, TeamIcon, UserPlusIcon } from "./Icons.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { PersonalIdentifier, PersonalIdentifierRevealButton } from "./PersonalIdentifier.js";
+import {
+  PersonalIdentifier,
+  PersonalIdentifierMask,
+  PersonalIdentifierRevealButton,
+  usePersonalIdentifierReveal,
+} from "./PersonalIdentifier.js";
 
 type AccessDialog =
   | { kind: "add-person" }
@@ -109,7 +114,7 @@ function AddPersonDialog({
   );
 }
 
-function ManagePersonDialog({
+export function ManagePersonDialog({
   actorRole,
   member,
   onClose,
@@ -122,6 +127,10 @@ function ManagePersonDialog({
 }) {
   const api = useApi();
   const [displayName, setDisplayName] = useState(member.userName);
+  // An email-shaped name stays out of the editable field until the admin deliberately shows it.
+  const nameIsPersonal = isPersonalIdentifier(member.userName);
+  const [nameShown, setNameShown] = useState(!nameIsPersonal);
+  const nameId = useId();
   const [role, setRole] = useState(member.role);
   const [status, setStatus] = useState<UserStatus>(member.userStatus);
   const [busy, setBusy] = useState(false);
@@ -158,10 +167,28 @@ function ManagePersonDialog({
       }
     >
       <div className="access-form">
-        <label>
-          <span>Name</span>
-          <input autoFocus value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
-        </label>
+        {nameIsPersonal ? (
+          <div className="access-form-field">
+            <div className="personal-identifier-field-head">
+              {nameShown ? <label htmlFor={nameId}>Name</label> : <span>Name</span>}
+              <PersonalIdentifierRevealButton
+                label="Person Name"
+                revealed={nameShown}
+                onToggle={() => setNameShown((shown) => !shown)}
+                controls={nameShown ? nameId : undefined}
+                withText
+              />
+            </div>
+            {nameShown
+              ? <input id={nameId} autoFocus value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
+              : <PersonalIdentifierMask />}
+          </div>
+        ) : (
+          <label>
+            <span>Name</span>
+            <input autoFocus value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
+          </label>
+        )}
         <label>
           <span>Access Level</span>
           <select value={role} onChange={(event) => setRole(event.target.value as OrganizationRole)}>
@@ -214,8 +241,10 @@ export function PairDeviceDialog({
     mountedRef.current = false;
   }, []);
   const person = activeMembers.find((member) => member.userId === userId);
-  const [namesRevealed, setNamesRevealed] = useState(false);
   const memberTitles = maskedAccountTitles(activeMembers.map((member) => member.userName), "Hidden Name");
+  const [namesRevealed, toggleNames] = usePersonalIdentifierReveal(
+    activeMembers.map((member) => member.userName).join("\n"),
+  );
   const requestClose = () => {
     if (!busy) onClose();
   };
@@ -340,7 +369,7 @@ export function PairDeviceDialog({
               <PersonalIdentifierRevealButton
                 label="Person Names"
                 revealed={namesRevealed}
-                onToggle={() => setNamesRevealed((revealed) => !revealed)}
+                onToggle={toggleNames}
                 controls="pair-person-choices"
                 withText
               />
@@ -402,8 +431,10 @@ function TeamDialog({
   const activeMembers = identity.memberships.filter((member) => member.userStatus === "active");
   const [name, setName] = useState(team?.name ?? "");
   const [memberIds, setMemberIds] = useState<string[]>(team?.memberUserIds ?? []);
-  const [namesRevealed, setNamesRevealed] = useState(false);
   const memberTitles = maskedAccountTitles(activeMembers.map((member) => member.userName), "Hidden Name");
+  const [namesRevealed, toggleNames] = usePersonalIdentifierReveal(
+    activeMembers.map((member) => member.userName).join("\n"),
+  );
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const toggle = (userId: string) => {
@@ -479,7 +510,7 @@ function TeamDialog({
             <PersonalIdentifierRevealButton
               label="Person Names"
               revealed={namesRevealed}
-              onToggle={() => setNamesRevealed((revealed) => !revealed)}
+              onToggle={toggleNames}
               withText
             />
           )}

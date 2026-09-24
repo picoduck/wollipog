@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
-import { PersonalIdentifier } from "./PersonalIdentifier.js";
+import { PersonalIdentifier, PersonalIdentifierRevealButton, usePersonalIdentifierReveal } from "./PersonalIdentifier.js";
 
 Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: React });
 Object.defineProperty(globalThis, "IS_REACT_ACT_ENVIRONMENT", { configurable: true, writable: true, value: true });
@@ -84,6 +84,42 @@ test("a changed value is hidden again and a remount never inherits an earlier re
     assert.equal(again.container.innerHTML.includes(EMAIL), false);
   } finally {
     await unmount(again);
+  }
+});
+
+test("returning to an earlier value after a change does not restore its reveal", async () => {
+  const mounted = await mount(<PersonalIdentifier value={EMAIL} label="Account Email" />);
+  try {
+    await act(async () => fireDomEvent.click(toggle(mounted.container)));
+    assert.ok(mounted.container.innerHTML.includes(EMAIL));
+    await act(async () => mounted.root.render(<PersonalIdentifier value="other@example.com" label="Account Email" />));
+    await act(async () => mounted.root.render(<PersonalIdentifier value={EMAIL} label="Account Email" />));
+    assert.equal(mounted.container.innerHTML.includes(EMAIL), false);
+    assert.equal(toggle(mounted.container).getAttribute("aria-label"), "Show Account Email");
+  } finally {
+    await unmount(mounted);
+  }
+});
+
+test("a picker-level reveal is bound to its exact list and hides when the list changes", async () => {
+  function Picker({ labels }: { labels: string[] }) {
+    const [revealed, toggleReveal] = usePersonalIdentifierReveal(labels.join("\n"));
+    return (
+      <div>
+        <PersonalIdentifierRevealButton label="Account Emails" revealed={revealed} onToggle={toggleReveal} withText />
+        <ul>{labels.map((label) => <li key={label}>{revealed ? label : "Hidden Account"}</li>)}</ul>
+      </div>
+    );
+  }
+  const mounted = await mount(<Picker labels={["a@example.com", "b@example.com"]} />);
+  try {
+    await act(async () => fireDomEvent.click(toggle(mounted.container)));
+    assert.ok(mounted.container.innerHTML.includes("a@example.com"));
+    await act(async () => mounted.root.render(<Picker labels={["c@example.com"]} />));
+    assert.equal(mounted.container.innerHTML.includes("c@example.com"), false);
+    assert.equal(toggle(mounted.container).textContent, "Show Account Emails");
+  } finally {
+    await unmount(mounted);
   }
 });
 

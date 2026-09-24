@@ -64,7 +64,7 @@ import {
 } from "./agent-options.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { Modal } from "./common.js";
-import { PersonalIdentifierRevealButton } from "./PersonalIdentifier.js";
+import { PersonalIdentifierRevealButton, usePersonalIdentifierReveal } from "./PersonalIdentifier.js";
 import { isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { useInstanceScope } from "../instance-scope.js";
@@ -231,7 +231,6 @@ export function NewSessionDialog({
   const initialAgentSelection = savedAgentSelection(initialAgentOptions, agentDefaults[runnerId]);
   const [agentId, setAgentId] = useState(initialAgentSelection.agentId);
   const [providerAccountId, setProviderAccountId] = useState("");
-  const [accountIdentifiersRevealed, setAccountIdentifiersRevealed] = useState(false);
   // `undefined` until the user chooses: a saved Orchestrator harness default then selects the role
   // on the user's behalf, exactly as the saved preset did before the role became independent.
   const [roleOverride, setRoleOverride] = useState<"normal" | "orchestrator" | undefined>(undefined);
@@ -384,6 +383,10 @@ export function NewSessionDialog({
     account.provider === provider &&
     ((agent?.context?.kind ?? "native") === "native" || account.id === agent?.defaultProviderAccountId));
   const providerAccountTitles = maskedAccountTitles(providerAccounts.map((account) => account.label));
+  // Bound to this exact account list: another Machine or Agent offers other accounts, hidden again.
+  const [accountIdentifiersRevealed, toggleAccountIdentifiers] = usePersonalIdentifierReveal(
+    providerAccounts.map((account) => account.label).join("\n"),
+  );
   useEffect(() => {
     const preferred = agent?.defaultProviderAccountId;
     setProviderAccountId((current) => providerAccounts.some((account) => account.id === current)
@@ -1510,7 +1513,7 @@ export function NewSessionDialog({
                   <PersonalIdentifierRevealButton
                     label="Account Emails"
                     revealed={accountIdentifiersRevealed}
-                    onToggle={() => setAccountIdentifiersRevealed((revealed) => !revealed)}
+                    onToggle={toggleAccountIdentifiers}
                     withText
                   />
                 )}
