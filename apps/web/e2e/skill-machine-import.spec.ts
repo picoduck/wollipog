@@ -168,6 +168,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
     await page.getByRole("button", { name: "Import from Machine" }).click();
     await page.getByRole("button", { name: "Inspect Recovery" }).click();
     await expect(page.getByText(`WSL: Ubuntu · .codex/skills/review · managed linked · ${operationId}`)).toBeVisible();
+    await page.screenshot({ path: info.outputPath(`wsl-recovery-${width}-${theme}.png`), fullPage: true });
     await page.getByRole("button", { name: "Discover Skills" }).click();
     await page.getByRole("button", { name: "Preview Files for review from WSL: Ubuntu · .codex/skills/review" }).click();
     await page.getByRole("button", { name: "Check Adoption" }).click();
