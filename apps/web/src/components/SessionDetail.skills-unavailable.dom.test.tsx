@@ -63,7 +63,7 @@ class FakeSocket implements UiSocket {
   push(message: ControlPlaneToUi) { this.onmessage?.({ data: JSON.stringify(message) }); }
 }
 
-async function renderedNotice(adapter: "host" | "container"): Promise<string | null> {
+async function renderedNotice(adapter: "host" | "container", mode: "expanded" | "preview" = "expanded"): Promise<string | null> {
   const current = targetSession(adapter);
   const socket = new FakeSocket();
   const client = {
@@ -95,7 +95,7 @@ async function renderedNotice(adapter: "host" | "container"): Promise<string | n
       <ApiProvider client={client}>
         <FeedbackContext.Provider value={{ confirm: async () => true, showToast: () => 0, dismissToast: () => {} } as never}>
           <StoreProvider connection={connection} navigation={navigation}>
-            <SessionDetail sessionId={current.id} mode="expanded" rightPanel={rightPanel}
+            <SessionDetail sessionId={current.id} mode={mode} rightPanel={rightPanel}
               onOpenTerminal={() => {}} pinnedOpen={false} composerDraftLoader={async () => null} />
           </StoreProvider>
         </FeedbackContext.Provider>
@@ -114,10 +114,12 @@ async function renderedNotice(adapter: "host" | "container"): Promise<string | n
   }
 }
 
-test("a container session shows its Machine's assigned skills as unavailable", async () => {
-  assert.match(await renderedNotice("container") ?? "", /1 Assigned Skill: review/u);
-});
+for (const mode of ["expanded", "preview"] as const) {
+  test(`a container session shows its Machine's assigned skills as unavailable (${mode})`, async () => {
+    assert.match(await renderedNotice("container", mode) ?? "", /1 Assigned Skill: review/u);
+  });
 
-test("a host session shows no skills notice", async () => {
-  assert.equal(await renderedNotice("host"), null);
-});
+  test(`a host session shows no skills notice (${mode})`, async () => {
+    assert.equal(await renderedNotice("host", mode), null);
+  });
+}

@@ -4644,6 +4644,7 @@ function SessionDetailLoaded({
         )}
         </>
       ) : (
+        <>
         <header className="session-preview-head">
           <div className="session-preview-heading">
             <h2 className="session-preview-title">{session.title}</h2>
@@ -4696,6 +4697,12 @@ function SessionDetailLoaded({
             Expand <kbd className="inbox-key-hint">Enter</kbd>
           </button>
         </header>
+        <SessionSkillsUnavailableNotice
+          runnerId={session.runnerId}
+          agentId={session.agentId}
+          adapter={session.executionTarget?.adapter}
+        />
+        </>
       )}
 
       {/* Chat column + the Codex-style right side panel. The panel's open/mode/width state

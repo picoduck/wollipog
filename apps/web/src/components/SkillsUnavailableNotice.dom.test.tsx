@@ -82,7 +82,14 @@ test("host sessions never fetch skills or render the notice", async () => {
   }
 });
 
-test("no notice without assigned skills or when the Machine's skills cannot be read", async () => {
+test("no notice when nothing is assigned to the session's agent", async () => {
   assert.equal((await render("container", { desired: [], reported: null })).label, null);
-  assert.equal((await render("container", new Error("forbidden"))).label, null);
+  assert.equal((await render("container", { desired: [desired[2]!], reported: null })).label, null);
+});
+
+test("an unreadable assignment list still reports the absence, without names", async () => {
+  const result = await render("cloud", new Error("forbidden"));
+  assert.equal(result.label, "Skills Unavailable on This Target");
+  assert.match(result.text, /unavailable on container and cloud targets/u);
+  assert.doesNotMatch(result.text, /Assigned/u);
 });

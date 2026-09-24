@@ -22,13 +22,18 @@ export function assignedSkillNamesForAgent(desired: RunnerDesiredSkill[], agentI
     .map((skill) => skill.name))].sort();
 }
 
-export function SkillsUnavailableNotice({ skillNames }: { skillNames: string[] }) {
-  const count = `${skillNames.length} Assigned ${skillNames.length === 1 ? "Skill" : "Skills"}`;
+/** `skillNames` is null when the Machine's assignments could not be read: the target still lacks
+ * every managed skill, so the notice stays and only the list is omitted. */
+export function SkillsUnavailableNotice({ skillNames }: { skillNames: string[] | null }) {
   return (
     <aside className="skills-unavailable-notice" role="status" aria-label="Skills Unavailable on This Target">
       <strong>Skills Unavailable on This Target</strong>
       <span>{SKILLS_UNAVAILABLE_ON_TARGET} The agent in this session cannot use them.</span>
-      <small>{count}: {skillNames.join(", ")}</small>
+      {skillNames && (
+        <small>
+          {skillNames.length} Assigned {skillNames.length === 1 ? "Skill" : "Skills"}: {skillNames.join(", ")}
+        </small>
+      )}
     </aside>
   );
 }
@@ -42,17 +47,19 @@ export function SessionSkillsUnavailableNotice({ runnerId, agentId, adapter }: {
 }) {
   const api = useApi();
   const unavailable = !managedSkillsAvailableForTarget(adapter);
-  const [skillNames, setSkillNames] = useState<string[]>([]);
+  // [] until loaded or when nothing is assigned; null when the assignments could not be read.
+  const [skillNames, setSkillNames] = useState<string[] | null>([]);
   useEffect(() => {
     setSkillNames([]);
     if (!unavailable) return;
     let cancelled = false;
-    // Best effort: a viewer without access to the Machine's skills simply sees no notice.
     void api.runnerSkills(runnerId).then((response) => {
       if (!cancelled) setSkillNames(assignedSkillNamesForAgent(response.desired ?? [], agentId));
-    }, () => {});
+    }, () => {
+      if (!cancelled) setSkillNames(null);
+    });
     return () => { cancelled = true; };
   }, [api, runnerId, agentId, unavailable]);
-  if (!unavailable || skillNames.length === 0) return null;
+  if (!unavailable || skillNames?.length === 0) return null;
   return <SkillsUnavailableNotice skillNames={skillNames} />;
 }

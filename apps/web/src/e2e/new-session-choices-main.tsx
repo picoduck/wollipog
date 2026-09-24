@@ -40,6 +40,9 @@ const orchestratorCapable = fixtureParams.get("orchestrator") !== "0";
 /** #1648: accounts people named after their email, which the picker must mask by default. */
 const emailAccounts = fixtureParams.get("emailAccounts") === "1";
 
+/** #1695: host and container execution targets, so target-specific copy can be inspected. */
+const containerTargets = fixtureParams.get("containerTargets") === "1";
+
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "fixture-runner",
@@ -124,6 +127,28 @@ const runner: RunnerView = {
   // A current runner, so `sessionOrchestration` is advertised and the Orchestrator preset is a real
   // choice rather than a disabled card. The disabled path is covered by `?orchestrator=0`.
   protocolVersion: PROTOCOL_VERSION,
+  ...(containerTargets ? {
+    executionTargets: [
+      {
+        id: "host-in-place", runnerId: "runner-1", name: "Runner Host · in place",
+        kind: "local", workspaceStrategy: "in_place", adapter: "host",
+        boundaries: { filesystem: "host", network: "inherit", secrets: "runner_local", billing: "agent_account" },
+        available: true,
+      },
+      {
+        id: "host-worktree", runnerId: "runner-1", name: "Runner Host · worktree",
+        kind: "local", workspaceStrategy: "worktree", adapter: "host",
+        boundaries: { filesystem: "worktree", network: "inherit", secrets: "runner_local", billing: "agent_account" },
+        available: true,
+      },
+      {
+        id: "container", runnerId: "runner-1", name: "Offline Container",
+        kind: "container", workspaceStrategy: "worktree", adapter: "container",
+        boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+        available: true,
+      },
+    ],
+  } satisfies Partial<RunnerView> : {}),
 };
 
 const project: ProjectView = {
