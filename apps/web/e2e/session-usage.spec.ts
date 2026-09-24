@@ -53,7 +53,7 @@ for (const viewport of [
     await expect(summary).toContainText("2");
     await expect(summary).toContainText("1 Duplicates Skipped");
     const compatibility = summary.getByRole("status");
-    await expect(compatibility).toContainText("is routed to a human. The Orchestrator model \"text-only\" does not advertise image input.");
+    await expect(compatibility).toContainText("is routed to a human. The Orchestrator model \"text-only\" does not accept image input.");
     await summary.scrollIntoViewIfNeeded();
     await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-summary.png` });
     await compatibility.scrollIntoViewIfNeeded();

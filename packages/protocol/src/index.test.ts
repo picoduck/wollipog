@@ -193,8 +193,10 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 178", () => {
-  assert.equal(PROTOCOL_VERSION, 178);
+test("PROTOCOL_VERSION is 179", () => {
+  assert.equal(PROTOCOL_VERSION, 179);
+  assert.equal(runnerSupportsProtocol(178, "orchestratorImageToolResults"), false);
+  assert.equal(runnerSupportsProtocol(179, "orchestratorImageToolResults"), true);
   assert.equal(runnerSupportsProtocol(174, "harnessInstallations"), false);
   assert.equal(runnerSupportsProtocol(175, "harnessInstallations"), true);
   assert.equal(runnerSupportsProtocol(175, "harnessSelectionBackgroundConsumers"), false);
@@ -1444,4 +1446,23 @@ test("the additive Orchestrator role is advertised separately from the coupled p
   assert.equal(
     mergeSessionCapabilities(catalog, caps({ orchestratorAdditive: false }))?.orchestratorAdditive, false,
     "a snapshot that states it explicitly still wins");
+});
+
+test("image tool results are installation truth that session snapshots never drop (#1492)", () => {
+  const caps = (extra: Partial<AgentCapabilities> = {}): AgentCapabilities => ({
+    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+    ...extra,
+  });
+  const catalog = caps({ imageToolResults: true, orchestratorAdditive: true });
+  assert.equal(mergeSessionCapabilities(catalog, undefined)?.imageToolResults, true);
+  assert.equal(mergeSessionCapabilities(catalog, { supportsSteering: false })?.imageToolResults, true,
+    "an overlay leaves the runner's attestation intact");
+  const snapshot = mergeSessionCapabilities(catalog, caps({ supportsImages: true }));
+  assert.equal(snapshot?.imageToolResults, true, "even a full provider-native snapshot does not drop it");
+  assert.equal(snapshot?.orchestratorAdditive, true, "and both attestations survive together");
+  assert.equal(snapshot?.supportsImages, true, "while the snapshot keeps its own prompt-image transport");
+  assert.equal(mergeSessionCapabilities(catalog, caps({ imageToolResults: false }))?.imageToolResults, false,
+    "a snapshot that states it explicitly still wins");
+  const plain = caps();
+  assert.equal(mergeSessionCapabilities(caps(), plain), plain, "nothing to inherit keeps the snapshot as is");
 });

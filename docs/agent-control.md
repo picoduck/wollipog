@@ -773,10 +773,17 @@ scoped evidence access needed to exercise it; there is no separate access toggle
 owns a decision only when all of the following hold, and otherwise the decision is created
 human-owned with a `humanFallback` code and reason shown on the request card:
 
-- the Orchestrator's runner speaks protocol v167 (`orchestratorUiEvidenceReview`);
-- its harness hands MCP image content to the model (Claude Code, Codex App Server), its installation
-  supports images, and its exact model advertises `image` input — unknown is treated as unsupported,
-  and a selected model missing from the catalog never inherits the default model's capability;
+- the Orchestrator's runner speaks protocol v179 (`orchestratorImageToolResults`), which includes
+  the v167 evidence reader;
+- its harness is one whose MCP image path has been audited (Claude Code, Codex App Server), and its
+  installation attests `imageToolResults`: the MCP client hands a tool's image content to the model.
+  Unknown is treated as unsupported (`harness_unsupported`). Prompt-image support (`supportsImages`)
+  is a different path and decides nothing here. The runner attests it only from live discovery — a
+  Claude Code release at or after the one `pnpm probe:claude-mcp-image` verified, or a Codex App
+  Server whose app-server contract is supported — and never from agent configuration;
+- its exact model is in the installation's catalog, and does not list input types that exclude
+  `image` (`model_unsupported`). A model that lists none, as every Claude Code model does, is covered
+  by the installation's attestation; a selected model missing from the catalog never inherits it;
 - every evidence item names an `artifactId` of a `screenshot` Session artifact owned by the requesting
   child, declares an allowed image `mediaType`, and matches that artifact's type, size, and SHA-256.
 

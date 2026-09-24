@@ -540,7 +540,12 @@
 //      inventory, and updates them when changed. Usage probes and external adoption enforce them.
 // 178: automatic provider-account switching pauses when harness choices cannot be synchronized.
 //      A newer control plane also suppresses it for older runners with a saved selection.
-export const PROTOCOL_VERSION = 178;
+// 179: runners attest `imageToolResults` per agent installation: its MCP client hands image
+//      content from a tool result to the model. Orchestrator UI evidence review consults that
+//      attestation instead of prompt-image transport (`supportsImages`), which describes sending an
+//      image in a prompt, not receiving one from a tool. A pre-v179 runner attests nothing, so the
+//      control plane keeps UI Evidence Approval human-owned for it.
+export const PROTOCOL_VERSION = 179;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -754,6 +759,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * MCP image content. Without it an Orchestrator cannot inspect evidence bytes, so the control
    * plane keeps UI Evidence Approval human-owned whatever the saved policy says. */
   orchestratorUiEvidenceReview: 167,
+  /** Runner attests `AgentCapabilities.imageToolResults`. Before it, nothing states whether a
+   * harness shows the model an image returned by a tool, so review cannot be delegated. */
+  orchestratorImageToolResults: 179,
   /** Pi driver never reports a provider-acknowledged steer as a definite `stale_turn` (#1433).
    * Gates Pi's admission to the automatic mid-turn steering lane; an older runner would re-queue
    * such a steer as an ordinary prompt and deliver the message twice. */
@@ -1370,8 +1378,21 @@ export interface AgentCapabilities {
   /** e.g. ["low","medium","high"]; empty when the agent has no effort knob. */
   effortLevels: string[];
   slashCommands: AgentSlashCommand[];
+  /** Prompt-image transport: the user can attach an image to a prompt. Says nothing about images
+   * returned by a tool; see `imageToolResults`. */
   supportsImages: boolean;
   supportsApprovals: boolean;
+  /**
+   * Runner-attested (protocol v179): this installation's MCP client hands `image` content from a
+   * tool result to the model as image input, for every catalog model that does not advertise its
+   * own `inputModalities`. A model that advertises them without `image` is still excluded.
+   *
+   * Independent of `supportsImages`: Claude Code derives that from its stream-json prompt contract,
+   * which describes sending an image, not receiving one from a tool. Absent means unknown, and
+   * delegated UI evidence review treats unknown as unsupported. Catalog truth about the
+   * installation, so a session snapshot never drops it.
+   */
+  imageToolResults?: boolean;
   /** Provider exposes a receipted primitive that incorporates input into the active turn. */
   supportsSteering?: boolean;
   /** Provider can mint an independent conversation from its current/history checkpoint. */
@@ -1433,11 +1454,18 @@ export function mergeSessionCapabilities(
   session: SessionCapabilities | undefined,
 ): AgentCapabilities | undefined {
   if (!session) return isOrchestratorOnlyCapabilities(catalog) ? undefined : catalog;
-  // `orchestratorAdditive` is runner-attested catalog truth about the installation, not something a
-  // session snapshot observes, so even a full provider-native snapshot must not drop it.
+  // `orchestratorAdditive` and `imageToolResults` are runner-attested catalog truth about the
+  // installation, not something a session snapshot observes, so even a full provider-native
+  // snapshot must not drop them.
   if ("models" in session) {
-    return catalog?.orchestratorAdditive !== undefined && session.orchestratorAdditive === undefined
-      ? { ...session, orchestratorAdditive: catalog.orchestratorAdditive }
+    const inheritAdditive = catalog?.orchestratorAdditive !== undefined && session.orchestratorAdditive === undefined;
+    const inheritImageToolResults = catalog?.imageToolResults !== undefined && session.imageToolResults === undefined;
+    return inheritAdditive || inheritImageToolResults
+      ? {
+          ...session,
+          ...(inheritAdditive ? { orchestratorAdditive: catalog!.orchestratorAdditive } : {}),
+          ...(inheritImageToolResults ? { imageToolResults: catalog!.imageToolResults } : {}),
+        }
       : session;
   }
   if (!catalog) return undefined;

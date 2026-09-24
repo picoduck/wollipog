@@ -1019,6 +1019,44 @@ test("verified app-server discovery enables steering on a matching config", () =
   assert.equal(merged!.capabilities?.supportsSteering, true);
 });
 
+test("image tool results are live discovery evidence, never configuration (#1492)", () => {
+  const capabilities = (imageToolResults?: boolean) => ({
+    models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
+    ...(imageToolResults === undefined ? {} : { imageToolResults }),
+  });
+  const claimed = (driver: NonNullable<AgentDefinition["driver"]>, command: string) =>
+    cfg({ id: `configured-${driver}`, driver, command, capabilities: capabilities(true) });
+  for (const driver of ["claude-code", "codex-app-server", "codex", "acp", "pi"] as const) {
+    const [unmatched] = mergeAgents([claimed(driver, `/opt/custom/${driver}`)], []);
+    assert.equal(unmatched!.capabilities?.imageToolResults, undefined, `${driver} config cannot self-attest`);
+  }
+
+  // Codex App Server attests it with a supported app-server contract; non-interactive exec never does.
+  const codexBase = cfg({ id: "codex", name: "Codex", driver: "codex", command: "/usr/bin/codex", bin: "codex", source: "discovered" });
+  const supported = codexAgentDefinitions(codexBase, SUPPORTED_APP_SERVER, []);
+  assert.equal(supported[0]!.driver, "codex-app-server");
+  assert.equal(supported[0]!.capabilities?.imageToolResults, true);
+  assert.equal(supported[1]!.capabilities?.imageToolResults, undefined);
+  const unsupported = codexAgentDefinitions(codexBase, {
+    status: "unsupported", installedVersion: "0.143.0", appServerAvailable: true,
+    failure: { code: "version_unverified", message: "Old Codex." },
+  }, []);
+  assert.equal(unsupported[0]!.capabilities?.imageToolResults, undefined);
+  assert.equal(mergeAgents([claimed("codex-app-server", "codex")], unsupported)[0]!.capabilities?.imageToolResults,
+    undefined, "old app-server discovery does not revive a configured claim");
+  assert.equal(mergeAgents([claimed("codex-app-server", "codex")], supported)[0]!.capabilities?.imageToolResults, true);
+
+  // Claude: the discovered installation's attestation replaces whatever the config said.
+  const discoveredClaude = (imageToolResults: boolean) => cfg({
+    id: "discovered", driver: "claude-code", command: "/usr/bin/claude", source: "discovered",
+    capabilities: capabilities(imageToolResults),
+  });
+  assert.equal(mergeAgents([claimed("claude-code", "/usr/bin/claude")], [discoveredClaude(false)])[0]!
+    .capabilities?.imageToolResults, false);
+  assert.equal(mergeAgents([cfg({ id: "configured", command: "/usr/bin/claude", capabilities: capabilities() })],
+    [discoveredClaude(true)])[0]!.capabilities?.imageToolResults, true);
+});
+
 test("explicit app-server config enriches from the primary without duplicating its launch", () => {
   const config = [cfg({ id: "my-interactive-codex", driver: "codex-app-server", command: "codex" })];
   const discovered = codexAgentDefinitions(

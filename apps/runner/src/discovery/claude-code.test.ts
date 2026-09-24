@@ -4,6 +4,7 @@ import {
   applyClaudeConfiguredAuth,
   applyClaudeAgentEnvironment,
   applyNativeClaudeGitBashReadiness,
+  CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION,
   CLAUDE_STEERING_MIN_VERSION,
   claudeCapabilitiesFromProbe,
   nativeClaudeGitBashCandidates,
@@ -70,6 +71,34 @@ test("normalized Claude capabilities expose fork and per-mode elicitation only w
   assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, status: "unsupported" }).supportsSteering, undefined);
   assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, replayUserMessages: false }).supportsSteering, undefined);
   assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, installedVersion: "2.1.240" }).supportsSteering, undefined);
+});
+
+test("Claude attests image tool results from the verified release, not from prompt-image transport (#1492)", () => {
+  const base = { models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: false };
+  const probe = {
+    status: "ready" as const,
+    installedVersion: CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION,
+    effortLevels: [],
+    permissionModes: ["acceptEdits"],
+    streamJsonInput: true,
+    streamJsonImages: true, controlProtocol: true, forkSession: true, replayUserMessages: true,
+    auth: { status: "authenticated" as const, billingSource: "subscription" as const },
+  };
+  assert.equal(claudeCapabilitiesFromProbe(base, probe).imageToolResults, true);
+  assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, installedVersion: "2.2.0" }).imageToolResults, true);
+  const promptOnly = claudeCapabilitiesFromProbe(base, { ...probe, streamJsonImages: false });
+  assert.equal(promptOnly.supportsImages, false);
+  assert.equal(promptOnly.imageToolResults, true, "the stream-json prompt contract decides nothing about tool results");
+
+  const older = claudeCapabilitiesFromProbe(base, { ...probe, installedVersion: "2.1.276" });
+  assert.equal(older.supportsImages, true, "an older release still sends prompt images");
+  assert.equal(older.imageToolResults, false, "but is not attested to show a tool's image to the model");
+  assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, installedVersion: undefined }).imageToolResults, false);
+  assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, status: "unauthenticated" }).imageToolResults, true,
+    "signing out does not change what the installed CLI does with a tool's image");
+  for (const status of ["unsupported", "unavailable"] as const) {
+    assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, status }).imageToolResults, false, status);
+  }
 });
 
 test("Claude fixed modes remain explicitly unavailable without the control protocol", () => {

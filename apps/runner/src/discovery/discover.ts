@@ -315,13 +315,18 @@ function withSlashCommands(driver: AgentDriverKind, slashCommands: AgentSlashCom
   return caps ? { ...caps, slashCommands } : undefined;
 }
 
-/** Same-turn steering is transport contract evidence, never a static driver-name assumption. */
+/** Same-turn steering and image tool results are transport contract evidence, never a static
+ * driver-name assumption. A supported Codex App Server hands an MCP tool's image content to the
+ * model as image input (reviewed end to end while dogfooding #1492); whether a given model accepts
+ * it is that model's own `inputModalities`. */
 function verifiedCodexAppServerCapabilities(
   slashCommands: AgentSlashCommand[],
   compatibility: NonNullable<AgentDefinition["codexAppServer"]>,
 ): AgentCapabilities | undefined {
   const caps = withSlashCommands("codex-app-server", slashCommands);
-  return caps && compatibility.status === "supported" ? { ...caps, supportsSteering: true } : caps;
+  return caps && compatibility.status === "supported"
+    ? { ...caps, supportsSteering: true, imageToolResults: true }
+    : caps;
 }
 
 function withoutConfiguredProviderAttestations(agent: AgentDefinition): AgentDefinition {
@@ -334,15 +339,22 @@ function withoutConfiguredProviderAttestations(agent: AgentDefinition): AgentDef
   } = agent;
   const codexAppServer = withoutAccounting.codexAppServer;
   const { orchestratorApproval: _unverifiedOrchestratorApproval, ...verifiedCodexAppServer } = codexAppServer ?? {};
-  const withoutCodexOrchestratorApproval = codexAppServer
+  const unattested = withoutConfiguredImageToolResults(codexAppServer
     ? { ...withoutAccounting, codexAppServer: verifiedCodexAppServer as typeof codexAppServer }
-    : withoutAccounting;
+    : withoutAccounting);
   if ((agent.driver !== "codex-app-server" && agent.driver !== "claude-code" && agent.driver !== "pi") ||
-      !agent.capabilities?.supportsSteering) {
-    return withoutCodexOrchestratorApproval;
+      !unattested.capabilities?.supportsSteering) {
+    return unattested;
   }
-  const { supportsSteering: _unverified, ...capabilities } = agent.capabilities;
-  return { ...withoutCodexOrchestratorApproval, capabilities };
+  const { supportsSteering: _unverified, ...capabilities } = unattested.capabilities;
+  return { ...unattested, capabilities };
+}
+
+/** Image tool results decide who may approve UI evidence, so no configuration can claim them. */
+function withoutConfiguredImageToolResults(agent: AgentDefinition): AgentDefinition {
+  if (agent.capabilities?.imageToolResults === undefined) return agent;
+  const { imageToolResults: _unverified, ...capabilities } = agent.capabilities;
+  return { ...agent, capabilities };
 }
 
 /** `driver|context` key so agents sharing an execution context read the same model source once. */
@@ -988,6 +1000,7 @@ export function mergeAgents(
               supportsApprovals: d.capabilities.supportsApprovals,
               supportsSteering: d.capabilities.supportsSteering,
               supportsConversationFork: d.capabilities.supportsConversationFork,
+              imageToolResults: d.capabilities.imageToolResults,
               slashCommands: d.capabilities.slashCommands,
             }
           : c.driver === "codex-app-server"
@@ -996,6 +1009,9 @@ export function mergeAgents(
                 slashCommands: d.capabilities?.slashCommands ?? c.capabilities.slashCommands,
                 ...(d.codexAppServer?.status === "supported" && d.capabilities?.supportsSteering
                   ? { supportsSteering: true as const }
+                  : {}),
+                ...(d.codexAppServer?.status === "supported" && d.capabilities?.imageToolResults
+                  ? { imageToolResults: true as const }
                   : {}),
               }
             : c.driver === "pi" && d.capabilities
