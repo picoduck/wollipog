@@ -759,18 +759,26 @@ test("crossing the breakpoint keeps the first visible row and the list's geometr
     // reading row several cards down while its displacement outside the viewport remains zero.
     // At the list's end, shrinking content can clamp scrollTop and move the row down. A jump
     // toward the top is still a lost reading position, even if the list ends at maximum scroll.
-    const readingOffsetError = async (): Promise<number> => {
-      const { offset, atEnd } = await list.evaluate((node, index) => {
+    const readingOffsetError = async (controlHeight?: number): Promise<number> =>
+      await list.evaluate((node, { index, before, controlHeight }) => {
         const row = node.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`);
-        return {
-          offset: row ? row.getBoundingClientRect().top - node.getBoundingClientRect().top : Number.POSITIVE_INFINITY,
-          atEnd: node.scrollTop >= node.scrollHeight - node.clientHeight - 1,
-        };
-      }, anchorIndex);
-      if (!Number.isFinite(offset)) return Number.POSITIVE_INFINITY;
-      const drift = offset - anchorOffsetBefore;
-      return atEnd ? Math.max(-drift, 0) : Math.abs(drift);
-    };
+        if (!row) return Number.POSITIVE_INFINITY;
+        const offset = () => row.getBoundingClientRect().top - node.getBoundingClientRect().top;
+        const atEnd = node.scrollTop >= node.scrollHeight - node.clientHeight - 1;
+        const originalTranslate = row.style.translate;
+        try {
+          if (controlHeight !== undefined) {
+            const downwardClamp = Math.max(offset() - before, 0);
+            row.style.translate = `0 -${downwardClamp + 2 * controlHeight}px`;
+          }
+          const drift = offset() - before;
+          return atEnd ? Math.max(-drift, 0) : Math.abs(drift);
+        } finally {
+          // Keep the injected geometry within this synchronous browser task. A resize correction
+          // or scroll anchor must never observe it on an animation frame.
+          if (controlHeight !== undefined) row.style.translate = originalTranslate;
+        }
+      }, { index: anchorIndex, before: anchorOffsetBefore, controlHeight });
     await expectGeometryPoll(
       readingOffsetError,
       `the first visible row keeps its reading offset across ${from} to ${to}`,
@@ -781,18 +789,9 @@ test("crossing the breakpoint keeps the first visible row and the list's geometr
     if (!checkedTopwardOvershoot && await list.evaluate((node) =>
       node.scrollTop >= node.scrollHeight - node.clientHeight - 1)) {
       const height = await cardHeight();
-      await list.evaluate((node, { index, distance }) => {
-        node.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`)!.style.translate = `0 -${distance}px`;
-      }, { index: anchorIndex, distance: 3 * height });
-      try {
-        expect(await readingOffsetError(), "a topward overshoot at maximum scroll must fail the reading-offset limit")
-          .toBeGreaterThan(height);
-        checkedTopwardOvershoot = true;
-      } finally {
-        await list.evaluate((node, index) => {
-          node.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`)!.style.translate = "";
-        }, anchorIndex);
-      }
+      expect(await readingOffsetError(height), "a topward overshoot at maximum scroll must fail the reading-offset limit")
+        .toBeGreaterThan(height);
+      checkedTopwardOvershoot = true;
     }
 
     // Polled on the predicate itself: a width change opens a new measurement epoch, and the
