@@ -214,7 +214,7 @@ export interface ContainerSpawnIsolation {
   /** Host-only configured args replaced by agentArgs at the container boundary. */
   hostAgentArgs: string[];
   /** Recheck mutable Podman defaults immediately before every client spawn, including later terminals. */
-  verifyDefaultMounts?: () => void;
+  verifyDefaults?: () => void;
   /** Trust-gated repository setup names forwarded without putting values in argv. */
   sessionEnvironmentKeys?: string[];
 }
@@ -651,7 +651,7 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
 
   let child: AgentProcess;
   try {
-    if (opts.isolation?.backend === "container") opts.isolation.verifyDefaultMounts?.();
+    if (opts.isolation?.backend === "container") opts.isolation.verifyDefaults?.();
     child = spawn(file, args, {
       cwd,
       env: {

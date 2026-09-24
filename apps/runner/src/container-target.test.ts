@@ -7,7 +7,7 @@ import test, { afterEach, beforeEach } from "node:test";
 import type { ExecutionTargetRef } from "@wollipog/protocol";
 import type { RunnerContainerTarget } from "./config.js";
 import { CANONICAL_CONTAINER_LABELS, LEGACY_CONTAINER_LABELS } from "./container-identity.js";
-import { ContainerTargetRegistry, containerSetupCheckDigest, containerTargetId, podmanDefaultMountsSafeForPaths, targetProbeEnvironment } from "./container-target.js";
+import { ContainerTargetRegistry, containerSetupCheckDigest, containerTargetId, podmanDefaultsSafeForPaths, targetProbeEnvironment } from "./container-target.js";
 import { spawnAgent } from "./spawn.js";
 
 const image = `example/agent@sha256:${"a".repeat(64)}`;
@@ -39,8 +39,8 @@ function runtime() {
   return { path: "/usr/bin/docker", via: "path" as const, launch: { command: "/usr/bin/docker", args: [] } };
 }
 
-function podmanMountFixture(config: string): () => boolean {
-  return () => podmanDefaultMountsSafeForPaths({
+function podmanDefaultsFixture(config: string): () => boolean {
+  return () => podmanDefaultsSafeForPaths({
     share: join(config, "share"), system: join(config, "system"), home: join(config, "home"),
     configHome: config, uid: 1000,
   });
@@ -52,7 +52,7 @@ test("Podman mount scanning rejects inherited rootless UID source changes", () =
     const differentUidDropin = join(config, "system", "containers.rootless.conf.d", "2000", "bind.conf");
     mkdirSync(join(config, "system", "containers.rootless.conf.d", "2000"), { recursive: true });
     writeFileSync(differentUidDropin, '[containers]\nvolumes = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
-    const safe = podmanMountFixture(config);
+    const safe = podmanDefaultsFixture(config);
     assert.equal(safe(), true, "actual UID does not load another UID's drop-in");
     process.env._CONTAINERS_ROOTLESS_UID = "2000";
     assert.equal(safe(), false, "a redirected per-UID config source is unavailable");
@@ -181,7 +181,7 @@ test("rootless local Podman checks retain storage and runtime paths without host
   try {
     let checkEnv: Record<string, string> | undefined;
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
-      podmanMountsSafe: () => true,
+      podmanDefaultsSafe: () => true,
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
         if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
@@ -220,7 +220,7 @@ test("Podman socket engines cannot claim a secret-free local mount boundary", {
   });
   await registry.initialize();
   assert.equal(registry.definitions()[0]!.available, false);
-  assert.match(registry.definitions()[0]!.unavailableReason ?? "", /default mounts/u);
+  assert.match(registry.definitions()[0]!.unavailableReason ?? "", /Podman defaults/u);
   assert.equal(calls.length, 0);
 });
 
@@ -236,7 +236,7 @@ test("Podman rejects host binds configured in containers.conf", {
   try {
     let setupRan = false;
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
-      podmanMountsSafe: podmanMountFixture(config),
+      podmanDefaultsSafe: podmanDefaultsFixture(config),
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         if (args[0] === "run") setupRan = true;
@@ -247,7 +247,7 @@ test("Podman rejects host binds configured in containers.conf", {
     await registry.initialize();
     assert.equal(registry.definitions()[0]!.available, false);
     assert.equal(setupRan, false);
-    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /default mounts/u);
+    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /Podman defaults/u);
     assert.doesNotMatch(JSON.stringify(registry.definitions()), /synthetic-host-credentials/u);
   } finally {
     if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -268,7 +268,7 @@ test("Podman does not advertise or launch a secret-free target when host default
   try {
     const calls: string[][] = [];
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
-      podmanMountsSafe: podmanMountFixture(config),
+      podmanDefaultsSafe: podmanDefaultsFixture(config),
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         calls.push(args);
@@ -279,7 +279,7 @@ test("Podman does not advertise or launch a secret-free target when host default
     await registry.initialize();
     const definition = registry.definitions()[0]!;
     assert.equal(definition.available, false);
-    assert.match(definition.unavailableReason ?? "", /default mounts/u);
+    assert.match(definition.unavailableReason ?? "", /Podman defaults/u);
     assert.equal(calls.some((args) => args[0] === "run"), false);
     assert.doesNotMatch(JSON.stringify(definition), /synthetic-host-credentials/u);
   } finally {
@@ -300,7 +300,7 @@ test("Podman rejects a default mount added after registration before session lau
   process.env.XDG_CONFIG_HOME = config;
   try {
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
-      podmanMountsSafe: podmanMountFixture(config),
+      podmanDefaultsSafe: podmanDefaultsFixture(config),
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => args[0] === "info"
         ? { code: 0, stdout: "false\n", stderr: "" }
@@ -316,14 +316,14 @@ test("Podman rejects a default mount added after registration before session lau
     };
     const reusableIsolation = registry.isolation(ref, "codex", "codex", [], "session-1");
     writeFileSync(mounts, "/synthetic-host-credentials:/run/secrets/host:ro\n");
-    assert.match(registry.validationError(ref, true, { kind: "native" }, "codex") ?? "", /default mounts/u);
-    assert.throws(() => registry.isolation(ref, "codex", "codex", [], "session-1"), /default mounts/u);
+    assert.match(registry.validationError(ref, true, { kind: "native" }, "codex") ?? "", /Podman defaults/u);
+    assert.throws(() => registry.isolation(ref, "codex", "codex", [], "session-1"), /Podman defaults/u);
     assert.throws(() => spawnAgent({ command: "git", args: ["--version"], cwd: config,
-      isolation: reusableIsolation }), /default mounts/u, "later terminal launches recheck mutable defaults");
+      isolation: reusableIsolation }), /Podman defaults/u, "later terminal launches recheck mutable defaults");
     writeFileSync(mounts, "# no implicit host mounts\n");
     writeFileSync(join(config, "containers", "containers.conf"), "[engine]\nremote = true\n");
-    assert.match(registry.validationError(ref, true, { kind: "native" }, "codex") ?? "", /default mounts/u);
-    assert.throws(() => registry.isolation(ref, "codex", "codex", [], "session-2"), /default mounts/u);
+    assert.match(registry.validationError(ref, true, { kind: "native" }, "codex") ?? "", /Podman defaults/u);
+    assert.throws(() => registry.isolation(ref, "codex", "codex", [], "session-2"), /Podman defaults/u);
     await registry.refreshInstallations();
     assert.equal(registry.definitions()[0]!.available, false);
   } finally {
@@ -343,7 +343,7 @@ test("Podman setup and probes stop if defaults change during readiness", {
   try {
     const runs: string[][] = [];
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
-      podmanMountsSafe: podmanMountFixture(config),
+      podmanDefaultsSafe: podmanDefaultsFixture(config),
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
@@ -357,7 +357,7 @@ test("Podman setup and probes stop if defaults change during readiness", {
     await registry.initialize();
     assert.equal(runs.length, 1, "a changed default blocks discovery probes after setup");
     assert.equal(registry.definitions()[0]!.available, false);
-    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /default mounts/u);
+    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /Podman defaults/u);
   } finally {
     rmSync(config, { recursive: true, force: true });
   }
@@ -373,7 +373,7 @@ test("Podman does not start a setup check after local-mode inspection adds a def
   try {
     let setupRan = false;
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
-      podmanMountsSafe: podmanMountFixture(config),
+      podmanDefaultsSafe: podmanDefaultsFixture(config),
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         if (args[0] === "info") {
@@ -387,7 +387,7 @@ test("Podman does not start a setup check after local-mode inspection adds a def
     await registry.initialize();
     assert.equal(setupRan, false);
     assert.equal(registry.definitions()[0]!.available, false);
-    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /default mounts/u);
+    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /Podman defaults/u);
   } finally {
     rmSync(config, { recursive: true, force: true });
   }
@@ -395,7 +395,7 @@ test("Podman does not start a setup check after local-mode inspection adds a def
 
 test("Podman mount scanning covers HOME, rootless global defaults, and quoted TOML keys", () => {
   const config = mkdtempSync(join(tmpdir(), "wollipog-podman-source-scan-"));
-  const safe = podmanMountFixture(config);
+  const safe = podmanDefaultsFixture(config);
   try {
     assert.equal(safe(), true);
     const systemMounts = join(config, "share", "mounts.conf");
@@ -437,7 +437,7 @@ test("Podman mount scanning covers HOME, rootless global defaults, and quoted TO
     const rootfulShareDropin = join(config, "share", "containers.rootful.conf.d", "40-bind.conf");
     mkdirSync(join(config, "share", "containers.rootful.conf.d"), { recursive: true });
     writeFileSync(rootfulShareDropin, '[containers]\nvolumes = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
-    assert.equal(podmanDefaultMountsSafeForPaths({
+    assert.equal(podmanDefaultsSafeForPaths({
       share: join(config, "share"), system: join(config, "system"), home: join(config, "home"),
       configHome: config, uid: 0,
     }), false, "current rootful share drop-ins are scanned");
@@ -459,6 +459,41 @@ test("Podman mount scanning covers HOME, rootless global defaults, and quoted TO
     assert.equal(safe(), false, "remote mode cannot redirect launch to an unchecked engine");
     writeFileSync(quotedKey, '[engine]\nRemote = true\n');
     assert.equal(safe(), false, "case-folded remote mode cannot redirect launch");
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Podman rejects non-mount defaults that cross the secret-free boundary", () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-podman-nonmount-"));
+  const file = join(config, "containers", "containers.conf");
+  const safe = podmanDefaultsFixture(config);
+  mkdirSync(join(config, "containers"));
+  try {
+    for (const [name, value] of [
+      ["host environment", "env_host = true"],
+      ["named host environment", 'env = ["SYNTHETIC_CREDENTIAL"]'],
+      ["mixed host environment", 'env = ["PUBLIC_SETTING=value", "SYNTHETIC_CREDENTIAL"]'],
+      ["host file copied into hosts", 'base_hosts_file = "/tmp/synthetic-hosts"'],
+      ["host PID namespace", 'pidns = "host"'],
+    ]) {
+      writeFileSync(file, `[containers]\n${value}\n`);
+      assert.equal(safe(), false, `${name} must not reach a container target`);
+    }
+    writeFileSync(file, 'containers."env_host" = true\n');
+    assert.equal(safe(), false, "dotted TOML keys cannot hide host environment forwarding");
+    writeFileSync(file, '[containers]\n"env_hoſt" = true\n');
+    assert.equal(safe(), false, "Unicode case folding cannot hide host environment forwarding");
+    writeFileSync(file, '[engine]\nenv = ["ENGINE_SETTING=value"]\n');
+    assert.equal(safe(), true, "engine environment is not a container environment default");
+    for (const value of [
+      "env_host = false", 'env = ["PUBLIC_SETTING=value"]',
+      'base_hosts_file = "image"', 'base_hosts_file = "none"',
+      'base_hosts_file = "/etc/hosts"', 'pidns = "private"',
+    ]) {
+      writeFileSync(file, `[containers]\n${value}\n`);
+      assert.equal(safe(), true, `${value} preserves safe Podman defaults`);
+    }
   } finally {
     rmSync(config, { recursive: true, force: true });
   }
@@ -574,7 +609,7 @@ test("Podman keeps a configured local storage file without loading general conta
     let checkEnv: Record<string, string> | undefined;
     let inspectedLocalMode = false;
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
-      podmanMountsSafe: () => true,
+      podmanDefaultsSafe: () => true,
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
         if (args[0] === "info") {
@@ -612,7 +647,7 @@ test("Podman config-selected remote mode cannot certify a local setup check", {
     let setupRan = false;
     let infoEnv: Record<string, string> | undefined;
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
-      podmanMountsSafe: () => true,
+      podmanDefaultsSafe: () => true,
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
         if (args[0] === "info") {
@@ -644,7 +679,7 @@ test("Podman setup checks fail closed when local mode cannot be confirmed", {
   ]) {
     let setupRan = false;
     const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
-      podmanMountsSafe: () => true,
+      podmanDefaultsSafe: () => true,
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         if (args[0] === "info") return info;
@@ -978,7 +1013,7 @@ test("Docker and Podman discover both generations and produce exact dual-label W
     const runtimeTemplate = { ...template, runtime: runtimeName };
     const expectedRunnerKey = runnerKey(`runner-${runtimeName}`);
     const registry = new ContainerTargetRegistry(`runner-${runtimeName}`, "host", [runtimeTemplate], {
-      podmanMountsSafe: () => true,
+      podmanDefaultsSafe: () => true,
       resolveRuntime: async () => ({
         path: `/usr/bin/${runtimeName}`,
         via: "path" as const,
@@ -1059,7 +1094,7 @@ test("legacy-only container discovery emits one value-free warning across Docker
     { ...template, id: "docker-tools", runtime: "docker" },
     ...(process.platform === "linux" ? [{ ...template, id: "podman-tools", runtime: "podman" as const }] : []),
   ], {
-    podmanMountsSafe: () => true,
+    podmanDefaultsSafe: () => true,
     resolveRuntime: async (runtimeName) => ({
       path: `/usr/bin/${runtimeName}`,
       via: "path" as const,

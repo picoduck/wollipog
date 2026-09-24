@@ -88,6 +88,12 @@ user defaults contain such entries or cannot be safely read. Podman configuratio
 remote engine also blocks the target; backslash escapes in config are rejected conservatively because
 they can hide those settings in quoted TOML keys. The runner checks again before each
 container client launch, including later terminals, and on Rediscover while the target is available.
+The same check rejects `env_host = true`, `env` entries that copy a named host variable, a custom
+`base_hosts_file`, and `pidns = "host"`. These can expose the Podman client's environment, a host
+file, or host processes to a target advertising `secrets: "none"`. Explicit `env_host = false`,
+literal `env` assignments, the default `/etc/hosts` or `image`/`none` hosts sources, and
+`pidns = "private"` remain usable. Environment arrays the runner cannot verify as literal-only
+are rejected; use a single-line array of literal assignments for this target.
 If the target becomes unavailable,
 remove the unsafe default and restart the runner to repeat readiness checks. Socket-backed Podman
 engines and Podman on non-Linux hosts remain unavailable because their engine's default mounts cannot

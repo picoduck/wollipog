@@ -22,7 +22,7 @@ interface ContainerTargetDeps {
     timeoutMs?: number; maxBuffer?: number; env?: Record<string, string>; replaceEnv?: boolean;
   }): Promise<ExecResult>;
   warnLegacyContainerLabels?(message: string): void;
-  podmanMountsSafe?(): boolean;
+  podmanDefaultsSafe?(): boolean;
 }
 
 const defaultDeps: ContainerTargetDeps = {
@@ -34,9 +34,49 @@ const MAX_RUNNER_CONTAINER_INVENTORY = 128;
 const LEGACY_CONTAINER_LABEL_WARNING =
   "legacy-only com.misko-agent-manager.* container state was found during orphan cleanup; " +
   "compatibility remains active for this migration window";
-const PODMAN_DEFAULT_MOUNTS_REASON = "Podman default mounts prevent a secret-free container target";
+const PODMAN_UNSAFE_DEFAULTS_REASON = "Podman defaults prevent a secret-free container target";
 
-interface PodmanMountConfigRoots {
+function podmanLiteralEnvironmentSafe(value: string): boolean {
+  const array = /^\[(.*)\]\s*(?:#.*)?$/u.exec(value);
+  if (!array) return false;
+  let entries = array[1]!.trim();
+  while (entries) {
+    const entry = /^(?:"([^"\\]*)"|'([^']*)')(?=\s*(?:,|$))/u.exec(entries);
+    if (!entry || !/^[A-Za-z_][A-Za-z0-9_]*=/u.test(entry[1] ?? entry[2] ?? "")) return false;
+    entries = entries.slice(entry[0].length).trim();
+    if (!entries) break;
+    if (!entries.startsWith(",")) return false;
+    entries = entries.slice(1).trim();
+  }
+  return true;
+}
+
+function podmanNonMountDefaultsSafe(lines: string[]): boolean {
+  let containersTable = false;
+  let topLevel = true;
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+    if (trimmed.startsWith("[")) {
+      topLevel = false;
+      containersTable = /^\[\s*(?:containers|"containers"|'containers')\s*\]\s*(?:#.*)?$/iu.test(trimmed);
+      continue;
+    }
+    const entry = topLevel ? trimmed.replace(/^(?:containers|"containers"|'containers')\./iu, "") : trimmed;
+    if (!containersTable && (!topLevel || entry === trimmed)) continue;
+    const assignment = /^(?:([A-Za-z_][A-Za-z0-9_-]*)|"([^"\\]*)"|'([^']*)')\s*=\s*(.*)$/u.exec(entry);
+    if (!assignment) continue;
+    const key = assignment[1] ?? assignment[2] ?? assignment[3] ?? "";
+    const value = assignment[4]!;
+    if (/^env_host$/iu.test(key) && !/^false\s*(?:#.*)?$/u.test(value)) return false;
+    if (/^pidns$/iu.test(key) && !/^(?:"private"|'private')\s*(?:#.*)?$/u.test(value)) return false;
+    if (/^base_hosts_file$/iu.test(key) && !/^(?:"(?:|none|image|\/etc\/hosts)"|'(?:|none|image|\/etc\/hosts)')\s*(?:#.*)?$/u.test(value)) return false;
+    if (/^env$/iu.test(key) && !podmanLiteralEnvironmentSafe(value)) return false;
+  }
+  return true;
+}
+
+interface PodmanConfigRoots {
   share: string;
   system: string;
   home: string;
@@ -44,9 +84,9 @@ interface PodmanMountConfigRoots {
   uid: number;
 }
 
-/** Podman can add host binds from mounts.conf and containers.conf defaults. Keep this path-based
+/** Podman can add host binds and leak host state from its defaults. Keep this path-based
  * check injectable so tests can use private fixtures rather than the developer's Podman setup. */
-export function podmanDefaultMountsSafeForPaths(roots: PodmanMountConfigRoots): boolean {
+export function podmanDefaultsSafeForPaths(roots: PodmanConfigRoots): boolean {
   const { share, system, home, configHome, uid } = roots;
   if (![share, system, home, configHome].every(isAbsolute)) return false;
   const inheritedUid = process.env._CONTAINERS_ROOTLESS_UID;
@@ -87,8 +127,10 @@ export function podmanDefaultMountsSafeForPaths(roots: PodmanMountConfigRoots): 
         const maxBytes = isMountsConf ? 64 * 1024 : 1024 * 1024;
         if (!stat.isFile() || stat.size > maxBytes) return false;
         const content = readFileSync(file, "utf8");
+        const lines = content.split(/\r?\n/u);
         if (Buffer.byteLength(content) > maxBytes ||
-            content.split(/\r?\n/u).some((line) => {
+            (!isMountsConf && !podmanNonMountDefaultsSafe(lines)) ||
+            lines.some((line) => {
               const trimmed = line.trim();
               if (trimmed === "" || trimmed.startsWith("#")) return false;
               // TOML quoted keys can hide a mount name with escapes, including \x in TOML 1.1.
@@ -104,9 +146,9 @@ export function podmanDefaultMountsSafeForPaths(roots: PodmanMountConfigRoots): 
   return true;
 }
 
-function podmanDefaultMountsSafe(): boolean {
+function podmanDefaultsSafe(): boolean {
   if (process.platform !== "linux" || process.env.CONTAINER_HOST || process.env.CONTAINER_CONNECTION) return false;
-  return podmanDefaultMountsSafeForPaths({
+  return podmanDefaultsSafeForPaths({
     share: "/usr/share/containers", system: "/etc/containers", home: process.env.HOME ?? homedir(),
     configHome: process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
     uid: process.getuid?.() ?? 0,
@@ -259,8 +301,8 @@ export class ContainerTargetRegistry {
   private readonly warnLegacyContainerLabels: (message: string) => void;
   private warnedLegacyContainerLabels = false;
 
-  private podmanMountsSafe(): boolean {
-    return this.deps.podmanMountsSafe?.() ?? podmanDefaultMountsSafe();
+  private podmanDefaultsSafe(): boolean {
+    return this.deps.podmanDefaultsSafe?.() ?? podmanDefaultsSafe();
   }
 
   constructor(
@@ -392,7 +434,7 @@ export class ContainerTargetRegistry {
       const name = `wollipog-probe-${this.runnerKey}-${probeKey}`;
       // A named, runner-labelled container can be forcibly removed after a client timeout
       // and found by startup orphan reconciliation if removal itself fails.
-      if (template.runtime === "podman" && !this.podmanMountsSafe()) {
+      if (template.runtime === "podman" && !this.podmanDefaultsSafe()) {
         return { code: 1, stdout: "", stderr: "" };
       }
       const result = await this.deps.run(runtime.launch.command, [
@@ -477,11 +519,11 @@ export class ContainerTargetRegistry {
         });
         continue;
       }
-      if (template.runtime === "podman" && !this.podmanMountsSafe()) {
+      if (template.runtime === "podman" && !this.podmanDefaultsSafe()) {
         this.prepared.set(id, {
           config: template,
           runtime,
-          definition: { ...base, unavailableReason: PODMAN_DEFAULT_MOUNTS_REASON },
+          definition: { ...base, unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON },
         });
         continue;
       }
@@ -515,8 +557,8 @@ export class ContainerTargetRegistry {
         }
         try {
           const opts = { env: await this.setupEnvironment(template, runtime, home), replaceEnv: true };
-          if (template.runtime === "podman" && !this.podmanMountsSafe()) {
-            failed = PODMAN_DEFAULT_MOUNTS_REASON;
+          if (template.runtime === "podman" && !this.podmanDefaultsSafe()) {
+            failed = PODMAN_UNSAFE_DEFAULTS_REASON;
             break;
           }
           const result = await this.deps.run(runtime.launch.command,
@@ -543,12 +585,12 @@ export class ContainerTargetRegistry {
         if (failed) break;
       }
       const installations = failed ? new Map() : await this.discoverInstallations(template, runtime, id);
-      const mountsUnsafe = template.runtime === "podman" && !this.podmanMountsSafe();
+      const defaultsUnsafe = template.runtime === "podman" && !this.podmanDefaultsSafe();
       this.prepared.set(id, {
         config: template,
         runtime,
         installations,
-        definition: mountsUnsafe ? { ...base, unavailableReason: PODMAN_DEFAULT_MOUNTS_REASON } :
+        definition: defaultsUnsafe ? { ...base, unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON } :
           failed ? { ...base, unavailableReason: failed } : {
           ...base, available: true,
           ...(installations.size ? { harnessInstallations: [...installations.values()].map((item) => item.info) } : {}),
@@ -564,14 +606,14 @@ export class ContainerTargetRegistry {
   async refreshInstallations(): Promise<void> {
     for (const [id, item] of this.prepared) {
       if (!item.runtime || !item.definition.available) continue;
-      if (item.config.runtime === "podman" && !this.podmanMountsSafe()) {
-        item.definition = { ...item.definition, available: false, unavailableReason: PODMAN_DEFAULT_MOUNTS_REASON };
+      if (item.config.runtime === "podman" && !this.podmanDefaultsSafe()) {
+        item.definition = { ...item.definition, available: false, unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON };
         item.installations = undefined;
         continue;
       }
       const installations = await this.discoverInstallations(item.config, item.runtime, id);
-      if (item.config.runtime === "podman" && !this.podmanMountsSafe()) {
-        item.definition = { ...item.definition, available: false, unavailableReason: PODMAN_DEFAULT_MOUNTS_REASON };
+      if (item.config.runtime === "podman" && !this.podmanDefaultsSafe()) {
+        item.definition = { ...item.definition, available: false, unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON };
         item.installations = undefined;
         continue;
       }
@@ -587,7 +629,7 @@ export class ContainerTargetRegistry {
   validationError(target: ExecutionTargetRef, useWorktree: boolean, context: AgentContext, agentId: string): string | null {
     const prepared = this.prepared.get(target.id);
     if (!prepared || target.runnerId !== this.runnerId) return "execution target does not belong to this runner";
-    if (prepared.config.runtime === "podman" && !this.podmanMountsSafe()) return PODMAN_DEFAULT_MOUNTS_REASON;
+    if (prepared.config.runtime === "podman" && !this.podmanDefaultsSafe()) return PODMAN_UNSAFE_DEFAULTS_REASON;
     if (target.adapter !== "container" || target.kind !== "container") return "execution target requires an unsupported adapter";
     if (!useWorktree || target.workspaceStrategy !== "worktree") return "container targets require an isolated worktree";
     if (context.kind !== "native") return "container targets require a native agent context";
@@ -626,7 +668,7 @@ export class ContainerTargetRegistry {
   ): ContainerSpawnIsolation {
     const prepared = this.prepared.get(target.id);
     if (!prepared?.runtime || !prepared.definition.available) throw new Error("container target is unavailable");
-    if (prepared.config.runtime === "podman" && !this.podmanMountsSafe()) throw new Error(PODMAN_DEFAULT_MOUNTS_REASON);
+    if (prepared.config.runtime === "podman" && !this.podmanDefaultsSafe()) throw new Error(PODMAN_UNSAFE_DEFAULTS_REASON);
     const selected = target.harnessInstallationId
       ? prepared.installations?.get(target.harnessInstallationId)
       : undefined;
@@ -648,8 +690,8 @@ export class ContainerTargetRegistry {
       hostAgentArgs: [...hostAgentArgs],
       agentCommand: agent.command,
       agentArgs: agent.args ?? [],
-      ...(prepared.config.runtime === "podman" ? { verifyDefaultMounts: () => {
-        if (!this.podmanMountsSafe()) throw new Error(PODMAN_DEFAULT_MOUNTS_REASON);
+      ...(prepared.config.runtime === "podman" ? { verifyDefaults: () => {
+        if (!this.podmanDefaultsSafe()) throw new Error(PODMAN_UNSAFE_DEFAULTS_REASON);
       } } : {}),
     };
   }
