@@ -2412,6 +2412,22 @@ CREATE TABLE IF NOT EXISTS skill_git_provenance (
   source TEXT NOT NULL
 );
 
+-- Opt-in Git automatic updates (absent row = off). checked_commit records the last upstream commit
+-- fully handled, so an unchanged ref never re-imports; held is a JSON review hold. Every write
+-- bumps revision, which fences a check's result against changes made while it fetched.
+CREATE TABLE IF NOT EXISTS skill_git_auto_updates (
+  skill_id       TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
+  enabled        INTEGER NOT NULL DEFAULT 0,
+  revision       INTEGER NOT NULL DEFAULT 0,
+  checked_at     INTEGER,
+  checked_commit TEXT,
+  error          TEXT,
+  error_at       INTEGER,
+  held           TEXT,
+  checked_modes  TEXT,
+  updated_at     INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS skill_machine_provenance (
   version_id TEXT PRIMARY KEY,
   source TEXT NOT NULL
@@ -3343,6 +3359,18 @@ export interface SkillVersionSummary {
   createdAt: number;
 }
 
+/** Why an automatic Git update waits for a human to import it through the preview. */
+export type SkillGitUpdateHoldReason = "scripts" | "local_changes" | "untracked_modes";
+
+export interface SkillGitAutoUpdateView {
+  enabled: boolean;
+  intervalMs: number;
+  checkedAt: number | null;
+  checkedCommit: string | null;
+  error: { message: string; at: number } | null;
+  held: { commit: string; reason: SkillGitUpdateHoldReason; scriptPaths: string[]; heldAt: number } | null;
+}
+
 export interface SkillView {
   id: string;
   name: string;
@@ -3350,6 +3378,7 @@ export interface SkillView {
   groupId: string | null;
   source: string;
   gitSource?: SkillVersionView["gitSource"];
+  gitAutoUpdate?: SkillGitAutoUpdateView;
   latestVersion: SkillVersionSummary | null;
   assignmentCount: number;
   createdAt: number;
@@ -3362,7 +3391,8 @@ export interface SkillVersionView extends SkillVersionSummary {
   manifest: string;
   files: SkillFile[];
   note: string | null;
-  gitSource?: { url: string; ref: string; subdirectory: string; path: string; commit: string };
+  /** executablePaths (100755 blobs) is recorded since automatic updates; absent on older imports. */
+  gitSource?: { url: string; ref: string; subdirectory: string; path: string; commit: string; executablePaths?: string[] };
   machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number;
     context?: AgentContext; providerAccountId?: string };
 }
@@ -4114,6 +4144,8 @@ export class ControlPlaneDb {
   setUsageRateTable(table: RateTable | null): void {
     this.usageRateTable = table;
   }
+  /** Configured Git automatic-update interval, reported with each skill's update status. */
+  skillGitAutoUpdateIntervalMs = 60 * 60_000;
   private lastMutationAuditArchive = 0;
   private mutationAuditWritesSinceArchive = 0;
   private stmt(sql: string): ReturnType<DatabaseSync["prepare"]> {
@@ -4262,6 +4294,11 @@ export class ControlPlaneDb {
     }
     try {
       db.exec("ALTER TABLE managed_background_jobs ADD COLUMN continuation_missing_result_at INTEGER");
+    } catch {
+      /* column already present */
+    }
+    try {
+      db.exec("ALTER TABLE skill_git_auto_updates ADD COLUMN checked_modes TEXT");
     } catch {
       /* column already present */
     }
@@ -6915,6 +6952,7 @@ export class ControlPlaneDb {
       groupId: row.group_id,
       source: row.source,
       ...(gitSource ? { gitSource: JSON.parse(gitSource.source) as NonNullable<SkillVersionView["gitSource"]> } : {}),
+      ...(gitSource ? { gitAutoUpdate: this.skillGitAutoUpdate(row.id) } : {}),
       latestVersion: latest
         ? { id: latest.id, digest: latest.digest, createdAt: latest.created_at }
         : null,
@@ -7156,20 +7194,134 @@ export class ControlPlaneDb {
       if ((current?.latestVersion?.id ?? null) !== input.expectedVersionId) {
         throw new SkillImportConflictError("The library changed after preview. Preview the import again.");
       }
+      if (current) {
+        // A reviewed import supersedes any automatic-update hold and becomes the new baseline.
+        this.stmt(`UPDATE skill_git_auto_updates SET checked_commit=?, held=NULL, updated_at=?,
+          revision=revision+1 WHERE skill_id=? AND enabled=1`).run(input.source.commit, Date.now(), current.id);
+      }
       if (current?.latestVersion?.digest === input.digest) {
         // An identical local version can acquire provenance without duplicating its content.
         // Existing provenance is immutable, including when another remote has identical bytes.
         this.stmt("INSERT OR IGNORE INTO skill_git_provenance (version_id, source) VALUES (?, ?)")
           .run(current.latestVersion.id, JSON.stringify(input.source));
         this.stmt("UPDATE skills SET source='git' WHERE id=?").run(current.id);
+        this.recordSkillGitBaselineModes(current.id, current.latestVersion.id, input.source.executablePaths);
         return this.getSkill(current.id)!;
       }
       const skill = current ?? this.createSkill(input);
       const version = current ? this.addSkillVersion(current.id, input)! : this.getSkillVersion(skill.latestVersion!.id)!;
       this.stmt("INSERT INTO skill_git_provenance (version_id, source) VALUES (?, ?)")
         .run(version.id, JSON.stringify(input.source));
+      if (current) this.recordSkillGitBaselineModes(current.id, version.id, input.source.executablePaths);
       this.stmt("UPDATE skills SET source='git' WHERE id=?").run(skill.id);
       return this.getSkill(skill.id)!;
+    });
+  }
+
+  getSkillGitAutoUpdate(skillId: string): SkillGitAutoUpdateView {
+    return this.skillGitAutoUpdate(skillId);
+  }
+
+  private skillGitAutoUpdate(skillId: string): SkillGitAutoUpdateView {
+    const row = this.stmt(`SELECT enabled, checked_at, checked_commit, error, error_at, held
+      FROM skill_git_auto_updates WHERE skill_id=?`).get(skillId) as {
+      enabled: number; checked_at: number | null; checked_commit: string | null;
+      error: string | null; error_at: number | null; held: string | null;
+    } | undefined;
+    return {
+      enabled: row?.enabled === 1,
+      intervalMs: this.skillGitAutoUpdateIntervalMs,
+      checkedAt: row?.checked_at ?? null,
+      checkedCommit: row?.checked_commit ?? null,
+      error: row?.error ? { message: row.error, at: row.error_at ?? 0 } : null,
+      held: row?.held ? JSON.parse(row.held) as NonNullable<SkillGitAutoUpdateView["held"]> : null,
+    };
+  }
+
+  /** Enabling starts a fresh baseline so the next check runs promptly and re-evaluates any hold;
+   * disabling drops its status. Neither changes versions or deployments. */
+  setSkillGitAutoUpdate(skillId: string, enabled: boolean, now = Date.now()): boolean {
+    return this.atomic(() => {
+      if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return false;
+      this.stmt(`INSERT INTO skill_git_auto_updates (skill_id, enabled, updated_at) VALUES (?, ?, ?)
+        ON CONFLICT(skill_id) DO UPDATE SET enabled=excluded.enabled, checked_at=NULL, checked_commit=NULL,
+          error=NULL, error_at=NULL, held=NULL, checked_modes=NULL, updated_at=excluded.updated_at,
+          revision=revision+1`).run(skillId, enabled ? 1 : 0, now);
+      return true;
+    });
+  }
+
+  /** Opaque write counter; null when the skill has never had an automatic-update setting. */
+  /** Executable paths of the last handled commit, valid only while `versionId` is still latest.
+   * Provenance is immutable, so a mode-only commit with identical content is recorded here. */
+  getSkillGitBaselineModes(skillId: string): { versionId: string; executablePaths: string[] } | null {
+    const row = this.stmt("SELECT checked_modes FROM skill_git_auto_updates WHERE skill_id=?").get(skillId) as { checked_modes: string | null } | undefined;
+    return row?.checked_modes ? JSON.parse(row.checked_modes) as { versionId: string; executablePaths: string[] } : null;
+  }
+
+  /** Modes recorded for unchanged content only grow: a stale import of an older commit with the
+   * same bytes cannot erase an executable bit a later handled commit reported. */
+  private recordSkillGitBaselineModes(skillId: string, versionId: string, executablePaths: string[] | undefined): void {
+    const prior = this.getSkillGitBaselineModes(skillId);
+    const merged = prior?.versionId === versionId
+      ? [...new Set([...prior.executablePaths, ...(executablePaths ?? [])])].sort()
+      : Array.isArray(executablePaths) ? executablePaths : null;
+    this.stmt(`UPDATE skill_git_auto_updates SET checked_modes=?, revision=revision+1 WHERE skill_id=? AND enabled=1`)
+      .run(merged ? JSON.stringify({ versionId, executablePaths: merged }) : null, skillId);
+  }
+
+  getSkillGitAutoUpdateRevision(skillId: string): number | null {
+    const row = this.stmt("SELECT revision FROM skill_git_auto_updates WHERE skill_id=?").get(skillId) as { revision: number } | undefined;
+    return row ? Number(row.revision) : null;
+  }
+
+  /** Enabled skills whose last check is at least one interval old, never-checked first. */
+  listDueSkillGitAutoUpdates(now: number, intervalMs: number, limit = 100): string[] {
+    const rows = this.stmt(`SELECT skill_id FROM skill_git_auto_updates
+      WHERE enabled=1 AND (checked_at IS NULL OR checked_at <= ?)
+      ORDER BY checked_at IS NOT NULL, checked_at, skill_id LIMIT ?`).all(now - intervalMs, limit) as Array<{ skill_id: string }>;
+    return rows.map((row) => row.skill_id);
+  }
+
+  /** Record one check outcome while automatic updates stay enabled. A failure keeps the prior
+   * commit baseline and any hold; success clears the error and replaces the hold. */
+  recordSkillGitAutoUpdateCheck(skillId: string, outcome:
+    | { kind: "failed"; error: string; at: number }
+    | { kind: "handled"; commit: string; at: number; held: SkillGitAutoUpdateView["held"] }): void {
+    if (outcome.kind === "failed") {
+      this.stmt(`UPDATE skill_git_auto_updates SET checked_at=?, error=?, error_at=?, updated_at=?,
+        revision=revision+1 WHERE skill_id=? AND enabled=1`).run(outcome.at, outcome.error.slice(0, 500), outcome.at, outcome.at, skillId);
+      return;
+    }
+    this.stmt(`UPDATE skill_git_auto_updates SET checked_at=?, checked_commit=?, error=NULL, error_at=NULL,
+      held=?, updated_at=?, revision=revision+1 WHERE skill_id=? AND enabled=1`)
+      .run(outcome.at, outcome.commit, outcome.held ? JSON.stringify(outcome.held) : null, outcome.at, skillId);
+  }
+
+  /** Apply an unattended Git update under the same latest-version fence as a preview import, plus
+   * the setting's revision (a reviewed identical import moves only the baseline). Returns whether
+   * deployable content changed, or null when the setting changed or was disabled meanwhile. */
+  applySkillGitAutoUpdate(input: {
+    skillId: string; files: SkillFile[]; manifest: string; digest: string;
+    source: NonNullable<SkillVersionView["gitSource"]>; expectedVersionId: string | null;
+    expectedRevision: number | null; at: number;
+  }): { changed: boolean } | null {
+    return this.atomic(() => {
+      if (!this.getSkillGitAutoUpdate(input.skillId).enabled ||
+          this.getSkillGitAutoUpdateRevision(input.skillId) !== input.expectedRevision) return null;
+      const current = this.getSkill(input.skillId);
+      if (!current || (current.latestVersion?.id ?? null) !== input.expectedVersionId || !current.latestVersion) {
+        throw new SkillImportConflictError("The library changed during the update check. It is retried at the next check.");
+      }
+      const changed = current.latestVersion.digest !== input.digest;
+      const versionId = changed
+        ? this.addSkillVersion(input.skillId, { ...input, note: `Automatic update from Git commit ${input.source.commit}` }, input.at)!.id
+        : current.latestVersion.id;
+      this.stmt("INSERT OR IGNORE INTO skill_git_provenance (version_id, source) VALUES (?, ?)")
+        .run(versionId, JSON.stringify(input.source));
+      this.recordSkillGitAutoUpdateCheck(input.skillId, { kind: "handled", commit: input.source.commit, at: input.at, held: null });
+      this.recordSkillGitBaselineModes(input.skillId, versionId, input.source.executablePaths);
+      return { changed };
     });
   }
 
@@ -7199,6 +7351,7 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM skill_machine_versions WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_machine_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       this.stmt("DELETE FROM skill_git_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
+      this.stmt("DELETE FROM skill_git_auto_updates WHERE skill_id=?").run(skillId);
       if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return false;
       this.stmt("DELETE FROM skill_assignments WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_versions WHERE skill_id=?").run(skillId);

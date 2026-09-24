@@ -1404,6 +1404,29 @@ export function validSkillFilePath(p: string): boolean {
   return parts.every((part) => part !== "" && part !== "." && part !== "..");
 }
 
+/** Whether a skill file is script-like: executable in its source tree, named with an interpreter,
+ * binary, or notebook extension, a command manifest (package.json scripts, Makefile, justfile,
+ * Taskfile), or kept under a scripts/bin directory. Previews label these files, and Git automatic
+ * updates hold any added or changed one for human review. */
+export function isSkillScriptPath(path: string, executable = false): boolean {
+  return executable ||
+    /\.(sh|bash|zsh|fish|ksh|csh|tcsh|nu|command|py|pyw|pyc|pyz|ipynb|rb|pl|pm|php|js|mjs|cjs|jsx|ts|mts|cts|tsx|coffee|lua|tcl|r|jl|go|java|swift|groovy|kts|csx|exs|awk|mk|ps1|psm1|psd1|bat|cmd|com|vbs|wsf|hta|reg|scr|msi|applescript|scpt|exe|dll|so|dylib|jar|wasm)$/i.test(path) ||
+    /(^|\/)(package\.json|makefile|gnumakefile|justfile|taskfile\.ya?ml)$/i.test(path) ||
+    /(^|\/)(scripts|bin)\//i.test(path);
+}
+
+/** A skill file that is script-like by path or mode, or whose content is a shebang script or a
+ * native executable (ELF, PE, Mach-O), whatever it is named. */
+export function isSkillScriptFile(file: SkillFile, executable = false): boolean {
+  if (isSkillScriptPath(file.path, executable)) return true;
+  if (file.encoding === "utf8") return file.content.startsWith("#!");
+  // Native executables are never valid UTF-8 text, so they arrive base64-encoded.
+  let head: string;
+  try { head = atob(file.content.slice(0, 8)); } catch { return false; }
+  return head.startsWith("#!") || head.startsWith("\x7fELF") || head.startsWith("MZ") ||
+    ["\xfe\xed\xfa\xce", "\xfe\xed\xfa\xcf", "\xce\xfa\xed\xfe", "\xcf\xfa\xed\xfe", "\xca\xfe\xba\xbe"].includes(head.slice(0, 4));
+}
+
 /** How an agent can deliver a permission decision for one permission mode. */
 export type ElicitationTransport =
   | "stdio-control"

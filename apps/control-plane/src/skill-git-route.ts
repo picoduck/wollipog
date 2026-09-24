@@ -55,6 +55,24 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
     return reply.code(204).send();
   });
 
+  // Unattended checks fetch with the control plane's ambient credentials, so only the principal
+  // who may use them for a preview may opt a skill in.
+  app.put("/api/skills/:id/git-auto-update", async (req, reply) => {
+    const principal = deps.requestHuman(req);
+    if (!principal || principal.userId !== LOCAL_OWNER_USER_ID || !["owner", "admin"].includes(principal.role)) {
+      return reply.code(403).send({ error: "Only the instance owner can change automatic updates that use the control plane's credentials." });
+    }
+    const id = (req.params as { id: string }).id;
+    if (!deps.db.canAccessSkill(principal, id)) return reply.code(404).send({ error: "skill not found" });
+    const body = (req.body ?? {}) as { enabled?: unknown };
+    if (typeof body.enabled !== "boolean") return reply.code(400).send({ error: "enabled must be a boolean" });
+    const skill = deps.db.getSkill(id);
+    if (!skill) return reply.code(404).send({ error: "skill not found" });
+    if (body.enabled && !skill.gitSource) return reply.code(409).send({ error: "Only a skill imported from Git can update automatically." });
+    deps.db.setSkillGitAutoUpdate(id, body.enabled);
+    return { skill: deps.db.getSkill(id) };
+  });
+
   app.post("/api/skill-git/import", async (req, reply) => {
     const principal = deps.requestHuman(req);
     if (!principal || principal.userId !== LOCAL_OWNER_USER_ID || !["owner", "admin"].includes(principal.role)) {
@@ -78,7 +96,7 @@ export function registerSkillGitRoutes(app: FastifyInstance, deps: SkillsRouteDe
     }
     try {
       const skill = deps.db.importGitSkill({ ...candidate,
-        source: { ...candidate.source, path: candidate.path, commit: candidate.commit },
+        source: { ...candidate.source, path: candidate.path, commit: candidate.commit, executablePaths: candidate.executablePaths },
         scope: { organizationId: principal.organizationId, owner: { kind: "organization", organizationId: principal.organizationId } },
         expectedVersionId: snapshot.versions.get(candidate.name) ?? null,
       });

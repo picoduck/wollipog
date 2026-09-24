@@ -2,8 +2,8 @@
 
 Status: managed Linux/macOS/Windows and mixed-context WSL deployment, Git import,
 Linux/macOS/Windows/WSL machine snapshots, guarded Linux and macOS adoption/recovery, version history with
-library rollback, machine-wide version pins, and assignable groups implemented. Project/workspace
-scope and opt-in automatic Git updates remain deferred.
+library rollback, machine-wide version pins, assignable groups, and opt-in automatic Git updates
+implemented. Project/workspace scope remains deferred.
 
 ## Assignable Group API
 
@@ -260,9 +260,46 @@ should be invoked through their interpreter. Supporting executable adoption requ
 rolling-compatible metadata format.
 
 Git-imported versions retain URL, requested ref, repository path, and resolved commit separately
-from skill content. **Check for Updates** repeats the preview flow; there is no automatic polling
-or update. Import does not rename collisions: use a new source name or cancel. Non-Linux machine
-snapshot import includes native Windows, native macOS, and Windows-hosted WSL distributions.
+from skill content. **Check for Updates** repeats the preview flow. Import does not rename
+collisions: use a new source name or cancel.
+
+Each Git-imported skill also has an **Automatic Updates** setting. It is off by default, and only
+the instance's local owner can change it, because checks use the control plane's ambient Git
+credentials. While it is on, the control plane checks the recorded ref and path once per interval
+(`CONTROL_PLANE_SKILL_GIT_UPDATE_INTERVAL_MS`, default one hour, minimum one minute). A due check
+starts within a minute. Checks run one at a time through the same fetch, limits, and validation as
+a preview. A check compares the fetched tip with the last commit handled for the skill:
+
+- No new commit: nothing changes.
+- New commit with identical content: the commit becomes the new baseline and no version is added.
+- New commit that changes content: the update becomes a library version that records the commit.
+  Track-latest machines receive it and pinned machines keep their revision. Commits that land
+  between two checks are not imported one by one; the tip is imported.
+- New commit that adds or changes a script: the update is held and no version is created. A
+  script is any of the following:
+  - an executable file;
+  - a file with an interpreter, binary, or notebook extension;
+  - a command manifest (`package.json`, Makefile, justfile, Taskfile);
+  - a file under `scripts/` or `bin/`;
+  - content that starts with a shebang or is a native executable.
+
+  A changed file counts if either its old or its new version is a script, so dropping an
+  executable bit cannot hide a change. Git versions record their executable paths for this
+  comparison. For a version imported before that was recorded, the first update that changes an
+  existing file is held once. Removing a script is not held. Instruction and data changes, such
+  as `SKILL.md` text, apply automatically by design; opting in accepts them. The update is also held when the library's latest version has local edits
+  without Git provenance, so an upstream commit cannot silently replace them. **Review Held
+  Update** opens the same preview and diff acceptance as **Check for Updates**, and a reviewed
+  import clears the hold. A later commit is compared with the current library version again, so
+  a hold is replaced or cleared as upstream changes.
+- Fetch, validation, or rename failure: the error is recorded on the skill and existing versions
+  and deployments stay unchanged. The next attempt is one interval later.
+- The library changes during a check: the result is discarded and the skill is checked again.
+
+Turning the setting on or off resets the baseline and clears any recorded error or hold.
+
+Non-Linux machine snapshot import includes native Windows, native macOS, and Windows-hosted WSL
+distributions.
 Native Windows deployment uses directory junctions. For WSL deployment, the Windows runner invokes
 a fixed in-distribution adapter; standalone WSL runners report Linux and use the Linux path. Later
 sections describe that broader target design.

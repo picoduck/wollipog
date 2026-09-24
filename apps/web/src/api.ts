@@ -580,6 +580,8 @@ export function createApiClient(transport: ApiTransport) {
   discardGitSkillPreview: (id: string) => req<void>(`/api/skill-git/preview/${encodeURIComponent(id)}`, { method: "DELETE" }),
   importGitSkill: (body: { previewId: string; path: string; acceptUpdate: boolean }) =>
     req<SkillDetailPayload>("/api/skill-git/import", { method: "POST", body: JSON.stringify(body) }),
+  setSkillGitAutoUpdate: (id: string, enabled: boolean) =>
+    req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}/git-auto-update`, { method: "PUT", body: JSON.stringify({ enabled }) }),
 
   createSkill: (body: { name: string; description?: string; groupId?: string; files: SkillFile[]; note?: string }) =>
     req<SkillDetailPayload>("/api/skills", { method: "POST", body: JSON.stringify(body) }),

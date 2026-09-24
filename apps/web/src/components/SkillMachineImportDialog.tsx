@@ -1,6 +1,7 @@
 import { useState } from "react";
 import type { RunnerView, SkillFile } from "@wollipog/protocol";
 import {
+  isSkillScriptFile,
   machineSkillAdoptionRecoveryRequirement,
   machineSkillAdoptionRequirement,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
@@ -222,7 +223,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
           const before = preview.previousFiles.find((file) => file.path === path);
           const after = preview.files.find((file) => file.path === path);
           const change = !before ? "Added" : !after ? "Removed" : contents(before) === contents(after) ? "Unchanged" : "Changed";
-          return <details key={path}><summary>{path}{/\.(sh|py|js|mjs|ts|ps1|bat|cmd)$/.test(path) ? " · Script" : ""} · {change}</summary>
+          return <details key={path}><summary>{path}{[after, before].some((file) => file && isSkillScriptFile(file, preview.executablePaths?.includes(path))) ? " · Script" : ""} · {change}</summary>
             {preview.disposition !== "new" && <><h4>Current</h4><pre className="skill-import-content">{contents(before)}</pre></>}
             <h4>Proposed</h4><pre className="skill-import-content">{contents(after)}</pre>
           </details>;
