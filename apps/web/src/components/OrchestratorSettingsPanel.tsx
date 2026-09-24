@@ -18,6 +18,7 @@ import {
   controlPlaneSupportsIntegrationIsolation,
 } from "../session-preset-defaults.js";
 import { SettingsGroup } from "./SettingsView.js";
+import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
 import { SegmentedRow, SelectRow, StaticRow } from "./ui/SettingsRows.js";
 
 const AUTO = "__automatic__";
@@ -451,6 +452,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         value={draft.delegation.decisions[category]}
         onChange={(value) => updateDelegation(category, value as "human" | "orchestrator")}
       />)}
+      <p className="settings-group-intro">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>
       <StaticRow
         title="Human-Only Decisions"
         description="Secrets, authentication, persistent permission grants, governance changes, cost budgets, and tool guardrails cannot be delegated. Change those controls as an authenticated human."
