@@ -5,6 +5,7 @@ import { basename } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
   isOrchestratorOnlyCapabilities,
+  POLICY_HOOK_ABANDONMENT_MS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
@@ -32,6 +33,14 @@ const WORKER_PERMISSION_MODES = ["default", "auto", "acceptEdits", "plan", "orch
  * box-tunnel blip) would stall an ordinary call for undici's ~300s header/body timeouts. */
 const CP_TIMEOUT_MS = 30_000;
 const MAX_WAIT_SESSION_INTERVAL_MS = 10_000;
+
+/** How long one create call keeps re-polling a pending child approval before it hands the control
+ * plane's 428 text back to the agent. A harness ends a tool call that outlives its own timeout with
+ * no diagnostic (Codex App Server's was observed at about 300 s; Claude Code's Bash tool, which runs
+ * the CLI form, defaults to 120 s), so the window is measured from the start of the call and stays
+ * well inside both even when one more request is in flight at its end. */
+export const SPAWN_APPROVAL_POLL_WINDOW_MS = 45_000;
+const SPAWN_APPROVAL_POLL_INTERVAL_MS = 1_000;
 
 export function nextWaitSessionIntervalMs(currentIntervalMs: number): number {
   return Math.min(MAX_WAIT_SESSION_INTERVAL_MS, Math.ceil(currentIntervalMs * 1.5));
@@ -334,11 +343,26 @@ async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): 
 }
 
 /** Keep the exact invocation alive while its CP-owned child approval is pending, including
- * run fan-out. Retrying maintains the durable approval's abandonment fence. */
-async function createWithSpawnApproval(deps: McpDeps, path: string, body: unknown) {
+ * run fan-out. Each identical retry refreshes the durable approval's abandonment fence: the control
+ * plane rejects an approval nobody has retried for POLICY_HOOK_ABANDONMENT_MS. Polling stops after
+ * SPAWN_APPROVAL_POLL_WINDOW_MS so the call returns before the harness times it out; the result tells
+ * the agent to repeat the call at once, which keeps the fence alive across calls. */
+async function createWithSpawnApproval(deps: McpDeps, toolName: string, path: string, body: unknown) {
+  const now = deps.now ?? Date.now;
+  const deadline = now() + SPAWN_APPROVAL_POLL_WINDOW_MS;
   let result = await cpFetch(deps, "POST", path, body);
   while (!result.ok && result.status === 428) {
-    if (!await cancellableSleep(deps, 1_000)) return { ok: false as const, message: "request cancelled" };
+    if (now() + SPAWN_APPROVAL_POLL_INTERVAL_MS > deadline) {
+      return {
+        ...result,
+        message: `${result.message} Still pending after ${SPAWN_APPROVAL_POLL_WINDOW_MS / 1000} s. Call ${toolName} ` +
+          `again now with identical arguments to keep waiting; once approved, that identical call succeeds. ` +
+          `If no identical call arrives within ${POLICY_HOOK_ABANDONMENT_MS / 1000} s, the approval is withdrawn as abandoned.`,
+      };
+    }
+    if (!await cancellableSleep(deps, SPAWN_APPROVAL_POLL_INTERVAL_MS)) {
+      return { ok: false as const, message: "request cancelled" };
+    }
     result = await cpFetch(deps, "POST", path, body);
   }
   return result;
@@ -1581,7 +1605,7 @@ export const TOOLS: McpTool[] = [
       for (const key of ["workflowVersion", "title", "useWorktree", "agentBindings", "costBudgetUsd", "maxToolCalls"]) {
         if (args[key] !== undefined) body[key] = args[key];
       }
-      const r = await createWithSpawnApproval(deps, "/api/workflow-runs", body);
+      const r = await createWithSpawnApproval(deps, "create_workflow_run", "/api/workflow-runs", body);
       if (!r.ok) return errorResult(r.message);
       return textResult({
         run: { id: r.data?.run?.id, title: r.data?.run?.title, sessionIds: capArray(r.data?.run?.sessionIds) },
@@ -1937,7 +1961,7 @@ export const TOOLS: McpTool[] = [
       body.useWorktree = args.useWorktree !== false;
       if (Object.keys(config).length) body.config = config;
 
-      const created = await createWithSpawnApproval(deps, "/api/sessions", body);
+      const created = await createWithSpawnApproval(deps, "create_session", "/api/sessions", body);
       if (!created.ok) return errorResult(created.message);
       const view = created.data;
       return textResult({
@@ -2099,7 +2123,7 @@ export const TOOLS: McpTool[] = [
       if (typeof args.title === "string") body.title = args.title;
       if (typeof args.costBudgetUsd === "number") body.costBudgetUsd = args.costBudgetUsd;
       if (typeof args.maxToolCalls === "number") body.maxToolCalls = args.maxToolCalls;
-      const r = await createWithSpawnApproval(deps, "/api/runs", body);
+      const r = await createWithSpawnApproval(deps, "create_run", "/api/runs", body);
       if (!r.ok) return errorResult(r.message);
       return textResult({
         run: { id: r.data?.run?.id, title: r.data?.run?.title, sessionIds: capArray(r.data?.run?.sessionIds) },
