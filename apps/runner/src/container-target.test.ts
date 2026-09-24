@@ -482,10 +482,26 @@ test("Podman rejects non-mount defaults that cross the secret-free boundary", ()
     }
     writeFileSync(file, 'containers."env_host" = true\n');
     assert.equal(safe(), false, "dotted TOML keys cannot hide host environment forwarding");
+    for (const [name, value] of [
+      ["inline table", "containers = { env_host = true }"],
+      ["spaced dotted key", "containers . env_host = true"],
+      ["inline named host environment", 'containers = { env = ["SYNTHETIC_CREDENTIAL"] }'],
+      ["inline host file", 'containers = { base_hosts_file = "/tmp/synthetic-hosts" }'],
+      ["inline PID namespace", 'containers = { pidns = "host" }'],
+      ["later unsafe inline value", 'containers = { env_host = false, pidns = "host" }'],
+      ["multiline string", '[containers]\nlog_tag = """\n[engine]\n"""\nenv_host = true'],
+    ]) {
+      writeFileSync(file, `${value}\n`);
+      assert.equal(safe(), false, `${name} must not hide an unsafe default`);
+    }
     writeFileSync(file, '[containers]\n"env_hoſt" = true\n');
     assert.equal(safe(), false, "Unicode case folding cannot hide host environment forwarding");
+    writeFileSync(file, '[containers]\nenv_hoſt = true\n');
+    assert.equal(safe(), false, "Unicode bare keys cannot hide host environment forwarding");
     writeFileSync(file, '[engine]\nenv = ["ENGINE_SETTING=value"]\n');
     assert.equal(safe(), true, "engine environment is not a container environment default");
+    writeFileSync(file, '[containers]\nenv_host = false # env_host = true is not enabled\n');
+    assert.equal(safe(), true, "comments do not turn a safe setting into an unsafe one");
     for (const value of [
       "env_host = false", 'env = ["PUBLIC_SETTING=value"]',
       'base_hosts_file = "image"', 'base_hosts_file = "none"',

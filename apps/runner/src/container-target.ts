@@ -52,26 +52,28 @@ function podmanLiteralEnvironmentSafe(value: string): boolean {
 }
 
 function podmanNonMountDefaultsSafe(lines: string[]): boolean {
-  let containersTable = false;
-  let topLevel = true;
   for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith("#")) continue;
-    if (trimmed.startsWith("[")) {
-      topLevel = false;
-      containersTable = /^\[\s*(?:containers|"containers"|'containers')\s*\]\s*(?:#.*)?$/iu.test(trimmed);
-      continue;
+    // Treat unknown TOML context conservatively: inline tables, dotted keys, and strings
+    // spanning lines can make a line-by-line table tracker miss a real container default.
+    let quote: "'" | '"' | undefined;
+    let code = line;
+    for (let index = 0; index < line.length; index += 1) {
+      const char = line[index];
+      if (quote) {
+        if (char === "\\" && quote === '"') { index += 1; continue; }
+        if (char === quote) quote = undefined;
+      } else if (char === "'" || char === '"') quote = char;
+      else if (char === "#") { code = line.slice(0, index); break; }
     }
-    const entry = topLevel ? trimmed.replace(/^(?:containers|"containers"|'containers')\./iu, "") : trimmed;
-    if (!containersTable && (!topLevel || entry === trimmed)) continue;
-    const assignment = /^(?:([A-Za-z_][A-Za-z0-9_-]*)|"([^"\\]*)"|'([^']*)')\s*=\s*(.*)$/u.exec(entry);
-    if (!assignment) continue;
-    const key = assignment[1] ?? assignment[2] ?? assignment[3] ?? "";
-    const value = assignment[4]!;
-    if (/^env_host$/iu.test(key) && !/^false\s*(?:#.*)?$/u.test(value)) return false;
-    if (/^pidns$/iu.test(key) && !/^(?:"private"|'private')\s*(?:#.*)?$/u.test(value)) return false;
-    if (/^base_hosts_file$/iu.test(key) && !/^(?:"(?:|none|image|\/etc\/hosts)"|'(?:|none|image|\/etc\/hosts)')\s*(?:#.*)?$/u.test(value)) return false;
-    if (/^env$/iu.test(key) && !podmanLiteralEnvironmentSafe(value)) return false;
+    const assignments = code.matchAll(/(?:^|[\s.{,])(?:"(env_host|pidns|base_hosts_file|env)"|'(env_host|pidns|base_hosts_file|env)'|(env_host|pidns|base_hosts_file|env))\s*=\s*/giu);
+    for (const assignment of assignments) {
+      const key = assignment[1] ?? assignment[2] ?? assignment[3] ?? "";
+      const value = code.slice(assignment.index + assignment[0].length);
+      if (/^env_host$/iu.test(key) && !/^false(?=\s*(?:[,}]|$))/u.test(value)) return false;
+      if (/^pidns$/iu.test(key) && !/^(?:"private"|'private')(?=\s*(?:[,}]|$))/u.test(value)) return false;
+      if (/^base_hosts_file$/iu.test(key) && !/^(?:"(?:|none|image|\/etc\/hosts)"|'(?:|none|image|\/etc\/hosts)')(?=\s*(?:[,}]|$))/u.test(value)) return false;
+      if (/^env$/iu.test(key) && !podmanLiteralEnvironmentSafe(value)) return false;
+    }
   }
   return true;
 }
