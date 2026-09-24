@@ -7937,6 +7937,7 @@ export class SessionsService {
     resolvedByParentSessionId?: string,
     canAccess: (sessionId: string) => boolean = () => true,
     evidenceReviewed?: string[],
+    evidenceReviewDigest?: string,
   ): ServiceResult<SessionView> {
     const now = Date.now();
     this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -7973,6 +7974,13 @@ export class SessionsService {
           return fail("workflow decision requires the Approve or Deny option", 409);
         }
         deny = optionId === "deny" || optionId === null;
+      }
+      // A web tab opened before artifact-only review support can leave an unseen image marked
+      // reviewed on an insecure origin. Only the updated card sends the exact snapshot digest.
+      if (!deny && snapshot.category === "ui_evidence_approval" &&
+          snapshot.evidence.some((item) => item.uri === undefined) &&
+          evidenceReviewDigest !== decision.resourceDigest) {
+        return fail("Reload the page to review artifact-only evidence before approving this decision", 409);
       }
       const resolution: ResolveWorkflowDecisionRequest = {
         outcome: deny ? "deny" : "approve",

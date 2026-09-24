@@ -9143,6 +9143,8 @@ export interface ApproveRequest {
   optionId: string | null;
   /** Exact evidence items the human affirmatively inspected before approving a UI gate. */
   evidenceReviewed?: string[];
+  /** Exact decision digest from a client that can safely review URI-free artifacts. */
+  evidenceReviewDigest?: string;
 }
 
 export interface SetColumnRequest {

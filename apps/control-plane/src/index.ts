@@ -4265,7 +4265,7 @@ app.post("/api/sessions/:id/approve", async (req, reply) => {
     kind: "human",
     id: humanActorId(req),
   }, undefined, (sessionId) => human ? db.canAccessSession(human, sessionId) : false,
-  body.evidenceReviewed));
+  body.evidenceReviewed, body.evidenceReviewDigest));
 });
 
 app.get("/api/sessions/:id/governance-audit", async (req, reply) => {

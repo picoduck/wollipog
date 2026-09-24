@@ -125,7 +125,8 @@ for (const viewport of [
     await item.getByRole("checkbox", { name: "Mark viewport-1 as Reviewed" }).check();
     await page.getByRole("button", { name: "Approve" }).click();
     expect(await page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions()))
-      .toEqual([{ requestId: "evidence-occurrence", optionId: "approve", evidenceReviewed: ["viewport-1"] }]);
+      .toEqual([{ requestId: "evidence-occurrence", optionId: "approve", evidenceReviewed: ["viewport-1"],
+        evidenceReviewDigest: "a".repeat(64) }]);
   });
 }
 

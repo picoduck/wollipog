@@ -465,6 +465,9 @@ export function SessionApprovalBanner({
         requestId: approval.requestId,
         optionId,
         ...(evidence.length && optionId === "approve" ? { evidenceReviewed: reviewedEvidence } : {}),
+        ...(evidenceDecision && optionId === "approve" && evidence.some((item) => item.uri === undefined)
+          ? { evidenceReviewDigest: evidenceDecision.resourceDigest }
+          : {}),
       });
       if (evidenceDecision) {
         clearEvidenceReviewDraft(

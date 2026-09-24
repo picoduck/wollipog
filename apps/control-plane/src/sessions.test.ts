@@ -19785,6 +19785,29 @@ test("an assigned Orchestrator reviews exact image evidence and resolves it only
   }
 });
 
+test("a stale human review card cannot approve URI-free evidence without the exact decision digest", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    assert.ok(h.svc.setParentControlPolicy(h.parent.id,
+      { ...h.decisions, ui_evidence_approval: "human" }, 1, { kind: "human", id: "owner" }).ok);
+    const child = h.createChild("Human UI Review");
+    const { uri: _externalCopy, ...artifactOnly } = h.screenshot(child.id, "after").item;
+    const decision = h.request(child.id, "human-artifact-only", [artifactOnly]);
+    assert.ok(decision.ok && decision.data, decision.error);
+    assert.equal(decision.data.authority, "human");
+    const approve = (digest?: string) => h.svc.approve(child.id, decision.data!.occurrenceId,
+      "approve", { kind: "human", id: "owner" }, undefined, () => true, ["after"], digest);
+    assert.match(approve().error ?? "", /Reload the page/u,
+      "an old tab cannot claim to have seen an artifact-only image");
+    assert.equal(approve("0".repeat(64)).status, 409, "the marker must name this exact snapshot");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "pending");
+    assert.ok(approve(decision.data.resourceDigest).ok,
+      "the updated card may approve after displaying and marking the image reviewed");
+  } finally {
+    h.db.close();
+  }
+});
+
 test("unreviewable UI evidence falls back to the human with a specific reason and never blocks other work", () => {
   const h = uiEvidenceReviewHarness();
   try {

@@ -766,7 +766,8 @@ The merge snapshot binds the repository, pull request, exact head SHA, cross-mod
 and passing required checks from that same head. Branch deletion binds the merged branch and merge
 commit and requires an explicit empty dependent-pull-request check. Follow-up publication binds the
 sanitized repository, title, body, and labels. UI approval binds immutable evidence identifiers,
-URIs, and SHA-256 digests, and resolution records which evidence was actually inspected.
+optional HTTPS URIs, artifact identities, and SHA-256 digests, and resolution records which evidence
+was actually inspected.
 
 ### Orchestrator Review of UI Evidence
 
@@ -817,6 +818,9 @@ any non-raster media type, and in a browser context without SubtleCrypto (plain 
 non-localhost origin), where unverifiable bytes are not shown as the evidence the request names.
 Those links are labelled as external. An artifact-only item with no SubtleCrypto cannot be marked
 reviewed or approved from that browser; the reviewer must use HTTPS or localhost.
+An artifact-only human approval also carries the exact decision digest from the updated review
+card. A tab kept open from an older web build lacks that field and is refused with a reload prompt
+instead of approving evidence it may not have shown.
 
 #### Attaching Evidence From a File
 
