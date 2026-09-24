@@ -302,6 +302,7 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
       const shellManager = new ShellManager({ onOutput: () => {}, onExit: () => {} });
       const pidFile = join(storeRoot, "fork-shell-descendant.pid");
       let detachedIdentity: PosixProcessIdentity | undefined;
+      let shellBodyCompleted = false;
       try {
         const childSource = [
           "const { spawn } = require('node:child_process');",
@@ -329,11 +330,12 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
         await shellManager.closeForWorktree(target.sessionId, { kind: "native" }, target.worktreePath!);
         assert.equal(await waitForOriginalProcessToStop(detachedIdentity), undefined,
           "worktree cleanup stopped the no-config fork shell descendant");
+        shellBodyCompleted = true;
       } finally {
         await runFixtureCleanup([
           ["shell disposal", () => shellManager.dispose()],
           ["detached process termination", () => terminateOriginalProcess(detachedIdentity)],
-        ], (message) => t.diagnostic(message));
+        ], (message) => t.diagnostic(message), !shellBodyCompleted);
       }
     }
     assert.equal(target.forkPoints?.["1"]?.eventSeq, 2, "fork point is re-based to the child's event seq space");

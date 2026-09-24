@@ -89,7 +89,7 @@ test("a throwing fixture cleanup still terminates its original child and removes
               attempts.push("temporary directory removal");
               rmSync(dir, { recursive: true, force: true });
             }],
-          ], (message) => diagnostics.push(message));
+          ], (message) => diagnostics.push(message), true);
         }
       }, /original test failure/u);
       assert.deepEqual(attempts, [
@@ -102,5 +102,20 @@ test("a throwing fixture cleanup still terminates its original child and removes
       if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
       rmSync(dir, { recursive: true, force: true });
     }
+  }
+});
+
+test("a cleanup failure fails a passing fixture after later cleanup still runs", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-posix-fixture-failure-"));
+  const diagnostics: string[] = [];
+  try {
+    await assert.rejects(runFixtureCleanup([
+      ["terminal disposal", () => { throw new Error("dispose failed"); }],
+      ["temporary directory removal", () => rmSync(dir, { recursive: true, force: true })],
+    ], (message) => diagnostics.push(message)), /dispose failed/u);
+    assert.equal(existsSync(dir), false);
+    assert.match(diagnostics.join("\n"), /dispose failed/u);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
   }
 });
