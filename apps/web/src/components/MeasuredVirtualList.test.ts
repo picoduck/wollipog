@@ -10,6 +10,7 @@ import {
   reanchorAtLogicalIndex,
   reseedMountedVirtualRows,
   scrollAnchorAdjustment,
+  shouldRelinquishAnchorCorrection,
   shouldAdjustVirtualScrollForResize,
   virtualTargetScrollAdjustment,
 } from "./MeasuredVirtualList.js";
@@ -25,6 +26,25 @@ test("scroll anchor adjustment preserves the previous viewport offset", () => {
   assert.equal(scrollAnchorAdjustment(24, 136), 112);
   assert.equal(scrollAnchorAdjustment(-8, -8), 0);
   assert.equal(scrollAnchorAdjustment(40, 10), -30);
+});
+
+test("a resize clamp does not relinquish the old anchor as reader intent", () => {
+  const before = {
+    correctedScrollTop: 583,
+    currentScrollTop: 165,
+    maxScrollTop: 165,
+    correctionRequiresIntent: false,
+    correctionIntentVersion: 0,
+    viewportIntentVersion: 0,
+  };
+  assert.equal(shouldRelinquishAnchorCorrection(before), false,
+    "a temporarily shorter list clamps the browser scroll position without changing reader intent");
+  assert.equal(shouldRelinquishAnchorCorrection({ ...before, maxScrollTop: 382 }), true,
+    "an unmarked movement inside the current scroll range relinquishes the stale anchor");
+  assert.equal(shouldRelinquishAnchorCorrection({ ...before, viewportIntentVersion: 1 }), true,
+    "explicit reader intent still wins when the viewport is at its new end");
+  assert.equal(shouldRelinquishAnchorCorrection({ ...before, currentScrollTop: 583, maxScrollTop: 814 }), false,
+    "an unchanged scroll position never relinquishes");
 });
 
 test("logical index fallback survives key churn and clamps to the nearest surviving ordinal", () => {

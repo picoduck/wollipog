@@ -91,6 +91,26 @@ export function scrollAnchorAdjustment(previousOffset: number, currentOffset: nu
   return currentOffset - previousOffset;
 }
 
+export function shouldRelinquishAnchorCorrection(state: {
+  correctedScrollTop: number | null;
+  currentScrollTop: number;
+  maxScrollTop: number;
+  correctionRequiresIntent: boolean;
+  correctionIntentVersion: number | null;
+  viewportIntentVersion: number;
+}): boolean {
+  const intentChanged = state.correctionIntentVersion != null &&
+    state.correctionIntentVersion !== state.viewportIntentVersion;
+  const correctionRelinquished = !state.correctionRequiresIntent || intentChanged;
+  // A width change can briefly shorten the virtual list before its rows are remeasured. The
+  // browser then clamps scrollTop to the temporary end; that movement did not come from the reader.
+  const clampedByLayout = !intentChanged && state.correctedScrollTop != null &&
+    state.correctedScrollTop > state.maxScrollTop + 0.5 &&
+    Math.abs(state.currentScrollTop - state.maxScrollTop) <= 0.5;
+  return state.correctedScrollTop != null && correctionRelinquished &&
+    !clampedByLayout && Math.abs(state.currentScrollTop - state.correctedScrollTop) > 0.5;
+}
+
 export function shouldAdjustVirtualScrollForResize({
   itemStart,
   scrollOffset,
@@ -934,10 +954,14 @@ function VirtualList<T>({
     }
     const correctionScrollTop = anchorCorrectionScrollTopRef.current;
     const correctionIntentVersion = anchorCorrectionIntentVersionRef.current;
-    const correctionRelinquished = !anchorCorrectionRequiresIntentRef.current ||
-      (correctionIntentVersion != null && correctionIntentVersion !== viewportIntentVersionRef.current);
-    if (pending && correctionScrollTop != null && correctionRelinquished &&
-        Math.abs(scroll.scrollTop - correctionScrollTop) > 0.5) {
+    if (pending && shouldRelinquishAnchorCorrection({
+      correctedScrollTop: correctionScrollTop,
+      currentScrollTop: scroll.scrollTop,
+      maxScrollTop: Math.max(0, scroll.scrollHeight - scroll.clientHeight),
+      correctionRequiresIntent: anchorCorrectionRequiresIntentRef.current,
+      correctionIntentVersion,
+      viewportIntentVersion: viewportIntentVersionRef.current,
+    })) {
       // A smooth scroll can cause a virtualizer render before the next settle callback. Apply the
       // same ownership rule before this layout correction so that render cannot hide the movement.
       pendingAnchorRef.current = null;
@@ -1020,10 +1044,14 @@ function VirtualList<T>({
           }
           const correctionScrollTop = anchorCorrectionScrollTopRef.current;
           const correctionIntentVersion = anchorCorrectionIntentVersionRef.current;
-          const correctionRelinquished = !anchorCorrectionRequiresIntentRef.current ||
-            (correctionIntentVersion != null && correctionIntentVersion !== viewportIntentVersionRef.current);
-          if (correctionScrollTop != null && correctionRelinquished &&
-              Math.abs(currentScroll.scrollTop - correctionScrollTop) > 0.5) {
+          if (shouldRelinquishAnchorCorrection({
+            correctedScrollTop: correctionScrollTop,
+            currentScrollTop: currentScroll.scrollTop,
+            maxScrollTop: Math.max(0, currentScroll.scrollHeight - currentScroll.clientHeight),
+            correctionRequiresIntent: anchorCorrectionRequiresIntentRef.current,
+            correctionIntentVersion,
+            viewportIntentVersion: viewportIntentVersionRef.current,
+          })) {
             // A reader, assistive technology, or programmatic paging operation moved the viewport
             // after our last correction. Relinquish the old anchor instead of snapping it back.
             pendingAnchorRef.current = null;
