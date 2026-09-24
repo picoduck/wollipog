@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
-import { captureLiveProcess, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
+import { captureLiveProcess, runFixtureCleanup, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_CACHE_HELPERS, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
 import { extendOwnedProcessTree, listPosixProcesses, ownsPosixRootProcessGroup, parsePosixProcessTable, terminatePosixProcessesByMarker } from "./posix-process-tree.js";
 
@@ -993,15 +993,12 @@ test("termination rescans the exact marker for a helper forked by a SIGTERM hand
   let helperIdentity: PosixProcessIdentity | undefined;
   let child: AgentProcess | undefined;
   t.after(async () => {
-    try {
-      if (child) {
-        killTree(child);
-        await waitForPendingKills(8_000);
-      }
-      await terminateOriginalProcess(helperIdentity);
-    } finally {
-      await fs.rm(dir, { recursive: true, force: true });
-    }
+    await runFixtureCleanup([
+      ["provider tree termination", () => { if (child) killTree(child); }],
+      ["provider tree drain", async () => { if (child) await waitForPendingKills(8_000); }],
+      ["helper termination", () => terminateOriginalProcess(helperIdentity)],
+      ["temporary directory removal", () => fs.rm(dir, { recursive: true, force: true })],
+    ], (message) => t.diagnostic(message));
   });
   await fs.writeFile(helperScript, [
     'const fs = require("node:fs");',
