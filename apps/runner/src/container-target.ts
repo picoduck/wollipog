@@ -67,7 +67,7 @@ function podmanNonMountDefaultsSafe(lines: string[]): boolean {
         else if (char === "#") { code = line.slice(0, index); break; }
       }
     }
-    const assignments = code.matchAll(/(?:^|[\s.{,])(?:"(env_host|pidns|base_hosts_file|env)"|'(env_host|pidns|base_hosts_file|env)'|(env_host|pidns|base_hosts_file|env))\s*=\s*/giu);
+    const assignments = code.matchAll(/(?:^|[\s.{,])(?:"(env_host|pidns|base_hosts_file|env|devices|ipcns)"|'(env_host|pidns|base_hosts_file|env|devices|ipcns)'|(env_host|pidns|base_hosts_file|env|devices|ipcns))\s*=\s*/giu);
     for (const assignment of assignments) {
       const key = assignment[1] ?? assignment[2] ?? assignment[3] ?? "";
       const value = code.slice(assignment.index + assignment[0].length);
@@ -75,6 +75,8 @@ function podmanNonMountDefaultsSafe(lines: string[]): boolean {
       if (/^pidns$/iu.test(key) && !/^(?:"private"|'private')(?=\s*(?:[,}]|$))/u.test(value)) return false;
       if (/^base_hosts_file$/iu.test(key) && !/^(?:"(?:|none|image|\/etc\/hosts)"|'(?:|none|image|\/etc\/hosts)')(?=\s*(?:[,}]|$))/u.test(value)) return false;
       if (/^env$/iu.test(key) && !podmanLiteralEnvironmentSafe(value)) return false;
+      if (/^devices$/iu.test(key) && !/^\[\s*\](?=\s*(?:[,}]|$))/u.test(value)) return false;
+      if (/^ipcns$/iu.test(key) && !/^(?:"(?:private|shareable|none)"|'(?:private|shareable|none)')(?=\s*(?:[,}]|$))/u.test(value)) return false;
     }
   }
   return true;

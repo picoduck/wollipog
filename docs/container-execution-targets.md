@@ -93,11 +93,14 @@ remote engine also blocks the target; backslash escapes in config are rejected c
 they can hide those settings in quoted TOML keys. The runner checks again before each
 container client launch, including later terminals, and on Rediscover while the target is available.
 The same check rejects `env_host = true`, `env` entries that copy a named host variable, a custom
-`base_hosts_file`, and `pidns = "host"`. These can expose the Podman client's environment, a host
-file, or host processes to a target advertising `secrets: "none"`. Explicit `env_host = false`,
-literal `env` assignments, the default `/etc/hosts` or `image`/`none` hosts sources, and
-`pidns = "private"` remain usable. Environment arrays the runner cannot verify as literal-only
-are rejected; use a single-line array of literal assignments for this target.
+`base_hosts_file`, `pidns = "host"`, nonempty `devices`, and `ipcns = "host"`. These can expose the
+Podman client's environment, a host file, host processes, host devices, or host IPC objects to a
+target advertising `secrets: "none"`. Wollipog does not select devices or IPC mode in its run
+arguments; Podman's built-in defaults add no host devices and create a separate IPC namespace, but
+operator configuration can override them. Explicit `env_host = false`, literal `env` assignments,
+the default `/etc/hosts` or `image`/`none` hosts sources, `pidns = "private"`, empty `devices`, and
+`ipcns = "private"`, `"shareable"`, or `"none"` remain usable. Environment arrays the runner cannot
+verify as literal-only are rejected; use a single-line array of literal assignments for this target.
 If the target becomes unavailable,
 remove the unsafe default and restart the runner to repeat readiness checks. Socket-backed Podman
 engines and Podman on non-Linux hosts remain unavailable because their engine's default mounts cannot
