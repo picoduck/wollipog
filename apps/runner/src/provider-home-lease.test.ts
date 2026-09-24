@@ -64,6 +64,7 @@ test("container and cloud launches never lease the host provider HOME", () => {
       backend: "container", runtime: "docker", command: "docker", args: [], image: `x@sha256:${"a".repeat(64)}`,
       network: "deny", templateId: "tools", runnerKey: "runner-key", containerName: "session",
       hostAgentCommand: "claude", hostAgentArgs: [], agentCommand: "claude", agentArgs: [],
+      verifyRuntimeIdentity: () => {},
     },
     {
       backend: "cloud", command: "cloud-proxy", args: [], env: {}, targetId: "remote",
@@ -515,6 +516,7 @@ test("provider-home leases fail closed for both WSL Direct isolation modes", (t)
       backend: "container", runtime: "docker", command: "docker", args: [], image: "image@sha256:test",
       network: "deny", templateId: "test", runnerKey: "runner", containerName: "test",
       hostAgentCommand: "agent", hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
+      verifyRuntimeIdentity: () => {},
     },
   });
 });
