@@ -324,9 +324,17 @@ test("Podman rejects a default mount added after registration before session lau
     assert.throws(() => spawnAgent({ command: "git", args: ["--version"], cwd: config,
       isolation: reusableIsolation }), /Podman defaults/u, "later terminal launches recheck mutable defaults");
     writeFileSync(mounts, "# no implicit host mounts\n");
-    writeFileSync(join(config, "containers", "containers.conf"), "[engine]\nremote = true\n");
+    const defaults = join(config, "containers", "containers.conf");
+    for (const value of ['devices = ["/dev/synthetic-host-device"]', 'ipcns = "host"']) {
+      writeFileSync(defaults, `[containers]\n${value}\n`);
+      assert.match(registry.validationError(ref, true, { kind: "native" }, "codex") ?? "", /Podman defaults/u);
+      assert.throws(() => registry.isolation(ref, "codex", "codex", [], "session-2"), /Podman defaults/u);
+      assert.throws(() => spawnAgent({ command: "git", args: ["--version"], cwd: config,
+        isolation: reusableIsolation }), /Podman defaults/u, "later terminals recheck device and IPC defaults");
+    }
+    writeFileSync(defaults, "[engine]\nremote = true\n");
     assert.match(registry.validationError(ref, true, { kind: "native" }, "codex") ?? "", /Podman defaults/u);
-    assert.throws(() => registry.isolation(ref, "codex", "codex", [], "session-2"), /Podman defaults/u);
+    assert.throws(() => registry.isolation(ref, "codex", "codex", [], "session-3"), /Podman defaults/u);
     await registry.refreshInstallations();
     assert.equal(registry.definitions()[0]!.available, false);
   } finally {
@@ -479,6 +487,8 @@ test("Podman rejects non-mount defaults that cross the secret-free boundary", ()
       ["mixed host environment", 'env = ["PUBLIC_SETTING=value", "SYNTHETIC_CREDENTIAL"]'],
       ["host file copied into hosts", 'base_hosts_file = "/tmp/synthetic-hosts"'],
       ["host PID namespace", 'pidns = "host"'],
+      ["host device", 'devices = ["/dev/synthetic-host-device"]'],
+      ["host IPC namespace", 'ipcns = "host"'],
     ]) {
       writeFileSync(file, `[containers]\n${value}\n`);
       assert.equal(safe(), false, `${name} must not reach a container target`);
@@ -491,6 +501,8 @@ test("Podman rejects non-mount defaults that cross the secret-free boundary", ()
       ["inline named host environment", 'containers = { env = ["SYNTHETIC_CREDENTIAL"] }'],
       ["inline host file", 'containers = { base_hosts_file = "/tmp/synthetic-hosts" }'],
       ["inline PID namespace", 'containers = { pidns = "host" }'],
+      ["inline host device", 'containers = { devices = ["/dev/synthetic-host-device"] }'],
+      ["inline host IPC", 'containers = { ipcns = "host" }'],
       ["later unsafe inline value", 'containers = { env_host = false, pidns = "host" }'],
       ["triple-quoted inline value", 'containers = { log_tag = """x"#""", env_host = true }'],
       ["triple-literal inline value", "containers = { log_tag = '''x'#''', pidns = \"host\" }"],
@@ -511,6 +523,7 @@ test("Podman rejects non-mount defaults that cross the secret-free boundary", ()
       "env_host = false", 'env = ["PUBLIC_SETTING=value"]',
       'base_hosts_file = "image"', 'base_hosts_file = "none"',
       'base_hosts_file = "/etc/hosts"', 'pidns = "private"',
+      'devices = []', 'devices = [ ]', 'ipcns = "private"', 'ipcns = "shareable"', 'ipcns = "none"',
     ]) {
       writeFileSync(file, `[containers]\n${value}\n`);
       assert.equal(safe(), true, `${value} preserves safe Podman defaults`);
