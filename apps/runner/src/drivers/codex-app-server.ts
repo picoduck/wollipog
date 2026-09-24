@@ -400,6 +400,9 @@ function resumeError(threadId: string, err: Json): CodexAppServerResumeError {
   return new CodexAppServerResumeError(`could not resume Codex thread ${threadId}: ${message}`, threadId, retryable, err?.code);
 }
 
+/** A skill catalog is display metadata; an unanswered lookup must not stay pending indefinitely. */
+const SKILL_CATALOG_TIMEOUT_MS = 30_000;
+
 export class CodexAppServerDriver implements Driver {
   private child: AgentProcess | null = null;
   private peer: JsonRpcPeer | null = null;
@@ -462,7 +465,9 @@ export class CodexAppServerDriver implements Driver {
   /** Registered skill name by exact SKILL.md path from `skills/list`. Empty until the first
    * lookup lands, and permanently on servers without it, so commands then stay plain. */
   private skillPaths: ReadonlyMap<string, string> = new Map();
-  private skillCatalogGeneration = 0;
+  /** The peer with a `skills/list` lookup in flight; later invalidations coalesce into one rerun. */
+  private skillCatalogPeer: JsonRpcPeer | null = null;
+  private skillCatalogStale = false;
   private serverIdentity = "unknown";
   private completedTurnId: string | null = null;
   /** A terminal notification can race ahead of both turn/started and the turn/start response.
@@ -1975,8 +1980,24 @@ export class CodexAppServerDriver implements Driver {
           : "in_progress";
         const skill = codexCommandSkillName(item.commandActions, item.cwd ?? this.cwd, this.skillPaths,
           this.providerSharesHostFilesystem());
-        if (skill != null) this.emitTool(id, skillToolTitle(skill), SKILL_TOOL_KIND, status, parentToolUseId);
-        else this.emitTool(id, `$ ${truncate(String(item.command ?? ""), 80)}`, "execute", status, parentToolUseId);
+        if (skill == null) {
+          this.emitTool(id, `$ ${truncate(String(item.command ?? ""), 80)}`, "execute", status, parentToolUseId);
+        } else if (this.seenItems.has(id) && !this.seenItems.has(`skill:${id}`)) {
+          // The catalog landed after this command started as a plain row. A repeated tool_call
+          // replaces the row's title and kind; a status update alone would leave it a command.
+          this.seenItems.add(`skill:${id}`);
+          this.cb.onEvent({
+            kind: "tool_call",
+            toolCallId: id,
+            title: skillToolTitle(skill),
+            toolKind: SKILL_TOOL_KIND,
+            status,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
+        } else {
+          this.seenItems.add(`skill:${id}`);
+          this.emitTool(id, skillToolTitle(skill), SKILL_TOOL_KIND, status, parentToolUseId);
+        }
         const out = item.aggregatedOutput ?? item.output;
         if (completed && out) {
           this.cb.onEvent({
@@ -2037,16 +2058,28 @@ export class CodexAppServerDriver implements Driver {
       (backend == null || backend === "bwrap" || backend === "seatbelt" || backend === "windows-job");
   }
 
-  /** Best-effort: a failed or unsupported lookup keeps the previous catalog, and a superseded or
-   * post-restart response is dropped so it cannot overwrite a newer one. */
+  /** Best-effort: a failed, unsupported, or unanswered lookup keeps the previous catalog. At most
+   * one bounded request is in flight per server; invalidations meanwhile rerun it once afterwards,
+   * and a response from a replaced server is dropped. */
   private refreshSkillCatalog(): void {
     const peer = this.peer;
     if (!peer || this.disposed) return;
-    const generation = ++this.skillCatalogGeneration;
-    peer.request<Json>("skills/list", { cwds: [this.cwd] }).then((response) => {
-      if (generation !== this.skillCatalogGeneration || this.peer !== peer || this.disposed) return;
-      this.skillPaths = codexSkillPathIndex(codexSkillsFromList(response));
-    }, () => {});
+    if (this.skillCatalogPeer === peer) {
+      this.skillCatalogStale = true;
+      return;
+    }
+    this.skillCatalogPeer = peer;
+    this.skillCatalogStale = false;
+    const settle = () => {
+      if (this.skillCatalogPeer !== peer) return;
+      this.skillCatalogPeer = null;
+      if (this.skillCatalogStale) this.refreshSkillCatalog();
+    };
+    peer.requestWithDeadline<Json>("skills/list", { cwds: [this.cwd] }, Date.now() + SKILL_CATALOG_TIMEOUT_MS)
+      .then((response) => {
+        if (this.peer === peer && !this.disposed) this.skillPaths = codexSkillPathIndex(codexSkillsFromList(response));
+      }, () => {})
+      .finally(settle);
   }
 
   private emitTool(

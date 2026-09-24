@@ -64,6 +64,13 @@ test("codexCommandSkillName matches only commands that purely read one registere
   ], "/repo", index, none), undefined, "a mixed command stays a command");
   assert.equal(codexCommandSkillName([read("/repo/skills/review/SKILL.md")], "/repo", index, none), undefined,
     "an unregistered SKILL.md with a registered name is not a skill use");
+  const sameName = codexSkillPathIndex([
+    { name: "review", path: "/repo/.agents/skills/review/SKILL.md" },
+    { name: "review", path: "/home/u/.codex/skills/review/SKILL.md" },
+  ]);
+  assert.equal(codexCommandSkillName([
+    read("/repo/.agents/skills/review/SKILL.md"), read("/home/u/.codex/skills/review/SKILL.md"),
+  ], "/repo", sameName, none), undefined, "same-named skills in different scopes are different skills");
   assert.equal(codexCommandSkillName([read("SKILL.md")], undefined, index, none), undefined);
   assert.equal(codexCommandSkillName([], "/repo", index, none), undefined);
   assert.equal(codexCommandSkillName(undefined, "/repo", index, none), undefined);

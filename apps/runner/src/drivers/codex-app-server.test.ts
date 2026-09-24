@@ -1041,6 +1041,10 @@ test("newSession starts a fresh thread and requires the server's actual id", asy
       calls.push({ method, params });
       return { thread: { id: "fresh-1" }, serviceTier: "flex" };
     },
+    requestWithDeadline: async (method: string, params: unknown) => {
+      calls.push({ method, params });
+      return { data: [] };
+    },
   };
   assert.equal(await h.driver.newSession("/fresh"), "fresh-1");
   assert.deepEqual(calls, [
@@ -1066,6 +1070,10 @@ test("newSession validates then resumes the exact persisted thread without repla
         return { thread: { id: "thread-7", status: { type: "idle" }, turns: [{ id: "old-turn" }] } };
       }
       return { thread: { id: "thread-7", turns: [{ id: "old-turn" }] }, serviceTier: null };
+    },
+    requestWithDeadline: async (method: string, params: unknown) => {
+      calls.push({ method, params });
+      return { data: [] };
     },
   };
   assert.equal(await h.driver.newSession("/resume"), "thread-7");
@@ -1709,30 +1717,65 @@ test("userMessage: explicit skill inputs become one named skill row each", () =>
   ]);
 });
 
-test("skills/list refreshes the catalog on thread start and skills/changed, dropping stale or failed lookups", async () => {
+test("skills/list keeps one bounded lookup in flight and coalesces skills/changed into one rerun", async () => {
   const h = makeHarness();
-  const requests: Array<{ method: string; params: any; resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
+  const requests: Array<{ method: string; params: any; deadlineAt: number; resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
   const peer = {
-    request: (method: string, params: any) => new Promise((resolve, reject) => requests.push({ method, params, resolve, reject })),
+    requestWithDeadline: (method: string, params: any, deadlineAt: number) =>
+      new Promise((resolve, reject) => requests.push({ method, params, deadlineAt, resolve, reject })),
   };
   (h.driver as any).peer = peer;
+  const before = Date.now();
   (h.driver as any).refreshSkillCatalog();
   assert.deepEqual(requests.map(({ method, params }) => [method, params]), [["skills/list", { cwds: ["/tmp/work"] }]]);
+  assert.ok(requests[0]!.deadlineAt > before && requests[0]!.deadlineAt <= Date.now() + 30_000,
+    "an unanswered lookup cannot stay pending forever");
   const listed = (name: string) => ({ data: [{ cwd: "/tmp/work", errors: [], skills: [
     { name, path: `/s/${name}/SKILL.md`, scope: "user", enabled: true },
   ] }] });
 
-  notificationHandlers(h.driver).get("skills/changed")!({});
+  const changed = notificationHandlers(h.driver).get("skills/changed")!;
+  for (let i = 0; i < 50; i++) changed({});
+  assert.equal(requests.length, 1, "a notification storm does not stack requests");
+  requests[0]!.resolve(listed("first"));
+  await nextTask();
+  assert.deepEqual([...(h.driver as any).skillPaths], [["/s/first/SKILL.md", "first"]]);
+  assert.equal(requests.length, 2, "invalidations during the lookup rerun it exactly once");
   requests[1]!.resolve(listed("fresh"));
-  requests[0]!.resolve(listed("stale"));
   await nextTask();
   assert.deepEqual([...(h.driver as any).skillPaths], [["/s/fresh/SKILL.md", "fresh"]]);
+  assert.equal(requests.length, 2);
 
   (h.driver as any).refreshSkillCatalog();
-  requests[2]!.reject({ code: -32601, message: "Method not found" });
+  requests[2]!.reject({ code: -32002, message: "request deadline exceeded (skills/list)", requestTimeout: true });
   await nextTask();
   assert.deepEqual([...(h.driver as any).skillPaths], [["/s/fresh/SKILL.md", "fresh"]],
-    "a failed lookup keeps the last known catalog");
+    "a failed or timed-out lookup keeps the last known catalog");
+  (h.driver as any).refreshSkillCatalog();
+  assert.equal(requests.length, 4, "a settled failure does not block later lookups");
+
+  const replacement = { requestWithDeadline: peer.requestWithDeadline };
+  (h.driver as any).peer = replacement;
+  (h.driver as any).refreshSkillCatalog();
+  assert.equal(requests.length, 5, "a restarted server gets its own lookup");
+  requests[3]!.resolve(listed("old-server"));
+  requests[4]!.resolve(listed("new-server"));
+  await nextTask();
+  assert.deepEqual([...(h.driver as any).skillPaths], [["/s/new-server/SKILL.md", "new-server"]],
+    "a replaced server's response is dropped");
+});
+
+test("commandExecution: a catalog arriving mid-command retitles the row as the skill", () => {
+  const h = makeHarness();
+  const item = { type: "commandExecution", id: "late", command: "cat SKILL.md", cwd: "/tmp/work",
+    commandActions: skillRead("/home/u/.codex/skills/review/SKILL.md") };
+  h.onItem(item, false);
+  (h.driver as any).skillPaths = new Map([["/home/u/.codex/skills/review/SKILL.md", "review"]]);
+  h.onItem({ ...item, exitCode: 0 }, true);
+  assert.deepEqual(h.events, [
+    { kind: "tool_call", toolCallId: "late", title: "$ cat SKILL.md", toolKind: "execute", status: "in_progress" },
+    { kind: "tool_call", toolCallId: "late", title: "Skill: review", toolKind: "skill", status: "completed" },
+  ]);
 });
 
 test("commandExecution: a nonzero exit remains failed even with a completed lifecycle", () => {

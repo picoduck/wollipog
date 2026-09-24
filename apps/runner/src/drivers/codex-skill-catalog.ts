@@ -80,19 +80,20 @@ export function codexCommandSkillName(
   canonicalizeOnHost: boolean,
 ): string | undefined {
   if (!index.size || !Array.isArray(commandActions) || !commandActions.length) return undefined;
-  let skill: string | undefined;
+  let skillPath: string | undefined;
   for (const action of commandActions) {
     const { type, path } = (action ?? {}) as { type?: unknown; path?: unknown };
     if (type !== "read" || typeof path !== "string") return undefined;
     const absolute = absoluteReadPath(path, cwd);
     if (!absolute) return undefined;
-    let name = index.get(absolute);
-    if (name == null && canonicalizeOnHost && SKILL_FILE.test(absolute)) {
+    let registered = index.has(absolute) ? absolute : undefined;
+    if (registered == null && canonicalizeOnHost && SKILL_FILE.test(absolute)) {
       const canonical = hostRealpath(absolute);
-      if (canonical) name = index.get(canonical);
+      if (canonical && index.has(canonical)) registered = canonical;
     }
-    if (name == null || (skill != null && skill !== name)) return undefined;
-    skill = name;
+    // Identity is the registered path: same-named skills in different scopes are different skills.
+    if (registered == null || (skillPath != null && skillPath !== registered)) return undefined;
+    skillPath = registered;
   }
-  return skill;
+  return skillPath == null ? undefined : index.get(skillPath);
 }
