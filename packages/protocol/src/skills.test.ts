@@ -63,7 +63,7 @@ test("skill file paths are strictly relative POSIX with bounded depth and length
 });
 
 test("script-like skill files are recognized by mode, extension, or scripts directory", () => {
-  for (const path of ["run.sh", "tools/check.py", "index.MJS", "setup.ps1", "scripts/run", "a/bin/tool"]) {
+  for (const path of ["run.sh", "tools/check.py", "index.MJS", "setup.ps1", "scripts/run", "a/bin/tool", "Scripts/run", "BIN/tool"]) {
     assert.equal(isSkillScriptPath(path), true, path);
   }
   for (const path of ["SKILL.md", "reference/api.txt", "agents/openai.yaml", "scriptsfoo/run", "robin/x"]) {

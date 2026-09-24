@@ -1409,7 +1409,7 @@ export function validSkillFilePath(p: string): boolean {
  * updates hold any added or changed one for human review. */
 export function isSkillScriptPath(path: string, executable = false): boolean {
   return executable || /\.(sh|bash|zsh|fish|py|rb|pl|php|js|mjs|cjs|ts|mts|cts|ps1|psm1|bat|cmd)$/i.test(path) ||
-    /(^|\/)(scripts|bin)\//.test(path);
+    /(^|\/)(scripts|bin)\//i.test(path);
 }
 
 /** How an agent can deliver a permission decision for one permission mode. */

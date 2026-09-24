@@ -2413,10 +2413,12 @@ CREATE TABLE IF NOT EXISTS skill_git_provenance (
 );
 
 -- Opt-in Git automatic updates (absent row = off). checked_commit records the last upstream commit
--- fully handled, so an unchanged ref never re-imports; held is a JSON review hold.
+-- fully handled, so an unchanged ref never re-imports; held is a JSON review hold. Every write
+-- bumps revision, which fences a check's result against changes made while it fetched.
 CREATE TABLE IF NOT EXISTS skill_git_auto_updates (
   skill_id       TEXT PRIMARY KEY REFERENCES skills(id) ON DELETE CASCADE,
   enabled        INTEGER NOT NULL DEFAULT 0,
+  revision       INTEGER NOT NULL DEFAULT 0,
   checked_at     INTEGER,
   checked_commit TEXT,
   error          TEXT,
@@ -7187,8 +7189,8 @@ export class ControlPlaneDb {
       }
       if (current) {
         // A reviewed import supersedes any automatic-update hold and becomes the new baseline.
-        this.stmt(`UPDATE skill_git_auto_updates SET checked_commit=?, held=NULL, updated_at=?
-          WHERE skill_id=? AND enabled=1`).run(input.source.commit, Date.now(), current.id);
+        this.stmt(`UPDATE skill_git_auto_updates SET checked_commit=?, held=NULL, updated_at=?,
+          revision=revision+1 WHERE skill_id=? AND enabled=1`).run(input.source.commit, Date.now(), current.id);
       }
       if (current?.latestVersion?.digest === input.digest) {
         // An identical local version can acquire provenance without duplicating its content.
@@ -7234,9 +7236,15 @@ export class ControlPlaneDb {
       if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return false;
       this.stmt(`INSERT INTO skill_git_auto_updates (skill_id, enabled, updated_at) VALUES (?, ?, ?)
         ON CONFLICT(skill_id) DO UPDATE SET enabled=excluded.enabled, checked_at=NULL, checked_commit=NULL,
-          error=NULL, error_at=NULL, held=NULL, updated_at=excluded.updated_at`).run(skillId, enabled ? 1 : 0, now);
+          error=NULL, error_at=NULL, held=NULL, updated_at=excluded.updated_at, revision=revision+1`).run(skillId, enabled ? 1 : 0, now);
       return true;
     });
+  }
+
+  /** Opaque write counter; null when the skill has never had an automatic-update setting. */
+  getSkillGitAutoUpdateRevision(skillId: string): number | null {
+    const row = this.stmt("SELECT revision FROM skill_git_auto_updates WHERE skill_id=?").get(skillId) as { revision: number } | undefined;
+    return row ? Number(row.revision) : null;
   }
 
   /** Enabled skills whose last check is at least one interval old, never-checked first. */
@@ -7253,23 +7261,26 @@ export class ControlPlaneDb {
     | { kind: "failed"; error: string; at: number }
     | { kind: "handled"; commit: string; at: number; held: SkillGitAutoUpdateView["held"] }): void {
     if (outcome.kind === "failed") {
-      this.stmt(`UPDATE skill_git_auto_updates SET checked_at=?, error=?, error_at=?, updated_at=?
-        WHERE skill_id=? AND enabled=1`).run(outcome.at, outcome.error.slice(0, 500), outcome.at, outcome.at, skillId);
+      this.stmt(`UPDATE skill_git_auto_updates SET checked_at=?, error=?, error_at=?, updated_at=?,
+        revision=revision+1 WHERE skill_id=? AND enabled=1`).run(outcome.at, outcome.error.slice(0, 500), outcome.at, outcome.at, skillId);
       return;
     }
     this.stmt(`UPDATE skill_git_auto_updates SET checked_at=?, checked_commit=?, error=NULL, error_at=NULL,
-      held=?, updated_at=? WHERE skill_id=? AND enabled=1`)
+      held=?, updated_at=?, revision=revision+1 WHERE skill_id=? AND enabled=1`)
       .run(outcome.at, outcome.commit, outcome.held ? JSON.stringify(outcome.held) : null, outcome.at, skillId);
   }
 
-  /** Apply an unattended Git update under the same latest-version fence as a preview import.
-   * Returns whether deployable content changed, or null when updates were disabled meanwhile. */
+  /** Apply an unattended Git update under the same latest-version fence as a preview import, plus
+   * the setting's revision (a reviewed identical import moves only the baseline). Returns whether
+   * deployable content changed, or null when the setting changed or was disabled meanwhile. */
   applySkillGitAutoUpdate(input: {
     skillId: string; files: SkillFile[]; manifest: string; digest: string;
-    source: NonNullable<SkillVersionView["gitSource"]>; expectedVersionId: string | null; at: number;
+    source: NonNullable<SkillVersionView["gitSource"]>; expectedVersionId: string | null;
+    expectedRevision: number | null; at: number;
   }): { changed: boolean } | null {
     return this.atomic(() => {
-      if (!this.getSkillGitAutoUpdate(input.skillId).enabled) return null;
+      if (!this.getSkillGitAutoUpdate(input.skillId).enabled ||
+          this.getSkillGitAutoUpdateRevision(input.skillId) !== input.expectedRevision) return null;
       const current = this.getSkill(input.skillId);
       if (!current || (current.latestVersion?.id ?? null) !== input.expectedVersionId || !current.latestVersion) {
         throw new SkillImportConflictError("The library changed during the update check. It is retried at the next check.");

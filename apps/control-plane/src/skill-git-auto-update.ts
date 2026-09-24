@@ -70,6 +70,7 @@ export class SkillGitAutoUpdater {
     };
     const skill = db.getSkill(skillId);
     const state = db.getSkillGitAutoUpdate(skillId);
+    const revision = db.getSkillGitAutoUpdateRevision(skillId);
     if (!skill || !state.enabled) return "skipped";
     const upstream = skill.gitSource;
     if (!upstream) return fail("The skill no longer records a Git source.");
@@ -94,7 +95,8 @@ export class SkillGitAutoUpdater {
     // The library may have changed while the fetch ran; a stale result is simply re-checked.
     const current = db.getSkill(skillId);
     const fresh = db.getSkillGitAutoUpdate(skillId);
-    if (!fresh.enabled || (current?.latestVersion?.id ?? null) !== expectedVersionId) return "skipped";
+    if (!fresh.enabled || (current?.latestVersion?.id ?? null) !== expectedVersionId ||
+        db.getSkillGitAutoUpdateRevision(skillId) !== revision) return "skipped";
     // Only commits after the recorded baseline are updates; a local edit alone is not.
     if (candidate.commit === (fresh.checkedCommit ?? upstream.commit)) {
       db.recordSkillGitAutoUpdateCheck(skillId, { kind: "handled", commit: candidate.commit, at: this.now(), held: fresh.held });
@@ -116,7 +118,7 @@ export class SkillGitAutoUpdater {
     let applied;
     try {
       applied = db.applySkillGitAutoUpdate({ skillId, files: candidate.files, manifest: candidate.manifest,
-        digest: candidate.digest, source, expectedVersionId, at: this.now() });
+        digest: candidate.digest, source, expectedVersionId, expectedRevision: revision, at: this.now() });
     } catch (error) {
       if (error instanceof SkillImportConflictError) return fail(error.message);
       return fail("The update could not be recorded. It is retried at the next check.");

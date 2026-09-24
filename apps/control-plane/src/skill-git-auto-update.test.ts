@@ -256,6 +256,20 @@ test("a library change or opt-out during the fetch discards the stale result", a
   assert.equal(db.getSkill(skill.id)!.gitAutoUpdate!.checkedCommit, null);
 });
 
+test("a reviewed identical-content import during the fetch becomes the baseline, not the stale result", async () => {
+  const { db, skill, latest } = setup();
+  db.setSkillGitAutoUpdate(skill.id, true);
+  const before = latest().id;
+  const reviewed = candidate("c".repeat(40), [skillMd("One")]);
+  const updater = new SkillGitAutoUpdater({ db, intervalMs: HOUR, pushSkillsSync: () => {}, discover: async () => {
+    db.importGitSkill({ ...reviewed, source: { ...reviewed.source, path: reviewed.path, commit: reviewed.commit }, scope: SCOPE, expectedVersionId: before });
+    return [candidate("b".repeat(40), [skillMd("Stale")])];
+  } });
+  assert.equal(await updater.check(skill.id), "skipped");
+  assert.equal(latest().id, before);
+  assert.equal(db.getSkill(skill.id)!.gitAutoUpdate!.checkedCommit, "c".repeat(40));
+});
+
 test("sweeps are single-flight and deleting a skill removes its automatic-update state", async () => {
   const { db, skill, advance } = setup();
   db.setSkillGitAutoUpdate(skill.id, true);
