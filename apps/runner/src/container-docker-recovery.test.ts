@@ -80,6 +80,8 @@ test("Docker target recovers from startup config failure through full readiness 
     assert.equal(recovered.harnessInstallations?.length, 1);
     assert.ok(launches.some(({ args }) => args.includes("--entrypoint") && args.includes("git")),
       "startup failure must rerun the setup check before advertising availability");
+    assert.equal(launches.some(({ args }) => args[0] === "ps" || args[0] === "rm"), false,
+      "Rediscover must not reconcile or remove containers while other targets may have live sessions");
     const probes = launches.filter(({ args }) => args[0] === "run" && args.includes("/bin/sh"));
     assert.ok(probes.length > 0);
     for (const { env } of probes) {

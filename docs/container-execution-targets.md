@@ -112,7 +112,8 @@ configure an intentional container proxy in the reviewed image rather than in th
 CLI config. FTP proxy names remain trust-gated setup variables.
 If the private Docker CLI config cannot be recreated, the affected target stays unavailable and
 its installation list is cleared. After the config location becomes writable again, Rediscover
-retries only that target. A failure before startup readiness repeats its image and setup checks;
+retries only that target. A failure before startup readiness repeats its image and setup checks,
+but does not rerun startup orphan cleanup while the runner may have live containers;
 a failure during installation discovery retries those probes against the previously checked
 endpoint. Every Docker probe still verifies the engine immediately before launching. Other
 unavailable reasons retain the runner-restart recovery path.

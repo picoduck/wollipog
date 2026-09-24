@@ -583,7 +583,7 @@ export class ContainerTargetRegistry {
     await this.prepareTemplates(this.templates);
   }
 
-  private async prepareTemplates(templates: RunnerContainerTarget[]): Promise<void> {
+  private async prepareTemplates(templates: RunnerContainerTarget[], skipOrphanCleanup = false): Promise<void> {
     for (const template of templates) {
       const id = containerTargetId(this.runnerId, template.id);
       const environment = {
@@ -645,7 +645,9 @@ export class ContainerTargetRegistry {
           continue;
         }
       }
-      const cleanupError = await this.cleanupOrphans(runtime);
+      // Orphan reconciliation is a startup-only operation. A Rediscover retry may run
+      // while another target has live sessions on this engine; never remove them here.
+      const cleanupError = skipOrphanCleanup ? null : await this.cleanupOrphans(runtime);
       if (cleanupError) {
         this.prepared.set(id, {
           config: template,
@@ -751,9 +753,9 @@ export class ContainerTargetRegistry {
         try { dockerTargetClientConfig(); }
         catch { continue; }
         if (item.dockerConfigRecovery === "readiness") {
-          // Startup stopped before image and setup checks, so repeat that target's complete
-          // readiness path. Other unavailable targets keep their original restart boundary.
-          await this.prepareTemplates([item.config]);
+          // Repeat image and setup checks, but never rerun startup orphan cleanup while
+          // other targets may have live sessions on the same engine.
+          await this.prepareTemplates([item.config], true);
           continue;
         }
       }
