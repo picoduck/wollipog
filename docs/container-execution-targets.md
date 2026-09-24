@@ -98,8 +98,9 @@ empty runner-owned CLI config and a verified local engine endpoint. No empty pro
 passed to `docker run`, so proxy values deliberately built into the digest-pinned image remain
 available. In particular, an uppercase-only image value is not shadowed by an empty lowercase
 value. The image operator must keep proxy values free of credentials to maintain the target's
-secret-free claim. Repository setup currently reserves proxy variable names, so configure an
-intentional container proxy in the reviewed image rather than in the operator's Docker CLI config.
+secret-free claim. Repository setup reserves HTTP, HTTPS, ALL, and NO proxy variable names, so
+configure an intentional container proxy in the reviewed image rather than in the operator's Docker
+CLI config. FTP proxy names remain trust-gated setup variables.
 Podman's independent `mounts.conf` files and `containers.conf` mount or volume defaults can add
 host binds without a Wollipog mount argument. A Podman target stays unavailable if local system or
 user defaults contain such entries or cannot be safely read. Podman configuration that selects a
@@ -124,6 +125,8 @@ Repository worktree setup cannot override Podman client config, connection, help
 environment variables; those values could otherwise change the engine, its default mounts, or host
 executables selected by the Podman client after the runner's check. Internal `_CONTAINERS_`
 variables are reserved because they can change which per-UID Podman configuration is loaded.
+Docker target launches also reject forwarded `DOCKER_` variables. Those names control the client
+itself, so allowing a setup value through could bypass the checked local endpoint or private config.
 Check output is never included in an unavailable reason. A runtime that needs a credential or a
 remote client configuration for these checks fails closed.
 

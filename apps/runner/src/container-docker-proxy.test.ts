@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { readFileSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { readFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { RunnerContainerTarget } from "./config.js";
 import { ContainerTargetRegistry } from "./container-target.js";
+import { dockerTargetClientConfig } from "./docker-client-config.js";
 import { spawnAgent } from "./spawn.js";
 
 const image = `example/agent@sha256:${"a".repeat(64)}`;
@@ -148,4 +149,39 @@ test("Docker client selectors cannot be forwarded as container environment", () 
       hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
     },
   }), /Docker client control environment cannot be forwarded/);
+});
+
+test("a replaced private config path cannot inject proxies into a later Docker launch", async () => {
+  const previousPath = dockerTargetClientConfig();
+  rmSync(previousPath, { recursive: true, force: true });
+  mkdirSync(previousPath, { mode: 0o700 });
+  writeFileSync(join(previousPath, "config.json"), JSON.stringify({
+    proxies: { default: { httpProxy: "http://operator:credential@operator.invalid:8080" } },
+  }));
+  try {
+    const replacement = dockerTargetClientConfig();
+    assert.notEqual(replacement, previousPath);
+    assert.deepEqual(JSON.parse(readFileSync(join(replacement, "config.json"), "utf8")), {});
+    const child = spawnAgent({
+      command: "agent", args: [], cwd: "/workspace", containerAgentLaunch: true,
+      isolation: {
+        backend: "container", runtime: "docker", command: process.execPath,
+        args: ["-e", "process.stdout.write(process.env.DOCKER_CONFIG ?? '')"],
+        image, network: "deny", templateId: "approved-image-proxy",
+        runnerKey: "runner", containerName: "wollipog-test", hostAgentCommand: "agent",
+        hostAgentArgs: [], agentCommand: "agent", agentArgs: [],
+      },
+    });
+    child.stdin.end();
+    let output = "";
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (text: string) => (output += text));
+    await new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("close", (code) => code === 0 ? resolve() : reject(new Error(`fake Docker client exited ${code}`)));
+    });
+    assert.equal(output, replacement);
+  } finally {
+    rmSync(previousPath, { recursive: true, force: true });
+  }
 });
