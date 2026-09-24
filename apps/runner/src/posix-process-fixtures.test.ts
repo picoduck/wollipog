@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { captureLiveProcess, terminateOriginalProcess, waitForLiveProcessPidFile } from "../test-support/posix-process.js";
+import { captureLiveProcess, runFixtureCleanup, terminateOriginalProcess, waitForLiveProcessPidFile, waitForOriginalProcessToStop } from "../test-support/posix-process.js";
 
 test("an empty but existing PID file waits for a live child", { skip: process.platform === "win32" }, async () => {
   const dir = mkdtempSync(join(tmpdir(), "wollipog-pid-handoff-"));
@@ -60,5 +60,47 @@ test("failed process enumeration preserves fixture failure and permits directory
   } finally {
     if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a throwing fixture cleanup still terminates its original child and removes its directory", {
+  skip: process.platform === "win32",
+}, async () => {
+  for (const failedStep of ["terminal disposal", "shell disposal", "provider tree termination"]) {
+    const dir = mkdtempSync(join(tmpdir(), "wollipog-posix-fixture-teardown-"));
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+    try {
+      const identity = await captureLiveProcess(child.pid!);
+      assert.ok(identity);
+      const attempts: string[] = [];
+      const diagnostics: string[] = [];
+      await assert.rejects(async () => {
+        try {
+          throw new Error("original test failure");
+        } finally {
+          await runFixtureCleanup([
+            [failedStep, () => { attempts.push(failedStep); throw new Error("injected teardown failure"); }],
+            ["pending kill drain", () => { attempts.push("pending kill drain"); }],
+            ["original process termination", async () => {
+              attempts.push("original process termination");
+              assert.equal(await terminateOriginalProcess(identity), true);
+            }],
+            ["temporary directory removal", () => {
+              attempts.push("temporary directory removal");
+              rmSync(dir, { recursive: true, force: true });
+            }],
+          ], (message) => diagnostics.push(message));
+        }
+      }, /original test failure/u);
+      assert.deepEqual(attempts, [
+        failedStep, "pending kill drain", "original process termination", "temporary directory removal",
+      ]);
+      assert.match(diagnostics.join("\n"), /injected teardown failure/u);
+      assert.equal(existsSync(dir), false);
+      assert.equal(await waitForOriginalProcessToStop(identity), undefined);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });

@@ -3,6 +3,20 @@ import { listPosixProcesses, type PosixProcessIdentity } from "../src/posix-proc
 
 export type { PosixProcessIdentity } from "../src/posix-process-tree.js";
 
+/** Attempt every fixture cleanup in order without masking an earlier test failure. */
+export async function runFixtureCleanup(
+  steps: ReadonlyArray<readonly [name: string, cleanup: () => void | Promise<void>]>,
+  diagnostic: (message: string) => void,
+): Promise<void> {
+  for (const [name, cleanup] of steps) {
+    try {
+      await cleanup();
+    } catch (error) {
+      diagnostic(`Fixture cleanup failed (${name}): ${String(error)}`);
+    }
+  }
+}
+
 export async function captureLiveProcess(pid: number): Promise<PosixProcessIdentity | undefined> {
   const current = (await listPosixProcesses()).get(pid);
   return current && !current.state?.startsWith("Z") ? current : undefined;

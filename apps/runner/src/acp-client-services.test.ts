@@ -10,7 +10,7 @@ import {
 } from "./acp-client-services.js";
 import { terminalOutputDelta } from "./acp.js";
 import { waitForPendingKills } from "./spawn.js";
-import { captureLiveProcess, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
+import { captureLiveProcess, runFixtureCleanup, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
 
 const NATIVE = { kind: "native" } as const;
 
@@ -154,12 +154,11 @@ test("ACP terminal preserves daemonized work until that terminal is released", {
   let daemonPid: number | undefined;
   let daemonIdentity: PosixProcessIdentity | undefined;
   t.after(async () => {
-    terminals.dispose();
-    try {
-      await terminateOriginalProcess(daemonIdentity);
-    } finally {
-      await rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-    }
+    await runFixtureCleanup([
+      ["terminal disposal", () => terminals.dispose()],
+      ["daemon termination", () => terminateOriginalProcess(daemonIdentity)],
+      ["temporary directory removal", () => rm(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 })],
+    ], (message) => t.diagnostic(message));
   });
   await writeFile(daemon, [
     'const fs = require("node:fs");',

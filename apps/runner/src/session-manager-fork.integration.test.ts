@@ -12,7 +12,7 @@ import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ShellManager } from "./shell-manager.js";
 import { createWorktree } from "./worktree.js";
-import { terminateOriginalProcess, waitForLiveProcessPidFile, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
+import { runFixtureCleanup, terminateOriginalProcess, waitForLiveProcessPidFile, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -145,7 +145,7 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
   });
 }
 
-test("provider fork preserves exact post-turn files, commit base, and target cwd", async () => {
+test("provider fork preserves exact post-turn files, commit base, and target cwd", async (t) => {
   const repo = mkdtempSync(join(tmpdir(), "wollipog-fork-repo-"));
   const storeRoot = mkdtempSync(join(tmpdir(), "wollipog-fork-store-"));
   try {
@@ -330,8 +330,10 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
         assert.equal(await waitForOriginalProcessToStop(detachedIdentity), undefined,
           "worktree cleanup stopped the no-config fork shell descendant");
       } finally {
-        shellManager.dispose();
-        await terminateOriginalProcess(detachedIdentity);
+        await runFixtureCleanup([
+          ["shell disposal", () => shellManager.dispose()],
+          ["detached process termination", () => terminateOriginalProcess(detachedIdentity)],
+        ], (message) => t.diagnostic(message));
       }
     }
     assert.equal(target.forkPoints?.["1"]?.eventSeq, 2, "fork point is re-based to the child's event seq space");
