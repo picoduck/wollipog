@@ -24,6 +24,9 @@ tauri-plugin-shell = "2"
 # §23.2 window geometry is not persisted; §23.4 a second launch races the first for the
 # sidecar port and the settings file.
 tauri-plugin-window-state = "2"
+# #1646 in-place updates from published releases. Native TLS to match the rest of the shell, and no
+# `zip`: this app publishes only v2 updater artifacts, never the v1 archives that feature unpacks.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["native-tls", "system-proxy"] }
 
 atomic-write-file = "0.3.1"
 base64 = "0.23.1"
@@ -37,6 +40,7 @@ memchr = "2.7.6"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "stream", "native-tls"] }
 same-file = "1.0.6"
 secrecy = "0.10.3"
+semver = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.11.0"

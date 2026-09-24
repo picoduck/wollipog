@@ -4,6 +4,16 @@ set -euo pipefail
 repo=${1:?repository is required}
 release_tag=${2:?release tag is required}
 manifest=${3:?checksum manifest is required}
+# Optional: a release signed for in-place updates passes its verified latest.json and the desktop
+# version it announces, and the gate then also requires every update package and signature.
+update_manifest=${4:-}
+desktop_version=${5:-}
+if [ -n "$update_manifest" ] && [ -z "$desktop_version" ]; then
+  echo "an update manifest requires the desktop version it announces" >&2
+  exit 2
+fi
+updater_args=()
+[ -z "$update_manifest" ] || updater_args=(--update-manifest "$update_manifest" --desktop-version "$desktop_version")
 attempts=${WOLLIPOG_RELEASE_METADATA_ATTEMPTS:-6}
 retry_delay=${WOLLIPOG_RELEASE_METADATA_RETRY_DELAY_SECONDS:-5}
 
@@ -44,7 +54,8 @@ while [ "$attempt" -le "$attempts" ]; do
   if gh api --paginate --slurp "repos/$repo/releases/$release_id/assets?per_page=100" >"$assets_json"; then
     if node "$release_verifier" release \
       --assets-json "$assets_json" \
-      --manifest "$manifest"; then
+      --manifest "$manifest" \
+      ${updater_args[@]+"${updater_args[@]}"}; then
       verified=1
       break
     fi

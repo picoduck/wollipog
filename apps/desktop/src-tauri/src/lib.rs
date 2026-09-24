@@ -31,6 +31,7 @@ mod instances;
 mod remote_transport;
 mod secrets;
 mod settings;
+mod updates;
 
 use instances::{
     add_remote_instance, edit_remote_instance, instance_registry, remove_remote_instance,
@@ -43,6 +44,10 @@ use remote_transport::{
 use settings::{
     app_data_dir, read_settings, read_settings_result, write_settings, DesktopSettings,
     LocalRunnerSettings,
+};
+use updates::{
+    check_for_desktop_update, desktop_update_status, install_desktop_update,
+    set_automatic_update_checks, DesktopUpdater,
 };
 
 const OWNERSHIP_LOCK_FILE: &str = "desktop-owner.lock";
@@ -784,39 +789,50 @@ fn risk_for_runner(sessions: &[serde_json::Value], runner_id: &str) -> ExitRisk 
 ///
 /// Returns true when the caller should PREVENT the close.
 fn hold_close_for_work(app: &tauri::AppHandle) -> bool {
-    let guard = app.state::<CloseGuard>();
-    // Checked, released, then re-checked. Holding the lock across the query would make the SECOND
-    // close wait on a control-plane round trip whose answer it does not need — the warning already
-    // decided it. Releasing and re-taking costs a second check, which is what the re-check is for.
-    if warning_still_authorizes(
-        *guard.warned_at.lock().unwrap(),
-        Instant::now(),
-        CLOSE_WARNING_GRACE,
-    ) {
+    let Some(count) = exit_hold_for_work(app, &app.state::<CloseGuard>().warned_at) else {
         return false;
-    }
-    let risk = local_work_in_flight(app);
-    if !should_hold_close(risk, false) {
-        return false;
-    }
-    let mut warned_at = guard.warned_at.lock().unwrap();
-    if warning_still_authorizes(*warned_at, Instant::now(), CLOSE_WARNING_GRACE) {
-        // Another close path warned while this one was querying. One warning is the whole rule.
-        return false;
-    }
-    *warned_at = Some(Instant::now());
-    drop(warned_at);
-
-    let count = match risk {
-        ExitRisk::Sessions(count) => count,
-        // The dashboard says "work may still be running" for an unknown count; it never invents one.
-        ExitRisk::Unknown | ExitRisk::None => 0,
     };
     // Best effort: if no webview can show this, the user presses close again and exits.
     for window in app.webview_windows().values() {
         let _ = window.emit(CLOSE_WOULD_STOP_WORK_EVENT, count);
     }
     true
+}
+
+/// The decision behind `hold_close_for_work`, under a caller's latch and without the close toast.
+///
+/// Installing an update restarts the app, which stops the same processes closing it does, so it
+/// asks the same question under the same one-warning rule (#1646). It keeps its OWN latch: a
+/// warning is authorization for the gesture it answered, and deferring an install must not let the
+/// next window close through unwarned. Its caller renders its own warning, because "closing again
+/// will stop it" is the wrong sentence for an install button.
+///
+/// `Some(count)` when the exit should be held: the number of sessions with work in flight, or 0
+/// when the control plane could not say.
+fn exit_hold_for_work(app: &tauri::AppHandle, latch: &Mutex<Option<Instant>>) -> Option<usize> {
+    // Checked, released, then re-checked. Holding the lock across the query would make the SECOND
+    // close wait on a control-plane round trip whose answer it does not need — the warning already
+    // decided it. Releasing and re-taking costs a second check, which is what the re-check is for.
+    if warning_still_authorizes(*latch.lock().unwrap(), Instant::now(), CLOSE_WARNING_GRACE) {
+        return None;
+    }
+    let risk = local_work_in_flight(app);
+    if !should_hold_close(risk, false) {
+        return None;
+    }
+    let mut warned_at = latch.lock().unwrap();
+    if warning_still_authorizes(*warned_at, Instant::now(), CLOSE_WARNING_GRACE) {
+        // Another close path warned while this one was querying. One warning is the whole rule.
+        return None;
+    }
+    *warned_at = Some(Instant::now());
+    drop(warned_at);
+
+    Some(match risk {
+        ExitRisk::Sessions(count) => count,
+        // The dashboard says "work may still be running" for an unknown count; it never invents one.
+        ExitRisk::Unknown | ExitRisk::None => 0,
+    })
 }
 
 /// Read a control-plane response into a risk, failing closed on anything unexpected.
@@ -3482,8 +3498,20 @@ fn process_owner_focus_callback(app: tauri::AppHandle) -> Arc<dyn Fn() -> bool +
     })
 }
 
+/// Whether an `ExitRequested` is a restart rather than a quit.
+///
+/// Only the updater restarts, after its own guarded decision, and Tauri ignores `prevent_exit` for a
+/// restart. Guarding it anyway would only raise a close warning nobody asked for — and consume a
+/// window close's authorization that belongs to a different gesture.
+fn is_restart_request(code: Option<i32>) -> bool {
+    code == Some(tauri::RESTART_EXIT_CODE)
+}
+
 fn handle_run_event(app: &tauri::AppHandle, event: RunEvent) {
-    if let RunEvent::ExitRequested { api, .. } = &event {
+    if let RunEvent::ExitRequested { api, code, .. } = &event {
+        if is_restart_request(*code) {
+            return;
+        }
         let authorized = take_exit_authorization(&app.state::<CloseGuard>());
         if should_guard_exit(authorized) && hold_close_for_work(app) {
             api.prevent_exit();
@@ -3539,6 +3567,10 @@ pub fn run() {
 
     let app = builder
         .plugin(tauri_plugin_shell::init())
+        // #1646. Registered for its Rust API only: the capability file grants the webview none of
+        // its commands, so every install goes through `install_desktop_update` and its exit guard.
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .manage(DesktopUpdater::default())
         .manage(CloseGuard::default())
         .manage(Sidecar(
             Mutex::new(SidecarState::default()),
@@ -3566,7 +3598,11 @@ pub fn run() {
             remote_ui_open,
             remote_ui_send,
             remote_ui_close,
-            open_external_url
+            open_external_url,
+            desktop_update_status,
+            check_for_desktop_update,
+            install_desktop_update,
+            set_automatic_update_checks
         ])
         .on_window_event(|window, event| {
             // §23.1. `RunEvent::Exit` kills the sidecar and the local runner, so closing the window
@@ -5030,6 +5066,16 @@ mod tests {
             should_guard_exit(take_exit_authorization(&guard)),
             "and the one after it is guarded again — the authorization was consumed, not read"
         );
+    }
+
+    #[test]
+    fn only_a_restart_skips_the_exit_guard() {
+        // #1646: the updater decides its restart under its own latch. A quit — any other code, or
+        // none — is still guarded, so a Cmd+Q during an install cannot pass unwarned.
+        assert!(is_restart_request(Some(tauri::RESTART_EXIT_CODE)));
+        assert!(!is_restart_request(None));
+        assert!(!is_restart_request(Some(0)));
+        assert!(!is_restart_request(Some(1)));
     }
 
     #[test]

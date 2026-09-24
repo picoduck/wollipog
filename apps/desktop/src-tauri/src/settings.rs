@@ -24,6 +24,8 @@ pub(crate) struct DesktopSettings {
     pub(crate) remote_instances: Vec<InstanceProfile>,
     pub(crate) active_instance_id: String,
     pub(crate) pending_remote_deletions: Vec<String>,
+    /// Check for a newer published release in the background (#1646). Manual checks ignore it.
+    pub(crate) automatic_update_checks: bool,
 }
 
 impl Default for DesktopSettings {
@@ -34,6 +36,7 @@ impl Default for DesktopSettings {
             remote_instances: Vec::new(),
             active_instance_id: crate::instances::LOCAL_INSTANCE_ID.to_string(),
             pending_remote_deletions: Vec::new(),
+            automatic_update_checks: true,
         }
     }
 }
@@ -147,6 +150,8 @@ mod tests {
     fn legacy_settings_default_to_local_instance() {
         let parsed: DesktopSettings = serde_json::from_str(r#"{"tailnet_access":true}"#).unwrap();
         assert!(parsed.tailnet_access);
+        // Settings written before #1646 have no update preference; they keep checking.
+        assert!(parsed.automatic_update_checks);
         assert_eq!(
             parsed.active_instance_id,
             crate::instances::LOCAL_INSTANCE_ID

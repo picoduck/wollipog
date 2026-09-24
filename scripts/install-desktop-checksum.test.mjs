@@ -12,6 +12,9 @@ const windowsInstaller = fileURLToPath(new URL("./install.ps1", import.meta.url)
 const assetName = "Wollipog_1.2.3_amd64.AppImage";
 const bytes = Buffer.from("verified desktop bytes\n");
 const digest = createHash("sha256").update(bytes).digest("hex");
+// Releases signed for in-place updates (#1646) publish `<package>.sig` beside each package, listed
+// first here so an unanchored match would pick the signature instead of the AppImage.
+const signatureAsset = `{"name":"${assetName}.sig","digest":"sha256:${"c".repeat(64)}","browser_download_url":"https://example.test/${assetName}.sig"},{"name":"latest.json","digest":"sha256:${"d".repeat(64)}","browser_download_url":"https://example.test/latest.json"}`;
 
 function executable(path, body) {
   writeFileSync(path, `#!/bin/sh\nset -eu\n${body}`, "utf8");
@@ -35,13 +38,14 @@ while [ "$#" -gt 0 ]; do
 done
 if echo "$url" | grep -q '/releases/latest$'; then
   [ "$TEST_PRIVATE" = 0 ] || exit 22
-  printf '%s' '{"tag_name":"v1.2.3","assets":[{"name":"other_x64.AppImage","digest":"sha256:${"b".repeat(64)}","browser_download_url":"https://example.test/other_x64.AppImage"},{"name":"${assetName}","digest":'"$TEST_DIGEST_JSON"',"browser_download_url":"https://example.test/${assetName}"}]}'
+  printf '%s' '{"tag_name":"v1.2.3","assets":[${signatureAsset},{"name":"other_x64.AppImage","digest":"sha256:${"b".repeat(64)}","browser_download_url":"https://example.test/other_x64.AppImage"},{"name":"${assetName}","digest":'"$TEST_DIGEST_JSON"',"browser_download_url":"https://example.test/${assetName}"}]}'
 else cp "$TEST_PAYLOAD" "$out"
 fi`);
   executable(join(fakeBin, "gh"), `
 printf '%s\\n' "$*" >> "$TEST_GH_LOG"
 if [ "$1" = api ]; then
   printf '%s\\n' v1.2.3
+  printf '%s\\t%s\\thttps://example.test/%s\\n' '${assetName}.sig' 'sha256:${"c".repeat(64)}' '${assetName}.sig'
   printf '%s\\t%s\\thttps://example.test/%s\\n' '${assetName}' "$TEST_DIGEST_FIELD" '${assetName}'
 elif [ "$1" = release ] && [ "$2" = download ]; then
   while [ "$#" -gt 0 ]; do [ "$1" != --output ] || { cp "$TEST_PAYLOAD" "$2"; exit; }; shift; done
@@ -118,6 +122,8 @@ test("macOS installer verifies the publisher digest before mounting the DMG", ()
 
 test("Windows installer validates raw REST digest before invoking msiexec", () => {
   const source = readFileSync(windowsInstaller, "utf8");
+  // `-like` is anchored at both ends, so `<name>.msi.sig` (#1646) cannot be selected as the MSI.
+  assert.match(source, /Where-Object \{ \$_\.name -like "\*_\$\{arch\}_\*\.msi" \}/u);
   assert.match(source, /gh api "repos\/\$repo\/releases\/latest"/u);
   const digestCheck = source.indexOf("$digest -cnotmatch '^sha256:([0-9a-f]{64})$'");
   const fileHash = source.indexOf("Get-FileHash -LiteralPath $out -Algorithm SHA256");

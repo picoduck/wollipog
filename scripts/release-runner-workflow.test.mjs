@@ -71,3 +71,42 @@ test("release workflow natively verifies dual runner assets and gates the final 
   assert.doesNotMatch(hostedGate, /expected_total|\b27\b/u);
   assert.doesNotMatch(hostedGate, /releases\/tags\//u);
 });
+
+test("release workflow signs update packages, writes latest.json once, and gates it on tag runs", () => {
+  const workflow = readFileSync(new URL("../.github/workflows/release.yml", import.meta.url), "utf8");
+  const releaseDocs = readFileSync(new URL("../docs/RELEASING.md", import.meta.url), "utf8");
+  const preflight = workflow.slice(workflow.indexOf("  preflight:"), workflow.indexOf("  build:"));
+  // A tag run without both halves of the key fails before the matrix; a partial key always fails.
+  assert.match(preflight, /TAURI_UPDATER_PUBLIC_KEY: \$\{\{ vars\.TAURI_UPDATER_PUBLIC_KEY \}\}/u);
+  assert.match(preflight, /HAS_PRIVATE_KEY: \$\{\{ secrets\.TAURI_SIGNING_PRIVATE_KEY != '' \}\}/u);
+  assert.match(preflight, /if \[ "\$REF_TYPE" = tag \]; then\s+echo "::error::The update signing key is not configured[^\n]*"\s+exit 1/u);
+  assert.match(preflight, /partially configured[^\n]*\n\s+exit 1/u);
+  assert.match(preflight, /node scripts\/desktop-update-manifest\.mjs check-public-key/u);
+  assert.match(preflight, /TAURI_UPDATER_PUBLIC_KEY="\$TAURI_UPDATER_NEXT_PUBLIC_KEY" node scripts\/desktop-update-manifest\.mjs check-public-key/u);
+  assert.match(preflight, /desktop_version=\$\(jq -r \.version apps\/desktop\/src-tauri\/tauri\.conf\.json\)/u);
+
+  // The key reaches the bundler only through the CI overlay and the Tauri step's own environment.
+  assert.match(workflow, /bundle: \{ createUpdaterArtifacts: true \}/u);
+  // Rotation: the app embeds the next key while the current key signs and verifies this release.
+  const overlayStep = workflow.slice(workflow.indexOf("- name: Configure updater signing"), workflow.indexOf("- name: Build & publish desktop bundles"));
+  assert.match(overlayStep, /TAURI_UPDATER_PUBLIC_KEY: \$\{\{ vars\.TAURI_UPDATER_NEXT_PUBLIC_KEY \|\| vars\.TAURI_UPDATER_PUBLIC_KEY \}\}/u);
+  const manifestStep = workflow.slice(workflow.indexOf("- name: Verify update signatures"), workflow.indexOf("- name: Verify release assets & publish checksums"));
+  assert.match(manifestStep, /TAURI_UPDATER_PUBLIC_KEY: \$\{\{ vars\.TAURI_UPDATER_PUBLIC_KEY \}\}/u);
+  assert.match(workflow, /--config \{0\}', env\.TAURI_UPDATER_CONFIG/u);
+  assert.match(workflow, /TAURI_SIGNING_PRIVATE_KEY: \$\{\{ needs\.preflight\.outputs\.updater_signing == '1' && secrets\.TAURI_SIGNING_PRIVATE_KEY \|\| '' \}\}/u);
+  assert.equal(workflow.match(/secrets\.TAURI_SIGNING_PRIVATE_KEY\b(?!_PASSWORD)/gu)?.length, 2, "the private key is read by preflight and the Tauri step only");
+  assert.doesNotMatch(workflow, /TAURI_SIGNING_PRIVATE_KEY[^\n]*GITHUB_ENV/u);
+  // The action's own latest.json races across the parallel legs.
+  assert.match(workflow, /includeUpdaterJson: false/u);
+
+  const verify = workflow.slice(workflow.indexOf("  verify-runner-release:"));
+  assert.match(
+    verify,
+    /Verify update signatures & publish the update manifest[\s\S]*node scripts\/desktop-update-manifest\.mjs build[\s\S]*--version "\$DESKTOP_VERSION"[\s\S]*gh release upload "\$RELEASE_TAG" latest\.json/u,
+  );
+  assert.match(verify, /set -- latest\.json "\$DESKTOP_VERSION"[\s\S]*bash scripts\/verify-draft-runner-release\.sh[\s\S]*SHA256SUMS \\\s+"\$@"/u);
+
+  assert.match(releaseDocs, /TAURI_UPDATER_PUBLIC_KEY/u);
+  assert.match(releaseDocs, /TAURI_SIGNING_PRIVATE_KEY_PASSWORD/u);
+  assert.match(releaseDocs, /exactly 47 release assets/u);
+});

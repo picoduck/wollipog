@@ -1,0 +1,225 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+
+/**
+ * #1646 — the dashboard's side of in-place desktop updates.
+ *
+ * The shell does the work: it asks GitHub for the latest published release, verifies the package
+ * against its compiled-in update key, and holds the restart behind the same work-in-flight guard as
+ * closing the window. This file states what the shell answered, and offers what the user may do.
+ */
+
+export type DesktopUpdateInstall =
+  | { mode: "inPlace" }
+  | { mode: "releasePage"; reason: string };
+
+export type DesktopUpdateCheck =
+  | { state: "current"; checkedAt: number }
+  | { state: "available"; version: string; releaseUrl: string; checkedAt: number };
+
+export interface DesktopUpdateStatus {
+  currentVersion: string;
+  install: DesktopUpdateInstall;
+  automaticChecks: boolean;
+  /** False when the installation turned every update request off. */
+  checksAllowed: boolean;
+  releasesUrl: string;
+  lastCheck: DesktopUpdateCheck | null;
+}
+
+export type DesktopUpdateOutcome =
+  | { outcome: "current" }
+  /** Work is in flight; nothing was installed. `sessions` is 0 when the shell could not count. */
+  | { outcome: "heldForWork"; sessions: number }
+  | { outcome: "restarting" };
+
+/** Emitted by the shell with the `DesktopUpdateCheck` whenever any check finishes. */
+export const DESKTOP_UPDATE_CHECKED = "wollipog://desktop-update-checked";
+
+export interface DesktopUpdateRuntime {
+  isTauri: () => boolean;
+  invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+  /** Subscribe to a shell event; resolves to its unsubscribe. Absent where nothing is emitted. */
+  listen?: (event: string, handler: (payload: unknown) => void) => Promise<() => void>;
+}
+
+const runtime: DesktopUpdateRuntime = {
+  isTauri,
+  invoke,
+  listen: (event, handler) => listen(event, (received) => handler(received.payload)),
+};
+
+export function readDesktopUpdateStatus(desktop: DesktopUpdateRuntime = runtime): Promise<DesktopUpdateStatus | null> {
+  if (!desktop.isTauri()) return Promise.resolve(null);
+  return desktop.invoke<DesktopUpdateStatus>("desktop_update_status");
+}
+
+/** `automatic` checks respect the user's setting and resolve to null when it is off. */
+export function checkForDesktopUpdate(
+  automatic: boolean,
+  desktop: DesktopUpdateRuntime = runtime,
+): Promise<DesktopUpdateCheck | null> {
+  return desktop.invoke<DesktopUpdateCheck | null>("check_for_desktop_update", { automatic });
+}
+
+/**
+ * `confirmed` is the "Install Anyway" answer to the shell's work-in-flight warning. Every other
+ * request is asked afresh, so a second surface's click is never taken as the confirmation.
+ */
+export function installDesktopUpdate(confirmed: boolean, desktop: DesktopUpdateRuntime = runtime): Promise<DesktopUpdateOutcome> {
+  return desktop.invoke<DesktopUpdateOutcome>("install_desktop_update", { confirmed });
+}
+
+export function writeAutomaticUpdateChecks(enabled: boolean, desktop: DesktopUpdateRuntime = runtime): Promise<boolean> {
+  return desktop.invoke<boolean>("set_automatic_update_checks", { enabled });
+}
+
+export function openReleasePage(url: string, desktop: DesktopUpdateRuntime = runtime): Promise<void> {
+  return desktop.invoke<void>("open_external_url", { url });
+}
+
+/** The install button's warning. Same rule as the close warning, different gesture. */
+export function updateWarning(sessions: number): string {
+  if (sessions <= 0) return "Agent work may still be running. Installing restarts Wollipog and will stop it.";
+  return sessions === 1
+    ? "1 session still has work running. Installing restarts Wollipog and will stop it."
+    : `${sessions} sessions still have work running. Installing restarts Wollipog and will stop them.`;
+}
+
+export function availableUpdateMessage(version: string): string {
+  return `Wollipog ${version} is available.`;
+}
+
+export function errorMessage(cause: unknown): string {
+  return cause instanceof Error ? cause.message : String(cause);
+}
+
+export interface DesktopUpdateSetting {
+  /** False in a browser or PWA: those are updated by upgrading the control plane that serves them. */
+  desktop: boolean;
+  status: DesktopUpdateStatus | null;
+  loading: boolean;
+  checking: boolean;
+  installing: boolean;
+  savingAutomatic: boolean;
+  /** Set when the last install attempt was held because work is in flight. */
+  heldSessions: number | null;
+  error: string | null;
+  check: () => void;
+  /** `confirmed` only for "Install Anyway". */
+  install: (confirmed?: boolean) => void;
+  dismissHold: () => void;
+  openRelease: () => void;
+  toggleAutomatic: () => void;
+}
+
+/**
+ * Settings state for the Updates row.
+ *
+ * Reads the shell's status once, which includes the last check the background notifier made, so
+ * opening Settings does not ask GitHub again. Checking is a click.
+ */
+export function useDesktopUpdateSetting(desktop: DesktopUpdateRuntime = runtime): DesktopUpdateSetting {
+  const inDesktop = useMemo(() => desktop.isTauri(), [desktop]);
+  const [status, setStatus] = useState<DesktopUpdateStatus | null>(null);
+  const [loading, setLoading] = useState(inDesktop);
+  const [checking, setChecking] = useState(false);
+  const [installing, setInstalling] = useState(false);
+  const [savingAutomatic, setSavingAutomatic] = useState(false);
+  const [heldSessions, setHeldSessions] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!inDesktop) return;
+    let disposed = false;
+    let stop: (() => void) | undefined;
+    // The background notifier's check lands in the shell, not here. Without this, a Settings page
+    // opened at launch said "Not checked yet" for the rest of the session. Subscribed BEFORE the
+    // status read, and kept aside, because a check can finish while that read is in flight: the
+    // read would then land with the older answer and overwrite the newer one.
+    let heard: DesktopUpdateCheck | null = null;
+    const newer = (next: DesktopUpdateStatus): DesktopUpdateStatus =>
+      heard && (!next.lastCheck || heard.checkedAt >= next.lastCheck.checkedAt) ? { ...next, lastCheck: heard } : next;
+    const subscribed = desktop.listen?.(DESKTOP_UPDATE_CHECKED, (payload) => {
+      if (disposed || !payload || typeof payload !== "object") return;
+      heard = payload as DesktopUpdateCheck;
+      setStatus((current) => (current ? newer(current) : current));
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stop = unlisten;
+    }).catch(() => undefined) ?? Promise.resolve();
+    void subscribed
+      .then(() => readDesktopUpdateStatus(desktop))
+      .then((next) => { if (!disposed) setStatus(next && newer(next)); })
+      .catch((cause) => { if (!disposed) setError(errorMessage(cause)); })
+      .finally(() => { if (!disposed) setLoading(false); });
+    return () => { disposed = true; stop?.(); };
+  }, [desktop, inDesktop]);
+
+  const check = useCallback(() => {
+    if (!status || checking || installing) return;
+    setChecking(true);
+    setError(null);
+    setHeldSessions(null);
+    checkForDesktopUpdate(false, desktop)
+      .then((lastCheck) => setStatus((current) => (current ? { ...current, lastCheck } : current)))
+      .catch((cause) => setError(errorMessage(cause)))
+      .finally(() => setChecking(false));
+  }, [checking, desktop, installing, status]);
+
+  const install = useCallback((confirmed = false) => {
+    if (!status || installing || checking) return;
+    setInstalling(true);
+    setError(null);
+    installDesktopUpdate(confirmed, desktop)
+      .then((result) => {
+        if (result.outcome === "heldForWork") {
+          setHeldSessions(result.sessions);
+        } else if (result.outcome === "current") {
+          setHeldSessions(null);
+          setStatus((current) => (current ? { ...current, lastCheck: { state: "current", checkedAt: Date.now() } } : current));
+        }
+        // "restarting": the shell is going away; leave the busy state up until it does.
+        if (result.outcome !== "restarting") setInstalling(false);
+      })
+      .catch((cause) => {
+        setError(errorMessage(cause));
+        setInstalling(false);
+      });
+  }, [checking, desktop, installing, status]);
+
+  const openRelease = useCallback(() => {
+    const url = status?.lastCheck?.state === "available" ? status.lastCheck.releaseUrl : status?.releasesUrl;
+    if (!url) return;
+    openReleasePage(url, desktop).catch((cause) => setError(errorMessage(cause)));
+  }, [desktop, status]);
+
+  const toggleAutomatic = useCallback(() => {
+    if (!status || savingAutomatic) return;
+    setSavingAutomatic(true);
+    setError(null);
+    writeAutomaticUpdateChecks(!status.automaticChecks, desktop)
+      .then((automaticChecks) => setStatus((current) => (current ? { ...current, automaticChecks } : current)))
+      .catch((cause) => setError(errorMessage(cause)))
+      .finally(() => setSavingAutomatic(false));
+  }, [desktop, savingAutomatic, status]);
+
+  const dismissHold = useCallback(() => setHeldSessions(null), []);
+
+  return {
+    desktop: inDesktop,
+    status,
+    loading,
+    checking,
+    installing,
+    savingAutomatic,
+    heldSessions,
+    error,
+    check,
+    install,
+    dismissHold,
+    openRelease,
+    toggleAutomatic,
+  };
+}

@@ -7,11 +7,19 @@ import {
   runnerArtifactNames,
   RUNNER_TARGET_TRIPLES,
 } from "../apps/runner/scripts/runner-artifacts.mjs";
+import {
+  desktopUpdaterArtifacts,
+  UPDATE_MANIFEST_NAME,
+  updaterReleaseAssetNames,
+} from "./desktop-update-manifest.mjs";
 
 export const EXPECTED_DESKTOP_RELEASE_ASSET_COUNT = 14;
 /** Desktop bundles + 12 runner names + 6 headless control planes + the web bundle + SHA256SUMS. */
 export const EXPECTED_RELEASE_ASSET_COUNT =
   EXPECTED_DESKTOP_RELEASE_ASSET_COUNT + RUNNER_TARGET_TRIPLES.length * 2 + headlessArtifactNames().length + 1;
+/** A release signed for in-place updates adds one `.sig` per update package plus `latest.json`. */
+export const EXPECTED_UPDATER_ASSET_COUNT = updaterReleaseAssetNames("0.0.0").length;
+export const EXPECTED_SIGNED_RELEASE_ASSET_COUNT = EXPECTED_RELEASE_ASSET_COUNT + EXPECTED_UPDATER_ASSET_COUNT;
 
 export function expectedRunnerAssetNames() {
   return RUNNER_TARGET_TRIPLES.flatMap((triple) => Object.values(runnerArtifactNames(triple))).sort();
@@ -104,8 +112,12 @@ function verifiedPublisherDigest(asset, name) {
 }
 
 /** Final hosted gate: consume GitHub's exact paginated asset endpoint, prove the complete inventory,
- * and bind every runner alias plus the uploaded manifest to its publisher-recorded digest. */
-export function verifyHostedRelease(assetPages, manifestText, expectedTotal = EXPECTED_RELEASE_ASSET_COUNT) {
+ * and bind every runner alias plus the uploaded manifest to its publisher-recorded digest.
+ *
+ * `updater`, when the release was signed for in-place updates, is the verified `latest.json` text
+ * and the desktop version it announces. Every update package, its `.sig`, and the manifest must then
+ * be present, and the hosted manifest must be the exact bytes the verification job produced. */
+export function verifyHostedRelease(assetPages, manifestText, expectedTotal = EXPECTED_RELEASE_ASSET_COUNT, updater = null) {
   const assets = assetsFromPaginatedList(assetPages);
   if (assets.length !== expectedTotal) {
     throw new Error(`release has ${assets.length} assets; expected exactly ${expectedTotal}`);
@@ -139,6 +151,34 @@ export function verifyHostedRelease(assetPages, manifestText, expectedTotal = EX
       throw new Error(`hosted runner alias digests differ for ${triple}`);
     }
   }
+  if (updater) verifyHostedUpdater(assets, names, updater);
+}
+
+function verifyHostedUpdater(assets, names, { manifestText, version }) {
+  const required = [
+    ...desktopUpdaterArtifacts(version).map(({ asset }) => asset),
+    ...updaterReleaseAssetNames(version),
+  ];
+  for (const name of required) {
+    if (!names.includes(name)) throw new Error(`release is missing ${name}`);
+    verifiedPublisherDigest(assets.find((candidate) => candidate.name === name), name);
+  }
+  const hosted = verifiedPublisherDigest(
+    assets.find((candidate) => candidate.name === UPDATE_MANIFEST_NAME),
+    UPDATE_MANIFEST_NAME,
+  );
+  if (hosted !== createHash("sha256").update(manifestText).digest("hex")) {
+    throw new Error(`${UPDATE_MANIFEST_NAME} publisher digest does not match the verified update manifest`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(manifestText);
+  } catch {
+    throw new Error(`${UPDATE_MANIFEST_NAME} is not valid JSON`);
+  }
+  if (parsed?.version !== version) {
+    throw new Error(`${UPDATE_MANIFEST_NAME} announces ${parsed?.version}, not ${version}`);
+  }
 }
 
 function option(args, name) {
@@ -160,13 +200,22 @@ async function main(args) {
   if (command === "release") {
     const assetsPath = option(args, "--assets-json");
     const manifestPath = option(args, "--manifest");
-    const expectedTotal = EXPECTED_RELEASE_ASSET_COUNT;
+    const updater = args.includes("--update-manifest")
+      ? {
+          manifestText: readFileSync(option(args, "--update-manifest"), "utf8"),
+          version: option(args, "--desktop-version"),
+        }
+      : null;
+    const expectedTotal = updater ? EXPECTED_SIGNED_RELEASE_ASSET_COUNT : EXPECTED_RELEASE_ASSET_COUNT;
     verifyHostedRelease(
       JSON.parse(readFileSync(assetsPath, "utf8")),
       readFileSync(manifestPath, "utf8"),
       expectedTotal,
+      updater,
     );
-    console.log(`verified exact ${expectedTotal}-asset release inventory, six runner digest pairs, and the headless assets`);
+    console.log(
+      `verified exact ${expectedTotal}-asset release inventory, six runner digest pairs, and the headless assets${updater ? `, and the ${EXPECTED_UPDATER_ASSET_COUNT} update assets` : ""}`,
+    );
     return;
   }
   throw new Error("usage: verify-runner-release-assets.mjs <local|release> [options]");

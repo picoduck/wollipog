@@ -12,6 +12,7 @@ import {
 import { useApi } from "../api-context.js";
 import { notifier } from "../notify.js";
 import { tailnetAccessDescription, type TailnetAccessSetting } from "../tailnet-access.js";
+import { availableUpdateMessage, updateWarning, type DesktopUpdateSetting } from "../desktop-updates.js";
 import { type PushSetting } from "../push.js";
 import { ArrowDownIcon, ArrowUpIcon, KeyboardIcon } from "./Icons.js";
 import { VIEW_ICONS } from "./Rail.js";
@@ -1565,31 +1566,147 @@ export function NetworkPanel({ tailnet }: { tailnet: TailnetAccessSetting }) {
   );
 }
 
-export function AboutPanel() {
+/** `update` is the shell's state (see `useDesktopUpdateSetting`); absent, this is a browser. */
+export function AboutPanel({ update }: { update?: DesktopUpdateSetting } = {}) {
+  const controlPlaneVersion = useControlPlaneVersion();
   return (
     <SettingsGroup title="Versions">
-      {/* The protocol version is a compile-time constant the web app already imports. The APP
-          version is not sent to the client at all, so it is named as missing rather than rendered
-          as "Unknown", which would read as a failure rather than as a gap. */}
       <dl className="settings-about">
+        {update?.status && <><dt>Desktop App</dt><dd>{update.status.currentVersion}</dd></>}
+        <dt>Control Plane</dt>
+        <dd>{controlPlaneVersion === undefined ? "Reading…" : controlPlaneVersion ?? "Not reported"}</dd>
         <dt>Protocol</dt><dd>{PROTOCOL_VERSION}</dd>
       </dl>
-      <PendingSetting
-        title="Application Version"
-        description="Which build of Wollipog this is."
-        reason="The control plane does not send its version to the client yet."
-      />
-      <PendingSetting
-        title="Updates"
-        description="Whether this build is current."
-        reason="The desktop app updates itself; there is no in-app update check yet."
-      />
+      {update?.desktop ? (
+        <DesktopUpdateRows update={update} />
+      ) : (
+        <PendingSetting
+          title="Updates"
+          description="Whether this build is current."
+          reason="This dashboard is served by its control plane and updates when that control plane is upgraded."
+        />
+      )}
       <PendingSetting
         title="Open-Source Licenses"
         description="What Wollipog is built on."
         reason="Not compiled into the app yet; see THIRD-PARTY-NOTICES in the repository."
       />
     </SettingsGroup>
+  );
+}
+
+/**
+ * The version of the control plane this window talks to, from its authenticated instance probe.
+ *
+ * `undefined` while reading and `null` when it did not say — an older control plane without the
+ * probe, or a failed read. The desktop app and the control plane can differ: a desktop window may be
+ * connected to a remote server, and updating the app never updates that server.
+ */
+function useControlPlaneVersion(): string | null | undefined {
+  const api = useApi();
+  const [version, setVersion] = useState<string | null | undefined>(undefined);
+  useEffect(() => {
+    let disposed = false;
+    setVersion(undefined);
+    api.instanceInfo()
+      .then((info) => { if (!disposed) setVersion(typeof info?.appVersion === "string" && info.appVersion ? info.appVersion : null); })
+      .catch(() => { if (!disposed) setVersion(null); });
+    return () => { disposed = true; };
+  }, [api]);
+  return version;
+}
+
+function formatCheckedAt(checkedAt: number): string {
+  return new Date(checkedAt).toLocaleString(undefined, { dateStyle: "medium", timeStyle: "short" });
+}
+
+/**
+ * #1646. What the shell last learned about published releases, and the one action that fits it.
+ *
+ * Installing restarts the app, so a first attempt while work is in flight is held by the shell and
+ * turned into a warning here; "Install Anyway" is the confirmation, and anything else defers.
+ */
+function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
+  const { status } = update;
+  if (!status) {
+    return (
+      <StaticRow
+        title="Updates"
+        description={update.loading
+          ? "Reading the update status…"
+          : `Could not read the update status: ${update.error ?? "the desktop app did not answer."}`}
+      />
+    );
+  }
+  const busy = update.checking || update.installing;
+  const check = (label: string) => (
+    <button type="button" className="btn ghost sm" disabled={busy} onClick={update.check}>
+      {update.checking ? "Checking…" : label}
+    </button>
+  );
+  const lastCheck = status.lastCheck;
+  let description: ReactNode;
+  if (!status.checksAllowed) {
+    description = "Update checks are turned off for this installation by WOLLIPOG_DISABLE_UPDATE_CHECK.";
+  } else if (update.heldSessions !== null) {
+    description = (
+      <>
+        <span className="settings-inline-error" role="alert">{updateWarning(update.heldSessions)}</span>{" "}
+        <button type="button" className="btn sm" disabled={busy} onClick={() => update.install(true)}>
+          {update.installing ? "Installing…" : "Install Anyway"}
+        </button>{" "}
+        <button type="button" className="btn ghost sm" disabled={busy} onClick={update.dismissHold}>Not Now</button>
+      </>
+    );
+  } else if (update.installing) {
+    description = "Downloading and verifying the update. Wollipog restarts when it is installed.";
+  } else if (lastCheck?.state === "available") {
+    description = status.install.mode === "inPlace" ? (
+      <>
+        {availableUpdateMessage(lastCheck.version)} Installing restarts Wollipog, which stops its local
+        control plane and runner.{" "}
+        <button type="button" className="btn sm" onClick={() => update.install(false)}>Install and Restart</button>{" "}
+        {check("Check Again")}
+      </>
+    ) : (
+      <>
+        {availableUpdateMessage(lastCheck.version)} {status.install.reason}{" "}
+        <button type="button" className="btn sm" onClick={update.openRelease}>Open Release Page</button>{" "}
+        {check("Check Again")}
+      </>
+    );
+  } else if (lastCheck?.state === "current") {
+    description = (
+      <>
+        Wollipog {status.currentVersion} is the latest release. Checked {formatCheckedAt(lastCheck.checkedAt)}.{" "}
+        {check("Check Again")}
+      </>
+    );
+  } else {
+    description = <>Not checked yet. {check("Check for Updates")}</>;
+  }
+  return (
+    <>
+      <StaticRow
+        title="Updates"
+        description={
+          <>
+            {description}
+            {update.error && <span className="settings-inline-error" role="alert"> {update.error}</span>}
+          </>
+        }
+      />
+      <SwitchRow
+        title="Check for Updates Automatically"
+        description={status.checksAllowed
+          ? "Look for a newer published release while Wollipog is open."
+          : "Turned off for this installation."}
+        checked={status.automaticChecks && status.checksAllowed}
+        busy={update.savingAutomatic}
+        disabled={!status.checksAllowed}
+        onClick={update.toggleAutomatic}
+      />
+    </>
   );
 }
 

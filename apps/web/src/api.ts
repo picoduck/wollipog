@@ -137,6 +137,7 @@ import type {
   UpdatePodOrchestrationRequest,
   UpdateAutomationRequest,
   DispatchWorkflowNodeResult,
+  ControlPlaneInstanceInfo,
 } from "@wollipog/protocol";
 import {
   isPromptImageReference,
@@ -301,6 +302,9 @@ export function createApiClient(transport: ApiTransport) {
   },
 
   sessionNamingSettings: () => req<SessionNamingSettingsView>("/api/session-naming"),
+
+  /** The authenticated identity probe; `appVersion` is the control plane's release. */
+  instanceInfo: () => req<ControlPlaneInstanceInfo>("/api/instance"),
 
   updateSessionNamingSettings: (input: UpdateSessionNamingSettingsRequest) =>
     req<SessionNamingSettingsView>("/api/session-naming", {
