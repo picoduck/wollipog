@@ -43,6 +43,22 @@ test("the Agent Control relay carries one bounded round-trip without a bearer", 
   }
 });
 
+test("the relay carries a video-sized JSON upload beyond the old 16 MiB frame bound", async () => {
+  const body = JSON.stringify({ data: "a".repeat(17 * 1024 * 1024) });
+  const sockets = new AgentControlRelaySockets(async (_sessionId, request) => {
+    assert.equal(request.body, body);
+    return { status: 201, body: '{"artifactId":"art_video"}' };
+  });
+  try {
+    const fetchImpl = agentControlRelayFetch(await sockets.ensure("s_video_relay"), "k".repeat(32));
+    const response = await fetchImpl("http://unused/api/sessions/s_video_relay/artifacts/videos", {
+      method: "POST", headers: { "content-type": "application/json" }, body,
+    });
+    assert.equal(response.status, 201);
+    assert.equal(await response.text(), '{"artifactId":"art_video"}');
+  } finally { await sockets.closeAll(); }
+});
+
 test("the Agent Control relay rejects non-loopback endpoints and non-JSON request shapes", async () => {
   assert.throws(() => agentControlRelayFetch("tcp://example.com:4318", "k".repeat(32)), /invalid Agent Control relay endpoint/);
   const sockets = new AgentControlRelaySockets(async () => ({ status: 200, body: "{}" }));

@@ -12,7 +12,7 @@ import {
   artifactBlobSha256,
   defaultArtifactBlobRoot,
 } from "./artifact-blob-store.js";
-import { ControlPlaneDb, MAX_SESSION_ARTIFACT_BYTES, SessionArtifactQuotaError } from "./db.js";
+import { ControlPlaneDb, MAX_SESSION_ATTACHED_ARTIFACT_BYTES, SessionArtifactQuotaError } from "./db.js";
 
 function artifact(artifactId: string, sessionId: string, data = "shared artifact bytes"): WorkflowArtifact {
   const bytes = Buffer.from(data, "utf8");
@@ -64,23 +64,29 @@ test("artifact rows keep metadata only while deduplicated blobs survive until th
   }
 });
 
-test("the session quota counts all kinds and authors before publishing a new blob", () => {
+test("the session attachment quota counts every author without blocking internal event chunks", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-artifact-quota-"));
   const path = join(root, "control-plane.db");
   try {
     const db = ControlPlaneDb.open(path);
     const human = { ...artifact("human-image", "session-one", "image"), kind: "screenshot" as const,
-      createdBy: { kind: "human" as const, id: "owner" } };
+      createdBy: { kind: "human" as const, id: "owner" }, metadata: { purpose: "session_attachment" } };
     db.createWorkflowArtifact(human);
     // Existing rows can predate the quota. Their recorded sizes still count, even when the
     // content-addressed blob itself is shared with another artifact.
     db.raw().prepare("UPDATE artifacts SET size_bytes=? WHERE id=?")
-      .run(MAX_SESSION_ARTIFACT_BYTES, human.artifactId);
-    const agent = artifact("agent-log", "session-one", "different bytes");
+      .run(MAX_SESSION_ATTACHED_ARTIFACT_BYTES, human.artifactId);
+    const agent = { ...artifact("agent-image", "session-one", "different bytes"),
+      kind: "screenshot" as const, createdBy: { kind: "agent" as const, id: "session-one" },
+      metadata: { purpose: "session_attachment" } };
     assert.throws(() => db.createWorkflowArtifact(agent), SessionArtifactQuotaError);
     assert.equal(db.getWorkflowArtifact(agent.artifactId), null);
     assert.equal(existsSync(artifactBlobFilePath(defaultArtifactBlobRoot(path), agent.sha256)), false,
       "a rejected upload leaves no blob behind");
+    const eventChunk = { ...artifact("event-chunk", "session-one", "large output"),
+      metadata: { purpose: "session_event_payload" } };
+    db.createWorkflowArtifact(eventChunk);
+    assert.ok(db.getWorkflowArtifact(eventChunk.artifactId));
     db.raw().prepare("UPDATE artifacts SET size_bytes=? WHERE id=?").run(human.sizeBytes, human.artifactId);
     db.createWorkflowArtifact(agent);
     assert.ok(db.getWorkflowArtifact(agent.artifactId));

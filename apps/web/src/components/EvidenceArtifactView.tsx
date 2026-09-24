@@ -160,7 +160,7 @@ export function EvidenceArtifactView({
     setState((current) => current.status === "decoding" || current.status === "ready"
       ? {
           status: "unavailable",
-          reason: "This artifact matches its recorded digest but could not be displayed as an image.",
+          reason: "This artifact matches its recorded digest but could not be displayed.",
           retryable: false,
         }
       : current);

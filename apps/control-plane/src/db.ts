@@ -3161,8 +3161,8 @@ interface WorkflowArtifactRow {
 }
 
 const MAX_WORKFLOW_ARTIFACT_BLOB_BYTES = 32 * 1024 * 1024;
-export const MAX_SESSION_ARTIFACT_COUNT = 4_096;
-export const MAX_SESSION_ARTIFACT_BYTES = 1024 * 1024 * 1024;
+export const MAX_SESSION_ATTACHED_ARTIFACT_COUNT = 4_096;
+export const MAX_SESSION_ATTACHED_ARTIFACT_BYTES = 1024 * 1024 * 1024;
 
 export class SessionArtifactQuotaError extends Error {
   constructor(message: string) { super(message); this.name = "SessionArtifactQuotaError"; }
@@ -21178,16 +21178,17 @@ export class ControlPlaneDb {
       this.artifactBlobs.put(artifact.sha256, bytes);
       this.db.exec("BEGIN IMMEDIATE");
       try {
-        // One transaction covers every writer: agent attachments, human uploads, workflow output,
-        // prompt images, and event chunks. Sharing one blob never bypasses the per-session bound.
-        if (artifact.sessionId) {
+        // Count durable file attachments across human and agent writers. Internal event chunks
+        // and prompt images must keep their own lifecycle and never lose data at this limit.
+        if (artifact.sessionId && artifact.metadata?.purpose === "session_attachment") {
           const usage = this.stmt(
-            "SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes FROM artifacts WHERE session_id=?",
+            `SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes FROM artifacts
+             WHERE session_id=? AND CASE WHEN json_valid(metadata) THEN json_extract(metadata,'$.purpose') END='session_attachment'`,
           ).get(artifact.sessionId) as { count: number; bytes: number };
-          if (usage.count >= MAX_SESSION_ARTIFACT_COUNT ||
-              usage.bytes + artifact.sizeBytes > MAX_SESSION_ARTIFACT_BYTES) {
+          if (usage.count >= MAX_SESSION_ATTACHED_ARTIFACT_COUNT ||
+              usage.bytes + artifact.sizeBytes > MAX_SESSION_ATTACHED_ARTIFACT_BYTES) {
             throw new SessionArtifactQuotaError(
-              `this session has reached its artifact limit (${MAX_SESSION_ARTIFACT_COUNT} artifacts or ${MAX_SESSION_ARTIFACT_BYTES} bytes)`,
+              `this session has reached its attachment limit (${MAX_SESSION_ATTACHED_ARTIFACT_COUNT} files or ${MAX_SESSION_ATTACHED_ARTIFACT_BYTES} bytes)`,
             );
           }
         }

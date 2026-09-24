@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 const SHOT = "test-results/evidence-artifacts";
 
@@ -10,6 +10,18 @@ async function openReview(page: Page, query: string): Promise<void> {
 
 const artifactRequests = (page: Page) =>
   page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.artifactRequests());
+
+async function playDecodedVideoFrame(video: Locator): Promise<void> {
+  const dimensions = await video.evaluate((element: HTMLVideoElement) => [element.videoWidth, element.videoHeight]);
+  expect(dimensions).toEqual([320, 180]);
+  await video.evaluate((element: HTMLVideoElement) => element.play());
+  await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeGreaterThan(1.25);
+  const presented = await video.evaluate((element: HTMLVideoElement) => new Promise<number>((resolve) => {
+    element.requestVideoFrameCallback((_now, metadata) => resolve(metadata.mediaTime));
+  }));
+  expect(presented).toBeGreaterThan(1);
+  await video.evaluate((element: HTMLVideoElement) => element.pause());
+}
 
 for (const viewport of [
   { name: "desktop", width: 1280, height: 800 },
@@ -92,7 +104,7 @@ test("an artifact that matches its digest but cannot be drawn is never shown and
   await openReview(page, "items=3&artifacts=undecodable");
   const broken = page.locator(".evidence-review-item", { hasText: "viewport-2" });
   await broken.scrollIntoViewIfNeeded();
-  await expect(broken.getByRole("alert")).toContainText("matches its recorded digest but could not be displayed as an image");
+  await expect(broken.getByRole("alert")).toContainText("matches its recorded digest but could not be displayed");
   // No broken-image placeholder is left on screen, and nothing offers to enlarge it.
   await expect(broken.locator("img:visible")).toHaveCount(0);
   await expect(broken.getByRole("button", { name: /Enlarge Evidence/ })).toHaveCount(0);
@@ -180,9 +192,7 @@ for (const viewport of [
     await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
     await expect(video).toHaveAttribute("controls", "");
     await expect(video).toHaveAttribute("playsinline", "");
-    await video.evaluate((element: HTMLVideoElement) => element.play());
-    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeGreaterThan(0.25);
-    await video.evaluate((element: HTMLVideoElement) => element.pause());
+    await playDecodedVideoFrame(video);
     const box = await video.boundingBox();
     expect(box).not.toBeNull();
     expect(box!.width).toBeLessThanOrEqual(viewport.width - 24);
@@ -206,9 +216,7 @@ for (const viewport of [
     await expect(video).toBeVisible();
     await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
     expect(await artifactRequests(page)).toEqual(["art_clip"]);
-    await video.evaluate((element: HTMLVideoElement) => element.play());
-    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeGreaterThan(0.25);
-    await video.evaluate((element: HTMLVideoElement) => element.pause());
+    await playDecodedVideoFrame(video);
     const box = await video.boundingBox();
     expect(box).not.toBeNull();
     expect(box!.width).toBeLessThanOrEqual(viewport.width - 24);
