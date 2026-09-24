@@ -740,6 +740,11 @@ test("crossing the breakpoint keeps the first visible row and the list's geometr
       return row ? Number(row.dataset.index) : null;
     });
     expect(anchorIndex, "a visible row anchors the reader before resizing").not.toBeNull();
+    const anchorOffsetBefore = await list.evaluate((node, index) => {
+      const row = node.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`);
+      return row ? row.getBoundingClientRect().top - node.getBoundingClientRect().top : Number.POSITIVE_INFINITY;
+    }, anchorIndex);
+    expect(Number.isFinite(anchorOffsetBefore), "the reading row has a measured source offset").toBe(true);
 
     await useViewport(page, to, 800);
     await settleResize();
@@ -748,6 +753,19 @@ test("crossing the breakpoint keeps the first visible row and the list's geometr
     await expectGeometryPoll(
       anchorDisplacement,
       `the first visible row stays within one card across ${from} to ${to}`,
+    ).toBeLessThanOrEqual(await cardHeight());
+    // Being somewhere inside a taller viewport is insufficient: a scroll reset can move the
+    // reading row several cards down while its displacement outside the viewport remains zero.
+    // At the list's end, shrinking content can clamp scrollTop and legitimately change the offset.
+    await expectGeometryPoll(
+      () => list.evaluate((node, { index, before }) => {
+        const row = node.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`);
+        if (!row) return Number.POSITIVE_INFINITY;
+        if (node.scrollTop >= node.scrollHeight - node.clientHeight - 1) return 0;
+        const offset = row.getBoundingClientRect().top - node.getBoundingClientRect().top;
+        return Math.abs(offset - before);
+      }, { index: anchorIndex, before: anchorOffsetBefore }),
+      `the first visible row keeps its reading offset across ${from} to ${to}`,
     ).toBeLessThanOrEqual(await cardHeight());
 
     // Polled on the predicate itself: a width change opens a new measurement epoch, and the
