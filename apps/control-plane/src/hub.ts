@@ -27,6 +27,8 @@ import type {
   ListSessionFilesResultMessage,
   LogoutAgentResultMessage,
   SwitchSessionProviderAccountResultMessage,
+  InspectProviderAuthenticationResultMessage,
+  SelectProviderAuthenticationAccountResultMessage,
   AcpRegistryApprovalResultMessage,
   QueuedPromptView,
   ReadQueuedPromptResultMessage,
@@ -216,6 +218,8 @@ export type RunnerRequestResult =
   | ListSessionFilesResultMessage
   | LogoutAgentResultMessage
   | SwitchSessionProviderAccountResultMessage
+  | InspectProviderAuthenticationResultMessage
+  | SelectProviderAuthenticationAccountResultMessage
   | AcpRegistryApprovalResultMessage
   | ReadSessionFileResultMessage
   | SearchWorkspaceReferencesResultMessage

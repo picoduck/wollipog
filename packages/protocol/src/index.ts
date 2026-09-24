@@ -545,7 +545,13 @@
 //      attestation instead of prompt-image transport (`supportsImages`), which describes sending an
 //      image in a prompt, not receiving one from a tool. A pre-v179 runner attests nothing, so the
 //      control plane keeps UI Evidence Approval human-owned for it.
-export const PROTOCOL_VERSION = 179;
+// 180: an Authentication Required card can ask the runner for a fresh, provider-reported current
+//      identity and choose another same-Machine, same-provider account without first accepting
+//      the current one. The identity reply is ephemeral: it answers one authorized request and
+//      never enters events, snapshots, logs, or stored identity evidence. The selection rechecks
+//      the chosen credential context and pins the identity it observed before provider work
+//      resumes. Older runners keep the existing recovery actions.
+export const PROTOCOL_VERSION = 180;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -677,6 +683,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   automaticAccountSwitchHarnessSelection: 178,
   automaticProviderAccountSwitch: 173,
   sessionProviderAccountSwitch: 171,
+  /** v180 current-identity inspection and account selection from an Authentication Required card. */
+  providerAuthenticationAccountRecovery: 180,
   providerAccounts: 170,
   providerLogin: 171,
   accountScopedAgentSkills: 172,
@@ -4899,6 +4907,68 @@ export interface SwitchSessionProviderAccountResponse {
   scheduled: boolean;
 }
 
+/** Provider-reported identity observed by a fresh status check for one Authentication Required
+ * card. `email` is present only when the provider supplied one; it is returned to the requesting
+ * human only and is never persisted, logged, or derived from a label or stored digest. */
+export interface ProviderAuthenticationCurrentIdentity {
+  status: "authenticated" | "unauthenticated" | "unknown";
+  /** False when this provider exposes no account email through its status command. */
+  emailSupported: boolean;
+  email: string | null;
+  observedAt: number;
+}
+
+export interface ProviderAuthenticationCurrentIdentityRequest {
+  /** The exact Authentication Required card the viewer is looking at. */
+  requestId: string;
+}
+
+export interface ProviderAuthenticationCurrentIdentityResponse {
+  identity: ProviderAuthenticationCurrentIdentity;
+}
+
+/** Why a same-Machine account cannot be chosen from recovery right now. */
+export type ProviderAuthenticationAccountAvailability =
+  | "available"
+  | "current"
+  | "sign_in_required"
+  | "status_unknown";
+
+export interface ProviderAuthenticationAccountOption {
+  id: string;
+  label: string;
+  authStatus: ProviderAccountDefinition["authStatus"];
+  availability: ProviderAuthenticationAccountAvailability;
+  /** Latest usage for context only; recovery never hides an account because usage is unknown. */
+  usageState?: SubscriptionUsageState;
+  buckets?: SubscriptionUsageBucket[];
+}
+
+export interface ProviderAuthenticationAccountOptionsResponse {
+  accounts: ProviderAuthenticationAccountOption[];
+}
+
+export interface SelectProviderAuthenticationAccountRequest {
+  requestId: string;
+  providerAccountId: string;
+  /** The session's configured account when the card was rendered; a change fails closed. */
+  expectedProviderAccountId: string;
+}
+
+export interface SelectProviderAuthenticationAccountResponse {
+  accepted: true;
+}
+
+/** Stable reasons a recovery account selection was refused, so the card can explain it. */
+export type ProviderAuthenticationAccountSelectionError =
+  | "recovery_changed"
+  | "account_changed"
+  | "account_unavailable"
+  | "sign_in_required"
+  | "status_unknown"
+  | "operation_in_progress"
+  | "not_resumable";
+
 /* ------------------- Operational transcript projection ------------------- */
 
 /**
@@ -7073,6 +7143,8 @@ export type RunnerToControlPlane =
   | WorkspaceWorktreeSetupResultMessage
   | LogoutAgentResultMessage
   | SwitchSessionProviderAccountResultMessage
+  | InspectProviderAuthenticationResultMessage
+  | SelectProviderAuthenticationAccountResultMessage
   | AcpRegistryApprovalResultMessage
   | SkillsStateMessage
   | SkillSnapshotResultMessage
@@ -7718,6 +7790,41 @@ export interface SwitchSessionProviderAccountResultMessage {
   requestId: string;
   ok: boolean;
   scheduled?: boolean;
+  error?: string;
+}
+
+/** Fresh current-identity check for one exact Authentication Required card (v180). */
+export interface InspectProviderAuthenticationMessage {
+  type: "inspect_provider_authentication";
+  requestId: string;
+  sessionId: string;
+  recoveryRequestId: string;
+}
+
+/** Ephemeral reply. Runners send it only on a live socket and never buffer or persist it. */
+export interface InspectProviderAuthenticationResultMessage {
+  type: "inspect_provider_authentication_result";
+  requestId: string;
+  ok: boolean;
+  identity?: ProviderAuthenticationCurrentIdentity;
+  error?: string;
+}
+
+/** Choose another same-provider account from an Authentication Required card (v180). */
+export interface SelectProviderAuthenticationAccountMessage {
+  type: "select_provider_authentication_account";
+  requestId: string;
+  sessionId: string;
+  recoveryRequestId: string;
+  providerAccountId: string;
+  expectedProviderAccountId: string;
+}
+
+export interface SelectProviderAuthenticationAccountResultMessage {
+  type: "select_provider_authentication_account_result";
+  requestId: string;
+  ok: boolean;
+  code?: ProviderAuthenticationAccountSelectionError;
   error?: string;
 }
 
@@ -8653,6 +8760,8 @@ export type ControlPlaneToRunner =
   | TestSessionNamingCustomModelMessage
   | LogoutAgentMessage
   | SwitchSessionProviderAccountMessage
+  | InspectProviderAuthenticationMessage
+  | SelectProviderAuthenticationAccountMessage
   | StartProviderLoginMessage
   | SubmitProviderLoginCodeMessage
   | CancelProviderLoginMessage
