@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -120,6 +121,29 @@ test("extensionless native Windows update commands cannot promise batch-safe arg
     const binary = { path: "C:\\Tools\\codex.cmd", via: "path" as const,
       launch: { command, args: ['embedded"quote', "%PATH%"] } };
     assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+  }
+});
+
+test("temporary native Windows dotted-command lookup probe", { skip: process.platform !== "win32" }, () => {
+  for (const suffix of ["cmd", "bat"]) {
+    const dir = mkdtempSync(join(tmpdir(), "wollipog dotted lookup "));
+    try {
+      writeFileSync(join(dir, `codex.v2.${suffix}`), "@echo off\r\necho DOTTED_WRAPPER_EXECUTED:%*\r\n");
+      const script = join(dir, "probe.ps1");
+      writeFileSync(script, [
+        "$resolved = Get-Command codex.v2 -ErrorAction SilentlyContinue",
+        "Write-Output \"RESOLVED:$($resolved.Source)\"",
+        "& codex.v2 probe",
+        "Write-Output \"NATIVE_EXIT:$LASTEXITCODE\"",
+      ].join("\r\n"));
+      const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-File", script], {
+        encoding: "utf8", env: { ...process.env, PATH: `${dir};${process.env.PATH}`, PATHEXT: ".COM;.EXE;.BAT;.CMD" },
+      });
+      console.log(`DOTTED_LOOKUP_PROBE_${suffix.toUpperCase()}: ${JSON.stringify({ status: probe.status, stdout: probe.stdout, stderr: probe.stderr })}`);
+      assert.equal(probe.status, 0, "PowerShell lookup probe should run");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 });
 
