@@ -11,7 +11,7 @@ import {
   LEGACY_CONTAINER_LABELS,
   containerLabelArgs,
 } from "./container-identity.js";
-import { dockerProxyClearArgs } from "./container-proxy-args.js";
+import { dockerTargetClientConfig } from "./docker-client-config.js";
 import { resolveNative, run, type ExecResult, type ResolvedBinary } from "./discovery/resolve.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
 import type { ContainerSpawnIsolation } from "./spawn.js";
@@ -226,10 +226,21 @@ export function targetProbeEnvironment(source: NodeJS.ProcessEnv): Record<string
     value !== undefined && !sensitiveEnvironmentName(name))) as Record<string, string>;
 }
 
+function dockerProbeEnvironment(source: NodeJS.ProcessEnv, dockerHost?: string): Record<string, string> {
+  const env = targetProbeEnvironment(source);
+  // A private config is useful only if no inherited Docker selector can redirect the client
+  // back to an operator context. The setup check has already verified this local endpoint.
+  for (const name of Object.keys(env)) if (/^DOCKER_/iu.test(name)) delete env[name];
+  env.DOCKER_CONFIG = dockerTargetClientConfig();
+  if (dockerHost) env.DOCKER_HOST = dockerHost;
+  return env;
+}
+
 interface PreparedContainerTarget {
   config: RunnerContainerTarget;
   definition: ExecutionTargetDefinition;
   runtime?: ResolvedBinary;
+  dockerHost?: string;
   installations?: Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>;
 }
 
@@ -342,7 +353,6 @@ function setupCheckArgs(
     "--security-opt", "no-new-privileges",
     "--pids-limit", "128",
     "--tmpfs", "/tmp:rw,nosuid,nodev",
-    ...(template.runtime === "docker" ? dockerProxyClearArgs() : []),
     "--entrypoint", check.command,
     template.image,
     ...(check.args ?? []),
@@ -487,7 +497,8 @@ export class ContainerTargetRegistry {
     return cleanup;
   }
 
-  private async discoverInstallations(template: RunnerContainerTarget, runtime: ResolvedBinary, targetId: string): Promise<
+  private async discoverInstallations(template: RunnerContainerTarget, runtime: ResolvedBinary,
+    targetId: string, dockerHost?: string): Promise<
     Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>
   > {
     const installations = new Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>();
@@ -510,10 +521,10 @@ export class ContainerTargetRegistry {
         "--network", "none", "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--pids-limit", "128",
         "--tmpfs", "/tmp:rw,nosuid,nodev", "--workdir", "/tmp",
-        ...(template.runtime === "docker" ? dockerProxyClearArgs() : []),
         "--entrypoint", entrypoint, template.image, ...args,
       ], { timeoutMs: 5_000, maxBuffer: 64 * 1024,
-        env: targetProbeEnvironment(process.env), replaceEnv: true });
+        env: template.runtime === "docker" ? dockerProbeEnvironment(process.env, dockerHost) :
+          targetProbeEnvironment(process.env), replaceEnv: true });
       if (result.timedOut || result.code === null || result.errorCode) {
         await this.deps.run(runtime.launch.command, [
           ...runtime.launch.args, "rm", "-f", name,
@@ -603,6 +614,16 @@ export class ContainerTargetRegistry {
         });
         continue;
       }
+      if (template.runtime === "docker") {
+        try { dockerTargetClientConfig(); }
+        catch {
+          this.prepared.set(id, {
+            config: template, runtime,
+            definition: { ...base, unavailableReason: "Docker client configuration could not be isolated" },
+          });
+          continue;
+        }
+      }
       const cleanupError = await this.cleanupOrphans(runtime);
       if (cleanupError) {
         this.prepared.set(id, {
@@ -623,6 +644,8 @@ export class ContainerTargetRegistry {
         continue;
       }
       let failed: string | null = null;
+      let dockerHost: string | undefined;
+      let dockerHostChecked = false;
       for (const check of template.setupChecks) {
         let home: string;
         try {
@@ -632,7 +655,15 @@ export class ContainerTargetRegistry {
           break;
         }
         try {
-          const opts = { env: await this.setupEnvironment(template, runtime, home), replaceEnv: true };
+          const setupEnv = await this.setupEnvironment(template, runtime, home);
+          if (template.runtime === "docker") {
+            if (dockerHostChecked && dockerHost !== setupEnv.DOCKER_HOST) {
+              throw new Error("Docker endpoint changed during setup checks");
+            }
+            dockerHost = setupEnv.DOCKER_HOST;
+            dockerHostChecked = true;
+          }
+          const opts = { env: setupEnv, replaceEnv: true };
           if (template.runtime === "podman" && !this.podmanDefaultsSafe()) {
             failed = PODMAN_UNSAFE_DEFAULTS_REASON;
             break;
@@ -660,11 +691,12 @@ export class ContainerTargetRegistry {
         }
         if (failed) break;
       }
-      const installations = failed ? new Map() : await this.discoverInstallations(template, runtime, id);
+      const installations = failed ? new Map() : await this.discoverInstallations(template, runtime, id, dockerHost);
       const defaultsUnsafe = template.runtime === "podman" && !this.podmanDefaultsSafe();
       this.prepared.set(id, {
         config: template,
         runtime,
+        dockerHost,
         installations,
         definition: defaultsUnsafe ? { ...base, unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON } :
           failed ? { ...base, unavailableReason: failed } : {
@@ -687,7 +719,7 @@ export class ContainerTargetRegistry {
         item.installations = undefined;
         continue;
       }
-      const installations = await this.discoverInstallations(item.config, item.runtime, id);
+      const installations = await this.discoverInstallations(item.config, item.runtime, id, item.dockerHost);
       if (item.config.runtime === "podman" && !this.podmanDefaultsSafe()) {
         item.definition = { ...item.definition, available: false, unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON };
         item.installations = undefined;
@@ -767,6 +799,7 @@ export class ContainerTargetRegistry {
       hostAgentArgs: [...hostAgentArgs],
       agentCommand: agent.command,
       agentArgs: agent.args ?? [],
+      ...(prepared.config.runtime === "docker" && prepared.dockerHost ? { dockerHost: prepared.dockerHost } : {}),
       ...(prepared.config.runtime === "podman" ? { verifyDefaults: () => {
         if (!this.podmanDefaultsSafe()) throw new Error(PODMAN_UNSAFE_DEFAULTS_REASON);
       } } : {}),

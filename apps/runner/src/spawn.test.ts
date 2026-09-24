@@ -231,11 +231,6 @@ test("Docker and Podman argv emit exact dual labels for rollback and mount only 
       "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "512",
       "--tmpfs", "/tmp:rw,nosuid,nodev",
       "--mount", "type=bind,src=C:\\worktrees\\session-1,dst=/workspace", "--workdir", "/workspace",
-      ...(runtime === "docker" ? [
-        "--env", "HTTP_PROXY=", "--env", "http_proxy=", "--env", "HTTPS_PROXY=", "--env", "https_proxy=",
-        "--env", "FTP_PROXY=", "--env", "ftp_proxy=", "--env", "NO_PROXY=", "--env", "no_proxy=",
-        "--env", "ALL_PROXY=", "--env", "all_proxy=",
-      ] : []),
       `example/agent@sha256:${"b".repeat(64)}`, "codex", "app-server", "--json",
     ]);
   }
