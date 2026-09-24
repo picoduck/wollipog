@@ -3340,6 +3340,36 @@ test("assistant non-edit tool (Bash) -> tool_call(execute), no file_edit", () =>
   assert.equal(h.events.filter((e) => e.kind === "file_edit").length, 0);
 });
 
+test("assistant Skill tool_use -> skill-kind tool_call titled by the skill name", () => {
+  const h = makeHarness();
+  h.feed({
+    type: "stream_event",
+    event: { type: "content_block_start", content_block: { type: "tool_use", id: "s1", name: "Skill" } },
+  });
+  h.feed({
+    type: "assistant",
+    message: {
+      content: [
+        { type: "tool_use", id: "s1", name: "Skill", input: { skill: "codex-review" } },
+        { type: "tool_use", id: "s2", name: "Skill", input: { skill: "review", args: `pr 42\n${"x".repeat(200)}` } },
+        { type: "tool_use", id: "s3", name: "Skill", input: {} },
+      ],
+    },
+  });
+  const calls = h.events.filter((e) => e.kind === "tool_call") as Extract<SessionEventPayload, { kind: "tool_call" }>[];
+  // Model-invoked and user `/name` skills reach the driver as the same Skill tool_use, so this one
+  // mapping labels both.
+  assert.deepEqual(calls.map((call) => [call.toolCallId, call.toolKind]), [
+    ["s1", "skill"],
+    ["s1", "skill"],
+    ["s2", "skill"],
+    ["s3", "skill"],
+  ]);
+  assert.equal(calls[1].title, "Skill: codex-review");
+  assert.equal(calls[2].title, `Skill: review pr 42 ${"x".repeat(54)}…`);
+  assert.equal(calls[3].title, "Skill");
+});
+
 test("assistant non-tool_use blocks (text) are ignored", () => {
   const h = makeHarness();
   const r = h.feed({

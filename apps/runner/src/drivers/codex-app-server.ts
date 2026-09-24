@@ -45,6 +45,13 @@ import { classifyPoisonedProviderHistory, poisonedProviderHistoryMessage } from 
 import { providerRejectionShape } from "./provider-rejection-shape.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
+import {
+  codexCommandSkillName,
+  codexSkillInputNames,
+  codexSkillPathIndex,
+  codexSkillsFromList,
+} from "./codex-skill-catalog.js";
+import { SKILL_TOOL_KIND, skillToolTitle } from "./skill-tool.js";
 import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
 import {
   codexPermissionProfileBase,
@@ -393,6 +400,9 @@ function resumeError(threadId: string, err: Json): CodexAppServerResumeError {
   return new CodexAppServerResumeError(`could not resume Codex thread ${threadId}: ${message}`, threadId, retryable, err?.code);
 }
 
+/** A skill catalog is display metadata; an unanswered lookup must not stay pending indefinitely. */
+const SKILL_CATALOG_TIMEOUT_MS = 30_000;
+
 export class CodexAppServerDriver implements Driver {
   private child: AgentProcess | null = null;
   private peer: JsonRpcPeer | null = null;
@@ -452,6 +462,12 @@ export class CodexAppServerDriver implements Driver {
    * exact replay duplicates must still not be added twice. */
   private readonly lastOnlyUsageFingerprints = new Map<string, Set<string>>();
   private promptGeneration = 0;
+  /** Registered skill name by exact SKILL.md path from `skills/list`. Empty until the first
+   * lookup lands, and permanently on servers without it, so commands then stay plain. */
+  private skillPaths: ReadonlyMap<string, string> = new Map();
+  /** The peer with a `skills/list` lookup in flight; later invalidations coalesce into one rerun. */
+  private skillCatalogPeer: JsonRpcPeer | null = null;
+  private skillCatalogStale = false;
   private serverIdentity = "unknown";
   private completedTurnId: string | null = null;
   /** A terminal notification can race ahead of both turn/started and the turn/start response.
@@ -889,6 +905,7 @@ export class CodexAppServerDriver implements Driver {
     }
     this.threadId = actualId;
     this.threadCarriesLegacySandboxPolicy = false;
+    this.refreshSkillCatalog();
     if (typeof res?.serviceTier === "string" && res.serviceTier) this.reconcileServiceTier(res.serviceTier);
     else if (res?.serviceTier === null) this.reconcileServiceTier(null);
     return actualId;
@@ -1536,6 +1553,7 @@ export class CodexAppServerDriver implements Driver {
         this.cb.onEvent({ kind: "question_request", requestId: id, questions: normalized.questions, ...ownership });
       }));
 
+    peer.onNotification("skills/changed", () => this.refreshSkillCatalog());
     peer.onNotification("serverRequest/resolved", (params: Json) => {
       const id = String(params?.requestId ?? "");
       this.attentionOwners.delete(id);
@@ -1906,6 +1924,13 @@ export class CodexAppServerDriver implements Driver {
         if (typeof clientId === "string" && this.steerClientIds.has(clientId) && completed) {
           this.steerClientIds.delete(clientId);
         }
+        // Explicit skill input is the one skill invocation the protocol reports directly.
+        codexSkillInputNames(item.content).forEach((name, index) => {
+          const skillId = `${id}:skill:${index}`;
+          if (!this.seenItems.has(skillId)) {
+            this.emitTool(skillId, skillToolTitle(name), SKILL_TOOL_KIND, "completed", parentToolUseId);
+          }
+        });
         break;
       }
       case "agentMessage":
@@ -1953,7 +1978,26 @@ export class CodexAppServerDriver implements Driver {
             ? item.exitCode === 0 ? "completed" : "failed"
             : item.status === "completed" ? "completed" : "failed"
           : "in_progress";
-        this.emitTool(id, `$ ${truncate(String(item.command ?? ""), 80)}`, "execute", status, parentToolUseId);
+        const skill = codexCommandSkillName(item.commandActions, item.cwd ?? this.cwd, this.skillPaths,
+          this.providerSharesHostFilesystem());
+        if (skill == null) {
+          this.emitTool(id, `$ ${truncate(String(item.command ?? ""), 80)}`, "execute", status, parentToolUseId);
+        } else if (this.seenItems.has(id) && !this.seenItems.has(`skill:${id}`)) {
+          // The catalog landed after this command started as a plain row. A repeated tool_call
+          // replaces the row's title and kind; a status update alone would leave it a command.
+          this.seenItems.add(`skill:${id}`);
+          this.cb.onEvent({
+            kind: "tool_call",
+            toolCallId: id,
+            title: skillToolTitle(skill),
+            toolKind: SKILL_TOOL_KIND,
+            status,
+            ...(parentToolUseId ? { parentToolUseId } : {}),
+          });
+        } else {
+          this.seenItems.add(`skill:${id}`);
+          this.emitTool(id, skillToolTitle(skill), SKILL_TOOL_KIND, status, parentToolUseId);
+        }
         const out = item.aggregatedOutput ?? item.output;
         if (completed && out) {
           this.cb.onEvent({
@@ -2004,6 +2048,40 @@ export class CodexAppServerDriver implements Driver {
         this.onCollabItem(item, completed, id, parentToolUseId);
         break;
     }
+  }
+
+  /** Skill paths are compared in the provider's filesystem view. Only a native launch outside a
+   * WSL, container, or cloud boundary may canonicalize them against the runner's own view. */
+  private providerSharesHostFilesystem(): boolean {
+    const backend = this.opts.isolation?.backend;
+    return this.opts.context?.kind === "native" &&
+      (backend == null || backend === "bwrap" || backend === "seatbelt" || backend === "windows-job");
+  }
+
+  /** Best-effort: a failed, unsupported, or unanswered lookup keeps the previous catalog. At most
+   * one bounded request is in flight per server; invalidations meanwhile rerun it once afterwards,
+   * and a response from a replaced server is dropped. */
+  private refreshSkillCatalog(): void {
+    const peer = this.peer;
+    if (!peer || this.disposed) return;
+    if (this.skillCatalogPeer === peer) {
+      this.skillCatalogStale = true;
+      return;
+    }
+    this.skillCatalogPeer = peer;
+    this.skillCatalogStale = false;
+    const settle = () => {
+      if (this.skillCatalogPeer !== peer) return;
+      this.skillCatalogPeer = null;
+      if (this.skillCatalogStale) this.refreshSkillCatalog();
+    };
+    // Deferred so even a synchronous transport throw becomes an ignored rejection, not a failed thread start.
+    Promise.resolve()
+      .then(() => peer.requestWithDeadline<Json>("skills/list", { cwds: [this.cwd] }, Date.now() + SKILL_CATALOG_TIMEOUT_MS))
+      .then((response) => {
+        if (this.peer === peer && !this.disposed) this.skillPaths = codexSkillPathIndex(codexSkillsFromList(response));
+      }, () => {})
+      .finally(settle);
   }
 
   private emitTool(

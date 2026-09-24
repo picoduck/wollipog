@@ -25,6 +25,7 @@ function contentFreeToolLabel(toolKind: unknown): string {
     case "command":
     case "execute": return "Command";
     case "agent": return "Subagent";
+    case "skill": return "Skill";
     default: return "Tool";
   }
 }

@@ -1919,14 +1919,14 @@ const TimelineRow = memo(function TimelineRow({
       // Output is collapsed by default — only the command header shows; click to reveal it.
       if (!item.text && !item.referencedText?.length) {
         return (
-          <div className={`tl-tool status-${item.status}`}>
+          <div className={`tl-tool status-${item.status}${item.toolKind === "skill" ? " tl-tool-skill" : ""}`}>
             <div className="tool-head">{head(false)}</div>
           </div>
         );
       }
       return (
         <details
-          className={`tl-tool status-${item.status}`}
+          className={`tl-tool status-${item.status}${item.toolKind === "skill" ? " tl-tool-skill" : ""}`}
           open={disclosureOpen}
           onToggle={(event) => {
             if (event.nativeEvent.isTrusted && event.currentTarget.open !== disclosureOpen) onDisclosureToggle?.();
@@ -2511,6 +2511,8 @@ function toolIcon(kind?: string): string {
       return "💭";
     case "agent":
       return "⑃";
+    case "skill":
+      return "🧩";
     default:
       return "🔧";
   }

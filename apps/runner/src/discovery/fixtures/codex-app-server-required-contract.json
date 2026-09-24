@@ -1,5 +1,5 @@
 {
-  "contractFingerprint": "codex-app-server-v2-async-questions-2026-09-22",
+  "contractFingerprint": "codex-app-server-v2-skill-rows-2026-09-24",
   "generatedWith": "codex-cli 0.155.1",
   "minimumVerifiedVersion": "0.147.0",
   "structuredLoginMinimumVersion": "0.155.1",
@@ -381,6 +381,20 @@
       "definitions": {
         "ThreadItem": {
           "variantRequiredProperties": {
+            "CommandExecutionThreadItem": {
+              "required": ["command", "commandActions", "cwd", "id", "status", "type"],
+              "properties": ["command", "commandActions", "cwd", "id", "status", "type"],
+              "propertyRefs": {
+                "commandActions": "CommandAction"
+              }
+            },
+            "UserMessageThreadItem": {
+              "required": ["content", "id", "type"],
+              "properties": ["content", "id", "type"],
+              "propertyRefs": {
+                "content": "UserInput"
+              }
+            },
             "AgentMessageThreadItem": {
               "required": ["id", "text", "type"],
               "properties": ["delivery", "id", "questions", "text", "type"],
@@ -410,6 +424,16 @@
                 "type"
               ]
             }
+          }
+        },
+        "CommandAction": {
+          "variantRequiredProperties": {
+            "ReadCommandAction": ["path", "type"]
+          }
+        },
+        "UserInput": {
+          "variantRequiredProperties": {
+            "SkillUserInput": ["name", "path", "type"]
           }
         },
         "AgentMessageDelivery": {
@@ -471,6 +495,20 @@
       "definitions": {
         "ThreadItem": {
           "variantRequiredProperties": {
+            "CommandExecutionThreadItem": {
+              "required": ["command", "commandActions", "cwd", "id", "status", "type"],
+              "properties": ["command", "commandActions", "cwd", "id", "status", "type"],
+              "propertyRefs": {
+                "commandActions": "CommandAction"
+              }
+            },
+            "UserMessageThreadItem": {
+              "required": ["content", "id", "type"],
+              "properties": ["content", "id", "type"],
+              "propertyRefs": {
+                "content": "UserInput"
+              }
+            },
             "AgentMessageThreadItem": {
               "required": ["id", "text", "type"],
               "properties": ["delivery", "id", "questions", "text", "type"],
@@ -500,6 +538,16 @@
                 "type"
               ]
             }
+          }
+        },
+        "CommandAction": {
+          "variantRequiredProperties": {
+            "ReadCommandAction": ["path", "type"]
+          }
+        },
+        "UserInput": {
+          "variantRequiredProperties": {
+            "SkillUserInput": ["name", "path", "type"]
           }
         },
         "AgentMessageDelivery": {
@@ -1227,6 +1275,27 @@
         "requestId",
         "threadId"
       ]
-    }
+    },
+    "v2/SkillsListParams.json": {
+      "properties": ["cwds"]
+    },
+    "v2/SkillsListResponse.json": {
+      "required": ["data"],
+      "properties": ["data"],
+      "definitions": {
+        "SkillsListEntry": {
+          "required": ["skills"],
+          "properties": ["skills"],
+          "propertyRefs": {
+            "skills": "SkillMetadata"
+          }
+        },
+        "SkillMetadata": {
+          "required": ["enabled", "name", "path"],
+          "properties": ["enabled", "name", "path"]
+        }
+      }
+    },
+    "v2/SkillsChangedNotification.json": {}
   }
 }

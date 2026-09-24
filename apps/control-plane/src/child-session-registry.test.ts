@@ -34,6 +34,15 @@ test("projects exact nested children from complete structured history with bound
   assert.equal(second.children[0]?.completedAt, 40);
 });
 
+test("a child's latest skill invocation is labeled by kind without exposing the skill name", () => {
+  const page = projectChildSessionRegistry([
+    event(1, { kind: "tool_call", toolCallId: "outer", toolKind: "agent", title: "Task", status: "running" }),
+    event(2, { kind: "tool_call", toolCallId: "skill", parentToolUseId: "outer", toolKind: "skill",
+      title: "Skill: private-deploy", status: "in_progress" }),
+  ], null, 7, 0, 10);
+  assert.deepEqual(page.children[0]?.latestTool, { title: "Skill", active: true });
+});
+
 test("projects pending owners on every bounded page and leaves missing or duplicate owners unresolved", () => {
   const events = [
     event(1, { kind: "tool_call", toolCallId: "first", toolKind: "agent", title: "Task", status: "completed" }),

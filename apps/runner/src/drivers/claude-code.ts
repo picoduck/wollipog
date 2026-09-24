@@ -49,6 +49,7 @@ import type {
   StopReason,
 } from "./driver.js";
 import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
+import { SKILL_TOOL_KIND, skillToolTitle } from "./skill-tool.js";
 import { readCompatibleEnv, type Environment } from "../env-compat.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -2915,6 +2916,8 @@ function contentToText(content: Json): string {
 }
 
 function toolTitle(name: string, input?: Record<string, Json>): string {
+  // Model-invoked skills and user `/name` skills both arrive as this one tool with the same input.
+  if (name === "Skill") return skillToolTitle(input?.skill, input?.args);
   if (input) {
     if (typeof input.file_path === "string") return `${name}: ${input.file_path}`;
     if (typeof input.command === "string") return `${name}: ${String(input.command).slice(0, 60)}`;
@@ -2951,5 +2954,6 @@ function toolKind(name: string): string {
   if (name === "Bash") return "execute";
   if (name === "WebFetch" || name === "WebSearch") return "fetch";
   if (name === "Task" || name === "Agent") return "agent";
+  if (name === "Skill") return SKILL_TOOL_KIND;
   return "other";
 }

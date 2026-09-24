@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -1041,9 +1041,16 @@ test("newSession starts a fresh thread and requires the server's actual id", asy
       calls.push({ method, params });
       return { thread: { id: "fresh-1" }, serviceTier: "flex" };
     },
+    requestWithDeadline: async (method: string, params: unknown) => {
+      calls.push({ method, params });
+      return { data: [] };
+    },
   };
   assert.equal(await h.driver.newSession("/fresh"), "fresh-1");
-  assert.deepEqual(calls, [{ method: "thread/start", params: { cwd: "/fresh", serviceTier: "fast" } }]);
+  assert.deepEqual(calls, [
+    { method: "thread/start", params: { cwd: "/fresh", serviceTier: "fast" } },
+    { method: "skills/list", params: { cwds: ["/fresh"] } },
+  ]);
   assert.deepEqual(h.serviceTiers, ["flex"]);
   assert.equal((h.driver as any).config.serviceTier, "flex");
   assert.equal(h.driver.agentSessionId(), "fresh-1");
@@ -1064,11 +1071,16 @@ test("newSession validates then resumes the exact persisted thread without repla
       }
       return { thread: { id: "thread-7", turns: [{ id: "old-turn" }] }, serviceTier: null };
     },
+    requestWithDeadline: async (method: string, params: unknown) => {
+      calls.push({ method, params });
+      return { data: [] };
+    },
   };
   assert.equal(await h.driver.newSession("/resume"), "thread-7");
   assert.deepEqual(calls, [
     { method: "thread/read", params: { threadId: "thread-7", includeTurns: false } },
     { method: "thread/resume", params: { threadId: "thread-7", serviceTier: "default" } },
+    { method: "skills/list", params: { cwds: ["/resume"] } },
   ]);
   assert.deepEqual(h.serviceTiers, [null]);
   assert.equal((h.driver as any).config.serviceTier, undefined);
@@ -1647,6 +1659,139 @@ test("commandExecution: started -> tool_call, completed -> tool_call_update + co
   assert.deepEqual(kinds, ["tool_call", "tool_call_update", "command_output"]);
   assert.equal((h.events[0] as { status: string }).status, "in_progress");
   assert.equal((h.events[1] as { status: string }).status, "completed");
+});
+
+const skillRead = (path: string) => [{ type: "read", command: `sed -n '1,260p' ${path}`, name: "SKILL.md", path }];
+
+test("commandExecution: a pure read of a registered SKILL.md becomes a named skill row", () => {
+  const h = makeHarness();
+  (h.driver as any).skillPaths = new Map([["/home/u/.codex/skills/review/SKILL.md", "review"]]);
+  const item = { type: "commandExecution", id: "s1", command: "sed -n '1,260p' SKILL.md", cwd: "/tmp/work",
+    commandActions: skillRead("/home/u/.codex/skills/review/SKILL.md") };
+  h.onItem(item, false);
+  h.onItem({ ...item, exitCode: 0, aggregatedOutput: "---\nname: review\n---\n" }, true);
+  h.onItem({ type: "commandExecution", id: "c1", command: "cat notes.md", cwd: "/tmp/work",
+    commandActions: skillRead("/tmp/work/skills/review/SKILL.md") }, false);
+  assert.deepEqual(h.events.map((event) => event.kind), ["tool_call", "tool_call_update", "command_output", "tool_call"]);
+  assert.deepEqual(h.events[0], {
+    kind: "tool_call", toolCallId: "s1", title: "Skill: review", toolKind: "skill", status: "in_progress",
+  });
+  assert.equal((h.events[1] as { status: string }).status, "completed");
+  assert.equal((h.events[3] as { title: string }).title, "$ cat notes.md", "an unregistered SKILL.md stays a command");
+  assert.equal((h.events[3] as { toolKind: string }).toolKind, "execute");
+});
+
+test("commandExecution: only a host-visible provider canonicalizes symlinked skill roots", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "codex-skill-row-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "store", "review"), { recursive: true });
+  writeFileSync(join(root, "store", "review", "SKILL.md"), "skill");
+  mkdirSync(join(root, "skills"));
+  symlinkSync(join(root, "store", "review"), join(root, "skills", "review"), process.platform === "win32" ? "junction" : "dir");
+  const catalog = new Map([[join(realpathSync(join(root, "store", "review")), "SKILL.md"), "review"]]);
+  const titleFor = (extra: Partial<DriverOptions>) => {
+    const h = makeHarness(extra);
+    (h.driver as any).skillPaths = catalog;
+    h.onItem({ type: "commandExecution", id: "s", command: "cat SKILL.md", cwd: root,
+      commandActions: skillRead(join(root, "skills", "review", "SKILL.md")) }, false);
+    return (h.events[0] as { title: string }).title;
+  };
+  assert.equal(titleFor({ context: { kind: "native" } }), "Skill: review");
+  assert.equal(titleFor({ context: { kind: "native" }, isolation: { backend: "container" } as DriverOptions["isolation"] }),
+    "$ cat SKILL.md", "a container path must not be resolved against the runner's filesystem");
+  assert.equal(titleFor({ context: { kind: "wsl", distro: "Ubuntu" } }), "$ cat SKILL.md");
+});
+
+test("userMessage: explicit skill inputs become one named skill row each", () => {
+  const h = makeHarness();
+  const item = { type: "userMessage", id: "u1", clientId: null, content: [
+    { type: "text", text: "run it", text_elements: [] },
+    { type: "skill", name: "deploy-check", path: "/s/deploy-check/SKILL.md" },
+    { type: "skill", name: "review", path: "/s/review/SKILL.md" },
+  ] };
+  h.onItem(item, false);
+  h.onItem(item, true);
+  assert.deepEqual(h.events, [
+    { kind: "tool_call", toolCallId: "u1:skill:0", title: "Skill: deploy-check", toolKind: "skill", status: "completed" },
+    { kind: "tool_call", toolCallId: "u1:skill:1", title: "Skill: review", toolKind: "skill", status: "completed" },
+  ]);
+});
+
+test("skills/list keeps one bounded lookup in flight and coalesces skills/changed into one rerun", async () => {
+  const h = makeHarness();
+  const requests: Array<{ method: string; params: any; deadlineAt: number; resolve: (value: unknown) => void; reject: (error: unknown) => void }> = [];
+  const peer = {
+    requestWithDeadline: (method: string, params: any, deadlineAt: number) =>
+      new Promise((resolve, reject) => requests.push({ method, params, deadlineAt, resolve, reject })),
+  };
+  (h.driver as any).peer = peer;
+  const before = Date.now();
+  (h.driver as any).refreshSkillCatalog();
+  await nextTask();
+  assert.deepEqual(requests.map(({ method, params }) => [method, params]), [["skills/list", { cwds: ["/tmp/work"] }]]);
+  assert.ok(requests[0]!.deadlineAt > before && requests[0]!.deadlineAt <= Date.now() + 30_000,
+    "an unanswered lookup cannot stay pending forever");
+  const listed = (name: string) => ({ data: [{ cwd: "/tmp/work", errors: [], skills: [
+    { name, path: `/s/${name}/SKILL.md`, scope: "user", enabled: true },
+  ] }] });
+
+  const changed = notificationHandlers(h.driver).get("skills/changed")!;
+  for (let i = 0; i < 50; i++) changed({});
+  await nextTask();
+  assert.equal(requests.length, 1, "a notification storm does not stack requests");
+  requests[0]!.resolve(listed("first"));
+  await nextTask();
+  assert.deepEqual([...(h.driver as any).skillPaths], [["/s/first/SKILL.md", "first"]]);
+  assert.equal(requests.length, 2, "invalidations during the lookup rerun it exactly once");
+  requests[1]!.resolve(listed("fresh"));
+  await nextTask();
+  assert.deepEqual([...(h.driver as any).skillPaths], [["/s/fresh/SKILL.md", "fresh"]]);
+  assert.equal(requests.length, 2);
+
+  (h.driver as any).refreshSkillCatalog();
+  await nextTask();
+  requests[2]!.reject({ code: -32002, message: "request deadline exceeded (skills/list)", requestTimeout: true });
+  await nextTask();
+  assert.deepEqual([...(h.driver as any).skillPaths], [["/s/fresh/SKILL.md", "fresh"]],
+    "a failed or timed-out lookup keeps the last known catalog");
+  (h.driver as any).refreshSkillCatalog();
+  await nextTask();
+  assert.equal(requests.length, 4, "a settled failure does not block later lookups");
+
+  const replacement = { requestWithDeadline: peer.requestWithDeadline };
+  (h.driver as any).peer = replacement;
+  (h.driver as any).refreshSkillCatalog();
+  await nextTask();
+  assert.equal(requests.length, 5, "a restarted server gets its own lookup");
+  requests[3]!.resolve(listed("old-server"));
+  requests[4]!.resolve(listed("new-server"));
+  await nextTask();
+  assert.deepEqual([...(h.driver as any).skillPaths], [["/s/new-server/SKILL.md", "new-server"]],
+    "a replaced server's response is dropped");
+});
+
+test("a skills/list transport that throws synchronously never fails thread start", async () => {
+  const h = makeHarness();
+  (h.driver as any).peer = {
+    request: async () => ({ thread: { id: "fresh-1" } }),
+    requestWithDeadline: () => { throw new Error("transport closed"); },
+  };
+  assert.equal(await h.driver.newSession("/fresh"), "fresh-1");
+  await nextTask();
+  assert.equal((h.driver as any).skillCatalogPeer, null, "the failed lookup settles so later ones can run");
+});
+
+test("commandExecution: a catalog arriving mid-command retitles the row as the skill", () => {
+  const h = makeHarness();
+  const item = { type: "commandExecution", id: "late", command: "cat SKILL.md", cwd: "/tmp/work",
+    commandActions: skillRead("/home/u/.codex/skills/review/SKILL.md") };
+  h.onItem(item, false);
+  (h.driver as any).skillPaths = new Map([["/home/u/.codex/skills/review/SKILL.md", "review"]]);
+  h.onItem({ ...item, exitCode: 0 }, true);
+  assert.deepEqual(h.events, [
+    { kind: "tool_call", toolCallId: "late", title: "$ cat SKILL.md", toolKind: "execute", status: "in_progress" },
+    { kind: "tool_call", toolCallId: "late", title: "Skill: review", toolKind: "skill", status: "completed" },
+  ]);
 });
 
 test("commandExecution: a nonzero exit remains failed even with a completed lifecycle", () => {
