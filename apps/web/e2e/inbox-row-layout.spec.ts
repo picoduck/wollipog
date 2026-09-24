@@ -645,6 +645,7 @@ test("crossing the breakpoint keeps the first visible row and the list's geometr
 
   const anchorTitle = "Orphaned Background Work Beside a Branch";
   let anchorIndex: number | null = null;
+  let checkedTopwardOvershoot = false;
 
   /**
    * How far the reader's row sits OUTSIDE the list's visible band, in pixels; 0 while it is on
@@ -756,17 +757,43 @@ test("crossing the breakpoint keeps the first visible row and the list's geometr
     ).toBeLessThanOrEqual(await cardHeight());
     // Being somewhere inside a taller viewport is insufficient: a scroll reset can move the
     // reading row several cards down while its displacement outside the viewport remains zero.
-    // At the list's end, shrinking content can clamp scrollTop and legitimately change the offset.
-    await expectGeometryPoll(
-      () => list.evaluate((node, { index, before }) => {
+    // At the list's end, shrinking content can clamp scrollTop and move the row down. A jump
+    // toward the top is still a lost reading position, even if the list ends at maximum scroll.
+    const readingOffsetError = async (): Promise<number> => {
+      const { offset, atEnd } = await list.evaluate((node, index) => {
         const row = node.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`);
-        if (!row) return Number.POSITIVE_INFINITY;
-        if (node.scrollTop >= node.scrollHeight - node.clientHeight - 1) return 0;
-        const offset = row.getBoundingClientRect().top - node.getBoundingClientRect().top;
-        return Math.abs(offset - before);
-      }, { index: anchorIndex, before: anchorOffsetBefore }),
+        return {
+          offset: row ? row.getBoundingClientRect().top - node.getBoundingClientRect().top : Number.POSITIVE_INFINITY,
+          atEnd: node.scrollTop >= node.scrollHeight - node.clientHeight - 1,
+        };
+      }, anchorIndex);
+      if (!Number.isFinite(offset)) return Number.POSITIVE_INFINITY;
+      const drift = offset - anchorOffsetBefore;
+      return atEnd ? Math.max(-drift, 0) : Math.abs(drift);
+    };
+    await expectGeometryPoll(
+      readingOffsetError,
       `the first visible row keeps its reading offset across ${from} to ${to}`,
     ).toBeLessThanOrEqual(await cardHeight());
+
+    // Negative control: move the mounted reading row upward while scrollTop stays clamped. The
+    // previous end-of-list exception returned zero for this broken geometry.
+    if (!checkedTopwardOvershoot && await list.evaluate((node) =>
+      node.scrollTop >= node.scrollHeight - node.clientHeight - 1)) {
+      const height = await cardHeight();
+      await list.evaluate((node, { index, distance }) => {
+        node.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`)!.style.translate = `0 -${distance}px`;
+      }, { index: anchorIndex, distance: 3 * height });
+      try {
+        expect(await readingOffsetError(), "a topward overshoot at maximum scroll must fail the reading-offset limit")
+          .toBeGreaterThan(height);
+        checkedTopwardOvershoot = true;
+      } finally {
+        await list.evaluate((node, index) => {
+          node.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`)!.style.translate = "";
+        }, anchorIndex);
+      }
+    }
 
     // Polled on the predicate itself: a width change opens a new measurement epoch, and the
     // re-seeded rows settle over the next frame or two. What must never settle is an overlap or a
@@ -789,6 +816,7 @@ test("crossing the breakpoint keeps the first visible row and the list's geometr
       `neighbouring cards do not leave a hole across ${from} to ${to}`,
     ).toBeLessThan(24);
   }
+  expect(checkedTopwardOvershoot, "the test exercises an end-of-list negative control").toBe(true);
   await expect(list).toBeVisible();
 });
 
