@@ -15,10 +15,14 @@ const template: RunnerContainerTarget = {
 };
 const localDockerHost = process.platform === "win32"
   ? "npipe:////./pipe/docker_engine" : "unix:///var/run/docker.sock";
+const exitedContainerId = "aaaaaaaaaaaa";
 
-function fixture() {
+function fixture(fixtureOptions: { removalFails?: boolean; removalDisappears?: boolean;
+  removalFailsOnce?: boolean } = {}) {
   const launches: Array<{ args: string[]; env?: Record<string, string> }> = [];
   let engineName = "Engine";
+  let removedByDocker = false;
+  let remainingRemovalFailures = fixtureOptions.removalFailsOnce ? 1 : 0;
   const registry = new ContainerTargetRegistry("runner", "host", [template], {
     resolveRuntime: async () => ({ path: "/usr/bin/docker", via: "path",
       launch: { command: "/usr/bin/docker", args: [] } }),
@@ -29,6 +33,14 @@ function fixture() {
       }
       if (args[0] === "version") {
         return { code: 0, stdout: JSON.stringify({ Server: { Components: [{ Name: engineName }] } }), stderr: "" };
+      }
+      if (args[0] === "ps") return { code: 0,
+        stdout: args.includes("status=exited") && !removedByDocker ? `${exitedContainerId}\n` : "", stderr: "" };
+      if (args[0] === "rm" && (fixtureOptions.removalFails || fixtureOptions.removalDisappears ||
+          remainingRemovalFailures > 0)) {
+        if (fixtureOptions.removalDisappears) removedByDocker = true;
+        if (remainingRemovalFailures > 0) remainingRemovalFailures -= 1;
+        return { code: 1, stdout: "", stderr: "container unavailable" };
       }
       if (args.includes("/bin/sh")) return { code: 0, stdout: "/usr/bin/codex\n", stderr: "" };
       if (args.at(-1) === "--version" && args.includes("/usr/bin/codex")) {
@@ -80,8 +92,18 @@ test("Docker target recovers from startup config failure through full readiness 
     assert.equal(recovered.harnessInstallations?.length, 1);
     assert.ok(launches.some(({ args }) => args.includes("--entrypoint") && args.includes("git")),
       "startup failure must rerun the setup check before advertising availability");
-    assert.equal(launches.some(({ args }) => args[0] === "ps" || args[0] === "rm"), false,
-      "Rediscover must not reconcile or remove containers while other targets may have live sessions");
+    const inventories = launches.filter(({ args }) => args[0] === "ps");
+    assert.equal(inventories.length, 2, "both label generations are checked");
+    for (const { args, env } of inventories) {
+      assert.ok(args.includes("status=exited"), "running sessions must be excluded by Docker");
+      assert.equal(env?.DOCKER_HOST, localDockerHost);
+      assert.notEqual(env?.DOCKER_CONFIG, process.env.DOCKER_CONFIG);
+      assert.equal(env?.DOCKER_CONTEXT, undefined);
+    }
+    const removals = launches.filter(({ args }) => args[0] === "rm");
+    assert.deepEqual(removals.map(({ args }) => args), [["rm", exitedContainerId]],
+      "recovery removes each exited container once, without forcing a running container");
+    assert.equal(removals[0]!.env?.DOCKER_HOST, localDockerHost);
     const probes = launches.filter(({ args }) => args[0] === "run" && args.includes("/bin/sh"));
     assert.ok(probes.length > 0);
     for (const { env } of probes) {
@@ -90,6 +112,91 @@ test("Docker target recovers from startup config failure through full readiness 
       assert.equal(env?.DOCKER_HOST, localDockerHost);
       assert.equal(readFileSync(join(env!.DOCKER_CONFIG!, "config.json"), "utf8"), "{}\n");
     }
+  } finally {
+    for (const [name, value] of Object.entries(saved)) restoreEnv(name as keyof typeof saved, value);
+    dockerTargetClientConfig();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Docker recovery stays unavailable after a persistent non-forced removal failure", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-docker-recovery-race-"));
+  const saved = {
+    TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP,
+    DOCKER_HOST: process.env.DOCKER_HOST,
+    DOCKER_CONFIG: process.env.DOCKER_CONFIG, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT,
+  };
+  try {
+    rmSync(dockerTargetClientConfig(), { recursive: true, force: true });
+    setTempDirectory(join(root, "missing"));
+    process.env.DOCKER_HOST = localDockerHost;
+    const { registry, launches } = fixture({ removalFails: true });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.unavailableReason,
+      "Docker client configuration could not be isolated");
+
+    setTempDirectory(root);
+    await registry.refreshInstallations();
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /orphan reconciliation failed/u);
+    assert.deepEqual(launches.filter(({ args }) => args[0] === "rm").map(({ args }) => args),
+      [["rm", exitedContainerId]], "a failed removal must never become a forced kill");
+    assert.equal(launches.some(({ args }) => args[0] === "image" || args[0] === "run"), false,
+      "readiness stops when safe reconciliation cannot complete");
+  } finally {
+    for (const [name, value] of Object.entries(saved)) restoreEnv(name as keyof typeof saved, value);
+    dockerTargetClientConfig();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Docker recovery accepts a container already removed by Docker", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-docker-recovery-autoremove-"));
+  const saved = {
+    TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP,
+    DOCKER_HOST: process.env.DOCKER_HOST,
+    DOCKER_CONFIG: process.env.DOCKER_CONFIG, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT,
+  };
+  try {
+    rmSync(dockerTargetClientConfig(), { recursive: true, force: true });
+    setTempDirectory(join(root, "missing"));
+    process.env.DOCKER_HOST = localDockerHost;
+    const { registry, launches } = fixture({ removalDisappears: true });
+    await registry.initialize();
+    setTempDirectory(root);
+    await registry.refreshInstallations();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(launches.filter(({ args }) => args[0] === "ps").length, 4,
+      "both label generations are rechecked after Docker auto-removes a candidate");
+    assert.deepEqual(launches.filter(({ args }) => args[0] === "rm").map(({ args }) => args),
+      [["rm", exitedContainerId]]);
+  } finally {
+    for (const [name, value] of Object.entries(saved)) restoreEnv(name as keyof typeof saved, value);
+    dockerTargetClientConfig();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Docker recovery retries a failed non-forced removal on the next Rediscover", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-docker-recovery-retry-"));
+  const saved = {
+    TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP,
+    DOCKER_HOST: process.env.DOCKER_HOST,
+    DOCKER_CONFIG: process.env.DOCKER_CONFIG, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT,
+  };
+  try {
+    rmSync(dockerTargetClientConfig(), { recursive: true, force: true });
+    setTempDirectory(join(root, "missing"));
+    process.env.DOCKER_HOST = localDockerHost;
+    const { registry, launches } = fixture({ removalFailsOnce: true });
+    await registry.initialize();
+    setTempDirectory(root);
+    await registry.refreshInstallations();
+    assert.equal(registry.definitions()[0]!.available, false);
+    await registry.refreshInstallations();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.deepEqual(launches.filter(({ args }) => args[0] === "rm").map(({ args }) => args),
+      [["rm", exitedContainerId], ["rm", exitedContainerId]]);
   } finally {
     for (const [name, value] of Object.entries(saved)) restoreEnv(name as keyof typeof saved, value);
     dockerTargetClientConfig();
@@ -146,8 +253,11 @@ test("Docker recovers when its private config disappears during startup context 
     assert.equal(registry.definitions()[0]!.available, true);
     assert.equal(calls.some((args) => args[0] === "image"), true);
     assert.equal(calls.some((args) => args[0] === "run" && args.includes("git")), true);
-    assert.equal(calls.some((args) => args[0] === "ps" || args[0] === "rm"), false,
-      "Rediscover must not remove containers while another target may have live sessions");
+    const inventories = calls.filter((args) => args[0] === "ps");
+    assert.equal(inventories.length, 2);
+    assert.ok(inventories.every((args) => args.includes("status=exited")));
+    assert.equal(calls.some((args) => args[0] === "rm"), false,
+      "an empty exited inventory cannot remove a live session container");
   } finally {
     for (const [name, value] of Object.entries(saved)) restoreEnv(name as keyof typeof saved, value);
     dockerTargetClientConfig();
