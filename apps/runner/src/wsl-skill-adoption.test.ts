@@ -224,6 +224,26 @@ for (const stage of ["restore_intent_durable", "managed_link_preserved", "recove
   });
 }
 
+test("WSL recovery still recognizes and restores journals after the store root is lost", local, async (t) => {
+  const linked = fixture(t);
+  const adopted = await linked.adopt();
+  assert.equal(adopted.status, "adopted");
+  if (adopted.status !== "adopted") return;
+  fs.renameSync(linked.storeRoot, `${linked.storeRoot}-lost`);
+  assert.deepEqual((await linked.list()).operations.map((entry) => entry.state), ["managed_linked"],
+    "the link text still names the managed store version");
+  assert.equal((await linked.restore(adopted.operationId)).status, "restored");
+  assert.match(fs.readFileSync(join(linked.source, "SKILL.md"), "utf8"), /Original instructions/u);
+
+  const preserved = fixture(t);
+  const interrupted = await preserved.adopt({ stage: "source_preserved", command: "k" });
+  assert.equal(interrupted.status, "recovery_required");
+  if (interrupted.status !== "recovery_required") return;
+  fs.renameSync(preserved.storeRoot, `${preserved.storeRoot}-lost`);
+  assert.equal((await preserved.restore(interrupted.operationId)).status, "restored");
+  assert.match(fs.readFileSync(join(preserved.source, "SKILL.md"), "utf8"), /Original instructions/u);
+});
+
 test("WSL restore reports a busy distro home without touching the journal", local, async (t) => {
   const f = fixture(t);
   const adopted = await f.adopt();

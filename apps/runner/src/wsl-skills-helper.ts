@@ -1060,14 +1060,23 @@ def rename_noreplace(source_parent, source, target_parent, target):
     if entry_kind(target_parent, target) != "absent": fail("the rename target is occupied")
     os.rename(source, target, src_dir_fd=source_parent, dst_dir_fd=target_parent)
 
-def adoption_roots(spec):
+def store_root_text(spec):
+    # Recovery names the managed link by text only, so it must work after the store is lost.
+    value = spec.get("storeRoot")
+    if not isinstance(value, str) or not value.startswith("/") or len(value) > 4096 or any(c in value for c in "\0\r\n"):
+        fail("invalid store root")
+    return value
+
+def adoption_roots(spec, open_store=True):
     owner = spec.get("ownerHash", "")
     if not isinstance(owner, str) or not DIGEST.fullmatch(owner): fail("invalid owner")
+    store_root = store_root_text(spec)
     home_fd, home = open_root(os.environ.get("HOME", ""))
-    try: store_fd, store_root = open_root(spec.get("storeRoot", ""))
+    if not open_store: return owner, home_fd, home, None, store_root
+    try: store_fd, resolved = open_root(store_root)
     except:
         os.close(home_fd); raise
-    if store_root != spec.get("storeRoot"):
+    if resolved != store_root:
         os.close(store_fd); os.close(home_fd); fail("store root is not canonical")
     return owner, home_fd, home, store_fd, store_root
 
@@ -1190,12 +1199,9 @@ def inspect(spec):
     if not isinstance(local, str) or not valid_relative(local) or (only is not None and (not isinstance(only, str) or
         not UUID.fullmatch(only))): fail("invalid inspection")
     result = {"parentIdentity": "", "journals": [], "truncated": False}
+    store_root = store_root_text(spec)
     try: home_fd, home = open_root(os.environ.get("HOME", ""))
     except OSError: return result
-    try:
-        store_fd, store_root = open_root(spec.get("storeRoot", ""))
-        os.close(store_fd)
-    except OSError: store_root = ""
     try:
         try: parent = walk(home_fd, local)
         except OSError: return result
@@ -1231,7 +1237,7 @@ def restore(spec):
         not isinstance(digest, str) or not DIGEST.fullmatch(digest) or not isinstance(parent_expected, str) or
         not IDENTITY.fullmatch(parent_expected) or not isinstance(source_expected, str) or
         not IDENTITY.fullmatch(source_expected)): fail("invalid restore request")
-    owner, home_fd, home, store_fd, store_root = adoption_roots(spec)
+    owner, home_fd, home, _, store_root = adoption_roots(spec, open_store=False)
     opened, lease = [], None
     def keep(fd):
         opened.append(fd); return fd
@@ -1289,7 +1295,7 @@ def restore(spec):
         try:
             if lease is not None: release_lease(lease)
         finally:
-            os.close(store_fd); os.close(home_fd)
+            os.close(home_fd)
 
 def main(spec):
     operation = spec.get("operation", "reconcile") if isinstance(spec, dict) else None

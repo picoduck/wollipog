@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { validSkillName, type AgentDefinition, type MachineSkillCandidate } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import type { SkillAdoptionResult } from "./skill-adoption.js";
 import { parseRecoveryInspection, type RecoveryDirectoryFacts } from "./skill-adoption-platform.js";
 import { SKILL_DIRS } from "./skills.js";
 import { validWslDistroName } from "./wsl-context.js";
-import { bootstrapWslSkillsHelper, translatedWslStoreRoot, type WslRun } from "./wsl-skills.js";
+import { bootstrapWslSkillsHelper, type WslRun } from "./wsl-skills.js";
 
 const REJECTED = "Adoption authorization, source or stored version could not be validated. No source directory was replaced.";
 const RECOVERY = "Adoption stopped. Inspect the private journal and preserved original; no automatic restore or cleanup was attempted.";
@@ -35,12 +36,24 @@ export function wslAdoptionDistros(agents: AgentDefinition[]): string[] {
     SKILL_DIRS[agent.driver ?? "acp"] ? [agent.context.distro] : []))];
 }
 
+/** The store as the distro sees it, named through the data directory like the native helpers, so
+ * recovery still recognizes a managed link after the store itself is lost. The store below the data
+ * directory contains no links, so this equals reconciliation's translated store root. */
+async function translatedStore(dataDir: string, distro: string, run: WslRun): Promise<string> {
+  const result = await run({ kind: "wsl", distro }, "wslpath", ["-a", realpathSync(dataDir)], {
+    cwd: "/", timeoutMs: 5_000, maxBuffer: 16 * 1024,
+  });
+  const path = result.stdout.trim().replace(/\/+$/u, "");
+  if (!path.startsWith("/") || path.length > 4096 || /[\0\r\n]/u.test(path)) throw new Error("invalid store path");
+  return `${path}/skills/store`;
+}
+
 async function helper(environment: WslAdoptionEnvironment, distro: string) {
   if (!OWNER.test(environment.ownerHash) || !validWslDistroName(distro)) throw new Error("invalid WSL helper scope");
   const run = environment.run ?? runContextCommand;
   const [path, storeRoot] = await Promise.all([
     bootstrapWslSkillsHelper(distro, environment.ownerHash, run),
-    environment.storeRoot ? environment.storeRoot(distro) : translatedWslStoreRoot(environment.dataDir, distro, run),
+    environment.storeRoot ? environment.storeRoot(distro) : translatedStore(environment.dataDir, distro, run),
   ]);
   return {
     storeRoot,
