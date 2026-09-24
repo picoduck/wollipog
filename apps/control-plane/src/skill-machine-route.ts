@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
+  machineSkillAdoptionRecoveryRequirement,
+  machineSkillAdoptionRequirement,
   runnerSupportsProtocol,
   runnerCapabilityRequirement,
   validSkillName,
@@ -85,10 +87,19 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     }
     return true;
   };
-  const adoptionAvailable = (runnerId: string, reply: FastifyReply) => {
+  const adoptionAvailable = (runnerId: string, reply: FastifyReply, candidate: MachineSkillCandidate) => {
     if (!snapshotAvailable(runnerId, reply)) return false;
-    if (deps.db.getRunner(runnerId)?.os !== "linux") {
-      reply.code(409).send({ error: "Machine skill adoption currently requires a Linux runner." });
+    const runner = deps.db.getRunner(runnerId)!;
+    const requirement = machineSkillAdoptionRequirement(runner.os, candidate.context);
+    if (!requirement) {
+      reply.code(409).send({ error: "Machine skill adoption is not available for this Machine or location." });
+      return false;
+    }
+    // Snapshot-only Linux runners keep the read-only preflight report; its adoption token and the
+    // mutation route require machineSkillAdoption separately. Other platforms gate the whole flow.
+    if (runner.os !== "linux" && !runnerSupportsProtocol(runner.protocolVersion, requirement.capability)) {
+      reply.code(409).send({ error: runnerCapabilityRequirement(runner.protocolVersion, requirement.capability,
+        requirement.label) });
       return false;
     }
     return true;
@@ -99,14 +110,15 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       reply.code(409).send({ error: "Machine is offline." });
       return false;
     }
-    if (!runnerSupportsProtocol(runner.protocolVersion, "machineSkillAdoptionRecovery")) {
-      reply.code(409).send({ error: runnerCapabilityRequirement(
-        runner.protocolVersion, "machineSkillAdoptionRecovery", "Machine skill adoption recovery",
-      ) });
+    const requirement = machineSkillAdoptionRecoveryRequirement(runner.os);
+    if (!requirement) {
+      reply.code(409).send({ error: "Machine skill adoption recovery currently requires a Linux or macOS runner." });
       return false;
     }
-    if (runner.os !== "linux") {
-      reply.code(409).send({ error: "Machine skill adoption recovery currently requires a Linux runner." });
+    if (!runnerSupportsProtocol(runner.protocolVersion, requirement.capability)) {
+      reply.code(409).send({ error: runnerCapabilityRequirement(
+        runner.protocolVersion, requirement.capability, requirement.label,
+      ) });
       return false;
     }
     return true;
@@ -243,7 +255,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
     if (discovery.owner !== ownerKey(principal) || !discovery.preview) return reply.code(404).send({ error: "Preview not found." });
     const preview = discovery.preview;
     if ((req.body as { previewId?: unknown } | null)?.previewId !== preview.id) return reply.code(409).send({ error: "Review the current snapshot first." });
-    if (!adoptionAvailable(discovery.runnerId, reply)) return;
+    if (!adoptionAvailable(discovery.runnerId, reply, preview.candidate)) return;
     const accessible = (human: NonNullable<ReturnType<typeof authorize>>) => {
       const skill = deps.db.getSkillByName(preview.candidate.name);
       return !skill || deps.db.canAccessSkill(human, skill.id);
@@ -263,7 +275,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       const currentPrincipal = authorize(req, reply, discovery.runnerId);
       if (!currentPrincipal) return;
       if (ownerKey(currentPrincipal) !== discovery.owner || !accessible(currentPrincipal)) return reply.code(404).send({ error: "Preview not found." });
-      if (!adoptionAvailable(discovery.runnerId, reply)) return;
+      if (!adoptionAvailable(discovery.runnerId, reply, preview.candidate)) return;
       if (result.type !== "skill_snapshot_result" || result.runnerId !== discovery.runnerId || result.requestId !== requestId || result.error || !result.snapshot) throw new Error();
       const { snapshot } = result;
       const candidate = preview.candidate;
@@ -304,7 +316,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
         body.confirmation !== "explicit") {
       return reply.code(409).send({ error: "Run and confirm the current adoption preflight first." });
     }
-    if (!adoptionAvailable(discovery.runnerId, reply)) return;
+    if (!adoptionAvailable(discovery.runnerId, reply, preview.candidate)) return;
     const runner = deps.db.getRunner(discovery.runnerId);
     if (!runnerSupportsProtocol(runner?.protocolVersion, "machineSkillAdoption")) {
       return reply.code(409).send({ error: runnerCapabilityRequirement(runner?.protocolVersion, "machineSkillAdoption", "Machine skill adoption") });
@@ -325,7 +337,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
           ownerKey(currentPrincipal) !== discovery.owner) {
         return reply.code(409).send({ error: "The adoption approval changed or expired. Preview the source again." });
       }
-      if (!adoptionAvailable(discovery.runnerId, reply)) return;
+      if (!adoptionAvailable(discovery.runnerId, reply, preview.candidate)) return;
       if (source.type !== "skill_snapshot_result" || source.requestId !== sourceRequestId ||
           source.runnerId !== discovery.runnerId || source.error || !source.snapshot) throw new Error();
       const snapshot = source.snapshot;
@@ -353,7 +365,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
           ownerKey(afterSyncPrincipal) !== discovery.owner) {
         return reply.code(409).send({ error: "Assignments or connectivity changed while preparing adoption. Run preflight again." });
       }
-      if (!adoptionAvailable(discovery.runnerId, reply)) return;
+      if (!adoptionAvailable(discovery.runnerId, reply, preview.candidate)) return;
       const afterSyncRunner = deps.db.getRunner(discovery.runnerId);
       if (!runnerSupportsProtocol(afterSyncRunner?.protocolVersion, "machineSkillAdoption")) {
         return reply.code(409).send({ error: runnerCapabilityRequirement(afterSyncRunner?.protocolVersion, "machineSkillAdoption", "Machine skill adoption") });

@@ -1,6 +1,11 @@
 import { useState } from "react";
 import type { RunnerView, SkillFile } from "@wollipog/protocol";
-import { runnerSupportsProtocol } from "@wollipog/protocol";
+import {
+  machineSkillAdoptionRecoveryRequirement,
+  machineSkillAdoptionRequirement,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
+  runnerSupportsProtocol,
+} from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import type {
   MachineSkillAdoptionPreflight,
@@ -59,10 +64,12 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
   const [recovery, setRecovery] = useState<MachineSkillRecovery | null>(null);
   const [restoreConfirmed, setRestoreConfirmed] = useState<string | null>(null);
   const selectedRunner = compatible.find((runner) => runner.runnerId === runnerId);
-  const recoverySupported = selectedRunner?.os === "linux" && runnerSupportsProtocol(
-    selectedRunner?.protocolVersion,
-    "machineSkillAdoptionRecovery",
-  );
+  const recoveryRequirement = machineSkillAdoptionRecoveryRequirement(selectedRunner?.os);
+  const recoverySupported = !!recoveryRequirement &&
+    runnerSupportsProtocol(selectedRunner?.protocolVersion, recoveryRequirement.capability);
+  const adoptionRequirement = preview && machineSkillAdoptionRequirement(selectedRunner?.os, preview.candidate.context);
+  const adoptionSupported = !!adoptionRequirement &&
+    runnerSupportsProtocol(selectedRunner?.protocolVersion, adoptionRequirement.capability);
   const close = () => {
     if (busy) return;
     if (discovery) void api.discardMachineSkillDiscovery(discovery.discoveryId).catch(() => {});
@@ -155,7 +162,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
   </>}>
     <div className="form skills-machine-import">
       <p>Import a read-only snapshot. After an identical library version is assigned, a separate confirmed action can preserve the original and replace it with a managed link. New skills stay unassigned; accepted updates deploy to current assignments on unpinned machines.</p>
-      <p className="skills-hint">Snapshot import requires protocol 111 on Linux, protocol 119 on Windows, protocol 120 on macOS, or protocol 125 for WSL locations. Adoption requires a connected Linux runner on protocol 115 or newer. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
+      <p className="skills-hint">Snapshot import requires protocol 111 on Linux, protocol 119 on Windows, protocol 120 on macOS, or protocol 125 for WSL locations. Adoption requires a connected Linux runner on protocol 115 or newer, or a macOS runner on protocol {RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption} or newer. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
       <label className="field"><span>Machine</span><Select label="Machine" value={runnerId} disabled={busy || discovery !== null}
         options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={selectRunner} /></label>
       {compatible.length === 0 && <p>No compatible connected machines. Update a Linux, macOS, or Windows runner to enable snapshot imports.</p>}
@@ -165,7 +172,9 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
       {selectedRunner && !recoverySupported && <p className="skills-hint">
         {selectedRunner.os === "linux"
           ? "Recovery inspection requires protocol 116 or newer. Update this runner to inspect or restore adoption journals."
-          : "Recovery inspection and source adoption require a Linux runner. Read-only snapshot import remains available."}
+          : selectedRunner.os === "macos"
+            ? `Recovery inspection and source adoption on macOS require protocol ${RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption} or newer. Update this runner to adopt skills or restore adoption journals.`
+            : "Recovery inspection and source adoption require a Linux or macOS runner. Read-only snapshot import remains available."}
       </p>}
       {error && <p className="form-error" role="alert">{error}</p>}
       {imported && <p role="status">Imported: {imported}. The source directory was not adopted.</p>}
@@ -220,8 +229,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
         })}
         {preview.disposition === "update" && <label className="field"><span><Checkbox label="Accept Version Diff and Update Existing Assignments" checked={accepted} disabled={busy} onChange={setAccepted} /> Accept Version Diff and Update Existing Assignments</span></label>}
         {preview.disposition === "identical" && <>
-          <button className="btn" type="button" disabled={busy || selectedRunner?.os !== "linux" ||
-            !runnerSupportsProtocol(selectedRunner.protocolVersion, "machineSkillAdoption")}
+          <button className="btn" type="button" disabled={busy || !adoptionSupported}
             onClick={() => void checkAdoption()}>Check Adoption</button>
           {preflight && <section className="skills-section">
             <h4>Adoption Safety Check</h4>

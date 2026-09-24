@@ -15,9 +15,19 @@ import {
   type SkillFile,
 } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
+import type {
+  PlatformAdoptionRequest,
+  PlatformRestoreRequest,
+  RecoveryDirectoryFacts,
+  RecoveryJournalFacts,
+  RecoverySourceFacts,
+  SkillAdoptionPlatformHelper,
+} from "./skill-adoption-platform.js";
 
 const MACOS_SNAPSHOT_ASSET = "wollipog/macos-skill-snapshots";
 const DIGEST = /^[0-9a-f]{64}$/u;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
+const IDENTITY = /^\d+:\d+$/u;
 let developmentHelper: string | null = null;
 let packagedHelper: string | null = null;
 
@@ -184,4 +194,84 @@ export function readMacosSkillCandidate(
       skillVersionDigest(first.files) !== skillVersionDigest(second.files) ||
       JSON.stringify(first.executablePaths) !== JSON.stringify(second.executablePaths)) throw new Error();
   return { files: first.files, executablePaths: first.executablePaths };
+}
+
+export function parseMacosRecoveryInspection(output: Buffer): RecoveryDirectoryFacts {
+  const reader = new Reader(output);
+  reader.magic("WMS1I");
+  const parentIdentity = reader.text(47);
+  const count = reader.u32();
+  if ((parentIdentity !== "" && !IDENTITY.test(parentIdentity)) || count > 64 ||
+      (parentIdentity === "" && count !== 0)) throw new Error();
+  const journals: RecoveryJournalFacts[] = [];
+  for (let index = 0; index < count; index++) {
+    const operationId = reader.text(36);
+    const intent = reader.text(8192);
+    const name = reader.text(64);
+    const digest = reader.text(64);
+    const originalIdentity = reader.text(47);
+    const kind = reader.u8();
+    const sourceIdentity = reader.text(47);
+    const role = reader.u8();
+    if (!UUID.test(operationId) || (name !== "" && !validSkillName(name)) || (digest !== "" && !DIGEST.test(digest)) ||
+        (originalIdentity !== "" && !IDENTITY.test(originalIdentity)) ||
+        (sourceIdentity !== "" && !IDENTITY.test(sourceIdentity)) || kind > 3 || role > 3 ||
+        (kind === 2) !== (role !== 0) || (kind !== 1 && sourceIdentity !== "")) throw new Error();
+    const source: RecoverySourceFacts = kind === 0 ? { kind: "absent" }
+      : kind === 1 ? { kind: "directory", identity: sourceIdentity || null }
+        : kind === 2 ? { kind: "link", role: role === 1 ? "managed" : role === 2 ? "recovery" : "foreign" }
+          : { kind: "other" };
+    journals.push({ operationId, intent, name, digest, originalIdentity: originalIdentity || null, source });
+  }
+  const truncated = reader.u8();
+  if (truncated > 1) throw new Error();
+  reader.end();
+  return { parentIdentity: parentIdentity || null, journals, truncated: truncated === 1 };
+}
+
+/** Run one mutating helper operation with an empty environment, so no inherited variable can
+ * reach the helper's test-only checkpoint. Output is returned even after a failure: the progress
+ * lines decide whether recovery evidence may exist. */
+function runMutation(args: string[], helper?: string): { lines: string[]; succeeded: boolean } {
+  let executable: string;
+  try {
+    executable = helper ?? resolveMacosSkillSnapshotHelper();
+  } catch {
+    return { lines: [], succeeded: false };
+  }
+  const result = spawnSync(executable, args, { encoding: "buffer", env: {}, timeout: 30_000, maxBuffer: 64 * 1024 });
+  const stdout = Buffer.isBuffer(result.stdout) ? result.stdout.toString("utf8") : "";
+  return { lines: stdout.split("\n"), succeeded: !result.error && !result.signal && result.status === 0 };
+}
+
+/** Map helper progress lines onto the runner's adoption outcome. */
+export function macosAdoptionOutcome(lines: string[], succeeded: boolean): { journal: boolean; adopted: boolean } {
+  return { journal: lines.includes("journal"), adopted: succeeded && lines.includes("adopted") };
+}
+
+export function macosAdoptionArguments(request: PlatformAdoptionRequest): string[] {
+  return ["adopt", request.home, request.localSourceDirectory, request.sourceDirectory, request.name,
+    request.generation, request.digest, request.dataDir, request.operationId,
+    ...(request.providerAccountId ? [request.providerAccountId] : [])];
+}
+
+export function macosRestoreArguments(request: PlatformRestoreRequest): string[] {
+  return ["restore", request.home, request.localSourceDirectory, request.dataDir, request.operationId,
+    request.name, request.digest, request.parentIdentity, request.sourceIdentity];
+}
+
+/** The fixed native helper owns every descriptor-anchored step of macOS adoption and recovery. */
+export function macosSkillAdoptionHelper(helper?: string): SkillAdoptionPlatformHelper {
+  return {
+    adopt: (request) => {
+      const run = runMutation(macosAdoptionArguments(request), helper);
+      return macosAdoptionOutcome(run.lines, run.succeeded);
+    },
+    inspect: (request) => parseMacosRecoveryInspection(runHelper(["inspect", request.home,
+      request.localSourceDirectory, request.dataDir, ...(request.operationId ? [request.operationId] : [])], helper)),
+    restore: (request) => {
+      const run = runMutation(macosRestoreArguments(request), helper);
+      return run.succeeded && run.lines.includes("restored");
+    },
+  };
 }

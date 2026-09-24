@@ -11,11 +11,12 @@ import { SkillsView } from "../components/SkillsView.js";
 import "../styles.css";
 
 const accountScopes = new URLSearchParams(location.search).has("accountScopes");
+const macosAdoption = new URLSearchParams(location.search).has("macosAdoption");
 
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "runner-host",
-  os: new URLSearchParams(location.search).has("macos")
+  os: new URLSearchParams(location.search).has("macos") || macosAdoption
     ? "macos"
     : new URLSearchParams(location.search).has("windows") || new URLSearchParams(location.search).has("wslSkills")
       ? "windows" : "linux",
@@ -46,6 +47,8 @@ const runner: RunnerView = {
   lastSeen: 1,
   protocolVersion: accountScopes
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.accountScopedAgentSkills
+    : macosAdoption
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption
     : new URLSearchParams(location.search).has("legacySkills")
     ? 1
     : new URLSearchParams(location.search).has("legacyRecovery")

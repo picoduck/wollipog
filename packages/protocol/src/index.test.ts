@@ -8,6 +8,8 @@ import {
   isControlPlaneService,
   isDurableSessionCommandErrorCode,
   isTerminalDurableDeliveryState,
+  machineSkillAdoptionRecoveryRequirement,
+  machineSkillAdoptionRequirement,
   DURABLE_DELIVERY_STATES,
   type DurableDeliveryState,
   LEGACY_CONTROL_PLANE_SERVICE,
@@ -193,8 +195,21 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
   stopped: "done",
 };
 
-test("PROTOCOL_VERSION is 180", () => {
-  assert.equal(PROTOCOL_VERSION, 180);
+test("machine skill adoption is capability-gated per platform", () => {
+  assert.deepEqual(machineSkillAdoptionRequirement("linux")?.capability, "machineSkillAdoption");
+  assert.deepEqual(machineSkillAdoptionRequirement("macos")?.capability, "nativeMacosMachineSkillAdoption");
+  assert.equal(machineSkillAdoptionRequirement("windows"), null);
+  assert.equal(machineSkillAdoptionRequirement("macos", { kind: "wsl", distro: "Ubuntu" }), null);
+  assert.equal(machineSkillAdoptionRequirement(undefined), null);
+  assert.deepEqual(machineSkillAdoptionRecoveryRequirement("linux")?.capability, "machineSkillAdoptionRecovery");
+  assert.deepEqual(machineSkillAdoptionRecoveryRequirement("macos")?.capability, "nativeMacosMachineSkillAdoption");
+  assert.equal(machineSkillAdoptionRecoveryRequirement("windows"), null);
+});
+
+test("PROTOCOL_VERSION is 181", () => {
+  assert.equal(PROTOCOL_VERSION, 181);
+  assert.equal(runnerSupportsProtocol(180, "nativeMacosMachineSkillAdoption"), false);
+  assert.equal(runnerSupportsProtocol(181, "nativeMacosMachineSkillAdoption"), true);
   assert.equal(runnerSupportsProtocol(179, "providerAuthenticationAccountRecovery"), false);
   assert.equal(runnerSupportsProtocol(180, "providerAuthenticationAccountRecovery"), true);
   assert.equal(runnerSupportsProtocol(178, "orchestratorImageToolResults"), false);

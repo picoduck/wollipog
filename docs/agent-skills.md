@@ -1,7 +1,7 @@
 # Agent Skills Management and Deployment
 
 Status: managed Linux/macOS/Windows and mixed-context WSL deployment, Git import,
-Linux/macOS/Windows/WSL machine snapshots, guarded Linux adoption/recovery, version history with
+Linux/macOS/Windows/WSL machine snapshots, guarded Linux and macOS adoption/recovery, version history with
 library rollback, machine-wide version pins, and assignable groups implemented. Project/workspace
 scope and opt-in automatic Git updates remain deferred.
 
@@ -107,7 +107,9 @@ is documented below.
 the machine snapshot preview. Import consumes that preview, so preview the source again after
 importing it and creating an explicit assignment. This owner/admin-only endpoint is read-only:
 it does not adopt a directory, create assignments, change pins, or send a deployment command.
-It uses the same online Linux/protocol-111 gate and bounded opaque-candidate read as import.
+It uses the same online snapshot gate and bounded opaque-candidate read as import. Linux runners keep
+the read-only report from protocol 111; macOS runners need protocol 181, and other platforms and WSL
+locations are refused before any command is sent.
 
 The source is read again and must match the preview's full content digest and discovery identity.
 After that read, current ownership, effective direct/group assignments, disabled overrides, and
@@ -123,15 +125,16 @@ not current filesystem links or observed reads, especially for an unmanaged cano
 It does not certify which running harnesses have loaded those files.
 
 `status: "prerequisites_met"` is an observation, not an adoption authorization. On a protocol-115
-Linux runner it also mints a one-use, preview-bound adoption token. Closing, importing, replacing,
+Linux runner or a protocol-181 macOS runner it also mints a one-use, preview-bound adoption token. Closing, importing, replacing,
 or expiring the preview invalidates it. The owner/admin must separately confirm the operation and
 any named shared-directory readers. Manual invocation variants remain blocked because their
 deployed frontmatter can differ from the approved source bytes.
 
 ### Internal recoverable adoption transaction
 
-The runner's `adoptMachineSkill` module implements the Linux filesystem transaction. Protocol 115
-exposes it through a serialized runner command, owner/admin API, and the machine-import dialog.
+The runner's `adoptMachineSkill` module implements the Linux filesystem transaction in-process.
+Protocol 115 exposes it through a serialized runner command, owner/admin API, and the machine-import
+dialog. Protocol 181 adds the same transaction on native macOS (see below).
 Its trusted caller must resolve the opaque candidate and expiry, verify the durable
 library version and current explicit assignment/invocation/shared-directory consent, and serialize
 the whole operation with reconciliation and store GC. A read-only preflight report is not that grant.
@@ -167,12 +170,43 @@ the substituted tree, which is detected as an identity mismatch rather than dele
 with reconciliation/GC, rechecks the latest desired digest and targets, and runs a solicited sync
 first so the target is materialized. Lost or uncorrelated results instruct the operator to inspect
 for a journal before retrying. Backups are intentionally retained without automatic cleanup.
-Adoption remains Linux-only. Windows-hosted WSL locations support snapshot import but not source
-replacement; standalone WSL runners report Linux and use the Linux adoption path.
+Adoption is available on Linux (protocol 115) and native macOS (protocol 181). Native Windows and
+Windows-hosted WSL locations support snapshot import but not yet source replacement; standalone WSL
+runners report Linux and use the Linux adoption path. Each platform has its own capability, so an
+older runner keeps the previous refusal and never receives an adoption or recovery command.
+
+### Native macOS adoption
+
+macOS has no descriptor-relative path API in Node, so the fixed, runner-owned native helper that
+already reads macOS snapshots (`apps/runner/native/macos-skill-snapshots.c`) performs every
+filesystem step of adoption, recovery inspection, and restore. The runner validates the command,
+resolves the candidate and credential home, holds the provider-home lease, and runs its
+authorization guard before launching the helper once, synchronously, so no runner state can change
+in between. The helper then repeats the Linux sequence under pinned no-follow descriptors:
+`openat` walks with a flush of each parent, two bounded content passes against the discovery
+generation and the approved digest for both source and store, `mkdirat` of the mode-0700 journal
+with a mode-0600 `intent.json`, `renameatx_np(RENAME_EXCL)` of the original into the journal,
+identity and content checks of the preserved tree, and an exclusive `symlinkat` of the store-target
+link followed by the same parent, store, and link verification. Executable files and hard links are
+refused, the journal records use the Linux format, and nothing is unlinked, overwritten, or restored
+automatically. Journal records and each rename or link publication are flushed with `F_FULLFSYNC`
+(falling back to `fsync`), because plain `fsync` on macOS does not force the drive cache.
+
+The helper computes the canonical version digest itself (the same SHA-256 JSON file manifest ordered
+by UTF-16 code units) and refuses paths that `validSkillFilePath` rejects or that are not valid
+UTF-8, so a digest disagreement can only refuse adoption. It prints `journal` before its first
+mutation; the runner reports `recovery_required` for any stop after that line and a clean rejection
+before it. Recovery inspection returns bounded descriptor-anchored facts for each journal, and the
+runner parses the journal and applies the same state machine as Linux. Restore passes the journal's
+identities and digest back to the helper, which reverifies them before moving the managed link into
+the journal and publishing the exclusive recovery link. Mutating operations run with an empty
+environment; the helper's test-only checkpoint, used by the macOS Platform Isolation tests to stop,
+fail, or kill the helper at every journal boundary, is therefore unreachable from the runner.
 
 ### Adoption recovery inspection and restore
 
-Protocol 116 adds a bounded recovery command. **Inspect Recovery** asks an online Linux runner to
+Protocol 116 adds a bounded recovery command (protocol 181 on macOS). **Inspect Recovery** asks an
+online Linux or macOS runner to
 scan at most 4,096 raw entries in each known native harness directory and return at most 64 validated
 journals. The control plane accepts only fixed harness-relative journal paths and projected operation
 fields; arbitrary client paths and malformed runner results are rejected. Inspection and restore are
@@ -545,7 +579,7 @@ desired-state reads stay unknown through manual sync until an authoritative refr
    enable/disable; symlink deployment for native Claude Code and Codex; Skills view and
    per-machine section.
 2. **Phase 2 (implemented)** — git upstream sync, groups as assignable units, invocation-mode
-   transforms, drift detection and guarded Linux adoption/recovery, versions/pin/rollback, and
+   transforms, drift detection and guarded Linux/macOS adoption/recovery, versions/pin/rollback, and
    Windows-junction plus mixed-context WSL support.
 3. **Phase 3** — project-scoped skills, usage analytics, sharing/export, edit-in-session,
    container mounts.
