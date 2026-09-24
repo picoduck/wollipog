@@ -39,7 +39,10 @@ export function SkillsUnavailableNotice({ skillNames }: { skillNames: string[] |
 }
 
 /** Fetches the Machine's assigned skills only for container and cloud sessions; host sessions
- * never issue the request and never render the notice. */
+ * never issue the request and never render the notice. No push event announces assignment changes,
+ * so the list is re-read whenever the tab regains visibility or focus, which covers a change made
+ * in another tab or on another device; a change made in this tab's Skills view remounts the
+ * session anyway. */
 export function SessionSkillsUnavailableNotice({ runnerId, agentId, adapter }: {
   runnerId: string;
   agentId: string | null | undefined;
@@ -52,13 +55,28 @@ export function SessionSkillsUnavailableNotice({ runnerId, agentId, adapter }: {
   useEffect(() => {
     setSkillNames([]);
     if (!unavailable) return;
-    let cancelled = false;
-    void api.runnerSkills(runnerId).then((response) => {
-      if (!cancelled) setSkillNames(assignedSkillNamesForAgent(response.desired ?? [], agentId));
-    }, () => {
-      if (!cancelled) setSkillNames(null);
-    });
-    return () => { cancelled = true; };
+    let disposed = false;
+    let generation = 0;
+    const load = () => {
+      const current = ++generation;
+      const live = () => !disposed && current === generation;
+      void api.runnerSkills(runnerId).then((response) => {
+        if (live()) setSkillNames(assignedSkillNamesForAgent(response.desired ?? [], agentId));
+      }, () => {
+        if (live()) setSkillNames(null);
+      });
+    };
+    const reloadWhenVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    load();
+    document.addEventListener("visibilitychange", reloadWhenVisible);
+    window.addEventListener("focus", load);
+    return () => {
+      disposed = true;
+      document.removeEventListener("visibilitychange", reloadWhenVisible);
+      window.removeEventListener("focus", load);
+    };
   }, [api, runnerId, agentId, unavailable]);
   if (!unavailable || skillNames?.length === 0) return null;
   return <SkillsUnavailableNotice skillNames={skillNames} />;

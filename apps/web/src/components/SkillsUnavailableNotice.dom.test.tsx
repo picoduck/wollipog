@@ -17,7 +17,7 @@ const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
 for (const [name, value] of Object.entries({
   window: domWindow, document: domWindow.document, navigator: domWindow.navigator,
-  HTMLElement: domWindow.HTMLElement, Node: domWindow.Node, React, IS_REACT_ACT_ENVIRONMENT: true,
+  HTMLElement: domWindow.HTMLElement, Node: domWindow.Node, Event: domWindow.Event, React, IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
 const desired: RunnerSkillsResponse["desired"] = [
@@ -92,4 +92,40 @@ test("an unreadable assignment list still reports the absence, without names", a
   assert.equal(result.label, "Skills Unavailable on This Target");
   assert.match(result.text, /unavailable on container and cloud targets/u);
   assert.doesNotMatch(result.text, /Assigned/u);
+});
+
+test("returning to the tab re-reads assignments changed elsewhere", async () => {
+  let current: RunnerSkillsResponse["desired"] = [];
+  let calls = 0;
+  const client = {
+    ...api,
+    runnerSkills: async () => { calls += 1; return { desired: current, reported: null }; },
+  } as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const label = () => container.querySelector("aside")?.getAttribute("aria-label") ?? null;
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={client}>
+        <SessionSkillsUnavailableNotice runnerId="runner-1" agentId="claude" adapter="container" />
+      </ApiProvider>,
+    ));
+    assert.equal(label(), null);
+
+    current = desired;
+    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("focus")); });
+    assert.equal(label(), "Skills Unavailable on This Target");
+    assert.match(container.textContent ?? "", /2 Assigned Skills: deploy, review/u);
+
+    current = [];
+    await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+    assert.equal(label(), null);
+    assert.equal(calls, 3);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+  await act(async () => { domWindow.dispatchEvent(new domWindow.Event("focus")); });
+  assert.equal(calls, 3, "an unmounted notice stops listening");
 });
