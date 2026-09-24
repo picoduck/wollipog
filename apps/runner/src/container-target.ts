@@ -82,9 +82,9 @@ export function podmanDefaultMountsSafeForPaths(roots: PodmanMountConfigRoots): 
             content.split(/\r?\n/u).some((line) => {
               const trimmed = line.trim();
               if (trimmed === "" || trimmed.startsWith("#")) return false;
-              // TOML basic quoted keys may spell any character with a Unicode escape.
-              // Fail closed rather than guessing whether an escaped key names a mount.
-              return isMountsConf || /\\(?:u[\da-fA-F]{4}|U[\da-fA-F]{8})/u.test(trimmed) ||
+              // TOML quoted keys can hide a mount name with escapes, including \x in TOML 1.1.
+              // Reject escapes rather than guessing which syntax a Podman version accepts.
+              return isMountsConf || trimmed.includes("\\") ||
                 /\b(?:mounts|volumes|remote|active_service|remote_uri)\b["']?\s*=/iu.test(trimmed);
             })) return false;
       } catch (error) {
@@ -383,6 +383,9 @@ export class ContainerTargetRegistry {
       const name = `wollipog-probe-${this.runnerKey}-${probeKey}`;
       // A named, runner-labelled container can be forcibly removed after a client timeout
       // and found by startup orphan reconciliation if removal itself fails.
+      if (template.runtime === "podman" && !this.podmanMountsSafe()) {
+        return { code: 1, stdout: "", stderr: "" };
+      }
       const result = await this.deps.run(runtime.launch.command, [
         ...runtime.launch.args, "run", "--rm", "--name", name,
         ...containerLabelArgs(this.runnerKey, template.id),
@@ -503,6 +506,10 @@ export class ContainerTargetRegistry {
         }
         try {
           const opts = { env: await this.setupEnvironment(template, runtime, home), replaceEnv: true };
+          if (template.runtime === "podman" && !this.podmanMountsSafe()) {
+            failed = PODMAN_DEFAULT_MOUNTS_REASON;
+            break;
+          }
           const result = await this.deps.run(runtime.launch.command,
             [...prefix, ...setupCheckArgs(template, check, this.runnerKey)], { ...opts, timeoutMs: 30_000 });
           if (result.code !== 0 || result.timedOut || result.errorCode) {
@@ -527,11 +534,13 @@ export class ContainerTargetRegistry {
         if (failed) break;
       }
       const installations = failed ? new Map() : await this.discoverInstallations(template, runtime, id);
+      const mountsUnsafe = template.runtime === "podman" && !this.podmanMountsSafe();
       this.prepared.set(id, {
         config: template,
         runtime,
         installations,
-        definition: failed ? { ...base, unavailableReason: failed } : {
+        definition: mountsUnsafe ? { ...base, unavailableReason: PODMAN_DEFAULT_MOUNTS_REASON } :
+          failed ? { ...base, unavailableReason: failed } : {
           ...base, available: true,
           ...(installations.size ? { harnessInstallations: [...installations.values()].map((item) => item.info) } : {}),
         },
@@ -552,6 +561,11 @@ export class ContainerTargetRegistry {
         continue;
       }
       const installations = await this.discoverInstallations(item.config, item.runtime, id);
+      if (item.config.runtime === "podman" && !this.podmanMountsSafe()) {
+        item.definition = { ...item.definition, available: false, unavailableReason: PODMAN_DEFAULT_MOUNTS_REASON };
+        item.installations = undefined;
+        continue;
+      }
       item.installations = installations;
       item.definition = {
         ...item.definition,
@@ -625,6 +639,9 @@ export class ContainerTargetRegistry {
       hostAgentArgs: [...hostAgentArgs],
       agentCommand: agent.command,
       agentArgs: agent.args ?? [],
+      ...(prepared.config.runtime === "podman" ? { verifyDefaultMounts: () => {
+        if (!this.podmanMountsSafe()) throw new Error(PODMAN_DEFAULT_MOUNTS_REASON);
+      } } : {}),
     };
   }
 }

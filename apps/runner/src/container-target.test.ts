@@ -8,6 +8,7 @@ import type { ExecutionTargetRef } from "@wollipog/protocol";
 import type { RunnerContainerTarget } from "./config.js";
 import { CANONICAL_CONTAINER_LABELS, LEGACY_CONTAINER_LABELS } from "./container-identity.js";
 import { ContainerTargetRegistry, containerSetupCheckDigest, containerTargetId, podmanDefaultMountsSafeForPaths, targetProbeEnvironment } from "./container-target.js";
+import { spawnAgent } from "./spawn.js";
 
 const image = `example/agent@sha256:${"a".repeat(64)}`;
 const template: RunnerContainerTarget = {
@@ -293,9 +294,12 @@ test("Podman rejects a default mount added after registration before session lau
       workspaceStrategy: definition.workspaceStrategy, adapter: definition.adapter,
       boundaries: definition.boundaries, environment: definition.environment,
     };
+    const reusableIsolation = registry.isolation(ref, "codex", "codex", [], "session-1");
     writeFileSync(mounts, "/synthetic-host-credentials:/run/secrets/host:ro\n");
     assert.match(registry.validationError(ref, true, { kind: "native" }, "codex") ?? "", /default mounts/u);
     assert.throws(() => registry.isolation(ref, "codex", "codex", [], "session-1"), /default mounts/u);
+    assert.throws(() => spawnAgent({ command: "git", args: ["--version"], cwd: config,
+      isolation: reusableIsolation }), /default mounts/u, "later terminal launches recheck mutable defaults");
     writeFileSync(mounts, "# no implicit host mounts\n");
     writeFileSync(join(config, "containers", "containers.conf"), "[engine]\nremote = true\n");
     assert.match(registry.validationError(ref, true, { kind: "native" }, "codex") ?? "", /default mounts/u);
@@ -305,6 +309,66 @@ test("Podman rejects a default mount added after registration before session lau
   } finally {
     if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
     else process.env.XDG_CONFIG_HOME = previousConfigHome;
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Podman setup and probes stop if defaults change during readiness", {
+  skip: process.platform !== "linux" || process.getuid?.() === 0,
+}, async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-podman-readiness-mount-test-"));
+  const mounts = join(config, "containers", "mounts.conf");
+  mkdirSync(join(config, "containers"));
+  writeFileSync(mounts, "# initially safe\n");
+  try {
+    const runs: string[][] = [];
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      podmanMountsSafe: podmanMountFixture(config),
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
+        if (args[0] === "run") {
+          runs.push(args);
+          writeFileSync(mounts, "/synthetic-host-credentials:/run/secrets/host:ro\n");
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(runs.length, 1, "a changed default blocks discovery probes after setup");
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /default mounts/u);
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Podman does not start a setup check after local-mode inspection adds a default mount", {
+  skip: process.platform !== "linux" || process.getuid?.() === 0,
+}, async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-podman-pre-setup-mount-test-"));
+  const mounts = join(config, "containers", "mounts.conf");
+  mkdirSync(join(config, "containers"));
+  writeFileSync(mounts, "# initially safe\n");
+  try {
+    let setupRan = false;
+    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+      podmanMountsSafe: podmanMountFixture(config),
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args) => {
+        if (args[0] === "info") {
+          writeFileSync(mounts, "/synthetic-host-credentials:/run/secrets/host:ro\n");
+          return { code: 0, stdout: "false\n", stderr: "" };
+        }
+        if (args[0] === "run") setupRan = true;
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(setupRan, false);
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /default mounts/u);
+  } finally {
     rmSync(config, { recursive: true, force: true });
   }
 });
@@ -344,6 +408,8 @@ test("Podman mount scanning covers HOME, rootless global defaults, and quoted TO
     assert.equal(safe(), false);
     writeFileSync(quotedKey, '[containers]\n"volum\\u0065s" = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
     assert.equal(safe(), false, "escaped TOML keys cannot hide a volume default");
+    writeFileSync(quotedKey, '[containers]\n"volume\\x73" = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
+    assert.equal(safe(), false, "TOML 1.1 hex escapes cannot hide a volume default");
     writeFileSync(quotedKey, '[containers]\nVolumes = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
     assert.equal(safe(), false, "case-folded TOML keys cannot hide a volume default");
     writeFileSync(quotedKey, '[containers]\n"volumeſ" = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
