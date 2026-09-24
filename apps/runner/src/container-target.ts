@@ -691,6 +691,22 @@ export class ContainerTargetRegistry {
             failed = PODMAN_UNSAFE_DEFAULTS_REASON;
             break;
           }
+          if (template.runtime === "docker") {
+            // Cleanup, image inspection, and earlier checks can outlive startup resolution.
+            // Probe the command and pinned engine with the exact client used by this run.
+            const version = await this.deps.run(runtime.launch.command, [...prefix, "--version"], {
+              ...opts, timeoutMs: 5_000, maxBuffer: 4_096,
+            });
+            const details = dockerVersionBanner(version)
+              ? await this.deps.run(runtime.launch.command, [...prefix, "version", "--format", "{{json .}}"], {
+                ...opts, timeoutMs: 5_000, maxBuffer: 64 * 1024,
+              }) : undefined;
+            const reason = containerRuntimeIdentityReason("docker", version, details);
+            if (reason) {
+              failed = `setup check '${check.name}' ${reason}`;
+              break;
+            }
+          }
           const result = await this.deps.run(runtime.launch.command,
             [...prefix, ...setupCheckArgs(template, check, this.runnerKey)], { ...opts, timeoutMs: 30_000 });
           if (result.code !== 0 || result.timedOut || result.errorCode) {

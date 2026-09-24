@@ -78,6 +78,9 @@ Before its first control-plane registration, the runner:
 
 Setup checks launch the runtime client with an explicit minimal environment and a temporary client
 config directory. Local Docker contexts are reduced to Unix socket or Windows named-pipe endpoints.
+Immediately before each Docker setup check, the runner rechecks the command and engine through that
+check's pinned endpoint and private client environment. A changed or inaccessible engine blocks the
+check and leaves the target unavailable without exposing client output.
 The runner probes the resolved command rather than trusting its filename. A `docker` wrapper that
 executes Podman, or a Docker CLI connected to a Podman API engine, is unavailable as a Docker target;
 configure a Podman target so its defaults and proxy guards apply. Unrecognized engine identities

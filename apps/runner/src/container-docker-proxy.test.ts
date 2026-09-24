@@ -248,6 +248,9 @@ test("Rediscover marks Docker unavailable if its private config disappears after
       resolveRuntime: async () => ({ path: "/usr/bin/docker", via: "path",
         launch: { command: "/usr/bin/docker", args: [] } }),
       run: async (_file, args) => {
+        if (args[0] === "--version") return { code: 0, stdout: "Docker version 27.0.0\n", stderr: "" };
+        if (args[0] === "version") return { code: 0,
+          stdout: '{"Server":{"Components":[{"Name":"Engine"}]}}', stderr: "" };
         if (args[0] === "run" && args.includes("git") && !removed) {
           rmSync(dockerTargetClientConfig(), { recursive: true, force: true });
           process.env.TMPDIR = join(root, "missing");
