@@ -134,13 +134,17 @@ test("mixed decisions show artifacts in place and keep a labelled external link 
   await page.setViewportSize({ width: 1280, height: 800 });
   await openReview(page, "items=4&artifacts=mixed");
   await expect(page.locator(".evidence-review-item").first().getByRole("img")).toBeVisible();
-  for (const id of ["viewport-2", "interaction-clip"]) {
+  for (const id of ["viewport-2"]) {
     const item = page.locator(".evidence-review-item", { hasText: id });
     await expect(item.getByRole("link", { name: `View External Evidence: ${id}` })).toBeVisible();
     await expect(item.locator(".evidence-artifact")).toHaveCount(0);
     await expect(item.getByRole("checkbox")).toBeEnabled();
   }
-  expect((await artifactRequests(page)).every((id) => id !== "art_clip")).toBe(true);
+  const clip = page.locator(".evidence-review-item", { hasText: "interaction-clip" });
+  await clip.scrollIntoViewIfNeeded();
+  await expect(clip.locator("video")).toBeVisible();
+  await expect(clip.getByRole("checkbox")).toBeEnabled();
+  expect(await artifactRequests(page)).toContain("art_clip");
   await page.screenshot({ path: `${SHOT}/desktop-mixed.png` });
 });
 
@@ -162,3 +166,56 @@ test("a large review loads images as they approach the viewport, not all at once
   const all = await artifactRequests(page);
   expect(new Set(all).size).toBe(all.length);
 });
+
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "mobile", width: 390, height: 844 },
+]) {
+  test(`${viewport.name}: a private video artifact plays inline in human review`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await openReview(page, "items=1&artifacts=video");
+    const item = page.locator(".evidence-review-item");
+    const video = item.locator('video[aria-label="Play Evidence: interaction-clip"]');
+    await expect(video).toBeVisible();
+    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
+    await expect(video).toHaveAttribute("controls", "");
+    await expect(video).toHaveAttribute("playsinline", "");
+    await video.evaluate((element: HTMLVideoElement) => element.play());
+    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeGreaterThan(0.25);
+    await video.evaluate((element: HTMLVideoElement) => element.pause());
+    const box = await video.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.width).toBeLessThanOrEqual(viewport.width - 24);
+    await video.scrollIntoViewIfNeeded();
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.screenshot({ path: testInfo.outputPath(`video-${theme}.png`) });
+    }
+    await item.getByRole("checkbox", { name: "Mark interaction-clip as Reviewed" }).check();
+    await expect(page.getByRole("button", { name: "Approve" })).toBeEnabled();
+  });
+
+  test(`${viewport.name}: a transcript video loads only after its inline action`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=artifact-timeline&items=1&artifacts=video");
+    const row = page.locator(".tl-artifact");
+    await expect(row).toContainText("Session Walkthrough.webm");
+    expect(await artifactRequests(page)).toEqual([]);
+    await row.getByRole("button", { name: "Load Video" }).click();
+    const video = row.locator('video[aria-label="Play Session Walkthrough.webm"]');
+    await expect(video).toBeVisible();
+    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.readyState)).toBeGreaterThan(0);
+    expect(await artifactRequests(page)).toEqual(["art_clip"]);
+    await video.evaluate((element: HTMLVideoElement) => element.play());
+    await expect.poll(() => video.evaluate((element: HTMLVideoElement) => element.currentTime)).toBeGreaterThan(0.25);
+    await video.evaluate((element: HTMLVideoElement) => element.pause());
+    const box = await video.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.width).toBeLessThanOrEqual(viewport.width - 24);
+    await video.scrollIntoViewIfNeeded();
+    for (const theme of ["dark", "light"]) {
+      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+      await page.screenshot({ path: testInfo.outputPath(`transcript-video-${theme}.png`) });
+    }
+  });
+}

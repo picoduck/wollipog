@@ -3160,7 +3160,13 @@ interface WorkflowArtifactRow {
   created_at: number;
 }
 
-const MAX_WORKFLOW_ARTIFACT_BLOB_BYTES = EVENT_PAYLOAD_CHUNK_BYTES;
+const MAX_WORKFLOW_ARTIFACT_BLOB_BYTES = 32 * 1024 * 1024;
+export const MAX_SESSION_ARTIFACT_COUNT = 4_096;
+export const MAX_SESSION_ARTIFACT_BYTES = 1024 * 1024 * 1024;
+
+export class SessionArtifactQuotaError extends Error {
+  constructor(message: string) { super(message); this.name = "SessionArtifactQuotaError"; }
+}
 const MAX_WORKFLOW_ARTIFACT_INLINE_BYTES = 11 * 1024 * 1024;
 
 function workflowArtifactBytes(input: {
@@ -3175,8 +3181,7 @@ function workflowArtifactBytes(input: {
   assertArtifactBlobKey(input.sha256);
   let bytes: Buffer;
   if (input.encoding === "base64") {
-    if (input.data.length % 4 !== 0 ||
-        !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(input.data)) {
+    if (input.data.length % 4 !== 0 || /[^A-Za-z0-9+/=]/u.test(input.data)) {
       throw new Error("workflow artifact base64 is not canonical");
     }
     bytes = Buffer.from(input.data, "base64");
@@ -21173,6 +21178,19 @@ export class ControlPlaneDb {
       this.artifactBlobs.put(artifact.sha256, bytes);
       this.db.exec("BEGIN IMMEDIATE");
       try {
+        // One transaction covers every writer: agent attachments, human uploads, workflow output,
+        // prompt images, and event chunks. Sharing one blob never bypasses the per-session bound.
+        if (artifact.sessionId) {
+          const usage = this.stmt(
+            "SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes FROM artifacts WHERE session_id=?",
+          ).get(artifact.sessionId) as { count: number; bytes: number };
+          if (usage.count >= MAX_SESSION_ARTIFACT_COUNT ||
+              usage.bytes + artifact.sizeBytes > MAX_SESSION_ARTIFACT_BYTES) {
+            throw new SessionArtifactQuotaError(
+              `this session has reached its artifact limit (${MAX_SESSION_ARTIFACT_COUNT} artifacts or ${MAX_SESSION_ARTIFACT_BYTES} bytes)`,
+            );
+          }
+        }
         this.stmt(
           `INSERT INTO artifacts
            (id, run_id, session_id, kind, name, mime_type, encoding, data, blob_key, size_bytes, sha256,
@@ -21240,6 +21258,57 @@ export class ControlPlaneDb {
        ORDER BY created_at, id LIMIT 1`,
     ).get(sessionId, sha256, name, mimeType, actor.kind, actor.id ?? null) as unknown as { id: string } | undefined;
     return row ? this.workflowArtifactExportPreflight(row.id)?.artifact ?? null : null;
+  }
+
+  findAttachedVideo(
+    sessionId: string, sha256: string, name: string, mimeType: string, actor: GovernanceActor,
+  ): WorkflowArtifactView | null {
+    const row = this.stmt(
+      `SELECT id FROM artifacts
+       WHERE session_id=? AND kind='video' AND sha256=? AND name=? AND mime_type=?
+         AND created_by_kind=? AND created_by_id IS ?
+       ORDER BY created_at, id LIMIT 1`,
+    ).get(sessionId, sha256, name, mimeType, actor.kind, actor.id ?? null) as { id: string } | undefined;
+    return row ? this.workflowArtifactExportPreflight(row.id)?.artifact ?? null : null;
+  }
+
+  hasAttachmentEvent(sessionId: string, artifactId: string): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM session_events WHERE session_id=? AND kind='artifact_attached'
+         AND json_extract(payload,'$.artifact.artifactId')=? LIMIT 1`,
+    ).get(sessionId, artifactId));
+  }
+
+  sessionVideoUsage(sessionId: string): { count: number; bytes: number } {
+    const row = this.stmt(
+      `SELECT COUNT(*) AS count, COALESCE(SUM(size_bytes), 0) AS bytes FROM artifacts
+       WHERE session_id=? AND kind='video'`,
+    ).get(sessionId) as { count: number; bytes: number };
+    return { count: Number(row.count), bytes: Number(row.bytes) };
+  }
+
+  /** The explicit 180-day retention policy applies to file-attached evidence only. Prompt images,
+   * event payload chunks, and workflow outputs retain their separate reachability/lifecycle rules. */
+  pruneExpiredSessionAttachments(cutoff: number, limit = 1_000): number {
+    const bounded = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 10_000)) : 1_000;
+    const ids = this.stmt(
+      `SELECT id FROM artifacts WHERE session_id IS NOT NULL AND run_id IS NULL
+         AND kind IN ('screenshot','video') AND created_at < ?
+         AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_attachment'
+         AND NOT EXISTS (SELECT 1 FROM workflow_attempt_artifacts WHERE artifact_id=artifacts.id)
+       ORDER BY created_at,id LIMIT ?`,
+    ).all(cutoff, bounded) as Array<{ id: string }>;
+    if (!ids.length) return 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      for (const row of ids) this.stmt("DELETE FROM artifacts WHERE id=?").run(row.id);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+    this.collectWorkflowArtifactBlobs();
+    return ids.length;
   }
 
   /** How much agents have attached to one session. Sizes are summed per artifact, so identical

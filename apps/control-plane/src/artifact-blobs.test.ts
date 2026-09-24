@@ -12,7 +12,7 @@ import {
   artifactBlobSha256,
   defaultArtifactBlobRoot,
 } from "./artifact-blob-store.js";
-import { ControlPlaneDb } from "./db.js";
+import { ControlPlaneDb, MAX_SESSION_ARTIFACT_BYTES, SessionArtifactQuotaError } from "./db.js";
 
 function artifact(artifactId: string, sessionId: string, data = "shared artifact bytes"): WorkflowArtifact {
   const bytes = Buffer.from(data, "utf8");
@@ -62,6 +62,56 @@ test("artifact rows keep metadata only while deduplicated blobs survive until th
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the session quota counts all kinds and authors before publishing a new blob", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-artifact-quota-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const db = ControlPlaneDb.open(path);
+    const human = { ...artifact("human-image", "session-one", "image"), kind: "screenshot" as const,
+      createdBy: { kind: "human" as const, id: "owner" } };
+    db.createWorkflowArtifact(human);
+    // Existing rows can predate the quota. Their recorded sizes still count, even when the
+    // content-addressed blob itself is shared with another artifact.
+    db.raw().prepare("UPDATE artifacts SET size_bytes=? WHERE id=?")
+      .run(MAX_SESSION_ARTIFACT_BYTES, human.artifactId);
+    const agent = artifact("agent-log", "session-one", "different bytes");
+    assert.throws(() => db.createWorkflowArtifact(agent), SessionArtifactQuotaError);
+    assert.equal(db.getWorkflowArtifact(agent.artifactId), null);
+    assert.equal(existsSync(artifactBlobFilePath(defaultArtifactBlobRoot(path), agent.sha256)), false,
+      "a rejected upload leaves no blob behind");
+    db.raw().prepare("UPDATE artifacts SET size_bytes=? WHERE id=?").run(human.sizeBytes, human.artifactId);
+    db.createWorkflowArtifact(agent);
+    assert.ok(db.getWorkflowArtifact(agent.artifactId));
+    db.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("retention expires only file-attached evidence and preserves shared bytes still referenced", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-artifact-retention-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const db = ControlPlaneDb.open(path);
+    const old = { ...artifact("old-clip", "session-one"), kind: "video" as const,
+      mimeType: "video/webm", encoding: "base64" as const,
+      data: Buffer.from("shared artifact bytes").toString("base64"),
+      metadata: { purpose: "session_attachment" }, createdAt: 1 };
+    const keep = { ...old, artifactId: "new-clip", createdAt: 200 };
+    const prompt = { ...old, artifactId: "prompt-image", kind: "screenshot" as const,
+      mimeType: "image/png", metadata: { purpose: "prompt_image" } };
+    db.createWorkflowArtifact(old);
+    db.createWorkflowArtifact(keep);
+    db.createWorkflowArtifact(prompt);
+    const blobPath = artifactBlobFilePath(defaultArtifactBlobRoot(path), old.sha256);
+    assert.equal(db.pruneExpiredSessionAttachments(100), 1);
+    assert.equal(db.getWorkflowArtifact(old.artifactId), null);
+    assert.ok(db.getWorkflowArtifact(keep.artifactId));
+    assert.ok(db.getWorkflowArtifact(prompt.artifactId));
+    assert.equal(existsSync(blobPath), true, "shared bytes remain while another artifact references them");
+    assert.equal(db.pruneExpiredSessionAttachments(100), 0);
+    db.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
 test("raw prompt image insertion never creates an inline base64 body", () => {

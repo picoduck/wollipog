@@ -1,6 +1,6 @@
 import type { WorkflowArtifactView } from "@wollipog/protocol";
 
-export type ArtifactPreviewClass = "html" | "image" | "json" | "markdown" | "text" | "unsupported";
+export type ArtifactPreviewClass = "html" | "image" | "video" | "json" | "markdown" | "text" | "unsupported";
 
 const MAX_BROWSER_URL_LENGTH = 2_048;
 const HTML_PREVIEW_CSP = "default-src 'none'; img-src data: blob:; style-src 'unsafe-inline'; font-src data:; form-action 'none'; base-uri 'none'";
@@ -30,6 +30,7 @@ export function normalizeBrowserUrl(input: string): BrowserUrlResult {
 export function classifyArtifactPreview(artifact: Pick<WorkflowArtifactView, "kind" | "mimeType" | "encoding">): ArtifactPreviewClass {
   if (artifact.kind === "html_preview" && artifact.mimeType === "text/html" && artifact.encoding === "utf8") return "html";
   if (artifact.kind === "screenshot" && artifact.mimeType.startsWith("image/") && artifact.encoding === "base64") return "image";
+  if (artifact.kind === "video" && ["video/mp4", "video/webm"].includes(artifact.mimeType) && artifact.encoding === "base64") return "video";
   if (artifact.kind === "verdict" && artifact.mimeType === "application/json" && artifact.encoding === "json") return "json";
   if (artifact.kind === "review_report" && artifact.mimeType === "text/markdown" && artifact.encoding === "utf8") return "markdown";
   if (artifact.encoding === "utf8" && (

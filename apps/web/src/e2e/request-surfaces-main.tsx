@@ -66,6 +66,12 @@ async function drawCapture(index: number): Promise<ArrayBuffer> {
 
 async function prepareArtifacts(): Promise<void> {
   if (!artifactMode) return;
+  if (artifactMode === "video" || artifactMode === "mixed") {
+    const bytes = await fetch(new URL("../../e2e/fixtures/session-artifact-review.webm", import.meta.url)).then((response) => response.arrayBuffer());
+    const digest = await crypto.subtle.digest("SHA-256", bytes);
+    artifactBytes.set("art_clip", bytes);
+    artifactDigests.set("art_clip", [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join(""));
+  }
   for (let index = 0; index < evidenceCount; index += 1) {
     const bytes = artifactMode === "undecodable" && index === 1
       ? new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new TextEncoder().encode("not an image")]).buffer
@@ -88,9 +94,16 @@ function evidenceSession(): SessionView {
       sha256: String(index).padStart(64, "0"),
     };
     if (!artifactMode) return base;
+    if (artifactMode === "video") return {
+      evidenceId: "interaction-clip",
+      artifactId: "art_clip",
+      mediaType: "video/webm",
+      sha256: artifactDigests.get("art_clip")!,
+    };
     if (artifactMode === "mixed" && index === 1) return base;
     if (artifactMode === "mixed" && index === 2) {
-      return { ...base, evidenceId: "interaction-clip", artifactId: "art_clip", mediaType: "video/webm" };
+      return { ...base, evidenceId: "interaction-clip", artifactId: "art_clip", mediaType: "video/webm",
+        sha256: artifactDigests.get("art_clip")! };
     }
     const artifact = {
       ...base,
@@ -356,7 +369,7 @@ function Fixture() {
       if (!bytes || (artifactMode === "unavailable" && artifactId === "art_2")) {
         throw new ApiError("artifact not found", 404);
       }
-      return new Blob([bytes], { type: "application/octet-stream" });
+      return new Blob([bytes], { type: artifactId === "art_clip" ? "video/webm" : "image/png" });
     },
     approve: async (_sessionId: string, body: unknown) => {
       submissions.push(structuredClone(body));
@@ -388,6 +401,13 @@ function Fixture() {
     options: standaloneTemplate.options,
     context: standaloneTemplate.context,
     ...(session.pendingApproval ? {} : { resolvedOptionId: "trust", resolutionReason: "submitted" as const }),
+  }] : [];
+  const artifactTimelineItems: TimelineItem[] = scenario === "artifact-timeline" ? [{
+    kind: "artifact_attached", id: 26, createdAt: Date.now(), artifact: {
+      artifactId: "art_clip", sessionId: session.id, kind: "video", name: "Session Walkthrough.webm",
+      mimeType: "video/webm", encoding: "base64", sizeBytes: artifactBytes.get("art_clip")?.byteLength ?? 0,
+      sha256: artifactDigests.get("art_clip")!, createdBy: { kind: "agent", id: session.id }, createdAt: Date.now(),
+    },
   }] : [];
 
   return (
@@ -433,9 +453,9 @@ function Fixture() {
                         </div>
                       </div>
                     ))}
-                    {(scenario === "standalone" || scenario === "worker") && (
+                    {(scenario === "standalone" || scenario === "worker" || scenario === "artifact-timeline") && (
                       <EventTimeline
-                        items={standaloneTimelineItems}
+                        items={scenario === "artifact-timeline" ? artifactTimelineItems : standaloneTimelineItems}
                         approvalContext={session.pendingApproval ? {
                           sessionId: session.id,
                           requestId: session.pendingApproval.requestId,

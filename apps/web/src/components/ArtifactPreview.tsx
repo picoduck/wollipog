@@ -13,7 +13,7 @@ import { Markdown } from "./Markdown.js";
 
 type LoadedPreview =
   | { kind: "html"; source: string; blob: Blob }
-  | { kind: "image"; objectUrl: string; blob: Blob }
+  | { kind: "image" | "video"; objectUrl: string; blob: Blob }
   | { kind: "json" | "markdown" | "text"; text: string; blob: Blob };
 
 function decodeUtf8(bytes: ArrayBuffer): string {
@@ -46,9 +46,9 @@ export function ArtifactPreview({ artifact }: { artifact: WorkflowArtifactView }
     void api.artifactExport(artifact.artifactId).then(async (blob) => {
       const bytes = await verifyArtifactPreviewBlob(artifact, blob);
       if (requestRef.current !== request) return;
-      if (previewClass === "image") {
+      if (previewClass === "image" || previewClass === "video") {
         objectUrl = URL.createObjectURL(new Blob([bytes], { type: artifact.mimeType }));
-        setLoaded({ kind: "image", objectUrl, blob });
+        setLoaded({ kind: previewClass, objectUrl, blob });
       } else {
         let text = decodeUtf8(bytes);
         if (previewClass === "json") text = JSON.stringify(JSON.parse(text) as unknown, null, 2);
@@ -94,6 +94,10 @@ export function ArtifactPreview({ artifact }: { artifact: WorkflowArtifactView }
       {busy && <div className="hint" role="status">Loading and verifying preview…</div>}
       {error && <div className="composer-error" role="alert">{error}</div>}
       {loaded?.kind === "image" && <img className="artifact-preview-image" src={loaded.objectUrl} alt={artifact.name} />}
+      {loaded?.kind === "video" && (
+        <video className="artifact-preview-video" src={loaded.objectUrl} controls playsInline preload="metadata"
+          aria-label={`Play ${artifact.name}`} />
+      )}
       {loaded?.kind === "html" && (
         <iframe
           className="artifact-preview-frame"

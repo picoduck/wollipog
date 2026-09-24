@@ -24,6 +24,8 @@ test("artifact preview classification is exact rather than MIME-sniffed", () => 
   assert.equal(classifyArtifactPreview(base), "html");
   assert.equal(classifyArtifactPreview({ ...base, kind: "test_log" }), "unsupported");
   assert.equal(classifyArtifactPreview({ kind: "screenshot", mimeType: "image/png", encoding: "base64" }), "image");
+  assert.equal(classifyArtifactPreview({ kind: "video", mimeType: "video/webm", encoding: "base64" }), "video");
+  assert.equal(classifyArtifactPreview({ kind: "video", mimeType: "text/html", encoding: "base64" }), "unsupported");
   assert.equal(classifyArtifactPreview({ kind: "review_report", mimeType: "text/markdown", encoding: "utf8" }), "markdown");
 });
 

@@ -10,7 +10,7 @@ export type WorkflowArtifactExportResult =
   | { ok: false; status: 404 | 422; error: string; code: "not_found" | "invalid_artifact" }
   | { ok: true; body: Buffer; filename: string; headers: Record<string, string> };
 
-const FALLBACK_EXTENSION: Record<Exclude<WorkflowArtifactKind, "screenshot">, string> = {
+const FALLBACK_EXTENSION: Record<Exclude<WorkflowArtifactKind, "screenshot" | "video">, string> = {
   html_preview: "html",
   patch: "patch",
   review_report: "md",
@@ -64,7 +64,7 @@ export function buildAuthorizedWorkflowArtifactExport(
     return { ok: false, status: 404, error: "artifact not found", code: "not_found" };
   }
   if (!Number.isSafeInteger(preflight.storedDataBytes) || preflight.storedDataBytes < 0 ||
-      preflight.storedDataBytes > MAX_STORED_ARTIFACT_TEXT_BYTES) {
+      preflight.storedDataBytes > (preflight.artifact.kind === "video" ? 32 * 1024 * 1024 : MAX_STORED_ARTIFACT_TEXT_BYTES)) {
     return { ok: false, status: 422, error: "artifact content is invalid", code: "invalid_artifact" };
   }
 
@@ -94,6 +94,7 @@ export function buildAuthorizedWorkflowArtifactExport(
     ? artifact.mimeType === "image/png" ? "png"
       : artifact.mimeType === "image/jpeg" || artifact.mimeType === "image/jpg" ? "jpg"
         : artifact.mimeType === "image/gif" ? "gif" : "webp"
+    : artifact.kind === "video" ? artifact.mimeType === "video/mp4" ? "mp4" : "webm"
     : FALLBACK_EXTENSION[artifact.kind];
   const fallback = `workflow-artifact-${artifact.kind}.${extension}`;
   return {
