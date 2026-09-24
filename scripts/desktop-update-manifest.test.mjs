@@ -50,10 +50,10 @@ function trusted(asset, version = VERSION) {
 
 function fixture(key, { override } = {}) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-update-manifest-"));
-  for (const { asset } of desktopUpdaterArtifacts(VERSION)) {
+  for (const { asset, signedAs } of desktopUpdaterArtifacts(VERSION)) {
     const bytes = Buffer.from(`update package ${asset}`);
     writeFileSync(join(root, asset), bytes);
-    const signature = override?.(asset, bytes) ?? signPackage(bytes, key, trusted(asset));
+    const signature = override?.(asset, bytes) ?? signPackage(bytes, key, trusted(signedAs));
     writeFileSync(join(root, `${asset}.sig`), signature);
   }
   return root;
@@ -159,14 +159,31 @@ test("the signed file name and version must be this release's", async () => {
   }
 });
 
+test("the macOS archives are checked against the name the bundler signed, not the uploaded name", async () => {
+  // tauri-action uploads `Wollipog.app.tar.gz` as `Wollipog_<arch>.app.tar.gz`; the signature was
+  // made before that rename. Requiring the uploaded name failed every real release.
+  const mac = desktopUpdaterArtifacts(VERSION).filter(({ keys }) => keys[0].startsWith("darwin-"));
+  assert.deepEqual(mac.map(({ signedAs }) => signedAs), ["Wollipog.app.tar.gz", "Wollipog.app.tar.gz"]);
+  assert.ok(desktopUpdaterArtifacts(VERSION).filter(({ keys }) => !keys[0].startsWith("darwin-")).every(({ asset, signedAs }) => asset === signedAs));
+
+  const key = updateKey();
+  const target = "Wollipog_aarch64.app.tar.gz";
+  const root = fixture(key, { override: (asset, bytes) => (asset === target ? signPackage(bytes, key, trusted(target)) : undefined) });
+  try {
+    await assert.rejects(manifestFor(root, key.publicKeyValue), /Wollipog_aarch64\.app\.tar\.gz was signed as Wollipog_aarch64\.app\.tar\.gz/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a trusted comment edited after signing is rejected", async () => {
   const key = updateKey();
   const target = "Wollipog_x64.app.tar.gz";
   const root = fixture(key, {
     override: (asset, bytes) => {
       if (asset !== target) return undefined;
-      const lines = Buffer.from(signPackage(bytes, key, trusted(asset, "0.27.0")), "base64").toString("utf8").split("\n");
-      lines[2] = `trusted comment: ${trusted(asset)}`;
+      const lines = Buffer.from(signPackage(bytes, key, trusted("Wollipog.app.tar.gz", "0.27.0")), "base64").toString("utf8").split("\n");
+      lines[2] = `trusted comment: ${trusted("Wollipog.app.tar.gz")}`;
       return Buffer.from(lines.join("\n")).toString("base64");
     },
   });
@@ -179,7 +196,8 @@ test("a trusted comment edited after signing is rejected", async () => {
 
 test("legacy (non-prehashed) signatures verify too", async () => {
   const key = updateKey();
-  const root = fixture(key, { override: (asset, bytes) => signPackage(bytes, key, trusted(asset), { prehashed: false }) });
+  const signedAs = new Map(desktopUpdaterArtifacts(VERSION).map((entry) => [entry.asset, entry.signedAs]));
+  const root = fixture(key, { override: (asset, bytes) => signPackage(bytes, key, trusted(signedAs.get(asset)), { prehashed: false }) });
   try {
     assert.equal(JSON.parse(await manifestFor(root, key.publicKeyValue)).version, VERSION);
   } finally {

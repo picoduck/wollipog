@@ -16,12 +16,13 @@
 //! system package manager, and a build without an update key cannot verify anything, so those
 //! report the new release and point at its page instead of attempting an install.
 
-use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::utils::config::BundleType;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 use crate::instances::InstanceRegistryState;
@@ -36,6 +37,14 @@ pub(crate) const DISABLE_UPDATE_CHECK_ENV: &str = "WOLLIPOG_DISABLE_UPDATE_CHECK
 
 /// The manifest is a few kilobytes; a stalled request should fail and say so.
 const CHECK_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The whole package download, which is ~100 MB. Without it a stalled download holds the install
+/// lock, and the button, for as long as the connection stays open.
+const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+
+/// Emitted with the `UpdateCheck` whenever a check finishes, so an open Settings page shows the
+/// result of the background check too. Named here and in `apps/web/src/desktop-updates.ts`.
+pub(crate) const UPDATE_CHECKED_EVENT: &str = "wollipog://desktop-update-checked";
 
 /// Whether this installation can replace itself, and if not, why.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -170,13 +179,22 @@ pub(crate) enum InstallOutcome {
 struct PendingUpdate {
     update: Update,
     bytes: Vec<u8>,
+    /// macOS/AppImage: the files are already replaced and only the restart is outstanding, because
+    /// work started while they were being replaced.
+    installed: bool,
 }
 
 #[derive(Default)]
 pub(crate) struct DesktopUpdater {
-    last_check: std::sync::Mutex<Option<UpdateCheck>>,
+    last_check: Mutex<Option<UpdateCheck>>,
     /// Held for a whole install attempt so two clicks cannot download or install twice.
     pending: tokio::sync::Mutex<Option<PendingUpdate>>,
+    /// This gesture's own warning latch. Shared with the close guard's, deferring an install
+    /// ("Not Now") would have authorized the next window close without a warning, and the reverse.
+    warned_at: Mutex<Option<Instant>>,
+    /// Set by the Windows exit hook once it has stopped the managed processes, so a failed installer
+    /// launch knows the app it returns to has none.
+    services_stopped: AtomicBool,
 }
 
 fn now_millis() -> i64 {
@@ -199,6 +217,10 @@ async fn fetch_update(app: &tauri::AppHandle) -> Result<Option<Update>, String> 
         .timeout(CHECK_TIMEOUT)
         .version_comparator(|current, release| offers_update(&current, &release.version))
         .on_before_exit(move || {
+            hook_app
+                .state::<DesktopUpdater>()
+                .services_stopped
+                .store(true, Ordering::Relaxed);
             crate::teardown_managed_processes(&hook_app);
             hook_app.cleanup_before_exit();
         })
@@ -222,7 +244,18 @@ fn record_check(app: &tauri::AppHandle, update: Option<&Update>) -> UpdateCheck 
         },
     };
     *app.state::<DesktopUpdater>().last_check.lock().unwrap() = Some(check.clone());
+    let _ = app.emit(UPDATE_CHECKED_EVENT, &check);
     check
+}
+
+/// Ask the close guard's question under this gesture's own latch. `Some(sessions)` holds.
+async fn hold_for_work(app: &tauri::AppHandle) -> Result<Option<usize>, String> {
+    let task_app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        crate::exit_hold_for_work(&task_app, &task_app.state::<DesktopUpdater>().warned_at)
+    })
+    .await
+    .map_err(|error| format!("Could not check for running work: {error}"))
 }
 
 #[tauri::command]
@@ -287,6 +320,11 @@ pub(crate) async fn set_automatic_update_checks(
 /// The package is downloaded and verified BEFORE asking whether work is in flight: the answer is
 /// only good for a moment, and a download can take minutes. A held attempt keeps the verified
 /// package, so confirming does not download it again.
+///
+/// The question is asked again after macOS or the AppImage has replaced the files, because work can
+/// start while they are being replaced. When the first answer was a confirmation the latch still
+/// covers it; when there was no work the first time, new work is warned about like any other, and
+/// confirming then only restarts.
 #[tauri::command]
 pub(crate) async fn install_desktop_update(
     app: tauri::AppHandle,
@@ -297,68 +335,88 @@ pub(crate) async fn install_desktop_update(
     let updater = app.state::<DesktopUpdater>();
     let mut pending = updater.pending.lock().await;
 
-    let update = fetch_update(&app).await?;
-    record_check(&app, update.as_ref());
-    let Some(update) = update else {
-        *pending = None;
-        return Ok(InstallOutcome::Current);
-    };
-    let reusable = pending
-        .as_ref()
-        .is_some_and(|held| held.update.version == update.version);
-    if !reusable {
-        // The plugin verifies the signature against the compiled-in key, and the signed version
-        // against the announced one, before it returns any bytes.
-        let bytes = update
-            .download(|_, _| {}, || {})
-            .await
-            .map_err(|error| format!("The update could not be downloaded and verified: {error}"))?;
-        *pending = Some(PendingUpdate { update, bytes });
+    let installed = pending.as_ref().is_some_and(|held| held.installed);
+    if !installed {
+        let update = fetch_update(&app).await?;
+        record_check(&app, update.as_ref());
+        let Some(mut update) = update else {
+            *pending = None;
+            return Ok(InstallOutcome::Current);
+        };
+        let reusable = pending
+            .as_ref()
+            .is_some_and(|held| held.update.version == update.version);
+        if !reusable {
+            // The plugin verifies the signature against the compiled-in key, and the signed version
+            // against the announced one, before it returns any bytes.
+            update.timeout = Some(DOWNLOAD_TIMEOUT);
+            let bytes = update.download(|_, _| {}, || {}).await.map_err(|error| {
+                format!("The update could not be downloaded and verified: {error}")
+            })?;
+            *pending = Some(PendingUpdate {
+                update,
+                bytes,
+                installed: false,
+            });
+        }
     }
 
-    let task_app = app.clone();
-    let held = tokio::task::spawn_blocking(move || crate::exit_hold_for_work(&task_app))
-        .await
-        .map_err(|error| format!("Could not check for running work: {error}"))?;
-    if let Some(sessions) = held {
+    if let Some(sessions) = hold_for_work(&app).await? {
         return Ok(InstallOutcome::HeldForWork { sessions });
     }
 
-    let PendingUpdate { update, bytes } = pending
-        .take()
-        .expect("a verified update is pending at this point");
-    let task_app = app.clone();
-    tokio::task::spawn_blocking(move || install_and_restart(&task_app, update, bytes))
+    if !installed {
+        let PendingUpdate { update, bytes, .. } = pending
+            .take()
+            .expect("a verified update is pending at this point");
+        let task_app = app.clone();
+        let (update, result) = tokio::task::spawn_blocking(move || {
+            // Windows does not return from here on success; see the exit hook in `fetch_update`.
+            let result = update.install(bytes);
+            (update, result)
+        })
         .await
-        .map_err(|error| format!("The update install task failed: {error}"))??;
+        .map_err(|error| format!("The update install task failed: {error}"))?;
+        if let Err(error) = result {
+            return Err(recover_from_failed_install(&task_app, error));
+        }
+        *pending = Some(PendingUpdate {
+            update,
+            bytes: Vec::new(),
+            installed: true,
+        });
+        if let Some(sessions) = hold_for_work(&app).await? {
+            return Ok(InstallOutcome::HeldForWork { sessions });
+        }
+    }
+
+    // A restart raises `RunEvent::Exit`, which stops the sidecar and runner before the new process
+    // starts. `handle_run_event` does not guard it: it was decided here, and Tauri ignores a
+    // prevented restart anyway.
+    app.request_restart();
     Ok(InstallOutcome::Restarting)
 }
 
-/// Replace the app, then restart through the normal exit path.
+/// Say why an install failed, restarting the app when the failure left it without its services.
 ///
-/// Runs on a blocking thread: the Windows exit hook tears the managed processes down synchronously.
-fn install_and_restart(
+/// On Windows the exit hook stops the sidecar and runner before the installer is launched, and the
+/// shutdown it begins refuses any later respawn. If the launch then fails, the old app is still
+/// open with no control plane; restarting it is the only way back.
+fn recover_from_failed_install(
     app: &tauri::AppHandle,
-    update: Update,
-    bytes: Vec<u8>,
-) -> Result<(), String> {
-    // The restart this causes was decided above. Deciding it again at `ExitRequested` could hold
-    // it — and a held restart after the files were replaced leaves the old process running the new
-    // app's resources.
-    app.state::<crate::CloseGuard>()
-        .exit_authorized
-        .store(true, Ordering::Relaxed);
-    // Windows does not return from here on success; see the exit hook in `fetch_update`.
-    if let Err(error) = update.install(bytes) {
-        app.state::<crate::CloseGuard>()
-            .exit_authorized
-            .store(false, Ordering::Relaxed);
-        return Err(format!("The update could not be installed: {error}"));
+    error: tauri_plugin_updater::Error,
+) -> String {
+    let message = format!("The update could not be installed: {error}");
+    if app
+        .state::<DesktopUpdater>()
+        .services_stopped
+        .load(Ordering::Relaxed)
+    {
+        eprintln!("[desktop] {message}; restarting to recover the managed processes");
+        app.request_restart();
+        return format!("{message}. Wollipog is restarting.");
     }
-    // macOS and the AppImage replace the files in place and leave relaunching to us. Requesting it
-    // raises `RunEvent::Exit`, which stops the sidecar and runner before the new process starts.
-    app.request_restart();
-    Ok(())
+    message
 }
 
 #[cfg(test)]

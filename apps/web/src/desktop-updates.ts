@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 
 /**
  * #1646 — the dashboard's side of in-place desktop updates.
@@ -33,12 +34,21 @@ export type DesktopUpdateOutcome =
   | { outcome: "heldForWork"; sessions: number }
   | { outcome: "restarting" };
 
+/** Emitted by the shell with the `DesktopUpdateCheck` whenever any check finishes. */
+export const DESKTOP_UPDATE_CHECKED = "wollipog://desktop-update-checked";
+
 export interface DesktopUpdateRuntime {
   isTauri: () => boolean;
   invoke: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
+  /** Subscribe to a shell event; resolves to its unsubscribe. Absent where nothing is emitted. */
+  listen?: (event: string, handler: (payload: unknown) => void) => Promise<() => void>;
 }
 
-const runtime: DesktopUpdateRuntime = { isTauri, invoke };
+const runtime: DesktopUpdateRuntime = {
+  isTauri,
+  invoke,
+  listen: (event, handler) => listen(event, (received) => handler(received.payload)),
+};
 
 export function readDesktopUpdateStatus(desktop: DesktopUpdateRuntime = runtime): Promise<DesktopUpdateStatus | null> {
   if (!desktop.isTauri()) return Promise.resolve(null);
@@ -118,11 +128,22 @@ export function useDesktopUpdateSetting(desktop: DesktopUpdateRuntime = runtime)
   useEffect(() => {
     if (!inDesktop) return;
     let disposed = false;
+    let stop: (() => void) | undefined;
     readDesktopUpdateStatus(desktop)
       .then((next) => { if (!disposed) setStatus(next); })
       .catch((cause) => { if (!disposed) setError(errorMessage(cause)); })
       .finally(() => { if (!disposed) setLoading(false); });
-    return () => { disposed = true; };
+    // The background notifier's check lands in the shell, not here. Without this, a Settings page
+    // opened at launch said "Not checked yet" for the rest of the session.
+    desktop.listen?.(DESKTOP_UPDATE_CHECKED, (payload) => {
+      if (disposed || !payload || typeof payload !== "object") return;
+      const lastCheck = payload as DesktopUpdateCheck;
+      setStatus((current) => (current ? { ...current, lastCheck } : current));
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stop = unlisten;
+    }).catch(() => undefined);
+    return () => { disposed = true; stop?.(); };
   }, [desktop, inDesktop]);
 
   const check = useCallback(() => {

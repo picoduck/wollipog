@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  DESKTOP_UPDATE_CHECKED,
   checkForDesktopUpdate,
   installDesktopUpdate,
   openReleasePage,
@@ -62,7 +63,13 @@ test("the webview cannot reach the updater plugin around the exit guard", () => 
   // The plugin's own commands install without asking whether work is in flight. Only the shell's
   // `install_desktop_update` holds a restart, so the webview must be granted none of them.
   assert.doesNotMatch(capabilities, /updater:/u);
-  assert.match(updates, /crate::exit_hold_for_work/u);
+  // Under the updater's OWN latch: a deferred install must not authorize a later window close.
+  assert.match(updates, /crate::exit_hold_for_work\(&task_app, &task_app\.state::<DesktopUpdater>\(\)\.warned_at\)/u);
+  assert.match(lib, /let Some\(count\) = exit_hold_for_work\(app, &app\.state::<CloseGuard>\(\)\.warned_at\)/u);
+});
+
+test("the check event the Settings hook listens for is the one the shell emits", () => {
+  assert.match(updates, new RegExp(`UPDATE_CHECKED_EVENT: &str = "${DESKTOP_UPDATE_CHECKED}"`, "u"));
 });
 
 test("the shell's serialized shapes are the ones this file reads", () => {

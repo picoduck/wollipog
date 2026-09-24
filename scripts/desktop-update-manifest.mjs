@@ -29,9 +29,13 @@ export function desktopUpdaterArtifacts(version) {
   if (typeof version !== "string" || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(version)) {
     throw new Error(`invalid desktop version: ${version}`);
   }
+  // `signedAs` is the file name the bundler signed, recorded in the signature's trusted comment.
+  // `tauri-action` uploads every package under that name except the macOS archive, which it renames
+  // from `<Product>.app.tar.gz` to add the architecture, so both macOS packages were signed as one name.
+  const macSignedAs = `${PRODUCT}.app.tar.gz`;
   return [
-    { asset: `${PRODUCT}_aarch64.app.tar.gz`, keys: ["darwin-aarch64", "darwin-aarch64-app"] },
-    { asset: `${PRODUCT}_x64.app.tar.gz`, keys: ["darwin-x86_64", "darwin-x86_64-app"] },
+    { asset: `${PRODUCT}_aarch64.app.tar.gz`, signedAs: macSignedAs, keys: ["darwin-aarch64", "darwin-aarch64-app"] },
+    { asset: `${PRODUCT}_x64.app.tar.gz`, signedAs: macSignedAs, keys: ["darwin-x86_64", "darwin-x86_64-app"] },
     { asset: `${PRODUCT}_${version}_x64-setup.exe`, keys: ["windows-x86_64", "windows-x86_64-nsis"] },
     { asset: `${PRODUCT}_${version}_x64_en-US.msi`, keys: ["windows-x86_64-msi"] },
     { asset: `${PRODUCT}_${version}_arm64-setup.exe`, keys: ["windows-aarch64", "windows-aarch64-nsis"] },
@@ -42,7 +46,7 @@ export function desktopUpdaterArtifacts(version) {
     { asset: `${PRODUCT}_${version}_aarch64.AppImage`, keys: ["linux-aarch64", "linux-aarch64-appimage"] },
     { asset: `${PRODUCT}_${version}_arm64.deb`, keys: ["linux-aarch64-deb"] },
     { asset: `${PRODUCT}-${version}-1.aarch64.rpm`, keys: ["linux-aarch64-rpm"] },
-  ];
+  ].map((entry) => ({ signedAs: entry.asset, ...entry }));
 }
 
 /** The release assets the updater adds: each package's `.sig` and the manifest. */
@@ -120,9 +124,10 @@ async function blake2b512File(path) {
  *
  * The app checks the key, the signature, the global signature over the trusted comment, and that
  * the signed version equals the announced one. The release also requires the signed file name to
- * be the published asset name, so a package cannot be published under another package's name.
+ * be the one the bundler produced for this asset, so a package cannot be published under another
+ * package's name.
  */
-export async function verifyUpdaterPackage({ path, signatureText, publicKey, asset, version }) {
+export async function verifyUpdaterPackage({ path, signatureText, publicKey, asset, signedAs = asset, version }) {
   const parsed = parseUpdaterSignature(signatureText);
   if (!parsed.keyId.equals(publicKey.keyId)) {
     throw new Error(`${asset} is signed by key ${Buffer.from(parsed.keyId).reverse().toString("hex").toUpperCase()}, not the update key ${publicKey.keyIdHex}`);
@@ -135,7 +140,7 @@ export async function verifyUpdaterPackage({ path, signatureText, publicKey, ass
   if (!verify(null, global, publicKey.key, parsed.globalSignature)) {
     throw new Error(`${asset} has an invalid trusted-comment signature`);
   }
-  if (parsed.fields.get("file") !== asset) {
+  if (parsed.fields.get("file") !== signedAs) {
     throw new Error(`${asset} was signed as ${parsed.fields.get("file") ?? "an unnamed file"}`);
   }
   if (parsed.fields.get("version") !== version) {
@@ -168,7 +173,7 @@ export function buildUpdateManifest({ version, repo, tag, pubDate, signatures })
 export async function verifiedUpdateManifest({ assetsDir, publicKeyValue, version, repo, tag, pubDate }) {
   const publicKey = parseUpdaterPublicKey(publicKeyValue);
   const signatures = new Map();
-  for (const { asset } of desktopUpdaterArtifacts(version)) {
+  for (const { asset, signedAs } of desktopUpdaterArtifacts(version)) {
     const path = join(assetsDir, asset);
     const signaturePath = `${path}.sig`;
     for (const required of [path, signaturePath]) {
@@ -181,7 +186,7 @@ export async function verifiedUpdateManifest({ assetsDir, publicKeyValue, versio
       if (size === 0) throw new Error(`release asset is empty: ${required.slice(assetsDir.length + 1)}`);
     }
     const signatureText = readFileSync(signaturePath, "utf8");
-    await verifyUpdaterPackage({ path, signatureText, publicKey, asset, version });
+    await verifyUpdaterPackage({ path, signatureText, publicKey, asset, signedAs, version });
     signatures.set(asset, signatureText);
   }
   return `${JSON.stringify(buildUpdateManifest({ version, repo, tag, pubDate, signatures }), null, 2)}\n`;
