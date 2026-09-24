@@ -344,8 +344,14 @@ test("Podman mount scanning covers HOME, rootless global defaults, and quoted TO
     assert.equal(safe(), false);
     writeFileSync(quotedKey, '[containers]\n"volum\\u0065s" = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
     assert.equal(safe(), false, "escaped TOML keys cannot hide a volume default");
+    writeFileSync(quotedKey, '[containers]\nVolumes = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
+    assert.equal(safe(), false, "case-folded TOML keys cannot hide a volume default");
+    writeFileSync(quotedKey, '[containers]\n"volumeſ" = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
+    assert.equal(safe(), false, "Unicode case folding cannot hide a volume default");
     writeFileSync(quotedKey, '[engine]\nremote = true\n');
     assert.equal(safe(), false, "remote mode cannot redirect launch to an unchecked engine");
+    writeFileSync(quotedKey, '[engine]\nRemote = true\n');
+    assert.equal(safe(), false, "case-folded remote mode cannot redirect launch");
   } finally {
     rmSync(config, { recursive: true, force: true });
   }

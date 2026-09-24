@@ -85,7 +85,7 @@ export function podmanDefaultMountsSafeForPaths(roots: PodmanMountConfigRoots): 
               // TOML basic quoted keys may spell any character with a Unicode escape.
               // Fail closed rather than guessing whether an escaped key names a mount.
               return isMountsConf || /\\(?:u[\da-fA-F]{4}|U[\da-fA-F]{8})/u.test(trimmed) ||
-                /\b(?:mounts|volumes|remote|active_service|remote_uri)\b["']?\s*=/u.test(trimmed);
+                /\b(?:mounts|volumes|remote|active_service|remote_uri)\b["']?\s*=/iu.test(trimmed);
             })) return false;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;
