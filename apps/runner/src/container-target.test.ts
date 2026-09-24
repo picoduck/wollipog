@@ -19,7 +19,7 @@ const template: RunnerContainerTarget = {
 
 const HOST_RUNTIME_ENV = ["DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "CONTAINER_HOST",
   "CONTAINER_CONNECTION", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "CONTAINERS_STORAGE_CONF",
-  "CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE"] as const;
+  "CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE", "_CONTAINERS_ROOTLESS_UID"] as const;
 const emptyDockerConfig = join(tmpdir(), `wollipog-empty-docker-config-${randomUUID()}`);
 let savedHostRuntimeEnv: Record<string, string | undefined> = {};
 beforeEach(() => {
@@ -45,6 +45,26 @@ function podmanMountFixture(config: string): () => boolean {
     configHome: config, uid: 1000,
   });
 }
+
+test("Podman mount scanning rejects inherited rootless UID source changes", () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-podman-uid-"));
+  try {
+    const differentUidDropin = join(config, "system", "containers.rootless.conf.d", "2000", "bind.conf");
+    mkdirSync(join(config, "system", "containers.rootless.conf.d", "2000"), { recursive: true });
+    writeFileSync(differentUidDropin, '[containers]\nvolumes = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
+    const safe = podmanMountFixture(config);
+    assert.equal(safe(), true, "actual UID does not load another UID's drop-in");
+    process.env._CONTAINERS_ROOTLESS_UID = "2000";
+    assert.equal(safe(), false, "a redirected per-UID config source is unavailable");
+    process.env._CONTAINERS_ROOTLESS_UID = "invalid";
+    assert.equal(safe(), false, "malformed inherited UID fails closed");
+    process.env._CONTAINERS_ROOTLESS_UID = "1000";
+    assert.equal(safe(), true, "matching inherited UID uses the scanned source");
+  } finally {
+    delete process.env._CONTAINERS_ROOTLESS_UID;
+    rmSync(config, { recursive: true, force: true });
+  }
+});
 
 function runnerKey(runnerId: string): string {
   return createHash("sha256").update(runnerId).digest("hex").slice(0, 20);

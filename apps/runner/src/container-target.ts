@@ -49,6 +49,9 @@ interface PodmanMountConfigRoots {
 export function podmanDefaultMountsSafeForPaths(roots: PodmanMountConfigRoots): boolean {
   const { share, system, home, configHome, uid } = roots;
   if (![share, system, home, configHome].every(isAbsolute)) return false;
+  const inheritedUid = process.env._CONTAINERS_ROOTLESS_UID;
+  if (inheritedUid !== undefined &&
+      (!/^(?:0|[1-9]\d*)$/u.test(inheritedUid) || Number(inheritedUid) !== uid)) return false;
   const mountFiles = [join(share, "mounts.conf"), join(system, "mounts.conf")];
   const configFiles = [join(share, "containers.conf"), join(system, "containers.conf")];
   const configDirs = [join(share, "containers.conf.d"), join(system, "containers.conf.d")];

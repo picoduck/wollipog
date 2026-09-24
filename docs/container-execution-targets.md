@@ -91,7 +91,8 @@ container client launch, including later terminals, and on Rediscover while the 
 If the target becomes unavailable,
 remove the unsafe default and restart the runner to repeat readiness checks. Socket-backed Podman
 engines and Podman on non-Linux hosts remain unavailable because their engine's default mounts cannot
-be checked locally.
+be checked locally. An inherited rootless UID that differs from the runner UID also makes Podman
+unavailable because the engine would read a different per-UID configuration directory.
 Repository worktree setup cannot override Podman client config, connection, helper-binary, or storage
 environment variables; those values could otherwise change the engine, its default mounts, or host
 executables selected by the Podman client after the runner's check. Internal `_CONTAINERS_`
