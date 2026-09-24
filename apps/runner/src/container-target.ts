@@ -67,6 +67,13 @@ const PODMAN_UNSAFE_DEFAULTS_REASON = "Podman defaults prevent a secret-free con
 const DOCKER_CLIENT_CONFIG_UNAVAILABLE_REASON = "Docker client configuration could not be isolated";
 
 class DockerClientConfigUnavailableError extends Error {}
+class DockerProbeIdentityUnavailableError extends Error {}
+
+function dockerDiscoveryFailureReason(error: unknown): string | null {
+  if (error instanceof DockerClientConfigUnavailableError) return DOCKER_CLIENT_CONFIG_UNAVAILABLE_REASON;
+  if (error instanceof DockerProbeIdentityUnavailableError) return error.message;
+  return null;
+}
 
 function podmanLiteralEnvironmentSafe(value: string): boolean {
   const array = /^\[(.*)\]\s*(?:#.*)?$/u.exec(value);
@@ -478,7 +485,9 @@ export class ContainerTargetRegistry {
   > {
     const installations = new Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>();
     const seen = new Set<string>();
-    const probe = async (candidate: { agentId: string; command: string; args: string[] },
+    let dockerProbeTail: Promise<void> = Promise.resolve();
+    let dockerProbeFailure: Error | undefined;
+    const runProbe = async (candidate: { agentId: string; command: string; args: string[] },
       phase: "resolve" | "version" | "capability" | "authentication", entrypoint: string, args: string[]): Promise<ExecResult> => {
       const probeKey = createHash("sha256").update(JSON.stringify([
         template.id, candidate.agentId, candidate.command, candidate.args, phase,
@@ -489,6 +498,26 @@ export class ContainerTargetRegistry {
       if (template.runtime === "podman" && !this.podmanDefaultsSafe()) {
         return { code: 1, stdout: "", stderr: "" };
       }
+      const env = template.runtime === "docker" ? dockerProbeEnvironment(process.env, dockerHost) :
+        targetProbeEnvironment(process.env);
+      if (template.runtime === "docker") {
+        // Use the exact client environment of the imminent probe. Rediscovery can run long
+        // after startup, and a Docker-named command or pinned daemon can change meanwhile.
+        const identityRun = async (identityArgs: string[], maxBuffer: number): Promise<ExecResult> => {
+          try {
+            return await this.deps.run(runtime.launch.command, [...runtime.launch.args, ...identityArgs], {
+              timeoutMs: 5_000, maxBuffer, env, replaceEnv: true,
+            });
+          } catch {
+            return { code: 1, stdout: "", stderr: "" };
+          }
+        };
+        const version = await identityRun(["--version"], 4_096);
+        const details = dockerVersionBanner(version)
+          ? await identityRun(["version", "--format", "{{json .}}"], 64 * 1024) : undefined;
+        const reason = containerRuntimeIdentityReason("docker", version, details);
+        if (reason) throw new DockerProbeIdentityUnavailableError(reason);
+      }
       const result = await this.deps.run(runtime.launch.command, [
         ...runtime.launch.args, "run", "--rm", "--name", name,
         ...(template.runtime === "podman" ? ["--http-proxy=false"] : []),
@@ -497,15 +526,25 @@ export class ContainerTargetRegistry {
         "--security-opt", "no-new-privileges", "--pids-limit", "128",
         "--tmpfs", "/tmp:rw,nosuid,nodev", "--workdir", "/tmp",
         "--entrypoint", entrypoint, template.image, ...args,
-      ], { timeoutMs: 5_000, maxBuffer: 64 * 1024,
-        env: template.runtime === "docker" ? dockerProbeEnvironment(process.env, dockerHost) :
-          targetProbeEnvironment(process.env), replaceEnv: true });
+      ], { timeoutMs: 5_000, maxBuffer: 64 * 1024, env, replaceEnv: true });
       if (result.timedOut || result.code === null || result.errorCode) {
         await this.deps.run(runtime.launch.command, [
           ...runtime.launch.args, "rm", "-f", name,
         ], { timeoutMs: 5_000 });
       }
       return result;
+    };
+    const probe = (candidate: { agentId: string; command: string; args: string[] },
+      phase: "resolve" | "version" | "capability" | "authentication", entrypoint: string, args: string[]): Promise<ExecResult> => {
+      if (template.runtime !== "docker") return runProbe(candidate, phase, entrypoint, args);
+      // Provider status can request two probes concurrently. Serialize Docker's identity
+      // check and launch so a failure cannot race another probe into the changed daemon.
+      const pending = dockerProbeTail.then(() => {
+        if (dockerProbeFailure) throw dockerProbeFailure;
+        return runProbe(candidate, phase, entrypoint, args);
+      });
+      dockerProbeTail = pending.then(() => undefined, (error: Error) => { dockerProbeFailure = error; });
+      return pending;
     };
     for (const candidate of candidateCommands(template)) {
       // No workspace mount, network, host secrets, or interactive stdin reaches these probes.
@@ -670,8 +709,9 @@ export class ContainerTargetRegistry {
       if (!failed) {
         try { installations = await this.discoverInstallations(template, runtime, id, dockerHost); }
         catch (error) {
-          if (!(error instanceof DockerClientConfigUnavailableError)) throw error;
-          failed = DOCKER_CLIENT_CONFIG_UNAVAILABLE_REASON;
+          const reason = dockerDiscoveryFailureReason(error);
+          if (!reason) throw error;
+          failed = reason;
         }
       }
       const defaultsUnsafe = template.runtime === "podman" && !this.podmanDefaultsSafe();
@@ -704,11 +744,12 @@ export class ContainerTargetRegistry {
       let installations: Map<string, { agentId: string; command: string; args: string[]; info: TargetHarnessInstallation }>;
       try { installations = await this.discoverInstallations(item.config, item.runtime, id, item.dockerHost); }
       catch (error) {
-        if (!(error instanceof DockerClientConfigUnavailableError)) throw error;
+        const reason = dockerDiscoveryFailureReason(error);
+        if (!reason) throw error;
         item.installations = undefined;
         item.definition = {
           ...item.definition, available: false, harnessInstallations: undefined,
-          unavailableReason: DOCKER_CLIENT_CONFIG_UNAVAILABLE_REASON,
+          unavailableReason: reason,
         };
         continue;
       }

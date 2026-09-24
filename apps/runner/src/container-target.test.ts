@@ -43,6 +43,26 @@ function runtime() {
   return { path: "/usr/bin/docker", via: "path" as const, launch: { command: "/usr/bin/docker", args: [] } };
 }
 
+/** Existing container fixtures exercise setup and probe behavior with a fake Docker client.
+ * Give that client a verified Engine response so identity rechecks reach the behavior under test. */
+function testRegistry(...args: ConstructorParameters<typeof ContainerTargetRegistry>): ContainerTargetRegistry {
+  const [runnerId, hostname, templates, deps] = args;
+  if (!deps) return new ContainerTargetRegistry(runnerId, hostname, templates);
+  return new ContainerTargetRegistry(runnerId, hostname, templates, {
+    ...deps,
+    run: (file, commandArgs, opts) => {
+      if (commandArgs.at(-1) === "--version" && !commandArgs.includes("run")) {
+        return Promise.resolve({ code: 0, stdout: "Docker version 27.0.0\n", stderr: "" });
+      }
+      if (commandArgs.at(-3) === "version" && commandArgs.at(-2) === "--format" &&
+          commandArgs.at(-1) === "{{json .}}") {
+        return Promise.resolve({ code: 0, stdout: '{"Server":{"Components":[{"Name":"Engine"}]}}', stderr: "" });
+      }
+      return deps.run(file, commandArgs, opts);
+    },
+  });
+}
+
 function podmanDefaultsFixture(config: string): () => boolean {
   return () => podmanDefaultsSafeForPaths({
     share: join(config, "share"), system: join(config, "system"), home: join(config, "home"),
@@ -67,7 +87,7 @@ test("a Docker-named Podman shim cannot advertise a secret-free target", {
     assert.match(runtime?.unavailableReason ?? "", /Docker command resolves to Podman/u);
     let containerCalls = 0;
     let podmanGuardCalls = 0;
-    const registry = new ContainerTargetRegistry("runner-shim", "host", [template], {
+    const registry = testRegistry("runner-shim", "host", [template], {
       resolveRuntime: async () => runtime,
       podmanDefaultsSafe: () => { podmanGuardCalls += 1; return defaultsSafe(); },
       run: async () => { containerCalls += 1; return { code: 0, stdout: "", stderr: "" }; },
@@ -90,7 +110,7 @@ test("production runtime resolution checks a Docker-named Podman shim", {
   try {
     writeFileSync(join(root, "docker"), "#!/bin/sh\nprintf 'podman version 5.4.0\\n'\n", { mode: 0o755 });
     process.env.PATH = `${root}${delimiter}${previousPath ?? ""}`;
-    const registry = new ContainerTargetRegistry("runner-path", "host", [template]);
+    const registry = testRegistry("runner-path", "host", [template]);
     await registry.initialize();
     assert.equal(registry.definitions()[0]?.available, false);
     assert.match(registry.definitions()[0]?.unavailableReason ?? "", /Docker command resolves to Podman/u);
@@ -155,7 +175,7 @@ function runnerKey(runnerId: string): string {
 
 test("digest-pinned templates pass argv-native checks and produce an exact immutable target", async () => {
   const calls: string[][] = [];
-  const registry = new ContainerTargetRegistry("runner / one", "host", [template], {
+  const registry = testRegistry("runner / one", "host", [template], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args) => { calls.push(args); return { code: 0, stdout: "", stderr: "" }; },
   });
@@ -233,7 +253,7 @@ test("setup checks launch the runtime without inherited host values or credentia
   `;
   try {
     let checkOutput = "";
-    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    const registry = testRegistry("runner", "host", [template], {
       resolveRuntime: async () => ({ path: "/bin/sh", via: "path", launch: {
         command: "/bin/sh", args: ["-c", script, "runtime"],
       } }),
@@ -265,7 +285,7 @@ test("rootless local Podman checks retain storage and runtime paths without host
   try {
     let checkEnv: Record<string, string> | undefined;
     let argsFromCheck: string[] | undefined;
-    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+    const registry = testRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       podmanDefaultsSafe: () => true,
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
@@ -301,7 +321,7 @@ test("Podman socket engines cannot claim a secret-free local mount boundary", {
 }, async () => {
   process.env.CONTAINER_HOST = "unix:///run/user/1000/podman/podman.sock";
   const calls: string[][] = [];
-  const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+  const registry = testRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args) => { calls.push(args); return { code: 0, stdout: "", stderr: "" }; },
   });
@@ -322,7 +342,7 @@ test("Podman rejects host binds configured in containers.conf", {
   process.env.XDG_CONFIG_HOME = config;
   try {
     let setupRan = false;
-    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+    const registry = testRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       podmanDefaultsSafe: podmanDefaultsFixture(config),
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
@@ -354,7 +374,7 @@ test("Podman does not advertise or launch a secret-free target when host default
   process.env.XDG_CONFIG_HOME = config;
   try {
     const calls: string[][] = [];
-    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+    const registry = testRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       podmanDefaultsSafe: podmanDefaultsFixture(config),
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
@@ -386,7 +406,7 @@ test("Podman rejects a default mount added after registration before session lau
   const previousConfigHome = process.env.XDG_CONFIG_HOME;
   process.env.XDG_CONFIG_HOME = config;
   try {
-    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+    const registry = testRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       podmanDefaultsSafe: podmanDefaultsFixture(config),
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => args[0] === "info"
@@ -437,7 +457,7 @@ test("Podman setup and probes stop if defaults change during readiness", {
   writeFileSync(mounts, "# initially safe\n");
   try {
     const runs: string[][] = [];
-    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+    const registry = testRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       podmanDefaultsSafe: podmanDefaultsFixture(config),
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
@@ -467,7 +487,7 @@ test("Podman does not start a setup check after local-mode inspection adds a def
   writeFileSync(mounts, "# initially safe\n");
   try {
     let setupRan = false;
-    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+    const registry = testRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       podmanDefaultsSafe: podmanDefaultsFixture(config),
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
@@ -624,7 +644,7 @@ test("a saved local Docker context supplies its Unix socket without exposing cli
   try {
     let checkEnv: Record<string, string> | undefined;
     let contextEnv: Record<string, string> | undefined;
-    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    const registry = testRegistry("runner", "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
         if (args[0] === "context") {
@@ -655,7 +675,7 @@ test("Windows Docker checks retain a local named-pipe endpoint", {
 }, async () => {
   process.env.DOCKER_HOST = "npipe:////./pipe/docker_engine";
   let checkEnv: Record<string, string> | undefined;
-  const registry = new ContainerTargetRegistry("runner", "host", [template], {
+  const registry = testRegistry("runner", "host", [template], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args, opts) => {
       if (args[0] === "run" && args.includes("git")) checkEnv = opts.env;
@@ -673,7 +693,7 @@ test("a remote saved Docker context fails closed without running a setup check",
   process.env.DOCKER_CONFIG = config;
   try {
     let checkRan = false;
-    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    const registry = testRegistry("runner", "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         if (args[0] === "context") return { code: 0, stdout: '"tcp://example.invalid:2376"\n', stderr: "" };
@@ -700,7 +720,7 @@ test("DOCKER_HOST wins over a stale or remote Docker context", async () => {
     process.env.DOCKER_CONTEXT = available ? "missing-context" : "local-context";
     let contextInspected = false;
     let checkEnv: Record<string, string> | undefined;
-    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    const registry = testRegistry("runner", "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
         if (args[0] === "context") contextInspected = true;
@@ -726,7 +746,7 @@ test("Podman keeps a configured local storage file without loading general conta
   try {
     let checkEnv: Record<string, string> | undefined;
     let inspectedLocalMode = false;
-    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+    const registry = testRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       podmanDefaultsSafe: () => true,
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
@@ -764,7 +784,7 @@ test("Podman config-selected remote mode cannot certify a local setup check", {
   try {
     let setupRan = false;
     let infoEnv: Record<string, string> | undefined;
-    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+    const registry = testRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       podmanDefaultsSafe: () => true,
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
@@ -796,7 +816,7 @@ test("Podman setup checks fail closed when local mode cannot be confirmed", {
     { code: 1, stdout: "", stderr: "", timedOut: true },
   ]) {
     let setupRan = false;
-    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+    const registry = testRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       podmanDefaultsSafe: () => true,
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
@@ -818,7 +838,7 @@ test("unsupported remote container endpoint fails closed before running a setup 
   process.env.DOCKER_HOST = "tcp://example.invalid:2375";
   try {
     let setupRan = false;
-    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    const registry = testRegistry("runner", "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         if (args[0] === "run" && args.includes("git")) setupRan = true;
@@ -842,7 +862,7 @@ test("an unavailable private runtime directory leaves only its target unavailabl
   process.env.TMPDIR = join(tmpdir(), `wollipog-missing-${randomUUID()}`);
   try {
     let setupRan = false;
-    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    const registry = testRegistry("runner", "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         if (args[0] === "run" && args.includes("git")) setupRan = true;
@@ -865,7 +885,7 @@ test("setup-check timeout and client errors expose only value-free failure categ
     [{ code: 1, stdout: "fixture-private-output", stderr: "", timedOut: true }, "timed out"],
     [{ code: 1, stdout: "", stderr: "fixture-private-output", errorCode: "ENOENT" }, "runtime client failed"],
   ] as const) {
-    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    const registry = testRegistry("runner", "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => args[0] === "run" ? result : { code: 0, stdout: "", stderr: "" },
     });
@@ -885,7 +905,7 @@ test("container installations stay target-bound, deduplicate aliases, and fail c
       ] } },
     { ...template, id: "beta", agentCommands: { codex: { command: "codex", args: ["app-server"] } } },
   ];
-  const registry = new ContainerTargetRegistry("runner", "host", configurations, {
+  const registry = testRegistry("runner", "host", configurations, {
     resolveRuntime: async () => runtime(),
     run: async (_file, args) => {
       if (args.includes("/bin/sh")) {
@@ -930,7 +950,7 @@ test("target-local probes use the selected image executable without mounts, host
   const configured: RunnerContainerTarget = {
     ...template, agentCommands: { "claude-code": { command: "claude" } },
   };
-  const registry = new ContainerTargetRegistry("runner", "host", [configured], {
+  const registry = testRegistry("runner", "host", [configured], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args, opts) => {
       calls.push({ args, ...opts });
@@ -984,7 +1004,7 @@ test("Docker setup checks and probes isolate client defaults without overriding 
   process.env.DOCKER_CONFIG = config;
   try {
     const runs: Array<{ args: string[]; env?: Record<string, string> }> = [];
-    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    const registry = testRegistry("runner", "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
         if (args[0] === "context") return { code: 0, stdout: '"unix:///var/run/docker.sock"\n', stderr: "" };
@@ -1026,7 +1046,7 @@ test("Podman installation probes disable default forwarding of client proxy vari
   process.env.HTTP_PROXY = "http://user:synthetic-password@proxy.example.invalid:8080";
   try {
     const probes: Array<{ args: string[]; env?: Record<string, string> }> = [];
-    const registry = new ContainerTargetRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
+    const registry = testRegistry("runner", "host", [{ ...template, runtime: "podman" }], {
       podmanDefaultsSafe: () => true,
       resolveRuntime: async () => runtime(),
       run: async (_file, args, opts) => {
@@ -1053,7 +1073,7 @@ test("Podman installation probes disable default forwarding of client proxy vari
 
 test("a timed-out authentication probe is removed and never becomes readiness evidence", async () => {
   const calls: string[][] = [];
-  const registry = new ContainerTargetRegistry("runner", "host", [template], {
+  const registry = testRegistry("runner", "host", [template], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args) => {
       calls.push(args);
@@ -1078,7 +1098,7 @@ test("a timed-out authentication probe is removed and never becomes readiness ev
 
 test("an output-limit error removes its probe container before returning unknown", async () => {
   const calls: string[][] = [];
-  const registry = new ContainerTargetRegistry("runner", "host", [template], {
+  const registry = testRegistry("runner", "host", [template], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args) => {
       calls.push(args);
@@ -1098,7 +1118,7 @@ test("an output-limit error removes its probe container before returning unknown
 
 test("a timed-out container version probe is named, labelled, and forcibly removed", async () => {
   const calls: string[][] = [];
-  const registry = new ContainerTargetRegistry("runner", "host", [template], {
+  const registry = testRegistry("runner", "host", [template], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args) => {
       calls.push(args);
@@ -1119,7 +1139,7 @@ test("a timed-out container version probe is named, labelled, and forcibly remov
 });
 
 test("container target display names stay within the control-plane registration bound", async () => {
-  const registry = new ContainerTargetRegistry(
+  const registry = testRegistry(
     "runner",
     "h".repeat(150),
     [{ ...template, name: "n".repeat(100) }],
@@ -1130,7 +1150,7 @@ test("container target display names stay within the control-plane registration 
 });
 
 test("missing runtimes and failed checks stay visible but unavailable without fallback", async () => {
-  const missing = new ContainerTargetRegistry("r", "host", [template], {
+  const missing = testRegistry("r", "host", [template], {
     resolveRuntime: async () => null,
     run: async () => { throw new Error("must not run"); },
   });
@@ -1141,7 +1161,7 @@ test("missing runtimes and failed checks stay visible but unavailable without fa
   let call = 0;
   const failedCalls: string[][] = [];
   let setupHome = "";
-  const failed = new ContainerTargetRegistry("r", "host", [template], {
+  const failed = testRegistry("r", "host", [template], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args, opts) => {
       failedCalls.push(args);
@@ -1178,7 +1198,7 @@ test("canonical and legacy inventories start concurrently within one timeout env
     reportStarted = resolve;
     setImmediate(() => resolve(false));
   });
-  const registry = new ContainerTargetRegistry("runner-concurrent", "host", [template], {
+  const registry = testRegistry("runner-concurrent", "host", [template], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args, opts) => {
       if (args[0] !== "ps") return { code: 0, stdout: "", stderr: "" };
@@ -1207,7 +1227,7 @@ test("Docker and Podman discover both generations and produce exact dual-label W
     const calls: Array<{ file: string; args: string[] }> = [];
     const runtimeTemplate = { ...template, runtime: runtimeName };
     const expectedRunnerKey = runnerKey(`runner-${runtimeName}`);
-    const registry = new ContainerTargetRegistry(`runner-${runtimeName}`, "host", [runtimeTemplate], {
+    const registry = testRegistry(`runner-${runtimeName}`, "host", [runtimeTemplate], {
       podmanDefaultsSafe: () => true,
       resolveRuntime: async () => ({
         path: `/usr/bin/${runtimeName}`,
@@ -1288,7 +1308,7 @@ test("Docker and Podman discover both generations and produce exact dual-label W
 
 test("legacy-only container discovery emits one value-free warning across Docker and Podman", async () => {
   const warnings: string[] = [];
-  const registry = new ContainerTargetRegistry("runner-warning-secret", "host", [
+  const registry = testRegistry("runner-warning-secret", "host", [
     { ...template, id: "docker-tools", runtime: "docker" },
     ...(process.platform === "linux" ? [{ ...template, id: "podman-tools", runtime: "podman" as const }] : []),
   ], {
@@ -1326,7 +1346,7 @@ test("the default production sink emits the bounded compatibility-window notice"
   const originalWarn = console.warn;
   console.warn = (...values: unknown[]) => warnings.push(values.map(String).join(" "));
   try {
-    const registry = new ContainerTargetRegistry("runner-default-warning-secret", "host", [template], {
+    const registry = testRegistry("runner-default-warning-secret", "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         if (args[0] !== "ps") return { code: 0, stdout: "", stderr: "" };
@@ -1350,7 +1370,7 @@ test("the default production sink emits the bounded compatibility-window notice"
 test("canonical-only and dual-labelled inventories do not emit legacy warnings", async () => {
   for (const mode of ["canonical-only", "dual"] as const) {
     const warnings: string[] = [];
-    const registry = new ContainerTargetRegistry(`runner-${mode}`, "host", [template], {
+    const registry = testRegistry(`runner-${mode}`, "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         if (args[0] !== "ps") return { code: 0, stdout: "", stderr: "" };
@@ -1374,7 +1394,7 @@ test("startup fails closed before removal when either label inventory cannot be 
   for (const failure of ["canonical-error", "legacy-error", "canonical-invalid", "legacy-invalid"] as const) {
     const calls: string[][] = [];
     const warnings: string[] = [];
-    const registry = new ContainerTargetRegistry(`runner-${failure}`, "host", [template], {
+    const registry = testRegistry(`runner-${failure}`, "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         calls.push(args);
@@ -1405,7 +1425,7 @@ test("startup bounds the combined canonical and legacy orphan inventory", async 
   const legacyIds = Array.from({ length: 64 }, (_, index) => (0x200000000000 + index).toString(16));
   const calls: string[][] = [];
   const warnings: string[] = [];
-  const bounded = new ContainerTargetRegistry("r", "host", [template], {
+  const bounded = testRegistry("r", "host", [template], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args) => {
       calls.push(args);
@@ -1428,7 +1448,7 @@ test("128 dual-labelled containers deduplicate within the inventory bound", asyn
   const ids = Array.from({ length: 128 }, (_, index) => (0x400000000000 + index).toString(16));
   const calls: string[][] = [];
   const warnings: string[] = [];
-  const registry = new ContainerTargetRegistry("runner-dual-bound", "host", [template], {
+  const registry = testRegistry("runner-dual-bound", "host", [template], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args) => {
       calls.push(args);
@@ -1451,7 +1471,7 @@ test("an over-bound canonical or legacy generation prevents warning and removal"
   for (const overBoundGeneration of ["canonical", "legacy"] as const) {
     const calls: string[][] = [];
     const warnings: string[] = [];
-    const registry = new ContainerTargetRegistry(`runner-over-bound-${overBoundGeneration}`, "host", [template], {
+    const registry = testRegistry(`runner-over-bound-${overBoundGeneration}`, "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         calls.push(args);
@@ -1480,7 +1500,7 @@ test("an over-bound canonical or legacy generation prevents warning and removal"
 test("orphan removal failure leaves the target unavailable with the existing diagnostic", async () => {
   const calls: string[][] = [];
   const warnings: string[] = [];
-  const registry = new ContainerTargetRegistry("runner-remove-failure", "host", [template], {
+  const registry = testRegistry("runner-remove-failure", "host", [template], {
     resolveRuntime: async () => runtime(),
     run: async (_file, args) => {
       calls.push(args);
