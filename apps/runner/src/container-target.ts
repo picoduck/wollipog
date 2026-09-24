@@ -433,21 +433,32 @@ export class ContainerTargetRegistry {
   }
 
   private cleanupOrphans(runtime: ResolvedBinary, opts: { env?: Record<string, string>; replaceEnv?: boolean } = {},
-    mode: "startup" | "exited" = "startup"): Promise<string | null> {
-    const key = `${runtime.launch.command}\0${runtime.launch.args.join("\0")}\0${opts.env?.DOCKER_HOST ?? ""}\0${mode}`;
+    mode: "startup" | "recovery" = "startup", recoveryTemplateId?: string): Promise<string | null> {
+    const key = `${runtime.launch.command}\0${runtime.launch.args.join("\0")}\0${opts.env?.DOCKER_HOST ?? ""}\0${mode}\0${recoveryTemplateId ?? ""}`;
     const existing = this.runtimeCleanup.get(key);
     if (existing) return existing;
     const cleanup = (async () => {
       const listInventory = async () => {
         const inventory = new Set<string>();
         const generationInventories = new Map<string, Set<string>>();
-        const listings = await Promise.all(CONTAINER_LABEL_GENERATIONS.map(async (labels) => ({
-          labels,
-          listed: await this.deps.run(runtime.launch.command, [
-            ...runtime.launch.args, "ps", "-aq", "--filter", `label=${labels.runner}=${this.runnerKey}`,
-            ...(mode === "exited" ? ["--filter", "status=exited"] : []),
-          ], { ...opts, timeoutMs: 15_000 }),
-        })));
+        const recoveryFilters: Array<{ status?: string; templateId?: string }> = mode === "startup" ? [{}] : [
+          { status: "exited" },
+          { status: "dead" },
+          { status: "removing" },
+          // A recovering template was unavailable throughout this runner lifetime, so it
+          // cannot have an in-flight launch. Other templates can; leave their created state alone.
+          ...(recoveryTemplateId ? [{ status: "created", templateId: recoveryTemplateId }] : []),
+        ];
+        const listings = await Promise.all(CONTAINER_LABEL_GENERATIONS.flatMap((labels) =>
+          recoveryFilters.map(async ({ status, templateId }) => ({
+            labels,
+            listed: await this.deps.run(runtime.launch.command, [
+              ...runtime.launch.args, "ps", "-aq", "--filter", `label=${labels.runner}=${this.runnerKey}`,
+              ...(status ? ["--filter", `status=${status}`] : []),
+              ...(templateId ? ["--filter", `label=${labels.template}=${templateId}`] : []),
+            ], { ...opts, timeoutMs: 15_000 }),
+          })),
+        ));
         let error: string | null = null;
         for (const { labels, listed } of listings) {
           if (listed.code !== 0) {
@@ -459,7 +470,9 @@ export class ContainerTargetRegistry {
             error ??= "container runtime returned an invalid runner-owned container inventory";
             continue;
           }
-          generationInventories.set(labels.runner, new Set(ids));
+          const generation = generationInventories.get(labels.runner) ?? new Set<string>();
+          generationInventories.set(labels.runner, generation);
+          for (const id of ids) generation.add(id);
           for (const id of ids) inventory.add(id);
         }
         if (inventory.size > MAX_RUNNER_CONTAINER_INVENTORY) {
@@ -482,7 +495,7 @@ export class ContainerTargetRegistry {
         { ...opts, timeoutMs: 30_000 },
       );
       if (removed.code === 0) return null;
-      if (mode === "exited") {
+      if (mode === "recovery") {
         // --rm containers can disappear during Docker's own post-exit teardown.
         // Recheck the exact candidates; a started container is no longer eligible either.
         const remaining = await listInventory();
@@ -492,7 +505,7 @@ export class ContainerTargetRegistry {
       return unavailableReason(removed.stderr || "could not remove orphaned runner containers");
     })();
     this.runtimeCleanup.set(key, cleanup);
-    if (mode === "exited") {
+    if (mode === "recovery") {
       // A failed recovery must be retryable on the next Rediscover.
       void cleanup.then((error) => { if (error) this.runtimeCleanup.delete(key); },
         () => { this.runtimeCleanup.delete(key); });
@@ -602,7 +615,7 @@ export class ContainerTargetRegistry {
     await this.prepareTemplates(this.templates);
   }
 
-  private async prepareTemplates(templates: RunnerContainerTarget[], cleanupMode: "startup" | "exited" = "startup"): Promise<void> {
+  private async prepareTemplates(templates: RunnerContainerTarget[], cleanupMode: "startup" | "recovery" = "startup"): Promise<void> {
     for (const template of templates) {
       const id = containerTargetId(this.runnerId, template.id);
       const environment = {
@@ -701,15 +714,16 @@ export class ContainerTargetRegistry {
           continue;
         }
       }
-      // Rediscover can share this engine with live sessions. Restrict recovery to exited
-      // containers and omit --force, so a container started after listing cannot be killed.
-      const cleanupError = await this.cleanupOrphans(runtime, dockerStartupOpts, cleanupMode);
+      // Rediscover can share this engine with live sessions. Limit created candidates to the
+      // recovering template and omit --force, so a started container cannot be killed.
+      const cleanupError = await this.cleanupOrphans(runtime, dockerStartupOpts, cleanupMode,
+        cleanupMode === "recovery" ? template.id : undefined);
       if (cleanupError) {
         this.prepared.set(id, {
           config: template,
           runtime,
           definition: { ...base, unavailableReason: `orphan reconciliation failed: ${cleanupError}` },
-          ...(cleanupMode === "exited" && template.runtime === "docker" ? {
+          ...(cleanupMode === "recovery" && template.runtime === "docker" ? {
             dockerConfigRecovery: "readiness" as const,
           } : {}),
         });
@@ -829,8 +843,8 @@ export class ContainerTargetRegistry {
         try { dockerTargetClientConfig(); }
         catch { continue; }
         if (item.dockerConfigRecovery === "readiness") {
-          // Repeat image and setup checks after reconciling only exited containers.
-          await this.prepareTemplates([item.config], "exited");
+          // Repeat image and setup checks after safely reconciling this Docker target.
+          await this.prepareTemplates([item.config], "recovery");
           continue;
         }
       }
