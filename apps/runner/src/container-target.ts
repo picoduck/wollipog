@@ -432,8 +432,8 @@ export class ContainerTargetRegistry {
     return env;
   }
 
-  private cleanupOrphans(runtime: ResolvedBinary): Promise<string | null> {
-    const key = `${runtime.launch.command}\0${runtime.launch.args.join("\0")}`;
+  private cleanupOrphans(runtime: ResolvedBinary, opts: { env?: Record<string, string>; replaceEnv?: boolean } = {}): Promise<string | null> {
+    const key = `${runtime.launch.command}\0${runtime.launch.args.join("\0")}\0${opts.env?.DOCKER_HOST ?? ""}`;
     const existing = this.runtimeCleanup.get(key);
     if (existing) return existing;
     const cleanup = (async () => {
@@ -443,7 +443,7 @@ export class ContainerTargetRegistry {
         labels,
         listed: await this.deps.run(runtime.launch.command, [
           ...runtime.launch.args, "ps", "-aq", "--filter", `label=${labels.runner}=${this.runnerKey}`,
-        ], { timeoutMs: 15_000 }),
+        ], { ...opts, timeoutMs: 15_000 }),
       })));
       let inventoryError: string | null = null;
       for (const { labels, listed } of listings) {
@@ -473,7 +473,7 @@ export class ContainerTargetRegistry {
       const removed = await this.deps.run(
         runtime.launch.command,
         [...runtime.launch.args, "rm", "-f", ...inventory],
-        { timeoutMs: 30_000 },
+        { ...opts, timeoutMs: 30_000 },
       );
       return removed.code === 0 ? null : unavailableReason(removed.stderr || "could not remove orphaned runner containers");
     })();
@@ -634,9 +634,13 @@ export class ContainerTargetRegistry {
         });
         continue;
       }
+      let dockerHost: string | undefined;
+      let dockerStartupOpts: { env: Record<string, string>; replaceEnv: true } | undefined;
       if (template.runtime === "docker") {
-        try { dockerTargetClientConfig(); }
-        catch {
+        let clientConfig: string;
+        try {
+          clientConfig = dockerTargetClientConfig();
+        } catch {
           this.prepared.set(id, {
             config: template, runtime,
             definition: { ...base, unavailableReason: DOCKER_CLIENT_CONFIG_UNAVAILABLE_REASON },
@@ -644,10 +648,40 @@ export class ContainerTargetRegistry {
           });
           continue;
         }
+        try {
+          // Resolve the operator's context before any startup inventory or image check.
+          // All subsequent Docker clients use this local endpoint and private config.
+          dockerHost = (await this.setupEnvironment(template, runtime, clientConfig)).DOCKER_HOST;
+          dockerStartupOpts = { env: dockerProbeEnvironment(process.env, dockerHost), replaceEnv: true };
+        } catch {
+          this.prepared.set(id, {
+            config: template, runtime,
+            definition: { ...base, unavailableReason: "Docker endpoint could not be verified" },
+          });
+          continue;
+        }
+        let reason: string | null;
+        try {
+          const version = await this.deps.run(runtime.launch.command, [...runtime.launch.args, "--version"], {
+            ...dockerStartupOpts, timeoutMs: 5_000, maxBuffer: 4_096,
+          });
+          const details = dockerVersionBanner(version)
+            ? await this.deps.run(runtime.launch.command, [...runtime.launch.args, "version", "--format", "{{json .}}"], {
+              ...dockerStartupOpts, timeoutMs: 5_000, maxBuffer: 64 * 1024,
+            }) : undefined;
+          reason = containerRuntimeIdentityReason("docker", version, details);
+        } catch {
+          reason = "container runtime identity could not be verified";
+        }
+        if (reason) {
+          this.prepared.set(id, { config: template, runtime,
+            definition: { ...base, unavailableReason: reason } });
+          continue;
+        }
       }
       // Orphan reconciliation is a startup-only operation. A Rediscover retry may run
       // while another target has live sessions on this engine; never remove them here.
-      const cleanupError = skipOrphanCleanup ? null : await this.cleanupOrphans(runtime);
+      const cleanupError = skipOrphanCleanup ? null : await this.cleanupOrphans(runtime, dockerStartupOpts);
       if (cleanupError) {
         this.prepared.set(id, {
           config: template,
@@ -657,7 +691,9 @@ export class ContainerTargetRegistry {
         continue;
       }
       const prefix = runtime.launch.args;
-      const inspected = await this.deps.run(runtime.launch.command, [...prefix, "image", "inspect", template.image], { timeoutMs: 15_000 });
+      const inspected = await this.deps.run(runtime.launch.command, [...prefix, "image", "inspect", template.image], {
+        ...dockerStartupOpts, timeoutMs: 15_000,
+      });
       if (inspected.code !== 0) {
         this.prepared.set(id, {
           config: template,
@@ -667,8 +703,7 @@ export class ContainerTargetRegistry {
         continue;
       }
       let failed: string | null = null;
-      let dockerHost: string | undefined;
-      let dockerHostChecked = false;
+      let dockerHostChecked = template.runtime === "docker";
       for (const check of template.setupChecks) {
         let home: string;
         try {
