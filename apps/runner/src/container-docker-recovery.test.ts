@@ -16,14 +16,22 @@ const template: RunnerContainerTarget = {
 const localDockerHost = process.platform === "win32"
   ? "npipe:////./pipe/docker_engine" : "unix:///var/run/docker.sock";
 const exitedContainerId = "aaaaaaaaaaaa";
+type DockerState = "exited" | "created" | "dead" | "removing" | "running" | "paused" | "restarting";
+interface Candidate { id: string; status: DockerState; templateId?: string; labels?: "canonical" | "legacy" | "both" }
 
 function fixture(fixtureOptions: { removalFails?: boolean; removalDisappears?: boolean;
-  removalFailsOnce?: boolean } = {}) {
+  removalFailsOnce?: boolean; startsDuringRemoval?: boolean; containers?: Candidate[] } = {}) {
   const launches: Array<{ args: string[]; env?: Record<string, string> }> = [];
   let engineName = "Engine";
   let removedByDocker = false;
   let remainingRemovalFailures = fixtureOptions.removalFailsOnce ? 1 : 0;
+  const removedByUs = new Set<string>();
+  const containers = (fixtureOptions.containers ?? [{ id: exitedContainerId, status: "exited" }]).map((candidate) => ({
+    ...candidate, templateId: candidate.templateId ?? template.id, labels: candidate.labels ?? "both",
+  }));
+  const warnings: string[] = [];
   const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    warnLegacyContainerLabels: (message) => warnings.push(message),
     resolveRuntime: async () => ({ path: "/usr/bin/docker", via: "path",
       launch: { command: "/usr/bin/docker", args: [] } }),
     run: async (_file, args, options) => {
@@ -34,14 +42,31 @@ function fixture(fixtureOptions: { removalFails?: boolean; removalDisappears?: b
       if (args[0] === "version") {
         return { code: 0, stdout: JSON.stringify({ Server: { Components: [{ Name: engineName }] } }), stderr: "" };
       }
-      if (args[0] === "ps") return { code: 0,
-        stdout: args.includes("status=exited") && !removedByDocker ? `${exitedContainerId}\n` : "", stderr: "" };
+      if (args[0] === "ps") {
+        const status = args.find((arg) => arg.startsWith("status="))?.slice(7);
+        const generation = args.some((arg) => arg.startsWith("label=com.wollipog.runner="))
+          ? "canonical" : "legacy";
+        const templateFilter = args.find((arg) => arg.startsWith(`label=${generation === "canonical"
+          ? "com.wollipog" : "com.misko-agent-manager"}.template=`))?.split("=").at(-1);
+        const ids = removedByDocker ? [] : containers.filter((candidate) =>
+          candidate.status === status && !removedByUs.has(candidate.id)
+          && (candidate.labels === generation || candidate.labels === "both")
+          && (!templateFilter || candidate.templateId === templateFilter)).map((candidate) => candidate.id);
+        return { code: 0, stdout: ids.length ? `${ids.join("\n")}\n` : "", stderr: "" };
+      }
+      if (args[0] === "rm" && fixtureOptions.startsDuringRemoval) {
+        for (const candidate of containers) {
+          if (candidate.status === "created" && args.includes(candidate.id)) candidate.status = "running";
+        }
+        return { code: 1, stdout: "", stderr: "container is running" };
+      }
       if (args[0] === "rm" && (fixtureOptions.removalFails || fixtureOptions.removalDisappears ||
           remainingRemovalFailures > 0)) {
         if (fixtureOptions.removalDisappears) removedByDocker = true;
         if (remainingRemovalFailures > 0) remainingRemovalFailures -= 1;
         return { code: 1, stdout: "", stderr: "container unavailable" };
       }
+      if (args[0] === "rm") for (const id of args.slice(1)) removedByUs.add(id);
       if (args.includes("/bin/sh")) return { code: 0, stdout: "/usr/bin/codex\n", stderr: "" };
       if (args.at(-1) === "--version" && args.includes("/usr/bin/codex")) {
         return { code: 0, stdout: "codex 1.0.0\n", stderr: "" };
@@ -49,7 +74,7 @@ function fixture(fixtureOptions: { removalFails?: boolean; removalDisappears?: b
       return { code: 0, stdout: "", stderr: "" };
     },
   });
-  return { registry, launches, setEngineName: (name: string) => { engineName = name; } };
+  return { registry, launches, warnings, setEngineName: (name: string) => { engineName = name; } };
 }
 
 function restoreEnv(name: "TMPDIR" | "TMP" | "TEMP" | "DOCKER_HOST" | "DOCKER_CONFIG" | "DOCKER_CONTEXT",
@@ -63,6 +88,115 @@ function setTempDirectory(value: string): void {
   process.env.TMP = value;
   process.env.TEMP = value;
 }
+
+async function withRecoveredDocker(
+  options: Parameters<typeof fixture>[0],
+  inspect: (result: ReturnType<typeof fixture>) => Promise<void> | void,
+): Promise<void> {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-docker-state-recovery-"));
+  const saved = {
+    TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP,
+    DOCKER_HOST: process.env.DOCKER_HOST,
+    DOCKER_CONFIG: process.env.DOCKER_CONFIG, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT,
+  };
+  try {
+    rmSync(dockerTargetClientConfig(), { recursive: true, force: true });
+    setTempDirectory(join(root, "missing"));
+    process.env.DOCKER_HOST = localDockerHost;
+    const result = fixture(options);
+    await result.registry.initialize();
+    assert.equal(result.registry.definitions()[0]!.available, false);
+    setTempDirectory(root);
+    await result.registry.refreshInstallations();
+    await inspect(result);
+  } finally {
+    for (const [name, value] of Object.entries(saved)) restoreEnv(name as keyof typeof saved, value);
+    dockerTargetClientConfig();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("Docker recovery removes created, dead, and exited orphans across both label generations", async () => {
+  await withRecoveredDocker({ containers: [
+    { id: "bbbbbbbbbbbb", status: "created", labels: "canonical" },
+    { id: "dddddddddddd", status: "created", labels: "legacy" },
+    { id: "cccccccccccc", status: "dead", labels: "legacy" },
+    { id: exitedContainerId, status: "exited", labels: "both" },
+  ] }, ({ registry, launches, warnings }) => {
+    assert.equal(registry.definitions()[0]!.available, true);
+    const removals = launches.filter(({ args }) => args[0] === "rm");
+    assert.equal(removals.length, 1);
+    assert.equal(removals[0]!.args[0], "rm");
+    assert.deepEqual(removals[0]!.args.slice(1).sort(),
+      ["bbbbbbbbbbbb", "cccccccccccc", "dddddddddddd", exitedContainerId].sort());
+    assert.equal(removals[0]!.args.includes("-f"), false);
+    assert.equal(warnings.length, 1);
+    assert.equal(launches.filter(({ args }) => args[0] === "ps").length, 8);
+  });
+});
+
+test("Docker recovery excludes other templates created during a live launch and all live states", async () => {
+  await withRecoveredDocker({ containers: [
+    { id: "bbbbbbbbbbbb", status: "created", templateId: "other-template" },
+    { id: "cccccccccccc", status: "running" },
+    { id: "dddddddddddd", status: "paused" },
+    { id: "eeeeeeeeeeee", status: "restarting" },
+  ] }, ({ registry, launches }) => {
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(launches.some(({ args }) => args[0] === "rm"), false);
+    const created = launches.filter(({ args }) => args[0] === "ps" && args.includes("status=created"));
+    assert.equal(created.length, 2);
+    assert.ok(created.every(({ args }) => args.some((arg) => arg.endsWith(".template=docker-recovery"))));
+  });
+});
+
+test("Docker recovery does not remove a created container that starts before non-forced removal", async () => {
+  await withRecoveredDocker({ startsDuringRemoval: true, containers: [
+    { id: "bbbbbbbbbbbb", status: "created" },
+  ] }, ({ registry, launches }) => {
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.deepEqual(launches.filter(({ args }) => args[0] === "rm").map(({ args }) => args),
+      [["rm", "bbbbbbbbbbbb"]]);
+    assert.equal(launches.filter(({ args }) => args[0] === "ps").length, 16);
+  });
+});
+
+test("Docker recovery accepts a removing container that disappears during cleanup", async () => {
+  await withRecoveredDocker({ removalDisappears: true, containers: [
+    { id: "bbbbbbbbbbbb", status: "removing" },
+  ] }, ({ registry, launches }) => {
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.deepEqual(launches.filter(({ args }) => args[0] === "rm").map(({ args }) => args),
+      [["rm", "bbbbbbbbbbbb"]]);
+    assert.equal(launches.filter(({ args }) => args[0] === "ps").length, 16);
+  });
+});
+
+test("Docker recovery retries a persistent dead container after non-forced removal fails", async () => {
+  await withRecoveredDocker({ removalFailsOnce: true, containers: [
+    { id: "bbbbbbbbbbbb", status: "dead" },
+  ] }, async ({ registry, launches }) => {
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /orphan reconciliation failed/u);
+    await registry.refreshInstallations();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.deepEqual(launches.filter(({ args }) => args[0] === "rm").map(({ args }) => args),
+      [["rm", "bbbbbbbbbbbb"], ["rm", "bbbbbbbbbbbb"]]);
+  });
+});
+
+test("Docker recovery bounds the combined inventory across non-running states", async () => {
+  const containers: Candidate[] = Array.from({ length: 129 }, (_, index) => ({
+    id: (0x100000000000 + index).toString(16),
+    status: index % 2 === 0 ? "created" : "dead",
+  }));
+  await withRecoveredDocker({ containers }, ({ registry, launches, warnings }) => {
+    assert.equal(registry.definitions()[0]!.available, false);
+    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /invalid.*inventory/u);
+    assert.equal(launches.some(({ args }) => args[0] === "rm"), false);
+    assert.deepEqual(warnings, []);
+  });
+});
 
 test("Docker target recovers from startup config failure through full readiness on Rediscover", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-docker-recovery-"));
@@ -93,9 +227,14 @@ test("Docker target recovers from startup config failure through full readiness 
     assert.ok(launches.some(({ args }) => args.includes("--entrypoint") && args.includes("git")),
       "startup failure must rerun the setup check before advertising availability");
     const inventories = launches.filter(({ args }) => args[0] === "ps");
-    assert.equal(inventories.length, 2, "both label generations are checked");
+    assert.equal(inventories.length, 8, "both label generations and four safe states are checked");
     for (const { args, env } of inventories) {
-      assert.ok(args.includes("status=exited"), "running sessions must be excluded by Docker");
+      assert.ok(args.some((arg) => /^status=(?:exited|created|dead|removing)$/.test(arg)),
+        "running sessions must be excluded by Docker");
+      if (args.includes("status=created")) {
+        assert.ok(args.some((arg) => arg.includes("template=docker-recovery")),
+          "created state must be scoped to the recovering template");
+      }
       assert.equal(env?.DOCKER_HOST, localDockerHost);
       assert.notEqual(env?.DOCKER_CONFIG, process.env.DOCKER_CONFIG);
       assert.equal(env?.DOCKER_CONTEXT, undefined);
@@ -166,8 +305,8 @@ test("Docker recovery accepts a container already removed by Docker", async () =
     setTempDirectory(root);
     await registry.refreshInstallations();
     assert.equal(registry.definitions()[0]!.available, true);
-    assert.equal(launches.filter(({ args }) => args[0] === "ps").length, 4,
-      "both label generations are rechecked after Docker auto-removes a candidate");
+    assert.equal(launches.filter(({ args }) => args[0] === "ps").length, 16,
+      "all safe states and label generations are rechecked after Docker auto-removes a candidate");
     assert.deepEqual(launches.filter(({ args }) => args[0] === "rm").map(({ args }) => args),
       [["rm", exitedContainerId]]);
   } finally {
@@ -254,8 +393,9 @@ test("Docker recovers when its private config disappears during startup context 
     assert.equal(calls.some((args) => args[0] === "image"), true);
     assert.equal(calls.some((args) => args[0] === "run" && args.includes("git")), true);
     const inventories = calls.filter((args) => args[0] === "ps");
-    assert.equal(inventories.length, 2);
-    assert.ok(inventories.every((args) => args.includes("status=exited")));
+    assert.equal(inventories.length, 8);
+    assert.ok(inventories.every((args) =>
+      args.some((arg) => /^status=(?:exited|created|dead|removing)$/.test(arg))));
     assert.equal(calls.some((args) => args[0] === "rm"), false,
       "an empty exited inventory cannot remove a live session container");
   } finally {
