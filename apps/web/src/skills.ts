@@ -12,6 +12,7 @@ import {
   type AgentContext,
   type ResourceScope,
   type DeployedSkillState,
+  type SkillDriftState,
   type SkillFile,
   type SkillInvocationPolicy,
   type SkillLinkRemoval,
@@ -149,6 +150,7 @@ export interface ReportedSkillsState {
   unmanaged?: UnmanagedSkillInfo[];
   removals?: SkillLinkRemoval[];
   removalsUpdatedAt?: number;
+  drift?: SkillDriftState[];
   error?: string;
   updatedAt?: number;
 }
@@ -160,10 +162,51 @@ export interface RunnerSkillsResponse {
   reported: ReportedSkillsState | null;
   /** Capability of the runner binary, independent of whether any removal event exists. */
   removalReporting?: "supported" | "unsupported" | "unknown";
+  /** Whether this runner verifies deployed copies; an older runner's empty drift list proves nothing. */
+  driftReporting?: "supported" | "unsupported" | "unknown";
 }
 
 export function normalizeRemovalReporting(value: unknown): NonNullable<RunnerSkillsResponse["removalReporting"]> {
   return value === "supported" || value === "unsupported" ? value : "unknown";
+}
+
+/** One reported drifted copy, as the resolution routes address it. */
+export type SkillDriftCopy = Pick<SkillDriftState, "name" | "digest" | "variant">;
+
+export interface SkillDriftPreview {
+  previewId: string;
+  drift: SkillDriftCopy & { observedDigest: string };
+  /** Library files the import would create (the Manual Only frontmatter line removed). */
+  files: SkillFile[];
+  /** The current latest library version's files. */
+  previousFiles: SkillFile[];
+  digest: string | null;
+  importable: boolean;
+  importBlocker?: string;
+  disposition: "identical" | "update";
+  /** False when the edited copy was published from an older version than the library's latest. */
+  publishedFromLatest: boolean;
+  pinned: boolean;
+  assignmentCount: number;
+}
+
+export interface SkillDriftResolution {
+  status?: "restored" | "not_needed";
+  released?: boolean;
+  pinMoved?: boolean;
+  warning?: string;
+  state?: ReportedSkillsState | null;
+}
+
+/** Well-formed drift entries for one skill; anything malformed is ignored rather than trusted. */
+export function reportedSkillDrift(reported: ReportedSkillsState | null | undefined, skillName: string): SkillDriftState[] {
+  if (!Array.isArray(reported?.drift)) return [];
+  return reported.drift.filter((entry) => entry && entry.name === skillName && typeof entry.digest === "string" &&
+    (entry.variant === "agent" || entry.variant === "manual"));
+}
+
+export function driftVariantLabel(variant: SkillInvocationPolicy): string {
+  return variant === "manual" ? "Manual Only Copy" : "Agent Invocable Copy";
 }
 
 /* Wrapped-or-bare payload aliases for the list routes, so the API client stays honest about the
@@ -278,7 +321,7 @@ export function skillEligibleAgents(agents: ReadonlyArray<AgentDefinition>, incl
 
 /* --- Deploy status derivation --- */
 
-export type SkillDeployStatus = "deployed" | "pending" | "conflict" | "error" | "offline";
+export type SkillDeployStatus = "deployed" | "pending" | "drift" | "conflict" | "error" | "offline";
 
 export interface SkillDeployBadge {
   status: SkillDeployStatus;
@@ -291,6 +334,7 @@ export interface SkillDeployBadge {
 const DEPLOY_BADGES: Record<SkillDeployStatus, { label: string; className: string }> = {
   deployed: { label: "Deployed", className: "st-done" },
   pending: { label: "Pending", className: "st-running" },
+  drift: { label: "Drift", className: "st-input" },
   conflict: { label: "Conflict", className: "st-input" },
   error: { label: "Error", className: "st-failed" },
   offline: { label: "Offline", className: "st-stopped" },
@@ -302,9 +346,10 @@ function badge(status: SkillDeployStatus, detail?: string): SkillDeployBadge {
 
 /** One skill × one machine → the chip the detail pane shows.
  *
- * Precedence: an unreachable machine reports nothing trustworthy (offline); a real file in the
- * way must be surfaced over everything else the report says (conflict); an explicit error next;
- * anything not yet reconciled to the desired digest and every target linked is pending. */
+ * Precedence: an unreachable machine reports nothing trustworthy (offline); a hand-edited deployed
+ * copy needs a decision before anything else can converge (drift); a real file in the way must be
+ * surfaced over everything else the report says (conflict); an explicit error next; anything not
+ * yet reconciled to the desired digest and every target linked is pending. */
 export function skillDeployBadge(input: {
   loadError?: string;
   loading?: boolean;
@@ -318,6 +363,12 @@ export function skillDeployBadge(input: {
   if (!input.runnerOnline) return badge("offline");
   if (input.loading) return badge("pending", "Skills status has not loaded.");
   if (input.loadError) return badge("error", input.loadError);
+  const drift = reportedSkillDrift(input.reported, input.skillName);
+  if (drift.length) {
+    return badge("drift", drift.some((entry) => entry.held)
+      ? "A deployed copy of this skill was edited on this machine. Updates and removals are held until you import the edit or restore the library version."
+      : "An edited copy of this skill is retained on this machine until you import the edit or restore the library version.");
+  }
   if (!input.desired) return badge("pending", "No assignment targets this machine yet.");
   const deployed = input.reported?.deployed?.filter((entry) => entry.name === input.skillName) ?? [];
   if (!deployed.length) {

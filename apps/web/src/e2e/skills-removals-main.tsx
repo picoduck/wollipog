@@ -8,11 +8,14 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import type { RunnerSkillsResponse } from "../skills.js";
 import { SkillsView } from "../components/SkillsView.js";
+import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import "../styles.css";
 
 const accountScopes = new URLSearchParams(location.search).has("accountScopes");
 const macosAdoption = new URLSearchParams(location.search).has("macosAdoption");
 const windowsAdoption = new URLSearchParams(location.search).has("windowsAdoption");
+// Drift resolution runs against the real API client so the spec can route and assert each request.
+const drift = new URLSearchParams(location.search).has("drift");
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -47,7 +50,9 @@ const runner: RunnerView = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: accountScopes
+  protocolVersion: drift
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift
+    : accountScopes
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.accountScopedAgentSkills
     : macosAdoption
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption
@@ -197,6 +202,7 @@ const client = {
   ...(new URLSearchParams(location.search).has("matrix") ? {
     runnerSkills: api.runnerSkills, getMachineSkillVersionPolicy: api.getMachineSkillVersionPolicy,
   } : {}),
+  ...(drift ? { runnerSkills: api.runnerSkills, syncRunnerSkills: api.syncRunnerSkills } : {}),
 } as unknown as ApiClient;
 
 function SkillsWhenReady() {
@@ -204,10 +210,14 @@ function SkillsWhenReady() {
   return ready ? <SkillsView /> : null;
 }
 
+const view = (
+  <StoreProvider connection={connection} navigation={navigation}>
+    <SkillsWhenReady />
+  </StoreProvider>
+);
+
 createRoot(document.getElementById("root")!).render(
   <ApiProvider client={client}>
-    <StoreProvider connection={connection} navigation={navigation}>
-      <SkillsWhenReady />
-    </StoreProvider>
+    {drift ? <FeedbackProvider>{view}</FeedbackProvider> : view}
   </ApiProvider>,
 );

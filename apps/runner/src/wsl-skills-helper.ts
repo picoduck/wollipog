@@ -1,10 +1,18 @@
+import { HELD_SKILL_LINK_DETAIL } from "./skills.js";
+
 /** Fixed in-distro filesystem adapter. JSON carries only validated desired state and store paths;
  * no payload value is evaluated as Python or shell source. */
 export const WSL_SKILLS_HELPER = String.raw`#!/usr/bin/env python3
 import ctypes, datetime, hashlib, json, os, re, stat, sys, uuid
 
+HELD_DETAIL = ${JSON.stringify(HELD_SKILL_LINK_DETAIL)}
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
+DRIFTED_VERSION = re.compile(r"^[0-9a-f]{64}(-manual)?$")
+MAX_COPY_ENTRIES = 1024
+MAX_COPY_FILES = 64
+MAX_COPY_FILE_BYTES = 512 * 1024
+MAX_COPY_BYTES = 2 * 1024 * 1024
 LEASE_ID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
 MAX_ENTRIES = 256
 MAX_MD = 65536
@@ -524,7 +532,7 @@ def link_probe(parent_fd, name, store_root, canonical=None, owned=False):
     if canonical is not None and resolved == canonical: return (("canonical" if owned else "canonical-unowned"), resolved)
     return ("foreign", resolved)
 
-def ensure_link(home_fd, relative, target, store_root, canonical, owned):
+def ensure_link(home_fd, relative, target, store_root, canonical, owned, gate=None):
     parent_rel, name = relative.rsplit("/", 1)
     parent = None
     try:
@@ -536,6 +544,8 @@ def ensure_link(home_fd, relative, target, store_root, canonical, owned):
             return (False, "conflict", "an unmanaged symlink already exists at ~/" + relative)
         if kind in ("store", "canonical", "canonical-unowned") and resolved == target:
             owned.add(relative); return (True, None, None)
+        if gate is not None and kind in ("store", "canonical") and not gate(kind, resolved):
+            return (False, "conflict", HELD_DETAIL)
         temp = ".%s.tmp-%s" % (name, uuid.uuid4().hex)
         try:
             os.symlink(target, temp, dir_fd=parent)
@@ -551,16 +561,70 @@ def ensure_link(home_fd, relative, target, store_root, canonical, owned):
     finally:
         if parent is not None: os.close(parent)
 
-def unlink_owned(home_fd, relative, store_root, canonical, owned, direct_store=False):
+def unlink_owned(home_fd, relative, store_root, canonical, owned, direct_store=False, gate=None):
     parent_rel, name = relative.rsplit("/", 1)
     try: parent = walk_dir(home_fd, parent_rel)
     except: return False
     try:
-        kind, _ = link_probe(parent, name, store_root, canonical, relative in owned)
+        kind, resolved = link_probe(parent, name, store_root, canonical, relative in owned)
+        if gate is not None and kind in ("store", "canonical") and not gate(kind, resolved): return False
         if kind == "store" and (direct_store or relative in owned) or kind == "canonical" and relative in owned:
             os.unlink(name, dir_fd=parent); owned.discard(relative); return True
         return False
     finally: os.close(parent)
+
+def generated_artifact(path):
+    parts = path.split("/")
+    return "__pycache__" in parts or parts[-1] == ".DS_Store"
+
+def copy_digest(store_fd, key):
+    # Content digest of one native store copy exactly as the runner's skillVersionDigest computes
+    # it (generated artifacts excluded), read through no-follow descriptors. "missing" when the
+    # copy is gone; None when it is no longer valid skill content.
+    name, version = key.split("/")
+    try: name_fd = child_dir(store_fd, name, strict=False)
+    except FileNotFoundError: return "missing"
+    except Exception: return None
+    try:
+        try: root = child_dir(name_fd, version, strict=False)
+        except FileNotFoundError: return "missing"
+        except Exception: return None
+    finally: os.close(name_fd)
+    files, totals = [], {"entries": 0, "bytes": 0}
+    def visit(fd, prefix, depth):
+        if depth > 8: raise ValueError("too deep")
+        for entry in os.scandir(fd):
+            totals["entries"] += 1
+            if totals["entries"] > MAX_COPY_ENTRIES: raise ValueError("too many entries")
+            path = prefix + entry.name
+            info = os.stat(entry.name, dir_fd=fd, follow_symlinks=False)
+            if stat.S_ISLNK(info.st_mode): raise ValueError("symlink")
+            if stat.S_ISDIR(info.st_mode):
+                child = os.open(entry.name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd)
+                try: visit(child, path + "/", depth + 1)
+                finally: os.close(child)
+                continue
+            if not stat.S_ISREG(info.st_mode): raise ValueError("special file")
+            if generated_artifact(path): continue
+            if len(files) >= MAX_COPY_FILES: raise ValueError("too many files")
+            handle = os.open(entry.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd)
+            try:
+                data = b""
+                while len(data) <= MAX_COPY_FILE_BYTES:
+                    chunk = os.read(handle, 65536)
+                    if not chunk: break
+                    data += chunk
+            finally: os.close(handle)
+            totals["bytes"] += len(data)
+            if len(data) > MAX_COPY_FILE_BYTES or totals["bytes"] > MAX_COPY_BYTES: raise ValueError("too large")
+            files.append({"path": path, "sha256": hashlib.sha256(data).hexdigest(), "size": len(data)})
+    try: visit(root, "", 0)
+    except Exception: return None
+    finally: os.close(root)
+    # JavaScript orders strings by UTF-16 code units.
+    files.sort(key=lambda item: item["path"].encode("utf-16-be"))
+    manifest = json.dumps({"files": files}, separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
 
 def version_path(store_fd, store_root, name, digest):
     first = child_dir(store_fd, name, strict=False)
@@ -636,8 +700,74 @@ def reconcile(spec):
         deployed, removals = [], []
         canonical_keep = set()
         harness_keep = {relative: set() for relative in set(DRIVER_DIRS.values())}
+        # A link of ours that serves an edited native store copy holds its skill here too; the
+        # native pass cannot see links inside this distro.
+        drifted = spec.get("drifted", [])
+        if not isinstance(drifted, list) or len(drifted) > 4096: fail("invalid WSL drift list")
+        drifted_targets = set()
+        for item in drifted:
+            parts = item.split("/") if isinstance(item, str) else []
+            if len(parts) != 2 or not NAME.match(parts[0]) or not DRIFTED_VERSION.match(parts[1]): fail("invalid WSL drift list")
+            drifted_targets.add(store_root + "/" + item)
+        # Probe each drifted name's link paths directly, recorded or not: ensure_link would replace
+        # any direct store link, including one whose ownership record was lost.
+        wsl_held = set()
+        link_dirs = [".agents/skills"] + sorted(set(DRIVER_DIRS.values()))
+        for name in sorted(set(item.split("/")[0] for item in drifted)):
+            for rel_dir in link_dirs:
+                try: parent = walk_dir(home_fd, rel_dir)
+                except: continue
+                try:
+                    kind, resolved = link_probe(parent, name, store_root)
+                    if kind == "store" and resolved in drifted_targets: wsl_held.add(name)
+                except: pass
+                finally: os.close(parent)
+        for name in wsl_held:
+            canonical_keep.add(name)
+            for keep in harness_keep.values(): keep.add(name)
+        # Scan-time digests of copies that were unedited (or captured) when the native pass verified
+        # them. A copy edited since then must not lose the links that serve it.
+        movable = spec.get("movable")
+        if movable is not None and (not isinstance(movable, dict) or len(movable) > 8192): fail("invalid WSL movable list")
+        for key, value in (movable or {}).items():
+            parts = key.split("/")
+            if len(parts) != 2 or not NAME.match(parts[0]) or not DRIFTED_VERSION.match(parts[1]) or \
+                    not isinstance(value, str) or not DIGEST.match(value): fail("invalid WSL movable list")
+        late_drift = {}
+        def served_copy(kind, resolved):
+            target = resolved
+            if kind == "canonical":
+                try: target = os.path.normpath(os.path.join(os.path.dirname(resolved), os.readlink(resolved)))
+                except OSError: return None
+            if not target.startswith(store_root + "/"): return None
+            rest = target[len(store_root) + 1:].split("/")
+            if len(rest) != 2 or not NAME.match(rest[0]) or not DRIFTED_VERSION.match(rest[1]): return None
+            return rest[0] + "/" + rest[1]
+        def may_stop_serving(kind, resolved):
+            key = served_copy(kind, resolved)
+            # Without scan-time digests (the native store could not be verified) nothing is gated.
+            if key is None or movable is None: return True
+            current = copy_digest(store_fd, key)
+            if current == "missing" or (current is not None and current == movable.get(key)): return True
+            late_drift[key] = current
+            wsl_held.add(key.split("/")[0])
+            canonical_keep.add(key.split("/")[0])
+            for keep in harness_keep.values(): keep.add(key.split("/")[0])
+            return False
         for skill in skills:
             name, digest = skill.get("name"), skill.get("versionDigest")
+            if (skill.get("held") is True or name in wsl_held) and isinstance(name, str) and NAME.match(name):
+                # The native store copy was edited: leave every link for this name untouched.
+                canonical_keep.add(name)
+                for keep in harness_keep.values(): keep.add(name)
+                targets = skill.get("targets") if isinstance(skill.get("targets"), list) else []
+                if targets and isinstance(digest, str) and DIGEST.match(digest):
+                    deployed.append({"name": name, "digest": digest, "links": [
+                        {"agentId": str(target.get("agentId")), "status": "conflict", "detail": HELD_DETAIL}
+                        if bindings.get(target.get("agentId")) else
+                        {"agentId": str(target.get("agentId")), "status": "unsupported", "detail": "this WSL agent is not present on the runner"}
+                        for target in targets if isinstance(target, dict)]})
+                continue
             row = {"name": str(name), "digest": str(digest), "links": []}
             if not isinstance(name, str) or not NAME.match(name) or not isinstance(digest, str) or not DIGEST.match(digest):
                 if isinstance(name, str) and NAME.match(name):
@@ -676,7 +806,13 @@ def reconcile(spec):
                 deployed.append(row); continue
             canonical_keep.add(name)
             canonical_rel = ".agents/skills/" + name
-            canonical_ok, canonical_status, canonical_detail = ensure_link(home_fd, canonical_rel, base, store_root, None, owned)
+            canonical_ok, canonical_status, canonical_detail = ensure_link(home_fd, canonical_rel, base, store_root, None, owned, may_stop_serving)
+            if not canonical_ok and name in wsl_held:
+                for target in targets:
+                    row["links"].append({"agentId": str(target.get("agentId")), "status": "conflict", "detail": HELD_DETAIL}
+                        if bindings.get(target.get("agentId")) else
+                        {"agentId": str(target.get("agentId")), "status": "unsupported", "detail": "this WSL agent is not present on the runner"})
+                deployed.append(row); continue
             if not canonical_ok: row["error"] = "canonical link: " + canonical_detail
             targeted = set(t.get("agentId") for t in targets)
             linked_dirs = set()
@@ -685,9 +821,9 @@ def reconcile(spec):
                 use_manual = bool(plan["manual"] and not plan["agent"])
                 relative = rel_dir + "/" + name
                 if use_manual:
-                    outcome = ensure_link(home_fd, relative, manual, store_root, canonical_dir + "/" + name, owned)
+                    outcome = ensure_link(home_fd, relative, manual, store_root, canonical_dir + "/" + name, owned, may_stop_serving)
                 elif not canonical_ok:
-                    removed = unlink_owned(home_fd, relative, store_root, canonical_dir + "/" + name, owned)
+                    removed = unlink_owned(home_fd, relative, store_root, canonical_dir + "/" + name, owned, gate=may_stop_serving)
                     if removed:
                         harness_keep[rel_dir].discard(name)
                         removals.append({"path": "~/%s (WSL %s)" % (relative, spec["distro"]),
@@ -696,7 +832,7 @@ def reconcile(spec):
                     else:
                         outcome = (False, canonical_status, "canonical link: " + canonical_detail)
                 else:
-                    outcome = ensure_link(home_fd, relative, canonical_dir + "/" + name, store_root, canonical_dir + "/" + name, owned)
+                    outcome = ensure_link(home_fd, relative, canonical_dir + "/" + name, store_root, canonical_dir + "/" + name, owned, may_stop_serving)
                 linked_ids = plan["manual"] if use_manual else plan["agent"] + ([] if mixed else plan["manual"])
                 for agent_id in linked_ids:
                     row["links"].append({"agentId": agent_id, "status": "linked"} if outcome[0] else
@@ -723,7 +859,7 @@ def reconcile(spec):
                     rel_dir = parts[0] + "/skills"
                     remove = rel_dir in harness_keep and parts[2] not in harness_keep[rel_dir]
                     canonical = canonical_dir + "/" + parts[2]
-                if remove and unlink_owned(home_fd, relative, store_root, canonical, owned, direct):
+                if remove and unlink_owned(home_fd, relative, store_root, canonical, owned, direct, may_stop_serving):
                     removals.append({"path": "~/%s (WSL %s)" % (relative, spec["distro"]), "reason": "No longer in the desired skill list."})
         if needs_lease: save_owned(state, owned)
         unmanaged = []
@@ -736,7 +872,10 @@ def reconcile(spec):
                 row = {"agentId": binding["agentId"], "name": item["name"]}
                 if item.get("description"): row["description"] = item["description"]
                 unmanaged.append(row)
-        return {"deployed": deployed, "unmanaged": unmanaged, "removedLinks": removals, "warnings": diagnostics}
+        return {"deployed": deployed, "unmanaged": unmanaged, "removedLinks": removals, "warnings": diagnostics,
+            "held": sorted(wsl_held),
+            "lateDrift": [dict({"name": key.split("/")[0], "version": key.split("/")[1]},
+                **({"observedDigest": value} if value else {})) for key, value in sorted(late_drift.items())]}
     finally:
         if lease is not None: release_lease(lease)
         os.close(state); os.close(store_fd); os.close(home_fd)

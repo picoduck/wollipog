@@ -86,7 +86,9 @@ import {
   type StopOperationView,
   type AcpSessionContextConfig,
   type ApprovalQueueProvenance,
+  validSkillName,
   type DeployedSkillState,
+  type SkillDriftState,
   type SkillFile,
   type SkillInvocationPolicy,
   type SkillLinkRemoval,
@@ -3442,6 +3444,50 @@ function normalizeSkillLinkRemovals(value: unknown): SkillLinkRemoval[] {
   return normalized;
 }
 
+const RUNNER_SKILL_DRIFT_LIMIT = 256;
+const RUNNER_SKILL_DRIFT_HELD_LIMIT = 4096;
+const RUNNER_SKILL_DRIFT_DETAIL_LIMIT = 500;
+
+/** Keep only well-formed drift reports; unknown properties never reach storage or the UI. Held
+ * copies are selected from the whole report (a runner holds at most one per deployed skill) before
+ * the storage bound is applied to retained ones, so no bound can hide a copy that is blocking a
+ * skill's updates. */
+export function normalizeSkillDrift(value: unknown): SkillDriftState[] {
+  if (!Array.isArray(value)) return [];
+  const normalized: SkillDriftState[] = [];
+  const seen = new Set<string>();
+  let heldCount = 0;
+  let retainedCount = 0;
+  for (const candidate of value) {
+    if (heldCount >= RUNNER_SKILL_DRIFT_HELD_LIMIT && retainedCount >= RUNNER_SKILL_DRIFT_LIMIT) break;
+    const entry = candidate as Partial<Record<keyof SkillDriftState, unknown>> | null;
+    if (!entry || typeof entry.name !== "string" || !validSkillName(entry.name) ||
+        typeof entry.digest !== "string" || !/^[0-9a-f]{64}$/.test(entry.digest) ||
+        (entry.variant !== "agent" && entry.variant !== "manual") || typeof entry.held !== "boolean" ||
+        (entry.observedDigest !== undefined &&
+          (typeof entry.observedDigest !== "string" || !/^[0-9a-f]{64}$/.test(entry.observedDigest))) ||
+        (entry.detail !== undefined && typeof entry.detail !== "string")) continue;
+    if (entry.held ? heldCount >= RUNNER_SKILL_DRIFT_HELD_LIMIT : retainedCount >= RUNNER_SKILL_DRIFT_LIMIT) continue;
+    const key = `${entry.name}\0${entry.digest}\0${entry.variant}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    if (entry.held) heldCount += 1;
+    else retainedCount += 1;
+    const detail = typeof entry.detail === "string"
+      ? entry.detail.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, RUNNER_SKILL_DRIFT_DETAIL_LIMIT)
+      : "";
+    normalized.push({
+      name: entry.name,
+      digest: entry.digest,
+      variant: entry.variant,
+      ...(typeof entry.observedDigest === "string" ? { observedDigest: entry.observedDigest } : {}),
+      held: entry.held,
+      ...(detail ? { detail } : {}),
+    });
+  }
+  return [...normalized.filter((entry) => entry.held), ...normalized.filter((entry) => !entry.held)];
+}
+
 /** The runner-reported deployment state for one machine plus a bounded latest-removal event. */
 export interface RunnerSkillStateRecord {
   runnerId: string;
@@ -3449,6 +3495,8 @@ export interface RunnerSkillStateRecord {
   unmanaged: UnmanagedSkillInfo[];
   removals: SkillLinkRemoval[];
   removalsUpdatedAt?: number;
+  /** Authoritative drifted store copies from a v183 runner; empty for older runners. */
+  drift: SkillDriftState[];
   error?: string;
   updatedAt: number;
 }
@@ -7346,6 +7394,51 @@ export class ControlPlaneDb {
     });
   }
 
+  /** Commit the exact reviewed bytes of a drifted store copy as the latest library version (an
+   * identical latest version is reused) with machine provenance. A machine pinned for this skill
+   * moves to that version, so the machine that holds the edit deploys exactly what was captured.
+   * Library and pin revisions fence stale previews; Git upstream configuration is preserved. */
+  importSkillDriftEdit(input: {
+    skillId: string;
+    runnerId: string;
+    files: SkillFile[];
+    manifest: string;
+    digest: string;
+    note: string;
+    source: NonNullable<SkillVersionView["machineSource"]>;
+    expectedLatestVersionId: string | null;
+    expectedPinRevision: string | null;
+  }): { skill: SkillView; version: SkillVersionView; pinMoved: boolean } {
+    return this.atomic(() => {
+      const skill = this.getSkill(input.skillId);
+      const pin = skill ? this.getMachineSkillVersion(skill.id, input.runnerId) : null;
+      if (!skill || (skill.latestVersion?.id ?? null) !== input.expectedLatestVersionId ||
+          (pin?.revision ?? null) !== input.expectedPinRevision) {
+        throw new SkillImportConflictError("The library or this machine's version policy changed. Review the edit again.");
+      }
+      const version = skill.latestVersion?.digest === input.digest
+        ? this.getSkillVersion(skill.latestVersion.id)!
+        : this.addSkillVersion(skill.id, { files: input.files, manifest: input.manifest, digest: input.digest, note: input.note })!;
+      this.stmt("INSERT OR IGNORE INTO skill_machine_provenance (version_id, source) VALUES (?, ?)")
+        .run(version.id, JSON.stringify(input.source));
+      const pinMoved = !!pin?.versionId && pin.versionId !== version.id;
+      if (pinMoved) {
+        this.stmt("UPDATE skill_machine_versions SET version_id=?, revision=? WHERE skill_id=? AND runner_id=?")
+          .run(version.id, randomUUID(), skill.id, input.runnerId);
+      }
+      return { skill: this.getSkill(skill.id)!, version, pinMoved };
+    });
+  }
+
+  /** The immutable version of a skill with an exact content digest, if the library still has it. */
+  getSkillVersionByDigest(skillId: string, digest: string): SkillVersionView | null {
+    const row = this.stmt(
+      `SELECT id, skill_id, digest, manifest, files, note, created_at FROM skill_versions
+       WHERE skill_id=? AND digest=? ORDER BY created_at DESC, id DESC LIMIT 1`,
+    ).get(skillId, digest) as unknown as SkillVersionRow | undefined;
+    return row ? this.skillVersionView(row) : null;
+  }
+
   deleteSkill(skillId: string): boolean {
     return this.atomic(() => {
       this.stmt("DELETE FROM skill_machine_versions WHERE skill_id=?").run(skillId);
@@ -7583,19 +7676,25 @@ export class ControlPlaneDb {
     });
   }
 
-  /** Persist a runner report. Deployment, unmanaged inventory, and error are full replacement;
-   * removals are a bounded latest-event projection. A non-empty event replaces and timestamps
-   * history, while an empty or omitted field retains the prior event for operator visibility. */
+  /** Persist a runner report. Deployment, unmanaged inventory, drift, and error are full
+   * replacement; removals are a bounded latest-event projection. A non-empty event replaces and
+   * timestamps history, while an empty or omitted field retains the prior event for operator
+   * visibility. Drift is accepted only from runners that negotiated it, so an older runner can
+   * never produce a drift result. */
   setRunnerSkillState(
     runnerId: string,
     state: {
       deployed: DeployedSkillState[];
       unmanaged: UnmanagedSkillInfo[];
       removals?: SkillLinkRemoval[];
+      drift?: SkillDriftState[];
       error?: string;
     },
     now = Date.now(),
   ): void {
+    const drift = runnerSupportsProtocol(this.getRunner(runnerId)?.protocolVersion, "skillDrift")
+      ? normalizeSkillDrift(state.drift)
+      : [];
     const previous = this.getRunnerSkillState(runnerId);
     const incomingRemovals = normalizeSkillLinkRemovals(state.removals);
     const removals = incomingRemovals.length > 0 ? incomingRemovals : previous?.removals ?? [];
@@ -7610,6 +7709,7 @@ export class ControlPlaneDb {
       unmanaged: state.unmanaged,
       ...(removals.length === 0 ? {} : { removals }),
       ...(removalsUpdatedAt === undefined ? {} : { removalsUpdatedAt }),
+      ...(drift.length === 0 ? {} : { drift }),
       ...(state.error === undefined ? {} : { error: state.error }),
     }), now);
   }
@@ -7625,6 +7725,7 @@ export class ControlPlaneDb {
       unmanaged?: UnmanagedSkillInfo[];
       removals?: SkillLinkRemoval[];
       removalsUpdatedAt?: number;
+      drift?: unknown;
       error?: string;
     }>(row.state);
     const removals = normalizeSkillLinkRemovals(parsed?.removals);
@@ -7637,6 +7738,7 @@ export class ControlPlaneDb {
       unmanaged: parsed?.unmanaged ?? [],
       removals,
       ...(removalsUpdatedAt === undefined ? {} : { removalsUpdatedAt }),
+      drift: normalizeSkillDrift(parsed?.drift),
       ...(parsed?.error === undefined ? {} : { error: parsed.error }),
       updatedAt: row.updated_at,
     };

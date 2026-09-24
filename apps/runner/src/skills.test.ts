@@ -14,7 +14,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import type { AgentDefinition, SkillFile, SkillSyncEntry, SkillSyncTarget } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
@@ -85,6 +85,21 @@ function skillFiles(name: string, body = "Do the thing.\n"): SkillFile[] {
 
 function entry(name: string, targets: SkillSyncTarget[], files = skillFiles(name)): SkillSyncEntry {
   return { name, versionDigest: skillVersionDigest(files), files, targets };
+}
+
+/** Write a genuine published store copy: its directory name is the digest of its files. Fixtures
+ * whose bytes do not match their name are edited copies, which store GC deliberately retains. */
+function publishedCopy(storeNameDir: string, files: SkillFile[]): string {
+  const version = join(storeNameDir, skillVersionDigest(files));
+  for (const file of files) {
+    mkdirSync(dirname(join(version, file.path)), { recursive: true });
+    writeFileSync(join(version, file.path), Buffer.from(file.content, file.encoding));
+  }
+  return version;
+}
+
+function singleFileSkill(name: string, body: string): SkillFile[] {
+  return [{ path: "SKILL.md", content: `---\nname: ${name}\n---\n${body}\n`, encoding: "utf8" }];
 }
 
 async function reconcile(
@@ -1022,7 +1037,8 @@ test("disabling a skill removes links but retains the staged store content for r
     await reconcile(roots, [alpha]);
     const store = realpathSync(skillsStoreRoot(roots.dataDir));
     const agentDir = join(store, "alpha", alpha.versionDigest);
-    writeFileSync(join(agentDir, "retained-marker"), "keep");
+    // A marker file would be an edit, so identify the retained directory by inode instead.
+    const retainedInode = lstatSync(agentDir).ino;
 
     await reconcile(roots, [], { allowRemovals: true });
     assert.equal(existsSync(join(roots.home, ".claude", "skills", "alpha")), false);
@@ -1033,7 +1049,7 @@ test("disabling a skill removes links but retains the staged store content for r
     const reEnabled = await reconcile(roots, [alpha]);
     assert.deepEqual(reEnabled.deployed[0]!.links, [{ agentId: claudeAgent.id, status: "linked" }]);
     assert.equal(realpathSync(join(roots.home, ".claude", "skills", "alpha")), agentDir);
-    assert.equal(readFileSync(join(agentDir, "retained-marker"), "utf8"), "keep",
+    assert.equal(lstatSync(agentDir).ino, retainedInode,
       "re-enable reused the retained version rather than rematerializing it");
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
@@ -1129,7 +1145,7 @@ test("retention enforces a deterministic fixed bound on safe stale versions", as
     const store = skillsStoreRoot(roots.dataDir);
     mkdirSync(join(store, "alpha"), { recursive: true });
     for (let index = 0; index < MAX_RETAINED_STALE_SKILL_VERSIONS + 7; index += 1) {
-      mkdirSync(join(store, "alpha", index.toString(16).padStart(64, "0")));
+      publishedCopy(join(store, "alpha"), singleFileSkill("alpha", `Version ${index}.`));
     }
     const current = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
     const logged: string[] = [];
@@ -1156,9 +1172,7 @@ test("maximum-entry retention metadata is byte-bounded and readable on restart",
       const prefix = `skill-${skillIndex.toString().padStart(3, "0")}-`;
       const name = `${prefix}${"x".repeat(64 - prefix.length)}`;
       for (let versionIndex = 0; versionIndex < versionCount; versionIndex += 1) {
-        const digest = `${skillIndex.toString(16).padStart(4, "0")}${versionIndex
-          .toString(16).padStart(4, "0")}${"a".repeat(56)}`;
-        mkdirSync(join(store, name, digest), { recursive: true });
+        publishedCopy(join(store, name), singleFileSkill(name, `Version ${versionIndex}.`));
       }
     }
     const firstLog: string[] = [];
@@ -1705,22 +1719,17 @@ test("protected live aliases remain outside the fixed unprotected stale-version 
     mkdirSync(canonicalDir, { recursive: true });
     const protectedVersions: string[] = [];
     for (let index = 0; index < MAX_RETAINED_STALE_SKILL_VERSIONS; index += 1) {
-      const digest = (index + 1).toString(16).padStart(64, "0");
-      const version = join(storeNameDir, digest);
-      mkdirSync(version);
-      writeFileSync(join(version, "SKILL.md"), "---\nname: alpha\n---\n");
+      const version = publishedCopy(storeNameDir, singleFileSkill("alpha", `Protected ${index}.`));
       symlinkSync(version, join(canonicalDir, `alias-${index.toString().padStart(2, "0")}`));
       protectedVersions.push(version);
     }
     const unprotectedVersions: string[] = [];
     for (let index = 0; index < MAX_RETAINED_STALE_SKILL_VERSIONS + 6; index += 1) {
-      const digest = `a${index.toString(16).padStart(63, "0")}`;
-      const version = join(storeNameDir, digest);
-      mkdirSync(version);
-      writeFileSync(join(version, "SKILL.md"), "---\nname: alpha\n---\n");
-      unprotectedVersions.push(version);
+      unprotectedVersions.push(publishedCopy(storeNameDir, singleFileSkill("alpha", `Unprotected ${index}.`)));
     }
-    const freshVersion = unprotectedVersions.at(-1)!;
+    // Equal-age stale versions are capped in digest order, so the last in that order must survive.
+    const freshVersion = unprotectedVersions.reduce((latest, version) =>
+      basename(version) > basename(latest) ? version : latest);
 
     const replacement = entry("alpha", [{ agentId: claudeAgent.id, invocation: "agent" }]);
     const blocked = await reconcile(roots, [replacement], {
@@ -1871,6 +1880,7 @@ test("removals of runner-created links are logged and returned in the reconcile 
         deployed: result.deployed,
         unmanaged: result.unmanaged,
         removals: result.removedLinks,
+        drift: [],
       },
       "the outbound skills_state carries this pass's exact removal records",
     );

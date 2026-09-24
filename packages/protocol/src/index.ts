@@ -559,7 +559,13 @@
 //      helper: the source stays pinned without delete sharing until a handle-relative no-replace
 //      rename, and the managed link is a junction published only by creating a new directory.
 //      Older Windows runners keep the snapshot-only refusal; WSL locations stay refused.
-export const PROTOCOL_VERSION = 182;
+// 183: runners re-verify every managed skill store copy on each reconciliation and report a copy
+//      whose bytes no longer match its version digest (typically a hand edit made through a
+//      harness link) in the additive `skills_state.drift` field. A drifted copy is never
+//      overwritten or deleted by reconciliation, update, or store GC; its links are held until a
+//      correlated `skill_drift` read or confirmed restore resolves it. Older control planes drop
+//      the unknown field, and older runners report no drift rather than a false clean result.
+export const PROTOCOL_VERSION = 183;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -815,6 +821,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   chunkedAgentSkills: 96,
   /** v96 runners emit the additive `skills_state.removals` event projection. */
   skillLinkRemovalReporting: 96,
+  /** v183 runners report hand-edited store copies in `skills_state.drift`, hold them, and accept
+   * correlated `skill_drift` read and restore commands. */
+  skillDrift: 183,
   sessionAgentNaming: 93,
   sessionCustomModelNaming: 94,
   sessionNamingTargets: 95,
@@ -1383,6 +1392,57 @@ export interface SkillAdoptionRecoveryResultMessage {
   operations?: SkillAdoptionRecoveryOperation[];
   operation?: SkillAdoptionRecoveryOperation;
   truncated?: boolean;
+  error?: string;
+}
+
+/** A runner-owned store copy whose bytes no longer match the immutable version it was published
+ * as (protocol v183), typically a hand edit made through a harness link. */
+export interface SkillDriftState {
+  name: string;
+  /** Version digest the copy was published as. */
+  digest: string;
+  /** `manual` is the Manual Only copy whose SKILL.md carries the injected
+   * `disable-model-invocation: true` frontmatter. */
+  variant: SkillInvocationPolicy;
+  /** Canonical manifest digest of the copy as it is now. Absent when the copy no longer fits the
+   * skill file rules (a symlink, special file, invalid path, or oversized tree), so it cannot be
+   * read back as skill content. */
+  observedDigest?: string;
+  /** True while the runner holds this skill's links on the edited copy instead of updating or
+   * removing them. */
+  held: boolean;
+  /** Sanitized human-readable explanation. */
+  detail?: string;
+}
+
+/** Correlated command for one drifted store copy (protocol v183). `read` returns its bounded files;
+ * `restore` requires explicit confirmation and the reviewed observation, then replaces the copy
+ * with verified library content (`files` for `digest`) or, when `files` is absent, discards it so
+ * the machine converges to its current desired state. */
+export interface SkillDriftMessage {
+  type: "skill_drift";
+  runnerId: string;
+  requestId: string;
+  operation: "read" | "restore";
+  name: string;
+  digest: string;
+  variant: SkillInvocationPolicy;
+  /** restore only: the observed digest that was reviewed; null means it was reviewed as unreadable. */
+  observedDigest?: string | null;
+  /** restore only: the library files of `digest`, untransformed. */
+  files?: SkillFile[];
+  confirmation?: "explicit";
+}
+
+export interface SkillDriftResultMessage {
+  type: "skill_drift_result";
+  runnerId: string;
+  requestId: string;
+  /** `not_needed` means the copy matches its version again. */
+  status: "read" | "restored" | "not_needed" | "rejected";
+  /** read only: the copy's files exactly as stored (Manual Only transform included). */
+  files?: SkillFile[];
+  observedDigest?: string;
   error?: string;
 }
 
@@ -7221,6 +7281,7 @@ export type RunnerToControlPlane =
   | SkillSnapshotResultMessage
   | SkillAdoptionResultMessage
   | SkillAdoptionRecoveryResultMessage
+  | SkillDriftResultMessage
   | SkillsSyncNeedMessage
   | DurableSessionCommandResultMessage
   | DurableSessionCommandUpdateMessage
@@ -8013,6 +8074,9 @@ export interface SkillsStateMessage {
    * the control plane retains the latest non-empty array across later empty/omitted reports and
    * timestamps it independently. Older runners omit this additive field. */
   removals?: SkillLinkRemoval[];
+  /** v183 authoritative full replacement: every drifted store copy on this machine. Older runners
+   * omit it and older control planes ignore it. */
+  drift?: SkillDriftState[];
   error?: string;
 }
 
@@ -8841,6 +8905,7 @@ export type ControlPlaneToRunner =
   | SkillSnapshotMessage
   | SkillAdoptionMessage
   | SkillAdoptionRecoveryMessage
+  | SkillDriftMessage
   | SkillsSyncManifestMessage
   | SkillsSyncContentMessage
   | SkillsSyncCompleteMessage

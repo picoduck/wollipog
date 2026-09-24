@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { SkillFile, SkillInvocationPolicy } from "@wollipog/protocol";
+import { runnerSupportsProtocol, type RunnerView, type SkillDriftState, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
@@ -14,6 +14,7 @@ import { SkillGitAutoUpdateControls } from "./SkillGitAutoUpdate.js";
 import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
 import { SkillVersionHistoryDialog } from "./SkillVersionHistoryDialog.js";
 import { SkillMachineVersionDialog } from "./SkillMachineVersionDialog.js";
+import { SkillDriftImportDialog } from "./SkillDriftImportDialog.js";
 import { AddAssignmentDialog } from "./SkillAssignmentDialog.js";
 import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
 import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
@@ -21,9 +22,11 @@ import { SkillAssignmentMatrix } from "./SkillAssignmentMatrix.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
+  driftVariantLabel,
   groupSkillList,
   invocationLabel,
   normalizeRemovalReporting,
+  reportedSkillDrift,
   reportedSkillLinkRemovals,
   reportedUnmanagedSkills,
   skillAssignmentsFromPayload,
@@ -38,6 +41,8 @@ import {
   type RunnerSkillsResponse,
   type SkillAgentSelector,
   type SkillAssignmentView,
+  type SkillDriftCopy,
+  type SkillDriftResolution,
   type SkillGroupView,
   type SkillSummary,
 } from "../skills.js";
@@ -163,7 +168,7 @@ function NewSkillDialog({ onClose, onCreate, busy }: {
 
 export function SkillsView() {
   const api = useApi();
-  const { confirm } = useFeedback();
+  const { confirm, showToast } = useFeedback();
   const runnersMap = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
   const runners = useMemo(() => [...runnersMap.values()], [runnersMap]);
@@ -181,6 +186,7 @@ export function SkillsView() {
   const [busy, setBusy] = useState(false);
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
   const [versionRunnerId, setVersionRunnerId] = useState<string | undefined>();
+  const [driftImport, setDriftImport] = useState<{ runnerId: string; copy: SkillDriftCopy } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | null>(null);
 
@@ -214,6 +220,7 @@ export function SkillsView() {
         return [runner.runnerId, {
           ...response,
           removalReporting: normalizeRemovalReporting(response.removalReporting),
+          driftReporting: normalizeRemovalReporting(response.driftReporting),
         } satisfies RunnerSkillsResponse] as const;
       } catch {
         // A machine that predates the skills routes reads as never reported rather than an error
@@ -328,6 +335,35 @@ export function SkillsView() {
     }
   };
 
+  /** Names with a reported edited copy on any machine, so the list can point at them. */
+  const driftedSkillNames = useMemo(() => new Set(Object.values(machineSkills)
+    .flatMap((machine) => machine.reported?.drift ?? []).map((entry) => entry.name)), [machineSkills]);
+
+  const driftResolved = async (result: SkillDriftResolution) => {
+    if (result.warning) showToast(result.warning, { tone: "error" });
+    await refreshList();
+    if (selectedId) await refreshDetail(selectedId);
+    await refreshMachines();
+  };
+
+  const restoreDrift = async (runner: RunnerView, entry: SkillDriftState) => {
+    const machine = machineLabels.get(runner.runnerId) ?? runner.runnerId;
+    const confirmed = await confirm({
+      title: `Restore the library version of “${entry.name}”?`,
+      message: `The edited copy on ${machine} is discarded. If the library still has version ${entry.digest.slice(0, 12)}, ` +
+        "which it was deployed from, the machine rebuilds that version in its place. The machine then syncs to its " +
+        "assigned version. The edit cannot be recovered.",
+      confirmLabel: "Restore Library Version",
+      tone: "danger",
+    });
+    if (!confirmed) return;
+    await mutate(async () => {
+      const result = await api.restoreSkillDrift(runner.runnerId,
+        { name: entry.name, digest: entry.digest, variant: entry.variant }, entry.observedDigest ?? null);
+      await driftResolved(result);
+    });
+  };
+
   const latest = detail?.latestVersion ?? null;
   const gitSource = detail?.gitSource ?? latest?.gitSource;
   const heldUpdate = detail?.gitAutoUpdate?.enabled ? detail.gitAutoUpdate.held : null;
@@ -376,7 +412,10 @@ export function SkillsView() {
                   aria-current={selectedId === skill.id ? "true" : undefined}
                   onClick={() => setSelectedId(skill.id)}
                 >
-                  <span className="skills-item-name">{skill.name}</span>
+                  <span className="skills-item-name">
+                    {skill.name}
+                    {driftedSkillNames.has(skill.name) && <span className="status-badge st-input skills-item-drift">Drift</span>}
+                  </span>
                   {skill.description && <span className="skills-item-description">{skill.description}</span>}
                 </button>
               ))}
@@ -551,6 +590,10 @@ export function SkillsView() {
                   const unmanaged = reportedUnmanagedSkills(machine?.reported);
                   const removals = reportedSkillLinkRemovals(machine?.reported);
                   const removalReporting = machine?.removalReporting ?? "unknown";
+                  const drift = reportedSkillDrift(machine?.reported, detail.name);
+                  const canResolveDrift = runner.status === "online" && !busy &&
+                    runnerSupportsProtocol(runner.protocolVersion, "skillDrift");
+                  const machineLabel = machineLabels.get(runner.runnerId) ?? runner.runnerId;
                   return (
                     <article className="skills-machine" key={runner.runnerId}>
                       <div className="skills-machine-head">
@@ -569,6 +612,44 @@ export function SkillsView() {
                         </button>
                       </div>
                       {badge.detail && <p className="skills-hint">{badge.detail}</p>}
+                      {drift.length > 0 && (
+                        <div className="skills-drift">
+                          <h5>Edited Copies</h5>
+                          <ul>
+                            {drift.map((entry) => (
+                              <li key={`${entry.variant}:${entry.digest}`}>
+                                <strong>{driftVariantLabel(entry.variant)}</strong>
+                                <span className="muted"> · Version {entry.digest.slice(0, 12)}</span>
+                                {entry.detail && <p className="skills-hint">{entry.detail}</p>}
+                                <div className="skills-drift-actions">
+                                  <button
+                                    type="button"
+                                    className="btn sm"
+                                    disabled={!canResolveDrift || !entry.observedDigest}
+                                    onClick={() => setDriftImport({
+                                      runnerId: runner.runnerId,
+                                      copy: { name: entry.name, digest: entry.digest, variant: entry.variant },
+                                    })}
+                                  >
+                                    Import Edit as New Version
+                                  </button>
+                                  <button
+                                    type="button"
+                                    className="btn danger sm"
+                                    disabled={!canResolveDrift}
+                                    onClick={() => void restoreDrift(runner, entry)}
+                                  >
+                                    Restore Library Version
+                                  </button>
+                                </div>
+                              </li>
+                            ))}
+                          </ul>
+                          {runner.status === "online" && !runnerSupportsProtocol(runner.protocolVersion, "skillDrift") && (
+                            <p className="skills-hint">Update this machine's runner to resolve edited copies here.</p>
+                          )}
+                        </div>
+                      )}
                       {unmanaged.length > 0 && (
                         <div className="skills-unmanaged">
                           <h5>Unmanaged Skills</h5>
@@ -657,6 +738,19 @@ export function SkillsView() {
           if (selectedId) await refreshDetail(selectedId);
           await refreshMachines();
         }} />}
+      {driftImport && detail && (
+        <SkillDriftImportDialog
+          key={`${driftImport.runnerId}:${driftImport.copy.variant}:${driftImport.copy.digest}`}
+          runnerId={driftImport.runnerId}
+          machineLabel={machineLabels.get(driftImport.runnerId) ?? driftImport.runnerId}
+          copy={driftImport.copy}
+          onClose={() => setDriftImport(null)}
+          onImported={async (result) => {
+            setDriftImport(null);
+            await driftResolved(result);
+          }}
+        />
+      )}
       {dialog === "add-assignment" && detail && (
         <AddAssignmentDialog
           skill={detail}

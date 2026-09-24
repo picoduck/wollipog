@@ -35,6 +35,10 @@
  * - All materialization goes through a fresh temp dir and one atomic rename; files are created
  *   with "wx" so no pre-existing path (symlinks included) can ever be followed or overwritten.
  * - Names, paths, and digests are validated and the digest recomputed before any write.
+ * - Every published copy is re-verified against its digest on each authoritative base pass
+ *   (protocol v183). An edited copy is never overwritten or garbage-collected, and while a link
+ *   serves it (or it is the desired version) its skill is held: no link for that name is created,
+ *   repointed, or removed until a confirmed restore or an import of exactly those bytes resolves it.
  * - Windows publishes directory junctions. Existing managed junctions are retargeted in place
  *   only after their current target is verified again by the runner-owned native helper.
  */
@@ -69,12 +73,26 @@ import {
   type AgentDriverKind,
   type DeployedSkillState,
   type SkillFile,
+  type SkillDriftState,
   type SkillLinkRemoval,
   type SkillsStateMessage,
   type SkillSyncEntry,
   type UnmanagedSkillInfo,
 } from "@wollipog/protocol";
+import {
+  manualInvocationVariantFiles,
+  withManualInvocationFrontmatter,
+} from "@wollipog/protocol/skill-invocation";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
+import {
+  cleanAgentCopyFiles,
+  manualVariantDigest,
+  readStoreSkillCopy,
+  scanStoreDrift,
+  storeCopyCollectable,
+  STORE_VERSION_NAME,
+  type StoreDriftScan,
+} from "./skill-store-copy.js";
 import { replaceWindowsSkillJunction } from "./windows-skill-junction.js";
 import { validWslDistroName } from "./wsl-context.js";
 
@@ -143,6 +161,12 @@ export interface ReconcileSkillsOptions {
   manageCanonical?: boolean;
   /** Opaque identity for the credential home reconciled by this pass. */
   providerAccountId?: string;
+  /** Base pass only: harness directories outside `home` (provider-account credential homes) whose
+   * direct store links also make a store copy live for drift holds. */
+  liveLinkDirectories?: readonly string[];
+  /** Account passes: names the base pass holds on an edited store copy. Their links are neither
+   * changed nor removed. */
+  heldSkillNames?: ReadonlySet<string>;
   desired: ReconcileSkillEntry[];
   /** Removal sweeps and store GC run only when an authoritative CP desired list is in hand. */
   allowRemovals?: boolean;
@@ -195,6 +219,18 @@ export interface ReconcileSkillsResult {
   /** Home-relative shown paths and reasons for every link this pass removed. Always logged as
    * well; a pass that removes nothing returns an empty array. */
   removedLinks: SkillLinkRemoval[];
+  /** Base pass only: every drifted store copy. Absent when the store could not be verified. */
+  drift?: SkillDriftState[];
+  /** Runner-internal, never sent: scan-time digests of unedited copies, keyed `<name>/<version>`. */
+  movableCopies?: Record<string, string>;
+}
+
+/** Link detail for every target of a skill held on an edited store copy. */
+export const HELD_SKILL_LINK_DETAIL =
+  "This skill's deployed copy was edited on this machine. Its links stay on the edited copy until the edit is imported as a new version, the library version is restored, or the edit is undone.";
+
+export function heldSkillNames(result: Pick<ReconcileSkillsResult, "drift">): Set<string> {
+  return new Set((result.drift ?? []).flatMap((entry) => entry.held ? [entry.name] : []));
 }
 
 function scopedResult(result: ReconcileSkillsResult, providerAccountId?: string): ReconcileSkillsResult {
@@ -240,11 +276,15 @@ export function mergeReconcileSkillsResults(
     }
   }
   const errors = [left.error, right.error].filter((value): value is string => !!value);
+  const drift = left.drift || right.drift ? [...left.drift ?? [], ...right.drift ?? []] : undefined;
+  const movable = left.movableCopies ?? right.movableCopies;
   return {
     deployed,
     unmanaged,
     removedLinks: [...left.removedLinks, ...right.removedLinks],
     error: [...new Set(errors)].join("; ") || undefined,
+    ...(drift ? { drift } : {}),
+    ...(movable ? { movableCopies: movable } : {}),
   };
 }
 
@@ -261,6 +301,7 @@ export function skillsStateMessage(
     deployed: result.deployed,
     unmanaged: result.unmanaged,
     removals: result.removedLinks,
+    ...(result.drift === undefined ? {} : { drift: result.drift }),
     ...(result.error === undefined ? {} : { error: result.error }),
   };
 }
@@ -334,33 +375,7 @@ export function parseSkillFrontmatter(content: string): { name?: string; descrip
   return { ...(name ? { name } : {}), ...(description ? { description } : {}) };
 }
 
-/** Produce the manual-invocation variant of a SKILL.md: the frontmatter gains
- * `disable-model-invocation: true` (replacing any existing spelling of the key); a file without
- * a frontmatter block gains one containing only that key. */
-export function withManualInvocationFrontmatter(content: string): string {
-  const bom = content.startsWith("\uFEFF") ? "\uFEFF" : "";
-  const body = bom ? content.slice(1) : content;
-  const lines = body.split(/(?<=\n)/);
-  if ((lines[0] ?? "").trim() === "---" && lines.length > 1) {
-    let closedAt = -1;
-    for (let index = 1; index < lines.length; index += 1) {
-      const trimmed = lines[index]!.trim();
-      if (trimmed === "---" || trimmed === "...") {
-        closedAt = index;
-        break;
-      }
-    }
-    if (closedAt > 0) {
-      const kept = lines
-        .slice(1, closedAt)
-        .filter((line) => !/^disable-model-invocation\s*:/i.test(line.trim()));
-      return (
-        bom + lines[0]! + "disable-model-invocation: true\n" + kept.join("") + lines.slice(closedAt).join("")
-      );
-    }
-  }
-  return `${bom}---\ndisable-model-invocation: true\n---\n\n${body}`;
-}
+export { withManualInvocationFrontmatter };
 
 /* ------------------------------- validation ------------------------------- */
 
@@ -425,9 +440,23 @@ function prepareSkillStoreRoot(dataDir: string): string {
   return realStoreRoot;
 }
 
+/** Resolve the existing store root without creating anything, with the same ancestry checks as
+ * reconciliation. Correlated drift commands use it; they never recreate a missing store. */
+export function existingSkillStoreRoot(dataDir: string): string {
+  const storeRoot = skillsStoreRoot(dataDir);
+  const realDataDir = realpathSync(dataDir);
+  assertNotSymlink(join(dataDir, "skills"), "the skills directory");
+  assertNotSymlink(storeRoot, "the skills store root");
+  const realStoreRoot = realpathSync(storeRoot);
+  if (!samePath(realStoreRoot, join(realDataDir, "skills", "store"))) {
+    throw new Error("the skills store root does not resolve inside the data directory");
+  }
+  return realStoreRoot;
+}
+
 /** A content-free manifest entry may reuse only a real digest directory physically contained in
- * this runner's store. This intentionally matches materializeVersion's trust model: published
- * digest directories were validated before their atomic rename and are not re-hashed each pass. */
+ * this runner's store. Availability deliberately ignores content: reconciliation re-verifies every
+ * copy separately, and a drifted copy must be held and reported, never retransferred over. */
 export function storedSkillVersionAvailable(
   dataDir: string,
   name: string,
@@ -459,9 +488,25 @@ function assertNotSymlink(path: string, what: string): void {
   }
 }
 
-/** Build the version into a fresh temp dir, then publish it with one atomic rename. Every file is
- * opened "wx" (mirroring protectedWrite): a pre-existing path — symlinks included — always fails
- * instead of being followed or replaced. An already-published digest dir is left untouched. */
+/** Write validated files into a new directory. Every file is opened "wx" (mirroring
+ * protectedWrite): a pre-existing path — symlinks included — always fails instead of being
+ * followed or replaced. */
+export function writeSkillVersionTree(dir: string, files: SkillFile[]): void {
+  mkdirSync(dir, { recursive: true, mode: 0o755 });
+  for (const file of files) {
+    const target = join(dir, ...file.path.split("/"));
+    mkdirSync(dirname(target), { recursive: true, mode: 0o755 });
+    const fd = openSync(target, "wx", 0o644);
+    try {
+      writeFileSync(fd, Buffer.from(file.content, file.encoding));
+    } finally {
+      closeSync(fd);
+    }
+  }
+}
+
+/** Build the version into a fresh temp dir, then publish it with one atomic rename. An
+ * already-published digest dir is left untouched. */
 function materializeVersion(
   storeRoot: string,
   name: string,
@@ -477,22 +522,8 @@ function materializeVersion(
   assertNotSymlink(finalDir, `the store version directory for this skill`);
   if (isRealDirectory(finalDir)) return;
   const temp = join(storeRoot, `.tmp-${randomUUID()}`);
-  mkdirSync(temp, { recursive: true, mode: 0o755 });
   try {
-    for (const file of files) {
-      const target = join(temp, ...file.path.split("/"));
-      mkdirSync(dirname(target), { recursive: true, mode: 0o755 });
-      let bytes = Buffer.from(file.content, file.encoding);
-      if (manualVariant && file.path === "SKILL.md") {
-        bytes = Buffer.from(withManualInvocationFrontmatter(bytes.toString("utf8")), "utf8");
-      }
-      const fd = openSync(target, "wx", 0o644);
-      try {
-        writeFileSync(fd, bytes);
-      } finally {
-        closeSync(fd);
-      }
-    }
+    writeSkillVersionTree(temp, manualVariant ? manualInvocationVariantFiles(files) : files);
     mkdirSync(nameDir, { recursive: true, mode: 0o755 });
     try {
       renameSync(temp, finalDir);
@@ -626,6 +657,7 @@ type LinkProbe =
   | { kind: "ours"; resolvedTarget: string; via: "store" | "canonical" }
   | { kind: "foreign-symlink" }
   | { kind: "occupied" };
+type OursProbe = Extract<LinkProbe, { kind: "ours" }>;
 
 function comparablePath(path: string, platform: NodeJS.Platform = process.platform): string {
   const normalized = platform === "win32" ? win32.resolve(path) : resolve(path);
@@ -636,7 +668,7 @@ function samePath(left: string, right: string, platform: NodeJS.Platform = proce
   return comparablePath(left, platform) === comparablePath(right, platform);
 }
 
-function containedInStore(path: string, realStoreRoot: string,
+export function containedInStore(path: string, realStoreRoot: string,
   platform: NodeJS.Platform = process.platform): boolean {
   const candidate = comparablePath(path, platform);
   const root = comparablePath(realStoreRoot, platform);
@@ -697,6 +729,8 @@ function ensureManagedSymlink(
   canonicalDir?: string,
   platform: NodeJS.Platform = process.platform,
   replaceJunction?: (path: string, expectedTarget: string, target: string) => void,
+  /** Last-moment check that the copy the existing link serves may stop being served. */
+  mayMove?: (current: OursProbe) => boolean,
 ): LinkOutcome {
   const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
   if (probe.kind === "occupied") {
@@ -706,6 +740,9 @@ function ensureManagedSymlink(
     return { ok: false, status: "conflict", detail: `an unmanaged symlink already exists at ${shownPath}` };
   }
   if (probe.kind === "ours" && samePath(probe.resolvedTarget, targetDir, platform)) return { ok: true };
+  if (probe.kind === "ours" && mayMove && !mayMove(probe)) {
+    return { ok: false, status: "conflict", detail: HELD_SKILL_LINK_DETAIL };
+  }
   try {
     mkdirSync(dirname(linkPath), { recursive: true, mode: 0o755 });
     if (platform === "win32" && probe.kind === "ours") {
@@ -736,6 +773,8 @@ interface SweepContext {
   shownDir: string;
   log?: (message: string) => void;
   platform?: NodeJS.Platform;
+  /** Last-moment check that the copy a link serves may stop being served. */
+  mayRemove?: (name: string, current: OursProbe) => boolean;
 }
 
 function ownedLink(owned: ReadonlySet<string>, path: string,
@@ -777,6 +816,7 @@ function sweepManagedLinks(
       // canonical location. Leave it; the unmanaged scan reports it.
       continue;
     }
+    if (sweep.mayRemove && !sweep.mayRemove(name, probe)) continue;
     const shownPath = `${sweep.shownDir}/${name}`;
     try {
       unlinkSync(linkPath);
@@ -800,6 +840,21 @@ interface StoreGcPolicy {
   now: number;
   /** Versions still targeted by a live shared-HOME symlink during a contended pass. */
   protectedVersions?: ReadonlySet<string>;
+  /** Edited or unverifiable copies. They are never aged out or removed by the fixed stale-version
+   * bound until the drift is resolved. */
+  driftedVersions?: ReadonlySet<string>;
+  /** Re-verifies a copy immediately before deletion, closing the window between the drift scan
+   * and GC in which an editor could still write to a formerly linked copy. */
+  collectable?: (name: string, version: string) => boolean;
+}
+
+function existsInStore(path: string): boolean {
+  try {
+    lstatSync(path);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 export const DEFAULT_REMOVED_SKILL_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -809,7 +864,6 @@ const RETENTION_STATE_VERSION = 2;
 const RETENTION_STATE_MAX_BYTES = 1024 * 1024;
 const RETENTION_STATE_MAX_ENTRIES = 8192;
 const RETENTION_MAX_CONTINUOUS_CLOCK_STEP_MS = 15 * 60 * 1000;
-const STORE_VERSION_NAME = /^[0-9a-f]{64}(?:-manual)?$/;
 interface RetentionState {
   entries: Map<string, number>;
   /** Wall-clock sample used only to normalize discontinuities between reconciliation passes. */
@@ -958,7 +1012,7 @@ function normalizeRetentionClock(
   state.observedAt = now;
 }
 
-function treeContainsSymlink(path: string): boolean {
+export function treeContainsSymlink(path: string): boolean {
   const pending = [path];
   let examined = 0;
   while (pending.length > 0) {
@@ -1032,7 +1086,7 @@ function gcStore(
         state.entries.delete(key);
         continue;
       }
-      if (policy.protectedVersions?.has(key)) {
+      if (policy.protectedVersions?.has(key) || policy.driftedVersions?.has(key)) {
         state.entries.delete(key);
         continue;
       }
@@ -1053,10 +1107,21 @@ function gcStore(
     }).sort((a, b) => a.since - b.since || a.name.localeCompare(b.name));
     const unlinkedAllowance = MAX_RETAINED_STALE_SKILL_VERSIONS;
     const forced = new Set(safeStale.slice(0, Math.max(0, safeStale.length - unlinkedAllowance)));
-    for (const candidate of safeStale) {
+    // Manual Only copies go first: an agent-invocation copy is what verifies its Manual Only
+    // sibling, so it is never removed while that sibling remains.
+    const ordered = [...safeStale.filter((candidate) => candidate.name.endsWith("-manual")),
+      ...safeStale.filter((candidate) => !candidate.name.endsWith("-manual"))];
+    for (const candidate of ordered) {
       const threshold = want === undefined ? policy.removedSkillMs : policy.previousVersionMs;
       const bounded = forced.has(candidate);
       if (!bounded && policy.now - candidate.since < threshold) continue;
+      if (!candidate.name.endsWith("-manual") && existsInStore(join(path, `${candidate.name}-manual`))) continue;
+      if (policy.collectable && !policy.collectable(entry.name, candidate.name)) {
+        // Edited after this pass verified the store; the next pass reports it as drift.
+        state.entries.delete(candidate.key);
+        log?.(`skill store gc: retained ${entry.name}/${candidate.name}, which changed since it was verified`);
+        continue;
+      }
       try {
         rmSync(candidate.path, { recursive: true, force: true });
         state.entries.delete(candidate.key);
@@ -1201,12 +1266,14 @@ function linkedStoreVersionKeys(
   realStoreRoot: string,
   platform: NodeJS.Platform = process.platform,
   harnessDirectories?: Record<string, string>,
+  extraDirectories: readonly string[] = [],
 ): Set<string> {
   const protectedVersions = new Set<string>();
   const canonicalDir = canonicalSkillsDir(home);
   const dirs = new Set([
     canonicalDir,
     ...Object.values(SKILL_DIRS).map((relDir) => harnessDirectories?.[relDir] ?? join(home, relDir)),
+    ...extraDirectories,
   ]);
   const protectDirectStoreLink = (linkPath: string): void => {
     const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
@@ -1247,6 +1314,72 @@ function linkedStoreVersionKeys(
     }
   }
   return protectedVersions;
+}
+
+/* ---------------------------------- drift --------------------------------- */
+
+interface StoreDriftOutcome {
+  report: SkillDriftState[];
+  /** Names whose links this pass (and its account and WSL siblings) must leave untouched. */
+  held: Set<string>;
+  /** Retention keys GC must keep while the drift remains. */
+  driftedVersions: Set<string>;
+}
+
+/** Classify every drifted copy. A copy whose bytes now equal the same variant of the desired
+ * version is captured: the edit is preserved as a library version, so it is neither reported nor
+ * retained. Any other drifted copy is retained, and a copy that a link serves or that is the desired
+ * version holds its skill: reconciliation must not repoint, remove, or propagate those links. */
+function classifyStoreDrift(
+  scan: StoreDriftScan,
+  desired: ReadonlyMap<string, { digest: string; manual: boolean }>,
+  liveVersions: ReadonlySet<string>,
+): StoreDriftOutcome {
+  const outcome: StoreDriftOutcome = { report: [], held: new Set(), driftedVersions: new Set() };
+  const kept: StoreDriftScan["drift"] = [];
+  for (const copy of scan.drift) {
+    const want = desired.get(copy.name);
+    const desiredDigest = copy.variant === "agent" ? want?.digest : scan.desiredManualDigests.get(copy.name);
+    if (want && copy.observedDigest !== undefined && copy.observedDigest === desiredDigest) continue;
+    const key = retentionKey(copy.name, copy.version);
+    const desiredCopy = want?.digest === copy.digest && (copy.variant === "agent" || want.manual);
+    if (desiredCopy || liveVersions.has(key)) outcome.held.add(copy.name);
+    outcome.driftedVersions.add(key);
+    kept.push(copy);
+  }
+  for (const copy of kept) {
+    const held = outcome.held.has(copy.name);
+    const unreadable = copy.unreadableReason ? `The edited copy cannot be read as skill content: ${copy.unreadableReason}. ` : "";
+    outcome.report.push({
+      name: copy.name,
+      digest: copy.digest,
+      variant: copy.variant,
+      ...(copy.observedDigest ? { observedDigest: copy.observedDigest } : {}),
+      held,
+      detail: unreadable + (held ? HELD_DRIFT_DETAIL : RETAINED_DRIFT_DETAIL),
+    });
+  }
+  return outcome;
+}
+
+const HELD_DRIFT_DETAIL =
+  "Updates and removals for this skill are held until the edit is imported as a new version or the library version is restored.";
+const RETAINED_DRIFT_DETAIL =
+  "This edited copy is no longer deployed. It is retained until the edit is imported as a new version or the library version is restored.";
+
+/** Mark drift held for names a later pass (a WSL distribution) found serving an edited copy. */
+export function holdSkillDrift(drift: readonly SkillDriftState[], names: ReadonlySet<string>): SkillDriftState[] {
+  return drift.map((entry) => !names.has(entry.name) || entry.held ? entry : {
+    ...entry,
+    held: true,
+    ...(entry.detail ? { detail: entry.detail.replace(RETAINED_DRIFT_DETAIL, HELD_DRIFT_DETAIL) } : {}),
+  });
+}
+
+/** Store versions of every reported drifted copy, as `<name>/<store directory>`. */
+export function driftedStoreVersions(result: Pick<ReconcileSkillsResult, "drift">): string[] {
+  return (result.drift ?? []).map((entry) =>
+    `${entry.name}/${entry.variant === "manual" ? `${entry.digest}-manual` : entry.digest}`);
 }
 
 /* -------------------------------- reconcile ------------------------------- */
@@ -1306,6 +1439,14 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const agentBinding = new Map(bindings.map((binding) => [binding.agentId, binding]));
   const wslAgentIds = new Set(agents.flatMap((agent) =>
     agent.context?.kind === "wsl" ? [agent.id] : []));
+  const unboundTargetDetail = (agentId: string): string => {
+    const agent = agents.find((candidate) => candidate.id === agentId);
+    return !agent
+      ? "this agent is not present on the runner"
+      : (agent.context?.kind ?? "native") !== "native"
+        ? "only native agent contexts are supported"
+        : "this agent's driver does not support managed skills";
+  };
 
   // Materialization is runner-data-dir-local and must remain available even while another runner
   // owns the shared provider HOME. Finish that phase before attempting the provider-home lease;
@@ -1364,6 +1505,68 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     }
   }
 
+  // Re-verify every store copy before any link can move away from it. Verification is store-local,
+  // so it also runs, and still protects edited copies from GC, while another process owns HOME.
+  let drift: StoreDriftOutcome | undefined;
+  const ready = prepared.filter(({ invalid, materializationError }) => !invalid && !materializationError);
+  const sources = new Map(ready.flatMap(({ entry }) =>
+    entry.files ? [[`${entry.name}\0${entry.versionDigest}`, entry.files] as const] : []));
+  const desiredCopies = new Map(ready.map(({ entry, manualNeeded }) =>
+    [entry.name, { digest: entry.versionDigest, manual: manualNeeded }]));
+  let scan: StoreDriftScan | undefined;
+  if (manageCanonical) {
+    scan = scanStoreDrift(realStoreRoot, {
+      desired: new Map(ready.map(({ entry }) => [entry.name, entry.versionDigest])),
+      sourceFiles: (name, digest) => sources.get(`${name}\0${digest}`),
+    });
+    drift = classifyStoreDrift(scan, desiredCopies,
+      linkedStoreVersionKeys(home, realStoreRoot, platform, options.harnessDirectories, options.liveLinkDirectories));
+    for (const name of drift.held) storeKeep.set(name, "all");
+  }
+  const heldNames = new Set<string>(drift?.held ?? options.heldSkillNames ?? []);
+  /** A copy may stop being served or be collected only while it still matches its version or its
+   * capture target (the same variant of the desired version). Re-read at the moment of the change,
+   * so an edit that lands after the scan is still protected. */
+  const collectable = (name: string, version: string): boolean => {
+    const want = desiredCopies.get(name);
+    let captureDigest: string | undefined = want?.digest;
+    if (want && version.endsWith("-manual")) {
+      const source = sources.get(`${name}\0${want.digest}`) ?? cleanAgentCopyFiles(realStoreRoot, name, want.digest);
+      captureDigest = source ? manualVariantDigest(source) : undefined;
+    }
+    return storeCopyCollectable(realStoreRoot, name, version, captureDigest);
+  };
+  const lateDrift: SkillDriftState[] = [];
+  /** Gate every managed link move or removal on the copy the link currently serves. */
+  const mayStopServing = (name: string, current: OursProbe): boolean => {
+    let target = current.resolvedTarget;
+    if (current.via === "canonical") {
+      const canonical = probeLink(target, realStoreRoot, undefined, platform);
+      if (canonical.kind !== "ours" || canonical.via !== "store") return true;
+      target = canonical.resolvedTarget;
+    }
+    const relative = target.slice(realStoreRoot.length + 1).split(platform === "win32" ? win32.sep : sep);
+    if (relative.length !== 2 || relative[0] !== name || !STORE_VERSION_NAME.test(relative[1]!) ||
+        !isRealDirectory(join(realStoreRoot, name, relative[1]!))) return true;
+    const version = relative[1]!;
+    if (collectable(name, version)) return true;
+    if (!heldNames.has(name)) {
+      heldNames.add(name);
+      storeKeep.set(name, "all");
+      const copy = readStoreSkillCopy(join(realStoreRoot, name, version));
+      lateDrift.push({
+        name,
+        digest: version.slice(0, 64),
+        variant: version.endsWith("-manual") ? "manual" : "agent",
+        ...(copy.readable ? { observedDigest: copy.digest } : {}),
+        held: true,
+        detail: (copy.readable ? "" : `The edited copy cannot be read as skill content: ${copy.reason}. `) + HELD_DRIFT_DETAIL,
+      });
+      options.log?.(`skill ${name}: a served store copy changed during reconciliation; holding its links`);
+    }
+    return false;
+  };
+
   const leaseNeeded = manageCanonical
     ? allowRemovals || prepared.some(({ entry, invalid, materializationError }) =>
         !invalid && !materializationError &&
@@ -1391,6 +1594,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             previousVersionMs: options.previousVersionGraceMs ?? DEFAULT_PREVIOUS_VERSION_GRACE_MS,
             now: options.now ?? Date.now(),
             protectedVersions: linkedStoreVersionKeys(home, realStoreRoot, platform, options.harnessDirectories),
+            ...(drift ? { driftedVersions: drift.driftedVersions } : {}),
+            collectable,
           },
           options.log,
         );
@@ -1426,13 +1631,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             links: targetsForPass(entry).map((target) => {
               const binding = agentBinding.get(target.agentId);
               if (binding) return { agentId: target.agentId, status: "error" as const, detail };
-              const agent = agents.find((candidate) => candidate.id === target.agentId);
-              const unsupported = !agent
-                ? "this agent is not present on the runner"
-                : (agent.context?.kind ?? "native") !== "native"
-                  ? "only native agent contexts are supported"
-                  : "this agent's driver does not support managed skills";
-              return { agentId: target.agentId, status: "unsupported" as const, detail: unsupported };
+              return { agentId: target.agentId, status: "unsupported" as const, detail: unboundTargetDetail(target.agentId) };
             }),
             error: detail,
           };
@@ -1440,6 +1639,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         unmanaged,
         removedLinks: [],
         error: `${detail}${foundForeignSymlink ? ` ${scanDetail}` : ""}`,
+        ...(drift ? { drift: drift.report } : {}),
+        ...(scan && drift ? { movableCopies: movableCopies(scan, drift.report) } : {}),
       }, options.providerAccountId);
     }
   }
@@ -1477,6 +1678,11 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const canonicalKeep = new Set<string>();
   const harnessKeep = new Map<string, Set<string>>();
   for (const relDir of sweepHarnessScope) harnessKeep.set(relDir, new Set());
+  // A held skill keeps every existing link, including one for a name that is no longer desired.
+  for (const name of heldNames) {
+    canonicalKeep.add(name);
+    for (const set of harnessKeep.values()) set.add(name);
+  }
   for (const { entry, invalid, manualNeeded, materializationError } of prepared) {
     const scopedTargets = targetsForPass(entry);
     if (typeof entry.name === "string" && entry.name && invalid) {
@@ -1537,6 +1743,15 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       continue;
     }
 
+    if (heldNames.has(entry.name)) {
+      // The canonical and every harness link stay exactly as they are; see classifyStoreDrift.
+      state.links = scopedTargets.map((target) => agentBinding.has(target.agentId)
+        ? { agentId: target.agentId, status: "conflict" as const, detail: HELD_SKILL_LINK_DETAIL }
+        : { agentId: target.agentId, status: "unsupported" as const, detail: unboundTargetDetail(target.agentId) });
+      deployed.push(state);
+      continue;
+    }
+
     canonicalKeep.add(entry.name);
 
     const agentVariantDir = join(realStoreRoot, entry.name, entry.versionDigest);
@@ -1553,6 +1768,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           undefined,
           platform,
           replaceJunction,
+          (current) => mayStopServing(entry.name, current),
         )
       : (() => {
           const probe = probeLink(canonicalPath, realStoreRoot, undefined, platform);
@@ -1560,6 +1776,14 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
             ? { ok: true }
             : { ok: false, status: "error", detail: "the canonical skill link was not prepared by the base pass" };
         })();
+    if (!canonical.ok && heldNames.has(entry.name)) {
+      // The canonical link serves a copy edited since the scan: hold it like any other.
+      state.links = scopedTargets.map((target) => agentBinding.has(target.agentId)
+        ? { agentId: target.agentId, status: "conflict" as const, detail: HELD_SKILL_LINK_DETAIL }
+        : { agentId: target.agentId, status: "unsupported" as const, detail: unboundTargetDetail(target.agentId) });
+      deployed.push(state);
+      continue;
+    }
     if (canonical.ok) {
       if (manageCanonical) ownLink(canonicalPath);
     } else {
@@ -1573,13 +1797,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     for (const target of scopedTargets) {
       const binding = agentBinding.get(target.agentId);
       if (!binding) {
-        const agent = agents.find((candidate) => candidate.id === target.agentId);
-        const detail = !agent
-          ? "this agent is not present on the runner"
-          : (agent.context?.kind ?? "native") !== "native"
-            ? "only native agent contexts are supported"
-            : "this agent's driver does not support managed skills";
-        state.links.push({ agentId: target.agentId, status: "unsupported", detail });
+        state.links.push({ agentId: target.agentId, status: "unsupported", detail: unboundTargetDetail(target.agentId) });
         continue;
       }
       if (target.invocation === "manual" && binding.driver !== "claude-code") {
@@ -1618,6 +1836,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           canonicalDir,
           platform,
           replaceJunction,
+          (current) => mayStopServing(entry.name, current),
         );
       } else if (!canonical.ok && canonical.status === "conflict") {
         // The canonical path has been replaced by foreign content. A managed harness link
@@ -1629,7 +1848,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         const linkPath = join(options.harnessDirectories?.[relDir] ?? join(home, relDir), entry.name);
         const shownPath = `~/${relDir}/${entry.name}`;
         const probe = probeLink(linkPath, realStoreRoot, canonicalDir, platform);
-        const removable = probe.kind === "ours" && (probe.via === "store" || !!ownedLink(owned, linkPath, platform));
+        const removable = probe.kind === "ours" && (probe.via === "store" || !!ownedLink(owned, linkPath, platform)) &&
+          mayStopServing(entry.name, probe);
         if (removable) {
           try {
             unlinkSync(linkPath);
@@ -1671,6 +1891,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           canonicalDir,
           platform,
           replaceJunction,
+          (current) => mayStopServing(entry.name, current),
         );
       }
       const linkedIds = useManual ? plan.manualTargets : [...plan.agentTargets, ...(mixed ? [] : plan.manualTargets)];
@@ -1731,6 +1952,11 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   }
 
   if (allowRemovals) {
+    // Names held during this pass keep every link; the sweep also re-verifies each served copy.
+    for (const name of heldNames) {
+      canonicalKeep.add(name);
+      for (const set of harnessKeep.values()) set.add(name);
+    }
     // Harness links route through the canonical link, so remove them first: removing the
     // canonical link first would leave dangling harness links if this pass crashed in between.
     for (const [relDir, keep] of harnessKeep) {
@@ -1738,7 +1964,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         options.harnessDirectories?.[relDir] ?? join(home, relDir),
         keep,
         realStoreRoot,
-        { owned, removedLinks, shownDir: `~/${relDir}`, log: options.log, platform },
+        { owned, removedLinks, shownDir: `~/${relDir}`, log: options.log, platform, mayRemove: mayStopServing },
         canonicalDir,
       );
     }
@@ -1749,6 +1975,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         shownDir: "~/.agents/skills",
         log: options.log,
         platform,
+        mayRemove: mayStopServing,
       });
       gcStoreWithRetention(
         dataDir,
@@ -1758,6 +1985,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
           removedSkillMs: options.removedSkillRetentionMs ?? DEFAULT_REMOVED_SKILL_RETENTION_MS,
           previousVersionMs: options.previousVersionGraceMs ?? DEFAULT_PREVIOUS_VERSION_GRACE_MS,
           now: options.now ?? Date.now(),
+          ...(drift ? { driftedVersions: drift.driftedVersions } : {}),
+          collectable,
         },
         options.log,
       );
@@ -1780,5 +2009,14 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
       return probe.via === "canonical" && !ownedLink(owned, linkPath, platform);
     }, options.harnessDirectories),
     removedLinks,
+    ...(drift || lateDrift.length ? { drift: [...drift?.report ?? [], ...lateDrift] } : {}),
+    ...(scan ? { movableCopies: movableCopies(scan, [...drift?.report ?? [], ...lateDrift]) } : {}),
   }, options.providerAccountId);
+}
+
+/** Scan-time content digests of every copy that was unedited or captured, which a later pass
+ * (a WSL distribution) may stop serving only while the copy still has that digest. */
+function movableCopies(scan: StoreDriftScan, drift: readonly SkillDriftState[]): Record<string, string> {
+  const drifted = new Set(driftedStoreVersions({ drift: [...drift] }));
+  return Object.fromEntries([...scan.copyDigests].filter(([key]) => !drifted.has(key)));
 }

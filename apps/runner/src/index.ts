@@ -51,6 +51,7 @@ import {
   type SkillsSyncManifestMessage,
   type SkillAdoptionMessage,
   type SkillAdoptionRecoveryMessage,
+  type SkillDriftMessage,
   type StartSessionMessage,
   isOrchestratorLaunch,
 } from "@wollipog/protocol";
@@ -213,6 +214,8 @@ import { codexPromptCommand, prepareCodexPromptCatalog } from "./discovery/codex
 import { discoverRegistryAgents, updateRegistryApproval } from "./discovery/acp-registry.js";
 import {
   cacheSkillSyncEntry,
+  driftedStoreVersions,
+  heldSkillNames,
   mergeReconcileSkillsResults,
   reconcileSkills,
   SKILL_DIRS,
@@ -222,6 +225,7 @@ import {
   storedSkillVersionAvailable,
   type ReconcileSkillEntry,
 } from "./skills.js";
+import { handleSkillDrift } from "./skill-drift.js";
 import { mergeWslSkillsResult, reconcileWslSkills } from "./wsl-skills.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
 import { handleSkillAdoption } from "./skill-adoption-command.js";
@@ -1423,6 +1427,9 @@ function queueSkillsReconcile(requestId?: string): void {
         agents: metadata.agents,
         harnessScope: [...baseHarnessScope],
         sweepHarnessScope: Object.values(SKILL_DIRS),
+        // A Manual Only link in any credential home can serve an edited store copy, so all of
+        // them count when deciding whether a drifted skill must be held.
+        liveLinkDirectories: reconciliationPlan.accountScopes.map(({ account }) => resolve(account.directory, "skills")),
         desired: desired ?? [],
         // Content frames are published immediately to bound memory. While their completion fence
         // is pending, suppress removal/GC so an interleaved discovery pass cannot reclaim that
@@ -1434,6 +1441,7 @@ function queueSkillsReconcile(requestId?: string): void {
         removedSkillRetentionMs: config.skillRetention.removedSkillDays * 24 * 60 * 60 * 1000,
         previousVersionGraceMs: config.skillRetention.previousVersionMinutes * 60 * 1000,
       });
+      const held = heldSkillNames(result);
       for (const { account, providerAccountId } of reconciliationPlan.accountScopes) {
         const accountAgents = metadata.agents.filter((agent) => account.provider === "claude"
           ? agent.driver === "claude-code"
@@ -1449,6 +1457,7 @@ function queueSkillsReconcile(requestId?: string): void {
           reportUnknownTargets: false,
           manageCanonical: false,
           providerAccountId,
+          heldSkillNames: held,
           desired: desired ?? [],
           allowRemovals,
           log,
@@ -1465,6 +1474,9 @@ function queueSkillsReconcile(requestId?: string): void {
           ownerHash: dataDirLease.ownerHash,
           agents: metadata.agents,
           desired: desired ?? [],
+          heldSkillNames: held,
+          driftedVersions: driftedStoreVersions(result),
+          ...(result.movableCopies ? { movableCopies: result.movableCopies } : {}),
           allowRemovals,
           log,
         });
@@ -1550,6 +1562,16 @@ function queueSkillAdoptionRecovery(msg: SkillAdoptionRecoveryMessage): void {
     // next in this same queue and keep reconcile/store GC out of every recovery transaction.
     if (result.status === "restored" || result.status === "not_needed" ||
         result.status === "recovery_required") queueSkillsReconcile();
+  };
+  skillsReconcileQueue = skillsReconcileQueue.then(run, run);
+}
+
+function queueSkillDrift(msg: SkillDriftMessage): void {
+  const run = async () => {
+    const result = handleSkillDrift({ message: msg, runnerId: config.runnerId, dataDir: config.dataDir, log });
+    sendUp(result);
+    // A restore releases the hold; the next pass in this queue converges links and reports it.
+    if (result.status === "restored") queueSkillsReconcile();
   };
   skillsReconcileQueue = skillsReconcileQueue.then(run, run);
 }
@@ -2755,6 +2777,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       if (runnerSupportsProtocol(controlPlaneProtocolVersion, "machineSkillAdoptionRecovery")) {
         queueSkillAdoptionRecovery(msg);
       }
+      break;
+    case "skill_drift":
+      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "skillDrift")) queueSkillDrift(msg);
       break;
     case "skills_sync_manifest":
       beginChunkedSkillsSync(msg);

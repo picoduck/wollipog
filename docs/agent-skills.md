@@ -2,8 +2,93 @@
 
 Status: managed Linux/macOS/Windows and mixed-context WSL deployment, Git import,
 Linux/macOS/Windows/WSL machine snapshots, guarded Linux, macOS, and Windows adoption/recovery, version history with
-library rollback, machine-wide version pins, assignable groups, and opt-in automatic Git updates
-implemented. Project/workspace scope remains deferred.
+library rollback, machine-wide version pins, assignable groups, opt-in automatic Git updates, and
+drift detection for hand-edited deployed copies implemented. Project/workspace scope remains
+deferred.
+
+## Drift Detection
+
+Deployed harness links resolve into the runner's version store, and store files are ordinary
+writable files, so an edit made through `~/.claude/skills/<name>/SKILL.md` (or any other harness or
+canonical link) changes the stored copy. A protocol 183 runner re-reads every published store copy
+on each reconciliation (every sync, registration, **Sync Now**, and the five-minute discovery pass)
+and compares it with the digest it was published as. A Manual Only copy is compared with the
+Manual Only transform of its verified agent-invocation sibling. When that sibling is edited or
+missing, removing exactly the injected frontmatter line must reproduce the version digest. A copy
+that cannot be verified either way is treated as drift. The read uses the skill payload rules: it
+never follows a symlink or opens a special file, and it stays within the 64-file, 512 KiB-per-file,
+and 2 MiB limits. On Linux, every directory is read through its own no-follow descriptor, so
+replacing a directory mid-read cannot redirect the read. On macOS and Windows, each directory's
+identity is checked again after the read. Any process that could swap directories inside the
+store runs as the runner's user and can already change the copy's bytes directly. Python bytecode caches (`__pycache__`) and Finder
+`.DS_Store` files are generated beside skill content without an edit and never count as drift.
+
+A copy that no longer matches is drift. The runner never changes its files and reports it in the
+additive `skills_state.drift` field: skill name, version digest, variant (agent-invocation or
+Manual Only), the copy's current digest, and whether the skill is held. The current digest is
+absent when the copy is no longer valid skill content (for example, it now contains a symlink), so
+it can be restored but not imported.
+
+- **Held skills.** When a link serves the edited copy (the canonical link, a Manual Only harness
+  link, including links in provider-account credential homes, or a WSL distribution's links into
+  the native store) or the copy is the desired version, the runner holds the skill. It creates,
+  repoints, and removes no link for that name, even for a library update, a new pin, an invocation
+  change, or a removed assignment, until the drift is resolved. Held targets report a Conflict
+  link state explaining the hold. Every managed link that is about to be repointed or removed
+  first re-reads the copy it currently serves, so an edit that lands during a pass holds the skill
+  in that same pass.
+- **Never deleted.** Store GC keeps every version of a held skill. An edited copy that no link
+  serves is also never aged out or removed by the fixed stale-version bound; the skill is not
+  held, and the copy is reported until it is resolved. GC re-reads each copy immediately before
+  deleting it, so an edit that lands during the pass is kept and reported on the next pass. GC
+  also never removes an agent-invocation copy while its Manual Only copy remains, because that copy
+  is what verifies the Manual Only one.
+- **WSL.** A WSL distribution's links resolve into the native store. The runner passes every
+  edited copy to the in-distribution helper, which holds any skill whose links still serve one,
+  including a link whose ownership record was lost. It also passes the verified digest of every
+  unedited copy. Before moving or removing a link, the helper re-reads the copy that link serves
+  and holds the skill if the copy changed since the native pass.
+- **Captured edits.** When the version a machine deploys has exactly the edited bytes (after
+  **Import Edit as New Version**), the runner treats the edit as captured. It releases the hold and
+  moves links to that version with no visible change, and the old copy becomes an ordinary stale
+  version.
+
+The Skills view marks a skill that has an edited copy in the skill list. Its Deployment section
+shows a **Drift** status for each affected machine, lists the edited copies, and offers two
+owner/admin actions:
+
+- **Import Edit as New Version** reads the copy through a correlated runner command and previews
+  it as a library update against the latest version. For a Manual Only copy it removes only the
+  injected `disable-model-invocation: true` line, and it refuses to import unless the result, when
+  published as Manual Only again, reproduces the edited bytes exactly. The files must also pass
+  the normal library validation (for example, the frontmatter name must still match). After
+  accepting the diff, the machine's copy is read again. If it changed since the review, the import
+  is refused. Otherwise the exact reviewed bytes become a new library version with machine
+  provenance. Machines that track the latest version deploy it. A machine pinned for this skill
+  moves its pin to the new version. If the machine no longer deploys the skill, the captured copy
+  is released: it is discarded under the same observation fence as a restore, and its links are
+  removed like any undesired skill's.
+- **Restore Library Version** requires confirmation and names the copy's current digest as reported
+  by the machine. If the copy changed after that report, the runner refuses rather than discard an
+  unreviewed edit. The runner builds the library version in a staging directory, verifies it, and
+  swaps it in with two renames (a harness can briefly see no directory between them). It checks
+  the copy again after moving it aside and puts it back if it changed. It checks once more before
+  deleting it and keeps it if a writer that still had a file open changed it. A copy that was
+  reported as unreadable has no digest to check against, so it is moved aside into the store
+  instead of being deleted. If the
+  library no longer has that version, the copy is discarded instead. The next reconciliation
+  releases the hold and converges to the assigned version.
+
+Undoing the edit by hand also clears the drift. Older runners report no drift, and the per-machine
+API labels their state `driftReporting: "unsupported"` so an empty list is not presented as
+verified. Older control planes ignore the new field. A protocol 183 runner still holds and reports
+an edited copy to them as a Conflict, and they cannot resolve it except by undoing the edit.
+Limitations: every pass re-reads every stored copy, so the cost grows with the size of the store. A
+Manual Only copy whose source set its own `disable-model-invocation` key cannot be verified without
+its agent-invocation sibling. It is then reported as drift even if unedited; restoring it
+republishes the missing sibling. If a skill is deleted
+from the library while a machine holds an edited copy, the runner keeps the copy and its links, and
+the Skills view cannot show it until a skill with that name exists again.
 
 ## Assignable Group API
 
@@ -405,8 +490,8 @@ A targeting rule: `(skill or group) × scope × agent selector`, with per-assign
 ### Deployed Skill State
 
 The runner-reported truth for one Machine: which skills are materialized at which digest, the
-health of each harness link, conflicts with unmanaged content, and any unmanaged skills discovered
-in harness directories.
+health of each harness link, conflicts with unmanaged content, any unmanaged skills discovered
+in harness directories, and any deployed copies whose bytes drifted from their version.
 
 ## Data model (control plane)
 
@@ -458,7 +543,8 @@ Properties:
   does not age retained content. Independently of time grace, each successfully validated and
   materialized skill retains at most 64 unprotected safe stale version directories plus its current
   desired variants; live-link-protected versions, invalid desired entries, and symlink-bearing trees
-  remain untouched rather than being deleted unsafely.
+  remain untouched rather than being deleted unsafely. Copies whose bytes drifted from their
+  version are never collected either (see Drift Detection).
 - **Never clobber user content.** The runner only creates or replaces symlinks that verifiably
   resolve into its own store. A pre-existing real directory at a target path (a hand-managed
   skill) is a conflict surfaced in the UI with an offer to adopt it into the library — never an
@@ -521,9 +607,10 @@ on every registration, which makes durability trivial (no receipt outbox needed)
   a healthy aggregate transfer while the same inactivity bound still fails a stalled one.
 - Manifest cache checks and reconciliation share the same native-harness/manual-variant policy, so
   discovery changes fail closed instead of letting the two phases disagree about required content.
-- **Runner→CP `skills_state`** — deployed digests, link health, conflicts, unmanaged skills, and
-  the pass's bounded managed-link removals. Deployed state, unmanaged inventory, and the pass error
-  are authoritative full replacements modeled on `SubscriptionUsageInventoryMessage`. Removals
+- **Runner→CP `skills_state`** — deployed digests, link health, conflicts, unmanaged skills, the
+  pass's bounded managed-link removals, and (protocol 183) drifted store copies. Deployed state,
+  unmanaged inventory, drift, and the pass error are authoritative full replacements modeled on
+  `SubscriptionUsageInventoryMessage`. Removals
   are instead a latest-event projection: each non-empty report replaces the prior event and gets
   its own `removalsUpdatedAt`; a later empty or omitted field retains that event and timestamp.
   History is absent only until a compatible runner reports its first non-empty event. Legacy
@@ -571,8 +658,8 @@ Git backs the library as an **upstream source**, not as the distribution transpo
 1. **Adopt from machine** — onboarding scan finds existing `~/.claude/skills` / `~/.codex/skills`
    trees; one action imports them into the library and converts the on-disk copy to a managed
    link. Resolves pre-existing drift immediately.
-2. **Drift detection** — deployed digest mismatch (hand-edited deployed copy) surfaces as a badge
-   with "adopt edit as new version" or "restore" actions.
+2. **Drift detection** (implemented; see Drift Detection above) — a hand-edited deployed copy
+   surfaces as a Drift status with **Import Edit as New Version** and **Restore Library Version**.
 3. **Skill lint** — validate frontmatter, name/directory match, size limits, broken relative
    references, sidecar consistency; hard failures block deploy.
 4. **Usage analytics** — count skill invocations per skill/machine/agent from session events to

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { RunnerMetadata, SkillFile } from "@wollipog/protocol";
+import { RUNNER_CAPABILITY_MIN_PROTOCOL, type RunnerMetadata, type SkillFile } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { PERSONAL_ORGANIZATION_ID } from "./identity.js";
 
@@ -265,4 +265,58 @@ test("runner skill inventory replaces fully while latest non-empty removal histo
     removals: [{ path: {} as never, reason: 1 as never }],
   }, 800);
   assert.deepEqual(db.getRunnerSkillState("runner-malformed")!.removals, []);
+});
+
+test("drift is authoritative replacement, normalized, and accepted only from runners that negotiated it", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const register = (runnerId: string, protocolVersion: number) => db.registerRunner(
+    { runnerId, hostname: runnerId, os: "linux", version: "1", agents: [], workspaces: [] }, 1, protocolVersion);
+  register("runner-current", RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift);
+  register("runner-old", RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift - 1);
+  const drift = [
+    { name: "alpha", digest: "a".repeat(64), variant: "agent" as const, observedDigest: "b".repeat(64), held: true,
+      detail: "Held\u0000 until resolved." },
+    { name: "alpha", digest: "a".repeat(64), variant: "agent" as const, held: false },
+    { name: "../escape", digest: "a".repeat(64), variant: "agent" as const, held: true },
+    { name: "beta", digest: "short", variant: "agent" as const, held: true },
+    { name: "gamma", digest: "c".repeat(64), variant: "other" as never, held: true },
+    { name: "delta", digest: "d".repeat(64), variant: "manual" as const, held: false, extra: "dropped" },
+  ];
+  db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [], drift }, 10);
+  assert.deepEqual(db.getRunnerSkillState("runner-current")!.drift, [
+    { name: "alpha", digest: "a".repeat(64), variant: "agent", observedDigest: "b".repeat(64), held: true, detail: "Held until resolved." },
+    { name: "delta", digest: "d".repeat(64), variant: "manual", held: false },
+  ]);
+  db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [] }, 20);
+  assert.deepEqual(db.getRunnerSkillState("runner-current")!.drift, [], "a later report without drift clears it");
+
+  db.setRunnerSkillState("runner-old", { deployed: [], unmanaged: [], drift }, 30);
+  assert.deepEqual(db.getRunnerSkillState("runner-old")!.drift, [], "an older runner can never produce a drift result");
+
+  const retained = Array.from({ length: 300 }, (_, index) => ({
+    name: `retained-${index}`, digest: "e".repeat(64), variant: "agent" as const, held: false,
+  }));
+  db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [],
+    drift: [...retained, { name: "live", digest: "f".repeat(64), variant: "agent", held: true }] }, 40);
+  const bounded = db.getRunnerSkillState("runner-current")!.drift;
+  assert.equal(bounded.length, 1 + 256, "retained copies are bounded; the held one is additional");
+  assert.equal(bounded[0]!.name, "live", "the storage bound never hides a held, actionable copy");
+
+  const heldEverywhere = Array.from({ length: 257 }, (_, index) => ({
+    name: `held-${index}`, digest: "e".repeat(64), variant: "agent" as const, held: true,
+  }));
+  db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [], drift: [...retained, ...heldEverywhere] }, 50);
+  const allHeld = db.getRunnerSkillState("runner-current")!.drift;
+  assert.equal(allHeld.length, 257 + 256, "every held copy stays resolvable beside the bounded retained ones");
+  assert.equal(allHeld.filter((entry) => entry.held).length, 257);
+
+  // A held copy reported after thousands of retained ones is still stored.
+  const manyRetained = Array.from({ length: 5000 }, (_, index) => ({
+    name: `old-${index}`, digest: "e".repeat(64), variant: "agent" as const, held: false,
+  }));
+  db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [],
+    drift: [...manyRetained, { name: "late-held", digest: "f".repeat(64), variant: "manual", held: true }] }, 60);
+  const late = db.getRunnerSkillState("runner-current")!.drift;
+  assert.equal(late[0]!.name, "late-held");
+  assert.equal(late.length, 1 + 256);
 });
