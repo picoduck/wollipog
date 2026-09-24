@@ -69,7 +69,9 @@ export function AuthenticationRecoveryPanel({
   const [identity, setIdentity] = useState<Loadable<ProviderAuthenticationCurrentIdentity> | null>(null);
   const [accounts, setAccounts] = useState<Loadable<ProviderAuthenticationAccountOption[]> | null>(null);
   const [selecting, setSelecting] = useState<string | null>(null);
-  const [selectionError, setSelectionError] = useState<string | null>(null);
+  // A refusal belongs to the account that was chosen. It renders in that row, beside the control
+  // the person just used, so it cannot land below the fold of a scrolling request panel.
+  const [selectionError, setSelectionError] = useState<{ accountId: string; message: string } | null>(null);
   const [startingSignIn, setStartingSignIn] = useState<string | null>(null);
   const active = supported && runnerOnline && !signingIn;
 
@@ -138,7 +140,7 @@ export function AuthenticationRecoveryPanel({
         expectedProviderAccountId: session.providerAccountId,
       });
     } catch (cause) {
-      setSelectionError((cause as Error).message);
+      setSelectionError({ accountId: account.id, message: (cause as Error).message });
       const code = cause instanceof ApiError ? cause.code : undefined;
       if (code === "account_changed" || code === "recovery_changed" || code === "sign_in_required" ||
           code === "status_unknown") {
@@ -155,7 +157,7 @@ export function AuthenticationRecoveryPanel({
     try {
       await api.startProviderLogin(session.runnerId, { accountId });
     } catch (cause) {
-      setSelectionError((cause as Error).message);
+      setSelectionError({ accountId, message: (cause as Error).message });
     } finally {
       setStartingSignIn(null);
     }
@@ -249,6 +251,11 @@ export function AuthenticationRecoveryPanel({
                       : account.availability === "available" ? "Use Account" : "Check and Use"}
                   </button>
                 </div>
+                {selectionError?.accountId === account.id && (
+                  <div className="form-error auth-recovery-account-error" role="alert" ref={revealError}>
+                    {selectionError.message}
+                  </div>
+                )}
               </li>
             ))}
           </ul>
@@ -256,10 +263,17 @@ export function AuthenticationRecoveryPanel({
         {accountLogins.map((login) => (
           <ProviderLoginCard key={login.operationId} runnerId={session.runnerId} login={login} />
         ))}
-        {selectionError && <div className="form-error" role="alert">{selectionError}</div>}
+        {selectionError && !alternatives.some((account) => account.id === selectionError.accountId) && (
+          <div className="form-error" role="alert" ref={revealError}>{selectionError.message}</div>
+        )}
       </section>
     </div>
   );
+}
+
+/** Bring a newly shown refusal into view inside whichever panel is scrolling. */
+function revealError(node: HTMLElement | null): void {
+  node?.scrollIntoView?.({ block: "nearest" });
 }
 
 function accountGuidance(account: ProviderAuthenticationAccountOption, canStartSignIn: boolean): string {

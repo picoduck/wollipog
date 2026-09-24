@@ -63,7 +63,12 @@ test("a refused selection keeps the card open and explains the next action", asy
   await page.setViewportSize({ width: 1180, height: 820 });
   const { recovery } = await open(page, "theme=dark&scenario=refused");
   await recovery.getByRole("button", { name: "Check and Use Team Pilot" }).click();
-  await expect(recovery.getByRole("alert")).toContainText("signed out. Sign in to it, then choose it again.");
+  const row = recovery.locator('[data-availability="sign_in_required"]');
+  const refusal = row.getByRole("alert");
+  await expect(refusal).toContainText("signed out. Sign in to it, then choose it again.");
+  // The refusal appears beside the chosen account and is scrolled into view, not below the fold.
+  await expect(refusal).toBeInViewport();
+  await expect(row.getByRole("button", { name: "Sign In" })).toBeInViewport();
   await capture(page, "auth-recovery-refused-desktop-dark");
 });
 

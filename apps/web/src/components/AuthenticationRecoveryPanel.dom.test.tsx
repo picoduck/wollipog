@@ -291,7 +291,9 @@ test("a refused selection explains itself and refreshes when the card or account
   );
   try {
     await act(async () => { view.button("Use Claude Personal")!.click(); await tick(); await tick(); });
-    assert.match(view.container.querySelector('[role="alert"]')?.textContent ?? "", /configured account changed/);
+    const row = view.container.querySelector<HTMLElement>('[data-availability="available"]');
+    assert.match(row?.querySelector('[role="alert"]')?.textContent ?? "", /configured account changed/,
+      "the refusal renders in the chosen account's row, beside the control that was used");
     assert.equal(api.calls.identity, 2);
   } finally {
     await view.cleanup();
