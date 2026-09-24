@@ -94,6 +94,10 @@ test("Claude attests image tool results from the verified release, not from prom
   assert.equal(older.supportsImages, true, "an older release still sends prompt images");
   assert.equal(older.imageToolResults, false, "but is not attested to show a tool's image to the model");
   assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, installedVersion: undefined }).imageToolResults, false);
+  assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, installedVersion: `${CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION}-rc.1` })
+    .imageToolResults, false, "a prerelease precedes the verified release it names");
+  assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, installedVersion: "2.1.278-rc.1" }).imageToolResults, true,
+    "a prerelease of a later release is past the floor");
   assert.equal(claudeCapabilitiesFromProbe(base, { ...probe, status: "unauthenticated" }).imageToolResults, true,
     "signing out does not change what the installed CLI does with a tool's image");
   for (const status of ["unsupported", "unavailable"] as const) {

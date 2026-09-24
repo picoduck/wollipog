@@ -105,11 +105,15 @@ function parseVersion(s: string): string | undefined {
 
 function versionAtLeast(version: string, floor: string): boolean {
   const parts = (value: string) => value.split(".").slice(0, 3).map((part) => Number.parseInt(part, 10));
+  const prerelease = (value: string) => /^\d+\.\d+\.\d+-/.test(value);
   const a = parts(version);
   const b = parts(floor);
   return (a[0] ?? 0) > (b[0] ?? 0)
     || ((a[0] ?? 0) === (b[0] ?? 0) && (a[1] ?? 0) > (b[1] ?? 0))
-    || ((a[0] ?? 0) === (b[0] ?? 0) && (a[1] ?? 0) === (b[1] ?? 0) && (a[2] ?? 0) >= (b[2] ?? 0));
+    || ((a[0] ?? 0) === (b[0] ?? 0) && (a[1] ?? 0) === (b[1] ?? 0) && (a[2] ?? 0) > (b[2] ?? 0))
+    // A prerelease (`2.1.277-rc.1`) precedes the release it names, so it does not meet that floor.
+    || ((a[0] ?? 0) === (b[0] ?? 0) && (a[1] ?? 0) === (b[1] ?? 0) && (a[2] ?? 0) === (b[2] ?? 0) &&
+      (!prerelease(version) || prerelease(floor)));
 }
 
 function optionBlock(help: string, option: string): string {
