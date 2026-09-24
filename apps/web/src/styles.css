@@ -5575,6 +5575,10 @@ textarea,
   gap: 9px;
   min-width: 0;
 }
+/* skill invocations read as a procedure the agent followed, not one more generic tool call */
+.tl-tool-skill {
+  box-shadow: inset 3px 0 0 var(--accent-2);
+}
 .tl-tool-time { padding-left: 19px; }
 /* tool output is collapsed by default — the header is the click target */
 .tl-tool > summary {

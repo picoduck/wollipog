@@ -356,6 +356,13 @@ test("parseClaudeTranscript recovers thinking, tool calls, edits, and results", 
   assert.equal(first(ev, "file_edit").path, "/repo/a.ts");
 });
 
+test("parseClaudeTranscript labels Skill tool calls by skill name with the skill kind", () => {
+  const content = `{"type":"assistant","message":{"content":[{"type":"tool_use","id":"sk","name":"Skill","input":{"skill":"deploy-check","args":"staging"}}]}}`;
+  const call = first(parseClaudeTranscript(content), "tool_call");
+  assert.equal(call.title, "Skill: deploy-check staging");
+  assert.equal(call.toolKind, "skill");
+});
+
 test("parseClaudeTranscript preserves recursive parent attribution and normalizes Task as agent", () => {
   const content = [
     `{"type":"assistant","parent_tool_use_id":"outer","message":{"usage":{"input_tokens":7,"output_tokens":3,"cache_read_input_tokens":2},"content":[{"type":"thinking","thinking":"delegate"},{"type":"tool_use","id":"inner","name":"Task","input":{}}]}}`,

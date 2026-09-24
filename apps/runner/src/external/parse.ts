@@ -11,6 +11,7 @@
  */
 
 import type { AgentContext, ExternalSessionDescriptor, SessionEventPayload } from "@wollipog/protocol";
+import { SKILL_TOOL_KIND, skillToolTitle } from "../drivers/skill-tool.js";
 
 const TITLE_MAX = 100;
 
@@ -142,10 +143,12 @@ function claudeToolKind(name: string): string | undefined {
   if (name === "Bash") return "execute";
   if (/^(WebFetch|WebSearch)$/.test(name)) return "fetch";
   if (name === "Task" || name === "Agent") return "agent";
+  if (name === "Skill") return SKILL_TOOL_KIND;
   return undefined;
 }
 
 function claudeToolTitle(name: string, input: Record<string, unknown>): string {
+  if (name === "Skill") return skillToolTitle(input.skill, input.args);
   if (name === "Bash") return clip(asString(input.command) || name, TITLE_CLIP);
   const path = asString(input.file_path) || asString(input.path) || asString(input.pattern) || asString(input.notebook_path);
   return clip(path ? `${name}: ${path}` : name, TITLE_CLIP);
