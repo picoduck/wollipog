@@ -289,6 +289,25 @@ test("macOS adoption detects a replaced link, a store edit, and a moved source b
   assert.equal(fs.readFileSync(join(moved.source, "SKILL.md"), "utf8"), "replacement content");
 });
 
+test("macOS adoption never preserves the original into a relocated journal", native, async (t) => {
+  const moved = fixture(t);
+  const early = await atCheckpoint(moved.helper, adoptionArguments(moved), "intent_durable", "c", () => {
+    fs.renameSync(join(moved.parent, `.wollipog-adoption-${operationId}`), join(moved.parent, "relocated-journal"));
+  });
+  assert.deepEqual(macosAdoptionOutcome(early.lines, early.code === 0), { journal: true, adopted: false });
+  assert.match(fs.readFileSync(join(moved.source, "SKILL.md"), "utf8"), /Original instructions/u,
+    "the original stays at its source path");
+  assert.equal(fs.existsSync(join(moved.parent, "relocated-journal", "original")), false);
+
+  const late = fixture(t);
+  const preserved = await atCheckpoint(late.helper, adoptionArguments(late), "source_preserved", "c", () => {
+    fs.renameSync(join(late.parent, `.wollipog-adoption-${operationId}`), join(late.parent, "relocated-journal"));
+  });
+  assert.deepEqual(macosAdoptionOutcome(preserved.lines, preserved.code === 0), { journal: true, adopted: false },
+    "a journal moved after preservation is reported as recovery, never as adopted");
+  assert.equal(fs.existsSync(late.source), false, "no managed link is published over the missing original");
+});
+
 test("a macOS parent symlink swap cannot redirect writes outside the pinned parent", native, async (t) => {
   const f = fixture(t);
   const outside = join(f.root, "outside"), moved = join(f.home, ".codex/moved");

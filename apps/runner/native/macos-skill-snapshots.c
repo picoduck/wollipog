@@ -922,6 +922,10 @@ static void adopt_candidate(int argc, char **argv) {
   if (mkdirat(parent, backup_name, 0700) != 0) fail();
   int backup = openat(parent, backup_name, DIRECTORY_FLAGS);
   if (backup < 0) fail();
+  char backup_id[48];
+  identity(backup, backup_id);
+  char *backup_relative = join_path(local, backup_name);
+  char *original_relative = join_path(backup_relative, "original");
   char intent[1024];
   int length = account
     ? snprintf(intent, sizeof(intent), "{\"format\":2,\"operationId\":\"%s\",\"sourceDirectory\":\"%s\","
@@ -942,6 +946,8 @@ static void adopt_candidate(int argc, char **argv) {
    * cannot redirect the move; the path checks detect it and stop before publication. */
   check_source(home_real, local, source_relative, parent_id, source_id, source, expected_generation, digest);
   check_path(data_real, target_relative, target_id);
+  /* The original may only move into the journal that recovery inspection will find. */
+  check_path(home_real, backup_relative, backup_id);
   if (renameatx_np(parent, name, backup, "original", RENAME_EXCL) != 0) fail();
   flush(backup);
   flush(parent);
@@ -956,6 +962,7 @@ static void adopt_candidate(int argc, char **argv) {
   snprintf(receipt, sizeof(receipt), "{\"sourceIdentity\":\"%s\",\"digest\":\"%s\"}", source_id, digest);
   record(backup, "preserved.json", receipt);
   check_path(home_real, local, parent_id);
+  check_path(home_real, original_relative, source_id);
   check_path(data_real, target_relative, target_id);
   check_content(target, digest, 0);
   /* symlinkat() fails with EEXIST rather than replacing anything created during the rename gap. */
@@ -963,6 +970,7 @@ static void adopt_candidate(int argc, char **argv) {
   flush(parent);
   checkpoint("link_created");
   check_path(home_real, local, parent_id);
+  check_path(home_real, original_relative, source_id);
   check_path(data_real, target_relative, target_id);
   check_content(target, digest, 0);
   if (!link_equals(parent, name, target_path)) fail();
