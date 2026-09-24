@@ -670,6 +670,60 @@ test("a saved local Docker context supplies its Unix socket without exposing cli
   }
 });
 
+test("Docker startup inventory, removal, and image inspection use the verified local client", async () => {
+  const config = mkdtempSync(join(tmpdir(), "wollipog-docker-startup-context-"));
+  writeFileSync(join(config, "config.json"), '{"currentContext":"local-fixture"}');
+  process.env.DOCKER_CONFIG = config;
+  process.env.DOCKER_CONTEXT = "local-fixture";
+  const socket = "unix:///run/user/1000/docker.sock";
+  const calls: Array<{ args: string[]; env?: Record<string, string>; replaceEnv?: boolean }> = [];
+  try {
+    const registry = testRegistry("runner", "host", [{ ...template, setupChecks: [] }], {
+      resolveRuntime: async () => runtime(),
+      run: async (_file, args, opts) => {
+        calls.push({ args, env: opts.env, replaceEnv: opts.replaceEnv });
+        if (args[0] === "context") return { code: 0, stdout: `${JSON.stringify(socket)}\n`, stderr: "" };
+        if (args[0] === "ps") return { code: 0, stdout: "abcdef123456\n", stderr: "" };
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.available, true);
+    const contextIndex = calls.findIndex(({ args }) => args[0] === "context");
+    const startup = calls.filter(({ args }) => ["ps", "rm", "image"].includes(args[0]!));
+    assert.equal(startup.length, 4);
+    assert.ok(contextIndex >= 0 && contextIndex < calls.findIndex(({ args }) => args[0] === "ps"));
+    for (const call of startup) {
+      assert.equal(call.replaceEnv, true);
+      assert.equal(call.env?.DOCKER_HOST, socket);
+      assert.equal(call.env?.DOCKER_CONTEXT, undefined);
+      assert.notEqual(call.env?.DOCKER_CONFIG, config);
+      assert.deepEqual(JSON.parse(readFileSync(join(call.env!.DOCKER_CONFIG!, "config.json"), "utf8")), {});
+    }
+  } finally {
+    rmSync(config, { recursive: true, force: true });
+  }
+});
+
+test("Docker startup never reconciles orphans on a local Podman engine", async () => {
+  process.env.DOCKER_HOST = "unix:///run/user/1000/docker.sock";
+  let startupRan = false;
+  const registry = new ContainerTargetRegistry("runner", "host", [template], {
+    resolveRuntime: async () => runtime(),
+    run: async (_file, args) => {
+      if (args[0] === "--version") return { code: 0, stdout: "Docker version 27.0.0\n", stderr: "" };
+      if (args[0] === "version") return { code: 0,
+        stdout: '{"Server":{"Platform":{"Name":"Podman Engine"}}}', stderr: "" };
+      if (["ps", "rm", "image"].includes(args[0]!)) startupRan = true;
+      return { code: 0, stdout: "", stderr: "" };
+    },
+  });
+  await registry.initialize();
+  assert.equal(registry.definitions()[0]!.available, false);
+  assert.match(registry.definitions()[0]!.unavailableReason!, /Podman engine/u);
+  assert.equal(startupRan, false);
+});
+
 test("Windows Docker checks retain a local named-pipe endpoint", {
   skip: process.platform !== "win32",
 }, async () => {
@@ -693,10 +747,12 @@ test("a remote saved Docker context fails closed without running a setup check",
   process.env.DOCKER_CONFIG = config;
   try {
     let checkRan = false;
+    let startupRan = false;
     const registry = testRegistry("runner", "host", [template], {
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         if (args[0] === "context") return { code: 0, stdout: '"tcp://example.invalid:2376"\n', stderr: "" };
+        if (["ps", "rm", "image"].includes(args[0]!)) startupRan = true;
         if (args[0] === "run" && args.includes("git")) checkRan = true;
         return { code: 0, stdout: "", stderr: "" };
       },
@@ -704,8 +760,9 @@ test("a remote saved Docker context fails closed without running a setup check",
     await registry.initialize();
     assert.equal(registry.definitions()[0]!.available, false);
     assert.equal(checkRan, false);
+    assert.equal(startupRan, false);
     assert.equal(registry.definitions()[0]!.unavailableReason,
-      "setup check 'git' could not launch isolated runtime");
+      "Docker endpoint could not be verified");
   } finally {
     rmSync(config, { recursive: true, force: true });
   }
@@ -848,7 +905,7 @@ test("unsupported remote container endpoint fails closed before running a setup 
     await registry.initialize();
     assert.equal(registry.definitions()[0]!.available, false);
     assert.equal(setupRan, false);
-    assert.match(registry.definitions()[0]!.unavailableReason!, /could not launch isolated runtime/);
+    assert.match(registry.definitions()[0]!.unavailableReason!, /Docker endpoint could not be verified/);
   } finally {
     if (previous === undefined) delete process.env.DOCKER_HOST;
     else process.env.DOCKER_HOST = previous;

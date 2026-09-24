@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -90,6 +90,64 @@ test("Docker target recovers from startup config failure through full readiness 
       assert.equal(env?.DOCKER_HOST, localDockerHost);
       assert.equal(readFileSync(join(env!.DOCKER_CONFIG!, "config.json"), "utf8"), "{}\n");
     }
+  } finally {
+    for (const [name, value] of Object.entries(saved)) restoreEnv(name as keyof typeof saved, value);
+    dockerTargetClientConfig();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("Docker recovers when its private config disappears during startup context inspection", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-docker-context-recovery-"));
+  const saved = {
+    TMPDIR: process.env.TMPDIR, TMP: process.env.TMP, TEMP: process.env.TEMP,
+    DOCKER_HOST: process.env.DOCKER_HOST,
+    DOCKER_CONFIG: process.env.DOCKER_CONFIG, DOCKER_CONTEXT: process.env.DOCKER_CONTEXT,
+  };
+  const operatorConfig = join(root, "operator");
+  mkdirSync(operatorConfig);
+  writeFileSync(join(operatorConfig, "config.json"), '{"currentContext":"local"}');
+  delete process.env.DOCKER_HOST;
+  process.env.DOCKER_CONFIG = operatorConfig;
+  process.env.DOCKER_CONTEXT = "local";
+  let removeDuringContext = true;
+  const calls: string[][] = [];
+  try {
+    const registry = new ContainerTargetRegistry("runner", "host", [template], {
+      resolveRuntime: async () => ({ path: "/usr/bin/docker", via: "path",
+        launch: { command: "/usr/bin/docker", args: [] } }),
+      run: async (_file, args) => {
+        calls.push(args);
+        if (args[0] === "context") {
+          if (removeDuringContext) {
+            removeDuringContext = false;
+            rmSync(dockerTargetClientConfig(), { recursive: true, force: true });
+            setTempDirectory(join(root, "missing"));
+          }
+          return { code: 0, stdout: `${JSON.stringify(localDockerHost)}\n`, stderr: "" };
+        }
+        if (args[0] === "--version") return { code: 0, stdout: "Docker version 29.2.1\n", stderr: "" };
+        if (args[0] === "version") return { code: 0,
+          stdout: '{"Server":{"Components":[{"Name":"Engine"}]}}', stderr: "" };
+        if (args.includes("/bin/sh")) return { code: 0, stdout: "/usr/bin/codex\n", stderr: "" };
+        if (args.at(-1) === "--version" && args.includes("/usr/bin/codex")) {
+          return { code: 0, stdout: "codex 1.0.0\n", stderr: "" };
+        }
+        return { code: 0, stdout: "", stderr: "" };
+      },
+    });
+    await registry.initialize();
+    assert.equal(registry.definitions()[0]!.unavailableReason,
+      "Docker client configuration could not be isolated");
+    assert.equal(calls.some((args) => ["ps", "rm", "image"].includes(args[0]!)), false);
+
+    setTempDirectory(root);
+    await registry.refreshInstallations();
+    assert.equal(registry.definitions()[0]!.available, true);
+    assert.equal(calls.some((args) => args[0] === "image"), true);
+    assert.equal(calls.some((args) => args[0] === "run" && args.includes("git")), true);
+    assert.equal(calls.some((args) => args[0] === "ps" || args[0] === "rm"), false,
+      "Rediscover must not remove containers while another target may have live sessions");
   } finally {
     for (const [name, value] of Object.entries(saved)) restoreEnv(name as keyof typeof saved, value);
     dockerTargetClientConfig();
