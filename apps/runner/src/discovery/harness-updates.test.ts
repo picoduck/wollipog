@@ -138,6 +138,28 @@ test("native PowerShell probe: copied cmd.exe command preserves a literal percen
     assert.match(probe.stdout, /%WOLLIPOG_INTERPRETER_PROBE% update/, `actual stdout: ${probe.stdout}`);
   });
 
+test("native PowerShell probe: copied cscript.exe command preserves an embedded quote",
+  { skip: process.platform !== "win32" }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "wollipog cscript probe "));
+    try {
+      const script = join(dir, "args.vbs");
+      writeFileSync(script, 'Dim arg\r\nFor Each arg In WScript.Arguments\r\nWScript.Echo "ARG:" & arg\r\nNext\r\n');
+      const command = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cscript.exe");
+      const binary = { path: command, via: "path" as const,
+        launch: { command, args: ["//nologo", script, 'a"b'] } };
+      const manual = manualCodexUpdateCommand(binary, { kind: "native" }, "win32");
+      assert.ok(manual);
+      const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", manual.command], {
+        encoding: "utf8",
+      });
+      assert.equal(probe.status, 0, probe.stderr);
+      assert.match(probe.stdout, /ARG:a"b/, `actual stdout: ${probe.stdout}`);
+      assert.match(probe.stdout, /ARG:update/, `actual stdout: ${probe.stdout}`);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
 test("extensionless native Windows update commands cannot promise batch-safe arguments", () => {
   for (const command of ["codex", "C:\\Tools\\codex"]) {
     const binary = { path: "C:\\Tools\\codex.cmd", via: "path" as const,
