@@ -392,10 +392,12 @@ function automationCapabilityError(
       agentBindings[node.agentId!] = resolved;
     }
     if (unavailableBinding) continue;
-    const orchestrator = target.installationBindings?.orchestrator
-      ? db.resolveSavedHarnessInstallation(target.runnerId, target.installationBindings.orchestrator)
-      : target.orchestratorAgentId ?? request.orchestratorAgentId;
-    if (target.installationBindings?.orchestrator && !orchestrator) continue;
+    const chosenOrchestrator = target.orchestratorAgentId ?? request.orchestratorAgentId;
+    const orchestratorPin = chosenOrchestrator ? target.installationBindings?.orchestrator : undefined;
+    const orchestrator = orchestratorPin
+      ? db.resolveSavedHarnessInstallation(target.runnerId, orchestratorPin)
+      : chosenOrchestrator;
+    if (orchestratorPin && !orchestrator) continue;
     const error = sessions.workflowRunCapabilityError({
       ...request,
       runnerId: target.runnerId,
@@ -416,8 +418,10 @@ function automationCapabilityError(
 function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: AutomationSchedule): AutomationSpec {
   if (spec.action.kind === "prompt_session") return spec;
   const pin = (runnerId: string, ids: Record<string, string>, existing?: AutomationInstallationBindings,
-    old?: { runnerId: string; ids: Record<string, string>; bindings?: AutomationInstallationBindings }) => {
+    old?: { runnerId: string; ids: Record<string, string>; bindings?: AutomationInstallationBindings },
+    pruneAbsentOrchestrator = false) => {
     const bindings = { ...existing };
+    if (pruneAbsentOrchestrator && !Object.hasOwn(ids, "orchestrator")) delete bindings.orchestrator;
     for (const [key, agentId] of Object.entries(ids)) {
       if (old && (old.runnerId !== runnerId || old.ids[key] !== agentId)) delete bindings[key];
       if (bindings[key]) continue;
@@ -477,10 +481,10 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
     previous && !oldAction ? undefined : action.installationBindings,
     oldAction ? { runnerId: oldAction.request.runnerId,
       ids: ids(oldAction.request.agentBindings ?? {}, oldAction.request.orchestratorAgentId),
-      bindings: oldAction.installationBindings } : undefined);
+      bindings: oldAction.installationBindings } : undefined, true);
   return {
     ...spec,
-    action: { ...action, ...(primary ? { installationBindings: primary } : {}) },
+    action: { ...action, installationBindings: primary },
     runnerPolicy: spec.runnerPolicy.kind !== "alternate" ? spec.runnerPolicy : {
       ...spec.runnerPolicy,
       targets: spec.runnerPolicy.targets.map((target) => {
@@ -493,8 +497,8 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
           oldTarget && oldAction ? { runnerId: oldTarget.runnerId,
             ids: ids({ ...(oldAction.request.agentBindings ?? {}), ...(oldTarget.agentBindings ?? {}) },
               oldTarget.orchestratorAgentId ?? oldAction.request.orchestratorAgentId),
-            bindings: oldTarget.installationBindings } : undefined);
-        return { ...target, ...(bindings ? { installationBindings: bindings } : {}) };
+            bindings: oldTarget.installationBindings } : undefined, true);
+        return { ...target, installationBindings: bindings };
       }),
     },
   };
@@ -1379,12 +1383,14 @@ export class AutomationsService {
       if (!agentId) return null;
       bindings[role] = agentId;
     }
-    const orchestrator = saved?.orchestrator
-      ? this.db.resolveSavedHarnessInstallation(target.runnerId, saved.orchestrator)
-      : target.orchestratorAgentId ?? request.orchestratorAgentId;
-    if (!saved?.orchestrator && orchestrator && this.db.getRunner(target.runnerId)?.agents.some((agent) =>
+    const chosenOrchestrator = target.orchestratorAgentId ?? request.orchestratorAgentId;
+    const orchestratorPin = chosenOrchestrator ? saved?.orchestrator : undefined;
+    const orchestrator = orchestratorPin
+      ? this.db.resolveSavedHarnessInstallation(target.runnerId, orchestratorPin)
+      : chosenOrchestrator;
+    if (!orchestratorPin && orchestrator && this.db.getRunner(target.runnerId)?.agents.some((agent) =>
       agent.id === orchestrator && agent.installation)) return null;
-    if (saved?.orchestrator && !orchestrator) return null;
+    if (orchestratorPin && !orchestrator) return null;
     return { ...target, agentBindings: bindings,
       ...(orchestrator ? { orchestratorAgentId: orchestrator } : {}) };
   }
