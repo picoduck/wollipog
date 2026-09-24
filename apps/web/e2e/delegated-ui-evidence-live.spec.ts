@@ -73,7 +73,7 @@ test("a browser sees delegated image review complete through live scoped routes 
     const port = await reservePort();
     const base = `http://127.0.0.1:${port}`;
     const env = { ...process.env };
-    for (const key of Object.keys(env)) if (/^(RUNNER_|CONTROL_PLANE_)/u.test(key)) delete env[key];
+    for (const key of Object.keys(env)) if (/^(RUNNER_|CONTROL_PLANE_|WOLLIPOG_)/u.test(key)) delete env[key];
     controlPlane = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
       cwd: REPO_ROOT,
       env: { ...env, CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT: String(port),
