@@ -155,6 +155,16 @@ test("Codex prompts and skills are labeled by source and $name dispatches the sa
   ], []));
   await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("$review pr 42");
 
+  // The reverse: a prompt receipt stays /name when a later catalog keeps only the same-named skill.
+  await composer.fill("/user:review notes");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("/review notes");
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
+    { name: "review", source: "skill", invocation: { id: "codex-skill-review-3", catalogRevision: "codex-catalog-3", executionMode: "passthrough" } },
+  ], []));
+  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("/review notes");
+  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("$review pr 42");
+
   await composer.fill("$HOME stays text");
   await expect(listbox).toBeHidden();
 });

@@ -3612,9 +3612,9 @@ function SessionDetailLoaded({
     ),
   }), [agentCaps?.slashCommands, canAnswerPendingQuestion, canStopTurn, planSupported, providerCommandAttachmentPolicy]);
   const composerSkillSigil = useMemo(() => composerCommandsIncludeSkills(composerCommands), [composerCommands]);
-  // A receipt outlives catalog rotation. Submissions this view sent as skills are known exactly;
-  // otherwise a current skill command id, then a name only skills use, identifies one.
-  const skillSubmissionIdsRef = useRef(new Set<string>());
+  // A receipt outlives catalog rotation. The kind of every submission this view sent is known
+  // exactly; otherwise a current skill command id, then a name only skills use, identifies a skill.
+  const submissionIsSkillRef = useRef(new Map<string, boolean>());
   const isSkillInvocation = useMemo(() => {
     const commands = agentCaps?.slashCommands ?? [];
     const skillIds = new Set(commands.flatMap((command) =>
@@ -3624,8 +3624,8 @@ function SessionDetailLoaded({
       .map((command) => command.name.toLowerCase())
       .filter((name) => commands.every((command) => command.source === "skill" || command.name.toLowerCase() !== name)));
     return (invocation: { submissionId: string; providerCommandId: string; commandName: string }) =>
-      skillSubmissionIdsRef.current.has(invocation.submissionId) ||
-      skillIds.has(invocation.providerCommandId) || skillOnlyNames.has(invocation.commandName.toLowerCase());
+      submissionIsSkillRef.current.get(invocation.submissionId) ??
+      (skillIds.has(invocation.providerCommandId) || skillOnlyNames.has(invocation.commandName.toLowerCase()));
   }, [agentCaps?.slashCommands]);
   const slashTrigger = useMemo(
     () => composerSelection.start === composerSelection.end
@@ -3884,7 +3884,7 @@ function SessionDetailLoaded({
         ...candidate,
       };
       commandSubmissionRetryRef.current = commandSubmission;
-      if (invocation.command.providerSource === "skill") skillSubmissionIdsRef.current.add(commandSubmission.submissionId);
+      submissionIsSkillRef.current.set(commandSubmission.submissionId, invocation.command.providerSource === "skill");
     }
     const submissionVersion = composerDraftVersionRef.current;
     const generation = viewGenerationRef.current;
