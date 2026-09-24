@@ -97,6 +97,9 @@ import type {
   SessionView,
   SessionProviderAccountOptionsResponse,
   SwitchSessionProviderAccountResponse,
+  ProviderAuthenticationAccountOptionsResponse,
+  ProviderAuthenticationCurrentIdentityResponse,
+  SelectProviderAuthenticationAccountResponse,
   SessionWorktreeView,
   SessionReminderReadResponse,
   SessionReminderView,
@@ -800,6 +803,25 @@ export function createApiClient(transport: ApiTransport) {
     req<SwitchSessionProviderAccountResponse>(
       `/api/sessions/${encodeURIComponent(id)}/provider-account`,
       { method: "POST", body: JSON.stringify({ providerAccountId }) },
+    ),
+  /** Fresh provider-reported identity for one open Authentication Required card. The response
+   * carries personal data: callers keep it in component memory only and never persist it. */
+  authenticationCurrentIdentity: (id: string, requestId: string) =>
+    req<ProviderAuthenticationCurrentIdentityResponse>(
+      `/api/sessions/${encodeURIComponent(id)}/authentication/current-identity`,
+      { method: "POST", body: JSON.stringify({ requestId }), cache: "no-store" },
+    ),
+  authenticationAccounts: (id: string) =>
+    req<ProviderAuthenticationAccountOptionsResponse>(
+      `/api/sessions/${encodeURIComponent(id)}/authentication/accounts`,
+    ),
+  selectAuthenticationAccount: (
+    id: string,
+    input: { requestId: string; providerAccountId: string; expectedProviderAccountId: string },
+  ) =>
+    req<SelectProviderAuthenticationAccountResponse>(
+      `/api/sessions/${encodeURIComponent(id)}/authentication/account`,
+      { method: "POST", body: JSON.stringify(input) },
     ),
   unarchiveAndRestart: (id: string) =>
     req<SessionView>(`/api/sessions/${id}/unarchive-and-restart`, { method: "POST" }),

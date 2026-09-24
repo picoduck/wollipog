@@ -12,6 +12,7 @@ import {
   describeProviderAuthIdentityMismatch,
   mergeProviderAuthIdentityEvidence,
   describeProviderCredentialScope,
+  displayableProviderEmail,
 } from "./provider-auth-recovery.js";
 import { writeRunnerCredentialFile } from "./runner-credential-file.js";
 import type { SessionMeta } from "./session-store.js";
@@ -122,6 +123,46 @@ test("Claude status derives only an opaque account identity and never returns pr
     ["apiProvider", "authMethod", "email", "orgId"]);
   assert.equal(JSON.stringify(observation).includes("private"), false);
   assert.equal(JSON.stringify(observation).includes("must-not-escape"), false);
+});
+
+test("an explicit inspection returns the provider email alongside the same opaque identity", async () => {
+  const status = (payload: unknown) => createTestProviderAuthRecovery(async () => ({
+    stdout: JSON.stringify(payload),
+    stderr: "https://private-auth-url.example.test",
+  }), "runner-local-hmac-key");
+  const claude = meta({ driver: "claude-code", command: "claude" });
+  const account = { loggedIn: true, email: "person@example.test", orgId: "org", authMethod: "claude.ai" };
+
+  const inspected = await status(account).inspect!(claude);
+  assert.equal(inspected.emailSupported, true);
+  assert.equal(inspected.email, "person@example.test");
+  assert.equal(inspected.observation.identityId, (await status(account).revalidate(claude)).identityId,
+    "inspection derives exactly the identity a recheck compares");
+  assert.equal(JSON.stringify(inspected.observation).includes("person@example.test"), false);
+
+  const orgOnly = await status({ loggedIn: true, orgId: "org" }).inspect!(claude);
+  assert.equal(orgOnly.observation.status, "authenticated");
+  assert.equal(orgOnly.email, null, "no email is inferred when the provider does not supply one");
+  assert.deepEqual(await status({ loggedIn: false, email: "stale@example.test" }).inspect!(claude), {
+    observation: { status: "unauthenticated" },
+    emailSupported: true,
+    email: null,
+  });
+
+  const codex = await createTestProviderAuthRecovery(async () => ({ stdout: "Logged in", stderr: "" }))
+    .inspect!(meta({ driver: "codex", command: "codex" }));
+  assert.equal(codex.emailSupported, false);
+  assert.equal(codex.email, null);
+});
+
+test("only a single plausible address is displayable as the provider email", () => {
+  assert.equal(displayableProviderEmail(" person@example.test "), "person@example.test");
+  assert.equal(displayableProviderEmail(null), null);
+  assert.equal(displayableProviderEmail(""), null);
+  assert.equal(displayableProviderEmail("not an email"), null);
+  assert.equal(displayableProviderEmail("a@b@c"), null);
+  assert.equal(displayableProviderEmail("line@example.test\nInjected: text"), null);
+  assert.equal(displayableProviderEmail(`${"a".repeat(250)}@example.test`), null);
 });
 
 test("runner auth evidence survives transport credential rotation and controller reconstruction", async () => {

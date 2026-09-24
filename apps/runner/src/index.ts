@@ -1158,6 +1158,9 @@ function sendUp(msg: RunnerToControlPlane): void {
       pending.reject(new Error(`Agent Control registration ended with session status ${msg.status}`));
     }
   }
+  // A provider-reported email answers one live request. Never hold it in the reconnect buffer:
+  // the waiting HTTP request cannot outlive this socket, so a buffered copy has no recipient.
+  const ephemeral = msg.type === "inspect_provider_authentication_result";
   if (ws && ws.readyState === WebSocket.OPEN && registered) {
     let projected: RunnerToControlPlane | null;
     try {
@@ -1170,11 +1173,13 @@ function sendUp(msg: RunnerToControlPlane): void {
     try {
       ws.send(JSON.stringify(projected));
     } catch (error) {
+      if (ephemeral) return;
       outbox.enqueue(msg);
       log(`buffering ${msg.type}: socket send failed (${errText(error)})`);
     }
     return;
   }
+  if (ephemeral) return;
   outbox.enqueue(msg);
 }
 
@@ -2645,6 +2650,39 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             error: result.error,
           }),
         ),
+      );
+      break;
+    case "inspect_provider_authentication":
+      runCommandTask(
+        "inspect_provider_authentication",
+        sessions.inspectProviderAuthentication(msg.sessionId, msg.recoveryRequestId)
+          .catch(() => ({ ok: false as const, error: "the provider identity check failed" }))
+          .then((result) => sendUp({
+            type: "inspect_provider_authentication_result",
+            requestId: msg.requestId,
+            ok: result.ok,
+            ...(result.ok ? { identity: result.identity } : { error: result.error }),
+          })),
+      );
+      break;
+    case "select_provider_authentication_account":
+      runCommandTask(
+        "select_provider_authentication_account",
+        sessions.selectProviderAuthenticationAccount(
+          msg.sessionId,
+          msg.recoveryRequestId,
+          msg.providerAccountId,
+          msg.expectedProviderAccountId,
+        ).catch((error: unknown) => {
+          log(`provider authentication account selection failed: ${errText(error)}`);
+          return { ok: false, code: undefined, error: "the account selection could not be completed" };
+        }).then((result) => sendUp({
+          type: "select_provider_authentication_account_result",
+          requestId: msg.requestId,
+          ok: result.ok,
+          ...(result.code ? { code: result.code } : {}),
+          ...(result.error ? { error: result.error } : {}),
+        })),
       );
       break;
     case "acp_registry_approval":

@@ -50,6 +50,14 @@ export interface ProviderAuthObservation {
   identityEvidence?: ProviderAuthIdentityEvidence;
 }
 
+/** A fresh provider observation plus the provider-reported email, for one authorized viewer.
+ * The email is transient: callers must return it directly and never persist or log it. */
+export interface ProviderAuthIdentityInspection {
+  observation: ProviderAuthObservation;
+  emailSupported: boolean;
+  email: string | null;
+}
+
 export interface ProviderAuthIdentityComparison {
   matches: boolean;
   evidenceAvailable: boolean;
@@ -63,6 +71,8 @@ export interface ProviderAuthIdentityComparison {
 export interface ProviderAuthRecoveryController {
   describe(meta: SessionMeta): ProviderCredentialScope | null;
   revalidate(meta: SessionMeta): Promise<ProviderAuthObservation>;
+  /** Optional so older test doubles remain valid; absent means identity cannot be displayed. */
+  inspect?(meta: SessionMeta): Promise<ProviderAuthIdentityInspection>;
   startLogin(meta: SessionMeta): Promise<"completed" | "cancelled" | "failed">;
   cancel(scopeId: string): boolean;
 }
@@ -286,20 +296,31 @@ export function describeProviderCredentialScope(
   };
 }
 
-function claudeObservation(
+const MAX_DISPLAY_EMAIL_LENGTH = 254;
+
+/** Accept only a plausible single address for display. Anything else is treated as not supplied
+ * rather than shown, so provider diagnostics cannot reach the card through this field. */
+export function displayableProviderEmail(value: string | null): string | null {
+  if (value === null) return null;
+  const email = value.trim();
+  if (!email || email.length > MAX_DISPLAY_EMAIL_LENGTH) return null;
+  return /^[^\s@\p{Cc}]+@[^\s@\p{Cc}]+$/u.test(email) ? email : null;
+}
+
+function claudeInspection(
   result: ContextCommandResult,
   digestKey?: DigestKey,
   evidenceVersion: ProviderAuthIdentityEvidence["version"] = 1,
-): ProviderAuthObservation {
+): { observation: ProviderAuthObservation; email: string | null } {
   let parsed: Record<string, unknown> | undefined;
   try {
     const value = JSON.parse(result.stdout);
     if (value && typeof value === "object" && !Array.isArray(value)) parsed = value as Record<string, unknown>;
   } catch {
-    return { status: "unknown" };
+    return { observation: { status: "unknown" }, email: null };
   }
-  if (parsed?.loggedIn === false) return { status: "unauthenticated" };
-  if (parsed?.loggedIn !== true) return { status: "unknown" };
+  if (parsed?.loggedIn === false) return { observation: { status: "unauthenticated" }, email: null };
+  if (parsed?.loggedIn !== true) return { observation: { status: "unknown" }, email: null };
   const account = {
     email: typeof parsed.email === "string" ? parsed.email : null,
     orgId: typeof parsed.orgId === "string" ? parsed.orgId : null,
@@ -308,12 +329,23 @@ function claudeObservation(
   };
   const hasAccountIdentity = account.email !== null || account.orgId !== null;
   return {
-    status: "authenticated",
-    ...(hasAccountIdentity ? {
-      identityId: digest(account, digestKey),
-      identityEvidence: identityEvidence(account, digestKey, evidenceVersion),
-    } : {}),
+    observation: {
+      status: "authenticated",
+      ...(hasAccountIdentity ? {
+        identityId: digest(account, digestKey),
+        identityEvidence: identityEvidence(account, digestKey, evidenceVersion),
+      } : {}),
+    },
+    email: displayableProviderEmail(account.email),
   };
+}
+
+function claudeObservation(
+  result: ContextCommandResult,
+  digestKey?: DigestKey,
+  evidenceVersion: ProviderAuthIdentityEvidence["version"] = 1,
+): ProviderAuthObservation {
+  return claudeInspection(result, digestKey, evidenceVersion).observation;
 }
 
 function codexIdentity(meta: SessionMeta, digestKey?: DigestKey): string | undefined {
@@ -453,6 +485,26 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
       }
       return { status: "unknown" };
     }
+  }
+
+  async inspect(meta: SessionMeta): Promise<ProviderAuthIdentityInspection> {
+    const scope = this.describe(meta);
+    if (scope?.provider !== "claude") {
+      return { observation: await this.revalidate(meta), emailSupported: false, email: null };
+    }
+    let stdout: string;
+    try {
+      stdout = (await this.runExact(meta, meta.command, providerArgs(meta, ["auth", "status"]), 15_000, 64 * 1024)).stdout;
+    } catch (error) {
+      // Same positive-evidence rule as revalidate(): a non-zero exit may still carry the payload.
+      const partial = error && typeof error === "object" && "stdout" in error
+        ? (error as { stdout?: unknown }).stdout
+        : undefined;
+      if (typeof partial !== "string") return { observation: { status: "unknown" }, emailSupported: true, email: null };
+      stdout = partial;
+    }
+    const inspected = claudeInspection({ stdout, stderr: "" }, this.digestKey, this.evidenceVersion);
+    return { ...inspected, emailSupported: true };
   }
 
   async startLogin(meta: SessionMeta): Promise<"completed" | "cancelled" | "failed"> {

@@ -35,6 +35,8 @@ import type {
   PromptImageInput,
   PromptImageReference,
   ProviderAccountSwitchFailureView,
+  ProviderAuthenticationAccountSelectionError,
+  ProviderAuthenticationCurrentIdentity,
   ProviderHistoryRecoveryMode,
   WorkspaceReference,
   QueuedPromptDraft,
@@ -594,6 +596,10 @@ interface ProviderRetirement {
   parkingGeneration?: number;
 }
 
+type ProviderAuthenticationInspectionResult =
+  | { ok: true; identity: ProviderAuthenticationCurrentIdentity }
+  | { ok: false; error: string };
+
 interface ApprovedProviderAuthentication {
   recoveryId: string;
   identityId?: string;
@@ -1110,6 +1116,9 @@ export class SessionManager {
   private readonly sessionCommandAuthority = new SessionCommandAuthorityRegistry();
   private readonly providerHomeLeases?: ProviderHomeLeaseRegistry;
   private readonly providerAuthOperations = new Set<string>();
+  private readonly providerAuthInspections = new Map<string, Promise<ProviderAuthenticationInspectionResult>>();
+  /** In-flight selected-account handoffs; tests and shutdown can await their settlement. */
+  readonly providerAuthSelections = new Map<string, Promise<void>>();
   private readonly providerAuthRevalidations = new Map<string, Promise<void>>();
   private readonly providerAuthAutomaticAttempted = new Set<string>();
   /** Process-local command handles for payloads whose durable replay coordinates live in the
@@ -10215,6 +10224,254 @@ export class SessionManager {
     return { ok: true, scheduled: false };
   }
 
+  /** Card-scoped checks shared by identity inspection and account selection. Only the session
+   * currently showing this exact unresolved Authentication Required card can act through it. */
+  private openProviderAuthenticationCard(
+    meta: SessionMeta | null,
+    recoveryRequestId: string,
+  ): NonNullable<SessionMeta["providerAuthBlock"]> | undefined {
+    const block = meta?.providerAuthBlock;
+    if (!meta || !block || block.resolution || meta.status === "stopped") return undefined;
+    if (!isProviderAuthenticationBlock(meta.pendingApproval) ||
+        meta.pendingApproval?.requestId !== recoveryRequestId ||
+        providerAuthenticationRequestId(block) !== recoveryRequestId) return undefined;
+    return block;
+  }
+
+  /** A provider-home probe must not mutate the persisted metadata object that readMeta caches. */
+  private async providerAuthenticationProbeMeta(
+    meta: SessionMeta,
+    account?: BoundProviderAccount,
+  ): Promise<SessionMeta> {
+    const probe = structuredClone(meta);
+    if (account) {
+      probe.providerAccountId = account.id;
+      probe.providerAccountLabel = account.label;
+      probe.providerAccountProvider = account.provider;
+      probe.providerCredentialHome = account.credentialHome;
+    }
+    await this.prepareLaunch?.(probe);
+    return probe;
+  }
+
+  /**
+   * Ask the provider, in this session's exact credential context, which account it reports now.
+   * The email answers only this request: it is never stored, logged, emitted as an event, or
+   * reconstructed from a label or recorded identity digest.
+   */
+  async inspectProviderAuthentication(
+    sessionId: string,
+    recoveryRequestId: string,
+  ): Promise<ProviderAuthenticationInspectionResult> {
+    const key = `${sessionId}\0${recoveryRequestId}`;
+    const inFlight = this.providerAuthInspections.get(key);
+    if (inFlight) return inFlight;
+    const inspection = this.inspectProviderAuthenticationOnce(sessionId, recoveryRequestId)
+      .finally(() => this.providerAuthInspections.delete(key));
+    this.providerAuthInspections.set(key, inspection);
+    return inspection;
+  }
+
+  private async inspectProviderAuthenticationOnce(
+    sessionId: string,
+    recoveryRequestId: string,
+  ): Promise<ProviderAuthenticationInspectionResult> {
+    const controller = this.providerAuthRecovery;
+    const meta = this.store.readMeta(sessionId);
+    const block = this.openProviderAuthenticationCard(meta, recoveryRequestId);
+    if (!meta || !block) return { ok: false, error: "this Authentication Required card is no longer current" };
+    if (!controller) return { ok: false, error: "authentication recovery is unavailable on this runner" };
+    const probe = await this.providerAuthenticationProbeMeta(meta);
+    const scope = controller.describe(probe);
+    if (!scope || scope.id !== block.credentialScopeId) {
+      return { ok: false, error: "the provider installation or credential context changed" };
+    }
+    const inspected = controller.inspect
+      ? await controller.inspect(probe)
+      : { observation: await controller.revalidate(probe), emailSupported: false, email: null };
+    const status = inspected.observation.status;
+    return {
+      ok: true,
+      identity: {
+        status,
+        emailSupported: inspected.emailSupported,
+        email: status === "authenticated" ? inspected.email : null,
+        observedAt: Date.now(),
+      },
+    };
+  }
+
+  /**
+   * Resolve an Authentication Required card by moving the session to another configured account
+   * on this Machine. The chosen credential context is rechecked first; its observed identity then
+   * becomes both the recovery expectation and the session pin, so the replacement provider launch
+   * resumes only if that same identity is still present. Anything else parks a new card rather
+   * than accepting a different identity on the chosen account's behalf.
+   */
+  async selectProviderAuthenticationAccount(
+    sessionId: string,
+    recoveryRequestId: string,
+    providerAccountId: string,
+    expectedProviderAccountId: string,
+  ): Promise<{ ok: boolean; code?: ProviderAuthenticationAccountSelectionError; error?: string }> {
+    const refuse = (code: ProviderAuthenticationAccountSelectionError, error: string) =>
+      ({ ok: false, code, error });
+    const controller = this.providerAuthRecovery;
+    const meta = this.store.readMeta(sessionId);
+    const block = this.openProviderAuthenticationCard(meta, recoveryRequestId);
+    if (!meta || !block) {
+      return refuse("recovery_changed", "This Authentication Required card is no longer current. Review the latest card.");
+    }
+    if (block.loginOperationId) {
+      return refuse("operation_in_progress", "A provider sign-in is in progress. Finish or cancel it first.");
+    }
+    if (!controller) return refuse("account_unavailable", "Authentication recovery is unavailable on this runner.");
+    if (meta.providerAccountId !== expectedProviderAccountId) {
+      return refuse(
+        "account_changed",
+        "The session's configured account changed while this card was open. Review the updated card.",
+      );
+    }
+    if (providerAccountId === meta.providerAccountId) {
+      return refuse("account_unavailable", "The session already uses that account. Choose Recheck Authentication instead.");
+    }
+    let target: BoundProviderAccount;
+    try {
+      target = this.providerAccountForSession(meta, providerAccountId);
+    } catch (error) {
+      return refuse("account_unavailable", `That account cannot be used for this session: ${errText(error)}.`);
+    }
+    if ((!meta.agentSessionId && meta.seq > 0) || (meta.agentSessionId && !canResumeSession(meta))) {
+      return refuse("not_resumable", "This provider conversation cannot resume under another account.");
+    }
+    const scopeId = block.credentialScopeId;
+    if (this.providerAuthOperations.has(scopeId) || this.providerAuthRevalidations.has(scopeId)) {
+      return refuse("operation_in_progress", "An authentication check is already running for this card. Try again in a moment.");
+    }
+    this.providerAuthOperations.add(scopeId);
+    // The incident moves to the chosen account's scope mid-operation. Guard both, so a Recheck on
+    // the same card cannot start a second completion and replay retained work twice.
+    let targetScopeId: string | undefined;
+    const release = () => {
+      this.providerAuthOperations.delete(scopeId);
+      if (targetScopeId) this.providerAuthOperations.delete(targetScopeId);
+      this.surfaceProviderAuthentication(scopeId);
+      const latest = this.store.readMeta(sessionId)?.providerAuthBlock;
+      if (latest && latest.credentialScopeId !== scopeId) this.surfaceProviderAuthentication(latest.credentialScopeId);
+    };
+    let handedOff = false;
+    try {
+      const probe = await this.providerAuthenticationProbeMeta(meta, target);
+      const targetScope = controller.describe(probe);
+      if (!targetScope) {
+        return refuse("account_unavailable", "Wollipog cannot check authentication for that account in this session's context.");
+      }
+      if (targetScope.id !== scopeId) {
+        if (this.providerAuthOperations.has(targetScope.id) || this.providerAuthRevalidations.has(targetScope.id)) {
+          return refuse("operation_in_progress", "Another authentication check is using that account. Try again in a moment.");
+        }
+        targetScopeId = targetScope.id;
+        this.providerAuthOperations.add(targetScopeId);
+      }
+      this.providerHomeLeases?.acquire({
+        driver: probe.driver,
+        command: probe.command,
+        context: probe.context,
+        env: probe.env,
+      });
+      const observation = await controller.revalidate(probe);
+      if (observation.status === "unauthenticated") {
+        return refuse("sign_in_required", "The provider reports that this account is signed out. Sign in to it, then choose it again.");
+      }
+      if (observation.status !== "authenticated") {
+        return refuse("status_unknown", "The provider could not confirm authentication for this account. Recheck it, then try again.");
+      }
+      // Claude reports an account for every real sign-in. Without one there is nothing to pin, so a
+      // later identity change in that home could not be told apart; fail closed instead. Codex never
+      // exposes a stable account identity, exactly as on every ordinary Codex launch.
+      if (targetScope.provider === "claude" && !observation.identityId) {
+        return refuse(
+          "status_unknown",
+          "Claude Code did not report an account identity for this account, so Wollipog cannot confirm it before resuming. Sign in to it again, then choose it.",
+        );
+      }
+      if (!await this.waitForAuthenticationTurnSettlement(sessionId)) {
+        return refuse("operation_in_progress", "The interrupted provider turn is still settling. Try again in a moment.");
+      }
+      const current = this.store.readMeta(sessionId);
+      const currentBlock = this.openProviderAuthenticationCard(current, recoveryRequestId);
+      if (!current || !currentBlock || currentBlock.recoveryId !== block.recoveryId) {
+        return refuse("recovery_changed", "This Authentication Required card changed while the account was checked. Review the latest card.");
+      }
+      if (current.providerAccountId !== expectedProviderAccountId) {
+        return refuse(
+          "account_changed",
+          "The session's configured account changed while this card was open. Review the updated card.",
+        );
+      }
+      const rehomed: NonNullable<SessionMeta["providerAuthBlock"]> = {
+        ...currentBlock,
+        credentialScopeId: targetScope.id,
+        canStartLogin: targetScope.canStartLogin,
+        configuredCredential: targetScope.configuredCredential,
+        expectedIdentityId: observation.identityId,
+        expectedIdentityEvidence: observation.identityEvidence,
+        identityMismatch: undefined,
+        reason: undefined,
+        loginOperationId: undefined,
+      };
+      // One durable write moves the binding, the pin, and the recovery incident together. If the
+      // replacement launch cannot finish, the card is re-raised for the chosen account's scope, so
+      // Recheck and sign-in keep working instead of pointing at the abandoned credential home.
+      const rebound = this.store.patchMeta(sessionId, {
+        providerAccountId: target.id,
+        providerAccountLabel: target.label,
+        providerAccountProvider: target.provider,
+        providerCredentialHome: target.credentialHome,
+        pendingProviderAccountId: undefined,
+        pendingProviderAccountLabel: undefined,
+        pendingProviderAccountProvider: undefined,
+        pendingProviderCredentialHome: undefined,
+        pendingProviderAccountSwitchAutomatic: undefined,
+        providerAccountAutomaticallySelected: false,
+        providerAccountSwitchFailure: undefined,
+        providerCredentialScopeId: targetScope.id,
+        providerCredentialIdentityId: observation.identityId,
+        providerCredentialIdentityEvidence: observation.identityEvidence,
+        providerAuthBlock: rehomed,
+      });
+      if (!rebound) return refuse("recovery_changed", "The session disappeared while the account was selected.");
+      this.store.flush(sessionId);
+      const entry = this.active.get(sessionId);
+      if (entry) entry.pendingProviderAccountSwitch = undefined;
+      this.emitEvent(sessionId, {
+        kind: "provider_account_switched",
+        providerAccountId: target.id,
+        providerAccountLabel: target.label,
+      });
+      this.send({ type: "session_runtime_updated", snapshot: this.snapshot(rebound) });
+      // The selection is durable now. Replacing the provider can take as long as a launch, so the
+      // caller is answered here while the operation guard stays held until the handoff settles.
+      handedOff = true;
+      this.providerAuthSelections.set(sessionId, this.completeProviderAuthentication(
+        sessionId,
+        rehomed,
+        observation,
+        true,
+        "auth:select-account",
+        true,
+      ).catch((error: unknown) => {
+        this.log(`selected-account recovery for ${boundedSessionIdForLog(sessionId)} failed: ${errText(error)}`);
+      }).finally(() => {
+        this.providerAuthSelections.delete(sessionId);
+        release();
+      }));
+      return { ok: true };
+    } finally {
+      if (!handedOff) release();
+    }
+  }
+
   /** Decide and persist an automatic handoff only after the rejected provider promise settled.
    * The existing rebind lane performs the actual credential change after drain releases the turn. */
   private scheduleAutomaticProviderAccountSwitch(sessionId: string, entry: ActiveSession): boolean {
@@ -16392,6 +16649,7 @@ export class SessionManager {
     observation: ProviderAuthObservation,
     targetOnly: boolean,
     targetResolutionOptionId: string,
+    credentialContextChanged = false,
   ): Promise<void> {
     const candidates = targetOnly
       ? this.store.listSessions().filter((meta) => meta.sessionId === targetSessionId)
@@ -16458,13 +16716,17 @@ export class SessionManager {
       // Use Current Account is offered only after identity cannot be matched to the recorded
       // session baseline. Codex keeps credentials in process memory, so even a provider that
       // cannot expose a stable identity id must cross a fresh-process boundary after acceptance.
-      const acceptedIdentityChanged = targetOnly && meta.driver === "codex-app-server";
+      // A selected account also moves the credential home, so any live provider process is stale.
+      const acceptedIdentityChanged = targetOnly &&
+        (meta.driver === "codex-app-server" || credentialContextChanged);
       const candidateSessionId = meta.sessionId;
       const staleEntry = acceptedIdentityChanged ? this.active.get(candidateSessionId) : undefined;
       if (staleEntry) {
         const replacement = await this.replaceProviderProcess(candidateSessionId, staleEntry, {
           replacementMeta: () => this.store.readMeta(candidateSessionId) ?? undefined,
-          queueFailureReason: () => "provider could not resume after authentication changed",
+          queueFailureReason: () => credentialContextChanged
+            ? "provider could not resume with the selected account"
+            : "provider could not resume after authentication changed",
           approvedAuthentication: {
             recoveryId: block.recoveryId,
             ...(observation.identityId ? { identityId: observation.identityId } : {}),
@@ -16478,7 +16740,14 @@ export class SessionManager {
           if (replacement.status === "superseded") continue;
           if (current?.providerAuthBlock?.recoveryId === block.recoveryId && current.status !== "stopped") {
             const preflightReparked = current.providerAuthBlock.reason !== block.reason;
-            const detail = replacement.status === "not_resumable"
+            const provider = providerDisplayName(current.driver);
+            const detail = credentialContextChanged
+              ? replacement.status === "lock_unavailable"
+                ? "Another runner owns this session. Choose Recheck Authentication after that runner releases it."
+                : replacement.status === "retirement_failed"
+                ? `The previous ${provider} process could not be stopped. It was not reused; choose Recheck Authentication after it exits.`
+                : `${provider} could not resume the existing conversation with the selected account. Choose Recheck Authentication to retry it.`
+              : replacement.status === "not_resumable"
               ? "The existing Codex conversation has no resumable thread identifier. The stale provider was not reused."
               : replacement.status === "lock_unavailable"
               ? "Another runner owns this session. Retry authentication recovery after that runner releases it."

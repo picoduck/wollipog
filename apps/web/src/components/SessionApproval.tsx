@@ -36,6 +36,7 @@ import {
   type EvidenceArtifactStatus,
 } from "./EvidenceArtifactView.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
+import { AuthenticationRecoveryPanel, authenticationRecoveryPanelApplies } from "./AuthenticationRecoveryPanel.js";
 
 const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
@@ -583,6 +584,9 @@ export function SessionApprovalBanner({
           </p>
         </div>
         <div className="approval-review-body">
+          {authenticationRecoveryPanelApplies(session, approval) && (
+            <AuthenticationRecoveryPanel session={session} approval={approval} runner={runner} runnerOnline={runnerOnline} />
+          )}
           <ApprovalSelectorContext context={approval.context} />
           {approval.context?.input && (
             <details className="approval-review-details">
@@ -668,6 +672,9 @@ export function SessionApprovalBanner({
       </div>
       {approval.kind === "authentication" && providerLogin && (
         <ProviderLoginCard runnerId={session.runnerId} login={providerLogin} />
+      )}
+      {authenticationRecoveryPanelApplies(session, approval) && (
+        <AuthenticationRecoveryPanel session={session} approval={approval} runner={runner} runnerOnline={runnerOnline} />
       )}
       {evidence.length > 0 && (
         <div className="approval-evidence" aria-label="Evidence Review">

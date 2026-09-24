@@ -234,6 +234,7 @@ import {
   providerAccountSwitchOptions,
   providerForSessionAccountSwitch,
 } from "./provider-account-switch.js";
+import { registerAuthenticationRecoveryRoutes } from "./authentication-recovery-routes.js";
 import { AutomationsService } from "./automations.js";
 import { buildAuthorizedSessionTranscriptExport, type TranscriptExportFormat } from "./session-exports.js";
 import { principalCanReadWorkflowArtifact } from "./artifact-exports.js";
@@ -1480,6 +1481,8 @@ app.register(async (instance) => {
       case "workspace_worktree_setup_result":
       case "logout_agent_result":
       case "switch_session_provider_account_result":
+      case "inspect_provider_authentication_result":
+      case "select_provider_authentication_account_result":
       case "acp_registry_approval_result":
       case "host_action_result":
       case "interrupt_turn_result":
@@ -4197,6 +4200,8 @@ app.post("/api/sessions/:id/provider-account", async (req, reply) => {
     return reply.code(504).send({ error: (error as Error).message });
   }
 });
+
+registerAuthenticationRecoveryRoutes(app, { db, hub, requestHuman });
 
 app.post("/api/sessions/:id/logout-agent", async (req, reply) => {
   const id = (req.params as { id: string }).id;
