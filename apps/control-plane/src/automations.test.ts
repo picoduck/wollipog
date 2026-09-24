@@ -1094,7 +1094,8 @@ test("scheduled sessions follow the saved installation through rediscovery and r
     installation: { id: "local", path: "/home/u/.local/bin/codex", via: "common-dir" as const } };
   const { db, service, created } = harness(175, [{ ...runner("runner-1"), agents: [system, local] }]);
   assert.equal(db.selectHarnessInstallation("runner-1", "agent-1", "system")?.installationId, "system");
-  const automation = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  const automation = service.create(baseSpec({ concurrencyPolicy: "parallel" }),
+    { kind: "human", id: "device" }, 0).data!;
   assert.equal(automation.action.kind === "create_session" &&
     automation.action.installationBindings?.agent?.installationId, "system");
 
@@ -1108,6 +1109,8 @@ test("scheduled sessions follow the saved installation through rediscovery and r
     "an older client may omit the binding after an agent id is reused");
   service.tick(60_000);
   assert.equal(created[0]?.agentId, "system-new");
+  assert.ok(db.activeAutomationExecution(automation.automationId),
+    "the first execution remains active when the next scheduled run is due");
 
   db.updateRunnerAgents("runner-1", [{ ...local, id: "agent-1" }], 61_000);
   service.tick(120_000);
