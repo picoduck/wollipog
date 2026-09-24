@@ -17,8 +17,11 @@ of `claude`, `codex`, and `pi`) to mark installed versions as pinned and suppres
 notifications for those harnesses. Wollipog never changes a running Agent Harness executable; after an external upgrade,
 restart idle sessions and rediscover.
 Machine settings labels a pinned installation and a policy-suppressed release check separately. A
-failed check establishes no current release status. An unavailable integration shows its availability
-reason separately from release status, since an upgrade may be the way to restore compatibility.
+failed check establishes no current release status. After resolving the check failure, an
+organization owner or admin can rediscover the reported installation from Connections with
+**Rediscover** for a native Machine, or **Reconnect** for an SSH Machine after active sessions
+finish. An unavailable integration shows its availability reason separately from release status,
+since an upgrade may be the way to restore compatibility.
 Agent Details quotes the launch command for the
 stated Machine PowerShell 7.3 or later or POSIX shell, or for a POSIX shell inside the named WSL distribution.
 Any displayed Codex self-update command uses the discovered launch target and the same shell context.
