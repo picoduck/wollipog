@@ -1209,6 +1209,10 @@ export function guardStateUninspectableRefusal(reason: string): string {
     "write multi-line content with a file tool, or run it from a script file.";
 }
 
+/** Values remembered per assigned name, and spellings judged per word, so no command is unbounded. */
+const MAX_ASSIGNED_VALUES = 4;
+const MAX_ASSIGNED_SPELLINGS = 16;
+
 const UNMODELLED_SHAPE_REASON =
   "it uses a heredoc, newline, backtick, pipe, or subshell, which the guard does not model, and one of its words names a directory that contains that state";
 
@@ -1518,8 +1522,11 @@ function tokenText(token: ShellToken): string | null {
  *   beneath it: `~/.wollipog-data/$X` still names an ancestor of the hook directory.
  * - The reading with every variable empty is judged in full, because an unset variable IS empty:
  *   `rm -rf $A/$B` can be `rm -rf /`.
- * - Each literal piece after a variable is judged only for landing INSIDE the hook directory. It is
- *   never a location by itself, but it keeps the old refusal of `$X/<hook directory>/file`.
+ * - Each literal piece after a variable is judged in full, as a location of its own, exactly as the
+ *   split tokens were: `$X..`, `$X/home/<user>`, `$X/<hook directory>/file`, and a trailing `$X/`
+ *   stay refused. The one exception is a piece of nothing but separators BETWEEN two variables. The
+ *   `/` in `$S/$d` joins two unknown components rather than naming a location, and reading it as the
+ *   root directory was #1632 itself. It is judged only for landing inside, which it never does.
  */
 type GuardStateReading = { path: string; insideOnly: boolean };
 
@@ -1531,7 +1538,11 @@ function guardStateReadings(text: string): GuardStateReading[] {
   const unset = pieces.join("");
   if (head) readings.push({ path: head, insideOnly: false });
   if (unset && unset !== head) readings.push({ path: unset, insideOnly: false });
-  for (const piece of pieces.slice(1)) if (piece) readings.push({ path: piece, insideOnly: true });
+  pieces.forEach((piece, index) => {
+    if (index === 0 || !piece) return;
+    const joinsVariables = index < pieces.length - 1 && /^[\\/]+$/u.test(piece);
+    readings.push({ path: piece, insideOnly: joinsVariables });
+  });
   return readings;
 }
 
@@ -1716,13 +1727,46 @@ export function commandTargetsGuardState(
     if (!relations.has(path)) relations.set(path, guardStateRelation(path, cwd, root));
     return relations.get(path) ?? null;
   };
+  // A variable the command assigns is also judged by the value it assigns: `Y=../../<data>/hooks;
+  // rm -rf "$HOME/x/y/$Y/"` names the hook directory, however opaque `$Y` would be on its own. Every
+  // assignment-looking word counts, wherever it sits, because the values only ADD readings: the word
+  // is still judged as written too. So an assignment the shell never keeps (a prefix, a subshell, a
+  // background job) cannot hide anything; it can only add a refusal.
+  const assignedValues = new Map<string, string[]>();
+  for (const token of tokens) {
+    const text = tokenText(token);
+    const assignment = text === null ? null : /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/su.exec(text);
+    if (!assignment) continue;
+    const [, name, value] = assignment as unknown as [string, string, string];
+    const values = assignedValues.get(name) ?? [];
+    if (values.length < MAX_ASSIGNED_VALUES && !values.includes(value)) values.push(value);
+    assignedValues.set(name, values);
+  }
+  /** The word as written, then with assigned values substituted, bounded to a few combinations. */
+  const spellings = (value: string): string[] => {
+    const texts = [value];
+    for (let index = 0; index < texts.length && texts.length < MAX_ASSIGNED_SPELLINGS; index += 1) {
+      // The first variable in this spelling that the command assigns; unknown ones stay in place.
+      const match = [...texts[index]!.matchAll(/\0([^\0]*)\0/gu)].find(([, name]) => assignedValues.has(name!));
+      if (!match) continue;
+      const before = texts[index]!.slice(0, match.index);
+      const after = texts[index]!.slice(match.index + match[0].length);
+      for (const assigned of assignedValues.get(match[1]!)!) {
+        const text = `${before}${assigned}${after}`;
+        if (!texts.includes(text) && texts.length < MAX_ASSIGNED_SPELLINGS) texts.push(text);
+      }
+    }
+    return texts;
+  };
   /** The strongest relation any reading of a word has: `inside`, then `ancestor`, then none. */
   const wordRelation = (value: string): GuardStateRelation["kind"] | null => {
     let strongest: GuardStateRelation["kind"] | null = null;
-    for (const { path, insideOnly } of guardStateReadings(value)) {
-      const relation = relationOf(path);
-      if (relation?.kind === "inside") return "inside";
-      if (relation?.kind === "ancestor" && !insideOnly) strongest = "ancestor";
+    for (const text of spellings(value)) {
+      for (const { path, insideOnly } of guardStateReadings(text)) {
+        const relation = relationOf(path);
+        if (relation?.kind === "inside") return "inside";
+        if (relation?.kind === "ancestor" && !insideOnly) strongest = "ancestor";
+      }
     }
     return strongest;
   };

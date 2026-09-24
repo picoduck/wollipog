@@ -1200,6 +1200,35 @@ test("a variable never hides a word that reaches the guard state (#1632)", (t) =
   assert.equal(commandTargetsGuardState(`ls ${home}/$D`, project, directory), GUARD_STATE_REFUSAL);
 });
 
+test("a variable the command itself assigns is judged by its value (#1632 review)", (t) => {
+  const { home, project, directory } = guardLayout(t);
+  mkdirSync(join(home, "foo", "bar"), { recursive: true });
+  // Found in review: `$Y` climbs out of an unrelated prefix into the hook directory. The old
+  // tokenizer refused it only because the trailing `/` read as the root directory.
+  for (const command of [
+    `Y=../../.wollipog-data/hooks; rm -rf "${home}/foo/bar/$Y/"`,
+    `Y=../../.wollipog-data/hooks; rm -rf "${home}/foo/bar/$Y"`,
+    `export Y=../.wollipog-data/hooks && cat $Y/s1.protections.json`,
+    `A=../.wollipog-data; B=hooks; for f in s1 s2; do cat $A/$B/$f.protections.json; done`,
+  ]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
+  }
+  // The assigned value is judged wherever the assignment sits, a newline included.
+  assertGuardRefused(commandTargetsGuardState(`Y=../../.wollipog-data/hooks\nrm -rf "${home}/foo/bar/$Y/"`,
+    project, directory), "newline form");
+  // An assignment the shell never keeps only ADDS a reading: the word is still judged as written,
+  // where an unset `$Y` makes `rm -rf $Y/` the root directory.
+  for (const command of ["(Y=/usr); rm -rf $Y/", "Y=/usr & rm -rf $Y/", "Y=/usr rm -rf $Y/"]) {
+    assertGuardRefused(commandTargetsGuardState(command, project, directory), command);
+  }
+  // With `$Y` unknown, a trailing `$Y/` is still judged as the old split tokens judged it.
+  assert.equal(commandTargetsGuardState(`rm -rf "${home}/foo/bar/$Y/"`, project, directory), GUARD_STATE_REFUSAL);
+  // A prefix assignment binds the command's environment, not the words the shell already expanded.
+  assert.equal(commandTargetsGuardState("S=/tmp/x cat $S/a/outdated.txt", project, directory), null);
+  // An assigned scratch directory is still allowed, however its loop variable varies.
+  assert.equal(commandTargetsGuardState("S=/tmp/x; for d in a b; do cat $S/$d/outdated.txt; done", project, directory), null);
+});
+
 test("a command the tokenizer cannot parse is refused for that reason, not blamed on guard state (#1632)", (t) => {
   const { project, directory } = guardLayout(t);
   // A quoted heredoc is never expanded by the shell, but the tokenizer rejects a `${...}` holding a
