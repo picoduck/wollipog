@@ -57,7 +57,11 @@ Apply the built-in `builtin:session-spawn-human-gate` to the
 organization owner and asks for shared audiences and other roles. An explicit stored governance
 policy can override that fallback. Bind each approval to the parent, exact creation request, and
 spawn ordinal. Use the existing durable governance approval queue, audit, expiry, rejection, and
-human response checks. The creating tool polls the same request while awaiting the human's decision.
+human response checks. The creating tool polls the same request while awaiting the human's decision,
+but for a bounded window well inside harness tool timeouts. When the window ends it returns the
+control plane's approval-required text, which names the parent and the request, and tells the agent
+to repeat the identical call at once. Each identical call refreshes the approval's abandonment fence,
+so an approval stays pending across calls only while the agent keeps asking.
 
 Agent-initiated ordinary runs and workflow runs use the same child-admission rules. The authenticated
 session is the parent of every member, including an explicitly requested workflow coordinator.

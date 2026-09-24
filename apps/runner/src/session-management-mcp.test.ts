@@ -14,6 +14,7 @@ import {
   dispatch,
   nextWaitSessionIntervalMs,
   serveSessionManagementMcp,
+  SPAWN_APPROVAL_POLL_WINDOW_MS,
   TOOLS,
   type McpDeps,
   type McpFetch,
@@ -1263,6 +1264,43 @@ test("create_session polls an exact pending spawn approval until it can create t
   assert.equal(resultJson(result).session.id, "s_child");
   assert.deepEqual(calls[0]!.body, calls[1]!.body);
   assert.deepEqual(sleeps, [1000]);
+});
+
+test("create tools return the control plane's retry instruction when an approval outlives the poll window", async () => {
+  const pending = `Child creation requires approval in parent session ${SELF_ID} (request spawn_abc). ` +
+    "Retry the same request after approval.";
+  const cases = [
+    { name: "create_session", args: { runnerId: "r1", agentId: "claude-code", workspaceId: "workspace" }, created: { id: "s_child" } },
+    { name: "create_run", args: { runnerId: "r", workspaceId: "w", agentIds: ["a"], task: "Build" }, created: { run: { id: "run" }, sessions: [] } },
+    { name: "create_workflow_run", args: { runnerId: "r", workspaceId: "w", workflowId: "workflow", task: "Build" }, created: { run: { id: "run" }, sessions: [] } },
+  ];
+  for (const { name, args, created } of cases) {
+    let approved = false;
+    let clock = 0;
+    const { deps, calls } = makeDeps(() => approved
+      ? { status: 201, body: created }
+      : { status: 428, body: { error: pending } });
+    deps.now = () => clock;
+    deps.sleep = async (ms) => { clock += ms; };
+
+    const result = await callTool(deps, name, args);
+    assert.equal(result.isError, true, name);
+    const text = resultText(result);
+    assert.ok(text.startsWith(`HTTP 428: ${pending}`), `${name} surfaces the control plane text: ${text}`);
+    assert.match(text, new RegExp(`As your next action, repeat the same ${name} call`));
+    assert.match(text, /Do not wait for the approval first: if no identical request arrives within 30 s, the approval is withdrawn as abandoned/);
+    assert.equal(text.includes("wollipog session create"), name === "create_session", name);
+    assert.match(TOOLS.find((tool) => tool.name === name)!.description, /repeat the identical call immediately/, name);
+    assert.ok(clock <= SPAWN_APPROVAL_POLL_WINDOW_MS, `${name} returned within the window`);
+    assert.equal(calls.length, SPAWN_APPROVAL_POLL_WINDOW_MS / 1000 + 1, name);
+    const polled = calls.length;
+
+    approved = true;
+    const retried = await callTool(deps, name, args);
+    assert.equal(retried.isError, undefined, name);
+    assert.equal(calls.length, polled + 1, name);
+    assert.deepEqual(calls.map((call) => call.body), Array(calls.length).fill(calls[0]!.body), name);
+  }
 });
 
 test("create_session arms budgets before the initial prompt can execute", async () => {
