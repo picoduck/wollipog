@@ -3938,6 +3938,162 @@ type ConfirmedSessionNamingHarnessTargetWrite = SessionNamingHarnessTargetWrite 
   Pick<SessionNamingHarnessTargetWrite, "context" | "provider" | "billingSource">
 >;
 
+// A child's charge against its parent's spawn allowance covers the child's subtree: its own usage
+// plus its own children's charges, since their allowance was carved out of its limits. A live child
+// holds at least the limits it reserved at creation; a terminal child settles to actual usage, and
+// late spend only raises that. Own usage never falls below its recorded peak, so replacing a
+// transcript or a lower runner cost report cannot release usage that already happened. A parent's
+// child_cost_reserved_usd/child_tool_calls_reserved hold the sum of its children's charges. Nothing
+// subtracts a deleted child's last charge, so deleting history cannot replenish an allowance, and a
+// restart re-reserves the child's unspent limits.
+const TERMINAL_STATUS_SQL = "('completed','failed','stopped')";
+// Matches countToolCalls byte-for-byte so it stays index-only on idx_session_events_tool_call.
+const toolCallCountSql = (sessionId: string) =>
+  `(SELECT COUNT(DISTINCT json_extract(payload,'$.toolCallId')) FROM session_events
+     WHERE session_id=${sessionId} AND kind='tool_call')`;
+const childCostChargeSql = (row: string) => {
+  const used = `(MAX(${row}.cost_usd, ${row}.usage_peak_cost_usd)+MAX(0, ${row}.child_cost_reserved_usd))`;
+  return `CASE WHEN ${row}.status IN ${TERMINAL_STATUS_SQL} THEN ${used}
+     ELSE MAX(${row}.parent_reserved_cost_usd, ${used}) END`;
+};
+const childToolCallChargeSql = (row: string) => {
+  const used = `(MAX(${toolCallCountSql(`${row}.id`)}, ${row}.usage_peak_tool_calls)
+     +MAX(0, ${row}.child_tool_calls_reserved))`;
+  return `CASE WHEN ${row}.status IN ${TERMINAL_STATUS_SQL} THEN ${used}
+     ELSE MAX(${row}.parent_reserved_tool_calls, ${used}) END`;
+};
+// Recreated on every open so the installed definitions always match this code. They read
+// session_events, so a migration that rebuilds that table must drop them first. The connection
+// enables recursive triggers, so a change in a child's charge re-fires the counter triggers on each
+// ancestor in turn until one's charge is unchanged. Tool calls reported after settlement are
+// raised by raiseSettledChildToolCallCharge once per insert batch rather than by recounting
+// history on every event, and recordChildToolCallPeak keeps the count before history is cleared.
+const CHILD_CHARGE_TRIGGERS_SQL = /* sql */ `
+DROP TRIGGER IF EXISTS sessions_settle_child_charge;
+CREATE TRIGGER sessions_settle_child_charge
+AFTER UPDATE OF status ON sessions
+WHEN NEW.parent_session_id IS NOT NULL
+  AND (OLD.status IN ${TERMINAL_STATUS_SQL}) IS NOT (NEW.status IN ${TERMINAL_STATUS_SQL})
+BEGIN
+  UPDATE sessions SET usage_peak_cost_usd=MAX(usage_peak_cost_usd, cost_usd),
+    usage_peak_tool_calls=MAX(usage_peak_tool_calls, ${toolCallCountSql("sessions.id")})
+  WHERE id=NEW.id;
+  UPDATE sessions SET
+    child_cost_reserved_usd=child_cost_reserved_usd+(
+      SELECT ${childCostChargeSql("child")}-child.parent_charged_cost_usd FROM sessions child WHERE child.id=NEW.id),
+    child_tool_calls_reserved=child_tool_calls_reserved+(
+      SELECT ${childToolCallChargeSql("child")}-child.parent_charged_tool_calls FROM sessions child WHERE child.id=NEW.id)
+  WHERE id=NEW.parent_session_id;
+  UPDATE sessions SET parent_charged_cost_usd=${childCostChargeSql("sessions")},
+    parent_charged_tool_calls=${childToolCallChargeSql("sessions")}
+  WHERE id=NEW.id;
+END;
+DROP TRIGGER IF EXISTS sessions_raise_child_cost_charge;
+CREATE TRIGGER sessions_raise_child_cost_charge
+AFTER UPDATE OF cost_usd ON sessions
+WHEN NEW.parent_session_id IS NOT NULL AND NEW.cost_usd > NEW.usage_peak_cost_usd
+BEGIN
+  UPDATE sessions SET usage_peak_cost_usd=cost_usd WHERE id=NEW.id AND cost_usd > usage_peak_cost_usd;
+  UPDATE sessions SET child_cost_reserved_usd=child_cost_reserved_usd+(
+    SELECT ${childCostChargeSql("child")}-child.parent_charged_cost_usd FROM sessions child WHERE child.id=NEW.id)
+  WHERE id=NEW.parent_session_id AND (
+    SELECT ${childCostChargeSql("child")}-child.parent_charged_cost_usd FROM sessions child WHERE child.id=NEW.id) > 0;
+  UPDATE sessions SET parent_charged_cost_usd=${childCostChargeSql("sessions")}
+  WHERE id=NEW.id AND ${childCostChargeSql("sessions")} > parent_charged_cost_usd;
+END;
+DROP TRIGGER IF EXISTS sessions_settle_grandchild_cost_charge;
+CREATE TRIGGER sessions_settle_grandchild_cost_charge
+AFTER UPDATE OF child_cost_reserved_usd ON sessions
+WHEN NEW.parent_session_id IS NOT NULL AND ${childCostChargeSql("NEW")}<>NEW.parent_charged_cost_usd
+BEGIN
+  UPDATE sessions SET child_cost_reserved_usd=child_cost_reserved_usd+(
+    SELECT ${childCostChargeSql("child")}-child.parent_charged_cost_usd FROM sessions child WHERE child.id=NEW.id)
+  WHERE id=NEW.parent_session_id;
+  UPDATE sessions SET parent_charged_cost_usd=${childCostChargeSql("sessions")} WHERE id=NEW.id;
+END;
+DROP TRIGGER IF EXISTS sessions_settle_grandchild_tool_call_charge;
+CREATE TRIGGER sessions_settle_grandchild_tool_call_charge
+AFTER UPDATE OF child_tool_calls_reserved ON sessions
+WHEN NEW.parent_session_id IS NOT NULL AND ${childToolCallChargeSql("NEW")}<>NEW.parent_charged_tool_calls
+BEGIN
+  UPDATE sessions SET child_tool_calls_reserved=child_tool_calls_reserved+(
+    SELECT ${childToolCallChargeSql("child")}-child.parent_charged_tool_calls FROM sessions child WHERE child.id=NEW.id)
+  WHERE id=NEW.parent_session_id;
+  UPDATE sessions SET parent_charged_tool_calls=${childToolCallChargeSql("sessions")} WHERE id=NEW.id;
+END;`;
+
+/** Settle the lifetime reservations recorded before per-child charges existed, bottom-up by the
+ * same rules as the triggers. A parent none of whose children were deleted is charged exactly its
+ * children's charges. Once any child was deleted, its share of the lifetime counter cannot be told
+ * apart from a surviving child's later-edited limits, so that parent keeps at least its lifetime
+ * counter: an upgrade never releases a deleted child's reservation. Each surviving child's
+ * reservation is estimated from its original allowance window. */
+function settleLegacyChildCharges(db: DatabaseSync): void {
+  const rows = db.prepare(
+    `SELECT id, parent_session_id AS parentId, status IN ${TERMINAL_STATUS_SQL} AS terminal,
+            cost_usd AS costUsd, ${toolCallCountSql("sessions.id")} AS toolCalls,
+            child_spawn_count AS spawnCount,
+            child_cost_reserved_usd AS lifetimeCostUsd, child_tool_calls_reserved AS lifetimeToolCalls,
+            COALESCE(cost_budget_step_usd, cost_budget_usd, 0) AS reservedCostUsd,
+            COALESCE(max_tool_calls_step, max_tool_calls, 0) AS reservedToolCalls
+     FROM sessions
+     WHERE parent_session_id IS NOT NULL
+        OR id IN (SELECT parent_session_id FROM sessions WHERE parent_session_id IS NOT NULL)`,
+  ).all() as unknown as Array<{
+    id: string; parentId: string | null; terminal: number; costUsd: number; toolCalls: number;
+    spawnCount: number; lifetimeCostUsd: number; lifetimeToolCalls: number;
+    reservedCostUsd: number; reservedToolCalls: number;
+  }>;
+  const children = new Map<string, typeof rows>();
+  for (const row of rows) {
+    if (row.parentId) children.set(row.parentId, [...(children.get(row.parentId) ?? []), row]);
+  }
+  const charges = new Map<string, { costUsd: number; toolCalls: number }>();
+  const counters = new Map<string, { costUsd: number; toolCalls: number }>();
+  const counterOf = (row: (typeof rows)[number]) => {
+    const known = counters.get(row.id);
+    if (known) return known;
+    const own = children.get(row.id) ?? [];
+    const counter = { costUsd: 0, toolCalls: 0 };
+    for (const child of own) {
+      const childCounter = counterOf(child);
+      const used = { costUsd: child.costUsd + childCounter.costUsd, toolCalls: child.toolCalls + childCounter.toolCalls };
+      const charge = child.terminal ? used : {
+        costUsd: Math.max(child.reservedCostUsd, used.costUsd),
+        toolCalls: Math.max(child.reservedToolCalls, used.toolCalls),
+      };
+      charges.set(child.id, charge);
+      counter.costUsd += charge.costUsd;
+      counter.toolCalls += charge.toolCalls;
+    }
+    if (row.spawnCount > own.length) {
+      counter.costUsd = Math.max(counter.costUsd, row.lifetimeCostUsd);
+      counter.toolCalls = Math.max(counter.toolCalls, row.lifetimeToolCalls);
+    }
+    counters.set(row.id, counter);
+    return counter;
+  };
+  const saveChild = db.prepare(
+    `UPDATE sessions SET parent_reserved_cost_usd=?, parent_reserved_tool_calls=?,
+       parent_charged_cost_usd=?, parent_charged_tool_calls=?, usage_peak_cost_usd=?, usage_peak_tool_calls=?
+     WHERE id=?`,
+  );
+  const saveCounter = db.prepare(
+    "UPDATE sessions SET child_cost_reserved_usd=?, child_tool_calls_reserved=? WHERE id=?",
+  );
+  for (const row of rows) {
+    const counter = counterOf(row);
+    if (children.has(row.id)) saveCounter.run(counter.costUsd, counter.toolCalls, row.id);
+  }
+  for (const row of rows) {
+    const charge = charges.get(row.id);
+    if (charge) {
+      saveChild.run(row.reservedCostUsd, row.reservedToolCalls, charge.costUsd, charge.toolCalls,
+        row.costUsd, row.toolCalls, row.id);
+    }
+  }
+}
+
 export class ControlPlaneDb {
   private constructor(
     private readonly db: DatabaseSync,
@@ -3991,6 +4147,10 @@ export class ControlPlaneDb {
     db.exec("PRAGMA journal_mode = WAL;");
     db.exec("PRAGMA secure_delete = ON;");
     db.exec("PRAGMA foreign_keys = ON;");
+    // The child-charge triggers carry a settled charge up every ancestor by re-firing on each
+    // parent row. The only other effect is that REPLACE fires DELETE triggers, and no table written
+    // with REPLACE has one.
+    db.exec("PRAGMA recursive_triggers = ON;");
     db.exec(SCHEMA);
     const reminderColumns = db.prepare("PRAGMA table_info(session_reminders)")
       .all() as unknown as Array<{ name: string }>;
@@ -5075,6 +5235,33 @@ export class ControlPlaneDb {
     db.exec("CREATE INDEX IF NOT EXISTS idx_sessions_parent ON sessions(parent_session_id, id)");
     db.exec("UPDATE sessions SET cost_budget_step_usd=cost_budget_usd WHERE cost_budget_step_usd IS NULL AND cost_budget_usd IS NOT NULL");
     db.exec("UPDATE sessions SET max_tool_calls_step=max_tool_calls WHERE max_tool_calls_step IS NULL AND max_tool_calls IS NOT NULL");
+    // Per-child allowance charges. Add the columns, settle pre-existing children, and install the
+    // triggers in one transaction so no existing child is ever left uncharged or double-counted.
+    db.exec("BEGIN IMMEDIATE");
+    try {
+      let addedChildCharges = false;
+      for (const column of [
+        "parent_reserved_cost_usd REAL NOT NULL DEFAULT 0",
+        "parent_reserved_tool_calls INTEGER NOT NULL DEFAULT 0",
+        "parent_charged_cost_usd REAL NOT NULL DEFAULT 0",
+        "parent_charged_tool_calls INTEGER NOT NULL DEFAULT 0",
+        "usage_peak_cost_usd REAL NOT NULL DEFAULT 0",
+        "usage_peak_tool_calls INTEGER NOT NULL DEFAULT 0",
+      ]) {
+        try {
+          db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`);
+          addedChildCharges = true;
+        } catch {
+          /* column already present */
+        }
+      }
+      if (addedChildCharges) settleLegacyChildCharges(db);
+      db.exec(CHILD_CHARGE_TRIGGERS_SQL);
+      db.exec("COMMIT");
+    } catch (error) {
+      db.exec("ROLLBACK");
+      throw error;
+    }
     db.exec("UPDATE sessions SET title_source='user' WHERE title_source IS NULL");
     try {
       db.exec("ALTER TABLE session_events ADD COLUMN runner_seq INTEGER");
@@ -11450,12 +11637,14 @@ export class ControlPlaneDb {
     count: number;
     /** Only nonterminal, unarchived children occupy the concurrent admission cap. */
     liveCount: number;
+    /** Children's charges, including deleted ones: at least their limits while live, and their
+     * subtree's actual use once terminal. */
     costBudgetUsd: number;
     maxToolCalls: number;
   } {
     return this.stmt(
-      `SELECT child_spawn_count AS count, child_cost_reserved_usd AS costBudgetUsd,
-              child_tool_calls_reserved AS maxToolCalls,
+      `SELECT child_spawn_count AS count, MAX(0, child_cost_reserved_usd) AS costBudgetUsd,
+              MAX(0, child_tool_calls_reserved) AS maxToolCalls,
               (SELECT COUNT(*) FROM sessions child
                 WHERE child.parent_session_id=? AND child.archived=0
                   AND child.status NOT IN ('completed','failed','stopped')) AS liveCount
@@ -11463,6 +11652,16 @@ export class ControlPlaneDb {
     ).get(parentSessionId, parentSessionId) as unknown as {
       count: number; liveCount: number; costBudgetUsd: number; maxToolCalls: number;
     };
+  }
+
+  /** The unspent limits a terminal child's settlement released, which restarting it re-reserves. */
+  childSessionRestartReservation(childSessionId: string): { costBudgetUsd: number; maxToolCalls: number } {
+    const row = this.stmt(
+      `SELECT MAX(0, parent_reserved_cost_usd-parent_charged_cost_usd) AS costBudgetUsd,
+              MAX(0, parent_reserved_tool_calls-parent_charged_tool_calls) AS maxToolCalls
+       FROM sessions WHERE id=?`,
+    ).get(childSessionId) as { costBudgetUsd: number; maxToolCalls: number } | undefined;
+    return { costBudgetUsd: row?.costBudgetUsd ?? 0, maxToolCalls: row?.maxToolCalls ?? 0 };
   }
 
   sessionHasIndividualOwner(sessionId: string): boolean {
@@ -11596,14 +11795,19 @@ export class ControlPlaneDb {
           .run(JSON.stringify(input.executionTarget), input.id);
       }
       if (input.parentSessionId) {
-        this.stmt("UPDATE sessions SET parent_session_id=? WHERE id=?")
-          .run(input.parentSessionId, input.id);
-        // Keep reservations after child deletion so deleting history cannot replenish a spawn
-        // allowance or spend the same parent budget a second time.
+        const reservedCostUsd = input.config.costBudgetUsd ?? 0;
+        const reservedToolCalls = input.config.maxToolCalls ?? 0;
+        this.stmt(`UPDATE sessions SET parent_session_id=?,
+          parent_reserved_cost_usd=?, parent_reserved_tool_calls=?,
+          parent_charged_cost_usd=?, parent_charged_tool_calls=? WHERE id=?`)
+          .run(input.parentSessionId, reservedCostUsd, reservedToolCalls, reservedCostUsd, reservedToolCalls, input.id);
+        // A live child is charged its full limits. The child-charge triggers settle it to actual
+        // usage once terminal and never subtract its charge on deletion, so deleting history
+        // cannot replenish a spawn allowance or spend the same parent budget a second time.
         this.stmt(`UPDATE sessions SET child_spawn_count=child_spawn_count+1,
           child_cost_reserved_usd=child_cost_reserved_usd+?,
           child_tool_calls_reserved=child_tool_calls_reserved+? WHERE id=?`)
-          .run(input.config.costBudgetUsd ?? 0, input.config.maxToolCalls ?? 0, input.parentSessionId);
+          .run(reservedCostUsd, reservedToolCalls, input.parentSessionId);
       }
       if (input.config.maxChildSessions !== undefined) {
         this.stmt("UPDATE sessions SET max_child_sessions=? WHERE id=?")
@@ -12719,6 +12923,7 @@ export class ControlPlaneDb {
         `DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL
            AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'`,
       ).run(id);
+      this.recordChildToolCallPeak(id);
       this.stmt("DELETE FROM session_events WHERE session_id=?").run(id);
       this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
       this.stmt(
@@ -12795,6 +13000,7 @@ export class ControlPlaneDb {
         `DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL
            AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'`,
       ).run(id);
+      this.recordChildToolCallPeak(id);
       this.stmt("DELETE FROM session_events WHERE session_id=?").run(id);
       this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
       this.stmt(
@@ -14581,6 +14787,34 @@ export class ControlPlaneDb {
       )
       .get(id) as { c: number };
     return row.c ?? 0;
+  }
+
+  /** Tool calls that reach a terminal child after its settlement (late hydration or a history
+   * replay) raise its charge against its parent. A live child is already held at its limit and is
+   * recounted at its next status transition, so only settled children pay for a recount. */
+  private raiseSettledChildToolCallCharge(sessionId: string): void {
+    this.stmt(
+      `UPDATE sessions SET usage_peak_tool_calls=MAX(usage_peak_tool_calls, ${toolCallCountSql("sessions.id")})
+       WHERE id=? AND parent_session_id IS NOT NULL AND status IN ${TERMINAL_STATUS_SQL}`,
+    ).run(sessionId);
+    this.stmt(
+      `UPDATE sessions SET child_tool_calls_reserved=child_tool_calls_reserved+(
+         SELECT MAX(0, ${childToolCallChargeSql("child")}-child.parent_charged_tool_calls)
+         FROM sessions child WHERE child.id=?)
+       WHERE id=(SELECT parent_session_id FROM sessions WHERE id=? AND status IN ${TERMINAL_STATUS_SQL})`,
+    ).run(sessionId, sessionId);
+    this.stmt(
+      `UPDATE sessions SET parent_charged_tool_calls=MAX(parent_charged_tool_calls, ${childToolCallChargeSql("sessions")})
+       WHERE id=? AND parent_session_id IS NOT NULL AND status IN ${TERMINAL_STATUS_SQL}`,
+    ).run(sessionId);
+  }
+
+  /** Keep a child's tool calls charged when its transcript is about to be replaced. */
+  private recordChildToolCallPeak(sessionId: string): void {
+    this.stmt(
+      `UPDATE sessions SET usage_peak_tool_calls=MAX(usage_peak_tool_calls, ${toolCallCountSql("sessions.id")})
+       WHERE id=? AND parent_session_id IS NOT NULL`,
+    ).run(sessionId);
   }
 
   /** A model change (including a context-window variant) invalidates the provider-resolved model
@@ -18186,6 +18420,7 @@ export class ControlPlaneDb {
         this.stmt("UPDATE sessions SET hydrated_seq=? WHERE id=? AND hydrated_seq < ?")
           .run(options.runnerSeq, sessionId, options.runnerSeq);
       }
+      if (payload.kind === "tool_call") this.raiseSettledChildToolCallCharge(sessionId);
 
       if (options?.accrueUsage) {
         this.recordUsageEventInTransaction(
@@ -18344,6 +18579,7 @@ export class ControlPlaneDb {
                 last_event_at=?, message_count=COALESCE(message_count,0)+?, preview=?
           WHERE id=?`,
       ).run(finalRunnerSeq, finalRunnerSeq, finalRunnerSeq, finalTs, events.length, preview, sessionId);
+      if (events.some((event) => event.payload.kind === "tool_call")) this.raiseSettledChildToolCallCharge(sessionId);
       this.db.exec("COMMIT");
       appliedResult = { applied: true, events: inserted };
     } catch (error) {

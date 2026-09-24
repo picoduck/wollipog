@@ -176,7 +176,7 @@ import {
 } from "./ui-evidence-review.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
-import { childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
+import { childRestartAllowanceError, childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
 import { NATIVE_TUI_DAILY_BUDGET_ERROR, NATIVE_TUI_TRACKED_GUARDRAILS_ERROR } from "./native-tui-launch.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
 import { type GuardrailFields, normalizeCostCheckpoints,
@@ -5917,6 +5917,12 @@ export class SessionsService {
         if (allocated.liveCount >= cap) {
           return fail("the parent session has 0 remaining live child slots; raise maxChildSessions before restarting this child", 409);
         }
+        const allowanceError = childRestartAllowanceError(
+          parent,
+          allocated,
+          this.db.childSessionRestartReservation(session.id),
+        );
+        if (allowanceError) return fail(allowanceError, 409);
       }
     }
     const reconciliationBlock = this.podReconciliationMutationError(sessionId);

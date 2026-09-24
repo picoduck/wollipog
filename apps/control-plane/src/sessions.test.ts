@@ -2690,6 +2690,122 @@ test("terminal or archived children free live slots while lifetime spend reserva
   } finally { db.close(); }
 });
 
+test("children that finished cheaply are charged actual usage, so their parent can create another", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const parent = svc.createSession({
+      ...request,
+      projectId: null,
+      config: { costBudgetUsd: 10, maxToolCalls: 100, maxChildSessions: 2 },
+    }, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    db.addSessionUsage(parent.id, { costUsd: 1 }, Date.now());
+    const spawn = () => svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    });
+    const first = spawn();
+    const second = spawn();
+    assert.ok(first.ok, first.error);
+    assert.ok(second.ok, second.error);
+    for (const child of [first.data!, second.data!]) {
+      assert.equal(child.costBudgetUsd, 4.5);
+      assert.equal(child.maxToolCalls, 50);
+    }
+    assert.ok(svc.setConfig(parent.id, { maxChildSessions: 3 }).ok);
+    const exhausted = spawn();
+    assert.equal(exhausted.status, 409);
+    assert.equal(
+      exhausted.error,
+      "the parent session has insufficient remaining budget to create a child: $0.00 of its $10.00 cost budget " +
+        "and 0 of its 100 tool calls remain after its own usage and its children's charges",
+      "the refusal names the remaining allowance",
+    );
+
+    for (const toolCallId of ["t1", "t1", "t2", "t3"]) {
+      svc.onSessionEvent(first.data!.id, { kind: "tool_call", toolCallId, title: "Read", status: "completed" });
+    }
+    db.addSessionUsage(first.data!.id, { costUsd: 0.4 }, Date.now());
+    svc.onSessionStatus(first.data!.id, "completed");
+    svc.onSessionEvent(second.data!.id, { kind: "tool_call", toolCallId: "u1", title: "Edit", status: "completed" });
+    db.addSessionUsage(second.data!.id, { costUsd: 0.25 }, Date.now());
+    svc.onSessionStatus(second.data!.id, "stopped");
+    const settled = db.childSessionAllocations(parent.id);
+    assert.ok(Math.abs(settled.costBudgetUsd - 0.65) < 1e-9, `charged ${settled.costBudgetUsd}`);
+    assert.equal(settled.maxToolCalls, 4);
+
+    const third = spawn();
+    assert.ok(third.ok, third.error);
+    assert.ok(Math.abs(third.data!.costBudgetUsd! - 8.35 / 3) < 1e-9, `third budget ${third.data!.costBudgetUsd}`);
+    assert.equal(third.data!.maxToolCalls, 32);
+
+    const charged = { ...db.childSessionAllocations(parent.id) };
+    db.deleteSession(first.data!.id);
+    db.deleteSession(second.data!.id);
+    assert.deepEqual({ ...db.childSessionAllocations(parent.id) }, charged,
+      "deleting a terminal child's history never replenishes the allowance");
+  } finally { db.close(); }
+});
+
+test("restarting a terminal child re-reserves its unspent limits only when the parent can still cover them", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    const owner = db.localIdentityContext();
+    const scope = { organizationId: owner.organizationId, owner: { kind: "user" as const, userId: owner.userId } };
+    const parent = svc.createSession({
+      ...request,
+      projectId: null,
+      config: { costBudgetUsd: 9, maxToolCalls: 90, maxChildSessions: 3 },
+    }, undefined, scope).data!;
+    db.updateSessionStatus(parent.id, "running", Date.now());
+    const spawn = () => svc.createSession(request, undefined, undefined, false, false, false, {
+      parentSessionId: parent.id,
+    });
+    const child = spawn().data!;
+    assert.equal(child.costBudgetUsd, 3);
+    assert.equal(child.maxToolCalls, 30);
+    const allocated = () => {
+      const { costBudgetUsd, maxToolCalls } = db.childSessionAllocations(parent.id);
+      return { costBudgetUsd: Math.round(costBudgetUsd * 1e6) / 1e6, maxToolCalls };
+    };
+
+    db.addSessionUsage(child.id, { costUsd: 1 }, Date.now());
+    for (let call = 0; call < 10; call++) {
+      svc.onSessionEvent(child.id, { kind: "tool_call", toolCallId: `t${call}`, title: "Read", status: "completed" });
+    }
+    svc.onSessionStatus(child.id, "stopped");
+    assert.deepEqual(allocated(), { costBudgetUsd: 1, maxToolCalls: 10 });
+    db.addSessionUsage(child.id, { costUsd: 0.5 }, Date.now());
+    svc.onSessionEvent(child.id, { kind: "tool_call", toolCallId: "late", title: "Read", status: "completed" });
+    svc.onSessionEvent(child.id, { kind: "tool_call", toolCallId: "late", title: "Read", status: "completed" });
+    assert.deepEqual(allocated(), { costBudgetUsd: 1.5, maxToolCalls: 11 }, "late usage still reaches the parent");
+
+    assert.ok(svc.restart(child.id).ok);
+    assert.deepEqual(allocated(), { costBudgetUsd: 3, maxToolCalls: 30 },
+      "a restarted child cannot escape its reservation");
+    svc.onSessionStatus(child.id, "stopped");
+    assert.deepEqual(allocated(), { costBudgetUsd: 1.5, maxToolCalls: 11 });
+
+    assert.ok(spawn().ok);
+    assert.ok(spawn().ok);
+    db.addSessionUsage(parent.id, { costUsd: 2 }, Date.now());
+    const before = allocated();
+    const refused = svc.restart(child.id);
+    assert.equal(refused.status, 409);
+    assert.equal(
+      refused.error,
+      "the parent session has $0.50 of its $9.00 cost budget and 27 of its 90 tool calls remaining, " +
+        "but restarting this child re-reserves $1.50 of its unspent limits; " +
+        "raise the parent's limits before restarting this child",
+    );
+    assert.equal(db.getSession(child.id)!.status, "stopped");
+    assert.deepEqual(allocated(), before);
+  } finally { db.close(); }
+});
+
 test("a live owner can raise the concurrent child cap and restarts consume the same slots", () => {
   const { db, svc } = makeHarness();
   try {
