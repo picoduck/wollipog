@@ -32,10 +32,10 @@ for (const theme of ["dark", "light"] as const) {
     expect(await recovery.innerHTML()).not.toContain(EMAIL);
     await capture(page, `auth-recovery-masked-desktop-${theme}`);
 
-    await recovery.getByRole("button", { name: "Reveal Provider-Reported Email" }).click();
+    await recovery.getByRole("button", { name: "Show Current Account Email" }).click();
     await expect(recovery).toContainText(EMAIL);
     await capture(page, `auth-recovery-revealed-desktop-${theme}`);
-    await recovery.getByRole("button", { name: "Hide Provider-Reported Email" }).click();
+    await recovery.getByRole("button", { name: "Hide Current Account Email" }).click();
     expect(await recovery.innerHTML()).not.toContain(EMAIL);
   });
 }
@@ -71,7 +71,7 @@ test("a provider without an email says so instead of guessing", async ({ page })
   await page.setViewportSize({ width: 1180, height: 820 });
   const { recovery } = await open(page, "theme=dark&scenario=no-email");
   await expect(recovery).toContainText("Claude Code did not supply an account email, so its identity cannot be displayed.");
-  await expect(recovery.getByRole("button", { name: "Reveal Provider-Reported Email" })).toHaveCount(0);
+  await expect(recovery.getByRole("button", { name: "Show Current Account Email" })).toHaveCount(0);
   await capture(page, "auth-recovery-no-email-desktop-dark");
 });
 
@@ -106,7 +106,7 @@ test("on a phone the card stays within the viewport and every action is reachabl
   await use.scrollIntoViewIfNeeded();
   await expect(use).toBeVisible();
   await capture(page, "auth-recovery-masked-mobile-dark");
-  await recovery.getByRole("button", { name: "Reveal Provider-Reported Email" }).click();
+  await recovery.getByRole("button", { name: "Show Current Account Email" }).click();
   await expect(recovery).toContainText(EMAIL);
   await capture(page, "auth-recovery-revealed-mobile-dark");
 });

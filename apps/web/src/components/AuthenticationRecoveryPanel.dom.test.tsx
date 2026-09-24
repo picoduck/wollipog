@@ -149,11 +149,11 @@ test("the card keeps the provider email hidden until revealed and never calls th
     assert.match(text, /Claude Work/);
     assert.match(text, /A label chosen on this Machine\. The provider has not verified it\./);
 
-    const reveal = view.button("Reveal Provider-Reported Email");
+    const reveal = view.button("Show Current Account Email");
     assert.ok(reveal);
     await act(async () => { reveal.click(); await tick(); });
     assert.match(view.container.textContent ?? "", new RegExp(EMAIL.replace(".", "\\.")));
-    const hide = view.button("Hide Provider-Reported Email");
+    const hide = view.button("Hide Current Account Email");
     assert.ok(hide);
     await act(async () => { hide.click(); await tick(); });
     assert.equal(view.container.innerHTML.includes(EMAIL), false);
@@ -171,7 +171,7 @@ test("the card says when the provider supplied no email instead of inferring one
   try {
     assert.match(view.container.textContent ?? "",
       /Claude Code did not supply an account email, so its identity cannot be displayed\./);
-    assert.equal(view.button("Reveal Provider-Reported Email"), undefined);
+    assert.equal(view.button("Show Current Account Email"), undefined);
   } finally {
     await view.cleanup();
   }
@@ -212,6 +212,34 @@ test("every other account stays visible with its status and next action, and sel
   }
 });
 
+test("email-shaped account labels stay masked and are named by distinct hidden ordinals", async () => {
+  const api = client();
+  const emailLabels = { ...api.value, authenticationAccounts: async () => ({ accounts: [
+    { id: "claude-work", label: "work@example.test", authStatus: "authenticated" as const, availability: "current" as const },
+    { id: "claude-a", label: "alex@example.test", authStatus: "authenticated" as const, availability: "available" as const },
+    { id: "claude-b", label: "blair@example.test", authStatus: "unknown" as const, availability: "status_unknown" as const },
+  ] }) } as ApiClient;
+  const view = await render(
+    <AuthenticationRecoveryPanel
+      session={session({ providerAccountLabel: "work@example.test" })}
+      approval={approval}
+      runner={runner()}
+      runnerOnline
+    />,
+    emailLabels,
+  );
+  try {
+    const html = view.container.innerHTML;
+    for (const label of ["work@example.test", "alex@example.test", "blair@example.test"]) {
+      assert.equal(html.includes(label), false, `${label} is absent before reveal`);
+    }
+    assert.ok(view.button("Use Hidden Account 1"));
+    assert.ok(view.button("Check and Use Hidden Account 2"));
+  } finally {
+    await view.cleanup();
+  }
+});
+
 test("a viewer who cannot manage the Machine is told who can sign the account in", async () => {
   const api = client();
   const view = await render(
@@ -234,7 +262,7 @@ test("an account change while the card is open discards the old identity and fet
     api.value,
   );
   try {
-    await act(async () => { view.button("Reveal Provider-Reported Email")!.click(); await tick(); });
+    await act(async () => { view.button("Show Current Account Email")!.click(); await tick(); });
     assert.ok(view.container.innerHTML.includes(EMAIL));
     await view.draw(
       <AuthenticationRecoveryPanel

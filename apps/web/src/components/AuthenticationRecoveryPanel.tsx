@@ -9,6 +9,8 @@ import {
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import { maskedAccountTitles } from "../personal-identifiers.js";
+import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
 
 type Loadable<T> =
@@ -116,6 +118,9 @@ export function AuthenticationRecoveryPanel({
   const alternatives = accountList?.state === "loaded"
     ? accountList.value.filter((account) => account.availability !== "current")
     : [];
+  // Button names cannot carry a reveal control, so an email-shaped label is named by a distinct
+  // hidden ordinal instead of its value.
+  const accountTitles = maskedAccountTitles(alternatives.map((account) => account.label));
   const canSwitch = !!session.providerAccountId;
   const canStartSignIn = runner?.canManage === true && runnerSupportsProtocol(runner.protocolVersion, "providerLogin");
   const accountLogins = (runner?.providerLogins ?? []).filter((login) =>
@@ -174,7 +179,9 @@ export function AuthenticationRecoveryPanel({
         <div>
           <dt>Configured Account</dt>
           <dd>
-            <span>{session.providerAccountLabel ?? "Machine Default Sign-In"}</span>
+            {session.providerAccountLabel
+              ? <PersonalIdentifier value={session.providerAccountLabel} label="Configured Account Email" />
+              : <span>Machine Default Sign-In</span>}
             <span className="auth-recovery-hint">
               {session.providerAccountLabel
                 ? "A label chosen on this Machine. The provider has not verified it."
@@ -206,10 +213,14 @@ export function AuthenticationRecoveryPanel({
           </p>
         ) : (
           <ul className="auth-recovery-account-list">
-            {alternatives.map((account) => (
+            {alternatives.map((account, index) => (
               <li key={account.id} className="auth-recovery-account" data-availability={account.availability}>
                 <div className="auth-recovery-account-head">
-                  <span className="auth-recovery-account-label">{account.label}</span>
+                  <PersonalIdentifier
+                    className="auth-recovery-account-label"
+                    value={account.label}
+                    label="Account Email"
+                  />
                   <span className={`atag ${account.availability === "sign_in_required" ? "broken" : "discovered"}`}>
                     {AVAILABILITY_LABEL[account.availability]}
                   </span>
@@ -230,7 +241,7 @@ export function AuthenticationRecoveryPanel({
                     type="button"
                     className={`btn sm${account.availability === "available" ? " primary" : ""}`}
                     disabled={!!selecting || !!startingSignIn}
-                    aria-label={`${account.availability === "available" ? "Use" : "Check and Use"} ${account.label}`}
+                    aria-label={`${account.availability === "available" ? "Use" : "Check and Use"} ${accountTitles[index]}`}
                     onClick={() => void select(account)}
                   >
                     {selecting === account.id
@@ -311,29 +322,8 @@ function ProviderIdentity({
     : null;
   return (
     <span className="auth-recovery-email">
-      {message ?? <PendingMaskedIdentifier value={value.email!} label="Provider-Reported Email" />}
+      {message ?? <PersonalIdentifier value={value.email!} label="Current Account Email" sensitive />}
       {checked}
-    </span>
-  );
-}
-
-/**
- * TEMPORARY SEAM — replaced by the shared default-masked identifier from #1648 before this branch
- * is proposed. It exists only so the recovery flow can be exercised meanwhile; do not reuse it.
- */
-function PendingMaskedIdentifier({ value, label }: { value: string; label: string }) {
-  const [revealed, setRevealed] = useState(false);
-  return (
-    <span className="auth-recovery-masked">
-      <span aria-label={revealed ? undefined : `${label} Hidden`}>{revealed ? value : "••••••••"}</span>
-      <button
-        type="button"
-        className="btn ghost sm"
-        aria-label={`${revealed ? "Hide" : "Reveal"} ${label}`}
-        onClick={() => setRevealed((current) => !current)}
-      >
-        {revealed ? "Hide" : "Reveal"}
-      </button>
     </span>
   );
 }

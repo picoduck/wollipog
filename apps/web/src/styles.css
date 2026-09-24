@@ -7077,8 +7077,7 @@ button.file-head.source-path-link {
   margin: 0;
   color: var(--text-dim);
 }
-.auth-recovery-email,
-.auth-recovery-masked {
+.auth-recovery-email {
   display: inline-flex;
   flex-wrap: wrap;
   align-items: center;
