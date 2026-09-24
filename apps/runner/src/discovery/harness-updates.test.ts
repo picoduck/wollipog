@@ -116,6 +116,28 @@ test("native Windows batch update commands are excluded, including embedded quot
   });
 });
 
+test("explicit Windows command interpreters cannot promise copyable update arguments", () => {
+  for (const command of ["C:\\Windows\\System32\\cmd.exe", "C:\\Windows\\System32\\cscript.exe"]) {
+    const binary = { path: command, via: "path" as const,
+      launch: { command, args: ["/c", "%WOLLIPOG_INTERPRETER_PROBE%"] } };
+    assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+  }
+});
+
+test("native PowerShell probe: copied cmd.exe command preserves a literal percent argument",
+  { skip: process.platform !== "win32" }, () => {
+    const command = process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe";
+    const binary = { path: command, via: "path" as const,
+      launch: { command, args: ["/d", "/c", "echo", "%WOLLIPOG_INTERPRETER_PROBE%"] } };
+    const manual = manualCodexUpdateCommand(binary, { kind: "native" }, "win32");
+    assert.ok(manual);
+    const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", manual.command], {
+      encoding: "utf8", env: { ...process.env, WOLLIPOG_INTERPRETER_PROBE: "EXPANDED" },
+    });
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.match(probe.stdout, /%WOLLIPOG_INTERPRETER_PROBE% update/, `actual stdout: ${probe.stdout}`);
+  });
+
 test("extensionless native Windows update commands cannot promise batch-safe arguments", () => {
   for (const command of ["codex", "C:\\Tools\\codex"]) {
     const binary = { path: "C:\\Tools\\codex.cmd", via: "path" as const,
