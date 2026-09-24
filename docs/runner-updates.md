@@ -32,7 +32,7 @@ which can expand percent signs or alter embedded quotes; arbitrary wrapper behav
 verified from the path alone, and a command without an explicit native executable suffix can resolve
 to one through `PATHEXT`.
 Built-in Codex update guidance likewise sends the operator to the
-original manager for that exact installation instead of promising a safe copied command. Direct
+original manager for that exact installation instead of promising a safe copied command.
 Explicit `.exe` and `.com` launches and POSIX commands inside WSL retain their shell-specific command guidance.
 
 Boxes run the runner **binary deployed to them** (a Node SEA executable copied over SSH), not
