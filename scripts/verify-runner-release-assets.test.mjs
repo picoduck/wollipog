@@ -7,9 +7,12 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { controlPlaneArtifactName, headlessArtifactNames, runnerArtifactNames, RUNNER_TARGET_TRIPLES, WEB_BUNDLE_ASSET_NAME } from "../apps/runner/scripts/runner-artifacts.mjs";
+import { desktopUpdaterArtifacts, updaterReleaseAssetNames } from "./desktop-update-manifest.mjs";
 import {
   checksumManifest,
   EXPECTED_RELEASE_ASSET_COUNT,
+  EXPECTED_SIGNED_RELEASE_ASSET_COUNT,
+  EXPECTED_UPDATER_ASSET_COUNT,
   expectedManifestAssetNames,
   expectedRunnerAssetNames,
   verifyHostedRelease,
@@ -150,6 +153,82 @@ test("hosted verification enforces the exact release count, manifest, and six re
     const cpAsset = missingControlPlane.flat().find((asset) => asset.name === controlPlaneArtifactName("x86_64-unknown-linux-gnu"));
     cpAsset.digest = `sha256:${"e".repeat(64)}`;
     assert.throws(() => verifyHostedRelease(missingControlPlane, manifest), /does not match SHA256SUMS: wollipog-control-plane-x86_64-unknown-linux-gnu/u);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a release signed for updates must carry every package, signature, and the exact update manifest", async () => {
+  const root = await fixture();
+  try {
+    const version = "0.28.0";
+    const digests = await verifyLocalRunnerAssets(root);
+    const manifest = checksumManifest(digests);
+    const updateManifest = `${JSON.stringify({ version, platforms: {} })}\n`;
+    const hosted = (name, bytes = name) => ({
+      name,
+      size: Buffer.byteLength(bytes),
+      digest: `sha256:${createHash("sha256").update(bytes).digest("hex")}`,
+    });
+    // The 14 desktop bundles are the 12 update packages plus the two disk images.
+    const desktop = [
+      ...desktopUpdaterArtifacts(version).map(({ asset }) => hosted(asset)),
+      hosted(`Wollipog_${version}_aarch64.dmg`),
+      hosted(`Wollipog_${version}_x64.dmg`),
+    ];
+    const assets = [
+      ...expectedManifestAssetNames().map((name) => ({ name, size: 100, digest: `sha256:${digests.get(name)}` })),
+      hosted("SHA256SUMS", manifest),
+      ...desktop,
+      ...updaterReleaseAssetNames(version).filter((name) => name !== "latest.json").map((name) => hosted(name)),
+      hosted("latest.json", updateManifest),
+    ];
+    assert.equal(EXPECTED_UPDATER_ASSET_COUNT, 13);
+    assert.equal(EXPECTED_SIGNED_RELEASE_ASSET_COUNT, 47);
+    assert.equal(assets.length, EXPECTED_SIGNED_RELEASE_ASSET_COUNT);
+    const updater = { manifestText: updateManifest, version };
+    const pages = [assets.slice(0, 20), assets.slice(20)];
+    assert.doesNotThrow(() => verifyHostedRelease(pages, manifest, EXPECTED_SIGNED_RELEASE_ASSET_COUNT, updater));
+
+    // An unsigned inventory of the same size is not a signed release.
+    const swapped = structuredClone(pages);
+    swapped.flat().find((asset) => asset.name === "Wollipog_0.28.0_amd64.deb.sig").name = "unexpected.sig";
+    assert.throws(
+      () => verifyHostedRelease(swapped, manifest, EXPECTED_SIGNED_RELEASE_ASSET_COUNT, updater),
+      /release is missing Wollipog_0\.28\.0_amd64\.deb\.sig/u,
+    );
+    const missingPackage = structuredClone(pages);
+    missingPackage.flat().find((asset) => asset.name === "Wollipog_x64.app.tar.gz").name = "Wollipog_x64.app.zip";
+    assert.throws(
+      () => verifyHostedRelease(missingPackage, manifest, EXPECTED_SIGNED_RELEASE_ASSET_COUNT, updater),
+      /release is missing Wollipog_x64\.app\.tar\.gz/u,
+    );
+    const replacedManifest = structuredClone(pages);
+    replacedManifest.flat().find((asset) => asset.name === "latest.json").digest = `sha256:${"a".repeat(64)}`;
+    assert.throws(
+      () => verifyHostedRelease(replacedManifest, manifest, EXPECTED_SIGNED_RELEASE_ASSET_COUNT, updater),
+      /latest\.json publisher digest does not match the verified update manifest/u,
+    );
+    assert.throws(
+      () => verifyHostedRelease(pages, manifest, EXPECTED_SIGNED_RELEASE_ASSET_COUNT, { ...updater, version: "0.28.1" }),
+      /release is missing/u,
+    );
+    // A signed release checked as an unsigned one fails on its count, never silently passes.
+    assert.throws(() => verifyHostedRelease(pages, manifest), /expected exactly 34/u);
+
+    const assetsPath = join(root, "hosted-assets.json");
+    const manifestPath = join(root, "SHA256SUMS");
+    const updatePath = join(root, "latest.json");
+    writeFileSync(assetsPath, JSON.stringify(pages));
+    writeFileSync(manifestPath, manifest);
+    writeFileSync(updatePath, updateManifest);
+    const cli = fileURLToPath(new URL("./verify-runner-release-assets.mjs", import.meta.url));
+    const cliResult = spawnSync(process.execPath, [
+      cli, "release", "--assets-json", assetsPath, "--manifest", manifestPath,
+      "--update-manifest", updatePath, "--desktop-version", version,
+    ], { encoding: "utf8" });
+    assert.equal(cliResult.status, 0, cliResult.stderr);
+    assert.match(cliResult.stdout, /verified exact 47-asset release inventory.*and the 13 update assets/u);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

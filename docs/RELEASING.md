@@ -44,8 +44,11 @@ executable or through `WOLLIPOG_WEB_DIST`. The job then downloads the 12 publish
 the 6 control-plane executables, and the web bundle, requires all six runner pairs to have identical
 SHA-256 digests, and uploads a lexically sorted `SHA256SUMS` covering all 19 names. It then compares
 that manifest with GitHub's recorded asset digests and requires exactly 34 release assets: 14 desktop
-bundles, 12 runner names, 6 control-plane executables, the web bundle, and the manifest. A missing,
-extra, empty, malformed, or mismatched asset fails the release workflow.
+bundles, 12 runner names, 6 control-plane executables, the web bundle, and the manifest. A release
+signed for [in-place desktop updates](#in-place-desktop-updates), which is every tag run, adds 12
+update signatures and `latest.json`, and the gate then requires exactly 47 release assets and the
+exact `latest.json` bytes the job verified. A missing, extra, empty, malformed, or mismatched asset
+fails the release workflow.
 Because GitHub's release-by-tag endpoint does not expose drafts, this final gate resolves exactly one
 draft from the paginated release collection, fetches every page of its asset endpoint by immutable
 numeric release ID, and retries both transient API errors and not-yet-converged verification
@@ -117,6 +120,88 @@ option selected, fails without the signing variables. Only a branch test dispatc
 builds unsigned bundles. Artifact Signing issues no EV certificates,
 so SmartScreen can still warn until the certificate's download reputation builds.
 
+## In-place desktop updates
+
+The desktop app updates itself from the **latest published** release
+([#1646](https://github.com/picoduck/wollipog/issues/1646)). It reads
+`https://github.com/picoduck/wollipog/releases/latest/download/latest.json`, which GitHub never
+resolves to a draft or a prerelease, and it never offers a prerelease to a stable build. Settings →
+About shows the running version, whether a newer release exists, and an **Install and Restart**
+button. Installing restarts the app, so it goes through the same work-in-flight guard as closing the
+window. `.deb` and `.rpm` installs, and any build without an update key, report the new release and
+link to its page instead of installing. `WOLLIPOG_DISABLE_UPDATE_CHECK=1` in the app's environment
+turns off every update request; the **Check for Updates Automatically** switch turns off only the
+background check.
+
+Update packages carry a second signature, separate from Developer ID and Authenticode: a minisign
+signature made with the **update key**. The app verifies it against the public key compiled into the
+build, and requires the signature to name the version `latest.json` announces, so an altered
+manifest cannot pair a new version number with an older package. The packages are the macOS
+`.app.tar.gz`, the Windows MSI and NSIS installers, and the Linux AppImage, `.deb`, and `.rpm`; each
+gets a `.sig` beside it.
+
+| Name                                 | Kind                | Holds |
+| ------------------------------------ | ------------------- | ----- |
+| `TAURI_UPDATER_PUBLIC_KEY`           | repository variable | The public key every current build trusts, as `tauri signer generate` writes it (base64). |
+| `TAURI_SIGNING_PRIVATE_KEY`          | repository secret   | The matching private key file's contents. |
+| `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` | repository secret   | Its password. |
+| `TAURI_UPDATER_NEXT_PUBLIC_KEY`      | repository variable | Empty, except during a key rotation. |
+
+The `preflight` job fails a tag run unless the public key and the private key are both configured,
+and fails any run where only one is. A branch test dispatch without them builds a release with no
+update assets. A build-time config overlay passes the public key to the bundler and turns on update
+artifacts, so local builds never need the private key. After every native leg has uploaded, the
+verification job downloads each update package and its `.sig`, checks the key ID, the signature, the
+signed trusted comment, the signed file name, and the signed version against
+`TAURI_UPDATER_PUBLIC_KEY`, and only then writes and uploads `latest.json`
+([`desktop-update-manifest.mjs`](../scripts/desktop-update-manifest.mjs)). The bundler only warns
+when the private key does not match the public key, so this check is what stops such a release. It
+fails while the release is still a draft. `tauri-action`'s own `latest.json` is disabled because
+each of the six parallel legs rewrites it and they drop each other's platforms.
+
+### Create and Back Up the Update Key
+
+```bash
+pnpm --filter @wollipog/desktop tauri signer generate -w ~/wollipog-updater.key   # prompts for a password
+gh secret set TAURI_SIGNING_PRIVATE_KEY < ~/wollipog-updater.key
+gh secret set TAURI_SIGNING_PRIVATE_KEY_PASSWORD                                   # prompts
+gh variable set TAURI_UPDATER_PUBLIC_KEY < ~/wollipog-updater.key.pub
+```
+
+GitHub secrets cannot be read back, so the key file and its password must also be stored outside
+GitHub before the local copy is deleted: in the maintainers' password manager, plus an offline copy.
+Keep the password apart from the key file. Anyone holding both can publish updates that every
+installed app accepts.
+
+### Rotate the Update Key
+
+An installed app trusts only the key it was built with, so a rotation takes one transitional
+release:
+
+1. Generate the new key pair and back it up as above. Set `TAURI_UPDATER_NEXT_PUBLIC_KEY` to the new
+   public key. Leave the two secrets and `TAURI_UPDATER_PUBLIC_KEY` on the current key.
+2. Cut a release. The current key signs it, so installed apps accept it, and it embeds the new public
+   key. The preflight log carries a notice saying so.
+3. After that release is published, move `TAURI_SIGNING_PRIVATE_KEY`,
+   `TAURI_SIGNING_PRIVATE_KEY_PASSWORD`, and `TAURI_UPDATER_PUBLIC_KEY` to the new key, and clear
+   `TAURI_UPDATER_NEXT_PUBLIC_KEY`. Every later release is signed with the new key.
+
+An app that skips the transitional release keeps the old key and cannot verify any later release.
+It reports the update as unverifiable, and the user reinstalls once from the release page.
+
+### If the Key Is Lost or Leaked
+
+- **Lost** (no backup): no installed app will accept anything signed with a new key. Generate a new
+  key, set all three values, and publish. Installed apps keep reporting that a newer release exists,
+  but every user has to install that release once by hand. The one-line installers work, because
+  they check GitHub's digest rather than the update key.
+- **Leaked**: anyone holding the key can sign packages that installed apps accept, if they can also
+  serve those apps a manifest. Rotate straight away, and publish the transitional release, so that
+  installed apps move off the leaked key.
+
+The first release that includes the updater can only be installed by hand. Earlier apps have no
+updater and cannot find it.
+
 ## One-line install
 
 End users install via the scripts in [`scripts/`](../scripts) (documented in the README's
@@ -173,7 +258,8 @@ git push origin vX.Y.Z
 
 The push triggers the workflow. When all six matrix jobs and the final runner-release verification are green, open the draft release on
 GitHub, replace the generic draft body with release notes, review upgrade behavior and known
-limitations, sanity-check the exact 34-asset inventory and `SHA256SUMS`, and **Publish**. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
+limitations, sanity-check the exact 47-asset inventory, `SHA256SUMS`, and `latest.json`, and
+**Publish**. Publishing is also what makes the release visible to installed apps. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
 as a GitHub pre-release automatically.
 
 After publishing, reconcile the repository's security advisories with the release. For every
@@ -197,7 +283,9 @@ dropdown. A branch run produces a unique throwaway draft tagged `v0.0.0-test.<ru
 repeated runs never collide), built from that branch's HEAD — delete it afterward. Nothing is
 published. (Selecting a real tag instead runs the same version-checked path as a tag push.)
 
-A branch run builds unsigned Windows bundles by default. To test Windows signing, select **Sign the
+A branch run signs update packages and uploads `latest.json` whenever the update key is configured.
+Installed apps never see it, because a draft is never the latest release. A branch run builds
+unsigned Windows bundles by default. To test Windows signing, select **Sign the
 Windows test build through Azure Artifact Signing** and first add that branch as a temporary branch
 rule on the `release` environment; remove the rule after the run. Without the rule GitHub refuses to
 start the Windows legs.

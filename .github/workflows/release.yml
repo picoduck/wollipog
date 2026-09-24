@@ -40,6 +40,8 @@ jobs:
     outputs:
       release_tag: ${{ steps.resolve.outputs.release_tag }}
       prerelease: ${{ steps.resolve.outputs.prerelease }}
+      desktop_version: ${{ steps.resolve.outputs.desktop_version }}
+      updater_signing: ${{ steps.updater.outputs.updater_signing }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -58,7 +60,46 @@ jobs:
           echo "release_tag=$tag" >>"$GITHUB_OUTPUT"
           # Pre-release when the tag carries a suffix (covers -rc.N and -test.N throwaways).
           case "$tag" in *-*) echo "prerelease=true" ;; *) echo "prerelease=false" ;; esac >>"$GITHUB_OUTPUT"
+          # The version the desktop bundles are named and update-signed for. A tag run gates it
+          # against the tag below; a branch test run keeps the checked-out version.
+          echo "desktop_version=$(jq -r .version apps/desktop/src-tauri/tauri.conf.json)" >>"$GITHUB_OUTPUT"
           echo "Release tag: $tag"
+
+      # In-place desktop updates (#1646). Installed apps accept only packages signed by the update
+      # key whose public half they were built with, so a release published without a signed update
+      # manifest silently strands every installed app on it. A tag run therefore refuses to build
+      # without both halves of the key; a branch test dispatch without them builds a release with
+      # no update assets. A partial configuration fails either way. Only the public key's shape is
+      # checked here; every signature is checked against it after all legs have uploaded, because
+      # the bundler merely warns when the private key does not match.
+      - name: Resolve updater signing
+        id: updater
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+          TAURI_UPDATER_NEXT_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_NEXT_PUBLIC_KEY }}
+          HAS_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY != '' }}
+        run: |
+          if [ -z "$TAURI_UPDATER_PUBLIC_KEY" ] && [ "$HAS_PRIVATE_KEY" != true ]; then
+            if [ "$REF_TYPE" = tag ]; then
+              echo "::error::The update signing key is not configured; refusing to publish a release installed apps cannot update to. See docs/RELEASING.md"
+              exit 1
+            fi
+            echo "::warning::The update signing key is not configured; this test release has no update assets"
+            echo "updater_signing=0" >>"$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "$TAURI_UPDATER_PUBLIC_KEY" ] || [ "$HAS_PRIVATE_KEY" != true ]; then
+            echo "::error::Update signing is partially configured: the TAURI_UPDATER_PUBLIC_KEY variable and the TAURI_SIGNING_PRIVATE_KEY secret must both be set"
+            exit 1
+          fi
+          node scripts/desktop-update-manifest.mjs check-public-key
+          # Key rotation: a transitional release embeds the next key while the current one signs it.
+          if [ -n "$TAURI_UPDATER_NEXT_PUBLIC_KEY" ]; then
+            TAURI_UPDATER_PUBLIC_KEY="$TAURI_UPDATER_NEXT_PUBLIC_KEY" node scripts/desktop-update-manifest.mjs check-public-key
+            echo "::notice::This release embeds the next update key; releases after it must be signed with that key"
+          fi
+          echo "updater_signing=1" >>"$GITHUB_OUTPUT"
 
       # All packaged-app and runner version fields must agree with the release tag. The control
       # plane uses this identity to select the matching remote-runner artifact at runtime.
@@ -380,11 +421,35 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $expires) { Write-Output "::error::could not obtain an Artifact Signing access token"; exit 1 }
           Write-Output "Artifact Signing access token valid until $expires"
 
+      # A build-time overlay, like the Windows signing one, so local builds never see an update key:
+      # the bundler refuses to build when a public key is configured without the private key. The
+      # key compiled in is the one the NEXT update must be signed with, which differs from the
+      # signing key only in a key-rotation release (see docs/RELEASING.md).
+      - name: Configure updater signing
+        if: needs.preflight.outputs.updater_signing == '1'
+        shell: bash
+        env:
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_NEXT_PUBLIC_KEY || vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          node -e '
+            const { writeFileSync } = require("node:fs");
+            const { join } = require("node:path");
+            const overlay = join(process.env.RUNNER_TEMP, "tauri-updater.json");
+            writeFileSync(overlay, JSON.stringify({
+              bundle: { createUpdaterArtifacts: true },
+              plugins: { updater: { pubkey: process.env.TAURI_UPDATER_PUBLIC_KEY } },
+            }));
+            process.stdout.write(`TAURI_UPDATER_CONFIG=${overlay.replace(/\\/g, "/")}\n`);
+          ' >>"$GITHUB_ENV"
+
       - name: Build & publish desktop bundles
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0.6.2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           WOLLIPOG_RUNNER_RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          # Read by the bundler only when the overlay above enabled update artifacts.
+          TAURI_SIGNING_PRIVATE_KEY: ${{ needs.preflight.outputs.updater_signing == '1' && secrets.TAURI_SIGNING_PRIVATE_KEY || '' }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ needs.preflight.outputs.updater_signing == '1' && secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD || '' }}
         with:
           projectPath: apps/desktop
           tauriScript: pnpm tauri # use the repo's pinned @tauri-apps/cli, not a global install
@@ -392,7 +457,12 @@ jobs:
           # name the sidecar AND to pass its same-arch guard (arch == host on a native runner).
           # A signing Windows leg adds the overlay that points bundle.windows.signCommand at the
           # shared signer, so Tauri signs the app executable, both installers, and the uninstaller.
-          args: --target ${{ matrix.target }}${{ env.WINDOWS_SIGNING == '1' && format(' --config {0}', env.TAURI_WINDOWS_SIGNING_CONFIG) || '' }}
+          # The updater overlay signs every update package after that, so its signature covers the
+          # Authenticode-signed bytes.
+          args: --target ${{ matrix.target }}${{ env.WINDOWS_SIGNING == '1' && format(' --config {0}', env.TAURI_WINDOWS_SIGNING_CONFIG) || '' }}${{ env.TAURI_UPDATER_CONFIG != '' && format(' --config {0}', env.TAURI_UPDATER_CONFIG) || '' }}
+          # latest.json is written once by the verification job. The action's own writer
+          # read-modify-writes one asset from all six parallel legs, which loses platforms.
+          includeUpdaterJson: false
           # Tag/label resolved by preflight: the pushed tag for a real release, or a unique
           # v0.0.0-test.<run> for a branch dispatch. All matrix jobs share one draft release.
           tagName: ${{ needs.preflight.outputs.release_tag }}
@@ -404,7 +474,8 @@ jobs:
             > macOS bundles are Developer ID signed and notarized, and Windows installers and
             > executables are Authenticode signed through Azure Artifact Signing (a branch test
             > dispatch without signing configured is unsigned). SmartScreen may still warn on
-            > the first Windows releases until the certificate builds reputation.
+            > the first Windows releases until the certificate builds reputation. Update packages
+            > carry a separate update signature, which the app checks before installing.
           releaseDraft: true
           prerelease: ${{ needs.preflight.outputs.prerelease }}
 
@@ -590,6 +661,36 @@ jobs:
           tar -C web-bundle -czf wollipog-web.tar.gz web
           gh release upload "$RELEASE_TAG" wollipog-web.tar.gz --repo "$GITHUB_REPOSITORY" --clobber
 
+      # Every update package is checked against the update public key exactly as the app will check
+      # it, plus the signed file name, before latest.json is written. A missing, extra-keyed,
+      # mismatched, or version-less signature fails the release here, while it is still a draft.
+      - name: Verify update signatures & publish the update manifest
+        if: needs.preflight.outputs.updater_signing == '1'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          DESKTOP_VERSION: ${{ needs.preflight.outputs.desktop_version }}
+          TAURI_UPDATER_PUBLIC_KEY: ${{ vars.TAURI_UPDATER_PUBLIC_KEY }}
+        run: |
+          mkdir updater-assets
+          gh release download "$RELEASE_TAG" \
+            --repo "$GITHUB_REPOSITORY" \
+            --pattern '*.sig' \
+            --pattern '*.app.tar.gz' \
+            --pattern '*.AppImage' \
+            --pattern '*.msi' \
+            --pattern '*-setup.exe' \
+            --pattern '*.deb' \
+            --pattern '*.rpm' \
+            --dir updater-assets
+          node scripts/desktop-update-manifest.mjs build \
+            --assets-dir updater-assets \
+            --version "$DESKTOP_VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --tag "$RELEASE_TAG" \
+            --output latest.json
+          gh release upload "$RELEASE_TAG" latest.json --repo "$GITHUB_REPOSITORY" --clobber
+
       - name: Verify release assets & publish checksums
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -609,12 +710,22 @@ jobs:
             --manifest SHA256SUMS
           gh release upload "$RELEASE_TAG" SHA256SUMS --repo "$GITHUB_REPOSITORY" --clobber
 
+      # A release signed for updates must also carry every update package, its signature, and the
+      # exact latest.json verified above; preflight guarantees that is every tag run.
       - name: Gate exact hosted release inventory & digests
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ needs.preflight.outputs.release_tag }}
+          UPDATER_SIGNING: ${{ needs.preflight.outputs.updater_signing }}
+          DESKTOP_VERSION: ${{ needs.preflight.outputs.desktop_version }}
         run: |
+          if [ "$UPDATER_SIGNING" = 1 ]; then
+            set -- latest.json "$DESKTOP_VERSION"
+          else
+            set --
+          fi
           bash scripts/verify-draft-runner-release.sh \
             "$GITHUB_REPOSITORY" \
             "$RELEASE_TAG" \
-            SHA256SUMS
+            SHA256SUMS \
+            "$@"

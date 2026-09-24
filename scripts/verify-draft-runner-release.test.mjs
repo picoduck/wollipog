@@ -139,6 +139,28 @@ esac
   },
 );
 
+test("draft hosted verification refuses an update manifest without the version it announces", {
+  skip: haveShell ? false : "requires bash",
+}, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-draft-release-updater-args-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const gh = join(root, "gh");
+  const ghLog = join(root, "gh.log");
+  writeFileSync(gh, `#!/bin/sh\nprintf '%s\\n' "$*" >>"$GH_LOG"\nexit 99\n`);
+  chmodSync(gh, 0o755);
+  const result = spawnSync(shell, [
+    "-c",
+    'PATH="$1:$PATH"; GH_LOG="$2"; export PATH GH_LOG; exec bash "$3" owner/repo v-test SHA256SUMS latest.json',
+    "draft-release-updater-args-test",
+    shellPath(root),
+    shellPath(ghLog),
+    shellPath(helper),
+  ], { encoding: "utf8" });
+  assert.equal(result.status, 2);
+  assert.match(result.stderr, /an update manifest requires the desktop version it announces/u);
+  assert.equal(existsSync(ghLog), false, "no release request may run with a half-specified gate");
+});
+
 test("draft hosted verification exhausts bounded release-id retries before any asset request", {
   skip: haveShell ? false : "requires bash",
 }, (t) => {

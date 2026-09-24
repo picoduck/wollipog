@@ -41,6 +41,8 @@ import { ShellDock } from "./components/ShellDock.js";
 import { useRightPanelState, type RightPanelState } from "./components/RightPanel.js";
 import { EditorSelect } from "./components/EditorSelect.js";
 import { DesktopCloseGuard } from "./components/DesktopCloseGuard.js";
+import { DesktopUpdateNotifier } from "./components/DesktopUpdateNotifier.js";
+import { useDesktopUpdateSetting } from "./desktop-updates.js";
 import { DesktopExternalLinkRouter } from "./components/DesktopExternalLinkRouter.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { CommandPalette } from "./components/CommandPalette.js";
@@ -160,6 +162,8 @@ function DesktopApp() {
           boundary tripped — so the shell held the close and warned into nothing, and the user's
           second click killed the work in silence. */}
       <DesktopCloseGuard />
+      {/* #1646. Above the instance boundary for the same reason: its toast outlives a switch. */}
+      <DesktopUpdateNotifier />
       <ErrorBoundary label="App">
         <InstanceProvider>
           <DesktopInstanceBoundary />
@@ -333,6 +337,8 @@ export function Shell() {
   // re-read on every visit and a toggle started before leaving completed against the discarded
   // instance — so returning to Network showed the value it had before the write.
   const tailnet = useTailnetAccessSetting();
+  // Same reason: an install started from Settings must still be reported after leaving About.
+  const desktopUpdate = useDesktopUpdateSetting();
   const notify = useNotifySetting();
   // Right side panel (Review/Terminal/Browser/Files/Side chat). State lives here — not in the
   // per-session-keyed SessionDetail — so open/mode/width survive navigating between sessions.
@@ -807,7 +813,7 @@ export function Shell() {
                     onToggle={experiments.setFlag}
                   />
                 ),
-                about: <AboutPanel />,
+                about: <AboutPanel update={desktopUpdate} />,
               }}
             />
           )}
