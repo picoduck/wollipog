@@ -28,6 +28,7 @@ wollipog worktree discard --path <absolute-path> --json
 wollipog decision request --request-id <id> --resource-key <key> --snapshot '<json>' --json
 wollipog decision get <occurrence-id> --json
 wollipog decision consume <occurrence-id> --snapshot '<json>' [--action '<json>'] --json
+wollipog decision reconcile <occurrence-id> --snapshot '<json>' --json
 ```
 
 An Orchestrator campaign must use the management tools as the policy boundary, not infer authority
@@ -62,7 +63,8 @@ JSON objects. The CLI refuses `--session` for these commands and exposes no reso
 Only the current owner may resolve the exact pending occurrence. Authentication, secrets,
 persistent grants, governance, budgets, and tool guardrails remain human-only.
 If an exact armed PR merge command already succeeded but its approved occurrence remained
-unconsumed, use `reconcile_workflow_decision` with that occurrence's unchanged resource snapshot.
+unconsumed, use `reconcile_workflow_decision` (or `wollipog decision reconcile`) with that
+occurrence's unchanged resource snapshot.
 It never reruns the command. For a Codex App Server child it proves the exact completed admission,
 provider command, and merged forge head; resume the same App Server session first. A Claude Code
 child's enqueue produces no permission receipt in auto or Full Access mode, so call it once the

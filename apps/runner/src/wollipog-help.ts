@@ -24,7 +24,7 @@ export function rootHelp(): string {
     "  session             Manage agent sessions",
     "  worktree            Create, attach, select, and discard session worktrees",
     "  artifact            Attach an image file to a session without passing its bytes through the model",
-    "  decision            Request, read, and consume typed workflow decisions for this session",
+    "  decision            Request, read, consume, and reconcile typed workflow decisions for this session",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
@@ -111,9 +111,11 @@ export function decisionHelp(): string {
     "  decision request --request-id <id> --resource-key <key> --snapshot <json> [--json]",
     "  decision get <occurrence-id> [--json]",
     "  decision consume <occurrence-id> --snapshot <json> [--action <json>] [--json]",
+    "  decision reconcile <occurrence-id> --snapshot <json> [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "The injected child session can request_workflow_decision, get_workflow_decision, and consume_workflow_decision only for itself; --session is refused.",
+    "The injected child session can request_workflow_decision, get_workflow_decision, consume_workflow_decision, and reconcile_workflow_decision only for itself; --session is refused.",
     "Pass the exact typed resourceSnapshot as a JSON object in --snapshot. For a pr_merge consume, pass the exact WorkflowDecisionAction JSON object in --action; other categories omit it.",
+    "Reconcile only an already-successful, exactly armed pr_merge action after the approved head has merged. Use its original snapshot; reconciliation never runs the merge command and requires control plane protocol v153.",
     "The control plane remains authoritative: it validates the category, policy owner, current resource snapshot, and one-shot consumption. This command cannot resolve its own decision.",
   ].join("\n");
 }

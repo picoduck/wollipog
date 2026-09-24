@@ -197,6 +197,20 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         input: { occurrenceId, resourceSnapshot: snapshot.value, ...(action ? { action } : {}) },
       };
     }
+    if (verb === "reconcile") {
+      if (!occurrenceId || occurrenceId.startsWith("--")) {
+        return { error: "decision reconcile requires an occurrence id" };
+      }
+      if (optionPresent(args, "--action")) {
+        return { error: "decision reconcile does not accept --action" };
+      }
+      const snapshot = jsonObjectOption(args, "--snapshot");
+      if ("error" in snapshot) return snapshot;
+      return {
+        tool: "reconcile_workflow_decision",
+        input: { occurrenceId, resourceSnapshot: snapshot.value },
+      };
+    }
     return { error: decisionHelp() };
   }
   // Only the group and verb are read positionally, so --file and --name are deliberately not added
@@ -501,6 +515,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement
     : parsed.tool === "attach_session_artifact"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach
+    : parsed.tool === "reconcile_workflow_decision"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
     : workflowDecisionTools.has(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.typedWorkflowDecisionDelegation
     : worktreeTools.has(parsed.tool)
