@@ -8,6 +8,7 @@ import type { DriverOptions } from "./drivers/driver.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
+import { spawnAgent } from "./spawn.js";
 import { ProviderStateCleanupJournal } from "./provider-state-reconciliation.js";
 import { providerStateKey } from "./execution-isolation.js";
 import { wslBwrapSessionRoot } from "./wsl-bwrap-launcher.js";
@@ -660,7 +661,7 @@ test("a new WSL bwrap session fails before its durable row or worktree is materi
   }
 });
 
-test("a WSL restart with a persisted container target bypasses host isolation", async () => {
+test("a WSL restart with a persisted container target cannot launch against another engine", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-session-container-"));
   try {
     const store = new SessionStore(root);
@@ -704,6 +705,10 @@ test("a WSL restart with a persisted container target bypasses host isolation", 
       // A restart may omit the immutable target; the durable row remains authoritative.
     }), true);
     assert.deepEqual(captured?.isolation, adapter);
+    assert.throws(() => spawnAgent({
+      command: "claude", args: [], cwd: "/repo-worktree",
+      context: { kind: "wsl", distro: "Ubuntu" }, isolation: adapter,
+    }), /native agent context/u);
     assert.equal(JSON.stringify(messages).includes("target-local no-follow"), false);
     manager.shutdownAll();
   } finally {

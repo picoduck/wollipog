@@ -419,6 +419,12 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   if (opts.context?.kind === "wsl" && opts.isolation?.backend === "bwrap") {
     throw new Error(WSL_BWRAP_UNAVAILABLE_ERROR);
   }
+  if (opts.context?.kind === "wsl" && opts.isolation?.backend === "container") {
+    // Container targets are registered against the native runner's engine. A persisted WSL
+    // context can bypass new-session validation; probing native Docker and launching in WSL
+    // would validate a different engine.
+    throw new Error("container execution targets require a native agent context");
+  }
   const remoteBoundary = opts.isolation?.backend === "container" || opts.isolation?.backend === "cloud";
   const scrubInheritedEnv = inheritedEnvironmentScrub(opts.scrubInheritedEnv);
   let file = opts.command;
