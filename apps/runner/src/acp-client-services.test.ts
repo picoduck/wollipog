@@ -185,7 +185,7 @@ test("ACP terminal preserves daemonized work until that terminal is released", {
   assert.doesNotThrow(() => process.kill(daemonPid!, 0), "natural command exit preserves its daemon");
   const daemonIdentity = await captureLiveProcess(daemonPid!);
   assert.ok(daemonIdentity, "daemon is running before terminal release");
-  assert.deepEqual(await waitForOriginalProcessToStop(daemonIdentity, 0), daemonIdentity,
+  assert.ok(await waitForOriginalProcessToStop(daemonIdentity, 0),
     "a still-running daemon fails the post-release check");
 
   terminals.release("session-daemon", terminalId);

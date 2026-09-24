@@ -657,7 +657,8 @@ test("a probe's whole process tree is gone when it settles", async () => {
     let pid = 0;
     for (let attempt = 0; attempt < 100 && !pid; attempt++) {
       try { pid = Number(readFileSync(pidFile, "utf8").trim()); }
-      catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
+      catch { /* the wrapper has not written the PID yet */ }
+      if (!pid) await new Promise((resolve) => setTimeout(resolve, 10));
     }
     const childIdentity = pid > 0 ? await captureLiveProcess(pid) : undefined;
     const result = await probe;
