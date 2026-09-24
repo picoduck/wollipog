@@ -762,30 +762,26 @@ test("crossing the breakpoint keeps the first visible row and the list's geometr
     const readingOffsetError = async (controlHeight?: number): Promise<number> =>
       await list.evaluate((node, { index, before, controlHeight }) => {
         const row = node.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`);
-        if (!row) return Number.POSITIVE_INFINITY;
-        const offset = () => row.getBoundingClientRect().top - node.getBoundingClientRect().top;
+        if (!row) return controlHeight === undefined ? Number.POSITIVE_INFINITY : Number.NaN;
         const atEnd = node.scrollTop >= node.scrollHeight - node.clientHeight - 1;
-        const originalTranslate = row.style.translate;
-        try {
-          if (controlHeight !== undefined) {
-            const downwardClamp = Math.max(offset() - before, 0);
-            row.style.translate = `0 -${downwardClamp + 2 * controlHeight}px`;
-          }
-          const drift = offset() - before;
-          return atEnd ? Math.max(-drift, 0) : Math.abs(drift);
-        } finally {
-          // Keep the injected geometry within this synchronous browser task. A resize correction
-          // or scroll anchor must never observe it on an animation frame.
-          if (controlHeight !== undefined) row.style.translate = originalTranslate;
-        }
+        // The control proves this exact exception. An unmounted row or a scroll that leaves the
+        // end between the guard and this measurement must fail instead of passing vacuously.
+        if (controlHeight !== undefined && !atEnd) return Number.NaN;
+        const measuredOffset = row.getBoundingClientRect().top - node.getBoundingClientRect().top;
+        // Feed a counterfactual topward landing through the same predicate without moving the DOM:
+        // even a brief CSS translation can perturb the browser's own scroll anchoring.
+        const offset = controlHeight === undefined ? measuredOffset
+          : measuredOffset - Math.max(measuredOffset - before, 0) - 2 * controlHeight;
+        const drift = offset - before;
+        return atEnd ? Math.max(-drift, 0) : Math.abs(drift);
       }, { index: anchorIndex, before: anchorOffsetBefore, controlHeight });
     await expectGeometryPoll(
       readingOffsetError,
       `the first visible row keeps its reading offset across ${from} to ${to}`,
     ).toBeLessThanOrEqual(await cardHeight());
 
-    // Negative control: move the mounted reading row upward while scrollTop stays clamped. The
-    // previous end-of-list exception returned zero for this broken geometry.
+    // Negative control: calculate a topward overshoot while scrollTop stays clamped. The previous
+    // end-of-list exception returned zero for this broken reading offset.
     if (!checkedTopwardOvershoot && await list.evaluate((node) =>
       node.scrollTop >= node.scrollHeight - node.clientHeight - 1)) {
       const height = await cardHeight();
