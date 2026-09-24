@@ -168,6 +168,24 @@ test("Agent Details does not offer an extensionless Windows batch launch to copy
   await page.screenshot({ path: "test-results/extensionless-batch-wrapper-details-mobile.png", fullPage: true });
 });
 
+test("Agent Details shows explicit Windows command hosts as reference data", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("explicit-interpreter"));
+  await page.getByText("Agents", { exact: true }).click();
+  await page.getByRole("button", { name: "View Codex App Server Details" }).click();
+  const details = page.getByRole("dialog", { name: "Codex App Server Details" });
+  await expect(details.getByText(/This Windows launch may resolve to a batch wrapper or use an executable with legacy PowerShell argument passing/)).toBeVisible();
+  await expect(details.locator("dt").filter({ hasText: /^Executable$/ }).locator("+ dd code"))
+    .toHaveText("C:\\Windows\\System32\\cmd.exe");
+  await expect(details.locator("dt", { hasText: "Arguments" }).locator("+ dd code"))
+    .toHaveText('["/d","/c","echo","%PATH%"]');
+  await expect(details.getByRole("button", { name: /Copy .* Launch Command/ })).toHaveCount(0);
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.screenshot({ path: "test-results/explicit-interpreter-details-desktop.png", fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expect(details).toBeVisible();
+  await page.screenshot({ path: "test-results/explicit-interpreter-details-mobile.png", fullPage: true });
+});
+
 test("offline Machines retain last-reported harness status without a fresh release notice", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.setAgentAvailabilityScenario("multiple-installations"));
   await setOffline(page);

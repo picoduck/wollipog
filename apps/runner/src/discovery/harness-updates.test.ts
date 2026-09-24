@@ -116,6 +116,51 @@ test("native Windows batch update commands are excluded, including embedded quot
   });
 });
 
+test("PowerShell legacy-passing executables cannot promise copyable update arguments", () => {
+  for (const name of ["cmd", "cscript", "wscript", "find", "sqlcmd"]) {
+    const command = `C:\\Windows\\System32\\${name}.exe`;
+    const binary = { path: command, via: "path" as const,
+      launch: { command, args: ["/c", "%WOLLIPOG_INTERPRETER_PROBE%"] } };
+    assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+  }
+});
+
+test("native PowerShell probe: cmd.exe expands a quoted percent argument",
+  { skip: process.platform !== "win32" }, () => {
+    const command = process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe";
+    const binary = { path: command, via: "path" as const,
+      launch: { command, args: ["/d", "/c", "echo", "%WOLLIPOG_INTERPRETER_PROBE%"] } };
+    assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+    // The command below was the previously offered PowerShell spelling of this launch.
+    const copied = `& '${command}' '/d' '/c' 'echo' '%WOLLIPOG_INTERPRETER_PROBE%' 'update'`;
+    const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", copied], {
+      encoding: "utf8", env: { ...process.env, WOLLIPOG_INTERPRETER_PROBE: "EXPANDED" },
+    });
+    assert.equal(probe.status, 0, probe.stderr);
+    assert.match(probe.stdout, /^EXPANDED update\r?\n$/);
+  });
+
+test("native PowerShell probe: cscript.exe merges an embedded-quote argument with update",
+  { skip: process.platform !== "win32" }, () => {
+    const dir = mkdtempSync(join(tmpdir(), "wollipog cscript probe "));
+    try {
+      const script = join(dir, "args.vbs");
+      writeFileSync(script, 'Dim arg\r\nFor Each arg In WScript.Arguments\r\nWScript.Echo "ARG:" & arg\r\nNext\r\n');
+      const command = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cscript.exe");
+      const binary = { path: command, via: "path" as const,
+        launch: { command, args: ["//nologo", script, 'a"b'] } };
+      assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+      const copied = `& '${command}' '//nologo' '${script}' 'a"b' 'update'`;
+      const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", copied], {
+        encoding: "utf8",
+      });
+      assert.equal(probe.status, 0, probe.stderr);
+      assert.equal(probe.stdout, "ARG:ab update\r\n");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
 test("extensionless native Windows update commands cannot promise batch-safe arguments", () => {
   for (const command of ["codex", "C:\\Tools\\codex"]) {
     const binary = { path: "C:\\Tools\\codex.cmd", via: "path" as const,
