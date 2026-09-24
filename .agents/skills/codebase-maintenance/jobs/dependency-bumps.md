@@ -34,7 +34,11 @@ open Dependabot PR is already tracked and must not be reported again. The conver
 an absent Dependabot PR is not evidence that a dependency is current. Compare the open PR count per
 ecosystem against `open-pull-requests-limit` in `.github/dependabot.yml`; a queue sitting at its
 limit is indistinguishable from a broken updater, and the run that found the `fastify` gap found
-nine outdated packages with no PR while the npm queue held exactly five.
+nine outdated packages with no PR while the npm queue held exactly five. Before calling an
+uncovered package a Dependabot gap, check its publish date (`npm view <pkg> time --json`, or the
+crates.io `created_at`): a release younger than about three days at Monday's run has simply not
+been seen yet, and the next weekly run covers it. On 2026-09-23 every uncovered release was under
+three days old and every covered one was older; establishing that by hand cost ten calls.
 
 ## Gate
 
