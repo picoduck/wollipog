@@ -3612,7 +3612,9 @@ function SessionDetailLoaded({
     ),
   }), [agentCaps?.slashCommands, canAnswerPendingQuestion, canStopTurn, planSupported, providerCommandAttachmentPolicy]);
   const composerSkillSigil = useMemo(() => composerCommandsIncludeSkills(composerCommands), [composerCommands]);
-  // A receipt outlives catalog rotation, so a stale command id falls back to a name only skills use.
+  // A receipt outlives catalog rotation. Submissions this view sent as skills are known exactly;
+  // otherwise a current skill command id, then a name only skills use, identifies one.
+  const skillSubmissionIdsRef = useRef(new Set<string>());
   const isSkillInvocation = useMemo(() => {
     const commands = agentCaps?.slashCommands ?? [];
     const skillIds = new Set(commands.flatMap((command) =>
@@ -3621,7 +3623,8 @@ function SessionDetailLoaded({
       .filter((command) => command.source === "skill")
       .map((command) => command.name.toLowerCase())
       .filter((name) => commands.every((command) => command.source === "skill" || command.name.toLowerCase() !== name)));
-    return (invocation: { providerCommandId: string; commandName: string }) =>
+    return (invocation: { submissionId: string; providerCommandId: string; commandName: string }) =>
+      skillSubmissionIdsRef.current.has(invocation.submissionId) ||
       skillIds.has(invocation.providerCommandId) || skillOnlyNames.has(invocation.commandName.toLowerCase());
   }, [agentCaps?.slashCommands]);
   const slashTrigger = useMemo(
@@ -3881,6 +3884,7 @@ function SessionDetailLoaded({
         ...candidate,
       };
       commandSubmissionRetryRef.current = commandSubmission;
+      if (invocation.command.providerSource === "skill") skillSubmissionIdsRef.current.add(commandSubmission.submissionId);
     }
     const submissionVersion = composerDraftVersionRef.current;
     const generation = viewGenerationRef.current;

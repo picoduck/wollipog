@@ -148,6 +148,13 @@ test("Codex prompts and skills are labeled by source and $name dispatches the sa
     .toEqual([["codex-skill-review", "pr 42"], ["codex-skill-review", "pr 43"]]);
   await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("$review pr 42");
 
+  // A rotated catalog that adds a same-named prompt must not respell the outstanding skill receipt.
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
+    { name: "review", source: "user", invocation: { id: "codex-prompt-review", catalogRevision: "codex-catalog-2", executionMode: "passthrough" } },
+    { name: "review", source: "skill", invocation: { id: "codex-skill-review-2", catalogRevision: "codex-catalog-2", executionMode: "passthrough" } },
+  ], []));
+  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("$review pr 42");
+
   await composer.fill("$HOME stays text");
   await expect(listbox).toBeHidden();
 });
