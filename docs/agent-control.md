@@ -963,4 +963,4 @@ Runners connected to older control planes do not inject the general surface. WSL
 withhold the Orchestrator capability unless both peers negotiate v124 and fresh discovery proves the
 complete target-local launcher contract.
 
-See [Using Wollipog](../.agents/skills/using-wollipog/SKILL.md) for the compact agent-facing skill.
+See [Using Wollipog](../skills/using-wollipog/SKILL.md) for the compact agent-facing skill.
