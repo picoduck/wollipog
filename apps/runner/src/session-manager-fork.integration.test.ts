@@ -12,6 +12,7 @@ import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
 import { ShellManager } from "./shell-manager.js";
 import { createWorktree } from "./worktree.js";
+import { captureLiveProcess, waitForOriginalProcessToStop } from "../test-support/posix-process.js";
 
 function git(cwd: string, args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -333,9 +334,11 @@ test("provider fork preserves exact post-turn files, commit base, and target cwd
         await waitFor(() => shellManager.snapshots().find((shell) => shell.shellId === "fork-shell")?.status === "exited",
           "fork shell parent did not exit");
         assert.equal(processExists(detachedPid), true, "the detached descendant initially outlives its shell parent");
+        const detachedIdentity = await captureLiveProcess(detachedPid);
+        assert.ok(detachedIdentity, "the detached descendant is running before worktree cleanup");
         await shellManager.closeForWorktree(target.sessionId, { kind: "native" }, target.worktreePath!);
-        await waitFor(() => !processExists(detachedPid),
-          "worktree cleanup did not terminate the no-config fork shell descendant");
+        assert.equal(await waitForOriginalProcessToStop(detachedIdentity), undefined,
+          "worktree cleanup stopped the no-config fork shell descendant");
       } finally {
         shellManager.dispose();
         if (detachedPid > 1 && processExists(detachedPid)) {
