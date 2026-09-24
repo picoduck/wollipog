@@ -4297,6 +4297,11 @@ export class ControlPlaneDb {
     } catch {
       /* column already present */
     }
+    try {
+      db.exec("ALTER TABLE skill_git_auto_updates ADD COLUMN checked_modes TEXT");
+    } catch {
+      /* column already present */
+    }
     for (const column of [
       "status_settlement_pending_at INTEGER",
       "status_settled_at INTEGER",
@@ -7254,9 +7259,15 @@ export class ControlPlaneDb {
     return row?.checked_modes ? JSON.parse(row.checked_modes) as { versionId: string; executablePaths: string[] } : null;
   }
 
+  /** Modes recorded for unchanged content only grow: a stale import of an older commit with the
+   * same bytes cannot erase an executable bit a later handled commit reported. */
   private recordSkillGitBaselineModes(skillId: string, versionId: string, executablePaths: string[] | undefined): void {
+    const prior = this.getSkillGitBaselineModes(skillId);
+    const merged = prior?.versionId === versionId
+      ? [...new Set([...prior.executablePaths, ...(executablePaths ?? [])])].sort()
+      : Array.isArray(executablePaths) ? executablePaths : null;
     this.stmt(`UPDATE skill_git_auto_updates SET checked_modes=?, revision=revision+1 WHERE skill_id=? AND enabled=1`)
-      .run(Array.isArray(executablePaths) ? JSON.stringify({ versionId, executablePaths }) : null, skillId);
+      .run(merged ? JSON.stringify({ versionId, executablePaths: merged }) : null, skillId);
   }
 
   getSkillGitAutoUpdateRevision(skillId: string): number | null {
