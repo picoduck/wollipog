@@ -10,7 +10,6 @@ import type {
   RecoverySourceFacts,
   SkillAdoptionPlatformHelper,
 } from "./skill-adoption-platform.js";
-import { skillsStoreRoot } from "./skills.js";
 import { WINDOWS_JUNCTION_REPARSE_TYPES } from "./windows-skill-junction.js";
 import { WINDOWS_SKILL_SNAPSHOT_TYPES } from "./windows-skill-snapshots.js";
 
@@ -712,13 +711,19 @@ function run(specification: Record<string, unknown>): { lines: string[]; stdout:
 }
 
 /** Link text uses the same Node realpath spelling as managed deployment, so reconciliation
- * classifies an adopted junction exactly like one it created itself. */
-function managedLink(dataDir: string, name: string, digest: string): string {
-  return win32.join(realpathSync(skillsStoreRoot(dataDir)), name, digest);
+ * classifies an adopted junction exactly like one it created itself. The store below the data
+ * directory contains no links, so the text is derived from the data directory: recovery can still
+ * name a managed junction after the store itself is lost, as on Linux and macOS. */
+function storeLink(dataDir: string): string {
+  return win32.join(realpathSync(dataDir), "skills", "store");
 }
 
-function optionalRealpath(path: string): string {
-  try { return realpathSync(path); } catch { return ""; }
+function managedLink(dataDir: string, name: string, digest: string): string {
+  return win32.join(storeLink(dataDir), name, digest);
+}
+
+function optional(value: () => string): string {
+  try { return value(); } catch { return ""; }
 }
 
 export function parseWindowsRecoveryInspection(value: unknown): RecoveryDirectoryFacts {
@@ -789,8 +794,8 @@ export function windowsSkillAdoptionHelper(): SkillAdoptionPlatformHelper {
     },
     inspect: (request) => {
       const result = run({ operation: "inspect", home: request.home,
-        localSourceDirectory: request.localSourceDirectory, homeLink: optionalRealpath(request.home),
-        storeLink: optionalRealpath(skillsStoreRoot(request.dataDir)), operationId: request.operationId ?? "" });
+        localSourceDirectory: request.localSourceDirectory, homeLink: optional(() => realpathSync(request.home)),
+        storeLink: optional(() => storeLink(request.dataDir)), operationId: request.operationId ?? "" });
       if (!result.succeeded) throw new Error("Windows adoption helper failed");
       return parseWindowsRecoveryInspection(JSON.parse(result.stdout));
     },

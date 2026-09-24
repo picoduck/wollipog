@@ -320,6 +320,26 @@ test("Windows pins the harness directory and journal so neither can move during 
   assert.match(fs.readFileSync(join(f.source, "SKILL.md"), "utf8"), /Original instructions/u);
 });
 
+test("Windows recovery still recognizes and restores journals after the store root is lost", native, async (t) => {
+  const linked = fixture(t);
+  const adopted = adoptMachineSkill(linked.options);
+  assert.equal(adopted.status, "adopted");
+  if (adopted.status !== "adopted") return;
+  fs.renameSync(join(linked.dataDir, "skills", "store"), join(linked.dataDir, "skills", "store-lost"));
+  assert.deepEqual(listSkillAdoptionRecovery(linked.home, linked.dataDir, agents).operations.map((entry) => entry.state),
+    ["managed_linked"], "the junction text still names the managed store version");
+  const restored = linked.restore(adopted.operationId);
+  assert.equal(restored.status, "restored", JSON.stringify(restored));
+  assert.match(fs.readFileSync(join(linked.source, "SKILL.md"), "utf8"), /Original instructions/u);
+
+  const preserved = fixture(t);
+  await atCheckpoint(adoptionSpecification(preserved), "source_preserved", "k");
+  fs.renameSync(join(preserved.dataDir, "skills", "store"), join(preserved.dataDir, "skills", "store-lost"));
+  const recovered = preserved.restore(operationId);
+  assert.equal(recovered.status, "restored", JSON.stringify(recovered));
+  assert.match(fs.readFileSync(join(preserved.source, "SKILL.md"), "utf8"), /Original instructions/u);
+});
+
 test("a targeted Windows restore finds its journal beyond the bounded listing scan", native, (t) => {
   const f = fixture(t);
   const adopted = adoptMachineSkill(f.options);
