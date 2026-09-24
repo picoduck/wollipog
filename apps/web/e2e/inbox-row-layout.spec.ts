@@ -645,6 +645,7 @@ test("crossing the breakpoint keeps the first visible row and the list's geometr
 
   const anchorTitle = "Orphaned Background Work Beside a Branch";
   let anchorIndex: number | null = null;
+  let checkedTopwardOvershoot = false;
 
   /**
    * How far the reader's row sits OUTSIDE the list's visible band, in pixels; 0 while it is on
@@ -756,17 +757,38 @@ test("crossing the breakpoint keeps the first visible row and the list's geometr
     ).toBeLessThanOrEqual(await cardHeight());
     // Being somewhere inside a taller viewport is insufficient: a scroll reset can move the
     // reading row several cards down while its displacement outside the viewport remains zero.
-    // At the list's end, shrinking content can clamp scrollTop and legitimately change the offset.
-    await expectGeometryPoll(
-      () => list.evaluate((node, { index, before }) => {
+    // At the list's end, shrinking content can clamp scrollTop and move the row down. A jump
+    // toward the top is still a lost reading position, even if the list ends at maximum scroll.
+    const readingOffsetError = async (controlHeight?: number): Promise<number> =>
+      await list.evaluate((node, { index, before, controlHeight }) => {
         const row = node.querySelector<HTMLElement>(`[data-virtual-row][data-index="${index}"]`);
-        if (!row) return Number.POSITIVE_INFINITY;
-        if (node.scrollTop >= node.scrollHeight - node.clientHeight - 1) return 0;
-        const offset = row.getBoundingClientRect().top - node.getBoundingClientRect().top;
-        return Math.abs(offset - before);
-      }, { index: anchorIndex, before: anchorOffsetBefore }),
+        if (!row) return controlHeight === undefined ? Number.POSITIVE_INFINITY : Number.NaN;
+        const atEnd = node.scrollTop >= node.scrollHeight - node.clientHeight - 1;
+        // The control proves this exact exception. An unmounted row or a scroll that leaves the
+        // end between the guard and this measurement must fail instead of passing vacuously.
+        if (controlHeight !== undefined && !atEnd) return Number.NaN;
+        const measuredOffset = row.getBoundingClientRect().top - node.getBoundingClientRect().top;
+        // Feed a counterfactual topward landing through the same predicate without moving the DOM:
+        // even a brief CSS translation can perturb the browser's own scroll anchoring.
+        const offset = controlHeight === undefined ? measuredOffset
+          : measuredOffset - Math.max(measuredOffset - before, 0) - 2 * controlHeight;
+        const drift = offset - before;
+        return atEnd ? Math.max(-drift, 0) : Math.abs(drift);
+      }, { index: anchorIndex, before: anchorOffsetBefore, controlHeight });
+    await expectGeometryPoll(
+      readingOffsetError,
       `the first visible row keeps its reading offset across ${from} to ${to}`,
     ).toBeLessThanOrEqual(await cardHeight());
+
+    // Negative control: calculate a topward overshoot while scrollTop stays clamped. The previous
+    // end-of-list exception returned zero for this broken reading offset.
+    if (!checkedTopwardOvershoot && await list.evaluate((node) =>
+      node.scrollTop >= node.scrollHeight - node.clientHeight - 1)) {
+      const height = await cardHeight();
+      expect(await readingOffsetError(height), "a topward overshoot at maximum scroll must fail the reading-offset limit")
+        .toBeGreaterThan(height);
+      checkedTopwardOvershoot = true;
+    }
 
     // Polled on the predicate itself: a width change opens a new measurement epoch, and the
     // re-seeded rows settle over the next frame or two. What must never settle is an overlap or a
@@ -789,6 +811,7 @@ test("crossing the breakpoint keeps the first visible row and the list's geometr
       `neighbouring cards do not leave a hole across ${from} to ${to}`,
     ).toBeLessThan(24);
   }
+  expect(checkedTopwardOvershoot, "the test exercises an end-of-list negative control").toBe(true);
   await expect(list).toBeVisible();
 });
 
