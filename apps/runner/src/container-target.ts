@@ -653,10 +653,13 @@ export class ContainerTargetRegistry {
           // All subsequent Docker clients use this local endpoint and private config.
           dockerHost = (await this.setupEnvironment(template, runtime, clientConfig)).DOCKER_HOST;
           dockerStartupOpts = { env: dockerProbeEnvironment(process.env, dockerHost), replaceEnv: true };
-        } catch {
+        } catch (error) {
+          const configUnavailable = error instanceof DockerClientConfigUnavailableError;
           this.prepared.set(id, {
             config: template, runtime,
-            definition: { ...base, unavailableReason: "Docker endpoint could not be verified" },
+            definition: { ...base, unavailableReason: configUnavailable ?
+              DOCKER_CLIENT_CONFIG_UNAVAILABLE_REASON : "Docker endpoint could not be verified" },
+            ...(configUnavailable ? { dockerConfigRecovery: "readiness" as const } : {}),
           });
           continue;
         }
