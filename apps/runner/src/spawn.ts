@@ -17,6 +17,7 @@ import { posix, win32 } from "node:path";
 import type { AgentContext } from "@wollipog/protocol";
 import { containerLabelArgs } from "./container-identity.js";
 import { RUNNER_CREDENTIAL_ENVIRONMENT, sensitiveEnvironmentName } from "./env-security.js";
+import { dockerProxyClearArgs } from "./container-proxy-args.js";
 import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher } from "./windows-job.js";
 import {
@@ -276,6 +277,7 @@ export function buildContainerArgs(
     "--tmpfs", "/tmp:rw,nosuid,nodev",
     "--mount", `type=bind,src=${opts.cwd},dst=/workspace`,
     "--workdir", "/workspace",
+    ...(isolation.runtime === "docker" ? dockerProxyClearArgs() : []),
     ...(opts.containerEnvironmentKeys ?? isolation.sessionEnvironmentKeys ?? []).flatMap((key) => ["--env", key]),
     isolation.image,
     command,

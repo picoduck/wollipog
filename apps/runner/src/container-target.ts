@@ -11,6 +11,7 @@ import {
   LEGACY_CONTAINER_LABELS,
   containerLabelArgs,
 } from "./container-identity.js";
+import { dockerProxyClearArgs } from "./container-proxy-args.js";
 import { resolveNative, run, type ExecResult, type ResolvedBinary } from "./discovery/resolve.js";
 import { sensitiveEnvironmentName } from "./env-security.js";
 import type { ContainerSpawnIsolation } from "./spawn.js";
@@ -284,6 +285,7 @@ function setupCheckArgs(
     "--security-opt", "no-new-privileges",
     "--pids-limit", "128",
     "--tmpfs", "/tmp:rw,nosuid,nodev",
+    ...(template.runtime === "docker" ? dockerProxyClearArgs() : []),
     "--entrypoint", check.command,
     template.image,
     ...(check.args ?? []),
@@ -451,6 +453,7 @@ export class ContainerTargetRegistry {
         "--network", "none", "--read-only", "--cap-drop", "ALL",
         "--security-opt", "no-new-privileges", "--pids-limit", "128",
         "--tmpfs", "/tmp:rw,nosuid,nodev", "--workdir", "/tmp",
+        ...(template.runtime === "docker" ? dockerProxyClearArgs() : []),
         "--entrypoint", entrypoint, template.image, ...args,
       ], { timeoutMs: 5_000, maxBuffer: 64 * 1024,
         env: targetProbeEnvironment(process.env), replaceEnv: true });
