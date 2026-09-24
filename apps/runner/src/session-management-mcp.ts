@@ -346,8 +346,9 @@ async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): 
  * run fan-out. Each identical retry refreshes the durable approval's abandonment fence: the control
  * plane rejects an approval nobody has retried for POLICY_HOOK_ABANDONMENT_MS. Polling stops after
  * SPAWN_APPROVAL_POLL_WINDOW_MS so the call returns before the harness times it out; the result tells
- * the agent to repeat the call at once, which keeps the fence alive across calls. */
-async function createWithSpawnApproval(deps: McpDeps, toolName: string, path: string, body: unknown) {
+ * the agent to repeat the request at once, which keeps the fence alive across calls. `retry` names
+ * that request as the caller can issue it. */
+async function createWithSpawnApproval(deps: McpDeps, retry: string, path: string, body: unknown) {
   const now = deps.now ?? Date.now;
   const deadline = now() + SPAWN_APPROVAL_POLL_WINDOW_MS;
   let result = await cpFetch(deps, "POST", path, body);
@@ -355,9 +356,10 @@ async function createWithSpawnApproval(deps: McpDeps, toolName: string, path: st
     if (now() + SPAWN_APPROVAL_POLL_INTERVAL_MS > deadline) {
       return {
         ...result,
-        message: `${result.message} Still pending after ${SPAWN_APPROVAL_POLL_WINDOW_MS / 1000} s. Call ${toolName} ` +
-          `again now with identical arguments to keep waiting; once approved, that identical call succeeds. ` +
-          `If no identical call arrives within ${POLICY_HOOK_ABANDONMENT_MS / 1000} s, the approval is withdrawn as abandoned.`,
+        message: `${result.message} Still pending after ${SPAWN_APPROVAL_POLL_WINDOW_MS / 1000} s. As your next ` +
+          `action, repeat ${retry} with identical arguments to keep waiting; once approved, that identical request ` +
+          `succeeds. Do not wait for the approval first: if no identical request arrives within ` +
+          `${POLICY_HOOK_ABANDONMENT_MS / 1000} s, the approval is withdrawn as abandoned.`,
       };
     }
     if (!await cancellableSleep(deps, SPAWN_APPROVAL_POLL_INTERVAL_MS)) {
@@ -1573,7 +1575,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "create_workflow_run",
-    description: "Create a role-bound workflow run whose workers wait for exact node dispatch. Subject to session permissions and governance policies.",
+    description: "Create a role-bound workflow run whose workers wait for exact node dispatch. A pending human approval returns after about 45 seconds; repeat the identical call immediately to keep it alive. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1605,7 +1607,7 @@ export const TOOLS: McpTool[] = [
       for (const key of ["workflowVersion", "title", "useWorktree", "agentBindings", "costBudgetUsd", "maxToolCalls"]) {
         if (args[key] !== undefined) body[key] = args[key];
       }
-      const r = await createWithSpawnApproval(deps, "create_workflow_run", "/api/workflow-runs", body);
+      const r = await createWithSpawnApproval(deps, "the same create_workflow_run call", "/api/workflow-runs", body);
       if (!r.ok) return errorResult(r.message);
       return textResult({
         run: { id: r.data?.run?.id, title: r.data?.run?.title, sessionIds: capArray(r.data?.run?.sessionIds) },
@@ -1902,7 +1904,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_session",
     description:
-      "Start a child session with an optional model and reasoning effort applied before its initial task. Unsupported model/effort pairs fail before launch; omitting effort preserves saved/default resolution. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports the effective model, effort, and each guardrail as a value or null (none). Subject to session permissions and governance policies.",
+      "Start a child session with an optional model and reasoning effort applied before its initial task. Unsupported model/effort pairs fail before launch; omitting effort preserves saved/default resolution. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports the effective model, effort, and each guardrail as a value or null (none). A pending human approval returns after about 45 seconds; repeat the identical call immediately to keep it alive. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1961,7 +1963,7 @@ export const TOOLS: McpTool[] = [
       body.useWorktree = args.useWorktree !== false;
       if (Object.keys(config).length) body.config = config;
 
-      const created = await createWithSpawnApproval(deps, "create_session", "/api/sessions", body);
+      const created = await createWithSpawnApproval(deps, "the same create_session call (or `wollipog session create` command)", "/api/sessions", body);
       if (!created.ok) return errorResult(created.message);
       const view = created.data;
       return textResult({
@@ -2088,7 +2090,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_run",
     description:
-      "Start a multi-agent run: the same task fanned out to several agents in isolated worktrees. Subject to session permissions and governance policies.",
+      "Start a multi-agent run: the same task fanned out to several agents in isolated worktrees. A pending human approval returns after about 45 seconds; repeat the identical call immediately to keep it alive. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2123,7 +2125,7 @@ export const TOOLS: McpTool[] = [
       if (typeof args.title === "string") body.title = args.title;
       if (typeof args.costBudgetUsd === "number") body.costBudgetUsd = args.costBudgetUsd;
       if (typeof args.maxToolCalls === "number") body.maxToolCalls = args.maxToolCalls;
-      const r = await createWithSpawnApproval(deps, "create_run", "/api/runs", body);
+      const r = await createWithSpawnApproval(deps, "the same create_run call", "/api/runs", body);
       if (!r.ok) return errorResult(r.message);
       return textResult({
         run: { id: r.data?.run?.id, title: r.data?.run?.title, sessionIds: capArray(r.data?.run?.sessionIds) },

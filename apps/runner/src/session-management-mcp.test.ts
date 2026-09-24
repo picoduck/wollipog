@@ -1287,8 +1287,10 @@ test("create tools return the control plane's retry instruction when an approval
     assert.equal(result.isError, true, name);
     const text = resultText(result);
     assert.ok(text.startsWith(`HTTP 428: ${pending}`), `${name} surfaces the control plane text: ${text}`);
-    assert.match(text, new RegExp(`Call ${name} again now with identical arguments`));
-    assert.match(text, /withdrawn as abandoned/);
+    assert.match(text, new RegExp(`As your next action, repeat the same ${name} call`));
+    assert.match(text, /Do not wait for the approval first: if no identical request arrives within 30 s, the approval is withdrawn as abandoned/);
+    assert.equal(text.includes("wollipog session create"), name === "create_session", name);
+    assert.match(TOOLS.find((tool) => tool.name === name)!.description, /repeat the identical call immediately/, name);
     assert.ok(clock <= SPAWN_APPROVAL_POLL_WINDOW_MS, `${name} returned within the window`);
     assert.equal(calls.length, SPAWN_APPROVAL_POLL_WINDOW_MS / 1000 + 1, name);
     const polled = calls.length;
