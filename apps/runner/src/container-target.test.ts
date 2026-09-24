@@ -219,12 +219,14 @@ test("Podman rejects host binds configured in containers.conf", {
       resolveRuntime: async () => runtime(),
       run: async (_file, args) => {
         if (args[0] === "run") setupRan = true;
+        if (args[0] === "info") return { code: 0, stdout: "false\n", stderr: "" };
         return { code: 0, stdout: "", stderr: "" };
       },
     });
     await registry.initialize();
     assert.equal(registry.definitions()[0]!.available, false);
     assert.equal(setupRan, false);
+    assert.match(registry.definitions()[0]!.unavailableReason ?? "", /default mounts/u);
     assert.doesNotMatch(JSON.stringify(registry.definitions()), /synthetic-host-credentials/u);
   } finally {
     if (previousConfigHome === undefined) delete process.env.XDG_CONFIG_HOME;
@@ -294,6 +296,10 @@ test("Podman rejects a default mount added after registration before session lau
     writeFileSync(mounts, "/synthetic-host-credentials:/run/secrets/host:ro\n");
     assert.match(registry.validationError(ref, true, { kind: "native" }, "codex") ?? "", /default mounts/u);
     assert.throws(() => registry.isolation(ref, "codex", "codex", [], "session-1"), /default mounts/u);
+    writeFileSync(mounts, "# no implicit host mounts\n");
+    writeFileSync(join(config, "containers", "containers.conf"), "[engine]\nremote = true\n");
+    assert.match(registry.validationError(ref, true, { kind: "native" }, "codex") ?? "", /default mounts/u);
+    assert.throws(() => registry.isolation(ref, "codex", "codex", [], "session-2"), /default mounts/u);
     await registry.refreshInstallations();
     assert.equal(registry.definitions()[0]!.available, false);
   } finally {
@@ -336,6 +342,10 @@ test("Podman mount scanning covers HOME, rootless global defaults, and quoted TO
     mkdirSync(join(config, "containers"));
     writeFileSync(quotedKey, '[containers]\n"volumes" = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
     assert.equal(safe(), false);
+    writeFileSync(quotedKey, '[containers]\n"volum\\u0065s" = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
+    assert.equal(safe(), false, "escaped TOML keys cannot hide a volume default");
+    writeFileSync(quotedKey, '[engine]\nremote = true\n');
+    assert.equal(safe(), false, "remote mode cannot redirect launch to an unchecked engine");
   } finally {
     rmSync(config, { recursive: true, force: true });
   }

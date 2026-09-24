@@ -82,7 +82,10 @@ export function podmanDefaultMountsSafeForPaths(roots: PodmanMountConfigRoots): 
             content.split(/\r?\n/u).some((line) => {
               const trimmed = line.trim();
               if (trimmed === "" || trimmed.startsWith("#")) return false;
-              return isMountsConf || /\b(?:mounts|volumes)\b["']?\s*=/u.test(trimmed);
+              // TOML basic quoted keys may spell any character with a Unicode escape.
+              // Fail closed rather than guessing whether an escaped key names a mount.
+              return isMountsConf || /\\(?:u[\da-fA-F]{4}|U[\da-fA-F]{8})/u.test(trimmed) ||
+                /\b(?:mounts|volumes|remote|active_service|remote_uri)\b["']?\s*=/u.test(trimmed);
             })) return false;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "ENOENT") return false;

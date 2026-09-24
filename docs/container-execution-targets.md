@@ -84,7 +84,9 @@ before isolating general Podman container config. Docker client config is isolat
 host variables and credentials are not inherited by the setup-check client or container.
 Podman's independent `mounts.conf` files and `containers.conf` mount or volume defaults can add
 host binds without a Wollipog mount argument. A Podman target stays unavailable if local system or
-user defaults contain such entries or cannot be safely read. The runner checks again before each
+user defaults contain such entries or cannot be safely read. Podman configuration that selects a
+remote engine also blocks the target; Unicode escapes in config are rejected conservatively because
+they can hide those settings in quoted TOML keys. The runner checks again before each
 session launch and on Rediscover while the target is available. If the target becomes unavailable,
 remove the unsafe default and restart the runner to repeat readiness checks. Socket-backed Podman
 engines and Podman on non-Linux hosts remain unavailable because their engine's default mounts cannot
