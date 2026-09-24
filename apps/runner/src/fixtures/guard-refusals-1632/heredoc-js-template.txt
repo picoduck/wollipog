@@ -1,0 +1,20 @@
+python3 - <<'EOF'
+p='packages/protocol/src/index.ts'
+s=open(p).read()
+a="""    /(^|\\/)(scripts|bin)\\//i.test(path);"""
+b="""    /(^|\\/)(package\\.json|makefile|gnumakefile|justfile|taskfile\\.ya?ml)$/i.test(path) ||
+    /(^|\\/)(scripts|bin)\\//i.test(path);"""
+assert s.count(a)==1, "a"
+s=s.replace(a,b,1)
+open(p,'w').write(s)
+
+p='apps/web/src/components/SkillGitAutoUpdate.tsx'
+s=open(p).read()
+a="""        : "the library has edits made since the last Git import."} Review it before it can deploy."""
+assert s.count(a)==1
+s=s.replace(a,"""        : held.reason === "untracked_modes"
+          ? `the last import predates executable-file tracking, so changed files need one review: ${held.scriptPaths.join(", ")}.`
+          : "the library has edits made since the last Git import."} Review it before it can deploy.""",1)
+open(p,'w').write(s)
+EOF
+echo ok

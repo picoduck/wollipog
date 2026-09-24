@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir, userInfo } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable } from "node:stream";
@@ -8,6 +8,7 @@ import { test } from "node:test";
 import fc from "fast-check";
 import {
   GUARD_STATE_REFUSAL,
+  GUARD_STATE_UNINSPECTABLE_PREFIX,
   MANAGED_WORKTREE_REFUSAL,
   MANAGED_WORKTREE_UNRESOLVED_REFUSAL,
   commandTargetsGuardState,
@@ -47,6 +48,16 @@ function hookInput(overrides: Record<string, unknown> = {}): string {
     tool_input: { command: "ls" },
     ...overrides,
   });
+}
+
+/**
+ * Refused over the guard state, either because the command names that state or because a command
+ * naming a directory that encloses it cannot be inspected (#1632). Both refuse; only the reason
+ * differs, and the #1632 tests pin which one each shape gets.
+ */
+function assertGuardRefused(verdict: string | null, command: string): void {
+  assert.ok(verdict === GUARD_STATE_REFUSAL || verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX),
+    `refused: ${command} (${verdict})`);
 }
 
 test("a destructive command against a protected worktree is denied with the managed refusal", (t) => {
@@ -759,7 +770,7 @@ test("recursive or unclassifiable work on an ancestor of the guard state stays r
     `ls ${home} && rm -rf ${home}`,
     `ls ${home} | xargs rm -rf ${data}`,
   ]) {
-    assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
+    assertGuardRefused(commandTargetsGuardState(command, project, directory), command);
   }
   // The directory itself and everything in it stay refused for every command, inspection included.
   for (const command of [`ls ${directory}`, `du -sh ${directory}`, `stat ${directory}`,
@@ -827,7 +838,7 @@ test("a command cannot launder itself into the ancestor carve-out", (t) => {
     // trailing IO number reads as a word after the bound and breaks the one admitted `find` shape.
     `find ${home} -maxdepth 1 2>/dev/null`,
   ]) {
-    assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
+    assertGuardRefused(commandTargetsGuardState(command, project, directory), command);
   }
 });
 
@@ -847,7 +858,7 @@ test("every bypass found while reviewing #1371 stays refused with du and find in
   const intoHooks = "../.wollipog-data/hooks/s1.protections.json";
   const refusedFrom = (cwd: string, commands: readonly string[]): void => {
     for (const command of commands) {
-      assert.equal(commandTargetsGuardState(command, cwd, directory), GUARD_STATE_REFUSAL, command);
+      assertGuardRefused(commandTargetsGuardState(command, cwd, directory), command);
     }
   };
   refusedFrom(project, [
@@ -1125,4 +1136,129 @@ test("an inspection never reaches into the guard state, whatever the command", (
     assert.equal(commandTargetsGuardState(`${bad} ${target}; ${good} ${target}`, cwd, root),
       GUARD_STATE_REFUSAL);
   }));
+});
+
+function guardLayout(t: { after: (fn: () => void) => void }): { home: string; project: string; data: string; directory: string } {
+  const home = mkdtempSync(join(tmpdir(), "wollipog-guard-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  const project = join(home, "project");
+  const data = join(home, ".wollipog-data");
+  const directory = join(data, "hooks");
+  mkdirSync(project);
+  mkdirSync(directory, { recursive: true });
+  return { home, project, data, directory };
+}
+
+test("a word built from variables is judged as one word, not as its pieces (#1632)", (t) => {
+  const { project, directory } = guardLayout(t);
+  // The #1632 table: every row names only a scratch directory. The two variables in `$S/$d` used to
+  // leave a lone `/` between them, which was judged as the root directory and refused.
+  for (const command of [
+    "S=/tmp/x; for d in a b; do cat $S/$d/outdated.txt; done",
+    "for d in a b; do cat $S/$d/outdated.txt; done",
+    "S=/tmp/x; cat $S/a/outdated.txt",
+    "for d in a b; do cat ~/.cache/wollipog-maintenance/$d/outdated.txt; done",
+    "for d in a b; do cat /tmp/x/$d/outdated.txt; done",
+    "while read -r d; do cat /tmp/x/$d; done < /tmp/list",
+    "if true; then cat /tmp/x/a; fi",
+    // The command the scheduled maintenance session was refused, verbatim.
+    "S=~/.cache/wollipog-maintenance; for d in dependency-bumps-2026-09-16 dependency-bumps-2026-09-09; do " +
+      "echo \"== $d\"; sed 's/\\x1b\\[[0-9;]*m//g' $S/$d/outdated.txt | grep -E '^│ [@a-z]' ; done",
+    "cat \"$S/$d/x\" ${S}/${d}/x $S$d/x",
+  ]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), null, command);
+  }
+});
+
+test("a variable never hides a word that reaches the guard state (#1632)", (t) => {
+  const { home, project, data, directory } = guardLayout(t);
+  for (const command of [
+    // A loop that names the hook directory, whatever the loop variable holds.
+    `for d in a b; do cat ${directory}/$d; done`,
+    `for f in s1 s2; do cat ../.wollipog-data/hooks/$f.protections.json; done`,
+    `for d in a b; do rm -rf ${home}/$d; done`,
+    // A static prefix that is an ancestor still names it: the variable lands somewhere beneath.
+    `cat ${data}/$X`,
+    `rm -rf ../.wollipog-data/$X`,
+    // An unset variable is empty, so `$A/$B` can be the root directory itself.
+    "rm -rf $A/$B",
+    "cat \"$S/$d\"",
+    "for d in a b; do rm -rf $S/$d; done",
+    `rm -rf $A${home}`,
+    // A literal piece after a variable is judged for landing inside the hook directory.
+    `cat $X${directory}/s1.protections.json`,
+    "cat $X../.wollipog-data/hooks/s1.protections.json",
+    "cp /tmp/fake.json $X/../.wollipog-data/hooks/../hooks/s1.protections.json && cat $Y../.wollipog-data/hooks/x",
+    // Quoting and braces do not change the word.
+    `cat "$X"'../.wollipog-data/hooks/s1.protections.json'`,
+    "cat ${X}../.wollipog-data/hooks/s1.protections.json",
+  ]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
+  }
+  // A variable in an inspection's words still disqualifies it: one opaque word could be `-R`.
+  assert.equal(commandTargetsGuardState(`ls $FLAGS ${home}`, project, directory), GUARD_STATE_REFUSAL);
+  assert.equal(commandTargetsGuardState(`ls ${home}/$D`, project, directory), GUARD_STATE_REFUSAL);
+});
+
+test("a command the tokenizer cannot parse is refused for that reason, not blamed on guard state (#1632)", (t) => {
+  const { project, directory } = guardLayout(t);
+  // A quoted heredoc is never expanded by the shell, but the tokenizer rejects a `${...}` holding a
+  // quote, which is what every JS template literal with a string argument looks like.
+  for (const command of ["node - <<'EOF'\nconsole.log(`${items.join(\", \")}`)\nEOF", "echo ${x"]) {
+    const verdict = commandTargetsGuardState(command, project, directory);
+    assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX), `${command}: ${verdict}`);
+    assert.ok(verdict?.includes("Bad substitution"), `${command}: ${verdict}`);
+    assert.notEqual(verdict, GUARD_STATE_REFUSAL);
+  }
+  // An unparsable command that names the hook directory outright keeps the guard-state refusal.
+  assert.equal(commandTargetsGuardState(`cat ${directory}/s1.protections.json \${x`, project, directory),
+    GUARD_STATE_REFUSAL);
+  // The refusal quotes the tokenizer's complaint, never the command text it echoes back.
+  const verdict = commandTargetsGuardState("echo ${secret-looking-text", project, directory);
+  assert.ok(verdict && !verdict.includes("secret-looking-text"), verdict ?? "");
+});
+
+const REFUSED_IN_1696 = new URL("./fixtures/guard-refusals-1632/", import.meta.url);
+
+test("the heredocs refused while delivering #1696 are attributed to their real cause (#1632)", (t) => {
+  const { project, directory } = guardLayout(t);
+  // Both carry a JS template literal inside a quoted heredoc, which the tokenizer rejects.
+  for (const name of ["heredoc-jsx-template.txt", "heredoc-js-template.txt"]) {
+    const command = readFileSync(new URL(name, REFUSED_IN_1696), "utf8").replaceAll("<session-worktree>", project);
+    const verdict = commandTargetsGuardState(command, project, directory);
+    assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX) && verdict.includes("Bad substitution"),
+      `${name}: ${verdict}`);
+  }
+  // This one parses, but its body's `// comment` reads as the word `//`: the root directory, which
+  // encloses the hook directory. A heredoc is not modelled, so it stays refused, and says why.
+  const comment = readFileSync(new URL("heredoc-js-comment.txt", REFUSED_IN_1696), "utf8")
+    .replaceAll("<session-worktree>", project);
+  const verdict = commandTargetsGuardState(comment, project, directory);
+  assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX) && verdict.includes("heredoc"), verdict ?? "");
+});
+
+test("an unmodelled command naming a directory that holds the guard state stays refused (#1632)", (t) => {
+  const { home, project, data, directory } = guardLayout(t);
+  // The fallback still refuses every command that reaches the hook directory. Only the reason says
+  // whether the command named the state itself or could not be inspected around a directory holding it.
+  for (const command of [
+    `(rm -rf ${home})`,
+    `ls ${home} | xargs rm -rf`,
+    `rm -rf \`echo ${data}\``,
+    `python3 - <<'EOF'\nimport shutil\nshutil.rmtree('${data}')\nEOF`,
+    `cat > /tmp/x <<'EOF'\n// a comment\nEOF`,
+  ]) {
+    const verdict = commandTargetsGuardState(command, project, directory);
+    assert.ok(verdict?.startsWith(GUARD_STATE_UNINSPECTABLE_PREFIX), `${command}: ${verdict}`);
+  }
+  for (const command of [
+    `python3 - <<'EOF'\nopen('../.wollipog-data/hooks/s1.protections.json', 'w').write('{}')\nEOF`,
+    `ls | cat ${directory}/s1.protections.json`,
+    `(cat ../.wollipog-data/hooks/s1.protections.json)`,
+  ]) {
+    assert.equal(commandTargetsGuardState(command, project, directory), GUARD_STATE_REFUSAL, command);
+  }
+  // An unmodelled command that names nothing related is still allowed, as before.
+  assert.equal(commandTargetsGuardState("cat > /tmp/x <<'EOF'\nhello\nEOF", project, directory), null);
+  assert.equal(commandTargetsGuardState("ls /usr | wc -l", project, directory), null);
 });
