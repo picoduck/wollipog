@@ -34,6 +34,8 @@ test("status text redaction removes every address and leaves other words", () =>
     `${HIDDEN_ACCOUNT} is not signed in; ${HIDDEN_ACCOUNT} is fine.`,
   );
   assert.equal(redactPersonalIdentifiers("\"john doe\"@example.com is not signed in."), `${HIDDEN_ACCOUNT} is not signed in.`);
+  assert.equal(redactPersonalIdentifiers("john'smith@example.com is not signed in."), `${HIDDEN_ACCOUNT} is not signed in.`);
+  assert.equal(accountLabelText("o'brien@example.com"), HIDDEN_ACCOUNT);
   assert.equal(redactPersonalIdentifiers("Usage appears after a provider response."), "Usage appears after a provider response.");
 });
 

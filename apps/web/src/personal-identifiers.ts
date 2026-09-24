@@ -18,8 +18,9 @@
  */
 
 // Deliberately broad: a false positive only costs one explicit reveal, while a miss exposes the value.
-// The local part may also be quoted (`"john doe"@example.com`), which may contain spaces.
-const EMAIL_ADDRESS = /(?:"[^"\n]*"|[^\s@<>()[\]\\,;:"']+)@[^\s@<>()[\]\\,;:"']+\.[^\s@<>()[\]\\,;:"'.]+/u;
+// The local part may also be quoted (`"john doe"@example.com`), which may contain spaces, and an
+// unquoted one may contain an apostrophe (`o'brien@example.com`), so redaction replaces all of it.
+const EMAIL_ADDRESS = /(?:"[^"\n]*"|[^\s@<>()[\]\\,;:"]+)@[^\s@<>()[\]\\,;:"']+\.[^\s@<>()[\]\\,;:"'.]+/u;
 const EMAIL_ADDRESSES = new RegExp(EMAIL_ADDRESS.source, "gu");
 
 /** Fixed-length so the mask never discloses the hidden value's length. */
