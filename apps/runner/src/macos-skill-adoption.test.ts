@@ -333,9 +333,40 @@ test("a macOS restore never reports a dangling recovery link after the harness d
   "restore_intent_durable", "c", () => { fs.renameSync(f.parent, moved); });
   assert.equal(run.code, 1);
   assert.equal(run.lines.includes("restored"), false);
-  assert.equal(fs.existsSync(join(moved, "alpha")), false, "no link was published inside the moved directory");
+  assert.equal(fs.readlinkSync(join(moved, "alpha")), join(fs.realpathSync(f.dataDir), "skills/store/alpha",
+    f.options.digest), "the managed link was neither moved nor replaced by a recovery link");
   assert.match(fs.readFileSync(join(moved, `.wollipog-adoption-${adopted.operationId}`, "original/SKILL.md"), "utf8"),
     /Original instructions/u);
+});
+
+test("a macOS restore never moves the managed link into a relocated journal", native, async (t) => {
+  const f = fixture(t);
+  const adopted = adoptMachineSkill(f.options);
+  assert.equal(adopted.status, "adopted");
+  if (adopted.status !== "adopted") return;
+  const journal = join(f.home, adopted.backupDirectory);
+  const intent = JSON.parse(fs.readFileSync(join(journal, "intent.json"), "utf8"));
+  const relocated = join(f.parent, "relocated-journal");
+  const run = await atCheckpoint(f.helper, macosRestoreArguments({ home: f.home, localSourceDirectory: ".codex/skills",
+    dataDir: f.dataDir, operationId: adopted.operationId, name: "alpha", digest: f.options.digest,
+    parentIdentity: intent.parentIdentity, sourceIdentity: intent.sourceIdentity }),
+  "restore_intent_durable", "c", () => { fs.renameSync(journal, relocated); });
+  assert.equal(run.code, 1);
+  assert.equal(fs.readlinkSync(f.source), join(fs.realpathSync(f.dataDir), "skills/store/alpha", f.options.digest),
+    "the live managed link stays at the source name");
+  assert.equal(fs.existsSync(join(relocated, "managed-link")), false);
+});
+
+test("a targeted macOS restore finds its journal beyond the bounded listing scan", native, (t) => {
+  const f = fixture(t);
+  const adopted = adoptMachineSkill(f.options);
+  assert.equal(adopted.status, "adopted");
+  if (adopted.status !== "adopted") return;
+  for (let index = 0; index < 20_000; index++) fs.writeFileSync(join(f.parent, `filler-${index}`), "");
+  assert.equal(listSkillAdoptionRecovery(f.home, f.dataDir, agents, [], f.recovery).truncated, true);
+  const restored = f.restore(adopted.operationId);
+  assert.equal(restored.status, "restored", JSON.stringify(restored));
+  assert.match(fs.readFileSync(join(f.source, "SKILL.md"), "utf8"), /Original instructions/u);
 });
 
 for (const stage of ["restore_intent_durable", "managed_link_preserved", "recovery_link_created"] as const) {

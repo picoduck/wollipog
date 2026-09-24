@@ -984,6 +984,63 @@ static int extract_field(const char *json, const char *field, char *output, size
   return 1;
 }
 
+/* Append descriptor-anchored facts for one journal entry, or return 0 when it is not a readable
+ * journal. The runner parses the journal and decides the recovery state. */
+static int inspect_journal(struct bytes *output, int parent, const char *entry_name, const char *operation,
+    const char *home_real, const char *data_real, const char *local) {
+  int backup = openat(parent, entry_name, DIRECTORY_FLAGS);
+  if (backup < 0) return 0;
+  size_t intent_length = 0;
+  char *intent = read_small_file(backup, "intent.json", &intent_length);
+  if (!intent) {
+    close(backup);
+    return 0;
+  }
+  char skill[65] = "", digest[65] = "";
+  if (!extract_field(intent, "name", skill, sizeof(skill)) || !valid_skill_name(skill) ||
+      !extract_field(intent, "digest", digest, sizeof(digest)) || !hex64(digest)) {
+    skill[0] = '\0';
+    digest[0] = '\0';
+  }
+  char original_id[48] = "";
+  int original = openat(backup, "original", DIRECTORY_FLAGS);
+  if (original >= 0) {
+    identity(original, original_id);
+    close(original);
+  }
+  unsigned char kind = PATH_OTHER, role = LINK_NONE;
+  char source_id[48] = "";
+  if (skill[0]) {
+    kind = (unsigned char)entry_kind(parent, skill);
+    if (kind == PATH_DIRECTORY) {
+      int source = openat(parent, skill, DIRECTORY_FLAGS);
+      if (source >= 0) {
+        identity(source, source_id);
+        close(source);
+      }
+    } else if (kind == PATH_LINK) {
+      char managed[PATH_MAX], recovery[PATH_MAX];
+      if (!data_real || snprintf(managed, sizeof(managed), "%s/skills/store/%s/%s", data_real, skill, digest) >=
+          (int)sizeof(managed)) managed[0] = '\0';
+      if (snprintf(recovery, sizeof(recovery), "%s/%s/%s/original", home_real, local, entry_name) >=
+          (int)sizeof(recovery)) fail();
+      role = managed[0] && link_equals(parent, skill, managed) ? LINK_MANAGED
+        : link_equals(parent, skill, recovery) ? LINK_RECOVERY : LINK_FOREIGN;
+    }
+  }
+  append_blob(output, operation, strlen(operation));
+  append_blob(output, intent, intent_length);
+  append_blob(output, skill, strlen(skill));
+  append_blob(output, digest, strlen(digest));
+  append_blob(output, original_id, strlen(original_id));
+  append_u8(output, kind);
+  append_blob(output, source_id, strlen(source_id));
+  append_u8(output, role);
+  free(intent);
+  close(backup);
+  return 1;
+}
+
 /* inspect HOME LOCAL DATA_DIR [OPERATION]
  * Report descriptor-anchored facts for each bounded journal. The runner parses the journal and
  * decides the recovery state; this helper never mutates anything. */
@@ -1012,6 +1069,17 @@ static void inspect_recovery(int argc, char **argv) {
   append_u32(&output, 0);
   uint32_t operations = 0;
   unsigned char truncated = 0;
+  if (only) {
+    /* A targeted lookup opens the named journal directly, like Linux restore, so it is never
+     * hidden behind the bounded listing scan of a very large harness directory. */
+    char entry_name[64];
+    snprintf(entry_name, sizeof(entry_name), "%s%s", JOURNAL_PREFIX, only);
+    if (inspect_journal(&output, parent, entry_name, only, home_real, data_real, local)) operations++;
+    patch_u32(&output, count_offset, operations);
+    append_u8(&output, truncated);
+    write_all(STDOUT_FILENO, output.data, output.length);
+    return;
+  }
   int duplicate = openat(parent, ".", DIRECTORY_FLAGS);
   if (duplicate < 0) fail();
   DIR *directory = fdopendir(duplicate);
@@ -1031,62 +1099,12 @@ static void inspect_recovery(int argc, char **argv) {
     }
     if (strncmp(entry->d_name, JOURNAL_PREFIX, strlen(JOURNAL_PREFIX)) != 0) continue;
     const char *operation = entry->d_name + strlen(JOURNAL_PREFIX);
-    if (!valid_uuid(operation) || (only && strcmp(operation, only) != 0)) continue;
+    if (!valid_uuid(operation)) continue;
     if (operations >= MAX_RECOVERY_OPERATIONS) {
       truncated = 1;
       break;
     }
-    int backup = openat(parent, entry->d_name, DIRECTORY_FLAGS);
-    if (backup < 0) continue;
-    size_t intent_length = 0;
-    char *intent = read_small_file(backup, "intent.json", &intent_length);
-    if (!intent) {
-      close(backup);
-      continue;
-    }
-    char skill[65] = "", digest[65] = "";
-    if (!extract_field(intent, "name", skill, sizeof(skill)) || !valid_skill_name(skill) ||
-        !extract_field(intent, "digest", digest, sizeof(digest)) || !hex64(digest)) {
-      skill[0] = '\0';
-      digest[0] = '\0';
-    }
-    char original_id[48] = "";
-    int original = openat(backup, "original", DIRECTORY_FLAGS);
-    if (original >= 0) {
-      identity(original, original_id);
-      close(original);
-    }
-    unsigned char kind = PATH_OTHER, role = LINK_NONE;
-    char source_id[48] = "";
-    if (skill[0]) {
-      kind = (unsigned char)entry_kind(parent, skill);
-      if (kind == PATH_DIRECTORY) {
-        int source = openat(parent, skill, DIRECTORY_FLAGS);
-        if (source >= 0) {
-          identity(source, source_id);
-          close(source);
-        }
-      } else if (kind == PATH_LINK) {
-        char managed[PATH_MAX], recovery[PATH_MAX];
-        if (!data_real || snprintf(managed, sizeof(managed), "%s/skills/store/%s/%s", data_real, skill, digest) >=
-            (int)sizeof(managed)) managed[0] = '\0';
-        if (snprintf(recovery, sizeof(recovery), "%s/%s/%s/original", home_real, local, entry->d_name) >=
-            (int)sizeof(recovery)) fail();
-        role = managed[0] && link_equals(parent, skill, managed) ? LINK_MANAGED
-          : link_equals(parent, skill, recovery) ? LINK_RECOVERY : LINK_FOREIGN;
-      }
-    }
-    append_blob(&output, operation, strlen(operation));
-    append_blob(&output, intent, intent_length);
-    append_blob(&output, skill, strlen(skill));
-    append_blob(&output, digest, strlen(digest));
-    append_blob(&output, original_id, strlen(original_id));
-    append_u8(&output, kind);
-    append_blob(&output, source_id, strlen(source_id));
-    append_u8(&output, role);
-    free(intent);
-    close(backup);
-    operations++;
+    if (inspect_journal(&output, parent, entry->d_name, operation, home_real, data_real, local)) operations++;
   }
   if (closedir(directory) != 0) fail();
   patch_u32(&output, count_offset, operations);
@@ -1118,6 +1136,9 @@ static void restore_recovery(int argc, char **argv) {
   snprintf(backup_name, sizeof(backup_name), "%s%s", JOURNAL_PREFIX, operation);
   int backup = openat(parent, backup_name, DIRECTORY_FLAGS);
   if (backup < 0) fail();
+  char backup_id[48];
+  identity(backup, backup_id);
+  char *backup_relative = join_path(local, backup_name);
   int original = openat(backup, "original", DIRECTORY_FLAGS);
   if (original < 0) fail();
   char current[65];
@@ -1137,6 +1158,9 @@ static void restore_recovery(int argc, char **argv) {
   enum path_kind preserved_kind = entry_kind(backup, "managed-link");
   if (source_kind == PATH_LINK) {
     if (preserved_kind != PATH_ABSENT || !link_equals(parent, name, managed)) fail();
+    /* Moving the live link is only safe into the journal that recovery inspection will find. */
+    check_path(home_real, local, parent_expected);
+    check_path(home_real, backup_relative, backup_id);
     if (renameatx_np(parent, name, backup, "managed-link", RENAME_EXCL) != 0) fail();
     flush(parent);
     flush(backup);
@@ -1157,8 +1181,7 @@ static void restore_recovery(int argc, char **argv) {
   /* The link text names the original by path, so the pinned parent and journal must still be where
    * that path leads, before and after publication; a moved parent would otherwise leave a dangling
    * link that the descriptor checks alone would accept. */
-  char *original_relative = join_path(local, backup_name);
-  char *original_path = join_path(original_relative, "original");
+  char *original_path = join_path(backup_relative, "original");
   check_path(home_real, local, parent_expected);
   check_path(home_real, original_path, source_expected);
   /* symlinkat() is the no-replace primitive: any last-instant occupant makes it fail untouched. */

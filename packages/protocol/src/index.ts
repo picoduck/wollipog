@@ -1117,7 +1117,6 @@ export function projectRunnerMessageForProtocol(
   return message;
 }
 
-/** Shared actionable copy for HTTP errors and disabled UI affordances. */
 export interface MachineSkillAdoptionRequirement {
   capability: RunnerProtocolCapability;
   label: string;
@@ -1146,6 +1145,7 @@ export function machineSkillAdoptionRecoveryRequirement(os: OS | undefined): Mac
   return null;
 }
 
+/** Shared actionable copy for HTTP errors and disabled UI affordances. */
 export function runnerCapabilityRequirement(
   protocolVersion: number | null | undefined,
   capability: RunnerProtocolCapability,
