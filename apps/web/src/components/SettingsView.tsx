@@ -1652,7 +1652,7 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
     description = (
       <>
         <span className="settings-inline-error" role="alert">{updateWarning(update.heldSessions)}</span>{" "}
-        <button type="button" className="btn sm" disabled={busy} onClick={update.install}>
+        <button type="button" className="btn sm" disabled={busy} onClick={() => update.install(true)}>
           {update.installing ? "Installing…" : "Install Anyway"}
         </button>{" "}
         <button type="button" className="btn ghost sm" disabled={busy} onClick={update.dismissHold}>Not Now</button>
@@ -1665,7 +1665,7 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
       <>
         {availableUpdateMessage(lastCheck.version)} Installing restarts Wollipog, which stops its local
         control plane and runner.{" "}
-        <button type="button" className="btn sm" onClick={update.install}>Install and Restart</button>{" "}
+        <button type="button" className="btn sm" onClick={() => update.install(false)}>Install and Restart</button>{" "}
         {check("Check Again")}
       </>
     ) : (

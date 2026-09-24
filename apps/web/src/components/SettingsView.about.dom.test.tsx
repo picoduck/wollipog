@@ -81,7 +81,7 @@ function setting(overrides: Partial<DesktopUpdateSetting> = {}): DesktopUpdateSe
     heldSessions: null,
     error: null,
     check: () => clicks.push("check"),
-    install: () => clicks.push("install"),
+    install: (confirmed) => clicks.push(confirmed ? "install-confirmed" : "install"),
     dismissHold: () => clicks.push("dismiss"),
     openRelease: () => clicks.push("open"),
     toggleAutomatic: () => clicks.push("automatic"),
@@ -166,7 +166,7 @@ test("a held install warns like closing does, and deferring is a choice", async 
   assert.equal(alert?.textContent, "1 session still has work running. Installing restarts Wollipog and will stop it.");
   await act(async () => view.button("Not Now")!.click());
   await act(async () => view.button("Install Anyway")!.click());
-  assert.deepEqual(update.clicks, ["dismiss", "install"]);
+  assert.deepEqual(update.clicks, ["dismiss", "install-confirmed"]);
   await view.unmount();
 });
 

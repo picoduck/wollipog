@@ -248,11 +248,24 @@ fn record_check(app: &tauri::AppHandle, update: Option<&Update>) -> UpdateCheck 
     check
 }
 
+/// Only an explicit confirmation may ride a recent warning.
+///
+/// The latch alone let any install request within the grace period through: a second, concurrent
+/// request from the other surface (Settings and the toast), or a plain "Install and Restart" right
+/// after "Not Now", restarted over live work without anyone choosing "Install Anyway".
+fn forget_unconfirmed_warning(latch: &Mutex<Option<Instant>>, confirmed: bool) {
+    if !confirmed {
+        *latch.lock().unwrap() = None;
+    }
+}
+
 /// Ask the close guard's question under this gesture's own latch. `Some(sessions)` holds.
-async fn hold_for_work(app: &tauri::AppHandle) -> Result<Option<usize>, String> {
+async fn hold_for_work(app: &tauri::AppHandle, confirmed: bool) -> Result<Option<usize>, String> {
     let task_app = app.clone();
     tokio::task::spawn_blocking(move || {
-        crate::exit_hold_for_work(&task_app, &task_app.state::<DesktopUpdater>().warned_at)
+        let latch = &task_app.state::<DesktopUpdater>().warned_at;
+        forget_unconfirmed_warning(latch, confirmed);
+        crate::exit_hold_for_work(&task_app, latch)
     })
     .await
     .map_err(|error| format!("Could not check for running work: {error}"))
@@ -321,6 +334,9 @@ pub(crate) async fn set_automatic_update_checks(
 /// only good for a moment, and a download can take minutes. A held attempt keeps the verified
 /// package, so confirming does not download it again.
 ///
+/// `confirmed` is the "Install Anyway" answer to this gesture's own warning, given within its grace
+/// period. Anything else is asked afresh.
+///
 /// The question is asked again after macOS or the AppImage has replaced the files, because work can
 /// start while they are being replaced. When the first answer was a confirmation the latch still
 /// covers it; when there was no work the first time, new work is warned about like any other, and
@@ -328,7 +344,9 @@ pub(crate) async fn set_automatic_update_checks(
 #[tauri::command]
 pub(crate) async fn install_desktop_update(
     app: tauri::AppHandle,
+    confirmed: Option<bool>,
 ) -> Result<InstallOutcome, String> {
+    let confirmed = confirmed.unwrap_or(false);
     if let InstallMode::ReleasePage { reason } = current_install_mode(&app) {
         return Err(reason);
     }
@@ -361,7 +379,7 @@ pub(crate) async fn install_desktop_update(
         }
     }
 
-    if let Some(sessions) = hold_for_work(&app).await? {
+    if let Some(sessions) = hold_for_work(&app, confirmed).await? {
         return Ok(InstallOutcome::HeldForWork { sessions });
     }
 
@@ -385,7 +403,9 @@ pub(crate) async fn install_desktop_update(
             bytes: Vec::new(),
             installed: true,
         });
-        if let Some(sessions) = hold_for_work(&app).await? {
+        // Confirmed or not, the latch now says what this request was told: a confirmation still
+        // covers it, and an unconfirmed request that found no work has nothing in it.
+        if let Some(sessions) = hold_for_work(&app, true).await? {
             return Ok(InstallOutcome::HeldForWork { sessions });
         }
     }
@@ -515,6 +535,21 @@ mod tests {
                 "{on:?}"
             );
         }
+    }
+
+    #[test]
+    fn only_a_confirmation_rides_a_recent_warning() {
+        let latch = Mutex::new(Some(Instant::now()));
+        forget_unconfirmed_warning(&latch, true);
+        assert!(
+            latch.lock().unwrap().is_some(),
+            "Install Anyway keeps its warning"
+        );
+        forget_unconfirmed_warning(&latch, false);
+        assert!(
+            latch.lock().unwrap().is_none(),
+            "a plain install request is asked afresh, never waved through by another's warning"
+        );
     }
 
     #[test]

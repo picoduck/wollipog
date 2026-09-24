@@ -41,13 +41,13 @@ export function DesktopUpdateNotifier({
     let disposed = false;
     let announced: string | null = null;
 
-    const install = async (): Promise<void> => {
-      const result = await installDesktopUpdate(desktop);
+    const install = async (confirmed = false): Promise<void> => {
+      const result = await installDesktopUpdate(confirmed, desktop);
       if (disposed || result.outcome !== "heldForWork") return;
       showToast(updateWarning(result.sessions), {
         tone: "error",
         durationMs: 0,
-        action: { label: "Install Anyway", busyLabel: "Installing…", run: install, failureLabel: "Update failed", retryLabel: "Retry Install" },
+        action: { label: "Install Anyway", busyLabel: "Installing…", run: () => install(true), failureLabel: "Update failed", retryLabel: "Retry Install" },
       });
     };
 
@@ -59,7 +59,7 @@ export function DesktopUpdateNotifier({
         if (disposed || !status) return;
         announced = result.version;
         const action: ToastOptions["action"] = status.install.mode === "inPlace"
-          ? { label: "Install and Restart", busyLabel: "Installing…", run: install, failureLabel: "Update failed", retryLabel: "Retry Install" }
+          ? { label: "Install and Restart", busyLabel: "Installing…", run: () => install(), failureLabel: "Update failed", retryLabel: "Retry Install" }
           : { label: "Open Release Page", run: () => openReleasePage(result.releaseUrl, desktop) };
         showToast(availableUpdateMessage(result.version), { durationMs: 0, action });
       } catch (cause) {

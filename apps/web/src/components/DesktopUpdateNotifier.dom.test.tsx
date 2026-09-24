@@ -107,7 +107,11 @@ test("installing while work is in flight turns into the warning, and its action 
   assert.equal(h.toasts[1]!.durationMs, 0);
   assert.equal(h.toasts[1]!.action?.label, "Install Anyway");
   await act(async () => { await h.toasts[1]!.action!.run(); });
-  assert.equal(h.calls.filter(({ command }) => command === "install_desktop_update").length, 2);
+  // Only the warning's own action is a confirmation; the first click is asked afresh.
+  assert.deepEqual(
+    h.calls.filter(({ command }) => command === "install_desktop_update").map(({ args }) => args),
+    [{ confirmed: false }, { confirmed: true }],
+  );
   assert.equal(h.toasts.length, 2, "a confirmed install restarts; it does not warn again");
   await unmount();
 });

@@ -31,6 +31,36 @@ const status: DesktopUpdateStatus = {
   lastCheck: null,
 };
 
+test("a check that finishes while the first status read is in flight is not overwritten by it", async () => {
+  const handlers = new Map<string, (payload: unknown) => void>();
+  let resolveStatus: (value: DesktopUpdateStatus) => void = () => undefined;
+  const desktop: DesktopUpdateRuntime = {
+    isTauri: () => true,
+    invoke: <T,>() => new Promise<T>((resolve) => { resolveStatus = resolve as (value: DesktopUpdateStatus) => void; }),
+    listen: async (event, handler) => {
+      handlers.set(event, handler);
+      return () => undefined;
+    },
+  };
+  let latest: DesktopUpdateSetting | undefined;
+  function Probe() {
+    latest = useDesktopUpdateSetting(desktop);
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => { root.render(<Probe />); });
+  // Subscribed before the read was even sent.
+  assert.ok(handlers.has(DESKTOP_UPDATE_CHECKED));
+  const available = { state: "available", version: "0.28.0", releaseUrl: "https://example.test", checkedAt: 5 };
+  await act(async () => { handlers.get(DESKTOP_UPDATE_CHECKED)!(available); });
+  await act(async () => { resolveStatus({ ...status, lastCheck: null }); });
+  assert.deepEqual(latest?.status?.lastCheck, available, "the older snapshot must not win");
+  await act(async () => root.unmount());
+  container.remove();
+});
+
 test("a background check that finishes after Settings loaded still reaches Settings", async () => {
   const handlers = new Map<string, (payload: unknown) => void>();
   let unlistened = 0;

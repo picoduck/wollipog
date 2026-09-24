@@ -36,7 +36,7 @@ test("every command the dashboard invokes is one the shell registers", async () 
   const { calls, desktop } = recorder();
   await readDesktopUpdateStatus(desktop);
   await checkForDesktopUpdate(true, desktop);
-  await installDesktopUpdate(desktop);
+  await installDesktopUpdate(false, desktop);
   await writeAutomaticUpdateChecks(false, desktop);
   await openReleasePage("https://github.com/picoduck/wollipog/releases/tag/v0.28.0", desktop);
   const handler = lib.slice(lib.indexOf("tauri::generate_handler!["), lib.indexOf("])", lib.indexOf("tauri::generate_handler![")));
@@ -47,7 +47,7 @@ test("every command the dashboard invokes is one the shell registers", async () 
   assert.deepEqual(calls.map(({ args }) => args), [
     undefined,
     { automatic: true },
-    undefined,
+    { confirmed: false },
     { enabled: false },
     { url: "https://github.com/picoduck/wollipog/releases/tag/v0.28.0" },
   ]);
@@ -64,7 +64,7 @@ test("the webview cannot reach the updater plugin around the exit guard", () => 
   // `install_desktop_update` holds a restart, so the webview must be granted none of them.
   assert.doesNotMatch(capabilities, /updater:/u);
   // Under the updater's OWN latch: a deferred install must not authorize a later window close.
-  assert.match(updates, /crate::exit_hold_for_work\(&task_app, &task_app\.state::<DesktopUpdater>\(\)\.warned_at\)/u);
+  assert.match(updates, /let latch = &task_app\.state::<DesktopUpdater>\(\)\.warned_at;\s*forget_unconfirmed_warning\(latch, confirmed\);\s*crate::exit_hold_for_work\(&task_app, latch\)/u);
   assert.match(lib, /let Some\(count\) = exit_hold_for_work\(app, &app\.state::<CloseGuard>\(\)\.warned_at\)/u);
 });
 

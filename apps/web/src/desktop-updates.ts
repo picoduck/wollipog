@@ -63,8 +63,12 @@ export function checkForDesktopUpdate(
   return desktop.invoke<DesktopUpdateCheck | null>("check_for_desktop_update", { automatic });
 }
 
-export function installDesktopUpdate(desktop: DesktopUpdateRuntime = runtime): Promise<DesktopUpdateOutcome> {
-  return desktop.invoke<DesktopUpdateOutcome>("install_desktop_update");
+/**
+ * `confirmed` is the "Install Anyway" answer to the shell's work-in-flight warning. Every other
+ * request is asked afresh, so a second surface's click is never taken as the confirmation.
+ */
+export function installDesktopUpdate(confirmed: boolean, desktop: DesktopUpdateRuntime = runtime): Promise<DesktopUpdateOutcome> {
+  return desktop.invoke<DesktopUpdateOutcome>("install_desktop_update", { confirmed });
 }
 
 export function writeAutomaticUpdateChecks(enabled: boolean, desktop: DesktopUpdateRuntime = runtime): Promise<boolean> {
@@ -103,7 +107,8 @@ export interface DesktopUpdateSetting {
   heldSessions: number | null;
   error: string | null;
   check: () => void;
-  install: () => void;
+  /** `confirmed` only for "Install Anyway". */
+  install: (confirmed?: boolean) => void;
   dismissHold: () => void;
   openRelease: () => void;
   toggleAutomatic: () => void;
@@ -129,20 +134,26 @@ export function useDesktopUpdateSetting(desktop: DesktopUpdateRuntime = runtime)
     if (!inDesktop) return;
     let disposed = false;
     let stop: (() => void) | undefined;
-    readDesktopUpdateStatus(desktop)
-      .then((next) => { if (!disposed) setStatus(next); })
-      .catch((cause) => { if (!disposed) setError(errorMessage(cause)); })
-      .finally(() => { if (!disposed) setLoading(false); });
     // The background notifier's check lands in the shell, not here. Without this, a Settings page
-    // opened at launch said "Not checked yet" for the rest of the session.
-    desktop.listen?.(DESKTOP_UPDATE_CHECKED, (payload) => {
+    // opened at launch said "Not checked yet" for the rest of the session. Subscribed BEFORE the
+    // status read, and kept aside, because a check can finish while that read is in flight: the
+    // read would then land with the older answer and overwrite the newer one.
+    let heard: DesktopUpdateCheck | null = null;
+    const newer = (next: DesktopUpdateStatus): DesktopUpdateStatus =>
+      heard && (!next.lastCheck || heard.checkedAt >= next.lastCheck.checkedAt) ? { ...next, lastCheck: heard } : next;
+    const subscribed = desktop.listen?.(DESKTOP_UPDATE_CHECKED, (payload) => {
       if (disposed || !payload || typeof payload !== "object") return;
-      const lastCheck = payload as DesktopUpdateCheck;
-      setStatus((current) => (current ? { ...current, lastCheck } : current));
+      heard = payload as DesktopUpdateCheck;
+      setStatus((current) => (current ? newer(current) : current));
     }).then((unlisten) => {
       if (disposed) unlisten();
       else stop = unlisten;
-    }).catch(() => undefined);
+    }).catch(() => undefined) ?? Promise.resolve();
+    void subscribed
+      .then(() => readDesktopUpdateStatus(desktop))
+      .then((next) => { if (!disposed) setStatus(next && newer(next)); })
+      .catch((cause) => { if (!disposed) setError(errorMessage(cause)); })
+      .finally(() => { if (!disposed) setLoading(false); });
     return () => { disposed = true; stop?.(); };
   }, [desktop, inDesktop]);
 
@@ -157,11 +168,11 @@ export function useDesktopUpdateSetting(desktop: DesktopUpdateRuntime = runtime)
       .finally(() => setChecking(false));
   }, [checking, desktop, installing, status]);
 
-  const install = useCallback(() => {
+  const install = useCallback((confirmed = false) => {
     if (!status || installing || checking) return;
     setInstalling(true);
     setError(null);
-    installDesktopUpdate(desktop)
+    installDesktopUpdate(confirmed, desktop)
       .then((result) => {
         if (result.outcome === "heldForWork") {
           setHeldSessions(result.sessions);
