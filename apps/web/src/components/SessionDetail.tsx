@@ -184,6 +184,8 @@ import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, Inf
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
+  composerCommandsForTrigger,
+  composerCommandsIncludeSkills,
   durableCommandPreservesAttachments,
   findComposerCommandTrigger,
   mapProviderComposerCommands,
@@ -3609,11 +3611,27 @@ function SessionDetailLoaded({
       providerCommandAttachmentPolicy,
     ),
   }), [agentCaps?.slashCommands, canAnswerPendingQuestion, canStopTurn, planSupported, providerCommandAttachmentPolicy]);
+  const composerSkillSigil = useMemo(() => composerCommandsIncludeSkills(composerCommands), [composerCommands]);
+  // A receipt outlives catalog rotation. The kind of every submission this view sent is known
+  // exactly; otherwise a current skill command id, then a name only skills use, identifies a skill.
+  const submissionIsSkillRef = useRef(new Map<string, boolean>());
+  const isSkillInvocation = useMemo(() => {
+    const commands = agentCaps?.slashCommands ?? [];
+    const skillIds = new Set(commands.flatMap((command) =>
+      command.source === "skill" && command.invocation ? [command.invocation.id] : []));
+    const skillOnlyNames = new Set(commands
+      .filter((command) => command.source === "skill")
+      .map((command) => command.name.toLowerCase())
+      .filter((name) => commands.every((command) => command.source === "skill" || command.name.toLowerCase() !== name)));
+    return (invocation: { submissionId: string; providerCommandId: string; commandName: string }) =>
+      submissionIsSkillRef.current.get(invocation.submissionId) ??
+      (skillIds.has(invocation.providerCommandId) || skillOnlyNames.has(invocation.commandName.toLowerCase()));
+  }, [agentCaps?.slashCommands]);
   const slashTrigger = useMemo(
     () => composerSelection.start === composerSelection.end
-      ? findComposerCommandTrigger(text, composerSelection.start)
+      ? findComposerCommandTrigger(text, composerSelection.start, { skillSigil: composerSkillSigil })
       : null,
-    [composerSelection.end, composerSelection.start, text],
+    [composerSelection.end, composerSelection.start, composerSkillSigil, text],
   );
   const workspaceReferencesSupported = runnerSupportsProtocol(runner?.protocolVersion, "workspaceReferences");
   const workspaceTrigger = useMemo(
@@ -3686,7 +3704,8 @@ function SessionDetailLoaded({
   };
   const slashMatches = useMemo(() => {
     if (!slashTrigger) return [];
-    const ranked = rankComposerCommands(composerCommands, slashTrigger.query).map((match) => match.command);
+    const ranked = rankComposerCommands(composerCommandsForTrigger(composerCommands, slashTrigger), slashTrigger.query)
+      .map((match) => match.command);
     return slashTrigger.query ? ranked : ranked.filter((command) => command.available);
   }, [composerCommands, slashTrigger]);
   const slashDismissKey = slashTrigger ? `${text}\u0000${composerSelection.start}` : null;
@@ -3865,6 +3884,7 @@ function SessionDetailLoaded({
         ...candidate,
       };
       commandSubmissionRetryRef.current = commandSubmission;
+      submissionIsSkillRef.current.set(commandSubmission.submissionId, invocation.command.providerSource === "skill");
     }
     const submissionVersion = composerDraftVersionRef.current;
     const generation = viewGenerationRef.current;
@@ -5166,6 +5186,7 @@ function SessionDetailLoaded({
               invocations={session.commandInvocations ?? []}
               timelineItems={items}
               historyPartial={isPartialHistory(eventWindow)}
+              isSkillInvocation={isSkillInvocation}
             />
             <SteeringReceipts
               attempts={session.steeringAttempts ?? []}

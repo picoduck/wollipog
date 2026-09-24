@@ -23,7 +23,7 @@ export interface ProviderComposerCommand {
   id?: string;
   name: string;
   description?: string;
-  providerSource?: "builtin" | "user" | "project" | "plugin";
+  providerSource?: AgentSlashCommand["source"];
   argumentHint?: string;
   executionMode?: Exclude<ComposerCommandExecutionMode, "app">;
   attachmentPolicy?: ComposerCommandAttachmentPolicy;
@@ -92,6 +92,8 @@ export interface ComposerCommandTrigger {
   query: string;
   /** Complete slash token, including any suffix after the caret. */
   raw: string;
+  /** `$` when the token is a Codex-style skill reference; absent for a slash command. */
+  sigil?: "$";
 }
 
 export type ComposerCommandResolution =
@@ -117,13 +119,15 @@ const PROVIDER_SOURCE_LABELS: Record<NonNullable<ProviderComposerCommand["provid
   user: "User",
   project: "Project",
   plugin: "Plugin",
+  skill: "Skill",
 };
 
 const PROVIDER_INVOCATION_PRECEDENCE: Record<NonNullable<ProviderComposerCommand["providerSource"]>, number> = {
   user: 0,
   project: 1,
-  plugin: 2,
-  builtin: 3,
+  skill: 2,
+  plugin: 3,
+  builtin: 4,
 };
 
 function advertisedName(value: string): { name: string; comparisonName: string } | null {
@@ -341,7 +345,8 @@ export function buildComposerCommandRegistry(input: {
       invocationAlias,
       ...(optionalText(provider.description) ? { description: optionalText(provider.description) } : {}),
       source: "provider",
-      sourceLabel: provider.providerSource ? PROVIDER_SOURCE_LABELS[provider.providerSource] : "Harness",
+      // A source newer than this client still renders as a harness command.
+      sourceLabel: (provider.providerSource && PROVIDER_SOURCE_LABELS[provider.providerSource]) || "Harness",
       ...(provider.providerSource ? { providerSource: provider.providerSource } : {}),
       ...(provider.providerCommandId ? { providerCommandId: provider.providerCommandId } : {}),
       ...(provider.catalogRevision ? { catalogRevision: provider.catalogRevision } : {}),
@@ -365,11 +370,20 @@ export function resolveComposerCommandInvocation(
   commands: readonly ComposerCommand[],
 ): ComposerCommandResolution {
   const trimmed = text.trim();
+  const skillReference = /^\$([^\s]+)(?:\s+([\s\S]*))?$/.exec(trimmed);
+  if (skillReference) {
+    // `$name` is Codex's skill spelling: it names only a skill, and ordinary `$` text stays text.
+    const skill = commands.find((candidate) => candidate.providerSource === "skill" &&
+      candidate.name.toLowerCase() === skillReference[1]!.toLowerCase());
+    return skill
+      ? { kind: "command", command: skill, arguments: (skillReference[2] ?? "").trimEnd(), originalText: text }
+      : { kind: "plaintext", text };
+  }
   const match = /^\/([^\s]+)(?:\s+([\s\S]*))?$/.exec(trimmed);
   if (!match) return { kind: "plaintext", text };
   const alias = match[1]!.toLowerCase();
   const exact = commands.find((candidate) => candidate.invocationAlias.toLowerCase() === alias);
-  const qualified = /^(builtin|user|project|plugin|provider):(.+)$/.exec(alias);
+  const qualified = /^(builtin|user|project|plugin|skill|provider):(.+)$/.exec(alias);
   const qualifiedProvider = !exact && qualified
     ? commands
         .filter((candidate) => candidate.source === "provider" &&
@@ -400,27 +414,54 @@ export function resolveComposerCommandInvocation(
 }
 
 const TRIGGER_TOKEN = /^\/([\p{L}\p{N}_.:-]*)$/u;
+const SKILL_TRIGGER_TOKEN = /^\$([\p{L}\p{N}_.:-]*)$/u;
 const TRIGGER_CHARACTER = /[\p{L}\p{N}_.:-]/u;
 
-export function findComposerCommandTrigger(text: string, caret: number): ComposerCommandTrigger | null {
+/** Find the command token being typed. `$` opens the menu only when the session advertises skills,
+ * so a `$` in any other composer stays ordinary text. */
+export function findComposerCommandTrigger(
+  text: string,
+  caret: number,
+  options: { skillSigil?: boolean } = {},
+): ComposerCommandTrigger | null {
   if (!Number.isSafeInteger(caret) || caret < 0 || caret > text.length) return null;
   const lineStart = text.lastIndexOf("\n", caret - 1) + 1;
   if (text.slice(0, lineStart).trim()) return null;
   const prefix = text.slice(lineStart, caret);
-  const prefixMatch = TRIGGER_TOKEN.exec(prefix);
+  const skill = options.skillSigil === true && prefix.startsWith("$");
+  const token = skill ? SKILL_TRIGGER_TOKEN : TRIGGER_TOKEN;
+  const prefixMatch = token.exec(prefix);
   if (!prefixMatch) return null;
 
   let tokenEnd = caret;
   while (tokenEnd < text.length && TRIGGER_CHARACTER.test(text[tokenEnd]!)) tokenEnd += 1;
-  if (text[tokenEnd] === "/") return null;
+  if (text[tokenEnd] === "/" || text[tokenEnd] === "$") return null;
   const raw = text.slice(lineStart, tokenEnd);
-  if (!TRIGGER_TOKEN.test(raw)) return null;
+  if (!token.test(raw)) return null;
   return {
     start: lineStart,
     end: tokenEnd,
     query: prefixMatch[1]!,
     raw,
+    ...(skill ? { sigil: "$" as const } : {}),
   };
+}
+
+/** True when a `$` token can name one of these commands. */
+export function composerCommandsIncludeSkills(commands: readonly ComposerCommand[]): boolean {
+  return commands.some((command) => command.providerSource === "skill");
+}
+
+/** The commands a trigger may offer: every command for `/`, and only skills, spelled `$name`,
+ * for `$`. */
+export function composerCommandsForTrigger(
+  commands: readonly ComposerCommand[],
+  trigger: ComposerCommandTrigger,
+): ComposerCommand[] {
+  if (trigger.sigil !== "$") return [...commands];
+  return commands
+    .filter((command) => command.providerSource === "skill")
+    .map((command) => ({ ...command, label: `$${command.name}` }));
 }
 
 export function replaceComposerCommandTrigger(
@@ -430,7 +471,7 @@ export function replaceComposerCommandTrigger(
 ): { text: string; caret: number } {
   let replaceEnd = trigger.end;
   while (text[replaceEnd] === " " || text[replaceEnd] === "\t") replaceEnd += 1;
-  const insertion = `/${command.invocationAlias} `;
+  const insertion = trigger.sigil === "$" ? `$${command.name} ` : `/${command.invocationAlias} `;
   return {
     text: `${text.slice(0, trigger.start)}${insertion}${text.slice(replaceEnd)}`,
     caret: trigger.start + insertion.length,

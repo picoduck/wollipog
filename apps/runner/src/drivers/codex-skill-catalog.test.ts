@@ -5,12 +5,32 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   codexCommandSkillName,
+  codexInvocableSkills,
+  codexSkillCommand,
   codexSkillInputNames,
   codexSkillPathIndex,
   codexSkillsFromList,
 } from "./codex-skill-catalog.js";
 
 const read = (path: string) => ({ type: "read", command: `sed -n '1,200p' ${path}`, name: "SKILL.md", path });
+
+test("skill commands carry the shortest provider description and one skill per name", () => {
+  const skills = codexSkillsFromList({ data: [{ cwd: "/repo", errors: [], skills: [
+    { name: "review", path: "/repo/.agents/skills/review/SKILL.md", enabled: true,
+      description: "Long description", shortDescription: "Legacy short", interface: { shortDescription: " Review  a PR " } },
+    { name: "deploy", path: "/u/.codex/skills/deploy/SKILL.md", enabled: true, description: "Deploy\nthe app" },
+    { name: "Review", path: "/u/.codex/skills/review/SKILL.md", enabled: true, description: "User review" },
+    { name: "bad name", path: "/u/.codex/skills/bad/SKILL.md", enabled: true },
+    { name: "bare", path: "/u/.codex/skills/bare/SKILL.md", enabled: true },
+  ] }] });
+  assert.equal(skills[0]!.description, "Review a PR");
+  assert.equal(skills[1]!.description, "Deploy the app");
+  assert.deepEqual(codexInvocableSkills(skills).map(codexSkillCommand), [
+    { name: "review", source: "skill", description: "Review a PR" },
+    { name: "deploy", source: "skill", description: "Deploy the app" },
+    { name: "bare", source: "skill" },
+  ], "the first registration of a case-folded name wins and untokenizable names are omitted");
+});
 
 test("codexSkillsFromList keeps enabled skills with a name and path across cwd entries", () => {
   const skills = codexSkillsFromList({ data: [

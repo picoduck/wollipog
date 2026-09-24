@@ -15,11 +15,13 @@ import type {
   Driver,
   DriverCommandInput,
   DriverCallbacks,
+  DriverOptions,
   PreparedDriverCommand,
 } from "./drivers/driver.js";
 import {
   providerStopError,
   SessionManager,
+  sessionCommandDisplayText,
   type SessionCommandInvocationLifecycle,
 } from "./session-manager.js";
 import { setGitRunnerForTests } from "./git-ops.js";
@@ -134,7 +136,7 @@ function harness(options: {
   fresh?: boolean;
   commands?: AgentSlashCommand[];
   invokeGate?: Promise<"end_turn" | "cancelled" | "refusal">;
-  driverKind?: "claude-code" | "acp";
+  driverKind?: "claude-code" | "acp" | "codex-app-server";
   newSessionGate?: Promise<string>;
   agentTurnId?: string;
 } = {}) {
@@ -146,6 +148,7 @@ function harness(options: {
   const invoked: PreparedDriverCommand[] = [];
   const prepared = new WeakSet<object>();
   let callbacks: DriverCallbacks | undefined;
+  let driverOptions: DriverOptions | undefined;
   const commands = options.commands ?? [{
     name: "deploy",
     source: "project" as const,
@@ -194,8 +197,9 @@ function harness(options: {
     store,
     "command-runner",
     undefined,
-    (_kind, _opts, cb) => {
+    (_kind, opts, cb) => {
       callbacks = cb;
+      driverOptions = opts;
       return driver;
     },
     undefined,
@@ -213,6 +217,9 @@ function harness(options: {
     (meta: SessionMeta) => {
       if (options.driverKind === "acp") return undefined;
       meta.sessionSlashCommands = commands;
+      if (options.driverKind === "codex-app-server") {
+        return { codexPrompts: commands.map((command) => ({ name: command.name, body: `Run ${command.name} on $1.` })) };
+      }
       return options.fresh === false
         ? undefined
         : {
@@ -226,9 +233,9 @@ function harness(options: {
     sessionId: "command-session",
     workspaceId: "workspace",
     workspacePath: root,
-    agentId: options.driverKind === "acp" ? "acp-test" : "claude-native",
+    agentId: options.driverKind === "acp" ? "acp-test" : options.driverKind === "codex-app-server" ? "codex-native" : "claude-native",
     driver: options.driverKind ?? "claude-code",
-    command: options.driverKind === "acp" ? "acp-agent" : "claude",
+    command: options.driverKind === "acp" ? "acp-agent" : options.driverKind === "codex-app-server" ? "codex" : "claude",
     args: [],
     env: {},
     useWorktree: false,
@@ -244,6 +251,7 @@ function harness(options: {
     preparedInputs,
     invoked,
     callbacks: () => callbacks!,
+    driverOptions: () => driverOptions,
     manager,
     start,
     cleanup: () => {
@@ -299,6 +307,7 @@ test("fresh v75 commands use a durable, provenance-preserving provider boundary 
       commandName: "deploy",
       argumentText: "production",
       executionMode: "passthrough",
+      commandSource: "project",
     }]);
     assert.deepEqual(firstReceipts.map((receipt) => receipt.state), ["queued", "started"]);
 
@@ -359,6 +368,60 @@ test("fresh v75 commands use a durable, provenance-preserving provider boundary 
     });
     assert.equal(h.store.readMeta("command-session")?.title, "");
     assert.equal(h.store.readMeta("command-session")?.titleSource, "generated");
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("command transcript text spells skills as $name and other commands as /name", () => {
+  assert.equal(sessionCommandDisplayText("review", "skill", "pr 42"), "$review pr 42");
+  assert.equal(sessionCommandDisplayText("review", "user", "a.ts"), "/review a.ts");
+  assert.equal(sessionCommandDisplayText("deploy", undefined, ""), "/deploy");
+});
+
+test("Codex authorizes prompts at thread start, adds skills when they arrive, and records skills as $name", async () => {
+  const h = harness({
+    driverKind: "codex-app-server",
+    commands: [{ name: "review", source: "user", description: "Review a change" }],
+  });
+  try {
+    assert.equal(await h.start(), true);
+    assert.deepEqual(h.driverOptions()?.codexPrompts, [{ name: "review", body: "Run review on $1." }],
+      "prompt bodies reach the driver without entering session metadata");
+    const initial = h.manager.sessionSnapshots()[0]?.agentCapabilities?.slashCommands ?? [];
+    assert.deepEqual(initial.map(({ name, source }) => [name, source]), [["review", "user"]]);
+    assert.ok(initial[0]?.invocation, "prompts are invocable as soon as the thread is ready");
+
+    const catalog: AgentSlashCommand[] = [
+      { name: "review", source: "user", description: "Review a change" },
+      { name: "review", source: "skill", description: "Review skill" },
+    ];
+    h.callbacks().onSessionCommands!(catalog);
+    assert.deepEqual(h.store.readMeta("command-session")?.sessionSlashCommands, catalog);
+    const live = h.manager.sessionSnapshots()[0]?.agentCapabilities?.slashCommands ?? [];
+    assert.deepEqual(live.map(({ name, source }) => [name, source]), [["review", "user"], ["review", "skill"]]);
+    const skill = live[1]!;
+    assert.ok(skill.invocation);
+    const refreshes = h.sent.filter((event) => event.type === "session_runtime_updated").length;
+    h.callbacks().onSessionCommands!(catalog.map((command) => ({ ...command })));
+    assert.equal(h.manager.sessionSnapshots()[0]?.agentCapabilities?.slashCommands?.[1]?.invocation?.id,
+      skill.invocation.id, "an unchanged catalog keeps its command IDs");
+    assert.ok(h.sent.filter((event) => event.type === "session_runtime_updated").length >= refreshes);
+
+    const receipts: Receipt[] = [];
+    assert.equal(h.manager.invokeSessionCommand(
+      message(skill.invocation, { argumentText: "pr 42" }),
+      receiptLifecycle("invocation-one", receipts),
+    ), true);
+    await waitFor(() => h.invoked.length === 1, "the skill command should start");
+    assert.deepEqual(h.preparedInputs, [{
+      commandName: "review",
+      argumentText: "pr 42",
+      executionMode: "passthrough",
+      commandSource: "skill",
+    }]);
+    const userEvent = h.store.readEvents("command-session").find((event) => event.payload.kind === "user_message");
+    assert.equal(userEvent?.payload.kind === "user_message" && userEvent.payload.text, "$review pr 42");
   } finally {
     h.cleanup();
   }

@@ -71,6 +71,7 @@ import type {
   WorktreeRecoveryView,
 } from "@wollipog/protocol";
 import type { WorktreeHookSnapshot } from "./worktree-setup.js";
+import { SESSION_COMMAND_AUTHORITY_PROTOCOL_VERSION } from "./session-command-authority.js";
 
 /** A session's persisted metadata (superset of the protocol SessionSnapshot with runner-only fields). */
 export interface SessionMeta {
@@ -2893,9 +2894,13 @@ export function metaToSnapshot(
     controlPlaneProtocolVersion >= NATIVE_ELICITATION_OVERLAY_PROTOCOL_VERSION
     ? m.capabilities?.elicitation
     : undefined;
+  // A skill is unambiguous only through runner-minted command authority: a pre-authority peer
+  // dispatches by bare name, which a same-named custom prompt would capture.
   const nativeSlashCommands = controlPlaneProtocolVersion != null &&
     controlPlaneProtocolVersion >= NATIVE_SLASH_COMMAND_OVERLAY_PROTOCOL_VERSION
-    ? m.sessionSlashCommands
+    ? controlPlaneProtocolVersion < SESSION_COMMAND_AUTHORITY_PROTOCOL_VERSION
+      ? m.sessionSlashCommands?.filter((command) => command.source !== "skill")
+      : m.sessionSlashCommands
     : undefined;
   const config = controlPlaneProtocolVersion != null &&
     controlPlaneProtocolVersion >= RUNNER_CAPABILITY_MIN_PROTOCOL.codexServiceTiers

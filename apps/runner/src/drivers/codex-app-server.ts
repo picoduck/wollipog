@@ -16,6 +16,7 @@ import {
   DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH,
   type AgentCapabilities,
   type AgentQuestion,
+  type AgentSlashCommand,
   type AuthoritativeSubagentLifecycle,
   type PlanEntry,
   type PromptImage,
@@ -36,9 +37,11 @@ import type {
   CompletedCommandReconciliationProof,
   Driver,
   DriverCallbacks,
+  DriverCommandInput,
   DriverOptions,
   DriverSteerInput,
   DriverSteerResult,
+  PreparedDriverCommand,
   StopReason,
 } from "./driver.js";
 import { classifyPoisonedProviderHistory, poisonedProviderHistoryMessage } from "./poisoned-provider-history.js";
@@ -47,10 +50,14 @@ import { isProviderAuthenticationFailure } from "./provider-auth-failure.js";
 import { stagePromptImages, type StagedPromptImages } from "./prompt-images.js";
 import {
   codexCommandSkillName,
+  codexInvocableSkills,
+  codexSkillCommand,
   codexSkillInputNames,
   codexSkillPathIndex,
   codexSkillsFromList,
+  type CodexSkill,
 } from "./codex-skill-catalog.js";
+import { codexPromptCommand, expandCodexPrompt, type CodexPromptTemplate } from "../discovery/codex-prompts.js";
 import { SKILL_TOOL_KIND, skillToolTitle } from "./skill-tool.js";
 import { codexOrchestratorMcpArgs } from "../orchestrator-preset.js";
 import {
@@ -465,6 +472,11 @@ export class CodexAppServerDriver implements Driver {
   /** Registered skill name by exact SKILL.md path from `skills/list`. Empty until the first
    * lookup lands, and permanently on servers without it, so commands then stay plain. */
   private skillPaths: ReadonlyMap<string, string> = new Map();
+  /** Skills a command may invoke: one per name, from the latest applied `skills/list`. */
+  private invocableSkills: readonly CodexSkill[] = [];
+  /** Catalog last reported through onSessionCommands, so unchanged refreshes stay silent. */
+  private reportedCommandFingerprint: string | null = null;
+  private readonly preparedCommands = new Set<PreparedDriverCommand>();
   /** The peer with a `skills/list` lookup in flight; later invalidations coalesce into one rerun. */
   private skillCatalogPeer: JsonRpcPeer | null = null;
   private skillCatalogStale = false;
@@ -972,7 +984,93 @@ export class CodexAppServerDriver implements Driver {
     }
   }
 
+  /** The complete invocable catalog: this launch's custom prompts, then its skills. */
+  sessionCommands(): AgentSlashCommand[] {
+    return [
+      ...(this.opts.codexPrompts ?? []).map(codexPromptCommand),
+      ...this.invocableSkills.map(codexSkillCommand),
+    ];
+  }
+
+  private reportSessionCommands(): void {
+    const commands = this.sessionCommands();
+    const fingerprint = JSON.stringify(commands);
+    if (fingerprint === this.reportedCommandFingerprint) return;
+    this.reportedCommandFingerprint = fingerprint;
+    this.cb.onSessionCommands?.(commands);
+  }
+
+  /** Resolve an advertised command by name. A source pins the kind; without one (a legacy
+   * `/name` prompt), a custom prompt wins over a same-named skill, as in the composer. */
+  private resolveSessionCommand(
+    name: string,
+    source?: AgentSlashCommand["source"],
+  ): { kind: "prompt"; prompt: CodexPromptTemplate } | { kind: "skill"; skill: CodexSkill } | null {
+    const find = <T extends { name: string }>(entries: readonly T[]) =>
+      entries.find((entry) => entry.name === name) ??
+      entries.find((entry) => entry.name.toLowerCase() === name.toLowerCase());
+    if (source !== "skill") {
+      const prompt = find(this.opts.codexPrompts ?? []);
+      if (prompt) return { kind: "prompt", prompt };
+      if (source === "user") return null;
+    }
+    const skill = find(this.invocableSkills);
+    return skill ? { kind: "skill", skill } : null;
+  }
+
+  /** Provider input for a resolved command: an expanded prompt, or Codex's documented `$name`
+   * text with the structured skill item it resolves to. */
+  private commandInput(
+    resolved: NonNullable<ReturnType<CodexAppServerDriver["resolveSessionCommand"]>>,
+    argumentText: string,
+  ): { text: string; items: Json[] } {
+    if (resolved.kind === "prompt") return { text: expandCodexPrompt(resolved.prompt.body, argumentText), items: [] };
+    const { name, path } = resolved.skill;
+    return {
+      text: `$${name}${argumentText.trim() ? ` ${argumentText.trim()}` : ""}`,
+      items: [{ type: "skill", name, path }],
+    };
+  }
+
+  prepareCommand(input: DriverCommandInput): PreparedDriverCommand {
+    if (input.executionMode !== "passthrough") {
+      throw new Error(`Codex does not support ${input.executionMode} session commands`);
+    }
+    if (!input.commandName || /\s/u.test(input.commandName) ||
+        !this.resolveSessionCommand(input.commandName, input.commandSource)) {
+      throw new Error(`unknown Codex command: ${input.commandName}`);
+    }
+    const prepared = Object.freeze({
+      commandName: input.commandName,
+      argumentText: input.argumentText,
+      executionMode: "passthrough" as const,
+      ...(input.commandSource ? { commandSource: input.commandSource } : {}),
+    }) as PreparedDriverCommand;
+    this.preparedCommands.add(prepared);
+    return prepared;
+  }
+
+  invokeCommand(command: PreparedDriverCommand): Promise<StopReason> {
+    if (!this.preparedCommands.delete(command)) {
+      throw new Error("session command was not prepared by this Codex driver");
+    }
+    const resolved = this.resolveSessionCommand(command.commandName, command.commandSource);
+    if (!resolved) throw new Error(`Codex command is no longer available: ${command.commandName}`);
+    const input = this.commandInput(resolved, command.argumentText);
+    return this.submitTurn(input.text, [], input.items);
+  }
+
   async prompt(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
+    // A legacy (pre-authority) command arrives as a bare name; expand it like an invoked one.
+    const resolved = slashCommand ? this.resolveSessionCommand(slashCommand) : null;
+    if (resolved) {
+      const input = this.commandInput(resolved, text);
+      return this.submitTurn(input.text, images, input.items);
+    }
+    return this.submitTurn(slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text, images, []);
+  }
+
+  private async submitTurn(base: string, images: PromptImage[] | undefined, commandItems: Json[]): Promise<StopReason> {
     if (this.promptBusy) {
       this.cb.onEvent({ kind: "error", message: "codex app-server already has a turn in progress" });
       return "refusal";
@@ -1013,9 +1111,8 @@ export class CodexAppServerDriver implements Driver {
       // fails or a skewed server omits turn/started.
       this.setSteeringTurn(null);
 
-      const base = slashCommand ? `/${slashCommand}${text ? " " + text : ""}`.trim() : text;
       const input: Json[] = base || !staged.inputs.length ? [{ type: "text", text: base }] : [];
-      input.push(...staged.inputs);
+      input.push(...commandItems, ...staged.inputs);
       const protections = this.opts.managedWorktreeProtections?.() ?? [];
       const params = buildCodexTurnParams(
         this.config,
@@ -2079,7 +2176,11 @@ export class CodexAppServerDriver implements Driver {
     Promise.resolve()
       .then(() => peer.requestWithDeadline<Json>("skills/list", { cwds: [this.cwd] }, Date.now() + SKILL_CATALOG_TIMEOUT_MS))
       .then((response) => {
-        if (this.peer === peer && !this.disposed) this.skillPaths = codexSkillPathIndex(codexSkillsFromList(response));
+        if (this.peer !== peer || this.disposed) return;
+        const skills = codexSkillsFromList(response);
+        this.skillPaths = codexSkillPathIndex(skills);
+        this.invocableSkills = codexInvocableSkills(skills);
+        this.reportSessionCommands();
       }, () => {})
       .finally(settle);
   }

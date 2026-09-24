@@ -209,6 +209,7 @@ import { invalidateStaleNativeInstallation, staleNativeInstallationKey } from ".
 import {
   prepareClaudeSlashCommandCatalog,
 } from "./discovery/claude-commands.js";
+import { codexPromptCommand, prepareCodexPromptCatalog } from "./discovery/codex-prompts.js";
 import { discoverRegistryAgents, updateRegistryApproval } from "./discovery/acp-registry.js";
 import {
   cacheSkillSyncEntry,
@@ -910,11 +911,18 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
     } else if (commandPreparation.outcome === "discarded") {
       log(`${commandPreparation.error}; discarded mismatched prior session command catalog`);
     }
+    // Codex skills come from the live thread; only custom prompts are read before launch. The
+    // persisted catalog starts from them and the driver re-adds skills once `skills/list` answers.
+    const codexPrompts = await prepareCodexPromptCatalog(meta);
+    if (codexPrompts.outcome === "failed") log(`${codexPrompts.error}; advertising no custom prompts for this launch`);
+    const launchPrompts = codexPrompts.outcome === "prepared" ? codexPrompts.prompts : [];
+    if (codexPrompts.outcome !== "not_applicable") meta.sessionSlashCommands = launchPrompts.map(codexPromptCommand);
     return {
       sessionCommandCatalogFresh:
         meta.driver === "claude-code" &&
         (commandPreparation.outcome === "updated" || commandPreparation.outcome === "cleared"),
       sessionCommandCatalogProvenance: JSON.stringify(meta.sessionSlashCommandProvenance ?? null),
+      ...(codexPrompts.outcome !== "not_applicable" ? { codexPrompts: launchPrompts } : {}),
     };
   },
   createPromptImageFetcher({

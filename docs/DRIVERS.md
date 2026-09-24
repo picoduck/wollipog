@@ -951,8 +951,16 @@ all existing app-server capabilities. Other startup failures are not retried or 
    are deliberately ignored because the runner event log already owns displayed history. Note
    app-server enums are **camelCase**: `readOnly` / `workspaceWrite` / `dangerFullAccess`.
 3. `turn/start` `{threadId, input:[{type:"text",text:"…"},{type:"localImage",path:"…"}]}`
-   (+ `{type:"skill",name,path}` items for slash-command/skill invocation) → streams notifications
-   until `turn/completed`. PNG/JPEG/WebP attachments are validated at the browser, control plane,
+   (+ a `{type:"skill",name,path}` item when a skill command is invoked) → streams notifications
+   until `turn/completed`. Session commands come from two sources. Custom prompts are the top-level
+   `.md` files in `$CODEX_HOME/prompts` (default `~/.codex/prompts`). They are read with the bounded
+   Claude command scanner on host targets only, never on container or cloud targets. The app-server
+   neither lists nor expands prompts, so the runner substitutes `$1`..`$9`, `$ARGUMENTS`, `NAME=value`
+   placeholders, and `$$` itself and sends the result as text; arguments given to a prompt without
+   placeholders follow it after a blank line. Skills come from `skills/list` on thread start and
+   resume, and again on `skills/changed`; invoking one sends `$name args` text with the skill item.
+   Prompts are advertised with source `user` ("User") and skills with source `skill` ("Skill"); the
+   transcript shows `/name args` for a prompt and `$name args` for a skill. PNG/JPEG/WebP attachments are validated at the browser, control plane,
    and runner; capped at 6 images and 8 MiB each. The browser uploads exact bytes to session-scoped,
    SHA-256-addressed artifacts, while prompt JSON, SQLite events, runner command journals, and
    WebSocket frames carry only bounded artifact references. The runner reads its active credential
@@ -1244,7 +1252,7 @@ for the credential lifecycle, route/audit boundary, commands, and compatibility 
 | model | select `model` config option | `--model <alias\|id>` | `thread/start.model` / `-m` |
 | effort | select `thought_level` config option | `--effort low..max` | `-c model_reasoning_effort=` / `model/list` |
 | approval preset | session mode or select `mode` option | `--permission-mode` | `approvalPolicy` + `sandbox` |
-| slash command | advertised command rendered as `/name` prompt text | `/name` inline in prompt | `$name` / `{type:"skill"}` input item |
+| slash command | advertised command rendered as `/name` prompt text | `/name` inline in prompt | custom prompt expanded runner-side; skill as `$name` text plus a `{type:"skill"}` input item |
 | approve/deny | select ACP optionId | stdio `control_response` allow/deny | reply `{decision}` to server-request |
 | session resume | ACP session id | `--session-id` / `--resume` | `thread/resume {threadId}` |
 | auth | per adapter | `CLAUDE_CODE_OAUTH_TOKEN` (subscription) | `~/.codex/auth.json` (ChatGPT plan) |

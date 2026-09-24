@@ -110,6 +110,65 @@ test("authorized provider commands use durable dispatch and preserve attachments
   await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
 });
 
+test("Codex prompts and skills are labeled by source and $name dispatches the same skill as /name", async ({ page }) => {
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
+    {
+      name: "summarize",
+      source: "user",
+      description: "Summarize the branch for review",
+      argumentHint: "[focus]",
+      invocation: { id: "codex-prompt-summarize", catalogRevision: "codex-catalog-1", executionMode: "passthrough" },
+    },
+    {
+      name: "review",
+      source: "skill",
+      description: "Review a pull request with a second model",
+      invocation: { id: "codex-skill-review", catalogRevision: "codex-catalog-1", executionMode: "passthrough" },
+    },
+  ], []));
+
+  const composer = page.locator(".composer-input");
+  await composer.fill("/");
+  const listbox = page.getByRole("listbox", { name: "Slash Commands" });
+  await expect(page.getByRole("option", { name: /\/summarize/ })).toContainText("User");
+  await expect(page.getByRole("option", { name: /\/review/ })).toContainText("Skill");
+
+  await composer.fill("$");
+  await expect(listbox).toBeVisible();
+  await expect(page.getByRole("option")).toHaveCount(1);
+  await expect(page.getByRole("option", { name: /\$review/ })).toContainText("Skill");
+  await page.keyboard.press("Tab");
+  await expect(composer).toHaveValue("$review ");
+  await composer.fill("$review pr 42");
+  await page.keyboard.press("Enter");
+  await composer.fill("/review pr 43");
+  await page.keyboard.press("Enter");
+  await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionCommandRequests()
+    .map(({ request }) => [request.providerCommandId, request.argumentText])))
+    .toEqual([["codex-skill-review", "pr 42"], ["codex-skill-review", "pr 43"]]);
+  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("$review pr 42");
+
+  // A rotated catalog that adds a same-named prompt must not respell the outstanding skill receipt.
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
+    { name: "review", source: "user", invocation: { id: "codex-prompt-review", catalogRevision: "codex-catalog-2", executionMode: "passthrough" } },
+    { name: "review", source: "skill", invocation: { id: "codex-skill-review-2", catalogRevision: "codex-catalog-2", executionMode: "passthrough" } },
+  ], []));
+  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("$review pr 42");
+
+  // The reverse: a prompt receipt stays /name when a later catalog keeps only the same-named skill.
+  await composer.fill("/user:review notes");
+  await page.keyboard.press("Enter");
+  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("/review notes");
+  await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
+    { name: "review", source: "skill", invocation: { id: "codex-skill-review-3", catalogRevision: "codex-catalog-3", executionMode: "passthrough" } },
+  ], []));
+  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("/review notes");
+  await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("$review pr 42");
+
+  await composer.fill("$HOME stays text");
+  await expect(listbox).toBeHidden();
+});
+
 test("a pending composer config survives a durable command and applies to the next ordinary prompt", async ({ page }) => {
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([{
     name: "deploy",

@@ -1217,7 +1217,8 @@ export interface AgentModelServiceTier {
 
 export interface AgentSlashCommand {
   name: string;
-  source: "builtin" | "user" | "project" | "plugin";
+  /** `skill` is a provider skill invoked as a command, such as a Codex `$name` skill. */
+  source: "builtin" | "user" | "project" | "plugin" | "skill";
   description?: string;
   /** Provider-authored argument usage, such as "<goal>" or "[on|off]". */
   argumentHint?: string;

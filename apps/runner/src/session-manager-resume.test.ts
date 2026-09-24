@@ -3601,10 +3601,13 @@ test("value-identical session command discovery does not publish a redundant run
     h.manager.prompt("resume-session", "continue", []);
     await tick();
     await tick();
-    assert.equal(
-      h.sent.filter((message) => message.type === "session_runtime_updated").length,
-      0,
-    );
+    // Rediscovery itself publishes nothing. The one update is the Codex thread authorizing its
+    // (unchanged) catalog, which is what makes those commands invocable.
+    const updates = h.sent.filter((message) => message.type === "session_runtime_updated");
+    assert.equal(updates.length, 1);
+    const [update] = updates;
+    assert.ok(update?.type === "session_runtime_updated" &&
+      update.snapshot.agentCapabilities?.slashCommands?.every((command) => command.invocation));
     assert.deepEqual(h.store.readMeta("resume-session")?.sessionSlashCommands, prior);
   } finally {
     h.manager.shutdownAll();

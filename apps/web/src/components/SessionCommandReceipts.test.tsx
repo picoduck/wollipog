@@ -147,3 +147,16 @@ test("a bounded window is not evidence that a completed command lost its message
     ["completed"],
   );
 });
+
+test("skill receipts use the $name spelling the transcript records", () => {
+  const html = renderToStaticMarkup(React.createElement(SessionCommandReceipts, {
+    invocations: [
+      invocation("started", { commandName: "review", argumentText: "pr 42" }),
+      invocation("queued", { invocationId: "ci-prompt", commandName: "summarize", argumentText: "" }),
+    ],
+    timelineItems: [],
+    isSkillInvocation: (candidate) => candidate.commandName === "review",
+  }));
+  assert.match(html, /\$review pr 42/);
+  assert.match(html, />\/summarize</);
+});

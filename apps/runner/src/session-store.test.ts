@@ -923,6 +923,20 @@ test("v74 native snapshots publish an explicit session command catalog, includin
   );
 });
 
+test("skill commands reach only control planes that dispatch through command authority", () => {
+  const prompt = { name: "review", source: "user" as const };
+  const skill = { name: "review", source: "skill" as const };
+  assert.deepEqual(
+    metaToSnapshot(meta({ sessionSlashCommands: [prompt, skill] }), 74).agentCapabilities,
+    { slashCommands: [prompt] },
+    "a pre-authority peer dispatches by bare name, which the same-named prompt would capture",
+  );
+  assert.deepEqual(
+    metaToSnapshot(meta({ sessionSlashCommands: [prompt, skill] }), 75).agentCapabilities,
+    { slashCommands: [prompt, skill] },
+  );
+});
+
 test("metaToSnapshot publishes raw ACP session overrides instead of the merged effective context", () => {
   const effective = { mcpServers: [{ type: "http" as const, name: "docs", url: "https://new.example/mcp" }] };
   const overrides = { mcpServers: [{ type: "http" as const, name: "docs", url: "https://old.example/mcp", disabled: true }] };

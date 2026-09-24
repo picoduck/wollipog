@@ -82,7 +82,7 @@ export interface ClaudeSlashCommandDiscoveryDeps {
   openNativeDirectory?: (path: string) => Promise<Dir>;
 }
 
-interface CommandFile {
+export interface CommandFile {
   path: string;
   name: string;
   source: "user" | "project";
@@ -98,7 +98,7 @@ interface CommandRootBinding {
   caseSensitiveRoot: boolean;
 }
 
-interface NativeCommandFileDiscovery {
+export interface NativeCommandFileDiscovery {
   files: CommandFile[];
   binding?: CommandRootBinding;
 }
@@ -182,7 +182,10 @@ function frontmatterValue(
 
 /** Parse only the metadata Claude documents for command files. This is intentionally not a general
  * YAML parser: aliases, tags, objects, and executable extensions are never interpreted. */
-export function parseClaudeCommandMetadata(content: string): {
+export function parseClaudeCommandMetadata(content: string, options: {
+  /** Claude documents a first-body-line fallback; callers that must not expose body text omit it. */
+  descriptionFromBody?: boolean;
+} = {}): {
   description?: string;
   argumentHint?: string;
 } {
@@ -226,7 +229,7 @@ export function parseClaudeCommandMetadata(content: string): {
   }
 
   const description = boundedText(
-    frontmatterDescription ?? firstBodyLine ?? "",
+    frontmatterDescription ?? (options.descriptionFromBody === false ? undefined : firstBodyLine) ?? "",
     CLAUDE_COMMAND_LIMITS.maxDescriptionCharacters,
   );
   const hint = boundedText(argumentHint ?? "", CLAUDE_COMMAND_LIMITS.maxArgumentHintCharacters);
@@ -354,7 +357,7 @@ function sameCanonicalPath(left: string, right: string, caseSensitive: boolean):
   return relative(left, right) === "" && relative(right, left) === "";
 }
 
-async function validateCommandRootBinding(
+export async function validateCommandRootBinding(
   binding: CommandRootBinding,
   deadline: number,
 ): Promise<void> {
@@ -378,7 +381,7 @@ async function validateCommandRootBinding(
   }
 }
 
-async function readBoundedNative(
+export async function readBoundedNative(
   path: string,
   canonicalRoot: string,
   deadline: number,
@@ -416,12 +419,15 @@ async function readBoundedNative(
   }
 }
 
-async function nativeCommandFiles(
+/** Bounded, containment-checked enumeration of `.md` command files below one source root. Shared
+ * with Codex prompt discovery, which reads only the root's own entries (`maxDepth: 0`). */
+export async function nativeCommandFiles(
   root: string,
   source: CommandFile["source"],
   deadline: number,
   options: {
     caseSensitiveRoot: boolean;
+    maxDepth?: number;
     beforeDirectoryRead?: ClaudeSlashCommandDiscoveryDeps["beforeNativeDirectoryRead"];
     beforeRootRealpath?: ClaudeSlashCommandDiscoveryDeps["beforeNativeRootRealpath"];
     openDirectory: (path: string) => Promise<Dir>;
@@ -518,7 +524,7 @@ async function nativeCommandFiles(
     for (const entry of entries) {
       if (files.length >= CLAUDE_COMMAND_LIMITS.maxFilesPerSource) break;
       const path = join(current.dir, entry.name);
-      if (entry.isDirectory() && current.depth < CLAUDE_COMMAND_LIMITS.maxDepth) {
+      if (entry.isDirectory() && current.depth < (options.maxDepth ?? CLAUDE_COMMAND_LIMITS.maxDepth)) {
         pending.push({ dir: path, depth: current.depth + 1 });
       } else if (entry.isFile()) {
         const name = commandName(relative(canonicalRoot, path), sep);
@@ -531,7 +537,7 @@ async function nativeCommandFiles(
   return { files, binding };
 }
 
-async function executeWithinWslBudget(
+export async function executeWithinWslBudget(
   execute: NonNullable<ClaudeSlashCommandDiscoveryDeps["run"]>,
   deadline: number,
   file: string,
