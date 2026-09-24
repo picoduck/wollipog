@@ -492,7 +492,10 @@ Git backs the library as an **upstream source**, not as the distribution transpo
   not create.
 - **Container and cloud execution targets cannot see host skills** — they mount only the workspace
   cwd. Gate exactly like `includeClaudeUserCommandsForTarget()` and report "unavailable on this
-  target" honestly. Mounting the skills root into containers is a deliberate later decision.
+  target" honestly. The New Session dialog says so when such a target is selected, and a container
+  or cloud session on a Machine with skills assigned to its agent shows a "Skills Unavailable on
+  This Target" notice naming them. Mounting the skills root into containers is a deliberate later
+  decision.
 - **Provider-home concurrency.** Content is verified and materialized in the runner-local store
   before the reconciler requests the process-lifetime `ProviderHomeLeaseRegistry` lease. Every
   canonical or harness link mutation, including removal, happens only after that lease is held.

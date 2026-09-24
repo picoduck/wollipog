@@ -28,6 +28,7 @@ import {
 } from "@wollipog/protocol";
 import { agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
+import { managedSkillsAvailableForTarget, SKILLS_UNAVAILABLE_ON_TARGET } from "./SkillsUnavailableNotice.js";
 import { ApiError } from "../api.js";
 import { useStore } from "../store.js";
 import { legacyWorkspaceLocationsByName, workspaceLocationKey } from "../projects.js";
@@ -1779,7 +1780,9 @@ export function NewSessionDialog({
                       ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
                       : effectiveIntegrationIsolation
                       ? `${integrationIsolationCopy.removed} ${integrationIsolationCopy.kept} ${INTEGRATION_ISOLATION_PRESERVED}`
-                      : "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session with this harness."}
+                      : hostExecutionTarget
+                      ? "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session with this harness."
+                      : `Hooks, plugins, extensions, and configured MCP servers load exactly as they would for a normal session with this harness. ${SKILLS_UNAVAILABLE_ON_TARGET}`}
                 </p>
                 {!orchestratorExecutionValid && <p className="form-error" role="alert">
                   {effectiveIntegrationIsolation && !integrationIsolationSupported
@@ -1911,6 +1914,9 @@ export function NewSessionDialog({
               <span className="muted">
                 Target: {executionTarget.name} · Network {executionTarget.boundaries.network} · Secrets {executionTarget.boundaries.secrets} · Billing {executionTarget.boundaries.billing}
               </span>
+            )}
+            {!managedSkillsAvailableForTarget(executionTarget?.adapter) && (
+              <span className="muted">{SKILLS_UNAVAILABLE_ON_TARGET}</span>
             )}
             {executionTarget?.adapter === "cloud" && executionTarget.policy && (
               <label>
