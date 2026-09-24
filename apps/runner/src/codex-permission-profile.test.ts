@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { test } from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
+import { captureLiveProcess, waitForOriginalProcessToStop } from "../test-support/posix-process.js";
 import {
   CODEX_GUARD_PERMISSION_PROFILE_ID,
   CODEX_PROFILE_RETRY_COOLDOWN_MS,
@@ -652,11 +653,21 @@ test("a probe's whole process tree is gone when it settles", async () => {
     const pidFile = join(dir, "child.pid");
     writeFileSync(wrapper, `#!/bin/sh\nsleep 30 &\necho $! > "${pidFile}"\nwait\n`);
     chmodSync(wrapper, 0o755);
-    const result = await readCodexSandboxProjection({ command: wrapper, args: [], cwd: dir, env: process.env }, undefined, 500);
+    const probeTimeoutMs = 2_000;
+    const probe = readCodexSandboxProjection({ command: wrapper, args: [], cwd: dir, env: process.env }, undefined, probeTimeoutMs);
+    const pidDeadline = Date.now() + probeTimeoutMs;
+    let pid = 0;
+    while (!pid && Date.now() < pidDeadline) {
+      try { pid = Number(readFileSync(pidFile, "utf8").trim()); }
+      catch { /* the wrapper has not written the PID yet */ }
+      if (!pid) await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const childIdentity = pid > 0 ? await captureLiveProcess(pid) : undefined;
+    const result = await probe;
     assert.equal(result.ok, false);
-    const pid = Number(readFileSync(pidFile, "utf8").trim());
-    await new Promise((resolve) => setTimeout(resolve, 100));
-    assert.throws(() => process.kill(pid, 0), "the wrapper's own child was killed with it");
+    assert.ok(childIdentity, "the wrapper child was running before probe cleanup");
+    assert.equal(await waitForOriginalProcessToStop(childIdentity), undefined,
+      "the wrapper's original child stopped after probe cleanup");
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

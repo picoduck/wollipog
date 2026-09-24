@@ -10,6 +10,7 @@ import {
 } from "./acp-client-services.js";
 import { terminalOutputDelta } from "./acp.js";
 import { waitForPendingKills } from "./spawn.js";
+import { captureLiveProcess, waitForOriginalProcessToStop } from "../test-support/posix-process.js";
 
 const NATIVE = { kind: "native" } as const;
 
@@ -182,10 +183,14 @@ test("ACP terminal preserves daemonized work until that terminal is released", {
   }
   assert.ok(daemonPid, "daemonized terminal work became ready");
   assert.doesNotThrow(() => process.kill(daemonPid!, 0), "natural command exit preserves its daemon");
+  const daemonIdentity = await captureLiveProcess(daemonPid!);
+  assert.ok(daemonIdentity, "daemon is running before terminal release");
+  assert.ok(await waitForOriginalProcessToStop(daemonIdentity, 0),
+    "a still-running daemon fails the post-release check");
 
   terminals.release("session-daemon", terminalId);
   assert.equal(await waitForPendingKills(8_000), true);
-  assert.throws(() => process.kill(daemonPid!, 0), /ESRCH/, "terminal release reaps its retained daemon");
+  assert.equal(await waitForOriginalProcessToStop(daemonIdentity), undefined, "terminal release stops its retained daemon");
 });
 
 test("ACP terminal IDs are session-scoped and kill preserves final output until release", async () => {
