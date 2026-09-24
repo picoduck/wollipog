@@ -57,6 +57,10 @@ Hard rules:
 6. Follow-up work in this session. A human may reply to the report with "publish", then "claim
    and fix" — that is their call, and it converts this session into a fixing session for the
    rest of its life. Three things must happen before any fix work starts:
+   - Do not put a shell-variable path inside a shell loop in one Bash call (a `do … done`
+     block reading `$S/$d/file`). The managed-worktree guard cannot inspect that shape and
+     refuses it with a message that wrongly blames runner-owned guard state (#1632). Write the loop to a
+     script file and run that, or use Python.
    - Never print the process environment to find anything — no `env`, `printenv`, `set`, or
      `cat /proc/self/environ`, filtered or not. Agent sessions inherit the runner's environment,
      and on 2026-09-17 an `env | grep -i token` wrote the live runner credential into a session

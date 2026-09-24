@@ -49,6 +49,16 @@ candidates (`contextWindowVariants` twice, `orchestratorCampaignManagement` once
 this shape. Once the line is outside the window and still has no production reader, it is the
 unread-floor finding above.
 
+Count readers with one fixed command per key, and treat zero as the candidate:
+`git grep -n -w <key> origin/main -- apps packages scripts | grep -v packages/protocol/src/index.test.ts | grep -v '<key>:'`
+(the definition line and the protocol test's own assertions are the only references an unread
+floor has; a key with three test assertions instead of two was missed on 2026-09-16 by a run that
+filtered on the total count). For `packages/protocol/src/index.ts` the open-pull-request
+exclusion is hunk-level, not file-level: nearly every protocol change edits that file, so exclude
+a floor only when an open PR's diff touches the `RUNNER_CAPABILITY_MIN_PROTOCOL` block or that
+key's assertions. On 2026-09-23 a whole-file rule held four verified floors behind a PR whose
+hunks were 1,800 lines away.
+
 ## Report
 
 For each finding: the flag or key, every definition and reader, the evidence it is fully resolved,
