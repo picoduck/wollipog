@@ -198,16 +198,19 @@ const EXPECTED_COLUMN: Record<SessionStatus, BoardColumn> = {
 test("machine skill adoption is capability-gated per platform", () => {
   assert.deepEqual(machineSkillAdoptionRequirement("linux")?.capability, "machineSkillAdoption");
   assert.deepEqual(machineSkillAdoptionRequirement("macos")?.capability, "nativeMacosMachineSkillAdoption");
-  assert.equal(machineSkillAdoptionRequirement("windows"), null);
-  assert.equal(machineSkillAdoptionRequirement("macos", { kind: "wsl", distro: "Ubuntu" }), null);
+  assert.deepEqual(machineSkillAdoptionRequirement("windows")?.capability, "nativeWindowsMachineSkillAdoption");
+  assert.equal(machineSkillAdoptionRequirement("windows", { kind: "wsl", distro: "Ubuntu" }), null);
   assert.equal(machineSkillAdoptionRequirement(undefined), null);
   assert.deepEqual(machineSkillAdoptionRecoveryRequirement("linux")?.capability, "machineSkillAdoptionRecovery");
   assert.deepEqual(machineSkillAdoptionRecoveryRequirement("macos")?.capability, "nativeMacosMachineSkillAdoption");
-  assert.equal(machineSkillAdoptionRecoveryRequirement("windows"), null);
+  assert.deepEqual(machineSkillAdoptionRecoveryRequirement("windows")?.capability, "nativeWindowsMachineSkillAdoption");
+  assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 181", () => {
-  assert.equal(PROTOCOL_VERSION, 181);
+test("PROTOCOL_VERSION is 182", () => {
+  assert.equal(PROTOCOL_VERSION, 182);
+  assert.equal(runnerSupportsProtocol(181, "nativeWindowsMachineSkillAdoption"), false);
+  assert.equal(runnerSupportsProtocol(182, "nativeWindowsMachineSkillAdoption"), true);
   assert.equal(runnerSupportsProtocol(180, "nativeMacosMachineSkillAdoption"), false);
   assert.equal(runnerSupportsProtocol(181, "nativeMacosMachineSkillAdoption"), true);
   assert.equal(runnerSupportsProtocol(179, "providerAuthenticationAccountRecovery"), false);

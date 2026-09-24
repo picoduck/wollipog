@@ -1,7 +1,7 @@
 # Agent Skills Management and Deployment
 
 Status: managed Linux/macOS/Windows and mixed-context WSL deployment, Git import,
-Linux/macOS/Windows/WSL machine snapshots, guarded Linux and macOS adoption/recovery, version history with
+Linux/macOS/Windows/WSL machine snapshots, guarded Linux, macOS, and Windows adoption/recovery, version history with
 library rollback, machine-wide version pins, assignable groups, and opt-in automatic Git updates
 implemented. Project/workspace scope remains deferred.
 
@@ -108,8 +108,8 @@ the machine snapshot preview. Import consumes that preview, so preview the sourc
 importing it and creating an explicit assignment. This owner/admin-only endpoint is read-only:
 it does not adopt a directory, create assignments, change pins, or send a deployment command.
 It uses the same online snapshot gate and bounded opaque-candidate read as import. Linux runners keep
-the read-only report from protocol 111; macOS runners need protocol 181, and other platforms and WSL
-locations are refused before any command is sent.
+the read-only report from protocol 111; macOS runners need protocol 181 and Windows runners protocol
+182, and WSL locations are refused before any command is sent.
 
 The source is read again and must match the preview's full content digest and discovery identity.
 After that read, current ownership, effective direct/group assignments, disabled overrides, and
@@ -125,7 +125,8 @@ not current filesystem links or observed reads, especially for an unmanaged cano
 It does not certify which running harnesses have loaded those files.
 
 `status: "prerequisites_met"` is an observation, not an adoption authorization. On a protocol-115
-Linux runner or a protocol-181 macOS runner it also mints a one-use, preview-bound adoption token. Closing, importing, replacing,
+Linux runner, a protocol-181 macOS runner, or a protocol-182 Windows runner it also mints a one-use,
+preview-bound adoption token. Closing, importing, replacing,
 or expiring the preview invalidates it. The owner/admin must separately confirm the operation and
 any named shared-directory readers. Manual invocation variants remain blocked because their
 deployed frontmatter can differ from the approved source bytes.
@@ -134,7 +135,7 @@ deployed frontmatter can differ from the approved source bytes.
 
 The runner's `adoptMachineSkill` module implements the Linux filesystem transaction in-process.
 Protocol 115 exposes it through a serialized runner command, owner/admin API, and the machine-import
-dialog. Protocol 181 adds the same transaction on native macOS (see below).
+dialog. Protocols 181 and 182 add the same transaction on native macOS and Windows (see below).
 Its trusted caller must resolve the opaque candidate and expiry, verify the durable
 library version and current explicit assignment/invocation/shared-directory consent, and serialize
 the whole operation with reconciliation and store GC. A read-only preflight report is not that grant.
@@ -170,9 +171,9 @@ the substituted tree, which is detected as an identity mismatch rather than dele
 with reconciliation/GC, rechecks the latest desired digest and targets, and runs a solicited sync
 first so the target is materialized. Lost or uncorrelated results instruct the operator to inspect
 for a journal before retrying. Backups are intentionally retained without automatic cleanup.
-Adoption is available on Linux (protocol 115) and native macOS (protocol 181). Native Windows and
-Windows-hosted WSL locations support snapshot import but not yet source replacement; standalone WSL
-runners report Linux and use the Linux adoption path. Each platform has its own capability, so an
+Adoption is available on Linux (protocol 115), native macOS (protocol 181), and native Windows
+(protocol 182). Windows-hosted WSL locations support snapshot import but not yet source replacement;
+standalone WSL runners report Linux and use the Linux adoption path. Each platform has its own capability, so an
 older runner keeps the previous refusal and never receives an adoption or recovery command.
 
 ### Native macOS adoption
@@ -205,10 +206,36 @@ the journal and publishing the exclusive recovery link. Mutating operations run 
 environment; the helper's test-only checkpoint, used by the macOS Platform Isolation tests to stop,
 fail, or kill the helper at every journal boundary, is therefore unreachable from the runner.
 
+### Native Windows adoption
+
+Windows runs the transaction in a fixed, runner-owned helper hosted by Windows PowerShell
+(`apps/runner/src/windows-skill-adoption.ts`). It compiles the same no-follow snapshot reader, so it
+shares the reader's pinned ancestry walk and discovery generation, and the same mount-point payload
+code that retargets managed junctions. Every untrusted component is opened with
+`FILE_FLAG_OPEN_REPARSE_POINT`; junctions and symbolic links are refused, and the home, harness, store,
+and journal directories stay open without delete sharing, so Windows refuses to rename or remove them
+while the helper runs. The source is held with `DELETE` access and without delete sharing from the
+first check until its move, so no other process can replace it; verification reopens it only with
+delete sharing, as Windows requires alongside that handle.
+
+The helper checks source and store content twice against the discovery generation and the approved
+digest (computed with the same canonical manifest), and refuses hard links. It creates the journal
+with `CreateDirectoryW` and writes each record with an exclusive create and `FlushFileBuffers`; the
+journal inherits the harness directory's access control. The original moves into the journal through
+`NtSetInformationFile` relative to the journal handle with replacement disabled. The managed link is a
+directory junction published only by creating a new empty directory at the source name and setting
+its mount-point payload through that directory's handle, so any occupant makes publication fail. Its
+target uses the same Node `realpath` spelling as managed deployment, and the helper proves that it
+resolves to the pinned store version before and after publication. Directory entries rely on NTFS
+metadata journaling rather than an explicit directory flush. Windows also refuses to move a directory
+while another process holds a file inside it open, which stops adoption before the move with an
+intent-only journal. Recovery inspection, restore, the `journal` progress line, and the test-only
+checkpoint (whose variables the runner strips from every helper environment) follow the macOS design.
+
 ### Adoption recovery inspection and restore
 
-Protocol 116 adds a bounded recovery command (protocol 181 on macOS). **Inspect Recovery** asks an
-online Linux or macOS runner to
+Protocol 116 adds a bounded recovery command (protocol 181 on macOS and 182 on Windows). **Inspect
+Recovery** asks an online Linux, macOS, or Windows runner to
 scan at most 4,096 raw entries in each known native harness directory and return at most 64 validated
 journals. The control plane accepts only fixed harness-relative journal paths and projected operation
 fields; arbitrary client paths and malformed runner results are rejected. Inspection and restore are
@@ -621,7 +648,7 @@ desired-state reads stay unknown through manual sync until an authoritative refr
    enable/disable; symlink deployment for native Claude Code and Codex; Skills view and
    per-machine section.
 2. **Phase 2 (implemented)** — git upstream sync, groups as assignable units, invocation-mode
-   transforms, drift detection and guarded Linux/macOS adoption/recovery, versions/pin/rollback, and
+   transforms, drift detection and guarded Linux/macOS/Windows adoption/recovery, versions/pin/rollback, and
    Windows-junction plus mixed-context WSL support.
 3. **Phase 3** — project-scoped skills, usage analytics, sharing/export, edit-in-session,
    container mounts.

@@ -23,17 +23,9 @@ interface WindowsSnapshotOutput {
  * remains open without FILE_SHARE_DELETE. That pins the walked ancestry, rejects junctions and
  * symlinks before traversal, and lets the helper check hard-link count and stable file identity
  * through the same handles used for reads. PowerShell only hosts this runner-owned P/Invoke.
+ * The adoption helper compiles the same C# so it shares this pinned walk and discovery generation.
  */
-export const WINDOWS_SKILL_SNAPSHOT_HELPER = String.raw`
-$ErrorActionPreference = 'Stop'
-[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
-$encoded = $env:WOLLIPOG_SKILL_SNAPSHOT_SPEC
-$env:WOLLIPOG_SKILL_SNAPSHOT_SPEC = $null
-if ([string]::IsNullOrWhiteSpace($encoded)) { throw 'missing snapshot specification' }
-$spec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded)) | ConvertFrom-Json
-
-Add-Type -TypeDefinition @'
-using System;
+export const WINDOWS_SKILL_SNAPSHOT_TYPES = String.raw`using System;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.IO;
@@ -53,18 +45,18 @@ public static class WollipogWindowsSkillSnapshots {
   const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
   const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
   const int MAX_PATH_CHARS = 32768;
-  const int MAX_RAW_ENTRIES = 4096;
-  const int MAX_USEFUL_ENTRIES = 256;
-  const int MAX_FILES = 64;
-  const long MAX_FILE_BYTES = 512 * 1024;
-  const long MAX_TOTAL_BYTES = 2 * 1024 * 1024;
-  static readonly Regex SkillName = new Regex("^[a-z0-9][a-z0-9._-]{0,63}$", RegexOptions.CultureInvariant);
+  internal const int MAX_RAW_ENTRIES = 4096;
+  internal const int MAX_USEFUL_ENTRIES = 256;
+  internal const int MAX_FILES = 64;
+  internal const long MAX_FILE_BYTES = 512 * 1024;
+  internal const long MAX_TOTAL_BYTES = 2 * 1024 * 1024;
+  internal static readonly Regex SkillName = new Regex("^[a-z0-9][a-z0-9._-]{0,63}$", RegexOptions.CultureInvariant);
 
   [StructLayout(LayoutKind.Sequential)]
-  struct FILETIME { public uint Low; public uint High; }
+  internal struct FILETIME { public uint Low; public uint High; }
 
   [StructLayout(LayoutKind.Sequential)]
-  struct BY_HANDLE_FILE_INFORMATION {
+  internal struct BY_HANDLE_FILE_INFORMATION {
     public uint FileAttributes;
     public FILETIME CreationTime;
     public FILETIME LastAccessTime;
@@ -105,7 +97,7 @@ public static class WollipogWindowsSkillSnapshots {
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
   static extern uint GetFinalPathNameByHandleW(SafeFileHandle file, StringBuilder path, uint length, uint flags);
 
-  static BY_HANDLE_FILE_INFORMATION Info(SafeFileHandle handle) {
+  internal static BY_HANDLE_FILE_INFORMATION Info(SafeFileHandle handle) {
     BY_HANDLE_FILE_INFORMATION info;
     if (!GetFileInformationByHandle(handle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error());
     return info;
@@ -115,12 +107,12 @@ public static class WollipogWindowsSkillSnapshots {
     return (info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
   }
 
-  static string Fingerprint(BY_HANDLE_FILE_INFORMATION info) {
+  internal static string Fingerprint(BY_HANDLE_FILE_INFORMATION info) {
     return info.VolumeSerialNumber + ":" + info.FileIndexHigh + ":" + info.FileIndexLow + ":" +
       info.LastWriteTime.High + ":" + info.LastWriteTime.Low + ":" + info.FileSizeHigh + ":" + info.FileSizeLow;
   }
 
-  static string FinalPath(SafeFileHandle handle) {
+  internal static string FinalPath(SafeFileHandle handle) {
     var buffer = new StringBuilder(MAX_PATH_CHARS);
     uint length = GetFinalPathNameByHandleW(handle, buffer, (uint)buffer.Capacity, 0);
     if (length == 0 || length >= (uint)buffer.Capacity) throw new Win32Exception(Marshal.GetLastWin32Error());
@@ -133,14 +125,14 @@ public static class WollipogWindowsSkillSnapshots {
     return path;
   }
 
-  static bool Below(string path, string root) {
+  internal static bool Below(string path, string root) {
     var candidate = DisplayPath(path).TrimEnd('\\');
     var boundary = DisplayPath(root).TrimEnd('\\');
     return candidate.Equals(boundary, StringComparison.OrdinalIgnoreCase) ||
       candidate.StartsWith(boundary + "\\", StringComparison.OrdinalIgnoreCase);
   }
 
-  static SafeFileHandle Open(string path, bool directory, string root) {
+  internal static SafeFileHandle Open(string path, bool directory, string root) {
     var flags = FILE_FLAG_OPEN_REPARSE_POINT | (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0);
     var handle = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
       OPEN_EXISTING, flags, IntPtr.Zero);
@@ -153,7 +145,7 @@ public static class WollipogWindowsSkillSnapshots {
     } catch { handle.Dispose(); throw; }
   }
 
-  static SafeFileHandle OpenHome(string home) {
+  internal static SafeFileHandle OpenHome(string home) {
     // The configured HOME itself may resolve through a user-selected link. Descendants may not.
     var handle = CreateFileW(home, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, IntPtr.Zero,
       OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, IntPtr.Zero);
@@ -172,7 +164,7 @@ public static class WollipogWindowsSkillSnapshots {
     return segments;
   }
 
-  static SafeFileHandle OpenRelativeDirectory(SafeFileHandle home, string relative, out string path,
+  internal static SafeFileHandle OpenRelativeDirectory(SafeFileHandle home, string relative, out string path,
       List<SafeFileHandle> ancestry) {
     var root = FinalPath(home);
     path = root;
@@ -183,7 +175,7 @@ public static class WollipogWindowsSkillSnapshots {
     return ancestry[ancestry.Count - 1];
   }
 
-  static void DisposeAll(List<SafeFileHandle> handles) {
+  internal static void DisposeAll(List<SafeFileHandle> handles) {
     for (int i = handles.Count - 1; i >= 0; i--) handles[i].Dispose();
   }
 
@@ -196,7 +188,7 @@ public static class WollipogWindowsSkillSnapshots {
     }
   }
 
-  static string DirectoryGeneration(SafeFileHandle directory, string path, string root) {
+  internal static string DirectoryGeneration(SafeFileHandle directory, string path, string root) {
     var entries = new List<string>();
     int raw = 0;
     foreach (var childPath in Directory.EnumerateFileSystemEntries(path)) {
@@ -330,6 +322,18 @@ public static class WollipogWindowsSkillSnapshots {
     return first;
   }
 }
+`;
+
+export const WINDOWS_SKILL_SNAPSHOT_HELPER = String.raw`
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$encoded = $env:WOLLIPOG_SKILL_SNAPSHOT_SPEC
+$env:WOLLIPOG_SKILL_SNAPSHOT_SPEC = $null
+if ([string]::IsNullOrWhiteSpace($encoded)) { throw 'missing snapshot specification' }
+$spec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded)) | ConvertFrom-Json
+
+Add-Type -TypeDefinition @'
+${WINDOWS_SKILL_SNAPSHOT_TYPES}
 '@
 
 if ([string]$spec.operation -eq 'list') {

@@ -1,5 +1,6 @@
 /** Internal source-preservation transaction. Not registered as a runner/RPC command. Linux runs
- * it in-process through descriptor paths; macOS delegates the same steps to its fixed native helper.
+ * it in-process through descriptor paths; macOS and Windows delegate the same steps to their fixed
+ * native helpers.
  * The caller must serialize this with reconcile/GC, own the provider-HOME lease, and supply
  * a fresh durable-library/explicit-assignment authorization fence. No preflight report is a grant. */
 import { randomUUID } from "node:crypto";
@@ -55,7 +56,9 @@ function record(parent: number, name: string, value: unknown): void {
 
 function validRequest(options: SkillAdoptionOptions): boolean {
   const { candidate, digest } = options;
-  if (!candidate || !validSkillName(candidate.name) || !/^[0-9a-f]{64}$/.test(digest)) return false;
+  // This transaction mutates the runner's native homes; a WSL candidate lives in its distro.
+  if (!candidate || (candidate.context?.kind ?? "native") !== "native" || !validSkillName(candidate.name) ||
+      !/^[0-9a-f]{64}$/.test(digest)) return false;
   const allowed = new Set([".agents/skills", ...options.agents.filter((agent) =>
     (agent.context?.kind ?? "native") === "native").map((agent) => SKILL_DIRS[agent.driver ?? "acp"]).filter(Boolean)]);
   return allowed.has(candidate.sourceDirectory);
@@ -69,7 +72,7 @@ export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionR
   const platform = options.platform ?? process.platform;
   if (platform === "linux") return adoptLinuxSkill(options);
   const helper = options.helper ?? platformSkillAdoptionHelper(platform);
-  if (!helper) return { status: "rejected", error: "Recoverable adoption requires Linux or macOS." };
+  if (!helper) return { status: "rejected", error: "Recoverable adoption requires Linux, macOS, or Windows." };
   return adoptWithHelper(options, helper);
 }
 

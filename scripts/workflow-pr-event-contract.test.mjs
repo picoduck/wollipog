@@ -370,8 +370,10 @@ test("native Linux isolation CI proves the managed-worktree read-only rule again
     "the Seatbelt hook-state mask (#1336) can only be verified on the macOS leg, so it must run there");
   assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/macos-skill-adoption\.test\.ts apps\/runner\/src\/skill-adoption-platform\.test\.ts < \/dev\/null/u,
     "native macOS skill adoption writes into harness homes, so its helper tests must run on the macOS leg");
-  assert.equal(platform.match(/grep -q '\^# skipped 0\$'/gu)?.length, 3,
-    "neither sandbox's enforcement test nor the native macOS adoption tests may pass by skipping");
+  assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/windows-skill-adoption\.test\.ts apps\/runner\/src\/skill-adoption-platform\.test\.ts < \/dev\/null/u,
+    "native Windows skill adoption writes into harness homes, so its helper tests must run on the Windows leg");
+  assert.equal(platform.match(/grep -q '\^# skipped 0\$'/gu)?.length, 4,
+    "neither sandbox's enforcement test nor the native adoption tests may pass by skipping");
   assert.match(platform, /grep -q '\^# skipped 0\$'/u,
     "a host that cannot create a user namespace must fail the job rather than report skipped coverage");
 });

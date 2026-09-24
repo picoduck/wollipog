@@ -586,13 +586,22 @@ test("adoption and recovery are gated per platform so older and unsupported runn
   assert.match(olderRecovery.json().error, /macOS machine skill adoption recovery requires protocol v181/u);
   assert.deepEqual(requests, ["snapshot:read"], "an older macOS runner receives no adoption or recovery command");
 
-  register("windows", RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption);
+  register("windows", RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillAdoption - 1);
+  requests.length = 0;
+  const olderWindows = (await preflight()).response;
+  assert.equal(olderWindows.statusCode, 409);
+  assert.match(olderWindows.json().error, /Windows machine skill adoption requires protocol v182/u);
+  assert.match((await inspect()).json().error, /Windows machine skill adoption recovery requires protocol v182/u);
+  assert.deepEqual(requests, ["snapshot:read"], "an older Windows runner receives no adoption or recovery command");
+
+  register("windows", RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillAdoption);
   requests.length = 0;
   const windows = (await preflight()).response;
-  assert.equal(windows.statusCode, 409);
-  assert.match(windows.json().error, /not available for this Machine/u);
-  assert.match((await inspect()).json().error, /requires a Linux or macOS runner/u);
-  assert.deepEqual(requests, ["snapshot:read"]);
+  assert.equal(windows.statusCode, 200, windows.body);
+  assert.equal(windows.json().mutationSupported, true);
+  assert.equal((await inspect()).statusCode, 200);
+  assert.deepEqual(requests, ["snapshot:read", "snapshot:read", "skill_adoption_recovery"],
+    "preview and preflight each read the source before recovery inspection");
 
   register("macos", RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption);
   requests.length = 0;

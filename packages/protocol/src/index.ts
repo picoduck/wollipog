@@ -555,7 +555,11 @@
 //      journal through the fixed descriptor-anchored helper, with the same explicit confirmation,
 //      source recheck, preserved original, and exclusive link publication as Linux. Older macOS
 //      runners keep the snapshot-only refusal.
-export const PROTOCOL_VERSION = 181;
+// 182: native Windows runners adopt, inspect, and restore the same way through a fixed handle-based
+//      helper: the source stays pinned without delete sharing until a handle-relative no-replace
+//      rename, and the managed link is a junction published only by creating a new directory.
+//      Older Windows runners keep the snapshot-only refusal; WSL locations stay refused.
+export const PROTOCOL_VERSION = 182;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -806,6 +810,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   machineSkillAdoptionRecovery: 116,
   /** Native macOS adoption and recovery through the fixed no-follow helper. */
   nativeMacosMachineSkillAdoption: 181,
+  /** Native Windows adoption and recovery through the fixed handle-based junction helper. */
+  nativeWindowsMachineSkillAdoption: 182,
   chunkedAgentSkills: 96,
   /** v96 runners emit the additive `skills_state.removals` event projection. */
   skillLinkRemovalReporting: 96,
@@ -1131,6 +1137,9 @@ export function machineSkillAdoptionRequirement(
   if (context?.kind === "wsl") return null;
   if (os === "linux") return { capability: "machineSkillAdoption", label: "Machine skill adoption" };
   if (os === "macos") return { capability: "nativeMacosMachineSkillAdoption", label: "macOS machine skill adoption" };
+  if (os === "windows") {
+    return { capability: "nativeWindowsMachineSkillAdoption", label: "Windows machine skill adoption" };
+  }
   return null;
 }
 
@@ -1141,6 +1150,9 @@ export function machineSkillAdoptionRecoveryRequirement(os: OS | undefined): Mac
   }
   if (os === "macos") {
     return { capability: "nativeMacosMachineSkillAdoption", label: "macOS machine skill adoption recovery" };
+  }
+  if (os === "windows") {
+    return { capability: "nativeWindowsMachineSkillAdoption", label: "Windows machine skill adoption recovery" };
   }
   return null;
 }

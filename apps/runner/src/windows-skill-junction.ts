@@ -8,46 +8,22 @@ import { spawnSync } from "node:child_process";
  * mount-point payload through `FSCTL_SET_REPARSE_POINT`. It never deletes a path or follows the
  * junction. PowerShell only hosts this runner-owned P/Invoke; no skill content is executed.
  */
-export const WINDOWS_SKILL_JUNCTION_HELPER = String.raw`
-$ErrorActionPreference = 'Stop'
-$encoded = $env:WOLLIPOG_SKILL_JUNCTION_SPEC
-$env:WOLLIPOG_SKILL_JUNCTION_SPEC = $null
-if ([string]::IsNullOrWhiteSpace($encoded)) { throw 'missing junction specification' }
-$spec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded)) | ConvertFrom-Json
-
-Add-Type -TypeDefinition @'
-using System;
-using System.ComponentModel;
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Text;
-using Microsoft.Win32.SafeHandles;
-
-public static class WollipogSkillJunction {
-  const uint GENERIC_READ = 0x80000000;
-  const uint GENERIC_WRITE = 0x40000000;
-  const uint FILE_SHARE_READ = 0x00000001;
-  const uint FILE_SHARE_WRITE = 0x00000002;
-  const uint FILE_SHARE_DELETE = 0x00000004;
-  const uint OPEN_EXISTING = 3;
-  const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
-  const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
-  const uint FSCTL_GET_REPARSE_POINT = 0x000900A8;
-  const uint FSCTL_SET_REPARSE_POINT = 0x000900A4;
-  const uint IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003;
-
-  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
-  static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security,
-    uint disposition, uint flags, IntPtr template);
+/** Shared C# for reading and building directory-junction (mount point) payloads. It has no
+ * `using` directives so each helper can compile it after its own. */
+export const WINDOWS_JUNCTION_REPARSE_TYPES = String.raw`
+public static class WollipogJunctionReparse {
+  internal const uint FSCTL_GET_REPARSE_POINT = 0x000900A8;
+  internal const uint FSCTL_SET_REPARSE_POINT = 0x000900A4;
+  internal const uint IO_REPARSE_TAG_MOUNT_POINT = 0xA0000003;
 
   [DllImport("kernel32.dll", SetLastError = true)]
-  static extern bool DeviceIoControl(SafeFileHandle file, uint code, byte[] input, int inputLength,
+  internal static extern bool DeviceIoControl(SafeFileHandle file, uint code, byte[] input, int inputLength,
     byte[] output, int outputLength, out int returned, IntPtr overlapped);
 
   [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
   static extern uint GetFullPathNameW(string path, uint length, StringBuilder buffer, IntPtr filePart);
 
-  static string NormalizeTarget(string value) {
+  internal static string NormalizeTarget(string value) {
     if (value.StartsWith(@"\??\UNC\", StringComparison.OrdinalIgnoreCase)) value = @"\\" + value.Substring(8);
     else if (value.StartsWith(@"\??\", StringComparison.Ordinal)) value = value.Substring(4);
     var buffer = new StringBuilder(32768);
@@ -61,23 +37,26 @@ public static class WollipogSkillJunction {
     return value.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
   }
 
-  static string OpenPath(string value) {
+  internal static bool SameTarget(string left, string right) {
+    return String.Equals(NormalizeTarget(left), NormalizeTarget(right), StringComparison.OrdinalIgnoreCase);
+  }
+
+  internal static string OpenPath(string value) {
     var normalized = NormalizeTarget(value);
     return normalized.StartsWith(@"\\", StringComparison.Ordinal)
       ? @"\\?\UNC\" + normalized.Substring(2)
       : @"\\?\" + normalized;
   }
 
-  static string CurrentTarget(SafeFileHandle handle) {
+  /** The substitute target of an opened mount point, or null for any other reparse point. */
+  internal static string MountPointTarget(SafeFileHandle handle) {
     var buffer = new byte[16 * 1024];
     int returned;
     if (!DeviceIoControl(handle, FSCTL_GET_REPARSE_POINT, null, 0,
         buffer, buffer.Length, out returned, IntPtr.Zero)) {
       throw new Win32Exception(Marshal.GetLastWin32Error(), "could not inspect the junction");
     }
-    if (returned < 16 || BitConverter.ToUInt32(buffer, 0) != IO_REPARSE_TAG_MOUNT_POINT) {
-      throw new InvalidOperationException("the managed path is not a directory junction");
-    }
+    if (returned < 16 || BitConverter.ToUInt32(buffer, 0) != IO_REPARSE_TAG_MOUNT_POINT) return null;
     int offset = BitConverter.ToUInt16(buffer, 8);
     int length = BitConverter.ToUInt16(buffer, 10);
     if (offset < 0 || length <= 0 || 16 + offset + length > returned) {
@@ -86,7 +65,7 @@ public static class WollipogSkillJunction {
     return Encoding.Unicode.GetString(buffer, 16 + offset, length);
   }
 
-  static byte[] Payload(string target) {
+  internal static byte[] Payload(string target) {
     var printName = NormalizeTarget(target);
     var substituteName = printName.StartsWith(@"\\", StringComparison.Ordinal)
       ? @"\??\UNC\" + printName.Substring(2)
@@ -106,20 +85,52 @@ public static class WollipogSkillJunction {
     Buffer.BlockCopy(pathBytes, 0, result, 16, pathBytes.Length);
     return result;
   }
+}
+`;
+
+export const WINDOWS_SKILL_JUNCTION_HELPER = String.raw`
+$ErrorActionPreference = 'Stop'
+$encoded = $env:WOLLIPOG_SKILL_JUNCTION_SPEC
+$env:WOLLIPOG_SKILL_JUNCTION_SPEC = $null
+if ([string]::IsNullOrWhiteSpace($encoded)) { throw 'missing junction specification' }
+$spec = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($encoded)) | ConvertFrom-Json
+
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using Microsoft.Win32.SafeHandles;
+${WINDOWS_JUNCTION_REPARSE_TYPES}
+public static class WollipogSkillJunction {
+  const uint GENERIC_READ = 0x80000000;
+  const uint GENERIC_WRITE = 0x40000000;
+  const uint FILE_SHARE_READ = 0x00000001;
+  const uint FILE_SHARE_WRITE = 0x00000002;
+  const uint FILE_SHARE_DELETE = 0x00000004;
+  const uint OPEN_EXISTING = 3;
+  const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+  const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+  static extern SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security,
+    uint disposition, uint flags, IntPtr template);
 
   public static void Replace(string path, string expectedTarget, string target) {
-    using (var handle = CreateFileW(OpenPath(path), GENERIC_READ | GENERIC_WRITE,
+    using (var handle = CreateFileW(WollipogJunctionReparse.OpenPath(path), GENERIC_READ | GENERIC_WRITE,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, IntPtr.Zero, OPEN_EXISTING,
       FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, IntPtr.Zero)) {
       if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error(), "could not open the junction");
-      if (!String.Equals(NormalizeTarget(CurrentTarget(handle)), NormalizeTarget(expectedTarget),
-          StringComparison.OrdinalIgnoreCase)) {
+      var current = WollipogJunctionReparse.MountPointTarget(handle);
+      if (current == null) throw new InvalidOperationException("the managed path is not a directory junction");
+      if (!WollipogJunctionReparse.SameTarget(current, expectedTarget)) {
         throw new InvalidOperationException("the junction target changed before replacement");
       }
-      var payload = Payload(target);
+      var payload = WollipogJunctionReparse.Payload(target);
       int returned;
-      if (!DeviceIoControl(handle, FSCTL_SET_REPARSE_POINT, payload, payload.Length,
-          null, 0, out returned, IntPtr.Zero)) {
+      if (!WollipogJunctionReparse.DeviceIoControl(handle, WollipogJunctionReparse.FSCTL_SET_REPARSE_POINT,
+          payload, payload.Length, null, 0, out returned, IntPtr.Zero)) {
         throw new Win32Exception(Marshal.GetLastWin32Error(), "could not retarget the junction");
       }
     }

@@ -113,11 +113,20 @@ test("helper adoption rejects invalid requests and failed guards before invoking
 });
 
 test("platforms without an adoption transaction refuse without touching guards", () => {
-  for (const platform of ["win32", "freebsd"] as const) {
+  for (const platform of ["freebsd", "aix"] as const) {
     const { value } = options(fakeHelper({ journal: true, adopted: true }).helper, {
       platform, helper: undefined, acquireProviderHomeLease: () => assert.fail("must not lease") });
     assert.equal(adoptMachineSkill(value).status, "rejected");
   }
+});
+
+test("a WSL candidate never reaches a native adoption helper", () => {
+  const { helper, requests } = fakeHelper({ journal: true, adopted: true });
+  const { value, calls } = options(helper, { platform: "win32",
+    candidate: { ...candidate, context: { kind: "wsl", distro: "Ubuntu" } } });
+  assert.equal(adoptMachineSkill(value).status, "rejected");
+  assert.deepEqual(calls, []);
+  assert.equal(requests.length, 0);
 });
 
 function journal(overrides: Partial<RecoveryJournalFacts> = {}, intent: Record<string, unknown> = {}): RecoveryJournalFacts {
@@ -240,5 +249,5 @@ test("helper restore stops safely on lease contention, blocked states, and helpe
     operationId: "../../outside", platform: "darwin", helper: intentOnly.helper,
     acquireProviderHomeLease: () => assert.fail("must not lease") }).status, "blocked");
   assert.equal(restoreSkillAdoptionRecovery({ home: "/home/user", dataDir: "/data", agents, operationId,
-    platform: "win32", acquireProviderHomeLease: () => assert.fail("must not lease") }).status, "blocked");
+    platform: "freebsd", acquireProviderHomeLease: () => assert.fail("must not lease") }).status, "blocked");
 });
