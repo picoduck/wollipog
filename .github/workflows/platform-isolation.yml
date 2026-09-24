@@ -168,8 +168,8 @@ jobs:
             $ErrorActionPreference = $savedSkillsPreference
             Write-Host $wslSkillsOutput
             if ($wslSkillsExit -ne 0) { throw "real WSL managed-skills integration tests failed" }
-            if ($wslSkillsOutput -notmatch '(?m)^# pass 2\r?$' -or $wslSkillsOutput -notmatch '(?m)^# skipped 0\r?$') {
-              throw "real WSL managed-skills integration tests did not execute exactly twice"
+            if ($wslSkillsOutput -notmatch '(?m)^# pass 3\r?$' -or $wslSkillsOutput -notmatch '(?m)^# skipped 0\r?$') {
+              throw "real WSL managed-skills integration tests did not execute exactly three times"
             }
 
             $savedSafePreference = $ErrorActionPreference

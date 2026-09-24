@@ -13,10 +13,18 @@ import type { RunnerProviderAccount } from "./config.js";
 import {
   platformSkillAdoptionHelper,
   recoveryState,
+  type RecoveryDirectoryFacts,
   type RecoverySourceFacts,
   type SkillAdoptionPlatformHelper,
 } from "./skill-adoption-platform.js";
 import { SKILL_DIRS } from "./skills.js";
+import {
+  inspectWslSkillRecovery,
+  restoreWslSkillRecovery,
+  wslAdoptionDirectories,
+  wslAdoptionDistros,
+  type WslAdoptionEnvironment,
+} from "./wsl-skill-adoption.js";
 
 const JOURNAL_PREFIX = ".wollipog-adoption-";
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -64,6 +72,8 @@ interface RecoveryScope {
   sourceDirectory: string;
   localSourceDirectory: string;
   providerAccountId?: string;
+  /** A WSL scope lives in its distro's HOME; the in-distro helper resolves it. */
+  context?: { kind: "wsl"; distro: string };
 }
 
 function recoveryScopes(home: string, agents: AgentDefinition[],
@@ -149,7 +159,8 @@ function recoveryBase(scope: RecoveryScope, parsed: Intent) {
   return { operationId: parsed.operationId,
     backupDirectory: `${scope.sourceDirectory}/${JOURNAL_PREFIX}${parsed.operationId}`,
     sourceDirectory: scope.sourceDirectory, name: parsed.name, digest: parsed.digest,
-    ...(scope.providerAccountId ? { providerAccountId: scope.providerAccountId } : {}) };
+    ...(scope.providerAccountId ? { providerAccountId: scope.providerAccountId } : {}),
+    ...(scope.context ? { context: scope.context } : {}) };
 }
 
 interface HelperView {
@@ -166,6 +177,10 @@ function helperViews(helper: SkillAdoptionPlatformHelper, scope: RecoveryScope, 
     facts = helper.inspect({ home: scope.home, localSourceDirectory: scope.localSourceDirectory, dataDir,
       ...(operationId ? { operationId } : {}) });
   } catch { return { views: [], truncated: false }; }
+  return viewsFromFacts(scope, facts);
+}
+
+function viewsFromFacts(scope: RecoveryScope, facts: RecoveryDirectoryFacts): { views: HelperView[]; truncated: boolean } {
   const parentIdentity = facts.parentIdentity;
   if (parentIdentity === null) return { views: [], truncated: facts.truncated };
   const views = facts.journals.flatMap((journal): HelperView[] => {
@@ -228,6 +243,12 @@ export function listSkillAdoptionRecovery(home: string, dataDir: string,
     operations: SkillAdoptionRecoveryOperation[];
     truncated: boolean;
   } {
+  const collected = collectRecovery(home, dataDir, agents, providerAccounts, platformOptions);
+  return { operations: markDuplicates(collected.operations), truncated: collected.truncated };
+}
+
+function collectRecovery(home: string, dataDir: string, agents: AgentDefinition[],
+  providerAccounts: RunnerProviderAccount[], platformOptions: SkillAdoptionRecoveryPlatformOptions) {
   const operations: SkillAdoptionRecoveryOperation[] = [];
   let truncated = false;
   const platform = platformOptions.platform ?? process.platform;
@@ -262,22 +283,23 @@ export function listSkillAdoptionRecovery(home: string, dataDir: string,
     } catch { /* unavailable harness directories have no inspectable recovery operations */ }
     finally { if (parent !== undefined) closeSync(parent); }
   }
-  // A copied journal can otherwise make the control plane reject the entire bounded response for
-  // duplicate operation IDs. Keep one visible, explicitly blocked representative so the operator
-  // can identify the collision; restore independently requires the ID to resolve uniquely.
+  return { operations, truncated };
+}
+
+/** A copied journal can otherwise make the control plane reject the entire bounded response for
+ * duplicate operation IDs. Keep one visible, explicitly blocked representative so the operator
+ * can identify the collision; restore independently requires the ID to resolve uniquely. */
+function markDuplicates(operations: SkillAdoptionRecoveryOperation[]): SkillAdoptionRecoveryOperation[] {
   const unique = new Map<string, SkillAdoptionRecoveryOperation>();
   const duplicateIds = new Set<string>();
   for (const operation of operations) {
     if (unique.has(operation.operationId)) duplicateIds.add(operation.operationId);
     else unique.set(operation.operationId, operation);
   }
-  return {
-    operations: [...unique.values()].map((operation) => duplicateIds.has(operation.operationId)
-      ? { ...operation, state: "blocked" as const,
-          detail: "This operation ID appears in more than one recovery journal. Resolve the duplicate journals manually." }
-      : operation),
-    truncated,
-  };
+  return [...unique.values()].map((operation) => duplicateIds.has(operation.operationId)
+    ? { ...operation, state: "blocked" as const,
+        detail: "This operation ID appears in more than one recovery journal. Resolve the duplicate journals manually." }
+    : operation);
 }
 
 export interface RestoreSkillAdoptionRecoveryOptions {
@@ -412,6 +434,84 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
     if (backup !== undefined) try { closeSync(backup); } catch { /* best effort */ }
     if (parent !== undefined) try { closeSync(parent); } catch { /* best effort */ }
   }
+}
+
+function nativeRecoveryMatchCount(options: RestoreSkillAdoptionRecoveryOptions): number {
+  const platform = options.platform ?? process.platform;
+  const helper = platform === "linux" ? null : options.helper ?? platformSkillAdoptionHelper(platform);
+  if (platform !== "linux" && !helper) return 0;
+  return recoveryScopes(options.home, options.agents, options.providerAccounts).reduce((count, scope) => count + (helper
+    ? helperViews(helper, scope, options.dataDir, options.operationId).views
+      .filter(({ view }) => view.operationId === options.operationId).length
+    : operationView(scope, options.dataDir, options.operationId) ? 1 : 0), 0);
+}
+
+function wslScopes(agents: AgentDefinition[]): RecoveryScope[] {
+  return wslAdoptionDistros(agents).flatMap((distro) => wslAdoptionDirectories(agents, distro).map((sourceDirectory) =>
+    ({ home: "", sourceDirectory, localSourceDirectory: sourceDirectory, context: { kind: "wsl" as const, distro } })));
+}
+
+async function wslViews(environment: WslAdoptionEnvironment, scope: RecoveryScope,
+  operationId?: string): Promise<{ views: HelperView[]; truncated: boolean }> {
+  try {
+    return viewsFromFacts(scope,
+      await inspectWslSkillRecovery(environment, scope.context!.distro, scope.sourceDirectory, operationId));
+  } catch { return { views: [], truncated: false }; }
+}
+
+/** Native recovery plus, on a Windows runner, each WSL distro's harness directories. The bounded
+ * operation budget and duplicate-ID handling span both so an ID resolves uniquely everywhere. */
+export async function listSkillAdoptionRecoveryWithWsl(home: string, dataDir: string, agents: AgentDefinition[],
+  providerAccounts: RunnerProviderAccount[], wsl: WslAdoptionEnvironment | undefined,
+  platformOptions: SkillAdoptionRecoveryPlatformOptions = {}): Promise<{
+    operations: SkillAdoptionRecoveryOperation[];
+    truncated: boolean;
+  }> {
+  const collected = collectRecovery(home, dataDir, agents, providerAccounts, platformOptions);
+  const operations = [...collected.operations];
+  let truncated = collected.truncated;
+  for (const scope of wsl ? wslScopes(agents) : []) {
+    const found = await wslViews(wsl!, scope);
+    truncated ||= found.truncated;
+    for (const { view } of found.views) {
+      if (operations.length >= SKILL_RECOVERY_SCAN_LIMITS.operations) { truncated = true; break; }
+      operations.push(view);
+    }
+  }
+  return { operations: markDuplicates(operations), truncated };
+}
+
+export async function restoreSkillAdoptionRecoveryWithWsl(options: RestoreSkillAdoptionRecoveryOptions,
+  wsl: WslAdoptionEnvironment | undefined): Promise<RestoreResult> {
+  if (!wsl || !UUID.test(options.operationId)) return restoreSkillAdoptionRecovery(options);
+  const matches: Array<HelperView & { scope: RecoveryScope }> = [];
+  for (const scope of wslScopes(options.agents)) {
+    for (const found of (await wslViews(wsl, scope, options.operationId)).views) {
+      if (found.view.operationId === options.operationId) matches.push({ scope, ...found });
+    }
+  }
+  if (matches.length === 0) return restoreSkillAdoptionRecovery(options);
+  if (matches.length !== 1 || nativeRecoveryMatchCount(options) !== 0) {
+    return { status: "blocked", error: "The recovery operation was not found uniquely." };
+  }
+  const { scope, view: initial, parsed } = matches[0]!;
+  if (initial.state === "intent_only" || initial.state === "restored") {
+    return { status: "not_needed", operation: initial };
+  }
+  if (initial.state !== "source_preserved" && initial.state !== "managed_linked") {
+    return { status: "blocked", operation: initial, error: initial.detail };
+  }
+  // The in-distro helper takes the distro HOME lease itself, as WSL reconciliation does.
+  const outcome = await restoreWslSkillRecovery(wsl, scope.context!.distro, { sourceDirectory: scope.sourceDirectory,
+    operationId: options.operationId, name: parsed.name, digest: parsed.digest,
+    parentIdentity: parsed.parentIdentity, sourceIdentity: parsed.sourceIdentity });
+  if (!outcome.leased) return { status: "blocked", operation: initial, error: "The provider home is currently in use." };
+  const operation = (await wslViews(wsl, scope, options.operationId)).views
+    .find(({ view }) => view.operationId === options.operationId)?.view ?? initial;
+  return outcome.restored
+    ? { status: "restored", operation }
+    : { status: "recovery_required", operation,
+        error: "Restore stopped safely. Inspect the journal and source path before retrying." };
 }
 
 export function recoveryResult(runnerId: string, requestId: string,

@@ -96,3 +96,25 @@ test("adoption preflight respects group inheritance, direct disables, audience c
   assert.ok(check().blockers.includes("effective_assignment_missing"));
   db.skillScope = originalScope;
 });
+test("a WSL candidate is read only by agents in its distro, and account-scoped WSL is blocked", (t) => {
+  const db = ControlPlaneDb.open(":memory:"); t.after(() => db.close());
+  db.registerRunner({ runnerId: "one", hostname: "host", os: "windows", version: "1", agents: [
+    ...agents, { id: "other-wsl", name: "Other", command: "codex", args: [], env: {}, driver: "codex",
+      context: { kind: "wsl", distro: "Debian" } },
+  ], providerAccounts: [{ id: "work", label: "Work", provider: "codex", authStatus: "authenticated" }],
+  workspaces: [] }, 1, 184);
+  const original = payload();
+  const skill = db.createSkill(original);
+  const wslCandidate = { ...candidate, context: { kind: "wsl" as const, distro: "Ubuntu" } };
+  const check = (target: string, overrides = {}) => skillAdoptionPreflight(db, "one", { ...wslCandidate, ...overrides },
+    original.digest);
+  const native = db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one",
+    agentSelector: { kind: "agent", agentId: "codex" } });
+  assert.ok(check("codex").blockers.includes("source_not_targeted"), "a native target does not read a WSL source");
+  db.deleteSkillAssignment(native.id);
+  db.createSkillAssignment({ skillId: skill.id, scopeKind: "runner", runnerId: "one",
+    agentSelector: { kind: "agent", agentId: "wsl" } });
+  assert.equal(check("wsl").status, "prerequisites_met");
+  assert.deepEqual(check("wsl").sharedReaders, [], "agents in another distro or the native host share nothing");
+  assert.ok(check("wsl", { providerAccountId: "work" }).blockers.includes("wsl_account_adoption_unsupported"));
+});

@@ -141,6 +141,12 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
         (providerAccountId !== undefined &&
           (!runnerSupportsProtocol(runner.protocolVersion, "accountScopedAgentSkills") || !account ||
             operation.sourceDirectory !== (account.provider === "claude" ? ".claude/skills" : ".codex/skills")))) return null;
+    // A WSL journal names its distro; only a runner that adopts inside WSL may report one, and
+    // WSL adoption never uses a host account home.
+    const context = operation.context;
+    if (context !== undefined && (providerAccountId !== undefined ||
+        !runnerSupportsProtocol(runner.protocolVersion, "wslMachineSkillAdoption") ||
+        !validCandidateContext({ context } as MachineSkillCandidate, runner.protocolVersion))) return null;
     return {
       operationId: operation.operationId,
       backupDirectory: operation.backupDirectory,
@@ -148,6 +154,7 @@ export function registerMachineSkillRoutes(app: FastifyInstance, deps: SkillsRou
       name: operation.name,
       digest: operation.digest,
       ...(providerAccountId ? { providerAccountId } : {}),
+      ...(context ? { context: { kind: "wsl" as const, distro: context.distro } } : {}),
       state: operation.state,
       detail: operation.detail,
     };

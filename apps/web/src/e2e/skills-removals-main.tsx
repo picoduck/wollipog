@@ -13,7 +13,9 @@ import "../styles.css";
 
 const accountScopes = new URLSearchParams(location.search).has("accountScopes");
 const macosAdoption = new URLSearchParams(location.search).has("macosAdoption");
-const windowsAdoption = new URLSearchParams(location.search).has("windowsAdoption");
+const windowsAdoption = new URLSearchParams(location.search).has("windowsAdoption") ||
+  new URLSearchParams(location.search).has("wslAdoption");
+const wslAdoption = new URLSearchParams(location.search).has("wslAdoption");
 // Drift resolution runs against the real API client so the spec can route and assert each request.
 const drift = new URLSearchParams(location.search).has("drift");
 
@@ -56,6 +58,8 @@ const runner: RunnerView = {
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.accountScopedAgentSkills
     : macosAdoption
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption
+    : wslAdoption
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.wslMachineSkillAdoption
     : windowsAdoption
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillAdoption
     : new URLSearchParams(location.search).has("legacySkills")

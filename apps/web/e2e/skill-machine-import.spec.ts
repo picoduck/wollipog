@@ -108,8 +108,9 @@ for (const platform of ["macos", "windows"] as const) for (const width of [1280,
     await page.goto(`/skills-removals-e2e.html?${platform}Adoption=1`);
     await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
     await page.getByRole("button", { name: "Import from Machine" }).click();
-    await expect(page.getByText(/a macOS runner on protocol 181 or newer, or a Windows runner on protocol 182 or newer/u))
-      .toBeVisible();
+    await expect(page.getByText(
+      /a macOS runner on protocol 181 or newer, or a Windows runner on protocol 182 or newer \(184 for WSL locations\)/u,
+    )).toBeVisible();
     await expect(page.getByText(/require a Linux, macOS, or Windows runner|require protocol 18[12]/u)).toBeHidden();
     await page.getByRole("button", { name: "Inspect Recovery" }).click();
     await expect(page.getByText("No adoption recovery journals were found.")).toBeVisible();
@@ -138,6 +139,59 @@ test("WSL snapshot candidates identify their distro without exposing transport p
     name: "Preview Files for review from WSL: Ubuntu · .codex/skills/review",
   })).toBeVisible();
   await expect(page.getByText(/wsl\.localhost/u)).toBeHidden();
+});
+
+for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
+  `a WSL location is adopted and recovered with its distro named at ${width} in ${theme}`,
+  async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    const candidate = { id: "wsl-opaque", name: "review", sourceDirectory: ".codex/skills",
+      generation: "a".repeat(64), context: { kind: "wsl", distro: "Ubuntu" } };
+    const operationId = "123e4567-e89b-42d3-a456-426614174000";
+    await page.route("**/api/runners/runner-1/skill-snapshots", (route) =>
+      route.fulfill({ json: { discoveryId: "discovery", candidates: [candidate] } }));
+    await page.route("**/api/skill-machine/discovery/preview", (route) =>
+      route.fulfill({ json: { previewId: "preview", candidate, digest: "a".repeat(64), disposition: "identical",
+        assignmentCount: 1, files: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: review\n---\nReview" }],
+        previousFiles: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: review\n---\nReview" }] } }));
+    await page.route("**/api/skill-machine/discovery/adoption-preflight", (route) =>
+      route.fulfill({ json: { status: "prerequisites_met", mutationSupported: true, blockers: [], advisories: [],
+        adoptionToken: "approval", sharedReaders: [], source: { candidate, digest: "a".repeat(64), checkedAt: 1 },
+        notice: "Read-only prerequisite report. No directory was changed." } }));
+    await page.route("**/api/runners/runner-1/skill-adoption-recovery", (route) => route.fulfill({ json: {
+      operations: [{ operationId, backupDirectory: `.codex/skills/.wollipog-adoption-${operationId}`,
+        sourceDirectory: ".codex/skills", name: "review", digest: "a".repeat(64), state: "managed_linked",
+        context: { kind: "wsl", distro: "Ubuntu" },
+        detail: "The managed link is active and the original is preserved." }], truncated: false } }));
+    await page.goto("/skills-removals-e2e.html?wslAdoption=1");
+    await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
+    await page.getByRole("button", { name: "Import from Machine" }).click();
+    await page.getByRole("button", { name: "Inspect Recovery" }).click();
+    await expect(page.getByText(`WSL: Ubuntu · .codex/skills/review · managed linked · ${operationId}`)).toBeVisible();
+    await page.getByRole("button", { name: "Discover Skills" }).click();
+    await page.getByRole("button", { name: "Preview Files for review from WSL: Ubuntu · .codex/skills/review" }).click();
+    await page.getByRole("button", { name: "Check Adoption" }).click();
+    await page.getByRole("checkbox", { name: "Confirm Recoverable Adoption" }).check();
+    await expect(page.getByRole("button", { name: "Adopt Source Directory" })).toBeEnabled();
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await page.screenshot({ path: info.outputPath(`wsl-adoption-${width}-${theme}.png`), fullPage: true });
+  },
+);
+
+test("a Windows runner without WSL adoption keeps WSL candidates snapshot-only", async ({ page }) => {
+  const candidate = { id: "wsl-opaque", name: "review", sourceDirectory: ".codex/skills",
+    generation: "a".repeat(64), context: { kind: "wsl", distro: "Ubuntu" } };
+  await page.route("**/api/runners/runner-1/skill-snapshots", (route) =>
+    route.fulfill({ json: { discoveryId: "discovery", candidates: [candidate] } }));
+  await page.route("**/api/skill-machine/discovery/preview", (route) =>
+    route.fulfill({ json: { previewId: "preview", candidate, digest: "a".repeat(64), disposition: "identical",
+      assignmentCount: 1, files: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: review\n---\nReview" }],
+      previousFiles: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: review\n---\nReview" }] } }));
+  await page.goto("/skills-removals-e2e.html?windowsAdoption=1");
+  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await page.getByRole("button", { name: "Discover Skills" }).click();
+  await page.getByRole("button", { name: "Preview Files for review from WSL: Ubuntu · .codex/skills/review" }).click();
+  await expect(page.getByRole("button", { name: "Check Adoption" })).toBeDisabled();
 });
 
 test("switching machines clears inspected adoption recovery", async ({ page }) => {

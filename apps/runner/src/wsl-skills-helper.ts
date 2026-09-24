@@ -3,7 +3,7 @@ import { HELD_SKILL_LINK_DETAIL } from "./skills.js";
 /** Fixed in-distro filesystem adapter. JSON carries only validated desired state and store paths;
  * no payload value is evaluated as Python or shell source. */
 export const WSL_SKILLS_HELPER = String.raw`#!/usr/bin/env python3
-import ctypes, datetime, hashlib, json, os, re, stat, sys, uuid
+import ctypes, datetime, errno, hashlib, json, os, re, signal, stat, sys, time, uuid
 
 HELD_DETAIL = ${JSON.stringify(HELD_SKILL_LINK_DETAIL)}
 NAME = re.compile(r"^[a-z0-9][a-z0-9._-]{0,63}$")
@@ -880,8 +880,427 @@ def reconcile(spec):
         if lease is not None: release_lease(lease)
         os.close(state); os.close(store_fd); os.close(home_fd)
 
+# Recoverable adoption. Mirrors the Linux runner transaction in-distro: descriptor-anchored,
+# no-follow walks from the pinned HOME, two content passes against the approved digest, a private
+# journal, a no-replace rename of the original, and an exclusive managed link. Nothing is unlinked,
+# overwritten, or restored automatically; every stop after "journal" leaves recovery evidence.
+JOURNAL_PREFIX = ".wollipog-adoption-"
+UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$")
+IDENTITY = re.compile(r"^[0-9]+:[0-9]+$")
+RELATIVE_PATTERN = re.compile(r"^[A-Za-z0-9._-]+(/[A-Za-z0-9._-]+)*$")
+RENAME_NOREPLACE = 1
+MAX_SKILL_FILES = 64
+MAX_SKILL_FILE_BYTES = 512 * 1024
+MAX_SKILL_TOTAL_BYTES = 2 * 1024 * 1024
+MAX_SKILL_ENTRIES = 256
+MAX_RECOVERY_RAW = 4096
+MAX_RECOVERY_OPERATIONS = 64
+MAX_JOURNAL_BYTES = 8192
+
+def valid_relative(value):
+    # A fixed harness-relative directory: plain segments, never "." or "..".
+    return (isinstance(value, str) and len(value) <= 64 and RELATIVE_PATTERN.fullmatch(value) is not None and
+        not any(part in (".", "..") for part in value.split("/")))
+
+def emit(line):
+    sys.stdout.write(line + "\n"); sys.stdout.flush()
+
+def checkpoint(stage):
+    # Test-only fault injection. Windows does not forward these variables into WSL unless WSLENV
+    # names them, and the runner never does.
+    if os.environ.get("WOLLIPOG_SKILL_ADOPTION_TEST_CHECKPOINT") != stage: return
+    control = os.environ.get("WOLLIPOG_SKILL_ADOPTION_TEST_CONTROL", "")
+    if not control: return
+    emit("checkpoint")
+    deadline = time.time() + 60
+    while not os.path.exists(control):
+        if time.time() > deadline: fail("checkpoint was not released")
+        time.sleep(0.05)
+    with open(control) as handle: command = handle.read().strip()
+    if command == "k": os.kill(os.getpid(), signal.SIGKILL)
+    if command != "c": fail("checkpoint failure")
+
+def identity(fd):
+    info = os.fstat(fd)
+    return "%d:%d" % (info.st_dev, info.st_ino)
+
+def open_directory(parent, name):
+    return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=parent)
+
+def walk(root, relative, durable=False, strict=False):
+    # A strict walk applies reconciliation's ownership rule to harness directories, so adoption
+    # never publishes a link where WSL reconciliation would refuse to manage it.
+    fd = os.dup(root)
+    try:
+        for segment in relative.split("/"):
+            if not segment or segment in (".", "..") or "\\" in segment: fail("invalid path segment")
+            following = open_directory(fd, segment)
+            info = os.fstat(following)
+            if strict and (info.st_uid != os.geteuid() or info.st_mode & 0o022):
+                os.close(following); fail("unsafe directory ownership")
+            if durable: os.fsync(fd)
+            os.close(fd); fd = following
+        return fd
+    except:
+        os.close(fd); raise
+
+def check_path(root, relative, expected):
+    fd = walk(root, relative)
+    try:
+        if identity(fd) != expected: fail("the recorded path changed")
+    finally: os.close(fd)
+
+def entry_kind(parent, name):
+    try: info = os.stat(name, dir_fd=parent, follow_symlinks=False)
+    except FileNotFoundError: return "absent"
+    return "directory" if stat.S_ISDIR(info.st_mode) else "link" if stat.S_ISLNK(info.st_mode) else "other"
+
+def read_link(parent, name):
+    try: return os.readlink(name, dir_fd=parent)
+    except OSError: return None
+
+def validate_skill_path(path):
+    # Mirrors validSkillFilePath; the exact path participates in the canonical version digest.
+    try: units = len(path.encode("utf-16-le")) // 2
+    except UnicodeEncodeError: fail("invalid skill file path")
+    if (units == 0 or units > 256 or path.startswith("/") or "\\" in path or re.match(r"^[A-Za-z]:", path) or
+        any(ord(character) < 0x20 or ord(character) == 0x7f for character in path)): fail("invalid skill file path")
+    parts = path.split("/")
+    if len(parts) > 8 or any(part in ("", ".", "..") for part in parts): fail("invalid skill file path")
+
+def tree_digest(root, reject_executable, durable):
+    # Mirrors skillVersionDigest: SHA-256 over {"files":[{"path","sha256","size"}]} ordered by UTF-16
+    # code units, with the same bounds as the runner's no-follow snapshot reader.
+    files, budget = [], {"entries": 0, "bytes": 0}
+    def visit(directory, prefix, depth):
+        if depth > 16: fail("skill tree is too deep")
+        for name in os.listdir(directory):
+            budget["entries"] += 1
+            if budget["entries"] > MAX_SKILL_ENTRIES: fail("skill tree has too many entries")
+            path = prefix + name
+            validate_skill_path(path)
+            info = os.stat(name, dir_fd=directory, follow_symlinks=False)
+            if stat.S_ISDIR(info.st_mode):
+                child = open_directory(directory, name)
+                try: visit(child, path + "/", depth + 1)
+                finally: os.close(child)
+                continue
+            if not stat.S_ISREG(info.st_mode) or len(files) >= MAX_SKILL_FILES: fail("unsupported skill entry")
+            child = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            try:
+                before = os.fstat(child)
+                if (not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > MAX_SKILL_FILE_BYTES or
+                    budget["bytes"] + before.st_size > MAX_SKILL_TOTAL_BYTES): fail("unsupported skill file")
+                if reject_executable and before.st_mode & 0o111: fail("executable files are not adopted")
+                content, total = hashlib.sha256(), 0
+                while True:
+                    chunk = os.pread(child, 65536, total)
+                    if not chunk: break
+                    total += len(chunk)
+                    if total > before.st_size: fail("skill file changed")
+                    content.update(chunk)
+                after = os.fstat(child)
+                if total != before.st_size or (after.st_dev, after.st_ino, after.st_size, after.st_nlink, after.st_mtime_ns,
+                    after.st_ctime_ns) != (before.st_dev, before.st_ino, before.st_size, before.st_nlink,
+                    before.st_mtime_ns, before.st_ctime_ns): fail("skill file changed")
+                if durable: os.fsync(child)
+            finally: os.close(child)
+            budget["bytes"] += before.st_size
+            files.append((path, content.hexdigest(), before.st_size))
+        if durable: os.fsync(directory)
+    visit(root, "", 0)
+    if not any(path == "SKILL.md" for path, _, _ in files): fail("SKILL.md is missing")
+    files.sort(key=lambda entry: entry[0].encode("utf-16-be"))
+    manifest = json.dumps({"files": [{"path": path, "sha256": sha, "size": size} for path, sha, size in files]},
+        separators=(",", ":"), ensure_ascii=False)
+    return hashlib.sha256(manifest.encode("utf-8")).hexdigest()
+
+def directory_generation(fd):
+    info = os.fstat(fd)
+    entries = sorted((name, entry_kind(fd, name)) for name in os.listdir(fd))
+    return (info.st_dev, info.st_ino, info.st_mtime_ns, info.st_ctime_ns, tuple(entries))
+
+def check_content(fd, digest, reject_executable):
+    before = directory_generation(fd)
+    if (tree_digest(fd, reject_executable, True) != digest or tree_digest(fd, reject_executable, True) != digest or
+        directory_generation(fd) != before): fail("skill content changed")
+
+def read_record(parent, name):
+    fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_JOURNAL_BYTES: fail("unsafe journal record")
+        raw = os.read(fd, MAX_JOURNAL_BYTES + 1)
+        if len(raw) != info.st_size: fail("journal record changed")
+        return raw
+    finally: os.close(fd)
+
+def record(parent, name, value, once=False):
+    # Exclusive create and flush. A write-once record accepts only identical existing bytes.
+    raw = json.dumps(value, separators=(",", ":")).encode()
+    try: fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=parent)
+    except FileExistsError:
+        if once and read_record(parent, name) == raw: return
+        raise
+    try: write_all(fd, raw); os.fsync(fd)
+    finally: os.close(fd)
+    os.fsync(parent)
+
+def rename_noreplace(source_parent, source, target_parent, target):
+    try:
+        renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+    except AttributeError: renameat2 = None
+    if renameat2 is not None:
+        if renameat2(source_parent, os.fsencode(source), target_parent, os.fsencode(target), RENAME_NOREPLACE) == 0: return
+        code = ctypes.get_errno()
+        if code not in (errno.ENOSYS, errno.EINVAL): raise OSError(code, os.strerror(code))
+    # Filesystems without RENAME_NOREPLACE keep the Linux runner's semantics inside a private journal.
+    if entry_kind(target_parent, target) != "absent": fail("the rename target is occupied")
+    os.rename(source, target, src_dir_fd=source_parent, dst_dir_fd=target_parent)
+
+def adoption_roots(spec):
+    owner = spec.get("ownerHash", "")
+    if not isinstance(owner, str) or not DIGEST.fullmatch(owner): fail("invalid owner")
+    home_fd, home = open_root(os.environ.get("HOME", ""))
+    try: store_fd, store_root = open_root(spec.get("storeRoot", ""))
+    except:
+        os.close(home_fd); raise
+    if store_root != spec.get("storeRoot"):
+        os.close(store_fd); os.close(home_fd); fail("store root is not canonical")
+    return owner, home_fd, home, store_fd, store_root
+
+def adopt(spec):
+    local, source_directory = spec.get("localSourceDirectory"), spec.get("sourceDirectory")
+    name, generation, digest, operation = spec.get("name"), spec.get("generation"), spec.get("digest"), spec.get("operationId")
+    if (not isinstance(local, str) or not valid_relative(local) or not isinstance(source_directory, str) or
+        not valid_relative(source_directory) or not isinstance(name, str) or not NAME.fullmatch(name) or
+        not isinstance(generation, str) or not DIGEST.fullmatch(generation) or not isinstance(digest, str) or
+        not DIGEST.fullmatch(digest) or not isinstance(operation, str) or not UUID.fullmatch(operation)):
+        fail("invalid adoption request")
+    owner, home_fd, home, store_fd, store_root = adoption_roots(spec)
+    opened, lease = [], None
+    def keep(fd):
+        opened.append(fd); return fd
+    try:
+        lease = acquire_lease(home_fd, owner)
+        target_relative = name + "/" + digest
+        target_path = store_root + "/" + target_relative
+        source_path = home + "/" + local + "/" + name
+        if target_path == source_path or target_path.startswith(source_path + "/") or source_path.startswith(target_path + "/"):
+            fail("source and store overlap")
+        parent = keep(walk(home_fd, local, True, True))
+        source = keep(open_directory(parent, name))
+        target = keep(walk(store_fd, target_relative, True))
+        if fd_path(target) != target_path: fail("store version escaped its root")
+        parent_id, source_id, target_id = identity(parent), identity(source), identity(target)
+        def check_source():
+            check_path(home_fd, local, parent_id)
+            check_path(home_fd, local + "/" + name, source_id)
+            check_content(source, digest, True)
+        def check_target():
+            check_path(store_fd, target_relative, target_id)
+            check_content(target, digest, False)
+        check_source()
+        check_target()
+        backup_name = JOURNAL_PREFIX + operation
+        backup_relative = local + "/" + backup_name
+        original_relative = backup_relative + "/original"
+        emit("journal")
+        os.mkdir(backup_name, 0o700, dir_fd=parent)
+        backup = keep(open_directory(parent, backup_name))
+        backup_id = identity(backup)
+        record(backup, "intent.json", {"format": 1, "operationId": operation, "sourceDirectory": source_directory,
+            "name": name, "digest": digest, "generation": generation, "sourceIdentity": source_id,
+            "parentIdentity": parent_id, "targetIdentity": target_id,
+            "targetRelative": "skills/store/" + target_relative})
+        os.fsync(parent)
+        checkpoint("intent_durable")
+        check_source()
+        check_path(store_fd, target_relative, target_id)
+        # The original may only move into the journal that recovery inspection will find.
+        check_path(home_fd, backup_relative, backup_id)
+        rename_noreplace(parent, name, backup, "original")
+        os.fsync(backup); os.fsync(parent)
+        checkpoint("source_preserved")
+        preserved = keep(open_directory(backup, "original"))
+        if identity(preserved) != source_id: fail("the preserved original changed")
+        check_content(preserved, digest, True)
+        record(backup, "preserved.json", {"sourceIdentity": source_id, "digest": digest})
+        check_path(home_fd, local, parent_id)
+        check_path(home_fd, original_relative, source_id)
+        check_target()
+        # symlink() fails with EEXIST rather than replacing anything created during the rename gap.
+        os.symlink(target_path, name, dir_fd=parent)
+        os.fsync(parent)
+        checkpoint("link_created")
+        check_path(home_fd, local, parent_id)
+        check_path(home_fd, original_relative, source_id)
+        check_target()
+        if read_link(parent, name) != target_path: fail("the published link changed")
+        record(backup, "linked.json", {"digest": digest})
+        emit("adopted")
+    finally:
+        for fd in reversed(opened):
+            try: os.close(fd)
+            except OSError: pass
+        try:
+            if lease is not None: release_lease(lease)
+        finally:
+            os.close(store_fd); os.close(home_fd)
+
+def inspect_journal(parent, entry, operation, home, local, store_root):
+    try: backup = open_directory(parent, entry)
+    except OSError: return None
+    try:
+        try: intent = read_record(backup, "intent.json").decode("utf-8")
+        except Exception: return None
+        journal = {"OperationId": operation, "Intent": intent, "Name": "", "Digest": "", "OriginalIdentity": "",
+            "Kind": 3, "SourceIdentity": "", "Role": 0}
+        try:
+            original = open_directory(backup, "original")
+            try: journal["OriginalIdentity"] = identity(original)
+            finally: os.close(original)
+        except OSError: pass
+        try: parsed = json.loads(intent)
+        except Exception: parsed = None
+        name = parsed.get("name") if isinstance(parsed, dict) else None
+        digest = parsed.get("digest") if isinstance(parsed, dict) else None
+        if isinstance(name, str) and NAME.fullmatch(name) and isinstance(digest, str) and DIGEST.fullmatch(digest):
+            journal["Name"], journal["Digest"] = name, digest
+            kind = entry_kind(parent, name)
+            journal["Kind"] = {"absent": 0, "directory": 1, "link": 2, "other": 3}[kind]
+            if kind == "directory":
+                try:
+                    source = open_directory(parent, name)
+                    try: journal["SourceIdentity"] = identity(source)
+                    finally: os.close(source)
+                except OSError: pass
+            elif kind == "link":
+                target = read_link(parent, name)
+                managed = store_root + "/" + name + "/" + digest if store_root else None
+                recovery = home + "/" + local + "/" + entry + "/original"
+                journal["Role"] = 1 if managed and target == managed else 2 if target == recovery else 3
+        return journal
+    finally: os.close(backup)
+
+def inspect(spec):
+    local, only = spec.get("localSourceDirectory"), spec.get("operationId") or None
+    if not isinstance(local, str) or not valid_relative(local) or (only is not None and (not isinstance(only, str) or
+        not UUID.fullmatch(only))): fail("invalid inspection")
+    result = {"parentIdentity": "", "journals": [], "truncated": False}
+    try: home_fd, home = open_root(os.environ.get("HOME", ""))
+    except OSError: return result
+    try:
+        store_fd, store_root = open_root(spec.get("storeRoot", ""))
+        os.close(store_fd)
+    except OSError: store_root = ""
+    try:
+        try: parent = walk(home_fd, local)
+        except OSError: return result
+        try:
+            result["parentIdentity"] = identity(parent)
+            if only is not None:
+                # A targeted lookup opens the named journal directly, like Linux restore.
+                journal = inspect_journal(parent, JOURNAL_PREFIX + only, only, home, local, store_root)
+                if journal is not None: result["journals"].append(journal)
+                return result
+            raw = 0
+            with os.scandir(parent) as entries:
+                for entry in entries:
+                    raw += 1
+                    if raw > MAX_RECOVERY_RAW:
+                        result["truncated"] = True; break
+                    if not entry.name.startswith(JOURNAL_PREFIX): continue
+                    operation = entry.name[len(JOURNAL_PREFIX):]
+                    if not UUID.fullmatch(operation): continue
+                    if len(result["journals"]) >= MAX_RECOVERY_OPERATIONS:
+                        result["truncated"] = True; break
+                    journal = inspect_journal(parent, entry.name, operation, home, local, store_root)
+                    if journal is not None: result["journals"].append(journal)
+            return result
+        finally: os.close(parent)
+    finally: os.close(home_fd)
+
+def restore(spec):
+    local, operation, name, digest = spec.get("localSourceDirectory"), spec.get("operationId"), spec.get("name"), spec.get("digest")
+    parent_expected, source_expected = spec.get("parentIdentity"), spec.get("sourceIdentity")
+    if (not isinstance(local, str) or not valid_relative(local) or not isinstance(operation, str) or
+        not UUID.fullmatch(operation) or not isinstance(name, str) or not NAME.fullmatch(name) or
+        not isinstance(digest, str) or not DIGEST.fullmatch(digest) or not isinstance(parent_expected, str) or
+        not IDENTITY.fullmatch(parent_expected) or not isinstance(source_expected, str) or
+        not IDENTITY.fullmatch(source_expected)): fail("invalid restore request")
+    owner, home_fd, home, store_fd, store_root = adoption_roots(spec)
+    opened, lease = [], None
+    def keep(fd):
+        opened.append(fd); return fd
+    try:
+        lease = acquire_lease(home_fd, owner)
+        emit("leased")
+        parent = keep(walk(home_fd, local, True, True))
+        if identity(parent) != parent_expected: fail("the source parent identity changed")
+        backup_name = JOURNAL_PREFIX + operation
+        backup_relative = local + "/" + backup_name
+        original_relative = backup_relative + "/original"
+        backup = keep(open_directory(parent, backup_name))
+        backup_id = identity(backup)
+        original = keep(open_directory(backup, "original"))
+        if identity(original) != source_expected or tree_digest(original, False, True) != digest:
+            fail("the preserved original changed")
+        record(backup, "restore-intent.json", {"operationId": operation, "sourceIdentity": source_expected}, True)
+        checkpoint("restore_intent_durable")
+        managed = store_root + "/" + name + "/" + digest
+        recovery = home + "/" + original_relative
+        source_kind, preserved_kind = entry_kind(parent, name), entry_kind(backup, "managed-link")
+        if source_kind == "link":
+            if preserved_kind != "absent" or read_link(parent, name) != managed: fail("the source is not the managed link")
+            # Moving the live link is only safe into the journal that recovery inspection will find.
+            check_path(home_fd, local, parent_expected)
+            check_path(home_fd, backup_relative, backup_id)
+            rename_noreplace(parent, name, backup, "managed-link")
+            os.fsync(parent); os.fsync(backup)
+            source_kind, preserved_kind = "absent", "link"
+        if preserved_kind == "link":
+            if read_link(backup, "managed-link") != managed: fail("the preserved managed link changed")
+            record(backup, "managed-link-preserved.json", {"target": managed}, True)
+            checkpoint("managed_link_preserved")
+        elif preserved_kind != "absent": fail("the preserved managed link is not a link")
+        if source_kind != "absent": fail("the source path is occupied")
+        # The link text names the original by path, so its parent and journal must still be where
+        # that path leads on both sides of publication.
+        check_path(home_fd, local, parent_expected)
+        check_path(home_fd, original_relative, source_expected)
+        os.symlink(recovery, name, dir_fd=parent)
+        os.fsync(parent)
+        checkpoint("recovery_link_created")
+        check_path(home_fd, local, parent_expected)
+        check_path(home_fd, original_relative, source_expected)
+        resolved = os.stat(name, dir_fd=parent)
+        if (read_link(parent, name) != recovery or "%d:%d" % (resolved.st_dev, resolved.st_ino) != source_expected or
+            identity(original) != source_expected or tree_digest(original, False, True) != digest):
+            fail("the recovery link changed")
+        record(backup, "restored.json", {"sourceIdentity": source_expected, "digest": digest}, True)
+        emit("restored")
+    finally:
+        for fd in reversed(opened):
+            try: os.close(fd)
+            except OSError: pass
+        try:
+            if lease is not None: release_lease(lease)
+        finally:
+            os.close(store_fd); os.close(home_fd)
+
+def main(spec):
+    operation = spec.get("operation", "reconcile") if isinstance(spec, dict) else None
+    if operation == "reconcile": print(json.dumps(reconcile(spec), separators=(",", ":")))
+    elif operation == "adopt": adopt(spec)
+    elif operation == "inspect": print(json.dumps(inspect(spec), separators=(",", ":")))
+    elif operation == "restore": restore(spec)
+    else: fail("invalid helper operation")
+
 try:
-    print(json.dumps(reconcile(bounded_json()), separators=(",", ":")))
+    main(bounded_json())
 except Exception as error:
     print(json.dumps({"error": str(error)}, separators=(",", ":")))
     sys.exit(1)

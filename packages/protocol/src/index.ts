@@ -565,7 +565,11 @@
 //      overwritten or deleted by reconciliation, update, or store GC; its links are held until a
 //      correlated `skill_drift` read or confirmed restore resolves it. Older control planes drop
 //      the unknown field, and older runners report no drift rather than a false clean result.
-export const PROTOCOL_VERSION = 183;
+// 184: Windows runners adopt, inspect, and restore Windows-hosted WSL locations inside the distro
+//      through the fixed in-distro helper, which takes the distro HOME lease itself. Recovery
+//      operations from a WSL distro carry an optional `context`; the runner reports them only to a
+//      control plane at this version, and older runners keep refusing WSL adoption.
+export const PROTOCOL_VERSION = 184;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -818,6 +822,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   nativeMacosMachineSkillAdoption: 181,
   /** Native Windows adoption and recovery through the fixed handle-based junction helper. */
   nativeWindowsMachineSkillAdoption: 182,
+  /** Windows-hosted WSL adoption and recovery through the fixed in-distro helper. */
+  wslMachineSkillAdoption: 184,
   chunkedAgentSkills: 96,
   /** v96 runners emit the additive `skills_state.removals` event projection. */
   skillLinkRemovalReporting: 96,
@@ -1143,7 +1149,9 @@ export function machineSkillAdoptionRequirement(
   os: OS | undefined,
   context?: MachineSkillCandidate["context"],
 ): MachineSkillAdoptionRequirement | null {
-  if (context?.kind === "wsl") return null;
+  if (context?.kind === "wsl") {
+    return os === "windows" ? { capability: "wslMachineSkillAdoption", label: "WSL machine skill adoption" } : null;
+  }
   if (os === "linux") return { capability: "machineSkillAdoption", label: "Machine skill adoption" };
   if (os === "macos") return { capability: "nativeMacosMachineSkillAdoption", label: "macOS machine skill adoption" };
   if (os === "windows") {
@@ -1371,6 +1379,8 @@ export interface SkillAdoptionRecoveryOperation {
   digest: string;
   /** Opaque runner account-home identity. Absent means the legacy process home. */
   providerAccountId?: string;
+  /** Present for a journal inside a Windows-hosted WSL distro; absent means the native host. */
+  context?: { kind: "wsl"; distro: string };
   state: "intent_only" | "source_preserved" | "managed_linked" | "restored" | "blocked";
   detail: string;
 }

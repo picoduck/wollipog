@@ -230,10 +230,11 @@ import { mergeWslSkillsResult, reconcileWslSkills } from "./wsl-skills.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
 import { handleSkillAdoption } from "./skill-adoption-command.js";
 import {
-  listSkillAdoptionRecovery,
+  listSkillAdoptionRecoveryWithWsl,
   recoveryResult,
-  restoreSkillAdoptionRecovery,
+  restoreSkillAdoptionRecoveryWithWsl,
 } from "./skill-adoption-recovery.js";
+import type { WslAdoptionEnvironment } from "./wsl-skill-adoption.js";
 import { ChunkedSkillsSyncAssembler, type ChunkedSyncStep } from "./skills-sync.js";
 import { VERSION } from "./version.js";
 import { overlayAcpAuthStatus, type AcpAuthRuntime } from "./acp-auth-status.js";
@@ -1498,9 +1499,18 @@ function queueSkillsReconcile(requestId?: string): void {
   skillsReconcileQueue = skillsReconcileQueue.then(run, run);
 }
 
+/** WSL adoption and recovery run inside each distro on a Windows runner, only when the control plane
+ * can validate the WSL context their recovery operations carry. */
+function wslAdoptionEnvironment(): WslAdoptionEnvironment | undefined {
+  return process.platform === "win32" && runnerSupportsProtocol(controlPlaneProtocolVersion, "wslMachineSkillAdoption")
+    ? { ownerHash: dataDirLease.ownerHash, dataDir: config.dataDir }
+    : undefined;
+}
+
 function queueSkillAdoption(msg: SkillAdoptionMessage): void {
   const run = async () => {
-    const result = handleSkillAdoption({
+    const wsl = wslAdoptionEnvironment();
+    const result = await handleSkillAdoption({
       message: msg,
       runnerId: config.runnerId,
       home: homedir(),
@@ -1509,7 +1519,9 @@ function queueSkillAdoption(msg: SkillAdoptionMessage): void {
       providerAccounts: () => config.providerAccounts,
       snapshots: machineSkillSnapshots,
       desired: lastDesiredSkills,
+      currentDesired: () => lastDesiredSkills,
       acquireProviderHomeLease: (home) => sessions.acquireSkillReconciliationProviderHome(home),
+      ...(wsl ? { wsl } : {}),
     });
     sendUp(result);
     // A completed or interrupted transaction may have changed the source path. Reconcile and
@@ -1529,13 +1541,14 @@ function queueSkillAdoptionRecovery(msg: SkillAdoptionRecoveryMessage): void {
       return;
     }
     if (msg.operation === "list") {
-      const listed = listSkillAdoptionRecovery(
+      const listed = await listSkillAdoptionRecoveryWithWsl(
         homedir(),
         config.dataDir,
         metadata.agents,
         runnerSupportsProtocol(controlPlaneProtocolVersion, "accountScopedAgentSkills")
           ? config.providerAccounts
           : [],
+        wslAdoptionEnvironment(),
       );
       sendUp(recoveryResult(config.runnerId, msg.requestId, { status: "listed", ...listed }));
       return;
@@ -1547,7 +1560,7 @@ function queueSkillAdoptionRecovery(msg: SkillAdoptionRecoveryMessage): void {
       }));
       return;
     }
-    const result = restoreSkillAdoptionRecovery({
+    const result = await restoreSkillAdoptionRecoveryWithWsl({
       home: homedir(),
       dataDir: config.dataDir,
       agents: metadata.agents,
@@ -1556,7 +1569,7 @@ function queueSkillAdoptionRecovery(msg: SkillAdoptionRecoveryMessage): void {
         : [],
       operationId: msg.operationId,
       acquireProviderHomeLease: (home) => sessions.acquireSkillReconciliationProviderHome(home),
-    });
+    }, wslAdoptionEnvironment());
     sendUp(recoveryResult(config.runnerId, msg.requestId, result));
     // A restore attempt can move a managed link or source directory. Publish converged inventory
     // next in this same queue and keep reconcile/store GC out of every recovery transaction.

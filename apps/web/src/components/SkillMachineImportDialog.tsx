@@ -37,6 +37,7 @@ const adoptionBlocker = (blocker: string) => ({
   invocation_unsupported: "An assigned agent does not support the selected invocation policy.",
   manual_variant_adoption_unsupported: "Manual invocation variants cannot be adopted because their deployed content may differ.",
   shared_invocation_conflict: "Agents sharing this directory require different invocation variants.",
+  wsl_account_adoption_unsupported: "Account-scoped WSL locations can be imported, but not adopted.",
 }[blocker] ?? `Adoption prerequisite failed: ${blocker.replaceAll("_", " ")}.`);
 
 export function SkillMachineImportDialog({ runners, onClose, onImported }: {
@@ -163,7 +164,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
   </>}>
     <div className="form skills-machine-import">
       <p>Import a read-only snapshot. After an identical library version is assigned, a separate confirmed action can preserve the original and replace it with a managed link. New skills stay unassigned; accepted updates deploy to current assignments on unpinned machines.</p>
-      <p className="skills-hint">Snapshot import requires protocol 111 on Linux, protocol 119 on Windows, protocol 120 on macOS, or protocol 125 for WSL locations. Adoption requires a connected Linux runner on protocol 115 or newer, a macOS runner on protocol {RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption} or newer, or a Windows runner on protocol {RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillAdoption} or newer; WSL locations are not adopted yet. Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
+      <p className="skills-hint">Snapshot import requires protocol 111 on Linux, protocol 119 on Windows, protocol 120 on macOS, or protocol 125 for WSL locations. Adoption requires a connected Linux runner on protocol 115 or newer, a macOS runner on protocol {RUNNER_CAPABILITY_MIN_PROTOCOL.nativeMacosMachineSkillAdoption} or newer, or a Windows runner on protocol {RUNNER_CAPABILITY_MIN_PROTOCOL.nativeWindowsMachineSkillAdoption} or newer ({RUNNER_CAPABILITY_MIN_PROTOCOL.wslMachineSkillAdoption} for WSL locations). Symlinks, hard links, special files, executable files, and manual invocation variants are not adopted.</p>
       <label className="field"><span>Machine</span><Select label="Machine" value={runnerId} disabled={busy || discovery !== null}
         options={compatible.map((runner) => ({ value: runner.runnerId, label: runner.displayName || runner.hostname || runner.runnerId }))} onChange={selectRunner} /></label>
       {compatible.length === 0 && <p>No compatible connected machines. Update a Linux, macOS, or Windows runner to enable snapshot imports.</p>}
@@ -191,7 +192,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
             <strong>{operation.name}</strong>
             <p className="skills-hint">{operation.providerAccountId
               ? `Account: ${accountLabel(selectedRunner, operation.providerAccountId)} · `
-              : ""}{operation.sourceDirectory}/{operation.name} · {operation.state.replaceAll("_", " ")} · {operation.operationId}</p>
+              : ""}{operation.context?.kind === "wsl" ? `WSL: ${operation.context.distro} · ` : ""}{operation.sourceDirectory}/{operation.name} · {operation.state.replaceAll("_", " ")} · {operation.operationId}</p>
             <p>{operation.detail}</p>
             {restorable && <>
               <label className="field"><span>

@@ -199,7 +199,9 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.deepEqual(machineSkillAdoptionRequirement("linux")?.capability, "machineSkillAdoption");
   assert.deepEqual(machineSkillAdoptionRequirement("macos")?.capability, "nativeMacosMachineSkillAdoption");
   assert.deepEqual(machineSkillAdoptionRequirement("windows")?.capability, "nativeWindowsMachineSkillAdoption");
-  assert.equal(machineSkillAdoptionRequirement("windows", { kind: "wsl", distro: "Ubuntu" }), null);
+  assert.deepEqual(machineSkillAdoptionRequirement("windows", { kind: "wsl", distro: "Ubuntu" })?.capability,
+    "wslMachineSkillAdoption");
+  assert.equal(machineSkillAdoptionRequirement("linux", { kind: "wsl", distro: "Ubuntu" }), null);
   assert.equal(machineSkillAdoptionRequirement(undefined), null);
   assert.deepEqual(machineSkillAdoptionRecoveryRequirement("linux")?.capability, "machineSkillAdoptionRecovery");
   assert.deepEqual(machineSkillAdoptionRecoveryRequirement("macos")?.capability, "nativeMacosMachineSkillAdoption");
@@ -207,8 +209,10 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 183", () => {
-  assert.equal(PROTOCOL_VERSION, 183);
+test("PROTOCOL_VERSION is 184", () => {
+  assert.equal(PROTOCOL_VERSION, 184);
+  assert.equal(runnerSupportsProtocol(183, "wslMachineSkillAdoption"), false);
+  assert.equal(runnerSupportsProtocol(184, "wslMachineSkillAdoption"), true);
   assert.equal(runnerSupportsProtocol(181, "nativeWindowsMachineSkillAdoption"), false);
   assert.equal(runnerSupportsProtocol(182, "nativeWindowsMachineSkillAdoption"), true);
   assert.equal(runnerSupportsProtocol(182, "skillDrift"), false);
