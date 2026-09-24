@@ -77,7 +77,8 @@ test("a browser sees delegated image review complete through live scoped routes 
     controlPlane = spawn(process.execPath, ["--import", "tsx", "apps/control-plane/src/index.ts"], {
       cwd: REPO_ROOT,
       env: { ...env, CONTROL_PLANE_HOST: "127.0.0.1", CONTROL_PLANE_PORT: String(port),
-        CONTROL_PLANE_DB: databasePath, WOLLIPOG_WEB_DIST: webDist },
+        CONTROL_PLANE_DB: databasePath, CONTROL_PLANE_USAGE_PRICING_URL: "off",
+        WOLLIPOG_WEB_DIST: webDist },
       stdio: ["ignore", "pipe", "pipe"],
     });
     const captureLog = (chunk: unknown) => {
@@ -91,12 +92,12 @@ test("a browser sees delegated image review complete through live scoped routes 
     controlPlane.stderr?.on("data", captureLog);
     let ready = false;
     for (let attempt = 0; attempt < 400; attempt += 1) {
-      if (controlPlane.exitCode !== null) throw new Error(`control plane exited early: ${output}`);
+      if (controlPlane.exitCode !== null) throw new Error("control plane exited early");
       try { ready = (await fetch(`${base}/healthz`)).ok; } catch { /* still starting */ }
       if (ready) break;
       await delay(50);
     }
-    if (!ready) throw new Error(`control plane did not become healthy: ${output}`);
+    if (!ready) throw new Error("control plane did not become healthy");
     // Startup marks sessions with no connected runner stopped. Restore their fixture status after
     // recovery, so an exact live agent credential can exercise the real authorization routes.
     const db = ControlPlaneDb.open(databasePath);
