@@ -31,9 +31,14 @@ PowerShell routes these wrappers through `cmd.exe`,
 which can expand percent signs or alter embedded quotes; arbitrary wrapper behavior cannot be
 verified from the path alone, and a command without an explicit native executable suffix can resolve
 to one through `PATHEXT`.
+The same reference-only treatment applies to explicit `cmd.exe`, `cscript.exe`, `wscript.exe`,
+`find.exe`, and `sqlcmd.exe` launches. PowerShell's Windows argument-passing mode uses legacy
+behavior for those executables. Native Windows probes showed that a copied `cmd.exe` command expands
+a quoted percent reference, while `cscript.exe` can merge an embedded-quote argument with the next
+argument.
 Built-in Codex update guidance likewise sends the operator to the
 original manager for that exact installation instead of promising a safe copied command.
-Explicit `.exe` and `.com` launches and POSIX commands inside WSL retain their shell-specific command guidance.
+Other explicit `.exe` and `.com` launches and POSIX commands inside WSL retain their shell-specific command guidance.
 
 Boxes run the runner **binary deployed to them** (a Node SEA executable copied over SSH), not
 this repo's source. Restarting your dev stack updates the *local* runner you launch from source,

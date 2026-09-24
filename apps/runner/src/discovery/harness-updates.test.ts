@@ -116,29 +116,31 @@ test("native Windows batch update commands are excluded, including embedded quot
   });
 });
 
-test("explicit Windows command interpreters cannot promise copyable update arguments", () => {
-  for (const command of ["C:\\Windows\\System32\\cmd.exe", "C:\\Windows\\System32\\cscript.exe"]) {
+test("PowerShell legacy-passing executables cannot promise copyable update arguments", () => {
+  for (const name of ["cmd", "cscript", "wscript", "find", "sqlcmd"]) {
+    const command = `C:\\Windows\\System32\\${name}.exe`;
     const binary = { path: command, via: "path" as const,
       launch: { command, args: ["/c", "%WOLLIPOG_INTERPRETER_PROBE%"] } };
     assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
   }
 });
 
-test("native PowerShell probe: copied cmd.exe command preserves a literal percent argument",
+test("native PowerShell probe: cmd.exe expands a quoted percent argument",
   { skip: process.platform !== "win32" }, () => {
     const command = process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe";
     const binary = { path: command, via: "path" as const,
       launch: { command, args: ["/d", "/c", "echo", "%WOLLIPOG_INTERPRETER_PROBE%"] } };
-    const manual = manualCodexUpdateCommand(binary, { kind: "native" }, "win32");
-    assert.ok(manual);
-    const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", manual.command], {
+    assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+    // The command below was the previously offered PowerShell spelling of this launch.
+    const copied = `& '${command}' '/d' '/c' 'echo' '%WOLLIPOG_INTERPRETER_PROBE%' 'update'`;
+    const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", copied], {
       encoding: "utf8", env: { ...process.env, WOLLIPOG_INTERPRETER_PROBE: "EXPANDED" },
     });
     assert.equal(probe.status, 0, probe.stderr);
-    assert.match(probe.stdout, /%WOLLIPOG_INTERPRETER_PROBE% update/, `actual stdout: ${probe.stdout}`);
+    assert.match(probe.stdout, /^EXPANDED update\r?\n$/);
   });
 
-test("native PowerShell probe: copied cscript.exe command preserves an embedded quote",
+test("native PowerShell probe: cscript.exe merges an embedded-quote argument with update",
   { skip: process.platform !== "win32" }, () => {
     const dir = mkdtempSync(join(tmpdir(), "wollipog cscript probe "));
     try {
@@ -147,14 +149,13 @@ test("native PowerShell probe: copied cscript.exe command preserves an embedded 
       const command = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "cscript.exe");
       const binary = { path: command, via: "path" as const,
         launch: { command, args: ["//nologo", script, 'a"b'] } };
-      const manual = manualCodexUpdateCommand(binary, { kind: "native" }, "win32");
-      assert.ok(manual);
-      const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", manual.command], {
+      assert.equal(manualCodexUpdateCommand(binary, { kind: "native" }, "win32"), null);
+      const copied = `& '${command}' '//nologo' '${script}' 'a"b' 'update'`;
+      const probe = spawnSync("pwsh", ["-NoProfile", "-NonInteractive", "-Command", copied], {
         encoding: "utf8",
       });
       assert.equal(probe.status, 0, probe.stderr);
-      assert.match(probe.stdout, /ARG:a"b/, `actual stdout: ${probe.stdout}`);
-      assert.match(probe.stdout, /ARG:update/, `actual stdout: ${probe.stdout}`);
+      assert.equal(probe.stdout, "ARG:ab update\r\n");
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }

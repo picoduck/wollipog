@@ -3,11 +3,15 @@ import type { AgentContext, RunnerView } from "@wollipog/protocol";
 type MachineOs = RunnerView["os"];
 
 export type HarnessLaunchGuidance =
-  | { command: string; shell: string; batchWrapper: false }
-  | { command: null; shell: null; batchWrapper: true };
+  | { command: string; shell: string; referenceOnly: false }
+  | { command: null; shell: null; referenceOnly: true };
 
 const posixWord = (value: string): string => `'${value.replaceAll("'", `'"'"'`)}'`;
 const powerShellWord = (value: string): string => `'${value.replace(/['\u2018-\u201B]/gu, "$&$&")}'`;
+const nativeWindowsCommand = (command: string): boolean =>
+  /(?:^|[\\/])[^\\/]+\.(?:exe|com)$/i.test(command) &&
+  // PowerShell's Windows mode uses legacy argv passing for these executable names.
+  !/(?:^|[\\/])(?:cmd|cscript|wscript|find|sqlcmd)\.exe$/i.test(command);
 
 /** A displayed command is for the named interactive shell, never a serialized spawn argv. */
 export function formatHarnessLaunchCommand(
@@ -20,24 +24,23 @@ export function formatHarnessLaunchCommand(
     return {
       command: [command, ...args].map(posixWord).join(" "),
       shell: `a POSIX shell inside WSL: ${context.distro}`,
-      batchWrapper: false,
+      referenceOnly: false,
     };
   }
   if (os === "windows") {
-    // Even a dotted name such as codex.v2 can resolve through PATHEXT to a batch wrapper.
-    // Only an explicit native executable suffix rules out that ambiguous lookup.
-    if (!/(?:^|[\\/])[^\\/]+\.(?:exe|com)$/i.test(command)) {
-      return { command: null, shell: null, batchWrapper: true };
+    // Extensionless and dotted names may resolve through PATHEXT to batch wrappers.
+    if (!nativeWindowsCommand(command)) {
+      return { command: null, shell: null, referenceOnly: true };
     }
     return {
       command: `& ${[command, ...args].map(powerShellWord).join(" ")}`,
       shell: "PowerShell 7.3 or later on this Machine",
-      batchWrapper: false,
+      referenceOnly: false,
     };
   }
   return {
     command: [command, ...args].map(posixWord).join(" "),
     shell: "a POSIX shell on this Machine",
-    batchWrapper: false,
+    referenceOnly: false,
   };
 }
