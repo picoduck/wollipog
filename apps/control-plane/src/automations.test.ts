@@ -1147,6 +1147,70 @@ test("reordering alternate targets preserves each runner's explicit installation
   "reordering cannot discard runner-2's explicit pin because its Machine selection changed");
 });
 
+test("changing a workflow's primary Machine drops an orphaned alternate Orchestrator pin", () => {
+  const installedRunner = (runnerId: string): RunnerMetadata => {
+    const base = runnerWithAgents(runnerId, [
+      { id: "worker" }, { id: "reviewer" }, { id: "orchestrator", driver: "codex-app-server" },
+    ]);
+    return { ...base, agents: base.agents.map((agent) => agent.id === "orchestrator"
+      ? { ...agent, installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } }
+      : agent) };
+  };
+  const { db, online, service, workflows } = harness(175, [
+    installedRunner("runner-1"), installedRunner("runner-2"),
+    runnerWithAgents("runner-3", [{ id: "worker" }, { id: "reviewer" }]),
+  ]);
+  installCapabilityWorkflow(db);
+  const actor = { kind: "human" as const, id: "device" };
+  const original = service.create(baseSpec({
+    action: { kind: "workflow_run", request: {
+      runnerId: "runner-1", workspaceId: "ws-1", workflowId: "workflow-capabilities",
+      task: "Build", orchestratorAgentId: "orchestrator",
+    } },
+    runnerPolicy: { kind: "alternate", targets: [{ runnerId: "runner-2", workspaceId: "ws-1" }] },
+  }), actor, 0).data!;
+  assert.equal(original.runnerPolicy.kind, "alternate");
+  if (original.runnerPolicy.kind !== "alternate" || original.action.kind !== "workflow_run") {
+    throw new Error("expected alternate workflow automation");
+  }
+  assert.equal(original.runnerPolicy.targets[0]?.installationBindings?.orchestrator?.installationId, "system");
+
+  const changed = service.update(original.automationId, baseSpec({
+    action: { ...original.action, request: {
+      ...original.action.request, runnerId: "runner-3", orchestratorAgentId: undefined,
+    } },
+    runnerPolicy: original.runnerPolicy,
+  }), actor, 1_000).data!;
+  assert.equal(changed.action.kind, "workflow_run");
+  assert.equal(changed.runnerPolicy.kind, "alternate");
+  if (changed.action.kind !== "workflow_run" || changed.runnerPolicy.kind !== "alternate") {
+    throw new Error("expected alternate workflow automation");
+  }
+  assert.equal(changed.action.installationBindings?.orchestrator, undefined);
+  assert.equal(changed.runnerPolicy.targets[0]?.installationBindings?.orchestrator, undefined);
+
+  // A schedule saved before this fix can still contain the orphaned alternate pin.
+  const oldPin = original.runnerPolicy.targets[0]!.installationBindings!.orchestrator!;
+  db.updateAutomation({
+    automationId: changed.automationId,
+    spec: baseSpec({
+      action: changed.action,
+      runnerPolicy: { kind: "alternate", targets: [{
+        ...changed.runnerPolicy.targets[0]!, installationBindings: {
+          ...changed.runnerPolicy.targets[0]!.installationBindings, orchestrator: oldPin,
+        },
+      }] },
+    }),
+    nextFireAt: changed.nextFireAt, actor, now: 2_000,
+  });
+  online.clear();
+  online.add("runner-2");
+  service.tick(60_000);
+  assert.equal(workflows.length, 1);
+  assert.equal(workflows[0]?.runnerId, "runner-2");
+  assert.equal(workflows[0]?.orchestratorAgentId, undefined);
+});
+
 test("an old plain-id automation requires an explicit installation migration", () => {
   const { db, service, created } = harness(175);
   const actor = { kind: "human" as const, id: "device" };
