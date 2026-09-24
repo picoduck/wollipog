@@ -402,6 +402,27 @@ test("Podman mount scanning covers HOME, rootless global defaults, and quoted TO
     assert.equal(safe(), false);
     rmSync(uidDropin);
 
+    const rootlessSystemDropin = join(config, "system", "containers.rootless.conf.d", "20-bind.conf");
+    mkdirSync(join(config, "system", "containers.rootless.conf.d"), { recursive: true });
+    writeFileSync(rootlessSystemDropin, '[containers]\nvolumes = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
+    assert.equal(safe(), false, "current rootless system drop-ins are scanned");
+    rmSync(rootlessSystemDropin);
+
+    const rootlessShareUidDropin = join(config, "share", "containers.rootless.conf.d", "1000", "30-bind.conf");
+    mkdirSync(join(config, "share", "containers.rootless.conf.d", "1000"), { recursive: true });
+    writeFileSync(rootlessShareUidDropin, '[containers]\nvolumes = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
+    assert.equal(safe(), false, "current per-UID rootless share drop-ins are scanned");
+    rmSync(rootlessShareUidDropin);
+
+    const rootfulShareDropin = join(config, "share", "containers.rootful.conf.d", "40-bind.conf");
+    mkdirSync(join(config, "share", "containers.rootful.conf.d"), { recursive: true });
+    writeFileSync(rootfulShareDropin, '[containers]\nvolumes = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');
+    assert.equal(podmanDefaultMountsSafeForPaths({
+      share: join(config, "share"), system: join(config, "system"), home: join(config, "home"),
+      configHome: config, uid: 0,
+    }), false, "current rootful share drop-ins are scanned");
+    rmSync(rootfulShareDropin);
+
     const quotedKey = join(config, "containers", "containers.conf");
     mkdirSync(join(config, "containers"));
     writeFileSync(quotedKey, '[containers]\n"volumes" = ["/synthetic-host-credentials:/run/secrets/host:ro"]\n');

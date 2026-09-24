@@ -61,6 +61,12 @@ export function podmanDefaultMountsSafeForPaths(roots: PodmanMountConfigRoots): 
     configDirs.push(join(configHome, "containers", "containers.conf.d"));
     configFiles.push(join(system, "containers.rootless.conf"));
     configDirs.push(join(system, "containers.rootless.d"), join(system, "containers.rootless.d", String(uid)));
+    for (const base of [share, system]) {
+      configDirs.push(join(base, "containers.rootless.conf.d"),
+        join(base, "containers.rootless.conf.d", String(uid)));
+    }
+  } else {
+    for (const base of [share, system]) configDirs.push(join(base, "containers.rootful.conf.d"));
   }
   if (process.env.CONTAINERS_CONF) configFiles.push(process.env.CONTAINERS_CONF);
   if (process.env.CONTAINERS_CONF_OVERRIDE) configFiles.push(process.env.CONTAINERS_CONF_OVERRIDE);
