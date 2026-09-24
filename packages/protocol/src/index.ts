@@ -3466,7 +3466,8 @@ export interface CreateWorkflowDecisionRequest {
 export interface ResolveWorkflowDecisionRequest {
   outcome: "approve" | "deny";
   selectedOptionId?: string;
-  /** Required to approve UI evidence and must exactly cover the requested evidence ids. */
+  /** Required to approve UI evidence and must exactly cover the requested evidence ids. Omit it when
+   * denying, and for every other category. */
   evidenceReviewed?: string[];
   /** Audit-only: never retained, never shown to the child; only its digest reaches audit. */
   rationale?: string;

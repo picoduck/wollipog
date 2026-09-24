@@ -7320,17 +7320,22 @@ export class SessionsService {
     } else if (resolution.selectedOptionId !== undefined) {
       return fail("selectedOptionId is valid only for implementation questions", 400);
     }
-    if (snapshot.category === "ui_evidence_approval" && resolution.outcome === "approve") {
-      const requested = snapshot.evidence.map((item) => item.evidenceId).sort();
-      const reviewed = Array.isArray(resolution.evidenceReviewed) &&
-        resolution.evidenceReviewed.every((item): item is string => typeof item === "string")
-        ? [...new Set(resolution.evidenceReviewed)].sort() : [];
-      if (reviewed.length !== requested.length || reviewed.some((item, index) => item !== requested[index])) {
-        return fail("UI evidence approval must identify every reviewed evidence item", 400);
+    if (snapshot.category === "ui_evidence_approval") {
+      if (resolution.outcome === "approve") {
+        const requested = snapshot.evidence.map((item) => item.evidenceId).sort();
+        const reviewed = Array.isArray(resolution.evidenceReviewed) &&
+          resolution.evidenceReviewed.every((item): item is string => typeof item === "string")
+          ? [...new Set(resolution.evidenceReviewed)].sort() : [];
+        if (reviewed.length !== requested.length || reviewed.some((item, index) => item !== requested[index])) {
+          return fail("UI evidence approval must identify every reviewed evidence item", 400);
+        }
+        resolution = { ...resolution, evidenceReviewed: reviewed };
       }
-      resolution = { ...resolution, evidenceReviewed: reviewed };
+      if (resolution.outcome === "deny" && resolution.evidenceReviewed !== undefined) {
+        return fail("a denied UI evidence decision cannot carry evidenceReviewed; omit it when denying", 400);
+      }
     } else if (resolution.evidenceReviewed !== undefined) {
-      return fail("evidenceReviewed is valid only for UI evidence approval", 400);
+      return fail("evidenceReviewed is valid only for ui_evidence_approval decisions", 400);
     }
     return ok(resolution);
   }
