@@ -744,13 +744,22 @@ export function AutomationsView() {
                     editingSpec.action.request.workflowId === form.workflowId &&
                     editingSpec.action.request.runnerId === form.runnerId
                     ? editingSpec.action.request.agentBindings?.[role] : undefined);
+                // A pin on an inherited target describes the old primary identity. Save-time
+                // pinning will replace it when that identity changes, so display the new choice.
+                const inheritedPrimaryChanged = Boolean(oldTarget && oldTarget.agentBindings?.[role] === undefined &&
+                  (primaryChoice ?? role) !== (editingSpec?.action.kind === "workflow_run"
+                    ? editingSpec.action.request.agentBindings?.[role] ?? role : role));
+                const effectiveReference = inheritedPrimaryChanged ? undefined : reference;
                 const boundId = alternateWorkflowBindingEdits[`role:${role}`] ??
-                  (reference ? resolvedInstallationAgentId(selectedFallback, reference) : undefined) ??
+                  (effectiveReference ? resolvedInstallationAgentId(selectedFallback, effectiveReference) : undefined) ??
                   oldTarget?.agentBindings?.[role] ??
                   primaryChoice ?? role;
-                const unavailable = Boolean(oldTarget) && !alternateWorkflowBindingEdits[`role:${role}`] && (reference
-                  ? !bindingAvailable(selectedFallback, reference)
-                  : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
+                const unavailable = Boolean(oldTarget) && !alternateWorkflowBindingEdits[`role:${role}`] && (effectiveReference
+                  ? !bindingAvailable(selectedFallback, effectiveReference)
+                  : inheritedPrimaryChanged
+                    ? !bindableAgents(selectedFallback).some((option) => option.agent.id === boundId &&
+                        (!option.agent.installation || installationFor(selectedFallback, boundId)))
+                    : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
                 return <div className="automation-field" key={role}>
                   <span className="field-label">Alternate {titleCaseLabel(role)} Agent</span>
                   <Select label={`Alternate ${titleCaseLabel(role)} Agent`} value={boundId}
@@ -781,12 +790,18 @@ export function AutomationsView() {
                       ? editingSpec.action.request.orchestratorAgentId : undefined);
                   if (!oldTarget?.orchestratorAgentId && !primaryChoice) return null;
                   const reference = oldTarget?.installationBindings?.orchestrator;
+                  const inheritedPrimaryChanged = Boolean(oldTarget && !oldTarget.orchestratorAgentId &&
+                    primaryChoice !== editingSpec.action.request.orchestratorAgentId);
+                  const effectiveReference = inheritedPrimaryChanged ? undefined : reference;
                   const boundId = alternateWorkflowBindingEdits.orchestrator ??
-                    (reference ? resolvedInstallationAgentId(selectedFallback, reference) : undefined) ??
+                    (effectiveReference ? resolvedInstallationAgentId(selectedFallback, effectiveReference) : undefined) ??
                     oldTarget?.orchestratorAgentId ?? primaryChoice!;
-                  const unavailable = Boolean(oldTarget) && !alternateWorkflowBindingEdits.orchestrator && (reference
-                    ? !bindingAvailable(selectedFallback, reference)
-                    : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
+                  const unavailable = Boolean(oldTarget) && !alternateWorkflowBindingEdits.orchestrator && (effectiveReference
+                    ? !bindingAvailable(selectedFallback, effectiveReference)
+                    : inheritedPrimaryChanged
+                      ? !bindableAgents(selectedFallback).some((option) => option.agent.id === boundId &&
+                          (!option.agent.installation || installationFor(selectedFallback, boundId)))
+                      : !selectedFallback?.agents.some((agent) => agent.id === boundId && !agent.installation));
                   return <div className="automation-field">
                     <span className="field-label">Alternate Orchestrator Agent</span>
                     <Select label="Alternate Orchestrator Agent" value={boundId}
