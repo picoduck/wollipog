@@ -777,7 +777,8 @@ export class ContainerTargetRegistry {
       }
       if (!item.runtime || (!item.definition.available && item.dockerConfigRecovery !== "installations")) continue;
       if (item.config.runtime === "podman" && !this.podmanDefaultsSafe()) {
-        item.definition = { ...item.definition, available: false, unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON };
+        item.definition = { ...item.definition, available: false, harnessInstallations: undefined,
+          unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON };
         item.installations = undefined;
         continue;
       }
@@ -795,7 +796,8 @@ export class ContainerTargetRegistry {
         continue;
       }
       if (item.config.runtime === "podman" && !this.podmanDefaultsSafe()) {
-        item.definition = { ...item.definition, available: false, unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON };
+        item.definition = { ...item.definition, available: false, harnessInstallations: undefined,
+          unavailableReason: PODMAN_UNSAFE_DEFAULTS_REASON };
         item.installations = undefined;
         continue;
       }
