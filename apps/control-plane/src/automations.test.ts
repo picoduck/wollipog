@@ -1102,8 +1102,10 @@ test("scheduled sessions follow the saved installation through rediscovery and r
   db.updateRunnerAgents("runner-1", [
     { ...local, id: "agent-1" }, { ...system, id: "system-new" },
   ], 1_000);
-  const edited = service.update(automation.automationId, baseSpec({ name: "Edited Schedule" }),
+  const edited = service.update(automation.automationId,
+    baseSpec({ name: "Edited Schedule", concurrencyPolicy: "parallel" }),
     { kind: "human", id: "device" }, 1_100).data!;
+  assert.equal(edited.concurrencyPolicy, "parallel");
   assert.equal(edited.action.kind === "create_session" &&
     edited.action.installationBindings?.agent?.installationId, "system",
     "an older client may omit the binding after an agent id is reused");
@@ -1113,7 +1115,17 @@ test("scheduled sessions follow the saved installation through rediscovery and r
     "the first execution remains active when the next scheduled run is due");
 
   db.updateRunnerAgents("runner-1", [{ ...local, id: "agent-1" }], 61_000);
+  assert.equal(db.selectHarnessInstallation("runner-1", "agent-1", "local")?.installationId, "local");
+  assert.ok(db.getAgentLaunch("runner-1", "agent-1"),
+    "the reused id is launchable, so the Automation's saved pin must block fallback");
+  const resolveSaved = db.resolveSavedHarnessInstallation.bind(db);
+  let savedSystemResolutions = 0;
+  db.resolveSavedHarnessInstallation = (runnerId, saved) => {
+    if (runnerId === "runner-1" && saved.installationId === "system") savedSystemResolutions += 1;
+    return resolveSaved(runnerId, saved);
+  };
   service.tick(120_000);
+  assert.ok(savedSystemResolutions > 0, "the second tick must resolve the saved system installation");
   assert.equal(created.length, 1, "the old id now belongs to a different installation");
   assert.equal(db.getAutomation(automation.automationId)?.action.kind, "create_session");
 });
