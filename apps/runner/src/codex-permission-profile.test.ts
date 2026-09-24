@@ -653,9 +653,11 @@ test("a probe's whole process tree is gone when it settles", async () => {
     const pidFile = join(dir, "child.pid");
     writeFileSync(wrapper, `#!/bin/sh\nsleep 30 &\necho $! > "${pidFile}"\nwait\n`);
     chmodSync(wrapper, 0o755);
-    const probe = readCodexSandboxProjection({ command: wrapper, args: [], cwd: dir, env: process.env }, undefined, 2_000);
+    const probeTimeoutMs = 2_000;
+    const probe = readCodexSandboxProjection({ command: wrapper, args: [], cwd: dir, env: process.env }, undefined, probeTimeoutMs);
+    const pidDeadline = Date.now() + probeTimeoutMs;
     let pid = 0;
-    for (let attempt = 0; attempt < 100 && !pid; attempt++) {
+    while (!pid && Date.now() < pidDeadline) {
       try { pid = Number(readFileSync(pidFile, "utf8").trim()); }
       catch { /* the wrapper has not written the PID yet */ }
       if (!pid) await new Promise((resolve) => setTimeout(resolve, 10));
