@@ -631,6 +631,16 @@ export {
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
+/** A pending child-creation approval is refreshed only by the agent repeating its identical create
+ * call, so the gap it must survive is the agent's own turn-around (model latency, compaction,
+ * provider backoff), not a sidecar's transport retry. It gets this longer fence while the parent's
+ * turn is still live; once the parent settles, the ordinary POLICY_HOOK_ABANDONMENT_MS fence
+ * applies, and stopping, archiving, or losing the parent's runner withdraws it at once. The
+ * control plane publishes the value it enforces in `/api/compatibility` as
+ * `spawnApprovalAbandonmentMs`; clients read it from there rather than from this constant. */
+export const SPAWN_APPROVAL_ABANDONMENT_MS = 600_000;
+/** Control-plane request ids for child-creation approvals; tool-call hook ids use `hook_`. */
+export const SPAWN_APPROVAL_REQUEST_ID_PREFIX = "spawn_";
 /** Maximum number of managed background jobs projected into one SessionView. */
 export const MANAGED_BACKGROUND_JOB_VIEW_LIMIT = 128;
 

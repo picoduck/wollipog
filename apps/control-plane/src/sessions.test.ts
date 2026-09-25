@@ -34,6 +34,7 @@ import {
   MAX_UI_SESSION_SUBSCRIPTIONS,
   POLICY_HOOK_ABANDONMENT_MS,
   PROTOCOL_VERSION,
+  SPAWN_APPROVAL_ABANDONMENT_MS,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   SESSION_NAMING_RUNNER_BUDGET_MS,
@@ -2238,6 +2239,120 @@ test("session spawn policy parks the exact child request and creates only after 
     db.close();
   }
 });
+
+/** A live parent asking for approval to create one child, one run fan-out, or one workflow run. */
+function pendingSpawnFixture(kind: "session" | "run" | "workflow") {
+  const harness = makeHarness();
+  const { db, svc } = harness;
+  const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+  db.updateSessionStatus(parent.id, "running", Date.now());
+  assert.ok(svc.upsertGovernancePolicy({
+    policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+    enabled: true, scope: { toolName: "wollipog.create_session" },
+  }).ok);
+  const sessionRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "Requested Child" };
+  const batchRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review", title: "Requested Batch" };
+  const create = (): { ok: boolean; status: number; error?: string } => kind === "session"
+    ? svc.createSession(sessionRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id })
+    : kind === "run"
+      ? svc.createRun({ ...batchRequest, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id })
+      : svc.createWorkflowRun({ ...batchRequest, workflowId: "builtin:build-review",
+          agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } },
+        { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+  const asked = create();
+  assert.equal(asked.status, 428, asked.error);
+  const requestId = db.getSession(parent.id)!.pendingApproval!.requestId;
+  const approval = () => db.getPolicyHookApproval(parent.id, requestId)!;
+  return { ...harness, parent, create, requestId, approval, sessionRequest, children: kind === "session" ? 1 : 2 };
+}
+
+for (const kind of ["session", "run", "workflow"] as const) {
+  test(`a pending ${kind} spawn approval survives a 60 s gap between identical calls and creates only on the next one`, () => {
+    const { db, svc, hub, parent, create, requestId, approval, sessionRequest, children } = pendingSpawnFixture(kind);
+    try {
+      if (kind === "session") {
+        assert.equal(requestId, `spawn_${createHash("sha256").update(JSON.stringify({
+          request: sessionRequest,
+          parentSessionId: parent.id,
+          ordinal: 0,
+        })).digest("hex")}`, "the request fingerprint is unchanged");
+      }
+      const returnedAt = approval().lastPolledAt;
+      assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + 60_000), 0,
+        "sixty seconds of agent turn-around does not abandon a live parent's spawn approval");
+      assert.equal(approval().status, "pending");
+      assert.equal(create().status, 428, "the identical call still finds the approval pending");
+      assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, requestId);
+
+      const launched = hub.sentOfType("start_session").length;
+      const refreshedAt = approval().lastPolledAt;
+      assert.ok(svc.approve(parent.id, requestId, "allow").ok);
+      assert.equal(svc.reconcilePolicyHookTimeouts(refreshedAt + 60_000), 0);
+      assert.equal(db.childSessionAllocations(parent.id).count, 0, "approval between calls creates no child");
+      assert.equal(hub.sentOfType("start_session").length, launched);
+      assert.equal(db.listRuns().length, 0);
+
+      const created = create();
+      assert.ok(created.ok, created.error);
+      assert.equal(db.childSessionAllocations(parent.id).count, children, "the identical call creates exactly once");
+      assert.equal(hub.sentOfType("start_session").length, launched + children);
+      assert.equal(create().status, 428, "the approval authorized one creation only");
+      assert.equal(db.childSessionAllocations(parent.id).count, children);
+    } finally { db.close(); }
+  });
+}
+
+test("a live parent's silent spawn approval is withdrawn at the spawn fence and the retry keeps its 403", () => {
+  const { db, svc, parent, create, requestId, approval } = pendingSpawnFixture("session");
+  try {
+    const returnedAt = approval().lastPolledAt;
+    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + SPAWN_APPROVAL_ABANDONMENT_MS - 1), 0);
+    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + SPAWN_APPROVAL_ABANDONMENT_MS), 1);
+    assert.equal(approval().status, "denied");
+    assert.ok(svc.governanceAudit(parent.id).some((entry) =>
+      entry.requestId === requestId && entry.outcome === "aborted" && entry.actor.id === "policy-hook-abandoned"));
+    const refused = create();
+    assert.equal(refused.status, 403);
+    assert.equal(refused.error, "child session creation was rejected or its approval expired");
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
+  } finally { db.close(); }
+});
+
+test("a spawn approval falls back to the hook fence once its parent's turn settles", () => {
+  const { db, svc, create, parent, approval } = pendingSpawnFixture("session");
+  try {
+    svc.onSessionStatus(parent.id, "idle");
+    assert.equal(approval().resumeStatus, "idle");
+    const returnedAt = approval().lastPolledAt;
+    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + POLICY_HOOK_ABANDONMENT_MS - 1), 0);
+    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + POLICY_HOOK_ABANDONMENT_MS), 1,
+      "nobody is waiting to collect it, so the ordinary 30 s fence applies");
+    assert.equal(approval().status, "denied");
+    assert.equal(create().ok, false);
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
+  } finally { db.close(); }
+});
+
+for (const [ending, actorId] of [
+  ["stopped", "session-stopped"],
+  ["archived", "session-stopped"],
+  ["disconnected from its runner", "runner-disconnected"],
+] as const) {
+  test(`a pending spawn approval is withdrawn at once when its parent is ${ending}`, () => {
+    const { db, svc, parent, create, requestId, approval } = pendingSpawnFixture("session");
+    try {
+      if (ending === "stopped") assert.ok(svc.stop(parent.id).ok);
+      else if (ending === "archived") assert.ok(svc.setArchived(parent.id, true).ok);
+      else svc.failRunnerSessions(RUNNER_ID);
+      assert.equal(approval().status, "denied");
+      assert.equal(db.getSession(parent.id)!.pendingApproval, null);
+      assert.ok(svc.governanceAudit(parent.id).some((entry) =>
+        entry.requestId === requestId && entry.outcome === "aborted" && entry.actor.id === actorId));
+      assert.equal(create().ok, false, "a later identical call is refused");
+      assert.equal(db.childSessionAllocations(parent.id).count, 0);
+    } finally { db.close(); }
+  });
+}
 
 function enableOrchestratorFixture(db: ControlPlaneDb): void {
   const meta = runnerMeta();

@@ -63,6 +63,19 @@ control plane's approval-required text, which names the parent and the request, 
 to repeat the identical call at once. Each identical call refreshes the approval's abandonment fence,
 so an approval stays pending across calls only while the agent keeps asking.
 
+That fence is sized to the agent's own turn-around, not to a hook sidecar's transport retry: while the
+parent's turn is live, a pending child approval is withdrawn only after 10 minutes
+(`SPAWN_APPROVAL_ABANDONMENT_MS`) with no identical request, so model latency, context compaction, or
+provider backoff between calls does not lose it. It is withdrawn sooner when nobody will collect it:
+at once when the parent is stopped, restarted, archived, or deleted, when its provider session ends,
+or when its runner disconnects; and 30 seconds after the last identical request
+(`POLICY_HOOK_ABANDONMENT_MS`, the ordinary tool-call fence) once the parent's turn has settled. The
+periodic sweep that enforces these runs every second. Nothing but an identical creation request that
+arrives after approval creates the child. Tool-call policy-hook approvals keep the 30-second fence.
+The control plane publishes the enforced spawn fence as `spawnApprovalAbandonmentMs` in
+`/api/compatibility`, and the creating tools quote that value; against a control plane that does not
+publish it, they quote the 30-second fence it enforces.
+
 Agent-initiated ordinary runs and workflow runs use the same child-admission rules. The authenticated
 session is the parent of every member, including an explicitly requested workflow coordinator.
 Preflight the complete member set against the parent's remaining spawn slots and allowances before

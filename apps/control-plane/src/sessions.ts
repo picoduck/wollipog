@@ -12,6 +12,8 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   PROMPT_IMAGE_MIME_TYPES,
   archiveRequiresStop,
   POLICY_HOOK_ABANDONMENT_MS,
+  SPAWN_APPROVAL_ABANDONMENT_MS,
+  SPAWN_APPROVAL_REQUEST_ID_PREFIX,
   isGuardrailApproval,
   MAX_UI_SESSION_SUBSCRIPTIONS,
   isPromptImageReference,
@@ -2455,6 +2457,7 @@ export class SessionsService {
     for (const abandoned of this.db.listAbandonedPolicyHookApprovals(
       now - POLICY_HOOK_ABANDONMENT_MS,
       sessionId,
+      now - SPAWN_APPROVAL_ABANDONMENT_MS,
     )) {
       const before = this.db.getSession(abandoned.sessionId);
       rememberCampaign(before);
@@ -3072,7 +3075,7 @@ export class SessionsService {
       parentSessionId,
       ordinal: this.db.childSessionAllocations(parentSessionId).count,
     })).digest("hex");
-    const requestId = `spawn_${fingerprint}`;
+    const requestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${fingerprint}`;
     this.reconcilePolicyHookTimeouts(now, parentSessionId);
     const stored = this.db.getPolicyHookApproval(parentSessionId, requestId);
     if (stored) {

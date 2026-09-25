@@ -36,6 +36,7 @@ import {
 } from "./automation-trigger-ingress.js";
 import {
   PROTOCOL_VERSION,
+  SPAWN_APPROVAL_ABANDONMENT_MS,
   POLICY_HOOK_POLL_CAPABILITY,
   SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
   parseMessage,
@@ -1742,7 +1743,12 @@ app.get("/healthz", async () => ({
   service: CONTROL_PLANE_SERVICE,
 }));
 
-app.get("/api/compatibility", async () => ({ protocolVersion: PROTOCOL_VERSION }));
+// `spawnApprovalAbandonmentMs` is the enforced silence a pending child-creation approval survives
+// while its parent's turn is live; create tools quote it instead of a client-side constant.
+app.get("/api/compatibility", async () => ({
+  protocolVersion: PROTOCOL_VERSION,
+  spawnApprovalAbandonmentMs: SPAWN_APPROVAL_ABANDONMENT_MS,
+}));
 
 registerManagedDesktopRoutes(app, MANAGED_DESKTOP_IDENTITY, {
   trustedLoopback,
