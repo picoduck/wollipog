@@ -5083,6 +5083,56 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  await t.test("a landed Claude Code merge stays armed after pre-proof reconciliation rejection", async () => {
+    for (const mismatch of ["snapshot", "terminal", "revision", "ancestry", "authority"] as const) {
+      const { db, hub, svc, parent, child, arm } = setup(AGENT_ID);
+      try {
+        const armed = await arm(1454 + ["snapshot", "terminal", "revision", "ancestry", "authority"].indexOf(mismatch));
+        const seen: ReconcileWorkflowActionMessage[] = [];
+        hub.requestHandler = forgeProof(child, armed, () => true, seen);
+        if (mismatch === "terminal") db.updateSessionStatus(parent.id, "stopped", Date.now());
+        if (mismatch === "revision") db.raw().prepare(
+          "UPDATE workflow_decisions SET policy_revision=policy_revision+1 WHERE occurrence_id=?",
+        ).run(armed.decision.occurrenceId);
+        if (mismatch === "ancestry") db.raw().prepare(
+          "UPDATE workflow_decisions SET controlling_session_id=? WHERE occurrence_id=?",
+        ).run(child.id, armed.decision.occurrenceId);
+        if (mismatch === "authority") db.raw().prepare(
+          "UPDATE workflow_decisions SET authority='human' WHERE occurrence_id=?",
+        ).run(armed.decision.occurrenceId);
+        const snapshot = mismatch === "snapshot"
+          ? { ...armed.snapshot, headSha: "f".repeat(40),
+              requiredChecks: { ...armed.snapshot.requiredChecks, headSha: "f".repeat(40) } }
+          : armed.snapshot;
+        const rejected = await svc.reconcileWorkflowDecision(
+          child.id, armed.decision.occurrenceId, { resourceSnapshot: snapshot }, () => true,
+        );
+        assert.equal(rejected.status, 409);
+        assert.equal(seen.length, 0, "pre-proof rejection must not consult a different merge target");
+        assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+        assert.equal(svc.governanceAudit(child.id).filter((entry) =>
+          entry.requestId === armed.decision.occurrenceId && entry.outcome === "revoked").length, 0);
+
+        if (mismatch === "terminal") db.updateSessionStatus(parent.id, "running", Date.now());
+        if (mismatch === "revision") db.raw().prepare(
+          "UPDATE workflow_decisions SET policy_revision=policy_revision-1 WHERE occurrence_id=?",
+        ).run(armed.decision.occurrenceId);
+        if (mismatch === "ancestry") db.raw().prepare(
+          "UPDATE workflow_decisions SET controlling_session_id=? WHERE occurrence_id=?",
+        ).run(parent.id, armed.decision.occurrenceId);
+        if (mismatch === "authority") db.raw().prepare(
+          "UPDATE workflow_decisions SET authority='orchestrator' WHERE occurrence_id=?",
+        ).run(armed.decision.occurrenceId);
+        const recovered = await svc.reconcileWorkflowDecision(
+          child.id, armed.decision.occurrenceId, { resourceSnapshot: armed.snapshot }, () => true,
+        );
+        assert.ok(recovered.ok, recovered.error);
+        assert.equal(recovered.data?.status, "consumed", "the already landed merge can be proven later");
+        assert.equal(seen.length, 1);
+      } finally { db.close(); }
+    }
+  });
+
   await t.test("stopping a Claude Code child records its landed merge consumed after revoking the grant", async () => {
     const { db, hub, svc, child, arm } = setup(AGENT_ID);
     try {
@@ -5672,11 +5722,11 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     }
   });
 
-  await t.test("stale snapshot, policy, ancestry, and authority cannot reconcile", async () => {
-    for (const mismatch of ["snapshot", "revision", "ancestry", "authority"] as const) {
-      const { db, svc, child, arm } = setup();
+  await t.test("stale snapshot, policy, ancestry, authority, and terminal parent cannot reconcile", async () => {
+    for (const mismatch of ["snapshot", "revision", "ancestry", "authority", "terminal"] as const) {
+      const { db, svc, parent, child, arm } = setup();
       try {
-        const armed = await arm(1200 + ["snapshot", "revision", "ancestry", "authority"].indexOf(mismatch));
+        const armed = await arm(1200 + ["snapshot", "revision", "ancestry", "authority", "terminal"].indexOf(mismatch));
         if (mismatch === "revision") {
           db.raw().prepare("UPDATE workflow_decisions SET policy_revision=policy_revision+1 WHERE occurrence_id=?")
             .run(armed.decision.occurrenceId);
@@ -5686,6 +5736,8 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         } else if (mismatch === "authority") {
           db.raw().prepare("UPDATE workflow_decisions SET authority='human' WHERE occurrence_id=?")
             .run(armed.decision.occurrenceId);
+        } else if (mismatch === "terminal") {
+          db.updateSessionStatus(parent.id, "stopped", Date.now());
         }
         const staleSnapshot = mismatch === "snapshot" ? {
           ...armed.snapshot,
@@ -5699,8 +5751,8 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
           () => true,
         );
         assert.equal(result.status, 409);
-        assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "revoked",
-          `${mismatch} must fail closed instead of remaining retryable`);
+        assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved",
+          `${mismatch} must fail closed without destroying an armed approval`);
       } finally { db.close(); }
     }
   });

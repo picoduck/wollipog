@@ -6878,9 +6878,6 @@ export class SessionsService {
     if (!normalized.ok || !normalized.data) return fail(normalized.error!, normalized.status);
     if (normalized.data.category !== "pr_merge" || decision.category !== "pr_merge" ||
         auditDigest(normalized.data) !== decision.resourceDigest) {
-      if (decision.status === "approved") {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
-      }
       return fail("workflow decision resource snapshot is stale", 409);
     }
     const child = this.db.getSession(sessionId);
@@ -6892,9 +6889,6 @@ export class SessionsService {
         !this.db.isSessionDescendant(parent.id, child.id) || !policy ||
         policy.revision !== decision.policyRevision ||
         this.effectiveWorkflowDecisionAuthority(parent, policy, "pr_merge") !== decision.authority) {
-      if (decision.status === "approved") {
-        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
-      }
       return fail("workflow decision authority was revoked or ancestry changed before reconciliation", 409);
     }
     for (const owner of [child, parent]) {
