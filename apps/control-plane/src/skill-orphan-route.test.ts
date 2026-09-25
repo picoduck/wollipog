@@ -18,6 +18,9 @@ import { listOrphanedSkillCopies } from "./skill-orphan-route.js";
 import { validateSkillPayload } from "./skills.js";
 import type { SkillsSyncPusher } from "./skills-route.js";
 
+/** The fingerprint the fake runner reports for every read. */
+const READ_FINGERPRINT = "9".repeat(64);
+
 const owner: HumanPrincipal = {
   kind: "human", actorId: LOCAL_OWNER_USER_ID, userId: LOCAL_OWNER_USER_ID, userName: "Owner",
   organizationId: PERSONAL_ORGANIZATION_ID, organizationName: "Personal", role: "owner", deviceId: null, localBootstrap: true,
@@ -80,7 +83,8 @@ function setup(t: TestContext, options: { protocolVersion?: number } = {}) {
           const copy = state.copies.get(message.id);
           if (message.operation === "read") {
             return copy
-              ? { type: "skill_kept_aside_result", runnerId, requestId, status: "read", files: copy, observedDigest: skillVersionDigest(copy) }
+              ? { type: "skill_kept_aside_result", runnerId, requestId, status: "read", files: copy, observedDigest: skillVersionDigest(copy),
+                observedFingerprint: READ_FINGERPRINT }
               : { type: "skill_kept_aside_result", runnerId, requestId, status: "not_found" };
           }
           return { type: "skill_kept_aside_result", runnerId, requestId, status: state.discardStatus,
@@ -115,16 +119,17 @@ test("orphaned copies are kept-aside copies and edited copies of deleted skills,
   const foreign = payload("foreign", "Other organization");
   db.createSkill({ name: "foreign", files: foreign.files, manifest: foreign.manifest, digest: foreign.digest,
     scope: { organizationId: "org-other", owner: { kind: "organization", organizationId: "org-other" } } });
-  const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID()];
+  const ids = [randomUUID(), randomUUID(), randomUUID(), randomUUID(), randomUUID()];
   report({
     keptAside: [
       { id: ids[0], name: "alpha", digest: "a".repeat(64), variant: "agent", keptAsideAt: 5, observedDigest: "b".repeat(64), detail: "kept\u0007" },
       { id: ids[1], name: "gone", observedFingerprint: "c".repeat(64) },
       { id: ids[2], name: "foreign", observedDigest: "d".repeat(64) },
       { id: ids[3] },
+      { id: ids[4], observedDigest: "e".repeat(64), observedFingerprint: "f".repeat(64) },
       { id: "../escape", name: "alpha" },
       { id: ids[0], name: "duplicate" },
-      { id: randomUUID(), observedDigest: "e".repeat(64), observedFingerprint: "f".repeat(64) },
+      { id: randomUUID(), observedFingerprint: "not-a-digest" },
     ],
     drift: [
       { name: "alpha", digest: "1".repeat(64), variant: "agent", observedDigest: "2".repeat(64), held: true },
@@ -137,6 +142,7 @@ test("orphaned copies are kept-aside copies and edited copies of deleted skills,
       observedDigest: "b".repeat(64), detail: "kept", skillId: alpha.id },
     { kind: "kept_aside", id: ids[1], name: "gone", observedFingerprint: "c".repeat(64) },
     { kind: "kept_aside", id: ids[3] },
+    { kind: "kept_aside", id: ids[4], observedDigest: "e".repeat(64), observedFingerprint: "f".repeat(64) },
     { kind: "deleted_skill", name: "deleted", digest: "3".repeat(64), variant: "manual", held: false, detail: "retained" },
   ], "a copy of another organization's skill, malformed entries, and drift of an existing skill are not orphaned here");
 });
@@ -183,6 +189,7 @@ test("a kept-aside copy of a missing skill imports as a new skill and is then di
     "import re-reads the copy, then releases it");
   const release = state.commands.at(-1) as SkillKeptAsideMessage;
   assert.equal(release.observedDigest, observedDigest, "the release is fenced on the imported bytes");
+  assert.equal(release.observedFingerprint, READ_FINGERPRINT, "and on every entry as it was when read for the review");
   assert.equal(release.confirmation, "explicit");
   assert.deepEqual(state.pushes, [], "a new skill has no assignments to deploy");
   assert.deepEqual(state.solicited, ["runner-1"]);
@@ -300,30 +307,35 @@ test("discard needs confirmation and the reported observation, and the runner fe
   const oversized = randomUUID();
   const observedDigest = "b".repeat(64);
   const observedFingerprint = "c".repeat(64);
+  const readableFingerprint = "d".repeat(64);
   report({ keptAside: [
-    { id: readable, name: "beta", observedDigest },
+    { id: readable, name: "beta", observedDigest, observedFingerprint: readableFingerprint },
     { id: unreadable, name: "beta", observedFingerprint },
     { id: oversized, name: "beta" },
   ] });
-  assert.equal((await discard(app, { kind: "kept_aside", id: readable, observedDigest })).statusCode, 400, "confirmation is required");
-  assert.equal((await discard(app, { kind: "kept_aside", id: readable, observedDigest, observedFingerprint, confirmation: "explicit" })).statusCode, 400);
-  assert.equal((await discard(app, { kind: "kept_aside", id: readable, observedDigest: "f".repeat(64), confirmation: "explicit" })).statusCode, 409,
+  const readableFence = { observedDigest, observedFingerprint: readableFingerprint };
+  assert.equal((await discard(app, { kind: "kept_aside", id: readable, ...readableFence })).statusCode, 400, "confirmation is required");
+  assert.equal((await discard(app, { kind: "kept_aside", id: readable, observedDigest, confirmation: "explicit" })).statusCode, 400,
+    "the fingerprint of every entry is required");
+  assert.equal((await discard(app, { kind: "kept_aside", id: readable, ...readableFence, observedDigest: "f".repeat(64), confirmation: "explicit" })).statusCode, 409,
     "a discard must name the observation the machine currently reports");
-  assert.equal((await discard(app, { kind: "kept_aside", id: unreadable, observedDigest, confirmation: "explicit" })).statusCode, 409);
+  assert.equal((await discard(app, { kind: "kept_aside", id: readable, observedFingerprint: readableFingerprint, confirmation: "explicit" })).statusCode, 409,
+    "a readable copy is also named by its content digest");
+  assert.equal((await discard(app, { kind: "kept_aside", id: unreadable, observedDigest, observedFingerprint, confirmation: "explicit" })).statusCode, 409);
   const tooLarge = await discard(app, { kind: "kept_aside", id: oversized, observedFingerprint, confirmation: "explicit" });
   assert.equal(tooLarge.statusCode, 409);
   assert.match(tooLarge.json().error, /too large to verify/);
   state.principal = { ...owner, role: "viewer" };
-  assert.equal((await discard(app, { kind: "kept_aside", id: readable, observedDigest, confirmation: "explicit" })).statusCode, 403);
+  assert.equal((await discard(app, { kind: "kept_aside", id: readable, ...readableFence, confirmation: "explicit" })).statusCode, 403);
   state.principal = owner;
   assert.equal(state.commands.length, 0);
 
-  const discarded = await discard(app, { kind: "kept_aside", id: readable, observedDigest, confirmation: "explicit" });
+  const discarded = await discard(app, { kind: "kept_aside", id: readable, ...readableFence, confirmation: "explicit" });
   assert.equal(discarded.statusCode, 200, discarded.body);
   assert.equal(discarded.json().status, "discarded");
   assert.equal(discarded.json().state.keptAside, undefined, "responses carry kept-aside copies only through the filtered list");
   assert.deepEqual(state.commands.at(-1), { type: "skill_kept_aside", runnerId: "runner-1", requestId: state.commands.at(-1)!.requestId,
-    operation: "discard", id: readable, observedDigest, confirmation: "explicit" });
+    operation: "discard", id: readable, observedFingerprint: readableFingerprint, observedDigest, confirmation: "explicit" });
   report({ keptAside: [{ id: unreadable, name: "beta", observedFingerprint }] });
   const fingerprinted = await discard(app, { kind: "kept_aside", id: unreadable, observedFingerprint, confirmation: "explicit" });
   assert.equal(fingerprinted.statusCode, 200, fingerprinted.body);
@@ -364,16 +376,17 @@ test("orphan resolution requires a capable, online runner and reauthorizes after
   ] });
   // An older runner with drift still resolves a deleted skill's drift; it cannot report kept-aside copies.
   assert.equal(listOrphanedSkillCopies(older.db, owner, "runner-1").length, 1);
-  const kept = await discard(older.app, { kind: "kept_aside", id, observedDigest: "b".repeat(64), confirmation: "explicit" });
+  const kept = await discard(older.app, { kind: "kept_aside", id, observedDigest: "b".repeat(64), observedFingerprint: "c".repeat(64), confirmation: "explicit" });
   assert.equal(kept.statusCode, 409, "an older runner never reports kept-aside copies");
 
   const current = setup(t);
-  current.report({ keptAside: [{ id, name: "beta", observedDigest: "b".repeat(64) }] });
+  current.report({ keptAside: [{ id, name: "beta", observedDigest: "b".repeat(64), observedFingerprint: "c".repeat(64) }] });
+  const fence = { observedDigest: "b".repeat(64), observedFingerprint: "c".repeat(64) };
   current.state.online = false;
-  assert.equal((await discard(current.app, { kind: "kept_aside", id, observedDigest: "b".repeat(64), confirmation: "explicit" })).statusCode, 409);
+  assert.equal((await discard(current.app, { kind: "kept_aside", id, ...fence, confirmation: "explicit" })).statusCode, 409);
   current.state.online = true;
   current.state.onRunnerRequest = () => { current.state.principal = { ...owner, role: "viewer" }; };
-  const denied = await discard(current.app, { kind: "kept_aside", id, observedDigest: "b".repeat(64), confirmation: "explicit" });
+  const denied = await discard(current.app, { kind: "kept_aside", id, ...fence, confirmation: "explicit" });
   assert.equal(current.state.commands.length, 1, "the discard was dispatched before authority changed");
   assert.equal(denied.statusCode, 403);
   assert.equal(denied.json().state, undefined);

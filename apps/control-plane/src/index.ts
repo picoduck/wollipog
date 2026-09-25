@@ -651,6 +651,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
     routePath === "/api/runners/:id/skills/sync" ||
     routePath === "/api/runners/:id/skill-snapshots" ||
     routePath.startsWith("/api/skill-machine/") ||
+    routePath.startsWith("/api/runners/:id/skill-drift/") || routePath.startsWith("/api/skill-drift/") ||
+    routePath.startsWith("/api/runners/:id/orphaned-skill-copies/") || routePath.startsWith("/api/orphaned-skill-copies/") ||
     routePath === "/api/runners/:runnerId/host-action" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/rename" ||
     routePath === "/api/runners/:runnerId/workspaces/:workspaceId/access-scope";

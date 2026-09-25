@@ -400,7 +400,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
     reported: { deployed: [], unmanaged: [], keptAsideOmitted: 2, updatedAt: 1_700_000_000_000 },
     orphaned: [
       { kind: "kept_aside", id: keptId, name: "notes", digest, variant: "manual", keptAsideAt: 1_700_000_000_000,
-        observedDigest: "e".repeat(64), detail: "A restore kept this edited copy aside in the skill store instead of deleting it." },
+        observedDigest: "e".repeat(64), observedFingerprint: "c".repeat(64), detail: "A restore kept this edited copy aside in the skill store instead of deleting it." },
       { kind: "kept_aside", id: unreadableId, observedFingerprint: "f".repeat(64),
         detail: "An earlier runner kept this edited copy aside without recording the skill version it came from." },
       { kind: "deleted_skill", name: "retired", digest, variant: "agent", observedDigest: "a".repeat(64), held: true },

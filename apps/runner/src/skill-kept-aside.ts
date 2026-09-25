@@ -141,6 +141,8 @@ export function keptAsideStamps(
       if (!stat.isDirectory()) continue;
       options.beforeList?.(prefix + name);
       if (!anchored) {
+        const now = lstatSync(child, { bigint: true });
+        if (!now.isDirectory() || now.dev !== stat.dev || now.ino !== stat.ino) throw new Error("a directory changed while it was walked");
         visited.push({ path: child, stat });
         visit(child, `${prefix}${name}/`);
         continue;
@@ -263,7 +265,7 @@ export interface KeptAsideRemovalHooks {
   afterVerify?: (relative: string) => void;
   /** Before a verified subdirectory is listed. */
   beforeList?: (relative: string) => void;
-  /** After a file is verified under its private name and opened, before it is unlinked. */
+  /** After an entry is verified under its private name (and a file opened), before it is unlinked. */
   beforeUnlink?: (relative: string) => void;
 }
 
@@ -320,12 +322,26 @@ export function removeKeptAsideTree(
       throw error;
     }
     if (fd === undefined) {
+      try {
+        options.beforeUnlink?.(relative);
+        inPlace(chain);
+        const now = lstatSync(aside, { bigint: true });
+        if (now.dev !== stat.dev || now.ino !== stat.ino) throw new CopyChanged();
+      } catch (error) {
+        putBack(aside, original);
+        throw error;
+      }
       unlinkEntry(aside, stat);
       return;
     }
     try {
-      options.beforeUnlink?.(relative);
-      inPlace(chain);
+      try {
+        options.beforeUnlink?.(relative);
+        inPlace(chain);
+      } catch (error) {
+        putBack(aside, original);
+        throw error;
+      }
       unlinkSync(aside);
       const after = fstatSync(fd, { bigint: true });
       if (after.size !== stat.size || after.mtimeNs !== stat.mtimeNs) {
@@ -396,14 +412,14 @@ export function describeKeptAsideCopy(
 ): SkillKeptAsideCopy {
   const dir = keptAsideDirectory(storeRoot, id);
   const record = options.record ?? readKeptAsideRecord(storeRoot, id);
-  const copy = readStoreSkillCopy(dir);
+  const observed = observeKeptAsideCopy(dir);
+  const { copy, fingerprint } = observed;
   let name = record?.name;
   if (!name && copy.readable && options.skillName) {
     const skillMd = copy.files.find((file) => file.path === "SKILL.md");
     const inferred = skillMd && options.skillName(Buffer.from(skillMd.content, skillMd.encoding).toString("utf8"));
     if (inferred && validSkillName(inferred)) name = inferred;
   }
-  const fingerprint = copy.readable ? undefined : keptAsideFingerprint(dir);
   let detail = record ? KEPT_ASIDE_DETAIL : LEGACY_DETAIL;
   if (!copy.readable) {
     detail += ` It cannot be read as skill content: ${copy.reason}.`;
@@ -413,9 +429,27 @@ export function describeKeptAsideCopy(
     id,
     ...(name ? { name } : {}),
     ...(record ? { digest: record.digest, variant: record.variant, keptAsideAt: record.keptAsideAt } : {}),
-    ...(copy.readable ? { observedDigest: copy.digest } : fingerprint ? { observedFingerprint: fingerprint } : {}),
+    ...(copy.readable ? { observedDigest: copy.digest } : {}),
+    ...(fingerprint ? { observedFingerprint: fingerprint } : {}),
     detail,
   };
+}
+
+/** One consistent observation of a kept-aside copy: its content, and the stamps of every entry
+ * (generated artifacts and metadata included), taken on both sides of the content read. The content
+ * digest covers only skill files, so a discard is fenced on the fingerprint as well. `stamps` and
+ * `fingerprint` are absent when the tree changed during the read or exceeds the fingerprint bound. */
+export function observeKeptAsideCopy(dir: string): {
+  copy: ReturnType<typeof readStoreSkillCopy>;
+  stamps?: Map<string, string>;
+  fingerprint?: string;
+} {
+  const before = keptAsideStamps(dir);
+  const copy = readStoreSkillCopy(dir);
+  const after = keptAsideStamps(dir);
+  if (!before || !after || !sameKeptAsideStamps(before, after)) return { copy };
+  const fingerprint = keptAsideFingerprint(dir, after);
+  return fingerprint ? { copy, stamps: after, fingerprint } : { copy };
 }
 
 /** Every kept-aside copy in the store, oldest first (copies without a record last), bounded. `omitted`

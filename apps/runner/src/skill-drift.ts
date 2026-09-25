@@ -30,8 +30,8 @@ import { manualCopyMatches, manualVariantDigest, readStoreSkillCopy, storeCopyMa
 import {
   KEPT_ASIDE_ID,
   keptAsideDirectory,
-  keptAsideFingerprint,
   keptAsideStamps,
+  observeKeptAsideCopy,
   removeKeptAsideRecord,
   removeKeptAsideTree,
   sameKeptAsideStamps,
@@ -239,9 +239,9 @@ export function handleSkillDrift(options: {
 }
 
 /** Read or discard one copy a restore kept aside. A discard needs explicit confirmation and deletes
- * the copy only while it still matches the reviewed observation: its content digest, or for a copy
- * that cannot be read as skill content, its change fingerprint. The removal re-verifies each entry
- * against that verified state immediately before removing it. */
+ * the copy only while it still matches the reviewed observation: the change fingerprint of every
+ * entry, and for a copy that is readable skill content, also its content digest. The removal
+ * re-verifies each entry against that verified state immediately before removing it. */
 export function handleSkillKeptAside(options: {
   message: SkillKeptAsideMessage;
   runnerId: string;
@@ -267,9 +267,8 @@ export function handleSkillKeptAside(options: {
     if (message.confirmation !== "explicit") return reject("Discarding a kept-aside copy requires explicit confirmation.");
     const digest = message.observedDigest;
     const fingerprint = message.observedFingerprint;
-    if ((digest === undefined) === (fingerprint === undefined) ||
-        (digest !== undefined && (typeof digest !== "string" || !DIGEST.test(digest))) ||
-        (fingerprint !== undefined && (typeof fingerprint !== "string" || !DIGEST.test(fingerprint)))) {
+    if (typeof fingerprint !== "string" || !DIGEST.test(fingerprint) ||
+        (digest !== undefined && (typeof digest !== "string" || !DIGEST.test(digest)))) {
       return reject("The kept-aside copy command is invalid.");
     }
   }
@@ -281,19 +280,15 @@ export function handleSkillKeptAside(options: {
   }
   const dir = keptAsideDirectory(storeRoot, id);
   if (!realDirectoryInside(dir, storeRoot)) return reply({ status: "not_found" });
+  // The content digest is trusted only for the entry state stamped on both sides of the read.
+  const { copy, stamps: settled, fingerprint } = observeKeptAsideCopy(dir);
   if (operation === "read") {
-    const copy = readStoreSkillCopy(dir);
     if (!copy.readable) return reject(`The kept-aside copy cannot be read as skill content: ${copy.reason}.`);
-    return reply({ status: "read", files: copy.files, observedDigest: copy.digest });
+    if (!fingerprint) return reject("The kept-aside copy changed while it was read. Try again.");
+    return reply({ status: "read", files: copy.files, observedDigest: copy.digest, observedFingerprint: fingerprint });
   }
-  // The content digest is trusted only for the entry state that was stamped on both sides of the read.
-  const stamps = keptAsideStamps(dir);
-  const copy = readStoreSkillCopy(dir);
-  const settled = keptAsideStamps(dir);
-  const unchanged = !!stamps && !!settled && sameKeptAsideStamps(stamps, settled) && (copy.readable
-    ? message.observedDigest === copy.digest
-    : message.observedFingerprint !== undefined && keptAsideFingerprint(dir, settled) === message.observedFingerprint);
-  if (!unchanged || !settled) {
+  if (!settled || fingerprint !== message.observedFingerprint ||
+      (copy.readable ? copy.digest : undefined) !== message.observedDigest) {
     return reject("The kept-aside copy changed after it was reviewed. Refresh the machine state and review it again.");
   }
   options.hooks?.beforeRemove?.(dir);

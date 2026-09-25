@@ -3497,8 +3497,7 @@ function keptAsideOmittedCount(value: unknown): number {
 }
 
 /** Keep only well-formed kept-aside copies, one per store entry; unknown properties never reach
- * storage or the UI. A copy names at most one observation: its content digest when it is readable,
- * otherwise its change fingerprint. */
+ * storage or the UI. */
 export function normalizeSkillKeptAside(value: unknown): SkillKeptAsideCopy[] {
   if (!Array.isArray(value)) return [];
   const digest = (candidate: unknown) => typeof candidate === "string" && /^[0-9a-f]{64}$/.test(candidate);
@@ -3513,7 +3512,7 @@ export function normalizeSkillKeptAside(value: unknown): SkillKeptAsideCopy[] {
         (entry.variant !== undefined && entry.variant !== "agent" && entry.variant !== "manual") ||
         (entry.keptAsideAt !== undefined && (!Number.isSafeInteger(entry.keptAsideAt) || (entry.keptAsideAt as number) < 0)) ||
         (entry.observedDigest !== undefined && !digest(entry.observedDigest)) ||
-        (entry.observedFingerprint !== undefined && (!digest(entry.observedFingerprint) || entry.observedDigest !== undefined)) ||
+        (entry.observedFingerprint !== undefined && !digest(entry.observedFingerprint)) ||
         (entry.detail !== undefined && typeof entry.detail !== "string")) continue;
     seen.add(entry.id);
     const detail = typeof entry.detail === "string"

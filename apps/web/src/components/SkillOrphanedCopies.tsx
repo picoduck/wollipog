@@ -14,9 +14,10 @@ export function canResolveOrphanedCopy(runner: RunnerView, copy: OrphanedSkillCo
     runnerSupportsProtocol(runner.protocolVersion, copy.kind === "kept_aside" ? "skillKeptAsideCopies" : "skillDrift");
 }
 
-/** A kept-aside copy that is neither readable nor fingerprinted has nothing a discard could be fenced on. */
+/** A kept-aside copy is discarded against the fingerprint of every entry; without one, a discard has
+ * nothing to be fenced on. */
 export function orphanedCopyDiscardable(copy: OrphanedSkillCopy): boolean {
-  return copy.kind === "deleted_skill" || !!copy.observedDigest || !!copy.observedFingerprint;
+  return copy.kind === "deleted_skill" || !!copy.observedFingerprint;
 }
 
 function copyDetail(copy: OrphanedSkillCopy): string | undefined {

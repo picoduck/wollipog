@@ -341,6 +341,7 @@ test("kept-aside copies are authoritative replacement, normalized, and accepted 
   db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [], keptAside: keptAside as never }, 10);
   assert.deepEqual(db.getRunnerSkillState("runner-current")!.keptAside, [
     { id, name: "alpha", digest: "a".repeat(64), variant: "manual", keptAsideAt: 7, observedDigest: "b".repeat(64), detail: "Kept aside." },
+    { id: "2f0e0d0c-0b0a-4908-8706-050403020100", observedDigest: "b".repeat(64), observedFingerprint: "c".repeat(64) },
     { id: "4f0e0d0c-0b0a-4908-8706-050403020100", observedFingerprint: "c".repeat(64) },
   ]);
   db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [] }, 20);

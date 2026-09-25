@@ -1479,11 +1479,13 @@ export interface SkillKeptAsideCopy {
   variant?: SkillInvocationPolicy;
   /** Epoch milliseconds when the runner kept the copy aside; absent before v185. */
   keptAsideAt?: number;
-  /** Canonical manifest digest of the copy as it is now. Absent when it is not readable skill content. */
+  /** Canonical manifest digest of the copy's skill files as they are now. Absent when it is not
+   * readable skill content. Generated artifacts (`__pycache__`, `.DS_Store`) are not covered. */
   observedDigest?: string;
-  /** Only when `observedDigest` is absent: a fingerprint of the unreadable tree's entry names, types,
-   * sizes, identities, and change times (never its contents). A discard must name it. Absent too
-   * when the tree exceeds the fingerprint bounds, in which case it cannot be discarded remotely. */
+  /** A fingerprint of every entry in the copy, artifacts included: names, types, sizes, identities,
+   * and modification and change times (never contents). A discard must name it, and the digest too
+   * when the copy is readable. Absent when the tree exceeds the fingerprint bound or changed while
+   * it was read; such a copy cannot be discarded remotely. */
   observedFingerprint?: string;
   /** Sanitized human-readable explanation, including why the copy cannot be read. */
   detail?: string;
@@ -1498,7 +1500,8 @@ export interface SkillKeptAsideMessage {
   requestId: string;
   operation: "read" | "discard";
   id: string;
-  /** discard only: exactly one of these, as the copy was reported and reviewed. */
+  /** discard only: the observation as the copy was reported and reviewed. The fingerprint is required;
+   * the digest is present exactly when the copy was readable. */
   observedDigest?: string;
   observedFingerprint?: string;
   confirmation?: "explicit";
@@ -1513,6 +1516,8 @@ export interface SkillKeptAsideResultMessage {
   /** read only: the copy's files exactly as stored. */
   files?: SkillFile[];
   observedDigest?: string;
+  /** read only: the fingerprint of every entry at the time of the read. */
+  observedFingerprint?: string;
   error?: string;
 }
 

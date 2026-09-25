@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   openSync,
   mkdtempSync,
@@ -165,7 +166,7 @@ test("a copy changed after the restore swap is kept aside readable, and a clean 
     assert.equal(reported?.length, 1);
     const late = [{ ...alpha.files[0]!, content: "written through an open file\n" }, alpha.files[1]!];
     assert.equal(reported![0]!.observedDigest, skillVersionDigest(late));
-    assert.equal(reported![0]!.observedFingerprint, undefined);
+    assert.match(reported![0]!.observedFingerprint ?? "", /^[0-9a-f]{64}$/, "every copy reports the fingerprint of all its entries");
     assert.equal(reported![0]!.detail, "A restore kept this edited copy aside in the skill store instead of deleting it.");
 
     // A restore that discards the reviewed copy leaves neither a copy nor a record.
@@ -199,10 +200,12 @@ test("a copy kept aside before records existed is reported with the name its SKI
 
     const reported = (await reconcile(roots, [])).keptAside ?? [];
     const named = reported.find((copy) => copy.id === legacy);
+    assert.match(named?.observedFingerprint ?? "", /^[0-9a-f]{64}$/);
     assert.deepEqual(named, {
       id: legacy,
       name: "beta",
       observedDigest: skillVersionDigest(skillFiles("beta")),
+      observedFingerprint: named?.observedFingerprint,
       detail: "An earlier runner kept this edited copy aside without recording the skill version it came from.",
     });
     const unidentified = reported.find((copy) => copy.id === unnamed);
@@ -276,24 +279,35 @@ test("a readable kept-aside copy is discarded only with confirmation and its rev
     const dir = join(store(roots), `.drift-${reported.id}`);
     const run = (message: SkillKeptAsideMessage) => handleSkillKeptAside({ message, runnerId: "runner-1", dataDir: roots.dataDir });
 
-    assert.equal(run(discard(reported.id, { observedDigest: reported.observedDigest, confirmation: undefined })).status, "rejected");
+    const observed = { observedDigest: reported.observedDigest, observedFingerprint: reported.observedFingerprint! };
+    assert.equal(run(discard(reported.id, { ...observed, confirmation: undefined })).status, "rejected");
     assert.equal(run(discard(reported.id, {})).status, "rejected", "a discard names the reviewed observation");
-    assert.equal(run(discard(reported.id, { observedDigest: reported.observedDigest, observedFingerprint: "f".repeat(64) })).status,
-      "rejected", "a discard names exactly one observation");
-    assert.equal(run(discard(reported.id, { observedFingerprint: "f".repeat(64) })).status, "rejected");
+    assert.equal(run(discard(reported.id, { observedDigest: reported.observedDigest })).status, "rejected",
+      "the fingerprint of every entry is required");
+    assert.equal(run(discard(reported.id, { observedFingerprint: reported.observedFingerprint })).status, "rejected",
+      "a readable copy is also named by its content digest");
+    assert.equal(run(discard(reported.id, { ...observed, observedFingerprint: "f".repeat(64) })).status, "rejected");
     writeFileSync(join(dir, "SKILL.md"), "changed after review\n");
-    const stale = run(discard(reported.id, { observedDigest: reported.observedDigest }));
+    const stale = run(discard(reported.id, observed));
     assert.equal(stale.status, "rejected");
     assert.match(stale.error ?? "", /changed after it was reviewed/);
     assert.equal(readFileSync(join(dir, "SKILL.md"), "utf8"), "changed after review\n", "an unreviewed change is never discarded");
 
-    const current = (await reconcile(roots, [alpha])).keptAside?.[0]?.observedDigest;
-    assert.ok(current);
-    assert.equal(run(discard(reported.id, { observedDigest: current })).status, "discarded");
+    // Generated artifacts are outside the content digest, but not outside the fence.
+    const settled = (await reconcile(roots, [alpha])).keptAside?.[0];
+    writeFileSync(join(dir, ".DS_Store"), "written after the report");
+    const artifact = run(discard(reported.id, { observedDigest: settled!.observedDigest, observedFingerprint: settled!.observedFingerprint }));
+    assert.equal(artifact.status, "rejected");
+    assert.equal(readFileSync(join(dir, ".DS_Store"), "utf8"), "written after the report");
+
+    const current = (await reconcile(roots, [alpha])).keptAside?.[0];
+    assert.ok(current?.observedDigest && current.observedFingerprint);
+    const fence = { observedDigest: current.observedDigest, observedFingerprint: current.observedFingerprint };
+    assert.equal(run(discard(reported.id, fence)).status, "discarded");
     assert.equal(existsSync(dir), false);
     assert.equal(existsSync(`${dir}.json`), false);
     assert.deepEqual((await reconcile(roots, [alpha])).keptAside, []);
-    assert.equal(run(discard(reported.id, { observedDigest: current })).status, "not_found");
+    assert.equal(run(discard(reported.id, fence)).status, "not_found");
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
@@ -375,6 +389,19 @@ test("removal unlinks symlinks, removes only verified entries, and never lists t
       } }));
       assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep\n", "nothing outside the copy is removed");
 
+      // A link entry whose directory is moved out of the copy just before the unlink stays linked.
+      const linked = join(root, `linked-${anchored}`);
+      const linkedAway = join(root, `linked-away-${anchored}`);
+      mkdirSync(join(linked, "sub"), { recursive: true });
+      symlinkSync(outside, join(linked, "sub", "link"));
+      const linkStamps = keptAsideStamps(linked, { anchored })!;
+      assert.throws(() => removeKeptAsideTree(linked, linkStamps, { anchored, beforeUnlink: (relative) => {
+        if (relative !== "sub/link") return;
+        renameSync(join(linked, "sub"), linkedAway);
+        symlinkSync(linkedAway, join(linked, "sub"));
+      } }), /changed while it was discarded/);
+      assert.equal(lstatSync(join(linkedAway, "link")).isSymbolicLink(), true, "the relocated link is put back, not removed");
+
       // A verified directory moved out of the copy, with a link to it left in its place, is not
       // followed: its files are not removed from their new location.
       for (const seam of ["beforeList", "afterVerify"] as const) {
@@ -429,8 +456,10 @@ test("a kept-aside copy changed after its fence check, or during removal, is kep
     mkdirSync(join(dir, "reference"), { recursive: true });
     for (const file of skillFiles("beta")) writeFileSync(join(dir, file.path), file.content);
     const observedDigest = skillVersionDigest(skillFiles("beta"));
+    // Named by the observation as it stands when each discard starts.
     const run = (hooks: Parameters<typeof handleSkillKeptAside>[0]["hooks"]) =>
-      handleSkillKeptAside({ message: discard(id, { observedDigest }), runnerId: "runner-1", dataDir: roots.dataDir, hooks });
+      handleSkillKeptAside({ message: discard(id, { observedDigest, observedFingerprint: keptAsideFingerprint(dir)! }),
+        runnerId: "runner-1", dataDir: roots.dataDir, hooks });
 
     const late = run({ beforeRemove: () => writeFileSync(join(dir, "SKILL.md"), "late write\n") });
     assert.equal(late.status, "rejected");

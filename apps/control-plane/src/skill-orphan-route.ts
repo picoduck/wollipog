@@ -57,7 +57,7 @@ export interface OrphanedSkillCopy {
   keptAsideAt?: number;
   /** Content digest while the copy is readable skill content. */
   observedDigest?: string;
-  /** kept_aside and unreadable: the change fingerprint a discard must name. */
+  /** kept_aside: the fingerprint of every entry, which a discard must name. */
   observedFingerprint?: string;
   /** deleted_skill: the runner's links still serve this copy. */
   held?: boolean;
@@ -117,6 +117,8 @@ interface OrphanPreview {
   /** The accessible skill the import updates; null creates a new skill. */
   skillId: string | null;
   observedDigest: string;
+  /** kept_aside: the fingerprint of every entry when the copy was read for the review. */
+  observedFingerprint?: string;
   payload: ValidatedSkillPayload | null;
   importBlocker?: string;
   disposition: "new" | "update" | "identical";
@@ -177,16 +179,18 @@ export function registerSkillOrphanRoutes(app: FastifyInstance, deps: SkillsRout
     }
     if (result.status === "read") {
       if (typeof result.observedDigest !== "string" || !DIGEST.test(result.observedDigest) ||
+          typeof result.observedFingerprint !== "string" || !DIGEST.test(result.observedFingerprint) ||
           !validReadFiles(result.files) || skillVersionDigest(result.files) !== result.observedDigest) {
         throw new Error("invalid runner read");
       }
-      return { status: "read" as const, observedDigest: result.observedDigest, files: result.files };
+      return { status: "read" as const, observedDigest: result.observedDigest, observedFingerprint: result.observedFingerprint, files: result.files };
     }
     if (result.status === "not_found") return { status: "gone" as const };
     if (result.status === "rejected") return { status: "rejected" as const, error: runnerError(result.error) };
     throw new Error("unexpected runner reply");
   };
-  const discardKeptAside = async (runnerId: string, id: string, observation: { observedDigest: string } | { observedFingerprint: string }) => {
+  /** The fingerprint covers every entry; the digest, present for a readable copy, ties it to the reviewed content. */
+  const discardKeptAside = async (runnerId: string, id: string, observation: { observedFingerprint: string; observedDigest?: string }) => {
     const requestId = randomUUID();
     const result = await hub.requestFromRunner(runnerId, requestId, {
       type: "skill_kept_aside", runnerId, requestId, operation: "discard", id, ...observation, confirmation: "explicit",
@@ -245,6 +249,7 @@ export function registerSkillOrphanRoutes(app: FastifyInstance, deps: SkillsRout
       const disposition = !skill ? "new" : payload && latest?.digest === payload.digest ? "identical" : "update";
       const preview: OrphanPreview = {
         id: randomUUID(), owner: ownerKey(principal), runnerId, ref, name, skillId, observedDigest, payload,
+        ...("observedFingerprint" in result ? { observedFingerprint: result.observedFingerprint } : {}),
         ...(importBlocker ? { importBlocker } : {}),
         disposition,
         expectedLatestVersionId: skill ? skill.latestVersion?.id ?? null : null,
@@ -337,8 +342,11 @@ export function registerSkillOrphanRoutes(app: FastifyInstance, deps: SkillsRout
       } else {
         lock.pending = true;
         try {
+          // The release names the observation of the review: a copy whose other entries changed since
+          // is kept, and the warning says so.
           const result = ref.kind === "kept_aside"
-            ? await discardKeptAside(preview.runnerId, ref.id, { observedDigest: preview.observedDigest })
+            ? await discardKeptAside(preview.runnerId, ref.id,
+              { observedDigest: preview.observedDigest, observedFingerprint: preview.observedFingerprint ?? "" })
             : await restoreDriftCopy(hub, preview.runnerId, ref, preview.observedDigest);
           released = result.status !== "rejected";
           if (result.status === "rejected") warning = `The copy was imported, but the machine kept it: ${result.error}`;
@@ -370,17 +378,18 @@ export function registerSkillOrphanRoutes(app: FastifyInstance, deps: SkillsRout
     const digest = body?.observedDigest;
     const fingerprint = body?.observedFingerprint;
     const validObservation = ref?.kind === "kept_aside"
-      ? (digest === undefined) !== (fingerprint === undefined) &&
-        (digest === undefined || (typeof digest === "string" && DIGEST.test(digest))) &&
-        (fingerprint === undefined || (typeof fingerprint === "string" && DIGEST.test(fingerprint)))
+      ? typeof fingerprint === "string" && DIGEST.test(fingerprint) &&
+        (digest === undefined || (typeof digest === "string" && DIGEST.test(digest)))
       : fingerprint === undefined && (digest === null || (typeof digest === "string" && DIGEST.test(digest)));
     if (!ref || body?.confirmation !== "explicit" || !validObservation) {
       return reply.code(400).send({ error: "Select one reported orphaned copy and explicitly confirm discarding it." });
     }
     const copy = listOrphanedSkillCopies(db, principal, runnerId).find((candidate) => sameRef(candidate, ref));
     if (!copy) return reply.code(409).send({ error: "This machine no longer reports that copy as orphaned. Sync it to refresh its state." });
-    if (ref.kind === "kept_aside" && !copy.observedDigest && !copy.observedFingerprint) {
-      return reply.code(409).send({ error: "This copy is too large to verify, so it can only be removed on the machine itself." });
+    if (ref.kind === "kept_aside" && !copy.observedFingerprint) {
+      return reply.code(409).send({ error: copy.observedDigest
+        ? "The copy changed while the machine reported it. Sync the machine and review it again."
+        : "This copy is too large to verify, so it can only be removed on the machine itself." });
     }
     if ((copy.observedDigest ?? null) !== (digest ?? null) || (copy.observedFingerprint ?? null) !== (fingerprint ?? null)) {
       return reply.code(409).send({ error: "The copy changed after you reviewed it. Review it again before discarding it." });
@@ -392,7 +401,7 @@ export function registerSkillOrphanRoutes(app: FastifyInstance, deps: SkillsRout
     try {
       if (ref.kind === "kept_aside") {
         const result = await discardKeptAside(runnerId, ref.id,
-          typeof digest === "string" ? { observedDigest: digest } : { observedFingerprint: fingerprint as string });
+          { observedFingerprint: fingerprint as string, ...(typeof digest === "string" ? { observedDigest: digest } : {}) });
         if (!stillAuthorized(req, reply, runnerId, ownerKey(principal), copy.skillId ?? null)) return;
         if (result.status === "rejected") return reply.code(409).send({ error: result.error });
         status = result.status === "not_found" ? "gone" : "discarded";

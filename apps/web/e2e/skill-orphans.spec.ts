@@ -14,7 +14,7 @@ const current = {
   reported,
   orphaned: [
     { kind: "kept_aside", id: keptId, name: "release-notes", digest, variant: "manual", keptAsideAt: 1_700_000_000_000,
-      observedDigest: "9b2e".padEnd(64, "0"),
+      observedDigest: "9b2e".padEnd(64, "0"), observedFingerprint: "7e1d".padEnd(64, "0"),
       detail: "A restore kept this edited copy aside in the skill store instead of deleting it." },
     { kind: "kept_aside", id: unidentifiedId, observedFingerprint: fingerprint,
       detail: "An earlier runner kept this edited copy aside without recording the skill version it came from. It cannot be read as skill content: it contains a symlink." },

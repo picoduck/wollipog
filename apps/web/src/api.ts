@@ -600,7 +600,7 @@ export function createApiClient(transport: ApiTransport) {
     req<void>(`/api/orphaned-skill-copies/${encodeURIComponent(previewId)}`, { method: "DELETE" }),
   /** The observation is exactly what the machine reported and the user confirmed. */
   discardOrphanedSkillCopy: (runnerId: string, copy: import("./skills.js").OrphanedSkillCopyRef,
-    observation: { observedDigest: string | null } | { observedFingerprint: string }) =>
+    observation: { observedDigest?: string | null; observedFingerprint?: string }) =>
     req<import("./skills.js").OrphanedSkillCopyResolution>(`/api/runners/${encodeURIComponent(runnerId)}/orphaned-skill-copies/discard`, {
       method: "POST", body: JSON.stringify({ ...copy, ...observation, confirmation: "explicit" }),
     }),

@@ -123,10 +123,12 @@ a skill the viewer cannot access is not listed. Owners and admins have two actio
   reviewed digest, and a library change since the review refuses the import. Because the library
   then holds exactly those bytes, the machine discards its copy under the same observation fence.
   A copy kept aside before records existed is imported exactly as stored.
-- **Discard Copy** requires confirmation and names the observation the machine reported. For a
-  readable copy that is its content digest. For a copy that cannot be read as skill content it is a
-  fingerprint of every entry's path, type, identity, size, and modification and change times, never
-  its contents. The runner computes the observation again and deletes nothing if it differs. It
+- **Discard Copy** requires confirmation and names the observation the machine reported: a
+  fingerprint of every entry's path, type, identity, size, and modification and change times (never
+  its contents), and for a readable copy also its content digest. Generated artifacts such as
+  `__pycache__` are outside the content digest but inside the fingerprint, and an import's release
+  names the fingerprint read for the review. The runner computes the observation again and deletes
+  nothing if it differs. It
   then checks each entry against that state just before removing it: an entry that changed or
   appeared stops the removal, and it is kept, with everything not yet removed, and listed again.
   Each entry is first moved to a private name in its own directory and checked again there, so a

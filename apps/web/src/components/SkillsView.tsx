@@ -397,9 +397,11 @@ export function SkillsView() {
     });
     if (!confirmed) return;
     await mutate(async () => {
-      const result = await api.discardOrphanedSkillCopy(runner.runnerId, orphanedCopyRef(copy), copy.observedDigest
-        ? { observedDigest: copy.observedDigest }
-        : copy.kind === "kept_aside" ? { observedFingerprint: copy.observedFingerprint! } : { observedDigest: null });
+      // Exactly what the machine reported: a kept-aside copy's fingerprint of every entry, plus its content
+      // digest when readable; a deleted skill's copy by its digest, or null when it was unreadable.
+      const result = await api.discardOrphanedSkillCopy(runner.runnerId, orphanedCopyRef(copy), copy.kind === "kept_aside"
+        ? { observedFingerprint: copy.observedFingerprint!, ...(copy.observedDigest ? { observedDigest: copy.observedDigest } : {}) }
+        : { observedDigest: copy.observedDigest ?? null });
       await orphanResolved(result);
     });
   };
