@@ -502,6 +502,19 @@ test("a kept-aside copy changed after its fence check, or during removal, is kep
     assert.equal(readFileSync(join(dir, "SKILL.md"), "utf8"), "saved by an editor\n");
     assert.deepEqual(leftovers(), []);
 
+    // A replacement placed at the private name after the file was opened there is not removed.
+    reset();
+    const swapped = run({ removal: { beforeUnlink: (relative) => {
+      if (relative !== "SKILL.md") return;
+      const [privateName] = leftovers();
+      renameSync(join(dir, privateName!), join(roots.root, "moved-away"));
+      writeFileSync(join(dir, privateName!), "placed at the private name\n");
+    } } });
+    assert.equal(swapped.status, "rejected");
+    assert.equal(readFileSync(join(dir, "SKILL.md"), "utf8"), "placed at the private name\n",
+      "the replacement is put back under the entry's name, never unlinked");
+    assert.deepEqual(leftovers(), []);
+
     // A write through a handle opened before the discard lands just before the unlink: kept.
     reset();
     const handle = openSync(join(dir, "SKILL.md"), "r+");

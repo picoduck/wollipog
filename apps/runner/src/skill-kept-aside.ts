@@ -338,6 +338,8 @@ export function removeKeptAsideTree(
       try {
         options.beforeUnlink?.(relative);
         inPlace(chain);
+        const now = lstatSync(aside, { bigint: true });
+        if (now.dev !== stat.dev || now.ino !== stat.ino) throw new CopyChanged();
       } catch (error) {
         putBack(aside, original);
         throw error;
@@ -349,6 +351,9 @@ export function removeKeptAsideTree(
         preserveFromHandle(fd, [original, aside], stat.mode);
         throw new CopyChanged();
       }
+      // The reviewed file lost a link only if the name still pointed at it when it was unlinked; a
+      // replacement raced onto the private name is reported instead of counted as discarded.
+      if (after.nlink >= stat.nlink) throw new CopyChanged();
     } finally {
       closeSync(fd);
     }
