@@ -336,14 +336,14 @@ test("a WSL distro that cannot be inspected makes the list incomplete and blocks
     assert.equal(fs.readlinkSync(f.source), f.target, "nothing was restored");
   });
 
-test("an unreadable WSL harness directory or journal fails inspection instead of looking empty",
+test("an unreadable WSL harness directory, journal, or intent record fails inspection instead of looking empty",
   { skip: local.skip || process.getuid?.() === 0 }, async (t) => {
     const f = fixture(t);
     const adopted = await f.adopt();
     assert.equal(adopted.status, "adopted", JSON.stringify(adopted));
     if (adopted.status !== "adopted") return;
     const journal = join(f.parent, `.wollipog-adoption-${adopted.operationId}`);
-    for (const locked of [f.parent, journal]) {
+    for (const locked of [f.parent, journal, join(journal, "intent.json")]) {
       const mode = fs.statSync(locked).mode & 0o777;
       fs.chmodSync(locked, 0);
       try {

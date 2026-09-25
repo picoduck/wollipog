@@ -1166,13 +1166,15 @@ def adopt(spec):
             os.close(store_fd); os.close(home_fd)
 
 def inspect_journal(parent, entry, operation, home, local, store_root):
-    # An unreadable journal still holds an operation ID, so it fails the inspection rather than
-    # vanish; any other entry that cannot be opened as a directory is not a journal.
+    # An unreadable journal or intent record still holds an operation ID, so it fails the inspection
+    # rather than vanish; any other entry that cannot be opened or parsed is not a journal. Later
+    # reads only refine a listed journal's state, so their errors cannot hide its ID.
     try: backup = open_directory(parent, entry)
     except PermissionError: raise
     except OSError: return None
     try:
         try: intent = read_record(backup, "intent.json").decode("utf-8")
+        except PermissionError: raise
         except Exception: return None
         journal = {"OperationId": operation, "Intent": intent, "Name": "", "Digest": "", "OriginalIdentity": "",
             "Kind": 3, "SourceIdentity": "", "Role": 0}
