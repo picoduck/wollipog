@@ -42,7 +42,7 @@ An ordinary request covering several issues does not authorize a campaign or chi
 the human explicitly asks for orchestration or delegation. A parent may maintain permitted planning
 artifacts directly. If the human explicitly asks the parent to implement, first inspect open child
 assignments and pull requests for overlap, then create and select a dedicated Wollipog worktree for
-the parent and follow the repository's normal testing, cross-model review, UI evidence, merge, and
+the parent and follow the repository's normal testing, review, UI evidence, merge, and
 cleanup workflow. Provider permissions and governance still apply throughout.
 
 **Strict Project Isolation** is a separate human-controlled execution setting. New sessions default
