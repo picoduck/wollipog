@@ -1547,6 +1547,30 @@ export interface SkillLinkRemoval {
 export const SKILL_MAX_FILES = 64;
 export const SKILL_MAX_TOTAL_BYTES = 2 * 1024 * 1024;
 export const SKILL_MAX_FILE_BYTES = 512 * 1024;
+/** The Agent Skills maximum for a frontmatter description, also the library's stored limit. */
+export const SKILL_DESCRIPTION_MAX_CHARS = 1024;
+
+/** Bound display text to maxCharacters UTF-16 units (the `String.length` the library API checks)
+ * without splitting a surrogate pair. Longer text is cut at the last word boundary that fits and
+ * ends with "…", so a shortened value never ends mid-word without saying so. A single word longer
+ * than the bound is cut inside the word, still with the ellipsis. */
+export function shortenAtWordBoundary(value: string, maxCharacters: number): string {
+  if (value.length <= maxCharacters) return value;
+  const kept: string[] = [];
+  let units = 0;
+  for (const character of value) {
+    if (units + character.length > maxCharacters - 1) break;
+    kept.push(character);
+    units += character.length;
+  }
+  const nextIsSpace = /\s/.test(value[units] ?? "");
+  let end = kept.length;
+  if (!nextIsSpace) {
+    while (end > 0 && !/\s/.test(kept[end - 1]!)) end -= 1;
+    if (end === 0) end = kept.length;
+  }
+  return `${kept.slice(0, end).join("").replace(/[\s,;:]+$/, "")}…`;
+}
 
 /** A skill name is also its on-disk directory name: the leading character class rejects ".",
  * "..", and every hidden-file spelling, and the class as a whole rejects path separators. */
