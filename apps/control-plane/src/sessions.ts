@@ -7831,7 +7831,10 @@ export class SessionsService {
       return fail("descendant request supervision is available only for an Orchestrator campaign", 403);
     }
     if (viewer === "orchestrator" && mode === "off" && !Object.values(typedPolicy.decisions).includes("orchestrator")) {
-      return fail("Parent Control is off", 403);
+      // Parent Control governs answering requests. A held child has nothing to answer, so its hold
+      // is still reported to the Orchestrator its campaign event wakes (#1650).
+      const blockedChildren = includeBlockedChildren ? this.blockedDescendants(parentSessionId, canAccess) : [];
+      return blockedChildren.length ? ok({ requests: [], blockedChildren }) : fail("Parent Control is off", 403);
     }
     const durableTyped = this.db.pendingWorkflowDecisionsForController(parentSessionId).flatMap(
       (decision): DescendantRequestView[] => {

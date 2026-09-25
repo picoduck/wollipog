@@ -20797,3 +20797,50 @@ test("a runner that no longer reports recovery cannot keep a resume held (#1650)
     db.close();
   }
 });
+
+test("revoking a decision and withdrawing its waiting resume commit together (#1650)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child } = f;
+  try {
+    const merge = f.requestMerge(1660);
+    svc.onSessionStatus(child.id, "idle");
+    f.approve(merge.occurrenceId);
+    const [staged] = f.resolutionPrompts(merge.occurrenceId);
+    assert.ok(staged);
+    db.raw().prepare("UPDATE session_prompt_commands SET state='pending' WHERE command_id=?").run(staged.commandId);
+    // Withdrawal fails part-way: the revocation rolls back with it instead of committing alone.
+    const cancel = db.cancelPendingSessionPromptCommand.bind(db);
+    db.cancelPendingSessionPromptCommand = () => { throw new Error("simulated crash while withdrawing"); };
+    assert.throws(() => db.markWorkflowDecisionRevoked(merge.occurrenceId, Date.now()), /simulated crash/u);
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "approved");
+    assert.equal(f.resumeState(merge.occurrenceId), "delivering");
+    db.cancelPendingSessionPromptCommand = cancel;
+    assert.equal(db.markWorkflowDecisionRevoked(merge.occurrenceId, Date.now())?.status, "revoked");
+    assert.equal(f.resumeState(merge.occurrenceId), "abandoned");
+    assert.equal(db.getSessionPromptCommand(staged.commandId)?.errorCode, "COMMAND_CANCELLED");
+  } finally {
+    db.close();
+  }
+});
+
+test("a held child is reported to its Orchestrator even with Parent Control off (#1650)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child, recovery } = f;
+  try {
+    assert.ok(svc.setParentControlPolicy(root.id, {
+      implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human",
+    }, 1).ok);
+    const quiet = svc.descendantRequests(root.id, () => true);
+    assert.equal(quiet.status, 403, "with nothing held, Parent Control off still refuses");
+    svc.onSessionStatus(child.id, "idle");
+    f.runnerReports(recovery, "input_required");
+    const held = svc.descendantRequests(root.id, () => true);
+    assert.ok(held.ok && held.data, held.error);
+    assert.deepEqual(held.data.requests, [], "no request becomes answerable");
+    assert.deepEqual(held.data.blockedChildren?.map((item) => item.sessionId), [child.id]);
+    assert.ok(db.campaignContinuationEvents(root.id).some((event) => event.kind === "child_blocked"));
+  } finally {
+    db.close();
+  }
+});

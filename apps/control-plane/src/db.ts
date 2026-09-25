@@ -15018,12 +15018,21 @@ export class ControlPlaneDb {
   }
 
   markWorkflowDecisionRevoked(occurrenceId: string, now: number): WorkflowDecisionView | null {
-    const revoked = Number(this.stmt(
-      `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
-       WHERE occurrence_id=? AND status IN ('pending','approved')`,
-    ).run(now, occurrenceId).changes) === 1;
-    if (revoked) this.retireWorkflowDecisionResume(occurrenceId, now);
-    this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
+    // One transaction, so a restart can never leave a revoked decision with its resume still
+    // waiting to be sent.
+    this.db.exec("BEGIN");
+    try {
+      const revoked = Number(this.stmt(
+        `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
+         WHERE occurrence_id=? AND status IN ('pending','approved')`,
+      ).run(now, occurrenceId).changes) === 1;
+      if (revoked) this.retireWorkflowDecisionResume(occurrenceId, now);
+      this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return this.workflowDecisionByOccurrence(occurrenceId);
   }
 
