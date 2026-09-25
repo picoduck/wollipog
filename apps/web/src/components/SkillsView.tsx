@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { runnerSupportsProtocol, type RunnerView, type SkillDriftState, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { useStoreSelector } from "../store.js";
+import { useStoreActions, useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { Empty, Modal, Skeleton } from "./common.js";
@@ -21,6 +21,8 @@ import { AddAssignmentDialog } from "./SkillAssignmentDialog.js";
 import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
 import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
 import { SkillAssignmentMatrix } from "./SkillAssignmentMatrix.js";
+import { SkillBuiltInSection } from "./SkillBuiltInSection.js";
+import { SkillBuiltInReviewDialog } from "./SkillBuiltInReviewDialog.js";
 import {
   describeAgentSelector,
   describeAssignmentScope,
@@ -42,6 +44,7 @@ import {
   skillGroupsFromPayload,
   skillMarkdownBody,
   skillMarkdownTemplate,
+  skillRecommended,
   skillsFromPayload,
   validateSkillDraft,
   type RunnerSkillsResponse,
@@ -174,8 +177,9 @@ function NewSkillDialog({ onClose, onCreate, busy }: {
 }
 
 
-export function SkillsView() {
+export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {}) {
   const api = useApi();
+  const { navigate } = useStoreActions();
   const { confirm, showToast } = useFeedback();
   const runnersMap = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
@@ -187,7 +191,7 @@ export function SkillsView() {
 
   const [skills, setSkills] = useState<SkillSummary[] | null>(null);
   const [groups, setGroups] = useState<SkillGroupView[]>([]);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(selectedSkillId ?? null);
   const [detail, setDetail] = useState<SkillSummary | null>(null);
   const [assignments, setAssignments] = useState<SkillAssignmentView[]>([]);
   const [machineSkills, setMachineSkills] = useState<Record<string, RunnerSkillsResponse>>({});
@@ -198,7 +202,25 @@ export function SkillsView() {
   const [showOrphans, setShowOrphans] = useState(false);
   const [orphanImport, setOrphanImport] = useState<{ runnerId: string; copy: OrphanedSkillCopy } | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | null>(null);
+  const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | "built-in-review" | null>(null);
+
+  /** The selection as of now, for async work that finishes after the user moved on. */
+  const selectedRef = useRef(selectedId);
+  const choose = useCallback((skillId: string | null) => {
+    selectedRef.current = skillId;
+    setSelectedId(skillId);
+  }, []);
+
+  // The route names the selected skill, so a link such as onboarding's Open Skills selects it, and
+  // returning to the bare Skills route (the rail, or history) clears the selection.
+  const select = useCallback((skillId: string | null) => {
+    choose(skillId);
+    navigate(skillId ? { name: "skills", id: skillId } : { name: "skills" });
+  }, [choose, navigate]);
+  useEffect(() => {
+    if (selectedSkillId) setShowOrphans(false);
+    choose(selectedSkillId ?? null);
+  }, [choose, selectedSkillId]);
 
   /** Only the newest started refresh of each surface may commit (see AutomationsView). */
   const listGeneration = useRef(0);
@@ -213,12 +235,14 @@ export function SkillsView() {
   }, [api]);
 
   const refreshDetail = useCallback(async (skillId: string) => {
+    // A mutation that finishes after the user selected another skill, or none, refreshes nothing.
+    if (selectedRef.current !== skillId) return;
     const generation = (detailGeneration.current += 1);
     const [detailPayload, assignmentsPayload] = await Promise.all([
       api.getSkill(skillId),
       api.listSkillAssignments(skillId),
     ]);
-    if (generation !== detailGeneration.current) return;
+    if (generation !== detailGeneration.current || selectedRef.current !== skillId) return;
     setDetail(skillFromPayload(detailPayload));
     setAssignments(skillAssignmentsFromPayload(assignmentsPayload));
   }, [api]);
@@ -254,6 +278,8 @@ export function SkillsView() {
 
   useEffect(() => {
     if (!selectedId) {
+      // A detail load still in flight must not repopulate the pane after the selection clears.
+      detailGeneration.current += 1;
       setDetail(null);
       setAssignments([]);
       return;
@@ -286,7 +312,7 @@ export function SkillsView() {
         files: input.files,
       }));
       setDialog(null);
-      if (created) setSelectedId(created.id);
+      if (created) select(created.id);
     }, async () => {
       await refreshList();
       await refreshMachines();
@@ -304,22 +330,40 @@ export function SkillsView() {
       await api.createSkillAssignment({ skillId: selectedId, ...input });
       setDialog(null);
     }, async () => {
+      // The list's assignment counts decide which built-in skills are still recommended.
+      await refreshList();
       await refreshDetail(selectedId);
       await refreshMachines();
+    });
+  };
+
+  /** One-step assignment of a recommended built-in skill to every supported agent. */
+  const assignRecommended = (runnerId: string | null) => createAssignment({
+    scopeKind: runnerId ? "runner" : "instance",
+    ...(runnerId ? { runnerId } : {}),
+    agentSelector: { kind: "all" },
+    invocation: "agent",
+  });
+
+  const setRecommendationDismissed = async (skillId: string, dismissed: boolean) => {
+    await mutate(() => api.setSkillRecommendationDismissed(skillId, dismissed), async () => {
+      await refreshList();
+      await refreshDetail(skillId);
     });
   };
 
   const deleteSkill = async (skill: SkillSummary) => {
     const confirmed = await confirm({
       title: `Delete “${skill.name}”?`,
-      message: "The skill, its versions, and its assignments are removed. The next sync removes it from every machine.",
+      message: "The skill, its versions, and its assignments are removed. The next sync removes it from every machine." +
+        (skill.builtIn ? " Later Wollipog releases do not add this built-in skill back." : ""),
       confirmLabel: "Delete Skill",
       tone: "danger",
     });
     if (!confirmed) return;
     await mutate(async () => {
       await api.deleteSkill(skill.id);
-      setSelectedId(null);
+      select(null);
     }, async () => {
       await refreshList();
       await refreshMachines();
@@ -452,7 +496,7 @@ export function SkillsView() {
               type="button"
               className={`skills-item${showOrphans ? " active" : ""}`}
               aria-current={showOrphans ? "true" : undefined}
-              onClick={() => { setSelectedId(null); setShowOrphans(true); }}
+              onClick={() => { select(null); setShowOrphans(true); }}
             >
               <span className="skills-item-name">
                 Orphaned Copies
@@ -484,11 +528,13 @@ export function SkillsView() {
                   type="button"
                   className={`skills-item${selectedId === skill.id ? " active" : ""}`}
                   aria-current={selectedId === skill.id ? "true" : undefined}
-                  onClick={() => { setShowOrphans(false); setSelectedId(skill.id); }}
+                  onClick={() => { setShowOrphans(false); select(skill.id); }}
                 >
                   <span className="skills-item-name">
                     {skill.name}
                     {driftedSkillNames.has(skill.name) && <span className="status-badge st-input skills-item-drift">Drift</span>}
+                    {skill.builtIn && <span className="status-badge st-queued skills-item-drift">Built-In</span>}
+                    {skillRecommended(skill) && <span className="status-badge st-running skills-item-drift">Recommended</span>}
                   </span>
                   {skill.description && <span className="skills-item-description">{skill.description}</span>}
                 </button>
@@ -539,6 +585,16 @@ export function SkillsView() {
                 </button>
               </div>
 
+              <SkillBuiltInSection
+                key={`built-in-${detail.id}`}
+                skill={detail}
+                runners={runners}
+                machineLabels={machineLabels}
+                busy={busy}
+                onAssign={(runnerId) => void assignRecommended(runnerId)}
+                onDismiss={(dismissed) => void setRecommendationDismissed(detail.id, dismissed)}
+                onReview={() => setDialog("built-in-review")}
+              />
               <button className="btn sm" type="button" onClick={() => setDialog("version-history")}>Version History</button>
               <button className="btn sm" type="button" onClick={() => setDialog("machine-versions")}>Machine Versions</button>
               {skillMd && (
@@ -640,6 +696,7 @@ export function SkillsView() {
                                   });
                                   if (!confirmed) return;
                                   await mutate(() => api.deleteSkillAssignment(assignment.id), async () => {
+                                    await refreshList();
                                     await refreshDetail(detail.id);
                                     await refreshMachines();
                                   });
@@ -847,6 +904,20 @@ export function SkillsView() {
           onImported={async (result) => {
             setOrphanImport(null);
             await orphanResolved(result);
+          }}
+        />
+      )}
+      {dialog === "built-in-review" && detail && (
+        <SkillBuiltInReviewDialog
+          key={detail.id}
+          skillId={detail.id}
+          skillName={detail.name}
+          onClose={() => setDialog(null)}
+          onAccepted={async () => {
+            setDialog(null);
+            await refreshList();
+            await refreshDetail(detail.id);
+            await refreshMachines();
           }}
         />
       )}

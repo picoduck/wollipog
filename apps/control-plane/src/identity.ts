@@ -79,6 +79,10 @@ export function mutationAuthorizationError(
   if (routePath === "/api/projects/:id/worktree-setup-notice/dismiss") {
     return null;
   }
+  // Dismissing a built-in skill's recommendation hides it for the requesting user only.
+  if (routePath === "/api/skills/:id/recommendation") {
+    return null;
+  }
   // Agent Harness defaults are private per-user preferences, not mutations of shared organization
   // resources. The route still requires an authenticated human and can only address that user.
   if (routePath === "/api/agent-harness-defaults" || routePath === "/api/orchestrator-settings") {

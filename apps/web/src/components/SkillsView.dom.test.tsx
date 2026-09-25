@@ -570,3 +570,303 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
   await act(async () => root.unmount());
   container.remove();
 });
+
+/** Mount the Skills view against a client and deliver a one-runner snapshot. */
+async function mountSkills(client: ApiClient, instanceId: string) {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId, runtimeKey: `${instanceId}:1`, createSocket: () => socket, close() {},
+  };
+  const feedback = { confirm: async () => true, showToast: () => -1, showUndo: () => -1, dismissToast: () => undefined };
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <FeedbackContext.Provider value={feedback as never}>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <SkillsWhenReady />
+          </StoreProvider>
+        </FeedbackContext.Provider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+    });
+  });
+  await act(settle);
+  const button = (label: string, scope: ParentNode = container) => [...scope.querySelectorAll<HTMLButtonElement>("button")]
+    .find((candidate) => candidate.textContent?.trim() === label);
+  const listItem = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".skills-item")]
+    .find((candidate) => candidate.querySelector(".skills-item-name")?.firstChild?.textContent === name);
+  return {
+    container, button, listItem,
+    async click(target: HTMLElement | undefined) {
+      assert.ok(target);
+      await act(async () => { target.click(); });
+      await act(settle);
+    },
+    async unmount() {
+      await act(async () => root.unmount());
+      container.remove();
+    },
+  };
+}
+
+test("SkillsView marks built-in skills recommended, assigns one in a step, and dismisses the recommendation", async () => {
+  const skillMd = "---\nname: using-wollipog\ndescription: Operate Wollipog sessions.\n---\nUse the CLI.\n";
+  const skill = {
+    id: "skill-builtin", name: "using-wollipog", description: "Operate Wollipog sessions.", source: "builtin",
+    builtIn: { release: "0.28.0", heldUpdate: null as { release: string; digest: string } | null },
+    recommendation: { dismissed: false },
+    assignmentCount: 0,
+    latestVersion: { id: "v1", digest: "d1", createdAt: 1 },
+  };
+  const assignments: unknown[] = [];
+  const calls: unknown[] = [];
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [structuredClone(skill)] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async () => ({ skill: structuredClone(skill),
+      latestVersion: { id: "v1", digest: "d1", files: [{ path: "SKILL.md", content: skillMd, encoding: "utf8" as const }] } }),
+    listSkillAssignments: async () => ({ assignments }),
+    runnerSkills: async () => ({ desired: [], reported: null }),
+    createSkillAssignment: async (body: Record<string, unknown>) => {
+      calls.push(body);
+      skill.assignmentCount += 1;
+      const assignment = { id: `assignment-${skill.assignmentCount}`, enabled: true, ...body };
+      assignments.push(assignment);
+      return { assignment };
+    },
+    deleteSkillAssignment: async () => {
+      assignments.length = 0;
+      skill.assignmentCount = 0;
+    },
+    setSkillRecommendationDismissed: async (id: string, dismissed: boolean) => {
+      calls.push({ id, dismissed });
+      skill.recommendation = { dismissed };
+      return { skill: structuredClone(skill) };
+    },
+  } as unknown as ApiClient;
+  const view = await mountSkills(client, "skills-built-in");
+  const badges = () => [...view.listItem("using-wollipog")!.querySelectorAll(".status-badge")].map((badge) => badge.textContent);
+  assert.deepEqual(badges(), ["Built-In", "Recommended"]);
+
+  await view.click(view.listItem("using-wollipog"));
+  const section = () => view.container.querySelector('[aria-label="Built-In Skill"]');
+  assert.match(section()?.textContent ?? "", /Ships with Wollipog 0\.28\.0/);
+  assert.match(section()?.textContent ?? "", /It is not deployed until you assign it/);
+
+  await view.click(view.button("Assign to All Machines"));
+  assert.deepEqual(calls.at(-1), { skillId: "skill-builtin", scopeKind: "instance", agentSelector: { kind: "all" }, invocation: "agent" });
+  assert.deepEqual(badges(), ["Built-In"], "an assigned built-in skill is no longer recommended");
+  assert.equal(view.button("Assign to All Machines"), undefined);
+
+  // Removing the assignment brings the recommendation back; a machine can be chosen instead.
+  await view.click(view.button("Delete"));
+  assert.deepEqual(badges(), ["Built-In", "Recommended"]);
+  await view.click(view.button("Assign to Machine"));
+  assert.deepEqual(calls.at(-1), {
+    skillId: "skill-builtin", scopeKind: "runner", runnerId: "runner-1", agentSelector: { kind: "all" }, invocation: "agent",
+  });
+
+  await view.click(view.button("Delete"));
+  await view.click(view.button("Dismiss Recommendation"));
+  assert.deepEqual(calls.at(-1), { id: "skill-builtin", dismissed: true });
+  assert.deepEqual(badges(), ["Built-In"], "a dismissed recommendation is hidden and the library entry stays");
+  assert.match(section()?.textContent ?? "", /You dismissed this recommendation\./);
+  // Release content held by local library changes waits for review.
+  skill.builtIn.heldUpdate = { release: "0.29.0", digest: "d2" };
+  await view.click(view.button("Show Recommendation"));
+  assert.deepEqual(calls.at(-1), { id: "skill-builtin", dismissed: false });
+  assert.deepEqual(badges(), ["Built-In", "Recommended"]);
+  assert.match(section()?.textContent ?? "", /Wollipog 0\.29\.0 includes an updated version/);
+  assert.ok(view.button("Review Built-In Update"));
+  await view.unmount();
+});
+
+test("SkillsView offers a same-name skill the built-in version and adopts it after explicit diff acceptance", async () => {
+  const mine = "---\nname: orchestrate-issues\n---\nMine.\n";
+  const release = "---\nname: orchestrate-issues\n---\nRelease.\n";
+  let skill: Record<string, unknown> = {
+    id: "skill-mine", name: "orchestrate-issues", source: "git", assignmentCount: 2,
+    builtInOffer: { release: "0.28.0", digest: "r1" },
+    gitAutoUpdate: { enabled: true },
+    latestVersion: { id: "v1", digest: "m1" },
+  };
+  const accepted: unknown[] = [];
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [skill] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async () => ({ skill, latestVersion: { id: "v1", digest: "m1", files: [{ path: "SKILL.md", content: mine, encoding: "utf8" as const }] } }),
+    listSkillAssignments: async () => ({ assignments: [] }),
+    runnerSkills: async () => ({ desired: [], reported: null }),
+    getBuiltInSkillVersion: async () => ({
+      kind: "adopt", release: "0.28.0", digest: "r1",
+      files: [{ path: "SKILL.md", content: release, encoding: "utf8" }],
+      currentVersion: { id: "v1", digest: "m1", files: [{ path: "SKILL.md", content: mine, encoding: "utf8" }] },
+      expectedLatestVersionId: "v1", assignmentCount: 2, gitAutoUpdate: true,
+    }),
+    acceptBuiltInSkillVersion: async (id: string, body: unknown) => {
+      accepted.push({ id, body });
+      skill = { ...skill, source: "builtin", builtInOffer: undefined, gitAutoUpdate: { enabled: false },
+        builtIn: { release: "0.28.0", heldUpdate: null }, recommendation: { dismissed: false } };
+      return { skill };
+    },
+  } as unknown as ApiClient;
+  const view = await mountSkills(client, "skills-built-in-offer");
+  assert.equal(view.listItem("orchestrate-issues")!.querySelector(".status-badge"), null, "a user-managed skill is not marked built-in");
+  await view.click(view.listItem("orchestrate-issues"));
+  const offer = view.container.querySelector('[aria-label="Built-In Version Available"]');
+  assert.match(offer?.textContent ?? "", /This library skill stays exactly as it is unless you review and accept the built-in version/);
+  assert.match(offer?.textContent ?? "", /Accepting also turns off this skill's automatic Git updates\./);
+
+  await view.click(view.button("Review Built-In Version"));
+  const dialog = view.container.querySelector('[role="dialog"]')!;
+  assert.match(dialog.textContent ?? "", /2 existing assignments and every machine pin stay as they are/);
+  assert.match(dialog.textContent ?? "", /Accepting turns off this skill's automatic Git updates\./);
+  assert.match(dialog.textContent ?? "", /SKILL\.md · Changed/);
+  const acceptButton = view.button("Accept Built-In Version", dialog)!;
+  assert.equal(acceptButton.disabled, true, "the version diff must be accepted first");
+  await act(async () => { dialog.querySelector<HTMLInputElement>('input[type="checkbox"]')!.click(); });
+  assert.equal(acceptButton.disabled, false);
+  await view.click(acceptButton);
+  assert.deepEqual(accepted, [{ id: "skill-mine", body: { digest: "r1", expectedLatestVersionId: "v1" } }]);
+  assert.equal(view.container.querySelector('[role="dialog"]'), null);
+  assert.equal(view.container.querySelector('[aria-label="Built-In Version Available"]'), null);
+  assert.ok(view.container.querySelector('[aria-label="Built-In Skill"]'));
+  await view.unmount();
+});
+
+test("SkillsView follows the route's selected skill, including back to no selection", async () => {
+  const skill = { id: "skill-1", name: "code-review", latestVersion: { id: "v1", digest: "d1" } };
+  let hold: Promise<void> | null = null;
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [skill] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async () => {
+      await hold;
+      return { skill, latestVersion: { id: "v1", digest: "d1", files: [] } };
+    },
+    listSkillAssignments: async () => ({ assignments: [] }),
+    runnerSkills: async () => ({ desired: [], reported: null }),
+  } as unknown as ApiClient;
+  let route!: (id: string | undefined) => void;
+  function Routed() {
+    const [id, setId] = React.useState<string | undefined>("skill-1");
+    route = setId;
+    const ready = useStoreSelector((state) => state.snapshotLoaded);
+    return ready ? <SkillsView selectedSkillId={id} /> : null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={{ instanceId: "skills-route", runtimeKey: "skills-route:1", createSocket: () => socket, close() {} }}
+          navigation={navigation}>
+          <Routed />
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+    });
+  });
+  await act(settle);
+  assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review", "the deep link selects its skill");
+  await act(async () => { route(undefined); });
+  await act(settle);
+  assert.equal(container.querySelector(".skills-detail-head"), null, "the bare Skills route clears the selection");
+  assert.match(container.querySelector(".skills-empty")?.textContent ?? "", /Select a skill/);
+
+  // A detail load still pending when the route clears never repopulates the pane.
+  let release!: () => void;
+  hold = new Promise((resolve) => { release = resolve; });
+  await act(async () => { route("skill-1"); });
+  await act(async () => { route(undefined); });
+  await act(async () => { release(); await hold; });
+  await act(settle);
+  assert.equal(container.querySelector(".skills-detail-head"), null, "a stale detail load is discarded");
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("SkillsView keeps following the selection when a mutation finishes after the user moved on", async () => {
+  const builtIn = { id: "skill-a", name: "using-wollipog", builtIn: { release: "0.28.0", heldUpdate: null },
+    recommendation: { dismissed: false }, assignmentCount: 0, latestVersion: { id: "va", digest: "da" } };
+  const other = { id: "skill-b", name: "code-review", latestVersion: { id: "vb", digest: "db" } };
+  let finishDismissal!: () => void;
+  const dismissal = new Promise<void>((resolve) => { finishDismissal = resolve; });
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [builtIn, other] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async (id: string) => {
+      const skill = id === builtIn.id ? builtIn : other;
+      return { skill, latestVersion: { ...skill.latestVersion, files: [] } };
+    },
+    listSkillAssignments: async () => ({ assignments: [] }),
+    runnerSkills: async () => ({ desired: [], reported: null }),
+    setSkillRecommendationDismissed: async () => {
+      await dismissal;
+      return { skill: { ...builtIn, recommendation: { dismissed: true } } };
+    },
+  } as unknown as ApiClient;
+  let route!: (id: string | undefined) => void;
+  function Routed() {
+    const [id, setId] = React.useState<string | undefined>(builtIn.id);
+    route = setId;
+    const ready = useStoreSelector((state) => state.snapshotLoaded);
+    return ready ? <SkillsView selectedSkillId={id} /> : null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={{ instanceId: "skills-late", runtimeKey: "skills-late:1", createSocket: () => socket, close() {} }}
+          navigation={navigation}>
+          <Routed />
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+    });
+  });
+  await act(settle);
+  const heading = () => container.querySelector(".skills-detail-head h3")?.textContent;
+  assert.equal(heading(), "using-wollipog");
+  const dismiss = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((candidate) => candidate.textContent?.trim() === "Dismiss Recommendation")!;
+  await act(async () => { dismiss.click(); });
+  await act(async () => { route(other.id); });
+  await act(settle);
+  assert.equal(heading(), "code-review");
+  await act(async () => { finishDismissal(); await dismissal; });
+  await act(settle);
+  assert.equal(heading(), "code-review", "the finished mutation does not bring back the skill the user left");
+  await act(async () => root.unmount());
+  container.remove();
+});

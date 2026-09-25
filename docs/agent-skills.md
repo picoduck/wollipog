@@ -552,10 +552,72 @@ sections describe that broader target design.
 
 The repository's [`skills`](../skills) directory holds agent skills for Wollipog users:
 `using-wollipog`, a compact reference for Wollipog's agent-facing CLI and MCP tools, and
-`orchestrate-issues`, which runs Orchestrator issue campaigns and requires `using-wollipog`. Import
-them with **Import from Git** using this repository, a release tag, and the subdirectory `skills`;
-like any import, they have no assignments until you add one. Skills under `.agents/skills` are for
-contributors to this repository and are not intended for import.
+`orchestrate-issues`, which runs Orchestrator issue campaigns and requires `using-wollipog`. Skills
+under `.agents/skills` are for contributors to this repository and are not intended for import.
+
+### Built-In Skills
+
+Every release compiles `skills/` into the control plane
+(`apps/control-plane/src/built-in-skills.generated.ts`, written by `pnpm generate:built-in-skills`; a
+unit test fails while the two differ). No network fetch or credential is involved, and no release
+asset is added. At startup, the control plane reconciles each built-in skill with the Skill Library:
+
+- **New name.** The skill becomes an organization-owned library entry of the personal organization,
+  marked built-in, with one version whose note and provenance name the release. It has no
+  assignments, so nothing is written to any machine.
+- **Upgrade.** When the release ships different content, the entry gets a new version with that
+  release's provenance. Machines that track the latest version deploy it through the ordinary sync;
+  machines pinned to a version keep it. Version History shows and restores every release's content.
+- **Local changes.** When the library's latest version is not release content (an **Import Edit as
+  New Version**, a Git or machine import, or an uploaded version), a new release's content does not
+  replace it. The skill shows **Review Built-In Update**, which opens the file-by-file diff; accepting
+  adds the release content as the latest version. A local edit alone, with no new release content,
+  is never offered as an update.
+- **Same-name user-managed skill.** A library skill that already uses the name (for example one
+  imported from Git) is never modified, re-sourced, or given a version by startup. Its page offers
+  **Review Built-In Version**. Accepting the diff adds the release content as a new version and turns
+  the entry into a built-in skill that later releases update like a fresh install. Its assignments
+  and machine pins stay, and its automatic Git updates are turned off, which only the instance
+  owner may do. Only a skill owned by the personal organization, like the built-in entry itself, is
+  offered the built-in version. A private skill or another organization's skill with the name is
+  left as it is; deleting it frees the name, and the next start adds the built-in. A hand-managed
+  directory with the same name on a machine is unaffected: assigning
+  the skill there reports the existing Conflict state, and Import from Machine and adoption work as
+  for any skill.
+- **Deletion.** Deleting a built-in entry declines it: later releases do not add it back. If the
+  name is later used by a user-managed skill, that skill is offered the built-in version as above.
+  Deleting a same-name user-managed skill frees the name, and the next start adds the built-in.
+- **Withdrawal.** When a release stops shipping a built-in skill, its entry stays as an ordinary
+  library skill.
+
+Built-in skills are **recommended** to each user until they are assigned or that user dismisses the
+recommendation. The Skills view marks them **Built-In** and **Recommended**. A recommended skill's
+page offers **Assign to All Machines**, or a machine and **Assign to Machine**. Either creates an
+ordinary assignment for every supported agent with agent invocation, so deployment uses the normal
+sync path to every harness on the selected machines. **Dismiss Recommendation** hides the
+recommendation for the signed-in user only and keeps the library entry; **Show Recommendation**
+restores it. The Machine onboarding dialog lists recommended skills that are still unassigned,
+under **Recommended Skills**, with **Open Skills**. Upgraded installations whose users do not reopen
+machine onboarding see the recommendation in the Skills view only.
+
+The REST surface adds:
+
+- `SkillView.builtIn` (`release`, and `heldUpdate` while release content waits for review),
+  `SkillView.builtInOffer` on a same-name user-managed skill, and `SkillView.recommendation`
+  (`dismissed`) for built-in skills, computed for the requesting human;
+- `SkillVersionView.builtInSource` (`release`, `digest`) on versions that are release content;
+- `PUT /api/skills/:id/recommendation` with `{ "dismissed": boolean }`, per user. Read-only members
+  may dismiss for themselves;
+- `GET /api/skills/:id/built-in-version`, which returns the release's files, the current version,
+  and the fences for review;
+- `POST /api/skills/:id/built-in-version` with `{ "digest", "expectedLatestVersionId", "accepted":
+  true }`. A changed library or offer is refused with `409`.
+
+Built-in skills belong to the personal organization, so members of other organizations on the same
+control plane do not see them. Older runners receive them as ordinary library skills. You can
+still import these skills with **Import from Git** (this repository, a release tag, and the
+subdirectory `skills`), for example to follow a branch. Such an import is user-managed, as described
+above.
 
 This document describes a planned feature that lets users manage a library of agent skills in
 Wollipog and deploy them to the Machines they have connected. A skill is a directory tree containing

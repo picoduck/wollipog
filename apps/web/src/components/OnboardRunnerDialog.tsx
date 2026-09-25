@@ -17,8 +17,37 @@ import {
   selectLocalRunnerId,
   type LocalRunnerStatus,
 } from "../local-runner.js";
-import { useStoreSelector } from "../store.js";
+import { skillRecommended, skillsFromPayload, type SkillSummary } from "../skills.js";
+import { useStoreActions, useStoreSelector } from "../store.js";
 import { CopyButton, Modal, Spinner } from "./common.js";
+
+/** Built-in skills the signed-in user has neither assigned nor dismissed. Hidden when none remain,
+ * and when the library cannot be read: a pointer never gets in the way of connecting a machine. */
+export function OnboardingRecommendedSkills({ onOpen }: { onOpen: (skillId: string) => void }) {
+  const api = useApi();
+  const [skills, setSkills] = useState<SkillSummary[]>([]);
+  useEffect(() => {
+    let active = true;
+    api.listSkills()
+      .then((payload) => { if (active) setSkills(skillsFromPayload(payload).filter(skillRecommended)); })
+      .catch(() => {});
+    return () => { active = false; };
+  }, [api]);
+  if (skills.length === 0) return null;
+  return (
+    <section className="onboard-recommended-skills" aria-label="Recommended Skills">
+      <h3>Recommended Skills</h3>
+      <p>
+        Wollipog includes skills that teach agents in Wollipog sessions to use its tools. They are not on any machine
+        until you assign them.
+      </p>
+      <ul className="onboard-recommended-skill-names">
+        {skills.map((skill) => <li key={skill.id}>{skill.name}</li>)}
+      </ul>
+      <button type="button" className="btn sm" onClick={() => onOpen(skills[0]!.id)}>Open Skills</button>
+    </section>
+  );
+}
 
 export function OnboardingHealthChecklist({ health }: { health: OnboardingHealthCheck[] }) {
   return (
@@ -86,6 +115,7 @@ export function OnboardRunnerDialog({
   onLocalRunnerChanged?: (status: LocalRunnerStatus) => void;
 }) {
   const api = useApi();
+  const { navigate } = useStoreActions();
   const runners = useStoreSelector((state) => state.runners);
   const [info, setInfo] = useState<OnboardingInfo | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -415,6 +445,10 @@ export function OnboardRunnerDialog({
             </li>
           </ol>
           </>}
+          <OnboardingRecommendedSkills onOpen={(skillId) => {
+            onClose();
+            navigate({ name: "skills", id: skillId });
+          }} />
         </div>
       )}
     </Modal>
