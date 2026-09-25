@@ -5764,8 +5764,9 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
       { kind: "human", id: "owner" }, undefined, () => true).ok);
     assert.equal(db.workflowDecisionByOccurrence(choice.data.occurrenceId)?.selectedOptionId, "deny",
       "an offered option named deny is selected rather than treated as the synthetic denial action");
-    assert.equal(db.getSession(child.data.id)?.status, "running",
-      "resolving a control-plane gate resumes the provider's swallowed idle with the outcome");
+    assert.equal(db.getSession(child.data.id)?.status, "queued",
+      "resolving a control-plane gate resumes the provider's swallowed idle with the outcome; the turn " +
+      "reads queued until the runner starts it (#1651)");
     assert.equal(db.policyResumeStatus(child.data.id), null);
     assert.ok((await svc.consumeWorkflowDecision(child.data.id, choice.data.occurrenceId, {
       resourceSnapshot: implementationSnapshot,
