@@ -1129,6 +1129,21 @@ test("a lone checkout operand is a file only when Git would read it as one (#165
   git(worktree, "checkout", "--", "README");
   // ...and a name that is nothing at all only makes Git fail, so it is not a switch either.
   assert.equal(verdict("git checkout no-such-branch"), null);
+  // Against a readable ref store, the spellings that detach or switch without naming a ref are
+  // still refused: the synthetic cases above only prove it where the store is unreadable.
+  const describe = execFileSync("git", ["describe", "--always", "--abbrev=7", "HEAD"], {
+    cwd: worktree, encoding: "utf8",
+  }).trim();
+  const primary = execFileSync("git", ["symbolic-ref", "--short", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  for (const command of [
+    "git checkout @", "git checkout -d", "git checkout --detach", "git checkout -", "git checkout HEAD~0",
+    "git checkout @{-1}", `git checkout v0-0-g${describe}`, `git checkout ${primary}`, "git checkout ORIG_HEAD",
+    "git checkout -b fix/x", "git switch -c fix/x", `git switch ${primary}`,
+  ]) {
+    assert.equal(verdict(command), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL, `real repository: ${command}`);
+  }
+  assert.equal(verdict("git checkout HEAD"), null);
+  assert.equal(verdict(`git checkout ${ownBranch}`), null);
   // A name that is both a file and a branch switches to the branch.
   assert.equal(verdict("git checkout feature"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
   assert.equal(verdict("git checkout cafe"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL,

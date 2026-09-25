@@ -847,11 +847,11 @@ function pinnedWorktreeAt(
 
 /**
  * Revision syntax: a commit reached from another (`~`, `^`, `@{…}`, `A...B`), found by its message
- * (`:/text`), or named by `git describe` (`v1.2-3-g<abbreviated id>`), and the pseudo-refs Git keeps
- * beside `HEAD` (`ORIG_HEAD`, `FETCH_HEAD`, …). A lone `checkout` operand spelled this way switches
- * or detaches.
+ * (`:/text`), or named by `git describe` (`v1.2-3-g<abbreviated id>`); `@`, which checkout reads as
+ * the current commit and detaches at; and the pseudo-refs Git keeps beside `HEAD` (`ORIG_HEAD`,
+ * `FETCH_HEAD`, …). A lone `checkout` operand spelled this way switches or detaches.
  */
-const REVISION_SYNTAX = /[~^]|@\{|\.\.\.|^:\/|-g[0-9a-fA-F]{4,}$|^(?:[A-Z]+_)+HEAD$/u;
+const REVISION_SYNTAX = /[~^]|@\{|\.\.\.|^:\/|^@$|-g[0-9a-fA-F]{4,}$|^(?:[A-Z]+_)+HEAD$/u;
 
 /**
  * A spelling no ref can have (`git check-ref-format`): a component starting with `.`, `..`, a space
