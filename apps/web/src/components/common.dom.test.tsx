@@ -288,6 +288,7 @@ test("background-delivery watchdog badges use compact visible labels and explana
           <BackgroundDeliveryBadge state="accepted_without_result" />
           <BackgroundDeliveryBadge state="result_not_projected" />
           <BackgroundDeliveryBadge state="dashboard_observation_pending" />
+          <BackgroundDeliveryBadge state="continuation_blocked" />
         </>,
       );
     });
@@ -298,6 +299,7 @@ test("background-delivery watchdog badges use compact visible labels and explana
         "Result Missing",
         "Transcript Delayed",
         "Notification Pending",
+        "Result Blocked",
       ],
     );
     const badges = [...container.querySelectorAll<HTMLElement>(".background-work-badge")];
@@ -305,7 +307,9 @@ test("background-delivery watchdog badges use compact visible labels and explana
     assert.match(badges[0]!.title, /result has not yet been returned to this conversation\.$/);
     assert.ok(badges[0]!.classList.contains("background-delivery-pending"));
     assert.ok(badges[1]!.classList.contains("background-work-orphaned"));
-    assert.ok(badges.slice(2).every((badge) => badge.classList.contains("background-delivery-pending")));
+    assert.ok(badges.slice(2, 4).every((badge) => badge.classList.contains("background-delivery-pending")));
+    // A blocked result asks for a step, so it wears the attention treatment, not the pending one.
+    assert.ok(badges[4]!.classList.contains("background-work-orphaned"));
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

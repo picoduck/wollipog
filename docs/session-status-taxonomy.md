@@ -6,7 +6,7 @@ Session status is multidimensional. A workflow column is organization only; it n
 
 | Dimension | Authoritative Input | Visible Label | Meaning |
 | --- | --- | --- | --- |
-| Activity | `status=queued` | **Queued** | Accepted but not yet starting. |
+| Activity | `status=queued` | **Queued** | Accepted but not yet starting. A `capacityWait` names the capacity boundary; a `queueHold` names the worktree or account handoff the accepted prompt waits behind, with its reason in `holds`. |
 | Activity | `status=starting` | **Starting** | The runner is launching or initializing the provider. |
 | Activity | `status=running` | **Running** | An agent turn is actively executing. |
 | Activity | `status=input_required` | **Awaiting Input** | The current turn is paused for a person. Pair this with the concrete attention label when available. |
@@ -35,6 +35,8 @@ Session status is multidimensional. A workflow column is organization only; it n
 | Background Work | `backgroundWorkState=running` | **Waiting on External Job** | Detached work is still pending externally. |
 | Background Work | `backgroundWorkState=continuation_pending` | **Continuation Pending** | A continuation is durably pending. |
 | Background Work | `backgroundWorkState=orphaned` | **Background Work: Orphaned** | Managed work needs recovery or authoritative re-observation. |
+| Background Work | `backgroundDeliveries[].watchdogState=continuation_blocked` | **Result Blocked** | A finished job's result cannot be returned while a sibling job from the same turn has no terminal status; it asks for a step, unlike the self-progressing **Result Pending**. |
+| Background Work | Listed job with `stalledSince` (no terminal status for over an hour) | **Stalled** job row | A report that the job may never end, not proof that it ended. |
 | Background Work | Settled delivery or legacy `backgroundWorkState=resumed` | No current-status badge | Completion remains in the timestamped Background Work inventory instead of resembling live work. |
 
 ## Projection Rules

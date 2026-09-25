@@ -2599,6 +2599,7 @@ textarea {
   font-weight: 600;
 }
 .background-work-state[data-state="running"] { color: var(--blue-on-tint); }
+.background-work-state[data-state="stalled"] { color: var(--amber-on-tint); }
 .background-work-state[data-state="completed"] { color: var(--positive-text); }
 .background-work-state[data-state="failed"],
 .background-work-state[data-state="killed"],

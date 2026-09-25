@@ -24,6 +24,7 @@ import type {
   type UsageAmount,
 } from "@wollipog/protocol";
 import {
+  BACKGROUND_JOB_STALL_MS,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
@@ -3628,6 +3629,58 @@ test("runner snapshots ignore missing-result evidence until the continuation is 
   db.close();
 });
 
+test("a finished job whose sibling never finishes is a blocked delivery, and a listed job past the bound is reported as stalled (#1651)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    const finished = {
+      id: "shell-1", parentTurnId: "turn-1", runnerId: "runner-1", workspaceId: null,
+      launchType: "shell" as const, registeredAt: 1_000,
+      terminalStatus: "completed" as const, terminalObservedAt: 1_100, continuationRequired: true,
+    };
+    const monitor = {
+      id: "monitor-1", parentTurnId: "turn-1", runnerId: "runner-1", workspaceId: null,
+      launchType: "monitor" as const, registeredAt: 900,
+    };
+    db.createSessionFromSnapshot(snapshot({
+      id: "blocked", driver: "claude_code", backgroundWorkState: "running", backgroundJobs: [finished, monitor],
+    }), "runner-1", 2_000);
+    // The runner records a continuation only once every job from the turn is terminal, so the
+    // finished job's result is blocked, not pending.
+    assert.deepEqual(db.getSession("blocked")?.backgroundDeliveries, [{
+      parentTurnId: "turn-1", jobCount: 1, terminalCount: 1,
+      watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1,
+    }]);
+    const before = db.listManagedBackgroundJobs("blocked", 900 + BACKGROUND_JOB_STALL_MS - 1);
+    assert.equal(before.find((job) => job.id === "monitor-1")?.stalledSince, undefined);
+    const after = db.listManagedBackgroundJobs("blocked", 900 + BACKGROUND_JOB_STALL_MS);
+    assert.equal(after.find((job) => job.id === "monitor-1")?.stalledSince, 900 + BACKGROUND_JOB_STALL_MS,
+      "a listed job with no terminal status past the bound is reported as stalled");
+    assert.equal(after.find((job) => job.id === "shell-1")?.stalledSince, undefined, "a terminal job never stalls");
+
+    // A sibling the runner no longer lists cannot block: only present work counts.
+    db.updateSessionFromSnapshot("blocked", snapshot({
+      id: "blocked", driver: "claude_code", backgroundWorkState: "continuation_pending", backgroundJobs: [finished],
+    }), 3_000);
+    assert.deepEqual(db.getSession("blocked")?.backgroundDeliveries, [{
+      parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, watchdogState: "terminal_without_continuation",
+    }]);
+    assert.equal(db.listManagedBackgroundJobs("blocked", 900 + 2 * BACKGROUND_JOB_STALL_MS)
+      .find((job) => job.id === "monitor-1")?.stalledSince, undefined, "a job that is no longer listed is not stalled");
+
+    // The monitor ends: the same turn is merely pending its continuation.
+    db.updateSessionFromSnapshot("blocked", snapshot({
+      id: "blocked", driver: "claude_code", backgroundWorkState: "continuation_pending",
+      backgroundJobs: [finished, { ...monitor, terminalStatus: "killed" as const, terminalObservedAt: 2_500, continuationRequired: true }],
+    }), 4_000);
+    assert.deepEqual(db.getSession("blocked")?.backgroundDeliveries, [{
+      parentTurnId: "turn-1", jobCount: 2, terminalCount: 2, watchdogState: "terminal_without_continuation",
+    }]);
+  } finally {
+    db.close();
+  }
+});
+
 test("managed background delivery stages survive reconnect, hydration, acknowledgement, and restart", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-background-delivery-"));
   const dbPath = join(root, "control-plane.db");
@@ -3960,6 +4013,8 @@ test("managed background job views are bounded, prioritize active work, and omit
     "terminalStatus", "terminalObservedAt", "continuationRequired", "continuationId",
     "continuationQueuedAt", "continuationSubmittedAt", "continuationAcceptedAt",
     "continuationMissingResultAt", "assistantResultPersistedAt",
+    // A read-time report that a listed job has had no terminal status for over an hour (#1651).
+    "stalledSince",
   ]);
   assert.ok(view.every((job) => Object.keys(job).every((key) => safeKeys.has(key))),
     "the dashboard projection contains only its explicit privacy-safe allowlist");

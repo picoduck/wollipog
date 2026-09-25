@@ -130,6 +130,7 @@ for (const width of [320, 1280]) {
     const header = page.locator(".session-detail > .detail-head");
     const cases = [
       ["terminal_without_continuation", "Result Pending", "A background job finished, but its result has not yet been returned to this conversation."],
+      ["continuation_blocked", "Result Blocked", "A background job finished, but its result cannot be returned while another job from the same turn is still running."],
       ["accepted_without_result", "Result Missing", "A background job finished, but its result is missing after Wollipog accepted the return step."],
       ["result_not_projected", "Transcript Delayed", "A background result reached Wollipog, but it has not appeared in this conversation yet."],
       ["dashboard_observation_pending", "Notification Pending", "A background result reached the conversation, but this dashboard has not yet confirmed the update."],

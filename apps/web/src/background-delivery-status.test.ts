@@ -9,6 +9,7 @@ import {
 
 const states: BackgroundDeliveryWatchdogState[] = [
   "terminal_without_continuation",
+  "continuation_blocked",
   "accepted_without_result",
   "result_not_projected",
   "dashboard_observation_pending",
@@ -17,6 +18,7 @@ const states: BackgroundDeliveryWatchdogState[] = [
 test("delivery-watchdog copy stays compact, plain-language, and complete", () => {
   assert.deepEqual(states.map((state) => BACKGROUND_DELIVERY_STATUS[state].label), [
     "Result Pending",
+    "Result Blocked",
     "Result Missing",
     "Transcript Delayed",
     "Notification Pending",

@@ -55,6 +55,13 @@ test("job and delivery presentation keep current lifecycle separate from deliver
   assert.equal(backgroundJobCurrentState(baseJob, "orphaned", true, true), "Orphaned");
   assert.equal(backgroundJobCurrentState(baseJob, undefined, true, true), "Status Unverified",
     "a source-present row cannot claim Running without a current aggregate lifecycle");
+  // A listed job past the stall bound is reported as stalled, from the control plane's mark or
+  // from the clock, and never declared ended (#1651).
+  assert.equal(backgroundJobCurrentState({ ...baseJob, stalledSince: 3_601_000 }, "running", true, true), "Stalled");
+  assert.equal(backgroundJobCurrentState(baseJob, "running", true, true, 1_000 + 3_600_000), "Stalled");
+  assert.equal(backgroundJobCurrentState(baseJob, "running", true, true, 1_000 + 3_599_000), "Running");
+  assert.equal(backgroundJobCurrentState({ ...baseJob, stalledSince: 3_601_000 }, "running", false, true), "Status Unverified",
+    "an offline runner cannot confirm a stalled job any more than a running one");
   assert.equal(backgroundJobDeliveryStage(baseJob), "Not Started");
   assert.equal(backgroundJobDeliveryStage({ ...baseJob, terminalObservedAt: 3_000, continuationRequired: true }), "Continuation Pending");
   assert.equal(backgroundJobDeliveryStage({ ...baseJob, continuationAcceptedAt: 4_000 }), "Continuation In Flight");
@@ -73,6 +80,7 @@ test("every watchdog highlights its delivery and explains completion, recovery, 
   const root = createRoot(container);
   const cases = [
     ["terminal_without_continuation", "Result Pending", /returning the result automatically/, /No action is needed/],
+    ["continuation_blocked", "Result Blocked", /cannot end that job itself/, /stop the unfinished job/],
     ["accepted_without_result", "Result Missing", /will not repeat an accepted step/, /Acknowledge the missing result/],
     ["result_not_projected", "Transcript Delayed", /updating the transcript automatically/, /No action is needed/],
     ["dashboard_observation_pending", "Notification Pending", /waiting for the dashboard confirmation/, /No action is needed/],

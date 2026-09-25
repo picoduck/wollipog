@@ -5561,6 +5561,118 @@ test("a governance hold defers worktree rebind and its queued prompt until rearm
   }
 });
 
+test("a queued prompt held behind a worktree rebind by unfinished background work is reported as a queue hold, not silence (#1651)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-queue-hold-worktree-rebind-"));
+  const repo = join(root, "repo");
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    execFileSync("git", ["init", repo]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "test@example.com"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "Test"]);
+    execFileSync("git", ["-C", repo, "commit", "--allow-empty", "-m", "base"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const sent: RunnerToControlPlane[] = [];
+    const launchedCwds: string[] = [];
+    const prompts: Array<{ cwd: string; text: string }> = [];
+    const factory = (_driver: unknown, launch: { cwd: string }) => {
+      launchedCwds.push(launch.cwd);
+      return {
+        pid: launchedCwds.length, initialize: async () => {}, newSession: async () => {}, close: async () => {},
+        prompt: async (text: string) => {
+          prompts.push({ cwd: launch.cwd, text });
+          return "end_turn" as const;
+        },
+        cancel: () => {}, dispose: () => {}, setConfig: () => {}, resolvePermission: () => false,
+        agentSessionId: () => "provider-session-id",
+      };
+    };
+    manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1);
+    const spec = {
+      sessionId: "s_queue_hold", workspaceId: "repo", workspacePath: repo, agentId: "claude",
+      command: "claude", args: [], env: {}, useWorktree: false, driver: "claude-code" as const,
+      context: { kind: "native" as const },
+    };
+    await manager.start(spec);
+    // A monitor started in an earlier turn never reached a terminal status.
+    store.patchMeta(spec.sessionId, {
+      backgroundWorkState: "running",
+      pendingBackgroundTaskIds: ["monitor-1"],
+      backgroundJobs: [{
+        id: "monitor-1", parentTurnId: "turn-1", runnerId: "runner", workspaceId: "repo",
+        context: { kind: "native" }, launchType: "monitor", registeredAt: 1_000,
+      }],
+    });
+    // The session selected a new worktree during a turn: the provider rebind waits for the work.
+    const requested = await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/queue-hold" });
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(launchedCwds, [repo], "the handoff waits for the background work");
+    assert.equal(sent.some((message) => message.type === "session_status" && message.status === "queued"), false,
+      "with nothing queued there is nothing held");
+
+    // A prompt — a decision resume, say — arrives. It is accepted, cannot start, and says so.
+    sent.length = 0;
+    manager.prompt(spec.sessionId, "resume after approval");
+    await waitForCondition(() => sent.some((message) => message.type === "session_status" && message.status === "queued"),
+      "the held prompt did not move the session to queued");
+    const status = sent.find((message) => message.type === "session_status" && message.status === "queued") as
+      { detail?: string };
+    assert.match(status.detail ?? "", /The queued message cannot start: the provider must first move to worktree/);
+    assert.match(status.detail ?? "", /waits for 1 background job with no terminal status \(a monitor started at/);
+    const holds = sent.filter((message) => message.type === "session_runtime_updated")
+      .map((message) => (message as { snapshot: { queueHold?: unknown } }).snapshot.queueHold);
+    const hold = holds.find(Boolean) as {
+      kind: string; holdId: string; since: number; target: string; queuedPrompts: number;
+      unfinishedBackgroundJobs: number; oldestUnfinishedJob?: { launchType: string; startedAt: number };
+    } | undefined;
+    assert.ok(hold, "the snapshot carries the hold");
+    assert.equal(hold.kind, "worktree_rebind");
+    assert.equal(hold.target, requested.worktree.path);
+    assert.equal(hold.queuedPrompts, 1);
+    assert.equal(hold.unfinishedBackgroundJobs, 1);
+    assert.deepEqual(hold.oldestUnfinishedJob, { launchType: "monitor", startedAt: 1_000 });
+    assert.equal(hold.holdId, `worktree-rebind:${hold.since}`);
+    assert.equal(store.readMeta(spec.sessionId)?.status, "queued");
+    assert.deepEqual(prompts, [], "nothing ran");
+
+    // Reporting the same incident again publishes nothing new.
+    const publishedBefore = sent.length;
+    manager.reportQueues();
+    await new Promise<void>((resolve) => setTimeout(resolve, 30));
+    assert.equal(sent.slice(publishedBefore).some((message) => message.type === "session_status"), false,
+      "an unchanged hold is not re-announced");
+
+    // The monitor ends: the hold is cleared explicitly, the handoff proceeds, and the prompt runs
+    // in the selected worktree.
+    sent.length = 0;
+    const internals = manager as unknown as {
+      onDriverBackgroundWork(sessionId: string, update: unknown): void;
+    };
+    internals.onDriverBackgroundWork(spec.sessionId, {
+      state: null, pendingTaskIds: [],
+      terminalJobs: [{
+        id: "monitor-1", launchType: "monitor", startedAt: 1_000, status: "killed", terminalAt: 2_000,
+        continuationRequired: false,
+      }],
+    });
+    await waitForCondition(() => prompts.length === 1, "the held prompt did not run once the background work ended");
+    assert.deepEqual(prompts, [{ cwd: requested.worktree.path, text: "resume after approval" }]);
+    assert.deepEqual(launchedCwds, [repo, requested.worktree.path]);
+    const cleared = sent.filter((message) => message.type === "session_runtime_updated")
+      .map((message) => (message as { snapshot: { queueHold?: unknown } }).snapshot.queueHold);
+    assert.ok(cleared.includes(null), "the hold is cleared with an explicit null");
+    assert.equal(cleared.slice(cleared.indexOf(null)).some(Boolean), false, "no hold is reported after it cleared");
+    assert.ok(sent.some((message) => message.type === "session_status" && message.status === "running"),
+      "the runner, not admission, reports the turn once it starts");
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a control-plane hold survives rebind and its release resumes an empty deferred rebind", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-control-plane-worktree-rebind-"));
   const repo = join(root, "repo");

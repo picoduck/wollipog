@@ -37,6 +37,7 @@ import {
   removePendingRequest,
   parentControlRequestEligible,
   sessionHolds,
+  BACKGROUND_JOB_STALL_MS,
   normalizeAgentHarnessIdentity,
   agentContextKey,
   runnerSupportsProtocol,
@@ -81,6 +82,7 @@ import {
   type WorktreeRecoveryView,
   type HeldSessionResumeView,
   type SessionHoldView,
+  type SessionQueueHoldView,
   type ChildSessionAttentionOwner,
   type ManagedBackgroundJobSnapshot,
   type ManagedBackgroundJobView,
@@ -651,6 +653,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   background_work_tracking TEXT,
   history_quarantine TEXT,
   worktree_recovery TEXT,
+  queue_hold TEXT,
   capacity_wait TEXT,
   status         TEXT NOT NULL DEFAULT 'queued',
   board_column   TEXT,
@@ -2602,6 +2605,7 @@ interface SessionRow {
   background_work_tracking: string | null;
   history_quarantine: string | null;
   worktree_recovery: string | null;
+  queue_hold: string | null;
   capacity_wait: string | null;
   status: string;
   board_column: string | null;
@@ -5283,6 +5287,8 @@ export class ControlPlaneDb {
       "history_quarantine TEXT",
       // Protocol v161: bounded runner-owned pre-launch worktree recovery coordinates.
       "worktree_recovery TEXT",
+      // Protocol v187: a runner-reported prompt held behind a handoff barrier (#1651).
+      "queue_hold TEXT",
       // Secret-free ACP MCP environment references and explicit directory selections.
       "acp_session_context TEXT",
       // Protocol v60 immutable launch placement. NULL identifies legacy sessions.
@@ -12426,6 +12432,10 @@ export class ControlPlaneDb {
         this.stmt("UPDATE sessions SET worktree_recovery=? WHERE id=?")
           .run(JSON.stringify(snap.worktreeRecovery), snap.id);
       }
+      if (snap.queueHold) {
+        this.stmt("UPDATE sessions SET queue_hold=? WHERE id=?")
+          .run(JSON.stringify(snap.queueHold), snap.id);
+      }
       const handoff = validateExecutionHandoffReceipt(snap.executionHandoff, snap.executionTarget);
       if (handoff) {
         this.stmt("UPDATE sessions SET execution_handoff_request=?, execution_handoff=? WHERE id=?")
@@ -12650,7 +12660,7 @@ export class ControlPlaneDb {
       );
     }
     this.stmt(
-      `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
+      `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), queue_hold=NULLIF(COALESCE(?, queue_hold), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
           model=?, resolved_model=?, effort=?, service_tier=?, permission_mode=?, agent_capabilities=?, input_tokens=?, output_tokens=?, context_tokens_used=?, context_window=?, cost_usd=?, adopted=?,
           acp_session_context=COALESCE(?, acp_session_context), runner_snapshot_fingerprint=?,
           runner_registration_snapshot_fingerprint=COALESCE(?, runner_registration_snapshot_fingerprint),
@@ -12669,6 +12679,7 @@ export class ControlPlaneDb {
       // conversation is healthy, which NULLIF turns into a real clear.
       historyQuarantineForStorage(snap.historyQuarantine),
       worktreeRecoveryForStorage(snap.worktreeRecovery),
+      queueHoldForStorage(snap.queueHold),
       capacityWaitForStorage(
         status,
         snap.capacityWait,
@@ -13203,31 +13214,40 @@ export class ControlPlaneDb {
         ...(watchdogState ? { watchdogState } : {}),
       };
     });
+    // The runner records a continuation for a parent turn only once every job it started has a
+    // terminal status (mergeDurableBackgroundJobs). A finished job whose sibling never finishes is
+    // therefore not pending: nothing returns its result until that sibling ends (#1651).
     const pending = status === "stopped" ? [] : this.stmt(
-      `SELECT parent_turn_id, COUNT(*) AS job_count,
-              SUM(CASE WHEN terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count
-         FROM managed_background_jobs
-        WHERE session_id=? AND source_present=1
-          AND continuation_required=1 AND terminal_observed_at IS NOT NULL
-          AND continuation_id IS NULL
-        GROUP BY parent_turn_id ORDER BY parent_turn_id
+      `SELECT job.parent_turn_id, COUNT(*) AS job_count,
+              SUM(CASE WHEN job.terminal_observed_at IS NOT NULL THEN 1 ELSE 0 END) AS terminal_count,
+              (SELECT COUNT(*) FROM managed_background_jobs sibling
+                WHERE sibling.session_id=job.session_id AND sibling.parent_turn_id=job.parent_turn_id
+                  AND sibling.source_present=1 AND sibling.terminal_observed_at IS NULL) AS unfinished_sibling_count
+         FROM managed_background_jobs job
+        WHERE job.session_id=? AND job.source_present=1
+          AND job.continuation_required=1 AND job.terminal_observed_at IS NOT NULL
+          AND job.continuation_id IS NULL
+        GROUP BY job.parent_turn_id ORDER BY job.parent_turn_id
         LIMIT 32`,
     ).all(sessionId) as unknown as Array<{
       parent_turn_id: string;
       job_count: number;
       terminal_count: number;
+      unfinished_sibling_count: number;
     }>;
     return views.concat(pending.map((row) => ({
       parentTurnId: row.parent_turn_id,
       jobCount: row.job_count,
       terminalCount: row.terminal_count,
-      watchdogState: "terminal_without_continuation" as const,
+      ...(row.unfinished_sibling_count > 0
+        ? { watchdogState: "continuation_blocked" as const, unfinishedSiblingJobs: row.unfinished_sibling_count }
+        : { watchdogState: "terminal_without_continuation" as const }),
     })));
   }
 
   /** Active and recent terminal jobs, bounded for session-list broadcasts. Provider-local fields
    * never enter this table and therefore cannot cross the dashboard privacy boundary here. */
-  listManagedBackgroundJobs(sessionId: string): ManagedBackgroundJobView[] {
+  listManagedBackgroundJobs(sessionId: string, now = Date.now()): ManagedBackgroundJobView[] {
     const rows = this.stmt(
       `SELECT job_id, parent_turn_id, launch_type, registered_at, last_observed_at,
               source_present, terminal_status, terminal_observed_at, continuation_required,
@@ -13278,6 +13298,12 @@ export class ControlPlaneDb {
         : {}),
       ...(row.assistant_result_persisted_at != null
         ? { assistantResultPersistedAt: row.assistant_result_persisted_at }
+        : {}),
+      // A listed job with no terminal status past the bound is reported, not declared ended: the
+      // runner cannot tell a monitor that never fires from one still waiting (#1651).
+      ...(row.source_present === 1 && row.terminal_observed_at == null &&
+          row.registered_at + BACKGROUND_JOB_STALL_MS <= now
+        ? { stalledSince: row.registered_at + BACKGROUND_JOB_STALL_MS }
         : {}),
     }));
   }
@@ -14561,11 +14587,13 @@ export class ControlPlaneDb {
     const resolvedCampaignId = campaign.id;
     const childIds = this.campaignDescendantIds(resolvedCampaignId);
     const rows = childIds.length ? (this.stmt(
-      `SELECT id, runner_id, status, archived, worktree_path, worktrees, pending_approval, worktree_recovery
+      `SELECT id, runner_id, status, archived, worktree_path, worktrees, pending_approval, worktree_recovery,
+              queue_hold
        FROM sessions WHERE id IN (${childIds.map(() => "?").join(",")})`,
     ).all(...childIds) as unknown as Array<{
       id: string; runner_id: string; status: SessionStatus; archived: number; worktree_path: string | null;
       worktrees: string | null; pending_approval: string | null; worktree_recovery: string | null;
+      queue_hold: string | null;
     }>) : [];
     const verified = this.validCampaignChildReportIds(resolvedCampaignId);
     const pending = this.stmt(
@@ -14620,7 +14648,7 @@ export class ControlPlaneDb {
       else if (reportVerified && policy.behavior.completion === "stop_and_archive") cleanupPending += 1;
       // A held child asks nothing, so it used to count as active while no turn could start (#1650).
       const holds = !reportVerified && !isTerminal(child.status)
-        ? this.sessionHoldsFor(child.id, child.worktree_recovery)
+        ? this.sessionHoldsFor(child.id, child.worktree_recovery, child.queue_hold)
         : [];
       if (!reportVerified && (child.status === "failed" || child.status === "stopped")) blocked += 1;
       else if (holds.length) {
@@ -15001,17 +15029,19 @@ export class ControlPlaneDb {
         SELECT id FROM sessions WHERE parent_session_id=?
         UNION
         SELECT s.id FROM sessions s JOIN descendants d ON s.parent_session_id=d.id
-      ) SELECT s.id, s.title, s.runner_id, s.event_epoch, s.status, s.worktree_recovery
+      ) SELECT s.id, s.title, s.runner_id, s.event_epoch, s.status, s.worktree_recovery, s.queue_hold
         FROM descendants d JOIN sessions s ON s.id=d.id
-        WHERE s.id<>? AND s.worktree_recovery IS NOT NULL AND s.worktree_recovery<>''
+        WHERE s.id<>?
+          AND ((s.worktree_recovery IS NOT NULL AND s.worktree_recovery<>'')
+            OR (s.queue_hold IS NOT NULL AND s.queue_hold<>''))
           AND s.status NOT IN ('completed','failed','stopped')
         ORDER BY s.created_at DESC, s.id ASC
     `).all(ancestorId, ancestorId) as unknown as Array<{
       id: string; title: string; runner_id: string; event_epoch: number | null; status: SessionStatus;
-      worktree_recovery: string | null;
+      worktree_recovery: string | null; queue_hold: string | null;
     }>;
     return rows.flatMap((row) => {
-      const holds = this.sessionHoldsFor(row.id, row.worktree_recovery);
+      const holds = this.sessionHoldsFor(row.id, row.worktree_recovery, row.queue_hold);
       return holds.length ? [{
         id: row.id,
         title: row.title,
@@ -15024,9 +15054,33 @@ export class ControlPlaneDb {
   }
 
   /** The holds one stored row implies; resumes are read only while a hold exists. */
-  private sessionHoldsFor(sessionId: string, worktreeRecoveryJson: string | null): SessionHoldView[] {
+  private sessionHoldsFor(
+    sessionId: string,
+    worktreeRecoveryJson: string | null,
+    queueHoldJson: string | null,
+  ): SessionHoldView[] {
     const worktreeRecovery = parseWorktreeRecovery(worktreeRecoveryJson);
-    return worktreeRecovery ? sessionHolds({ worktreeRecovery }, this.heldWorkflowDecisionResumes(sessionId)) : [];
+    const queueHold = parseQueueHold(queueHoldJson);
+    if (!worktreeRecovery && !queueHold) return [];
+    return sessionHolds({ worktreeRecovery, queueHold }, this.workflowDecisionResumesWaitingOnHold(sessionId));
+  }
+
+  /** Resumes a hold keeps from reaching the provider (#1651): the ones the control plane still
+   * owes (`held`), and the ones the runner has accepted but not started, which a queue hold keeps
+   * in its FIFO. Only the former are the sweep's to deliver; see heldWorkflowDecisionResumes. */
+  private workflowDecisionResumesWaitingOnHold(sessionId: string): HeldSessionResumeView[] {
+    return (this.stmt(
+      `SELECT d.occurrence_id, d.resume_updated_at FROM workflow_decisions d
+       LEFT JOIN session_prompt_commands c ON c.command_id=d.resume_command_id
+       WHERE d.session_id=? AND (d.resume_state='held'
+         OR (d.resume_state='delivering' AND c.state IN ('pending','sent','accepted','queued')))
+       ORDER BY d.resolved_at, d.occurrence_id`,
+    ).all(sessionId) as unknown as Array<{ occurrence_id: string; resume_updated_at: number | null }>)
+      .map((row) => ({
+        kind: "workflow_decision_resolution" as const,
+        occurrenceId: row.occurrence_id,
+        since: row.resume_updated_at ?? 0,
+      }));
   }
 
   /**
@@ -18643,9 +18697,17 @@ export class ControlPlaneDb {
       })(),
       ...(() => {
         const worktreeRecovery = parseWorktreeRecovery(row.worktree_recovery);
-        return worktreeRecovery
-          ? { worktreeRecovery, holds: this.sessionHoldsFor(row.id, row.worktree_recovery) }
-          : {};
+        // A terminal session has nothing left to start, so a hold its runner reported before it
+        // ended is not one; the runner clears the record on its next snapshot anyway.
+        const queueHold = isTerminal(status) ? undefined : parseQueueHold(row.queue_hold);
+        const holds = worktreeRecovery || queueHold
+          ? this.sessionHoldsFor(row.id, row.worktree_recovery, queueHold ? row.queue_hold : null)
+          : [];
+        return {
+          ...(worktreeRecovery ? { worktreeRecovery } : {}),
+          ...(queueHold ? { queueHold } : {}),
+          ...(holds.length ? { holds } : {}),
+        };
       })(),
       ...(() => {
         const backgroundDeliveries = this.listBackgroundDeliveries(row.id, status);
@@ -24425,6 +24487,49 @@ function parseWorktreeRecovery(raw: string | null): WorktreeRecoveryView | undef
     expectedBranch: value.expectedBranch,
     detail: value.detail,
   } as WorktreeRecoveryView;
+}
+
+/** Three-valued like worktree recovery: `undefined` is a pre-v187 runner saying nothing, `null`
+ * is a supporting runner clearing the hold it reported (#1651). */
+function queueHoldForStorage(value: SessionQueueHoldView | null | undefined): string | null {
+  if (value === undefined) return null;
+  return value === null ? "" : JSON.stringify(value);
+}
+
+const QUEUE_HOLD_KINDS = new Set<SessionQueueHoldView["kind"]>(["worktree_rebind", "provider_account_switch"]);
+const BACKGROUND_LAUNCH_TYPES = new Set<ManagedBackgroundJobSnapshot["launchType"]>(
+  ["agent", "shell", "monitor", "workflow", "unknown"],
+);
+
+function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
+  if (!raw) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return undefined;
+  }
+  if (!parsed || typeof parsed !== "object") return undefined;
+  const value = parsed as Partial<SessionQueueHoldView>;
+  if (!value.kind || !QUEUE_HOLD_KINDS.has(value.kind) ||
+      typeof value.holdId !== "string" || !value.holdId || value.holdId.length > 128 ||
+      !Number.isSafeInteger(value.since) || value.since! < 0 ||
+      typeof value.target !== "string" || !value.target || value.target.length > 4_096 ||
+      !Number.isSafeInteger(value.queuedPrompts) || value.queuedPrompts! < 1 ||
+      !Number.isSafeInteger(value.unfinishedBackgroundJobs) || value.unfinishedBackgroundJobs! < 1) return undefined;
+  const oldest = value.oldestUnfinishedJob;
+  if (oldest !== undefined && (!oldest || typeof oldest !== "object" ||
+      !BACKGROUND_LAUNCH_TYPES.has(oldest.launchType) ||
+      !Number.isSafeInteger(oldest.startedAt) || oldest.startedAt < 0)) return undefined;
+  return {
+    kind: value.kind,
+    holdId: value.holdId,
+    since: value.since!,
+    target: value.target,
+    queuedPrompts: value.queuedPrompts!,
+    unfinishedBackgroundJobs: value.unfinishedBackgroundJobs!,
+    ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.startedAt } } : {}),
+  };
 }
 
 function validBackgroundIdentity(value: unknown): value is string {

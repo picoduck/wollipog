@@ -576,7 +576,13 @@
 //      report no kept-aside copies rather than a false empty result.
 // 186: sessions may attach bounded MP4/WebM video artifacts from a file. Older control planes
 //      understand only screenshot attachments and must never receive a video upload.
-export const PROTOCOL_VERSION = 186;
+// 187: runners report a prompt they accepted but cannot start because a worktree or account
+//      handoff is waiting on unfinished background work as the three-valued `queueHold` snapshot
+//      field, with `queued` status, and clear both explicitly. The control plane derives a
+//      `worktree_rebind` or `provider_account_switch` hold from it beside the v161 worktree
+//      recovery hold. Older runners leave the field absent, so a queued prompt behind such a
+//      barrier is invisible to them as before.
+export const PROTOCOL_VERSION = 187;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -884,6 +890,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   progressAwareSessionWorktrees: 113,
   /** v161 carries durable worktree-recovery state and its exact not-delivered receipt. */
   worktreeRecovery: 161,
+  /** v187 reports a prompt held behind a handoff barrier as `queueHold`, with `queued` status. */
+  queueHolds: 187,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
@@ -5324,7 +5332,16 @@ export interface ManagedBackgroundJobView {
   continuationAcceptedAt?: number;
   continuationMissingResultAt?: number;
   assistantResultPersistedAt?: number;
+  /** Set once a job the runner still lists has gone `BACKGROUND_JOB_STALL_MS` without a terminal
+   * status (#1651). It is a report, not proof that the job ended: Wollipog cannot tell a monitor
+   * that never fires from one still waiting. */
+  stalledSince?: number;
 }
+
+/** How long a listed background job may lack a terminal status before it is reported as stalled.
+ * A CI watch or a subagent normally finishes well inside this; a monitor whose condition never
+ * fires does not, and it would otherwise hold a sibling's result and a queued prompt in silence. */
+export const BACKGROUND_JOB_STALL_MS = 60 * 60_000;
 
 /** Provider-neutral terminal evidence safe to project across runner/control-plane boundaries. */
 export interface ManagedBackgroundResult {
@@ -5336,6 +5353,10 @@ export interface ManagedBackgroundResult {
 
 export type BackgroundDeliveryWatchdogState =
   | "terminal_without_continuation"
+  /** A finished job's result cannot be returned: another job started by the same turn has no
+   * terminal status, and the runner records a continuation only once every one of them does
+   * (#1651). Unlike `terminal_without_continuation`, nothing progresses on its own. */
+  | "continuation_blocked"
   | "accepted_without_result"
   | "result_not_projected"
   | "dashboard_observation_pending";
@@ -5386,6 +5407,8 @@ export interface BackgroundDeliveryView {
   /** Separate service, display, and click acknowledgements for each push subscription. */
   notifications?: BackgroundNotificationReceiptView[];
   watchdogState?: BackgroundDeliveryWatchdogState;
+  /** With `continuation_blocked`: jobs from the same turn that still have no terminal status. */
+  unfinishedSiblingJobs?: number;
 }
 
 /** The union's single source, exported so a consumer can enumerate the states rather than restate
@@ -5613,13 +5636,79 @@ export function worktreeRecoveryAction(recovery: Pick<WorktreeRecoveryView, "sel
 }
 
 /**
+ * A prompt the runner has accepted but cannot start (#1651). The runner defers a worktree or
+ * provider-account handoff until the provider's detached background work has settled, because
+ * retiring the provider would end that work, and every ordinary queued prompt waits behind the
+ * handoff. Every other reason a handoff waits — a guardrail card, an interrupt, an unanswered
+ * question — is already visible on the session, so only this silent wait is reported as a hold.
+ */
+export type SessionQueueHoldKind = "worktree_rebind" | "provider_account_switch";
+
+export interface SessionQueueHoldView {
+  kind: SessionQueueHoldKind;
+  /** Stable for one incident; a later hold of the same kind has a new identity. */
+  holdId: string;
+  since: number;
+  /** Where the provider moves once the handoff proceeds: the selected worktree path, or the
+   * provider account's label. */
+  target: string;
+  /** Prompts waiting behind the barrier. */
+  queuedPrompts: number;
+  /** Listed background jobs with no terminal status; the handoff waits for every one of them. */
+  unfinishedBackgroundJobs: number;
+  /** The oldest of them, for the reason text. */
+  oldestUnfinishedJob?: { launchType: ManagedBackgroundJobSnapshot["launchType"]; startedAt: number };
+}
+
+function backgroundLaunchTypeNoun(launchType: ManagedBackgroundJobSnapshot["launchType"]): string {
+  switch (launchType) {
+    case "agent": return "a subagent";
+    case "shell": return "a shell command";
+    case "monitor": return "a monitor";
+    case "workflow": return "a workflow";
+    default: return "a job";
+  }
+}
+
+/** One bounded sentence saying why the queued prompt has not started. */
+export function queueHoldReason(hold: SessionQueueHoldView): string {
+  const messages = hold.queuedPrompts === 1 ? "The queued message" : `The ${hold.queuedPrompts} queued messages`;
+  const cannot = hold.queuedPrompts === 1 ? "cannot start" : "cannot start";
+  const move = hold.kind === "worktree_rebind"
+    ? `move to worktree ${hold.target}`
+    : `switch to provider account ${hold.target}`;
+  const jobs = hold.unfinishedBackgroundJobs === 1
+    ? "1 background job"
+    : `${hold.unfinishedBackgroundJobs} background jobs`;
+  const oldest = hold.oldestUnfinishedJob
+    ? ` (${hold.unfinishedBackgroundJobs === 1 ? "" : "the oldest, "}${backgroundLaunchTypeNoun(hold.oldestUnfinishedJob.launchType)}` +
+      ` started at ${new Date(hold.oldestUnfinishedJob.startedAt).toISOString().slice(0, 16)}Z)`
+    : "";
+  return `${messages} ${cannot}: the provider must first ${move}, and that handoff waits for ${jobs}` +
+    ` with no terminal status${oldest}.`;
+}
+
+/** What clears a queue hold. Waiting is the ordinary way; a restart is the bounded way out of a
+ * job that never ends, and its cost to an approved decision is stated so nobody is surprised. */
+export function queueHoldRecoveryAction(hold: SessionQueueHoldView): string {
+  const one = hold.unfinishedBackgroundJobs === 1;
+  const jobs = one ? "job" : "jobs";
+  const messages = hold.queuedPrompts === 1 ? "message" : "messages";
+  return `Wait for the unfinished background ${jobs} to end; the handoff and the queued ${messages} then proceed on their own. ` +
+    `If ${one ? "it never ends" : "they never end"} (a monitor whose condition never fires ends only with its provider process), ` +
+    "restart the session with restart_session: that retires the provider, recovers the " +
+    `${jobs} as orphaned work, keeps the queued ${messages}, and revokes any approved workflow decision ` +
+    "the session has not yet consumed, which must then be requested again.";
+}
+
+/**
  * Why a session cannot start its next turn although nothing is asking a question (#1650). A hold
  * is not a request: there is nothing to answer, only a condition to clear, so it is reported
  * beside requests rather than as one. Every surface that shows a blocked session — the session
  * itself, its parent's descendant view, and the campaign projection — reads this one shape, and a
  * later runner-side hold adds a kind here rather than a surface of its own.
  */
-export type SessionHoldKind = "worktree_recovery";
+export type SessionHoldKind = "worktree_recovery" | SessionQueueHoldKind;
 
 /** A resume the control plane owes the session and will deliver once the hold clears. */
 export interface HeldSessionResumeView {
@@ -5644,20 +5733,34 @@ export interface SessionHoldView {
 
 /** The holds a session's own state implies. Pure, so every surface derives them identically. */
 export function sessionHolds(
-  session: { worktreeRecovery?: WorktreeRecoveryView | null },
+  session: { worktreeRecovery?: WorktreeRecoveryView | null; queueHold?: SessionQueueHoldView | null },
   heldResumes: HeldSessionResumeView[] = [],
 ): SessionHoldView[] {
+  const holds: SessionHoldView[] = [];
   const recovery = session.worktreeRecovery;
-  if (!recovery) return [];
-  return [{
-    kind: "worktree_recovery",
-    holdId: recovery.recoveryId,
-    since: recovery.detectedAt,
-    // The runner's own bounded account of what failed: a switched branch, a missing path, and so on.
-    reason: recovery.detail,
-    recoveryAction: worktreeRecoveryAction(recovery),
-    ...(heldResumes.length ? { heldResumes } : {}),
-  }];
+  if (recovery) {
+    holds.push({
+      kind: "worktree_recovery",
+      holdId: recovery.recoveryId,
+      since: recovery.detectedAt,
+      // The runner's own bounded account of what failed: a switched branch, a missing path, and so on.
+      reason: recovery.detail,
+      recoveryAction: worktreeRecoveryAction(recovery),
+      ...(heldResumes.length ? { heldResumes } : {}),
+    });
+  }
+  const queueHold = session.queueHold;
+  if (queueHold) {
+    holds.push({
+      kind: queueHold.kind,
+      holdId: queueHold.holdId,
+      since: queueHold.since,
+      reason: queueHoldReason(queueHold),
+      recoveryAction: queueHoldRecoveryAction(queueHold),
+      ...(heldResumes.length ? { heldResumes } : {}),
+    });
+  }
+  return holds;
 }
 
 /** Denormalised session record for the UI (board cards + lists). */
@@ -5709,6 +5812,8 @@ export interface SessionView {
   historyQuarantine?: ProviderHistoryQuarantineView;
   /** The provider is parked until this session selects or creates a verified replacement tree. */
   worktreeRecovery?: WorktreeRecoveryView;
+  /** A prompt the runner accepted waits behind a handoff barrier (#1651); see `holds`. */
+  queueHold?: SessionQueueHoldView;
   /** Conditions that keep the next turn from starting, with the step that clears each (#1650).
    * Omitted when there are none, and by control planes that predate it. */
   holds?: SessionHoldView[];
@@ -5911,6 +6016,9 @@ export interface SessionSnapshot {
   historyQuarantine?: ProviderHistoryQuarantineView | null;
   /** Three-valued like historyQuarantine: undefined is an older peer, null explicitly clears. */
   worktreeRecovery?: WorktreeRecoveryView | null;
+  /** A prompt the runner accepted but cannot start behind a handoff barrier (#1651). Three-valued
+   * like worktreeRecovery: undefined is a pre-v187 peer, null explicitly clears. */
+  queueHold?: SessionQueueHoldView | null;
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** Explicit provider capability boundary. Omitted for pre-v83 control planes. */
