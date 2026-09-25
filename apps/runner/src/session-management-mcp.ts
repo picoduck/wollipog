@@ -529,6 +529,50 @@ function renderEventLine(ev: Json): string {
   return truncate(`(${ev?.seq}) ${kind ?? "event"}: ${oneLine}`, MAX_LINE);
 }
 
+/**
+ * Read one bounded page of a session's timeline: the first `limit` events after `after`, or the
+ * newest `limit` events when `after` is undefined. The bounded control-plane read is pinned to the
+ * session's event epoch; a replacement between the metadata read and the page read retries once.
+ * The CP cache hydrates forward from the runner, so a short page from an incomplete cache is not
+ * authoritative. Only then does this fall back to the unbounded read, which waits for hydration.
+ */
+async function readSessionEventPage(
+  deps: McpDeps,
+  sessionId: string,
+  after: number | undefined,
+  limit: number,
+): Promise<{ ok: true; events: Json[]; hasMore: boolean } | { ok: false; message: string }> {
+  const base = `/api/sessions/${encodeURIComponent(sessionId)}`;
+  const select = (events: Json[]) => {
+    const page = after === undefined ? events.slice(-limit) : events.slice(0, limit);
+    return { ok: true as const, events: page, hasMore: after !== undefined && events.length > limit };
+  };
+  const unbounded = async () => {
+    const r = await cpFetch(deps, "GET", `${base}/events?after=${after ?? 0}`);
+    if (!r.ok) return r;
+    return select(Array.isArray(r.data?.events) ? r.data.events : []);
+  };
+  for (let attempt = 0; ; attempt++) {
+    const s = await cpFetch(deps, "GET", base);
+    if (!s.ok) return s;
+    const epoch = typeof s.data?.session?.eventEpoch === "number" ? s.data.session.eventEpoch : 0;
+    const cursor = after === undefined ? "direction=backward" : `after=${after}`;
+    const r = await cpFetch(deps, "GET", `${base}/events?${cursor}&limit=${limit}&eventEpoch=${epoch}`);
+    if (!r.ok) {
+      if (r.status === 409 && attempt === 0) continue;
+      return r;
+    }
+    const events: Json[] = Array.isArray(r.data?.events) ? r.data.events : [];
+    // A control plane without bounded pages ignores the page parameters and returns everything.
+    if (typeof r.data?.cacheComplete !== "boolean") return select(events);
+    if (r.data.cacheComplete === true) {
+      return { ok: true, events, hasMore: after !== undefined && r.data.hasMoreCached === true };
+    }
+    if (after !== undefined && events.length === limit) return { ok: true, events, hasMore: true };
+    return unbounded();
+  }
+}
+
 function mapWorkflowNode(node: Json, includePrompt = false): Json {
   const prompt = typeof node?.prompt === "string" ? node.prompt : undefined;
   return {
@@ -1301,12 +1345,15 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_session_events",
-    description: "Read a session's recent timeline events (tail; use after/limit to page).",
+    description: "Read a session's timeline events. Without `after`: the newest `limit` events (\"what just " +
+      "happened?\"). With `after`: the first `limit` events whose seq is greater than `after`, oldest " +
+      "first; pass the returned `lastSeq` as the next `after` to read every event exactly once, " +
+      "while `hasMore` is true. `lastSeq` is the seq of the last returned event (or `after` when none).",
     inputSchema: {
       type: "object",
       properties: {
         sessionId: { type: "string" },
-        after: { type: "number", description: "Only events with seq greater than this" },
+        after: { type: "number", description: "Page forward from this seq (exclusive). Omit to read the newest events." },
         limit: { type: "number", minimum: 1, maximum: 100, description: "Max events, default 30" },
       },
       required: ["sessionId"],
@@ -1314,17 +1361,17 @@ export const TOOLS: McpTool[] = [
     },
     handler: async (args, deps) => {
       if (typeof args?.sessionId !== "string" || !args.sessionId) return errorResult("sessionId is required");
-      const after = typeof args.after === "number" && args.after > 0 ? Math.floor(args.after) : 0;
+      const after = typeof args.after === "number" && Number.isFinite(args.after)
+        ? Math.max(0, Math.floor(args.after))
+        : undefined;
       const limit = Math.min(100, Math.max(1, typeof args.limit === "number" ? Math.floor(args.limit) : 30));
-      const r = await cpFetch(deps, "GET", `/api/sessions/${encodeURIComponent(args.sessionId)}/events?after=${after}`);
-      if (!r.ok) return errorResult(r.message);
-      const events: Json[] = Array.isArray(r.data?.events) ? r.data.events : [];
-      // The tail is what matters ("what just happened?"); lastSeq feeds the next page's `after`.
-      const tail = events.slice(-limit);
-      const last = events[events.length - 1];
+      const page = await readSessionEventPage(deps, args.sessionId, after, limit);
+      if (!page.ok) return errorResult(page.message);
+      const last = page.events[page.events.length - 1];
       return textResult({
-        lines: tail.map(renderEventLine),
-        lastSeq: typeof last?.seq === "number" ? last.seq : after,
+        lines: page.events.map(renderEventLine),
+        lastSeq: typeof last?.seq === "number" ? last.seq : after ?? 0,
+        ...(after !== undefined ? { hasMore: page.hasMore } : {}),
       });
     },
   },

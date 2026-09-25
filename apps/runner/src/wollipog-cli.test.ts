@@ -574,7 +574,7 @@ test("CLI emits JSON for get, events, prompt, wait, and stop core commands", asy
   const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
   const cases = [
     { argv: ["session", "get", "s_child"], method: "GET", path: "/api/sessions/s_child" },
-    { argv: ["session", "events", "s_child", "--after", "4", "--limit", "2"], method: "GET", path: "/api/sessions/s_child/events?after=4" },
+    { argv: ["session", "events", "s_child", "--after", "4", "--limit", "2"], method: "GET", path: "/api/sessions/s_child" },
     { argv: ["session", "prompt", "s_child", "Keep", "going"], method: "POST", path: "/api/sessions/s_child/prompt" },
     { argv: ["session", "wait", "s_child", "--for", "completed", "--timeout", "50"], method: "GET", path: "/api/sessions/s_child" },
     { argv: ["session", "stop", "s_child"], method: "POST", path: "/api/sessions/s_child/stop" },
@@ -605,6 +605,46 @@ test("CLI emits JSON for get, events, prompt, wait, and stop core commands", asy
     assert.doesNotThrow(() => JSON.parse(output), testCase.argv.join(" "));
     assert.equal(requests[1]!.method, testCase.method);
     assert.equal(requests[1]!.url, `http://cp${testCase.path}`);
+  }
+});
+
+test("CLI session events pages forward with --after and reads the newest events without it", async () => {
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
+  const events = Array.from({ length: 12 }, (_, i) => ({ seq: i + 1, ts: i, payload: { kind: "agent_message", text: `m${i + 1}` } }));
+  for (const [argv, pagePath, seqs, lastSeq] of [
+    [["--after", "4", "--limit", "2"], "/api/sessions/s_child/events?after=4&limit=2&eventEpoch=3", [5, 6], 6],
+    [["--limit", "2"], "/api/sessions/s_child/events?direction=backward&limit=2&eventEpoch=3", [11, 12], 12],
+  ] as const) {
+    const requests: string[] = [];
+    const fetch: McpFetch = async (url) => {
+      requests.push(url);
+      const query = new URL(url).searchParams;
+      const limit = Number(query.get("limit"));
+      const body = url.endsWith("/api/compatibility")
+        ? { protocolVersion: PROTOCOL_VERSION }
+        : url.endsWith("/api/sessions/s_child")
+          ? { session: { id: "s_child", eventEpoch: 3 } }
+          : query.get("direction") === "backward"
+            ? { events: events.slice(-limit), eventEpoch: 3, hasMoreOlder: true, cacheComplete: true }
+            : {
+              events: events.filter((e) => e.seq > Number(query.get("after"))).slice(0, limit),
+              eventEpoch: 3,
+              hasMoreCached: true,
+              cacheComplete: true,
+            };
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    };
+    let output = "";
+    assert.equal(await runWollipogCli(
+      ["node", "cli.js", "--wollipog-cli", "session", "events", "s_child", ...argv, "--json"],
+      env,
+      { stdout: (text) => { output += text; }, stderr: () => {} },
+      fetch,
+    ), 0);
+    assert.equal(requests[2], `http://cp${pagePath}`);
+    const data = JSON.parse(output);
+    assert.deepEqual(data.lines.map((line: string) => Number(/^\((\d+)\)/.exec(line)![1])), seqs);
+    assert.equal(data.lastSeq, lastSeq);
   }
 });
 

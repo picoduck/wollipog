@@ -79,6 +79,7 @@ export function sessionHelp(): string {
     "  session guardrails <session-id> [--cost-budget <usd>] [--max-tool-calls <count>]",
     "                     [--max-child-sessions <count>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
+    "session events without --after returns the newest events. With --after it pages forward from that seq; pass the returned lastSeq as the next --after while hasMore is true.",
   ].join("\n");
 }
 

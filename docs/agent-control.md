@@ -72,6 +72,12 @@ wollipog pair <create|list|revoke|url> [options]
 wollipog help [doctor|update|pair|service|admin|session|worktree|artifact|decision]
 ```
 
+`wollipog session events` (MCP `get_session_events`) without `--after` returns the newest `--limit`
+events (default 30, at most 100). With `--after SEQ` it pages forward: the first `--limit` events
+whose seq is greater than `SEQ`, oldest first. Pass the returned `lastSeq` as the next `--after` while
+`hasMore` is true to read every event exactly once. Each call is one bounded control-plane read; it
+falls back to the full read only while the control plane's event cache is still hydrating.
+
 `wollipog admin` is host administration for an SSH operator on the control-plane machine. It
 authenticates with the control plane's protected local credential over loopback instead of a
 session or device token and is documented in [host administration](./host-administration.md).

@@ -963,27 +963,149 @@ test("get_session redacts pendingApproval to its title and caps the preview (no 
   assert.equal(s.tokensOut, 20);
 });
 
-test("get_session_events: after/limit paging, tail truncation, 400-char line cap, lastSeq", async () => {
-  const events = Array.from({ length: 40 }, (_, i) => ({
+/** A control plane that serves `GET /api/sessions/:id` and the bounded and unbounded events routes
+ * over `total` events, with a forward-hydrated cache holding the first `cached` of them. */
+function eventsCp(total: number, options: { cached?: number; eventEpoch?: number; text?: (seq: number) => string } = {}) {
+  const events = Array.from({ length: total }, (_, i) => ({
     seq: i + 1,
     ts: 1000 + i,
-    payload: { kind: "agent_message", text: `line ${i + 1} ` + "x".repeat(1000) },
+    payload: { kind: "agent_message", text: options.text?.(i + 1) ?? `line ${i + 1}` },
   }));
-  const { deps, calls } = makeDeps(() => ({ status: 200, body: { events } }));
-  const result = await callTool(deps, "get_session_events", { sessionId: "s_1", after: 3, limit: 5 });
-  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_1/events?after=3`);
-  const data = resultJson(result);
-  assert.equal(data.lines.length, 5, "tail-truncated to limit");
-  assert.match(data.lines[0], /^\(36\) agent_message: line 36/);
+  const cached = options.cached ?? total;
+  const eventEpoch = options.eventEpoch ?? 2;
+  return makeDeps((call) => {
+    const url = new URL(call.url);
+    if (url.pathname === "/api/sessions/s_1") return { status: 200, body: { session: { id: "s_1", eventEpoch } } };
+    assert.equal(url.pathname, "/api/sessions/s_1/events");
+    const q = url.searchParams;
+    const after = Number(q.get("after") ?? 0);
+    if (!q.has("limit")) return { status: 200, body: { events: events.filter((e) => e.seq > after) } };
+    if (Number(q.get("eventEpoch")) !== eventEpoch) {
+      return { status: 409, body: { error: "session event history was replaced", code: "stale_event_epoch", eventEpoch } };
+    }
+    const limit = Number(q.get("limit"));
+    const cache = events.slice(0, cached);
+    const cacheComplete = cached >= total;
+    if (q.get("direction") === "backward") {
+      return { status: 200, body: { events: cache.slice(-limit), eventEpoch, hasMoreOlder: cache.length > limit, cacheComplete } };
+    }
+    const rest = cache.filter((e) => e.seq > after);
+    const page = rest.slice(0, limit);
+    return {
+      status: 200,
+      body: { events: page, eventEpoch, nextAfter: page.at(-1)?.seq ?? after, hasMoreCached: rest.length > limit, cacheComplete },
+    };
+  });
+}
+
+const seqOf = (line: string) => Number(/^\((\d+)\)/.exec(line)![1]);
+
+test("get_session_events: after/limit pages forward through a bounded read, 400-char line cap, lastSeq", async () => {
+  const { deps, calls } = eventsCp(40, { text: (seq) => `line ${seq} ` + "x".repeat(1000) });
+  const data = resultJson(await callTool(deps, "get_session_events", { sessionId: "s_1", after: 3, limit: 5 }));
+  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_1`);
+  assert.equal(calls[1]!.url, `${CP_URL}/api/sessions/s_1/events?after=3&limit=5&eventEpoch=2`);
+  assert.equal(calls.length, 2, "one page never fetches the full history");
+  assert.deepEqual(data.lines.map(seqOf), [4, 5, 6, 7, 8], "the first events after the cursor, ascending");
+  assert.match(data.lines[0], /^\(4\) agent_message: line 4/);
   for (const line of data.lines) assert.ok(line.length <= 401, "capped at 400 chars (+ellipsis)");
-  assert.equal(data.lastSeq, 40);
+  assert.equal(data.lastSeq, 8, "lastSeq is the last returned event");
+  assert.equal(data.hasMore, true);
 });
 
-test("get_session_events defaults: after=0, limit=30; lastSeq echoes after when empty", async () => {
-  const { deps, calls } = makeDeps(() => ({ status: 200, body: { events: [] } }));
-  const data = resultJson(await callTool(deps, "get_session_events", { sessionId: "s_1" }));
-  assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_1/events?after=0`);
-  assert.deepEqual(data, { lines: [], lastSeq: 0 });
+test("get_session_events: repeated after=lastSeq reads every event exactly once", async () => {
+  const { deps } = eventsCp(23);
+  const seen: number[] = [];
+  let after = 0;
+  let pages = 0;
+  for (;;) {
+    const data = resultJson(await callTool(deps, "get_session_events", { sessionId: "s_1", after, limit: 5 }));
+    pages += 1;
+    seen.push(...data.lines.map(seqOf));
+    assert.equal(data.lastSeq, data.lines.length ? seqOf(data.lines.at(-1)) : after);
+    after = data.lastSeq;
+    if (!data.hasMore) break;
+    assert.ok(pages < 10, "paging terminates");
+  }
+  assert.equal(pages, 5);
+  assert.deepEqual(seen, Array.from({ length: 23 }, (_, i) => i + 1));
+});
+
+test("get_session_events: an empty page keeps the cursor and reports no more events", async () => {
+  const { deps } = eventsCp(10);
+  const data = resultJson(await callTool(deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
+  assert.deepEqual(data, { lines: [], lastSeq: 10, hasMore: false });
+});
+
+test("get_session_events without after reads the newest events through a bounded backward read", async () => {
+  const { deps, calls } = eventsCp(40);
+  const data = resultJson(await callTool(deps, "get_session_events", { sessionId: "s_1", limit: 5 }));
+  assert.equal(calls[1]!.url, `${CP_URL}/api/sessions/s_1/events?direction=backward&limit=5&eventEpoch=2`);
+  assert.deepEqual(data.lines.map(seqOf), [36, 37, 38, 39, 40]);
+  assert.equal(data.lastSeq, 40, "the newest seq, ready to page forward for what happens next");
+  assert.equal("hasMore" in data, false);
+
+  const empty = eventsCp(0);
+  const none = resultJson(await callTool(empty.deps, "get_session_events", { sessionId: "s_1" }));
+  assert.equal(empty.calls[1]!.url, `${CP_URL}/api/sessions/s_1/events?direction=backward&limit=30&eventEpoch=2`);
+  assert.deepEqual(none, { lines: [], lastSeq: 0 });
+});
+
+test("get_session_events falls back to the hydrating read only when the cache cannot answer", async () => {
+  // The cache holds seq 1-12 of 30. A full forward page inside it is exact and stays bounded.
+  const full = eventsCp(30, { cached: 12 });
+  const inside = resultJson(await callTool(full.deps, "get_session_events", { sessionId: "s_1", after: 2, limit: 5 }));
+  assert.deepEqual(inside.lines.map(seqOf), [3, 4, 5, 6, 7]);
+  assert.equal(inside.hasMore, true);
+  assert.equal(full.calls.length, 2);
+
+  // A short page at the cache edge is not the end of the log; the unbounded read waits for hydration.
+  const edge = eventsCp(30, { cached: 12 });
+  const past = resultJson(await callTool(edge.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
+  assert.equal(edge.calls[2]!.url, `${CP_URL}/api/sessions/s_1/events?after=10`);
+  assert.deepEqual(past.lines.map(seqOf), [11, 12, 13, 14, 15], "still the first events after the cursor");
+  assert.equal(past.lastSeq, 15);
+  assert.equal(past.hasMore, true);
+
+  // The cached tail of an incomplete cache is an old prefix, never the newest events.
+  const tail = eventsCp(30, { cached: 12 });
+  const newest = resultJson(await callTool(tail.deps, "get_session_events", { sessionId: "s_1", limit: 3 }));
+  assert.equal(tail.calls[2]!.url, `${CP_URL}/api/sessions/s_1/events?after=0`);
+  assert.deepEqual(newest.lines.map(seqOf), [28, 29, 30]);
+});
+
+test("get_session_events retries once when the event history is replaced between reads", async () => {
+  let epoch = 1;
+  const events = [{ seq: 1, ts: 1, payload: { kind: "agent_message", text: "fresh" } }];
+  const { deps, calls } = makeDeps((call) => {
+    const url = new URL(call.url);
+    if (url.pathname === "/api/sessions/s_1") return { status: 200, body: { session: { id: "s_1", eventEpoch: epoch++ } } };
+    if (url.searchParams.get("eventEpoch") !== "2") return { status: 409, body: { error: "session event history was replaced" } };
+    return { status: 200, body: { events, eventEpoch: 2, nextAfter: 1, hasMoreCached: false, cacheComplete: true } };
+  });
+  const data = resultJson(await callTool(deps, "get_session_events", { sessionId: "s_1", after: 0, limit: 5 }));
+  assert.equal(calls.length, 4);
+  assert.deepEqual(data, { lines: ["(1) agent_message: fresh"], lastSeq: 1, hasMore: false });
+
+  const stale = makeDeps((call) => new URL(call.url).pathname === "/api/sessions/s_1"
+    ? { status: 200, body: { session: { id: "s_1", eventEpoch: 1 } } }
+    : { status: 409, body: { error: "session event history was replaced" } });
+  const result = await callTool(stale.deps, "get_session_events", { sessionId: "s_1", after: 0 });
+  assert.equal(result.isError, true, "a second replacement is reported rather than retried forever");
+  assert.equal(stale.calls.length, 4);
+});
+
+test("get_session_events pages forward against a control plane without bounded pages", async () => {
+  const events = Array.from({ length: 20 }, (_, i) => ({ seq: i + 1, ts: i, payload: { kind: "agent_message", text: "t" } }));
+  const { deps } = makeDeps((call) => new URL(call.url).pathname === "/api/sessions/s_1"
+    ? { status: 200, body: { session: { id: "s_1" } } }
+    : { status: 200, body: { events: events.filter((e) => e.seq > Number(new URL(call.url).searchParams.get("after") ?? 0)) } });
+  const forward = resultJson(await callTool(deps, "get_session_events", { sessionId: "s_1", after: 4, limit: 3 }));
+  assert.deepEqual(forward.lines.map(seqOf), [5, 6, 7]);
+  assert.equal(forward.lastSeq, 7);
+  assert.equal(forward.hasMore, true);
+  const newest = resultJson(await callTool(deps, "get_session_events", { sessionId: "s_1", limit: 3 }));
+  assert.deepEqual(newest.lines.map(seqOf), [18, 19, 20]);
 });
 
 test("list_runs -> GET /api/runs", async () => {
