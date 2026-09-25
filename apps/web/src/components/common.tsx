@@ -579,18 +579,19 @@ export function BackgroundDeliveryBadge({ state, onOpen }: { state: BackgroundDe
   const accessibleName = backgroundDeliveryAccessibleName(state);
   // Only a state that progresses on its own reads as pending; a blocked or missing result asks
   // for a step, so it wears the attention treatment.
-  const className = status.severity === "pending"
-    ? "background-work-badge background-delivery-pending"
-    : "background-work-badge background-work-orphaned";
   if (onOpen) return (
-    <button type="button" className={className}
+    <button type="button" className={status.severity === "pending"
+      ? "background-work-badge background-delivery-pending"
+      : "background-work-badge background-work-orphaned"}
       aria-label={accessibleName} aria-controls="right-panel" title={status.description} onClick={onOpen}>
       <span className="background-work-dot" aria-hidden="true" />
       {status.label}
     </button>
   );
   return (
-    <span className={className}
+    <span className={status.severity === "pending"
+      ? "background-work-badge background-delivery-pending"
+      : "background-work-badge background-work-orphaned"}
       aria-label={accessibleName} title={status.description}>
       <span className="background-work-dot" aria-hidden="true" />
       {status.label}

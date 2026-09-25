@@ -5880,8 +5880,9 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
     assert.equal(db.policyResumeStatus(child.data.id), "idle");
     assert.ok(svc.approve(child.data.id, idleDecision.data.occurrenceId, "approve",
       { kind: "human", id: "owner" }, undefined, () => true).ok);
-    assert.equal(db.getSession(child.data.id)?.status, "running",
-      "a decision created from provider Idle resumes the child when settled");
+    assert.equal(db.getSession(child.data.id)?.status, "queued",
+      "a decision created from provider Idle resumes the child when settled; it reads queued until the runner " +
+      "starts the turn (#1651)");
     assert.ok((await svc.consumeWorkflowDecision(child.data.id, idleDecision.data.occurrenceId, {
       resourceSnapshot: implementationSnapshot,
     })).ok);
@@ -5904,8 +5905,9 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
       "supersession preserves the swallowed Idle proof for the replacement occurrence");
     assert.ok(svc.approve(child.data.id, replacementIdle.data.occurrenceId, "approve",
       { kind: "human", id: "owner" }, undefined, () => true).ok);
-    assert.equal(db.getSession(child.data.id)?.status, "running",
-      "the replacement occurrence inherits the swallowed Idle, so its resolution resumes the child");
+    assert.equal(db.getSession(child.data.id)?.status, "queued",
+      "the replacement occurrence inherits the swallowed Idle, so its resolution resumes the child, " +
+      "queued until the runner starts the turn (#1651)");
 
     const terminalApproval = svc.createWorkflowDecision(child.data.id, {
       requestId: "approved-before-terminal", resourceKey: "implementation:terminal-consume",
