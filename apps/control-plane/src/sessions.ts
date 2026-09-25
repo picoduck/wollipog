@@ -7832,8 +7832,11 @@ export class SessionsService {
     }
     if (viewer === "orchestrator" && mode === "off" && !Object.values(typedPolicy.decisions).includes("orchestrator")) {
       // Parent Control governs answering requests. A held child has nothing to answer, so its hold
-      // is still reported to the Orchestrator its campaign event wakes (#1650).
-      const blockedChildren = includeBlockedChildren ? this.blockedDescendants(parentSessionId, canAccess) : [];
+      // is still reported, but only to the campaign Orchestrator its campaign event wakes (#1650);
+      // any other parent with Parent Control off is refused as before.
+      const blockedChildren = includeBlockedChildren && rootCampaign?.id === parent.id
+        ? this.blockedDescendants(parentSessionId, canAccess)
+        : [];
       return blockedChildren.length ? ok({ requests: [], blockedChildren }) : fail("Parent Control is off", 403);
     }
     const durableTyped = this.db.pendingWorkflowDecisionsForController(parentSessionId).flatMap(

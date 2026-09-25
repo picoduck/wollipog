@@ -20844,3 +20844,34 @@ test("a held child is reported to its Orchestrator even with Parent Control off 
     db.close();
   }
 });
+
+test("only a campaign Orchestrator sees held descendants past Parent Control off (#1650)", () => {
+  const { db, svc } = makeHarness();
+  try {
+    // An ordinary parent session, not a campaign, with a child the runner parked for recovery.
+    const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, parentControl: "off" });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "Ordinary Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      const approval = db.getSession(parent.data.id)!.pendingApproval!;
+      assert.ok(svc.approve(parent.data.id, approval.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+      id: child.id, title: child.title, status: "input_required", worktreePath: "/repos/demo/.agent-worktrees/x",
+      worktreeRecovery: {
+        recoveryId: "worktree-recovery:ordinary", detectedAt: 1, selectedPath: "/repos/demo/.agent-worktrees/x",
+        expectedBranch: `agent/${child.id}`, detail: "the selected worktree could not be verified before a live turn",
+      },
+    }));
+    assert.ok(db.getSession(child.id)?.holds?.length, "the child itself reports its hold");
+    const refused = svc.descendantRequests(parent.data.id, () => true);
+    assert.equal(refused.status, 403, "Parent Control off still refuses a parent that is not a campaign Orchestrator");
+  } finally {
+    db.close();
+  }
+});
