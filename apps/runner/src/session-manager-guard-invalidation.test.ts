@@ -308,3 +308,22 @@ test("an Orchestrator's guard list is every runner-created worktree on the runne
   assert.deepEqual(refreshed.find((entry) => entry.id === "s_orch")!.paths.sort(),
     ["/home/me/repo-worktrees/s_guard", "/home/me/repo-worktrees/s_other"]);
 });
+
+test("only a session's own default worktree is pinned to its branch (#1650)", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-sm-guard-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const store = new SessionStore(root);
+  store.create(meta({
+    worktreePath: "/home/me/repo-worktrees/s_guard",
+    worktreeBranch: "agent/s_guard",
+    worktrees: [
+      { id: "wt_c", path: "/home/me/repo-worktrees/s_guard.requested/wt_c", branch: "fix/issue-1650", source: "created", createdAt: 1 },
+      { id: "wt_a", path: "/home/me/repo-worktrees/operator", branch: "main", source: "attached", createdAt: 1 },
+    ],
+  }));
+  const sm = new SessionManager(() => {}, () => {}, store, "test-runner");
+  assert.deepEqual(sm.managedWorktreeProtections(store.readMeta("s_guard")!), [
+    { worktreePath: "/home/me/repo-worktrees/s_guard.requested/wt_c", repoPath: "/home/me/repo" },
+    { worktreePath: "/home/me/repo-worktrees/s_guard", repoPath: "/home/me/repo", pinnedBranch: "agent/s_guard" },
+  ]);
+});
