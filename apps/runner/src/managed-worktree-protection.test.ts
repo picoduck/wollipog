@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import fc from "fast-check";
-import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   commandTargetsManagedWorktree,
+  MANAGED_WORKTREE_ESCAPE_REFUSAL,
   MANAGED_WORKTREE_REFUSAL,
   MANAGED_WORKTREE_UNRESOLVED_REFUSAL,
   PLACELESS_CWD,
@@ -35,9 +36,6 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
     `python -c "import shutil; shutil.rmtree('${protectedPath}')"`,
     "rm -rf .",
     "p=. ; rm -rf \"$p\"",
-    "cd /runner/worktrees/session/requested && rm -rf managed",
-    "cd ..",
-    "pushd /runner/worktrees/session/requested",
     "rm -rf /runner/worktrees/session/requested/manage*",
     `rm -rf ./*.tmp ${protectedPath}`,
     "rm -rf /runner/worktrees/session/requested/{managed,other}",
@@ -81,6 +79,15 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
     "rm -rf /runner/worktrees/session/requested/{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{a,b}{managed,other}",
   ]) {
     assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), MANAGED_WORKTREE_REFUSAL, command);
+  }
+  // Leaving the worktree is refused first, with its own message: the escape is what stops these.
+  for (const command of [
+    "cd /runner/worktrees/session/requested && rm -rf managed",
+    "cd ..",
+    "pushd /runner/worktrees/session/requested",
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), MANAGED_WORKTREE_ESCAPE_REFUSAL,
+      command);
   }
 });
 
@@ -161,7 +168,7 @@ test("all literal spellings of the protected root stay refused while descendants
 test("a relative removal is judged from where the shell actually is", () => {
   // From a subdirectory, `cd ..` stays inside the worktree; from the root it leaves it.
   assert.equal(commandTargetsManagedWorktree("cd ..", `${protectedPath}/apps/runner`, protection), null);
-  assert.equal(commandTargetsManagedWorktree("cd ..", protectedPath, protection), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("cd ..", protectedPath, protection), MANAGED_WORKTREE_ESCAPE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("rm -rf ../..", `${protectedPath}/apps/runner`, protection), MANAGED_WORKTREE_REFUSAL);
 });
 
@@ -184,7 +191,7 @@ test("operands are judged from the physical form of the directory as well as its
   assert.equal(commandTargetsManagedWorktree("cd inner && cd .. && rm -rf .", worktree, protections),
     MANAGED_WORKTREE_REFUSAL, "the shell's own cd chain is logical and reaches the root");
   assert.equal(commandTargetsManagedWorktree("cd link/escape", worktree, protections),
-    MANAGED_WORKTREE_REFUSAL, "a cd whose physical target leaves the worktree is an escape");
+    MANAGED_WORKTREE_ESCAPE_REFUSAL, "a cd whose physical target leaves the worktree is an escape");
   // From a physical directory two levels down, both spellings of the way back up are judged.
   assert.equal(commandTargetsManagedWorktree("rm -rf ../../managed", join(worktree, "x"), protections),
     MANAGED_WORKTREE_REFUSAL, "../../managed from managed/x is the worktree itself");
@@ -214,9 +221,9 @@ test("a worktree reached through a symlinked prefix is not refused against itsel
   // The guard hook is handed the PHYSICAL directory. The shell is still inside the worktree, so
   // leaving it is still an escape, and moving around inside it still is not.
   const physical = join(base, "real", "managed");
-  assert.equal(commandTargetsManagedWorktree("cd ..", physical, protections), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("cd ..", physical, protections), MANAGED_WORKTREE_ESCAPE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("cd .. && ln -s . jump && rm -rf 'jump/m*'", physical, protections),
-    MANAGED_WORKTREE_REFUSAL);
+    MANAGED_WORKTREE_ESCAPE_REFUSAL);
   assert.equal(commandTargetsManagedWorktree("cd apps && cd ..", physical, protections), null);
   assert.equal(commandTargetsManagedWorktree("cd ..", join(physical, "apps"), protections), null);
   assert.equal(commandTargetsManagedWorktree(`cd ${join(worktree, "apps")}`, physical, protections), null,
@@ -307,10 +314,27 @@ test("from the placeless directory only refusals that hold wherever the shell is
   }
   // ...while anything that names the worktree, or moves into it before acting, still is.
   for (const command of [`rm -rf ${protectedPath}`, `git worktree remove ${protectedPath}`,
-    `cd ${protectedPath} && rm -rf .`, `cd ${protectedPath}/apps && rm -rf ..`, `cd ${protectedPath} && cd ..`,
+    `cd ${protectedPath} && rm -rf .`, `cd ${protectedPath}/apps && rm -rf ..`,
     `git -C ${protectedPath} worktree prune`, `rm -rf ${"../".repeat(80)}`]) {
     assert.equal(commandTargetsManagedWorktree(command, PLACELESS_CWD, protection), MANAGED_WORKTREE_REFUSAL, command);
   }
+  assert.equal(commandTargetsManagedWorktree(`cd ${protectedPath} && cd ..`, PLACELESS_CWD, protection),
+    MANAGED_WORKTREE_ESCAPE_REFUSAL);
+});
+
+test("leaving a managed worktree is refused as an escape, never blamed on the worktree (#1632)", () => {
+  // The evidence upload refused while delivering #1696, from inside the worktree it ran in. It named
+  // nothing in the worktree; only the `cd` leaving it stopped it, and the refusal now says so.
+  const upload = readFileSync(new URL("./fixtures/guard-refusals-1632/evidence-upload.txt", import.meta.url), "utf8");
+  assert.equal(commandTargetsManagedWorktree(upload, protectedPath, protection), MANAGED_WORKTREE_ESCAPE_REFUSAL);
+  // The same work, naming its files instead of changing directory, is not refused at all.
+  assert.equal(commandTargetsManagedWorktree(
+    "node ~/.claude/skills/issue-workflow/scripts/evidence.mjs put --prefix pr-1701 /tmp/wp-1696-evidence/a.png; " +
+      "sha256sum /tmp/wp-1696-evidence/*.png", protectedPath, protection), null);
+  // The escape message is only for the escape: a removal of the worktree keeps the worktree refusal.
+  assert.equal(commandTargetsManagedWorktree(`rm -rf ${protectedPath} && cd /tmp`, "/tmp", protection),
+    MANAGED_WORKTREE_REFUSAL);
+  assert.notEqual(MANAGED_WORKTREE_ESCAPE_REFUSAL, MANAGED_WORKTREE_REFUSAL);
 });
 
 test("the filesystem root is an ancestor of the worktree like any other", () => {

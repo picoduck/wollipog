@@ -1,0 +1,32 @@
+python3 - <<'EOF'
+p='components/SkillsView.tsx'
+s=open(p).read()
+old="""                <p className="skills-hint">Commit {gitSource.commit}</p>
+                <button className="btn sm" type="button" onClick={() => setDialog("git-update")}>Check for Updates</button>
+              </section>}"""
+new="""                <p className="skills-hint">Commit {gitSource.commit}</p>
+                <SkillGitAutoUpdateControls status={detail.gitAutoUpdate} gitRef={gitSource.ref} busy={busy}
+                  onChange={(enabled) => void mutate(() => api.setSkillGitAutoUpdate(detail.id, enabled), () => refreshDetail(detail.id))} />
+                <button className={`btn sm${detail.gitAutoUpdate?.enabled && detail.gitAutoUpdate.held ? " primary" : ""}`} type="button" onClick={() => setDialog("git-update")}>
+                  {detail.gitAutoUpdate?.enabled && detail.gitAutoUpdate.held ? "Review Held Update" : "Check for Updates"}
+                </button>
+              </section>}"""
+assert s.count(old)==1
+s=s.replace(old,new,1)
+old="""import { SkillGitImportDialog } from "./SkillGitImportDialog.js";
+"""
+s=s.replace(old,old+"""import { SkillGitAutoUpdateControls } from "./SkillGitAutoUpdate.js";
+""",1)
+open(p,'w').write(s)
+
+p='styles.css'
+s=open(p).read()
+old=""".skills-git-source { min-width: 0; overflow-wrap: anywhere; }
+"""
+assert s.count(old)==1
+s=s.replace(old,old+""".skills-git-auto-update { display: grid; gap: 4px; margin: 8px 0; }
+.skills-git-held { margin: 0; padding: 8px 10px; border-radius: var(--radius-sm, 6px); border: 1px solid var(--warn, #b7791f); color: var(--text); font-size: var(--text-sm); }
+""",1)
+open(p,'w').write(s)
+EOF
+grep -n "^  --warn\|^  --radius-sm\|--warning:" styles.css | head

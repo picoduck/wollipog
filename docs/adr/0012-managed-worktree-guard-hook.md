@@ -727,6 +727,38 @@ What is done instead:
   And `find <ancestor> -maxdepth 1 2>/dev/null` is refused, because the tokenizer drops the adjacency
   that makes `2>` a redirection, so its `2` reads as one more word after the bound.
 
+  Amended by #1632: a word built from unknown variables is judged as one word. The tokenizer used to
+  split `$S/$d/outdated.txt` at each variable. The lone `/` between them then read as the root
+  directory, an ancestor, and refused an ordinary loop over a scratch directory. Variables are now
+  kept in place, as the worktree classifier already did. Such a word is judged by these readings:
+  - the static prefix before the first variable, judged in full;
+  - the reading with every variable empty (an unset one is), judged in full, which keeps
+    `rm -rf $A/$B` refused;
+  - the reading with every variable as one opaque path component, judged in full. A `..` after it
+    climbs back out, so `$X/../../<data>/hooks/*` stays refused. The old tokenizer read a variable
+    in a glob exactly this way;
+  - each literal piece after a variable, judged in full as the split tokens were. A piece of nothing
+    but separators BETWEEN two variables is the exception. It joins two components rather than naming
+    a location, so it is judged only for landing inside.
+  - with every value the command assigns to one of its variables substituted in. These readings are
+    added to the word as written, never replacing it, so `Y=<climb>; rm -rf "$HOME/x/$Y/"` is refused
+    and an assignment the shell never keeps (a prefix, a subshell, a background job) cannot hide
+    anything.
+
+  A base-versus-head fuzz ran 78,912 commands with variables and backticks, globs, `..` climbs, and three
+  working directories. Every command it found that the old tokenization refused and the new one
+  allows contains the `$X/$Y` join itself.
+
+  The refusal also says why it fired. When a command names the guard state itself, it gets the
+  guard-state message. When the tokenizer rejects a command, the refusal names the tokenizer's
+  complaint: a quoted heredoc holding a JS template literal such as `${a.join(", ")}` is one. When
+  an unmodelled command (a heredoc, newline, backtick, pipe, or subshell) only names a directory that
+  contains the state, it gets a "could not inspect" message. Heredoc data such as a `//` comment
+  reads as the root directory. None of those is refused less than before; only the reason is
+  truthful. In that unmodelled fallback, each piece between backticks is judged as its own word,
+  which closes `rm -rf \`echo <data dir>\``. Separately, a `cd` that would leave a managed worktree
+  is still refused, but with its own message instead of the worktree-retirement one.
+
 - **No free advertising.** The protections path is not exported in the settings `env` block (which
   reaches every tool process); it travels only in the hook command inside the 0600 settings file,
   and the guard accepts it only from there — never from the environment.
