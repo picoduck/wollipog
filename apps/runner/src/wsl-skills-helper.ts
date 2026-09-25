@@ -1166,7 +1166,10 @@ def adopt(spec):
             os.close(store_fd); os.close(home_fd)
 
 def inspect_journal(parent, entry, operation, home, local, store_root):
+    # An unreadable journal still holds an operation ID, so it fails the inspection rather than
+    # vanish; any other entry that cannot be opened as a directory is not a journal.
     try: backup = open_directory(parent, entry)
+    except PermissionError: raise
     except OSError: return None
     try:
         try: intent = read_record(backup, "intent.json").decode("utf-8")
@@ -1206,11 +1209,13 @@ def inspect(spec):
         not UUID.fullmatch(only))): fail("invalid inspection")
     result = {"parentIdentity": "", "journals": [], "truncated": False}
     store_root = store_root_text(spec)
+    # Only a missing path is empty. Any other error (for example EACCES) fails the inspection, so
+    # the runner treats the scope as uninspected instead of hiding its journals.
     try: home_fd, home = open_root(os.environ.get("HOME", ""))
-    except OSError: return result
+    except (FileNotFoundError, NotADirectoryError): return result
     try:
         try: parent = walk(home_fd, local)
-        except OSError: return result
+        except (FileNotFoundError, NotADirectoryError): return result
         try:
             result["parentIdentity"] = identity(parent)
             if only is not None:

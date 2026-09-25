@@ -341,7 +341,8 @@ enable it. Recovery operations from a distro carry a `context` naming it, which 
 accepts only from a protocol-184 runner and displays next to the location. Like native harness
 directories, recovery inspects only distros that currently have a configured agent. If the last agent
 in a distro is removed, its journals stay on disk untouched and are listed again once an agent in that
-distro is configured. A distro that cannot be inspected marks the recovery list as incomplete and
+distro is configured. A distro that cannot be inspected, including one whose harness directory or
+journal has become unreadable (only a missing directory counts as empty), marks the recovery list as incomplete and
 blocks every restore until it can be, because operation IDs must resolve uniquely across all
 scopes. Account-scoped WSL locations remain import-only, because WSL deployment manages
 only the distro's own HOME.
