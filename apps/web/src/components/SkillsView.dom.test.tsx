@@ -11,6 +11,7 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import type { RunnerSkillsResponse } from "../skills.js";
 import { SkillsView } from "./SkillsView.js";
+import { RecommendedSkillsNotice } from "./RecommendedSkillsNotice.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
@@ -689,6 +690,77 @@ test("SkillsView marks built-in skills recommended, assigns one in a step, and d
   assert.match(section()?.textContent ?? "", /Wollipog 0\.29\.0 includes an updated version/);
   assert.ok(view.button("Review Built-In Update"));
   await view.unmount();
+});
+
+test("a recommendation dismissed in the Skills view or the Inbox notice is dismissed in both", async () => {
+  const skillMd = (name: string) => `---\nname: ${name}\n---\nBody.\n`;
+  const skills = ["orchestrate-issues", "using-wollipog"].map((name) => ({
+    id: `skill-${name}`, name, source: "builtin", builtIn: { release: "0.28.0", heldUpdate: null },
+    assignmentCount: 0, latestVersion: { id: `v-${name}`, digest: "d1", createdAt: 1 },
+  }));
+  // One user's dismissals, shared by both surfaces as the control plane shares them.
+  const dismissed = new Set<string>();
+  const view = (skill: (typeof skills)[number]) => ({ ...skill, recommendation: { dismissed: dismissed.has(skill.id) } });
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: skills.map(view) }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async (id: string) => {
+      const skill = skills.find((candidate) => candidate.id === id)!;
+      return { skill: view(skill), latestVersion: { id: skill.latestVersion.id, digest: "d1",
+        files: [{ path: "SKILL.md", content: skillMd(skill.name), encoding: "utf8" as const }] } };
+    },
+    listSkillAssignments: async () => ({ assignments: [] }),
+    runnerSkills: async () => ({ desired: [], reported: null }),
+    setSkillRecommendationDismissed: async (id: string, value: boolean) => {
+      if (value) dismissed.add(id); else dismissed.delete(id);
+      return { skill: view(skills.find((candidate) => candidate.id === id)!) };
+    },
+  } as unknown as ApiClient;
+  const mountNotice = async () => {
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(container as never);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(<ApiProvider client={client}><RecommendedSkillsNotice onOpen={() => {}} /></ApiProvider>);
+    });
+    await act(settle);
+    return {
+      names: () => [...container.querySelectorAll(".recommended-skills-notice-list a")].map((link) => link.textContent),
+      async dismiss(name: string) {
+        const button = container.querySelector<HTMLButtonElement>(`button[aria-label="Dismiss ${name}"]`);
+        assert.ok(button);
+        await act(async () => { button.click(); });
+        await act(settle);
+      },
+      async unmount() { await act(async () => root.unmount()); container.remove(); },
+    };
+  };
+
+  // Skills view to Inbox notice.
+  const skillsView = await mountSkills(client, "skills-recommendation-surfaces");
+  await skillsView.click(skillsView.listItem("using-wollipog"));
+  await skillsView.click(skillsView.button("Dismiss Recommendation"));
+  await skillsView.unmount();
+  let notice = await mountNotice();
+  assert.deepEqual(notice.names(), ["orchestrate-issues"]);
+
+  // Inbox notice to Skills view.
+  await notice.dismiss("orchestrate-issues");
+  assert.deepEqual(notice.names(), []);
+  await notice.unmount();
+  const reopened = await mountSkills(client, "skills-recommendation-surfaces-2");
+  const badges = (name: string) => [...reopened.listItem(name)!.querySelectorAll(".status-badge")].map((badge) => badge.textContent);
+  assert.deepEqual(badges("orchestrate-issues"), ["Built-In"]);
+  await reopened.click(reopened.listItem("orchestrate-issues"));
+  assert.match(reopened.container.querySelector('[aria-label="Built-In Skill"]')?.textContent ?? "", /You dismissed this recommendation\./);
+
+  // Show Recommendation in the Skills view brings it back to the notice.
+  await reopened.click(reopened.button("Show Recommendation"));
+  await reopened.unmount();
+  notice = await mountNotice();
+  assert.deepEqual(notice.names(), ["orchestrate-issues"]);
+  await notice.unmount();
 });
 
 test("SkillsView offers a same-name skill the built-in version and adopts it after explicit diff acceptance", async () => {

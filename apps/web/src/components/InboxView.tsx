@@ -60,6 +60,7 @@ import type { PreviewNavigationControls } from "./usePreviewNavigationRegistrati
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
+import { RecommendedSkillsNotice } from "./RecommendedSkillsNotice.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
@@ -1394,6 +1395,7 @@ export function InboxView({
             ))}
           </section>
         )}
+        <RecommendedSkillsNotice onOpen={(skillId) => navigate({ name: "skills", id: skillId })} />
         {boardMode ? (
           <Board
             sessions={boardSessions}
