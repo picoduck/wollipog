@@ -71,9 +71,10 @@ at once when the parent is stopped, restarted, archived, or deleted, when its pr
 or when its runner disconnects; and 30 seconds after the last identical request
 (`POLICY_HOOK_ABANDONMENT_MS`, the ordinary tool-call fence) once the parent's turn has settled. A
 control-plane restart does not by itself withdraw it: startup marks the parent stopped only
-provisionally, the runner's reconnect snapshot withdraws it if the parent is no longer in a turn, and
-a runner that never reconnects leaves it to the 10-minute fence. The periodic sweep that enforces
-these runs every second. Nothing but an identical creation request that
+provisionally and restarts the approval's 30-second fence. A runner that reconnects within it
+restores a parent still in its turn to the 10-minute fence, or withdraws the approval at once if the
+parent is no longer in a turn; a runner that stays away lets it lapse. The periodic sweep that
+enforces these runs every second. Nothing but an identical creation request that
 arrives after approval creates the child. Tool-call policy-hook approvals keep the 30-second fence.
 The control plane publishes the enforced spawn fence as `spawnApprovalAbandonmentMs` in
 `/api/compatibility`, and the creating tools quote that value; against a control plane that does not

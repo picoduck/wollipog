@@ -2354,41 +2354,60 @@ test("a spawn approval falls back to the hook fence once its parent's turn settl
   } finally { db.close(); }
 });
 
-test("a settle that passes a displaced spawn approval still ends its longer fence", () => {
-  const { db, svc, parent, requestId, approval } = pendingSpawnFixture("session");
-  try {
-    // A non-policy card holds the visible slot, so the idle is not swallowed as a policy resume.
-    assert.ok(db.requeuePolicyHookApproval(parent.id, requestId));
-    db.setPendingApproval(parent.id, { requestId: "permission", title: "Run Command", kind: "permission", options: [] });
-    svc.onSessionStatus(parent.id, "idle");
-    assert.equal(approval().status, "queued");
-    assert.equal(approval().resumeStatus, "idle", "the settled turn is recorded on the open spawn row");
-    const returnedAt = approval().lastPolledAt;
-    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + POLICY_HOOK_ABANDONMENT_MS), 1,
-      "no agent turn is left to repeat the call, so the 30 s fence applies");
-    assert.equal(approval().status, "denied");
-  } finally { db.close(); }
-});
+for (const settle of ["status frame", "runtime snapshot"] as const) {
+  test(`a ${settle} settle that passes a displaced spawn approval still ends its longer fence`, () => {
+    const { db, svc, parent, requestId, approval } = pendingSpawnFixture("session");
+    try {
+      // A non-policy card holds the visible slot, so the idle is not swallowed as a policy resume.
+      assert.ok(db.requeuePolicyHookApproval(parent.id, requestId));
+      db.setPendingApproval(parent.id, { requestId: "permission", title: "Run Command", kind: "permission", options: [] });
+      if (settle === "status frame") svc.onSessionStatus(parent.id, "idle");
+      else svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id: parent.id, status: "idle" }));
+      assert.equal(approval().status, "queued");
+      assert.equal(approval().resumeStatus, "idle", "the settled turn is recorded on the open spawn row");
+      const returnedAt = approval().lastPolledAt;
+      assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + POLICY_HOOK_ABANDONMENT_MS), 1,
+        "no agent turn is left to repeat the call, so the 30 s fence applies");
+      assert.equal(approval().status, "denied");
+    } finally { db.close(); }
+  });
+}
 
-test("a control-plane restart keeps a live parent's spawn approval until its runner reports the turn", () => {
+test("a control-plane restart restarts the fence so a promptly reconnecting parent keeps its spawn approval", () => {
   const { db, svc, parent, create, requestId, approval } = pendingSpawnFixture("session");
   try {
-    const returnedAt = approval().lastPolledAt;
-    // Startup settlement provisionally stops every mid-flight session until its runner reconnects.
-    db.settleStartupState(returnedAt + 1_000);
-    assert.equal(db.getSession(parent.id)!.status, "stopped");
-    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + 60_000), 0,
-      "a restart during the agent's turn-around does not withdraw the approval");
-    assert.equal(approval().status, "pending");
+    // The agent had been between calls for 50 s when the control plane restarted.
+    const startedAt = approval().lastPolledAt + 50_000;
+    db.settleStartupState(startedAt);
+    assert.equal(db.getSession(parent.id)!.status, "stopped", "startup stops the parent provisionally");
+    assert.equal(approval().lastPolledAt, startedAt, "startup restarts the fence for the reconnect");
+    assert.equal(svc.reconcilePolicyHookTimeouts(startedAt + POLICY_HOOK_ABANDONMENT_MS - 1), 0);
 
-    db.registerRunner(runnerMeta(), returnedAt + 61_000, PROTOCOL_VERSION);
-    db.updateSessionStatus(parent.id, "input_required", returnedAt + 61_000);
+    // The runner reconnects and reports the parent still in its turn.
+    db.registerRunner(runnerMeta(), startedAt + 5_000, PROTOCOL_VERSION);
+    db.updateSessionStatus(parent.id, "input_required", startedAt + 5_000);
+    assert.equal(svc.reconcilePolicyHookTimeouts(startedAt + 90_000), 0,
+      "the reconnected live parent is back on the longer spawn fence");
     const retried = create();
-    assert.equal(retried.status, 428, retried.error ?? "the reconnected parent's identical call still finds it pending");
+    assert.equal(retried.status, 428, retried.error);
     assert.equal(db.getSession(parent.id)!.pendingApproval?.requestId, requestId);
     assert.ok(svc.approve(parent.id, requestId, "allow").ok);
     assert.ok(create().ok);
     assert.equal(db.childSessionAllocations(parent.id).count, 1);
+  } finally { db.close(); }
+});
+
+test("a spawn approval lapses at the ordinary fence when its runner never returns after a restart", () => {
+  const { db, svc, parent, create, approval } = pendingSpawnFixture("session");
+  try {
+    const startedAt = approval().lastPolledAt + 1_000;
+    db.settleStartupState(startedAt);
+    assert.equal(svc.reconcilePolicyHookTimeouts(startedAt + POLICY_HOOK_ABANDONMENT_MS - 1), 0);
+    assert.equal(svc.reconcilePolicyHookTimeouts(startedAt + POLICY_HOOK_ABANDONMENT_MS), 1,
+      "a parent whose runner stays away cannot collect the approval");
+    assert.equal(approval().status, "denied");
+    assert.equal(create().ok, false);
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
   } finally { db.close(); }
 });
 

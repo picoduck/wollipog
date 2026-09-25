@@ -11405,7 +11405,9 @@ export class SessionsService {
       this.db.clearPolicyResumeStatus(snapshot.id);
     } else if (runtimeSnapshot.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
       this.db.notePolicyResumeStatus(snapshot.id, "idle");
-    } else if (runtimeSnapshot.status !== "idle") {
+    } else if (runtimeSnapshot.status === "idle") {
+      this.db.noteSpawnApprovalsSettled(snapshot.id);
+    } else {
       this.db.clearPolicyResumeStatus(snapshot.id);
     }
     const history = this.db.updateSessionFromSnapshot(snapshot.id, runtimeSnapshot, now);
