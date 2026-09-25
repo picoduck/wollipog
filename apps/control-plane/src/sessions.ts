@@ -11363,7 +11363,17 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
-    const campaignBefore = this.campaignAttentionController(existing);
+    const runtimeSnapshot = snapshot.costUsd < existing.costUsd
+      ? { ...snapshot, costUsd: existing.costUsd }
+      : snapshot;
+    const policyGateMayRunBeforeUpdate = runtimeSnapshot.status === "idle" || runtimeSnapshot.costUsd > existing.costUsd ||
+      this.db.sessionCostUsd(snapshot.id) > existing.costUsd;
+    const repeated = this.db.isRepeatedRuntimeSnapshot(snapshot.id, runtimeSnapshot);
+    // A CP-owned budget can change between identical runner snapshots. Preserve the before-view
+    // when this snapshot may park a new policy card, so its campaign receives the transition.
+    const newPolicyAsk = repeated && existing.parentSessionId && policyGateMayRunBeforeUpdate &&
+      this.pendingPolicyAsk({ ...existing, status: runtimeSnapshot.status, costUsd: runtimeSnapshot.costUsd });
+    const campaignBefore = repeated && !newPolicyAsk ? null : this.campaignAttentionController(existing);
     if (existing.archived && !isTerminal(snapshot.status) && !this.db.hasSessionStopIntent(snapshot.id)) {
       this.requestStop(existing, Date.now(), true);
       return;
@@ -11385,9 +11395,6 @@ export class SessionsService {
       }
     }
     const now = Date.now();
-    const runtimeSnapshot = snapshot.costUsd < existing.costUsd
-      ? { ...snapshot, costUsd: existing.costUsd }
-      : snapshot;
     if (isTerminal(runtimeSnapshot.status)) {
       this.revokeUnconsumedWorkflowDecisionsForSession(snapshot.id, "provider-session-ended");
       this.abortPolicyHookApprovals(existing, now, "provider-session-ended");

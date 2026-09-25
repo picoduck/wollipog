@@ -12688,6 +12688,14 @@ export class ControlPlaneDb {
     return createHash("sha256").update(JSON.stringify(snapshot)).digest("hex");
   }
 
+  /** A replay carries no new runner facts for campaign attention, even when CP-owned policy
+   * state still needs its ordinary runtime reconciliation. */
+  isRepeatedRuntimeSnapshot(sessionId: string, snapshot: SessionSnapshot): boolean {
+    const row = this.stmt("SELECT runner_snapshot_fingerprint FROM sessions WHERE id=?")
+      .get(sessionId) as { runner_snapshot_fingerprint: string | null } | undefined;
+    return row?.runner_snapshot_fingerprint === ControlPlaneDb.sessionSnapshotFingerprint(snapshot);
+  }
+
   /** Monotonic mirror of projection-safe runner facts. Absence means a pre-v82 runner and leaves
    * prior evidence intact; a present array is authoritative, so missing jobs become inactive
    * tombstones while their audit and delivery evidence remains durable. */

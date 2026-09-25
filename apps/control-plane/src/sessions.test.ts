@@ -15756,6 +15756,73 @@ test("a live session runtime snapshot updates only its owner and preserves sessi
   assert.equal(db.getSession("runtime-two")!.status, "idle", "single-snapshot update is not full reconciliation");
 });
 
+test("replayed child snapshots skip campaign scans while changed snapshots survive provisional stops", () => {
+  const { db, svc } = makeHarness();
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const root = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "questions",
+    }).data!;
+    db.updateSessionStatus(root.id, "running", Date.now());
+    const childRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID };
+    let child = svc.createSession(childRequest, undefined, undefined, false, false, false,
+      { parentSessionId: root.id });
+    if (child.status === 428) {
+      const approval = db.getSession(root.id)!.pendingApproval!;
+      assert.ok(svc.approve(root.id, approval.requestId, "allow").ok);
+      child = svc.createSession(childRequest, undefined, undefined, false, false, false,
+        { parentSessionId: root.id });
+    }
+    assert.ok(child.ok && child.data, child.error);
+    const runtime = snapshot({ id: child.data.id, status: "running", seq: 1 });
+    svc.applySessionRuntimeUpdate(RUNNER_ID, runtime);
+
+    const originalRequests = svc.descendantRequests.bind(svc);
+    let descendantScans = 0;
+    svc.descendantRequests = (...args) => {
+      descendantScans += 1;
+      return originalRequests(...args);
+    };
+    svc.applySessionRuntimeUpdate(RUNNER_ID, runtime);
+    assert.equal(descendantScans, 0, "a repeated runtime snapshot carries no new campaign attention");
+
+    // The CP can have a higher settled cost than the runner's snapshot. The stored fingerprint
+    // hashes that clamped runtime snapshot, so its replay must compare the same value.
+    db.raw().prepare("UPDATE sessions SET cost_usd=1 WHERE id=?").run(child.data.id);
+    svc.applySessionRuntimeUpdate(RUNNER_ID, runtime);
+    descendantScans = 0;
+    svc.applySessionRuntimeUpdate(RUNNER_ID, runtime);
+    assert.equal(descendantScans, 0, "cost clamping does not turn a replay into new attention");
+
+    db.updateSessionStatus(root.id, "stopped", Date.now());
+    db.appendEvent(child.data.id, { kind: "agent_message", text: "Completed child report", final: true }, Date.now());
+    svc.applySessionRuntimeUpdate(RUNNER_ID, { ...runtime, status: "idle", seq: 2 });
+    assert.ok(descendantScans > 0, "a changed child must still publish while its root is provisionally stopped");
+    assert.ok(db.campaignContinuationEvents(root.id).some((event) =>
+      event.kind === "child_ready" && event.subjectSessionId === child.data!.id));
+
+    db.updateSessionStatus(root.id, "running", Date.now());
+    assert.ok(db.campaignContinuationEvents(root.id).some((event) => event.kind === "child_ready"),
+      "the durable event remains available after root recovery");
+
+    const scansBeforePolicy = descendantScans;
+    db.updateSessionCostBudget(child.data.id, 0.2, Date.now());
+    svc.applySessionRuntimeUpdate(RUNNER_ID, { ...runtime, status: "idle", seq: 2 });
+    assert.equal(db.getSession(child.data.id)?.pendingApproval?.kind, "cost_budget");
+    assert.ok(descendantScans > scansBeforePolicy,
+      "a repeated runner snapshot can still create a new CP-owned policy card");
+  } finally {
+    db.close();
+  }
+});
+
 test("a terminal runner snapshot aborts a durable hook ask instead of preserving its card", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
