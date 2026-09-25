@@ -15721,6 +15721,35 @@ test("a known runner history epoch change atomically clears the cache and broadc
   assert.ok(artifactIds.every((artifactId) => db.getWorkflowArtifact(artifactId) === null));
 });
 
+test("a runner history reset broadcasts retained attachment rows to open dashboards", () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 0, historyEpoch: 10 })]);
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("attachment"),
+    ]);
+    const input = { name: "proof.png", mimeType: "image/png", data: bytes.toString("base64") };
+    const actor = { kind: "agent" as const, id: "s_box1" };
+    const attached = svc.attachSessionScreenshot("s_box1", input, actor);
+    assert.ok(attached.ok && attached.data, attached.error);
+    const original = db.listEvents("s_box1")[0]!;
+    assert.equal(original.payload.kind, "artifact_attached");
+
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 0, historyEpoch: 11 })]);
+    assert.deepEqual(db.listEvents("s_box1"), [original]);
+    assert.deepEqual(hub.sessionEventsResetCalls.at(-1), {
+      sessionId: "s_box1", events: [original], eventEpoch: 1,
+    });
+    const retried = svc.attachSessionScreenshot("s_box1", input, actor);
+    assert.equal(retried.status, 200);
+    assert.equal(retried.data?.artifactId, attached.data.artifactId);
+    assert.deepEqual(db.listEvents("s_box1"), [original]);
+  } finally {
+    db.close();
+  }
+});
+
 test("a live session runtime snapshot updates only its owner and preserves session-scoped controls", () => {
   const { db, svc } = makeHarness();
   svc.hydrateRunnerSessions(RUNNER_ID, [

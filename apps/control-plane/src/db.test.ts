@@ -5208,6 +5208,62 @@ test("neutral registration followed by negotiated history does not re-fence reco
   }
 });
 
+test("runner history resets preserve attachment rows, timestamps, and retry identity", () => {
+  const db = withRunner();
+  try {
+    const id = "attachment-history";
+    db.createSessionFromSnapshot(snapshot({ id, historyEpoch: 4, seq: 1 }), "runner-1", 1_000);
+    db.appendHydratedPage(id, { afterSeq: 0, historyEpoch: 4, eventEpoch: 0 }, [
+      { seq: 1, ts: 10, payload: { kind: "agent_message", text: "old runner history" } },
+    ]);
+    const image = createScreenshotArtifact(db, { sessionId: id }, "reset-image",
+      { purpose: "session_attachment" });
+    const videoBytes = Buffer.from("attachment video");
+    const video = db.createWorkflowArtifactBytes({
+      ...image,
+      artifactId: "reset-video",
+      kind: "video",
+      name: "reset-video.webm",
+      mimeType: "video/webm",
+      sizeBytes: videoBytes.length,
+      sha256: createHash("sha256").update(videoBytes).digest("hex"),
+      createdAt: 20,
+    }, videoBytes);
+    const imageEvent = db.appendEvent(id, { kind: "artifact_attached", artifact: image }, 100);
+    const videoEvent = db.appendEvent(id, { kind: "artifact_attached", artifact: video }, 200);
+    const originalIds = [imageEvent.id, videoEvent.id];
+
+    for (const [epoch, eventEpoch] of [[5, 1], [6, 2]] as const) {
+      const reset = db.reconcileRunnerHistory(id, epoch, 1);
+      assert.equal(reset?.reset, true);
+      assert.equal(reset?.eventEpoch, eventEpoch);
+      const attachments = db.listEvents(id);
+      assert.deepEqual(attachments.map((event) => event.id), originalIds);
+      assert.deepEqual(attachments.map((event) => event.seq), [1, 2]);
+      assert.deepEqual(attachments.map((event) => event.ts), [100, 200]);
+      assert.deepEqual(attachments.map((event) => event.payload.kind),
+        ["artifact_attached", "artifact_attached"]);
+      assert.equal(db.getSession(id)?.messageCount, 2);
+      assert.equal(db.getSession(id)?.lastEventAt, 200);
+      assert.equal(db.hasAttachmentEvent(id, image.artifactId), true);
+      assert.equal(db.hasAttachmentEvent(id, video.artifactId), true);
+      assert.ok(db.getWorkflowArtifact(image.artifactId));
+      assert.ok(db.getWorkflowArtifact(video.artifactId));
+
+      const hydrated = db.appendHydratedPage(
+        id, { afterSeq: 0, historyEpoch: epoch, eventEpoch },
+        [{ seq: 1, ts: 300 + epoch, payload: { kind: "agent_message", text: "new runner history" } }],
+      );
+      assert.equal(hydrated.applied, true);
+      assert.deepEqual(db.listEvents(id).map((event) => event.seq), [1, 2, 3]);
+      assert.equal(db.appendHydratedPage(id, { afterSeq: 0, historyEpoch: epoch, eventEpoch }, []).applied,
+        false, "replaying hydration cannot duplicate attachment rows");
+    }
+  } finally {
+    db.close();
+  }
+});
+
 test("appendHydratedPage is atomic, crash-idempotent, stale-safe, and keeps CP seq independent", () => {
   const db = withRunner();
   db.createSession(newSession({ id: "history-page" }));
