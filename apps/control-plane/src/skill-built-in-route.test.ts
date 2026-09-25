@@ -7,6 +7,8 @@ import {
   LOCAL_OWNER_USER_ID,
   mutationAuthorizationError,
   PERSONAL_ORGANIZATION_ID,
+  type AgentPrincipal,
+  type AuthPrincipal,
   type HumanPrincipal,
 } from "./identity.js";
 import { builtInSkills, seedBuiltInSkills } from "./built-in-skills.js";
@@ -42,16 +44,16 @@ async function fixture() {
     requestFromRunner: () => { throw new Error("unexpected runner request"); },
   } as SkillsHub;
   const release = builtInSkills([{ name: "using-wollipog", files: files("using-wollipog", "Release content.") }], "1.0.0");
-  let current = human(LOCAL_OWNER_USER_ID, "owner");
+  let current: AuthPrincipal = human(LOCAL_OWNER_USER_ID, "owner");
   const app = Fastify();
   registerSkillRoutes(app, {
-    db, hub, requestHuman: () => current, requestPrincipal: () => current,
+    db, hub, requestHuman: () => current.kind === "human" ? current : null, requestPrincipal: () => current,
     pushSkillsSync: makeSkillsSyncPusher({ db, hub }), builtInSkills: release,
   });
   await app.ready();
   return {
     app, db, pushed, online, release,
-    as(principal: HumanPrincipal) { current = principal; },
+    as(principal: AuthPrincipal) { current = principal; },
   };
 }
 
@@ -83,6 +85,37 @@ test("recommendations are listed per user, and dismissing one hides it only for 
   const restored = await app.inject({ method: "PUT", url: `/api/skills/${listed.id}/recommendation`, payload: { dismissed: false } });
   assert.deepEqual(restored.json().skill.recommendation, { dismissed: false });
   assert.equal((await app.inject({ method: "PUT", url: `/api/skills/${listed.id}/recommendation`, payload: {} })).statusCode, 400);
+});
+
+// The Inbox notice and the Skills view both recommend exactly what this listing marks, so it decides
+// who sees the notice.
+test("recommendations reach viewers of the personal organization, but not other organizations or agents", async (t) => {
+  const { app, db, release, as } = await fixture();
+  t.after(async () => { await app.close(); db.close(); });
+  seedBuiltInSkills(db, release, 100);
+  const listed = async () => (await app.inject({ method: "GET", url: "/api/skills" })).json().skills as
+    Array<{ id: string; recommendation?: { dismissed: boolean } }>;
+
+  as(human("usr_viewer", "viewer"));
+  const [skill] = await listed();
+  assert.deepEqual(skill?.recommendation, { dismissed: false });
+
+  as({ ...human("usr_elsewhere", "owner"), organizationId: "org_other", organizationName: "Other" });
+  assert.deepEqual(await listed(), [], "another organization cannot read the personal organization's built-ins");
+  const foreign = await app.inject({ method: "PUT", url: `/api/skills/${skill!.id}/recommendation`, payload: { dismissed: true } });
+  assert.equal(foreign.statusCode, 404);
+
+  const agent: AgentPrincipal = {
+    kind: "agent", actorId: "agent_1", organizationId: PERSONAL_ORGANIZATION_ID,
+    delegatedScope: { organizationId: PERSONAL_ORGANIZATION_ID, owner: { kind: "organization", organizationId: PERSONAL_ORGANIZATION_ID } },
+  };
+  as(agent);
+  const [readByAgent] = await listed();
+  assert.equal(readByAgent?.id, skill!.id);
+  assert.equal(readByAgent?.recommendation, undefined, "an agent is never recommended a skill");
+  const byAgent = await app.inject({ method: "PUT", url: `/api/skills/${skill!.id}/recommendation`, payload: { dismissed: true } });
+  assert.equal(byAgent.statusCode, 403);
+  assert.deepEqual([...db.skillRecommendationDismissals("usr_viewer")], []);
 });
 
 test("only built-in skills have a recommendation to dismiss", async (t) => {

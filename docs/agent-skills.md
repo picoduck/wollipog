@@ -597,8 +597,16 @@ ordinary assignment for every supported agent with agent invocation, so deployme
 sync path to every harness on the selected machines. **Dismiss Recommendation** hides the
 recommendation for the signed-in user only and keeps the library entry; **Show Recommendation**
 restores it. The Machine onboarding dialog lists recommended skills that are still unassigned,
-under **Recommended Skills**, with **Open Skills**. Upgraded installations whose users do not reopen
-machine onboarding see the recommendation in the Skills view only.
+under **Recommended Skills**, with **Open Skills**.
+
+The Inbox shows the same list above the sessions as a **Recommended Skills** notice, so upgraded
+installations whose users do not reopen machine onboarding still learn about them. Each skill name
+opens it in the Skills view. **Dismiss** beside a skill, and **Dismiss All** for every listed skill,
+write the same per-user dismissal as **Dismiss Recommendation**, so a dismissal from either place
+applies to both, and **Show Recommendation** returns a skill to the notice. There is no separate
+notice dismissal: a built-in skill that a later release adds appears on its own. The notice follows
+the Skills view's rule, so it reaches every member of the personal organization who can read the
+built-in skills, viewers included. It offers no assignment, which a viewer could not make.
 
 The REST surface adds:
 

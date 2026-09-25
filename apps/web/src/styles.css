@@ -7596,6 +7596,62 @@ button.file-head.source-path-link {
   color: var(--text-dim);
 }
 
+.recommended-skills-notice {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin: 0 12px 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev);
+}
+
+.recommended-skills-notice-copy {
+  display: grid;
+  flex: 1 1 260px;
+  gap: 3px;
+  min-width: 0;
+  font-size: var(--text-sm);
+}
+
+.recommended-skills-notice-copy > span {
+  color: var(--text-dim);
+}
+
+.recommended-skills-notice-error {
+  color: var(--red);
+}
+
+.recommended-skills-notice-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.recommended-skills-notice-list > li {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 2px 2px 2px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elev-3);
+}
+
+.recommended-skills-notice-list a {
+  font-family: var(--mono);
+  font-size: var(--text-sm);
+}
+
+.recommended-skills-notice-actions {
+  display: flex;
+  flex: none;
+}
+
 @media (max-width: 680px) {
   .worktree-setup-notice {
     align-items: stretch;
@@ -7604,6 +7660,11 @@ button.file-head.source-path-link {
 
   .worktree-setup-notice-actions {
     flex-wrap: wrap;
+  }
+
+  .recommended-skills-notice {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

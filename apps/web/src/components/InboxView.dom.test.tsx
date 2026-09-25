@@ -1926,6 +1926,60 @@ test("an expanded child inside a collapsed thread is the session marked seen, no
   saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set());
 });
 
+test("the Inbox lists recommended built-in skills above the sessions in list and board modes, and opens one in Skills", async () => {
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-recommended-skills",
+    runtimeKey: "inbox-recommended-skills:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const pushed: unknown[] = [];
+  const spyNavigation: ViewNavigation = {
+    current: () => ({ name: "inbox" }),
+    push: (view) => void pushed.push(view),
+    listen: () => () => {},
+  };
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [{
+      id: "skill-using", name: "using-wollipog", builtIn: { release: "0.28.0", heldUpdate: null },
+      recommendation: { dismissed: false }, assignmentCount: 0,
+    }] }),
+  } as unknown as ApiClient;
+  const mountView = async (viewMode: "list" | "board") => {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client}>
+          <StoreProvider connection={connection} navigation={spyNavigation}>
+            <InboxView key={viewMode} viewMode={viewMode} rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+          </StoreProvider>
+        </ApiProvider>,
+      );
+    });
+    await act(async () => { socket.push(snapshot([session("A", 30)])); });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+  };
+
+  await mountView("board");
+  assert.ok(container.querySelector('.board-wrap'));
+  assert.equal(container.querySelector('[aria-label="Recommended Skills"]') !== null, true, "board mode shows the notice");
+
+  await mountView("list");
+  const notice = container.querySelector('[aria-label="Recommended Skills"]');
+  assert.equal(notice !== null, true, "list mode shows the notice");
+  assert.equal(Boolean(notice!.compareDocumentPosition(container.querySelector(".inbox-list")!) & 4), true,
+    "the notice sits above the session list");
+  const link = notice!.querySelector("a") as unknown as HTMLAnchorElement;
+  assert.equal(link.textContent, "using-wollipog");
+  await act(async () => { link.click(); });
+  assert.deepEqual(pushed.at(-1), { name: "skills", id: "skill-using" });
+});
+
 test("every mounted root is torn down before the next test starts", () => {
   assert.deepEqual(mountedRoots, [], "a previous test left a React root mounted");
   assert.equal(
