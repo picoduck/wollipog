@@ -4677,10 +4677,10 @@ function SessionDetailLoaded({
             onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
           />
         )}
-        {session.orchestratorCampaign && (
+        {heldChildren.length > 0 && (
           <CampaignHeldChildren
             heldChildren={heldChildren}
-            blocked={session.orchestratorCampaign.children.blocked}
+            blocked={session.orchestratorCampaign?.children?.blocked ?? heldChildren.length}
             childTitle={heldChildTitle}
             onOpenChild={(childSessionId) => navigate({ name: "session", id: childSessionId })}
           />

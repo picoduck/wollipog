@@ -320,7 +320,7 @@ for (const viewport of [
     await expect(held).toBeVisible();
     const entries = held.locator(".campaign-held-child");
     await expect(entries).toHaveCount(2);
-    await expect(held).toContainText("The campaign counts 3 blocked children, including failed and stopped ones.");
+    await expect(held).toContainText("1 other blocked child is not listed here, such as failed or stopped children.");
 
     const recovery = entries.nth(0);
     const link = recovery.getByRole("link", { name: "Fix #1650: Keep a Decision Resume Across Worktree Recovery" });
@@ -350,7 +350,7 @@ for (const viewport of [
     // The campaign projection drops a child once its hold clears; the entry and the count follow.
     await page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.clearHold("held-child-1"));
     await expect(entries).toHaveCount(1);
-    await expect(held).toContainText("The campaign counts 2 blocked children");
+    await expect(held).toContainText("1 other blocked child is not listed here");
     await page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.clearHold("held-child-2"));
     await expect(held).toHaveCount(0);
   });

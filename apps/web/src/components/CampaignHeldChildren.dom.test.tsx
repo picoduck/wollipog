@@ -102,8 +102,8 @@ test("held children list each child's link, hold reason, recovery action, and he
     assert.equal(section.querySelector("dd code")?.textContent, "git -C /work/tree switch feat/example",
       "the quoted recovery command is rendered as code");
     assert.match(text, /wd_occ_42/);
-    assert.match(text, /Nothing is waiting for an answer\./);
-    assert.doesNotMatch(text, /The campaign counts/, "the summary omits the blocked total when every blocked child is held");
+    assert.match(text, /A hold has nothing to answer\./);
+    assert.doesNotMatch(text, /not listed here/, "the summary omits unlisted blocked children when every one is held");
     assert.equal(section.querySelectorAll("button, input, select, textarea").length, 0,
       "a hold offers no answer or approve control");
     assert.equal(view.container.querySelector('[aria-label="Pending Requests"]'), null);
@@ -113,9 +113,13 @@ test("held children list each child's link, hold reason, recovery action, and he
     await act(async () => fireDomEvent.click(link!, { button: 0 }));
     assert.deepEqual(opened, ["child/one"]);
 
-    // Blocked also counts failed and stopped children; the list says so rather than disagreeing.
+    // Blocked also counts failed and stopped children, and held ones past the projection's limit;
+    // the list says so rather than disagreeing.
     await view.render(list(held, 3));
-    assert.match(view.container.textContent ?? "", /The campaign counts 3 blocked children, including failed and stopped ones\./);
+    assert.match(view.container.textContent ?? "",
+      /2 other blocked children are not listed here, such as failed or stopped children\./);
+    await view.render(list(held, 2));
+    assert.match(view.container.textContent ?? "", /1 other blocked child is not listed here/);
 
     // The projection drops the child once its hold clears, and the entry goes with it.
     await view.render(list([], 0));

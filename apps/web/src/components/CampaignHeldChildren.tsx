@@ -55,8 +55,10 @@ export function CampaignHeldChildren({
       </div>
       <p className="campaign-held-children-summary">
         {held === 1 ? "This child cannot" : "These children cannot"} start another turn until the hold clears.
-        {" "}Nothing is waiting for an answer.
-        {blocked > held && ` The campaign counts ${blocked} blocked children, including failed and stopped ones.`}
+        {" "}A hold has nothing to answer.
+        {/* The projection lists at most 32 held children, so the rest of Blocked may be held too. */}
+        {blocked > held && ` ${blocked - held} other blocked ${blocked - held === 1 ? "child is" : "children are"} ` +
+          "not listed here, such as failed or stopped children."}
       </p>
       {/* Focusable so a keyboard can scroll the list once it reaches its height limit. */}
       <ul className="campaign-held-children-list" tabIndex={0} aria-labelledby={headingId}>
