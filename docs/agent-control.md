@@ -799,7 +799,10 @@ Video (`media_video_unsupported`), unknown or non-raster media (`media_unsupport
 that lives only behind a URI (`provider_untrusted`) always go to the human. The control plane never
 fetches a child-supplied URL; the URI is display material for the human reviewer only. A screenshot
 Session artifact can be submitted without a URI when it names its `artifactId`, raster `mediaType`,
-and SHA-256. URI-only evidence still requires a safe HTTPS link. Campaign-level
+and SHA-256. A first-class MP4 or WebM Session artifact can also be submitted without a URI, but
+video remains human-owned: no installed Orchestrator client is audited to deliver its motion to the
+model, so an artifact and a matching digest alone cannot create a review receipt. URI-only evidence
+still requires a safe HTTPS link. Campaign-level
 unavailability is reported as `uiEvidenceReview.reasonCode` and `reason` on the campaign projection.
 A human fallback is scoped to that one decision: other children and other assigned categories are
 unaffected.

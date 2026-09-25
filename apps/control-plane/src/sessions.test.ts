@@ -19885,6 +19885,21 @@ function uiEvidenceReviewHarness(
       },
     };
   };
+  const video = (sessionId: string, label: string) => {
+    const bytes = Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]),
+      Buffer.from("webm"), Buffer.alloc(8),
+    ]);
+    const artifact = svc.attachSessionVideo(sessionId, {
+      name: `${label}.webm`, mimeType: "video/webm", data: bytes.toString("base64"),
+    }, { kind: "agent", id: sessionId });
+    assert.ok(artifact.ok && artifact.data, artifact.error);
+    return {
+      bytes,
+      item: { evidenceId: label, sha256: artifact.data.sha256,
+        artifactId: artifact.data.artifactId, mediaType: "video/webm" },
+    };
+  };
   const request = (childId: string, requestId: string, evidence: unknown[]) => svc.createWorkflowDecision(childId, {
     requestId, resourceKey: `${requestId}-ui`,
     resourceSnapshot: { category: "ui_evidence_approval", evidence } as never,
@@ -19899,7 +19914,7 @@ function uiEvidenceReviewHarness(
     }
     return delivered;
   };
-  return { db, hub, svc, parent: parent.data, createChild, decisions, screenshot, request, review };
+  return { db, hub, svc, parent: parent.data, createChild, decisions, screenshot, video, request, review };
 }
 
 test("campaign policy delivered to a child names no manager tool the child toolset lacks (#1278)", async () => {
@@ -20079,8 +20094,10 @@ test("unreviewable UI evidence falls back to the human with a specific reason an
     const child = h.createChild("UI Child");
     const other = h.createChild("Other Child");
     const image = h.screenshot(child.id, "after");
+    const clip = h.video(child.id, "clip");
+    assert.deepEqual(h.db.readWorkflowArtifactBytes(clip.item.artifactId), clip.bytes);
     const cases: Array<[string, unknown, string]> = [
-      ["video", { ...image.item, evidenceId: "clip", mediaType: "video/webm" }, "media_video_unsupported"],
+      ["video", clip.item, "media_video_unsupported"],
       ["external", { evidenceId: "after", uri: image.item.uri, sha256: image.item.sha256 }, "provider_untrusted"],
       ["unknown-media", { ...image.item, mediaType: undefined }, "media_unsupported"],
       ["svg", { ...image.item, mediaType: "image/svg+xml" }, "media_unsupported"],
