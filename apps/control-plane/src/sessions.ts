@@ -7470,6 +7470,11 @@ export class SessionsService {
       if (!delivered.ok) {
         this.log.warn(`workflow decision ${decision.occurrenceId} resolution not delivered to ${child.id}: ${delivered.error}`);
       }
+      // A resume held under a newer runner is settled here either way: the ordinary prompt has no
+      // receipt to follow, and leaving it held would send it again on every sweep.
+      if (from !== null) {
+        this.db.setWorkflowDecisionResume(decision.occurrenceId, delivered.ok ? "delivered" : "failed", null, now);
+      }
       return delivered.ok;
     }
     if (child.worktreeRecovery) {

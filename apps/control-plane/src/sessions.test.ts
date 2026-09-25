@@ -20686,3 +20686,27 @@ test("a held resume survives a restart at either delivery boundary and is still 
     db.close();
   }
 });
+
+test("a resume held before its runner downgraded is sent once on the ordinary path (#1650)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child, recovery } = f;
+  try {
+    const merge = f.requestMerge(1655);
+    svc.onSessionStatus(child.id, "idle");
+    f.runnerReports(recovery, "input_required");
+    f.approve(merge.occurrenceId);
+    assert.equal(f.resumeState(merge.occurrenceId), "held");
+    // The runner comes back at a protocol that cannot report a not-sent receipt.
+    db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.worktreeRecovery - 1);
+    const ordinary = () => f.hub.sentOfType("prompt_session").filter((message) => message.sessionId === child.id &&
+      message.text.includes(`[Wollipog Workflow Decision — ${merge.occurrenceId}]`));
+    f.runnerReports(null, "idle");
+    assert.equal(ordinary().length, 1);
+    assert.equal(f.resumeState(merge.occurrenceId), "delivered", "the ordinary prompt settles the held resume");
+    svc.retryDuePrompts(Date.now() + 5_000);
+    svc.retryDuePrompts(Date.now() + 10_000);
+    assert.equal(ordinary().length, 1, "no sweep sends it again");
+  } finally {
+    db.close();
+  }
+});
