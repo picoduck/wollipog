@@ -11,6 +11,7 @@ import {
   assignedSkillNamesForAgent,
   managedSkillsAvailableForTarget,
   SessionSkillsUnavailableNotice,
+  targetsWithoutManagedSkills,
 } from "./SkillsUnavailableNotice.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -31,6 +32,14 @@ test("only container and cloud targets lose managed skills", () => {
   assert.equal(managedSkillsAvailableForTarget("host"), true);
   assert.equal(managedSkillsAvailableForTarget("container"), false);
   assert.equal(managedSkillsAvailableForTarget("cloud"), false);
+});
+
+test("only container and cloud targets are listed as lacking managed skills", () => {
+  assert.deepEqual(targetsWithoutManagedSkills(undefined), []);
+  assert.deepEqual(targetsWithoutManagedSkills([{ name: "Host", adapter: "host" }]), []);
+  assert.deepEqual(targetsWithoutManagedSkills([
+    { name: "Box", adapter: "container" }, { name: "Host", adapter: "host" }, { name: "Sky", adapter: "cloud" },
+  ]), ["Box", "Sky"]);
 });
 
 test("assigned skill names follow the session agent", () => {

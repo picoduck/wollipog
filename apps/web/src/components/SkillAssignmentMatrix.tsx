@@ -3,6 +3,7 @@ import { runnerSupportsProtocol, type RunnerView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { skillAgentMatrixCell } from "../skill-assignment-matrix.js";
 import type { MachineSkillVersionPolicy, RunnerSkillsResponse } from "../skills.js";
+import { SKILLS_UNAVAILABLE_ON_TARGET, targetsWithoutManagedSkills } from "./SkillsUnavailableNotice.js";
 
 export function SkillAssignmentMatrix({ skillId, skillName, runners, machineLabels, machineSkills, onManageVersion }: {
   skillId: string; skillName: string; runners: RunnerView[]; machineLabels: Map<string, string>;
@@ -23,8 +24,12 @@ export function SkillAssignmentMatrix({ skillId, skillName, runners, machineLabe
     {!runners.length && <p>Connect a machine to see its agents and deployment state.</p>}
     {runners.map(runner => {
       const policy = policies[runner.runnerId]; const state = machineSkills[runner.runnerId];
+      const skillFreeTargets = targetsWithoutManagedSkills(runner.executionTargets);
       return <article className="skills-section" key={runner.runnerId} aria-label={`Assignments on ${machineLabels.get(runner.runnerId) ?? runner.runnerId}`}>
         <h5>{machineLabels.get(runner.runnerId) ?? runner.runnerId} · {runner.status === "online" ? "Online" : "Offline"}</h5>
+        {skillFreeTargets.length > 0 && <p className="skills-hint skills-target-unavailable" role="note" aria-label="Skills Unavailable on Container and Cloud Targets">
+          {SKILLS_UNAVAILABLE_ON_TARGET} Assigned skills load only for host sessions. Affected {skillFreeTargets.length === 1 ? "target" : "targets"}: {skillFreeTargets.join(", ")}.
+        </p>}
         <p className="skills-hint">Version policy: {!policy ? "Loading…" : policy === "error" ? "Unavailable" : policy.policy?.versionId ? `Pinned · ${policy.policy.versionId}` : "Track Latest"}. All assigned agents share this version.</p>
         <button className="btn sm" type="button" disabled={!runnerSupportsProtocol(runner.protocolVersion, "agentSkills")} onClick={() => onManageVersion(runner.runnerId)}>Manage Machine Version</button>
         <p className="skills-hint">Reported: {!state || state.loadError ? "Unknown" : state.reported?.updatedAt === undefined ? "Never" : new Date(state.reported.updatedAt).toLocaleString()}.</p>
