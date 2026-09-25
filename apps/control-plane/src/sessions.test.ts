@@ -20376,16 +20376,6 @@ test("file-based screenshot attach fixes the session, kind, and encoding and bou
     );
     assert.equal(replay.data.artifactId, original?.artifactId);
     assert.equal(db.sessionAgentScreenshotUsage(session.data.id).count, 3, "a replay stores nothing");
-    const legacy = svc.createWorkflowArtifact({
-      sessionId: session.data.id, kind: "screenshot", encoding: "base64", ...body("legacy"),
-    }, agent);
-    assert.ok(legacy.ok && legacy.data, legacy.error);
-    const eventCount = db.listEvents(session.data.id, 0, 100).filter((event) => event.payload.kind === "artifact_attached").length;
-    const legacyReplay = svc.attachSessionScreenshot(session.data.id, body("legacy"), agent, limits);
-    assert.equal(legacyReplay.status, 200);
-    assert.equal(legacyReplay.data?.artifactId, legacy.data.artifactId);
-    assert.equal(db.listEvents(session.data.id, 0, 100).filter((event) => event.payload.kind === "artifact_attached").length,
-      eventCount, "replaying a pre-attachment screenshot must not insert a new transcript row");
     // Anything that is not the same attachment is a new one, and the bound applies to it.
     assert.equal(svc.attachSessionScreenshot(session.data.id, { ...body("second"), name: "renamed.png" }, agent, limits).status, 409);
     assert.equal(svc.attachSessionScreenshot(session.data.id, body("second"), { kind: "agent", id: other.data.id }, limits).status, 409,
@@ -20404,6 +20394,17 @@ test("file-based screenshot attach fixes the session, kind, and encoding and bou
     // A human's upload does not use the agent-specific bound; the general session bound still applies.
     assert.ok(svc.attachSessionScreenshot(session.data.id, body("human"), { kind: "human", id: "owner" }, { count: 0, bytes: 0 }).ok);
     assert.equal(db.sessionAgentScreenshotUsage(session.data.id).count, 4);
+
+    const legacy = svc.createWorkflowArtifact({
+      sessionId: session.data.id, kind: "screenshot", encoding: "base64", ...body("legacy"),
+    }, agent);
+    assert.ok(legacy.ok && legacy.data, legacy.error);
+    const eventCount = db.listEvents(session.data.id, 0, 100).filter((event) => event.payload.kind === "artifact_attached").length;
+    const legacyReplay = svc.attachSessionScreenshot(session.data.id, body("legacy"), agent, limits);
+    assert.equal(legacyReplay.status, 200);
+    assert.equal(legacyReplay.data?.artifactId, legacy.data.artifactId);
+    assert.equal(db.listEvents(session.data.id, 0, 100).filter((event) => event.payload.kind === "artifact_attached").length,
+      eventCount, "replaying a pre-attachment screenshot must not insert a new transcript row");
   } finally {
     db.close();
   }
