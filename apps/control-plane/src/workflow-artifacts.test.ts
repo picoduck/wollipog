@@ -2,6 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { validateWorkflowArtifact } from "./workflow-artifacts.js";
 
+const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(12)]);
+const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
+
 test("validates and content-addresses each workflow artifact contract", () => {
   const cases = [
     { kind: "html_preview", encoding: "utf8", mimeType: "text/html", data: "<!doctype html><title>Preview</title>" },
@@ -10,6 +13,7 @@ test("validates and content-addresses each workflow artifact contract", () => {
     { kind: "test_log", encoding: "utf8", mimeType: "text/plain", data: "12 passed" },
     { kind: "verdict", encoding: "json", mimeType: "application/json", data: "{\n  \"verdict\": \"upvote\"\n}" },
     { kind: "screenshot", encoding: "base64", mimeType: "image/png", data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64") },
+    { kind: "video", encoding: "base64", mimeType: "video/mp4", data: mp4.toString("base64") },
   ] as const;
   for (const input of cases) {
     const result = validateWorkflowArtifact({ runId: "r1", ...input, name: `${input.kind}.artifact`, metadata: { attempt: 1 } });
@@ -19,6 +23,17 @@ test("validates and content-addresses each workflow artifact contract", () => {
     assert.ok(result.value.sizeBytes > 0);
     if (input.kind === "verdict") assert.equal(result.value.data, '{"verdict":"upvote"}');
   }
+});
+
+test("video validation accepts MP4 and WebM signatures and rejects spoofed or oversized media", () => {
+  const make = (mimeType: string, data: Buffer) => validateWorkflowArtifact({
+    sessionId: "session", kind: "video", name: "clip", mimeType, encoding: "base64", data: data.toString("base64"),
+  });
+  assert.equal(make("video/mp4", mp4).ok, true);
+  assert.equal(make("video/webm", webm).ok, true);
+  assert.match((make("video/mp4", webm) as { error: string }).error, /declared MIME type/u);
+  assert.match((make("video/webm", Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from("matroska")])) as { error: string }).error, /declared MIME type/u);
+  assert.match((make("video/mp4", Buffer.concat([mp4, Buffer.alloc(32 * 1024 * 1024 + 1 - mp4.length)])) as { error: string }).error, /size limit/u);
 });
 
 test("artifact validation rejects ambiguous encodings, spoofed images, invalid JSON, and oversized data", () => {

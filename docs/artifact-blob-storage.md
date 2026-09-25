@@ -38,6 +38,23 @@ only after confirming that no artifact row still references the digest, so dedup
 survives until its final reference is gone. Failed filesystem cleanup remains queued for a later
 pass and startup recovery.
 
+File-attached Session evidence is stored here as screenshots (at most 8 MiB each) or MP4/WebM
+videos (at most 32 MiB each). An agent may attach at most 256 screenshots / 512 MiB; every author
+shares a limit of 16 videos / 256 MiB in one Session. A separate limit of 4,096 file attachments /
+1 GiB per Session covers every author, including human uploads. Prompt images and event payload
+chunks retain their separate lifecycle and are not counted against the attachment limit. Duplicate
+file attaches return the existing artifact before these limits are checked. The authenticated
+artifact list and export routes serve the same private bytes after runner or worktree removal.
+
+File-attached evidence expires 180 days after upload. The minute maintenance sweep deletes at most
+1,000 expired metadata rows at a time and then collects blobs with no other references. It leaves
+prompt images, event payload chunks, and workflow outputs under their existing lifecycle rules.
+An existing timeline row for an expired attachment reports that its artifact is unavailable.
+Runner history resets rebuild that timeline from runner events, so attachment rows can disappear
+after a reset; the private artifact list remains available until retention expires. Session and
+runner deletion still remove their artifact rows and queue the same blob collection; stopping or
+disconnecting either does not.
+
 Raw prompt-image uploads are preparation leases, not permanent artifacts merely because their
 bytes were accepted. Identical uncommitted bytes for the same Session reuse one metadata row and
 renew its lease, so retries do not create unbounded duplicates. A successful queued edit commits

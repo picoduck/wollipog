@@ -1745,6 +1745,37 @@ test("attach_session_artifact uploads a file from disk and returns metadata only
   }
 });
 
+test("attach_session_artifact uploads video to the gated route without returning its bytes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "attach-video-tool-"));
+  try {
+    const bytes = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const file = join(dir, "video.txt");
+    writeFileSync(file, bytes);
+    const old = makeDeps((call) => call.url.endsWith("/api/compatibility")
+      ? { status: 200, body: { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach - 1 } }
+      : { status: 201, body: {} });
+    const refused = await callTool(old.deps, "attach_session_artifact", { path: file });
+    assert.equal(refused.isError, true);
+    assert.match(resultText(refused), new RegExp(
+      `requires control plane protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach}`, "u",
+    ));
+    assert.equal(old.calls.some((call) => call.method === "POST"), false);
+
+    const current = makeDeps((call) => call.url.endsWith("/api/compatibility")
+      ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+      : { status: 201, body: { artifactId: "art_video", sessionId: SELF_ID, kind: "video",
+          name: call.body.name, mimeType: call.body.mimeType, sizeBytes: bytes.length, sha256 } });
+    const attached = await callTool(current.deps, "attach_session_artifact", { path: file });
+    assert.equal(attached.isError, undefined, resultText(attached));
+    const upload = current.calls.find((call) => call.method === "POST")!;
+    assert.equal(upload.url, `${CP_URL}/api/sessions/${SELF_ID}/artifacts/videos`);
+    assert.equal(upload.body.mimeType, "video/webm");
+    assert.deepEqual(resultJson(attached).artifact.kind, "video");
+    assert.equal(resultText(attached).includes(bytes.toString("base64")), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("attach_session_artifact refuses before reading or uploading when the request cannot succeed", async () => {
   const dir = mkdtempSync(join(tmpdir(), "attach-tool-"));
   try {

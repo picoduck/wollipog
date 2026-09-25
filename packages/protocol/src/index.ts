@@ -574,7 +574,9 @@
 //      they keep one aside, and accept a correlated `skill_kept_aside` read and a confirmed,
 //      observation-fenced discard. Older control planes drop the unknown field, and older runners
 //      report no kept-aside copies rather than a false empty result.
-export const PROTOCOL_VERSION = 185;
+// 186: sessions may attach bounded MP4/WebM video artifacts from a file. Older control planes
+//      understand only screenshot attachments and must never receive a video upload.
+export const PROTOCOL_VERSION = 186;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -800,6 +802,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** Control plane serves the session-scoped screenshot attach route. Checked by the runner's
    * attach_session_artifact tool against the connected control plane, not against a runner. */
   sessionArtifactFileAttach: 169,
+  sessionVideoArtifactAttach: 186,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,
@@ -3626,7 +3629,7 @@ export type WorkflowDecisionResourceSnapshot =
       category: "ui_evidence_approval";
       evidence: Array<{
         evidenceId: string;
-        /** HTTPS link for external evidence. An artifact-backed raster image may omit it. */
+        /** HTTPS link for external evidence. An artifact-backed image or video may omit it. */
         uri?: string;
         sha256: string;
         /** First-class Session artifact holding the exact bytes. Only artifact-backed evidence can
@@ -4520,6 +4523,8 @@ export type SessionEventPayload =
       };
     }
   | { kind: "agent_message"; text: string; final?: boolean; messageId?: string; parentToolUseId?: string }
+  /** Control-plane-authored row for a file attachment. Bytes remain in the private artifact store. */
+  | { kind: "artifact_attached"; artifact: WorkflowArtifactView }
   /** Content-free evidence that a response delivered as message chunks reached a successful turn
    * boundary. Completion-only responses continue to use `agent_message.final` instead. */
   | { kind: "agent_response_completed" }
@@ -6190,7 +6195,8 @@ export interface RelayPodResult {
   appendedEntry?: PodContextEntry;
 }
 
-export type WorkflowArtifactKind = "html_preview" | "patch" | "review_report" | "screenshot" | "test_log" | "verdict";
+export type WorkflowArtifactKind = "html_preview" | "patch" | "review_report" | "screenshot" | "video" | "test_log" | "verdict";
+export const MAX_SESSION_VIDEO_BYTES = 32 * 1024 * 1024;
 export type WorkflowArtifactEncoding = "utf8" | "base64" | "json";
 export type WorkflowArtifactMetadataValue = string | number | boolean | null;
 
@@ -6238,6 +6244,9 @@ export interface AttachSessionScreenshotRequest {
   data: string;
   metadata?: Record<string, WorkflowArtifactMetadataValue>;
 }
+
+/** Body of POST /api/sessions/:id/artifacts/videos; the route fixes kind and encoding. */
+export type AttachSessionVideoRequest = AttachSessionScreenshotRequest;
 
 /* -------------------------- Durable workflows --------------------------- */
 

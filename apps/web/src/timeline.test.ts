@@ -74,6 +74,19 @@ const payloadRef = (artifactId: string, mimeType: EventPayloadReference["mimeTyp
   sha256: "a".repeat(64),
 });
 
+test("a durable attachment remains a standalone transcript row with its exact artifact identity", () => {
+  const artifact = {
+    artifactId: "art_clip", sessionId: "s", kind: "video" as const, name: "Walkthrough.webm",
+    mimeType: "video/webm", encoding: "base64" as const, sizeBytes: 20,
+    sha256: "a".repeat(64), createdBy: { kind: "agent" as const, id: "s" }, createdAt: 10,
+  };
+  const items = deriveTimeline([ev({ kind: "tool_call", toolCallId: "attach", title: "Attach", status: "completed" }),
+    ev({ kind: "artifact_attached", artifact })]);
+  const groups = groupTimeline(items);
+  assert.equal(groups.at(-1)?.kind, "item");
+  assert.deepEqual(items.at(-1), { kind: "artifact_attached", id: seq, artifact, createdAt: seq });
+});
+
 test("timeline row identity follows runner sequence across REST database-id replacement", () => {
   const payload: SessionEventPayload = { kind: "user_message", text: "stable" };
   const live = deriveTimeline([{ id: 17, sessionId: "s", seq: 42, ts: 1, payload }]);

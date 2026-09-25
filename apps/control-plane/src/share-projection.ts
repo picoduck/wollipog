@@ -195,6 +195,7 @@ function publicMessages(
         }
         break;
       case "agent_thought":
+      case "artifact_attached":
       case "tool_call":
       case "agent_response_completed":
       case "tool_call_update":

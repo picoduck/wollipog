@@ -11,7 +11,10 @@ import { createServer, connect, type Server, type Socket } from "node:net";
 import type { McpFetch } from "./session-management-mcp.js";
 import { isSafeSessionFileId } from "./session-file-id.js";
 
-const MAX_FRAME_BYTES = 16 * 1024 * 1024;
+// A 32 MiB video becomes up to 42.7 MiB of base64 inside the JSON request envelope.
+// Keep responses at their previous bound; they return metadata, never video bytes.
+const MAX_REQUEST_FRAME_BYTES = 48 * 1024 * 1024;
+const MAX_RESPONSE_FRAME_BYTES = 16 * 1024 * 1024;
 const MAX_PATH_BYTES = 16 * 1024;
 export const AGENT_CONTROL_RELAY_ENDPOINT_ENV = "WOLLIPOG_AGENT_CONTROL_RELAY_ENDPOINT";
 export const AGENT_CONTROL_RELAY_KEY_ENV = "WOLLIPOG_AGENT_CONTROL_RELAY_KEY";
@@ -79,6 +82,10 @@ function relayRoundTrip(
   request: AgentControlRelayRequest,
   signal?: AbortSignal,
 ): Promise<AgentControlRelayResponse> {
+  const frame = `${JSON.stringify(request)}\n`;
+  if (Buffer.byteLength(frame, "utf8") > MAX_REQUEST_FRAME_BYTES) {
+    return Promise.reject(new Error("Agent Control relay request is too large"));
+  }
   return new Promise((resolvePromise, reject) => {
     let settled = false;
     let total = 0;
@@ -98,10 +105,10 @@ function relayRoundTrip(
       return;
     }
     signal?.addEventListener("abort", aborted, { once: true });
-    socket.once("connect", () => socket.write(`${JSON.stringify(request)}\n`));
+    socket.once("connect", () => socket.write(frame));
     socket.on("data", (chunk: Buffer) => {
       total += chunk.length;
-      if (total > MAX_FRAME_BYTES) finish(new Error("Agent Control relay response is too large"));
+      if (total > MAX_RESPONSE_FRAME_BYTES) finish(new Error("Agent Control relay response is too large"));
       else chunks.push(chunk);
     });
     socket.on("end", () => {
@@ -154,7 +161,7 @@ function serveConnection(socket: Socket, sessionId: string, handler: AgentContro
   socket.on("data", (chunk: Buffer) => {
     if (handling) return;
     total += chunk.length;
-    if (total > MAX_FRAME_BYTES) {
+    if (total > MAX_REQUEST_FRAME_BYTES) {
       socket.destroy();
       return;
     }
@@ -176,7 +183,7 @@ function serveConnection(socket: Socket, sessionId: string, handler: AgentContro
     handler(sessionId, request, abort.signal).then(
       (response) => {
         const frame = JSON.stringify(response);
-        if (Buffer.byteLength(frame, "utf8") > MAX_FRAME_BYTES) socket.destroy();
+        if (Buffer.byteLength(frame, "utf8") > MAX_RESPONSE_FRAME_BYTES) socket.destroy();
         else if (!socket.destroyed) socket.end(frame);
       },
       () => socket.destroy(),

@@ -67,10 +67,12 @@ function rawDb(db: ControlPlaneDb): DatabaseSync {
 test("authenticated artifact export returns exact decoded bytes with hardened attachment headers", () => {
   const { db, principal } = fixture();
   const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
   const cases = [
     { artifactId: "art-patch", kind: "patch", name: "agent-authored-change.patch", mimeType: "text/x-diff", encoding: "utf8", data: "diff --git a/a b/a\n" },
     { artifactId: "art-report", kind: "review_report", name: "résumé (final).md", mimeType: "text/markdown", encoding: "utf8", data: "# Review\n" },
     { artifactId: "art-image", kind: "screenshot", name: "agent-authored-screen.png", mimeType: "image/png", encoding: "base64", data: png.toString("base64") },
+    { artifactId: "art-video", kind: "video", name: "agent-authored-video.webm", mimeType: "video/webm", encoding: "base64", data: webm.toString("base64") },
     { artifactId: "art-log", kind: "test_log", name: "agent-authored-tests.log", mimeType: "text/plain", encoding: "utf8", data: "pass ✓\n" },
     { artifactId: "art-verdict", kind: "verdict", name: "agent-authored-verdict.json", mimeType: "application/json", encoding: "json", data: '{"outcome":"accepted"}', runOnly: true },
   ] as const;

@@ -135,6 +135,7 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "POST /api/artifacts",
   "POST /api/artifacts/screenshots",
   "POST /api/sessions/:id/artifacts/screenshots",
+  "POST /api/sessions/:id/artifacts/videos",
 ]);
 
 const ORCHESTRATOR_API_ROUTES = new Set([

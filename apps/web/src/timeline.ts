@@ -14,6 +14,7 @@ import type {
   ReviewRiskLevel,
   SessionCommandExecutionMode,
   SessionEvent,
+  WorkflowArtifactView,
   StructuredRequestResolutionReason,
 } from "@wollipog/protocol";
 
@@ -63,6 +64,7 @@ function mergeTurnUsage(current: TurnUsage | undefined, addition: TurnUsage): Tu
 }
 
 export type TimelineItem =
+  | { kind: "artifact_attached"; id: number; artifact: WorkflowArtifactView; createdAt: number }
   | {
       kind: "user_message";
       id: number;
@@ -793,6 +795,10 @@ export class TimelineBuilder {
   push(ev: SessionEvent): void {
     const p = ev.payload;
     switch (p.kind) {
+      case "artifact_attached":
+        this.breakText();
+        this.markDirty(this.items.push({ kind: "artifact_attached", id: ev.seq, artifact: p.artifact, createdAt: ev.ts }) - 1);
+        break;
       case "user_message": {
         this.breakText();
         const userIndex = this.items.push({

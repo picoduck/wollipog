@@ -48,6 +48,8 @@ after(() => {
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("desktop-after")]);
 const PNG_SHA = createHash("sha256").update(PNG).digest("hex");
+const WEBM = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
+const WEBM_SHA = createHash("sha256").update(WEBM).digest("hex");
 const RESOURCE_DIGEST = "b".repeat(64);
 
 type Evidence = { evidenceId: string; uri?: string; sha256: string; artifactId?: string; mediaType?: string };
@@ -186,6 +188,48 @@ test("artifact-only evidence can be reviewed without creating an external link",
   }
 });
 
+test("artifact-backed video is reviewable only after a picture frame loads", async () => {
+  domWindow.localStorage.clear();
+  const item = { evidenceId: "clip", artifactId: "art_clip", mediaType: "video/webm", sha256: WEBM_SHA };
+  const view = await mount(sessionWith([item]), async () => new Blob([WEBM], { type: "video/webm" }));
+  try {
+    assert.deepEqual(view.requests, ["art_clip"]);
+    const video = view.container.querySelector<HTMLVideoElement>(".evidence-artifact-video");
+    assert.ok(video);
+    assert.equal(video.hidden, true);
+    assert.equal(view.checkbox("clip").disabled, true);
+    Object.defineProperties(video, { videoWidth: { value: 320 }, videoHeight: { value: 180 } });
+    await act(async () => video.dispatchEvent(new domWindow.Event("loadedmetadata") as unknown as Event));
+    assert.equal(video.hidden, true, "metadata alone does not prove a frame was shown");
+    assert.equal(view.checkbox("clip").disabled, true);
+    await act(async () => video.dispatchEvent(new domWindow.Event("loadeddata") as unknown as Event));
+    assert.equal(video.hidden, false);
+    assert.equal(video.hasAttribute("controls"), true);
+    assert.equal(video.hasAttribute("playsinline"), true);
+    assert.equal(view.checkbox("clip").disabled, false);
+    assert.equal(view.container.querySelector(".evidence-review-item a"), null);
+    await act(async () => view.checkbox("clip").click());
+    assert.equal(view.button("Approve").disabled, false);
+  } finally { await view.unmount(); }
+});
+
+test("a video without a picture track cannot be marked reviewed", async () => {
+  domWindow.localStorage.clear();
+  const item = { evidenceId: "clip", artifactId: "art_clip", mediaType: "video/webm", sha256: WEBM_SHA };
+  const view = await mount(sessionWith([item]), async () => new Blob([WEBM], { type: "video/webm" }));
+  try {
+    const video = view.container.querySelector<HTMLVideoElement>(".evidence-artifact-video");
+    assert.ok(video);
+    Object.defineProperties(video, { videoWidth: { value: 0 }, videoHeight: { value: 0 } });
+    assert.equal(video.videoWidth, 0);
+    await act(async () => video.dispatchEvent(new domWindow.Event("loadedmetadata") as unknown as Event));
+    assert.match(view.container.querySelector('.evidence-artifact [role="alert"]')?.textContent ?? "",
+      /could not be displayed\.$/u);
+    assert.equal(view.checkbox("clip").disabled, true);
+    assert.equal(view.button("Approve").disabled, true);
+  } finally { await view.unmount(); }
+});
+
 test("a digest mismatch or an unavailable artifact shows no image and cannot count as reviewed", async () => {
   domWindow.localStorage.clear();
   // A mark saved on an earlier visit must not survive the artifact turning out to be wrong.
@@ -223,7 +267,7 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
   try {
     await undrawable.decode("error");
     assert.match(undrawable.container.querySelector('.evidence-artifact [role="alert"]')?.textContent ?? "",
-      /matches its recorded digest but could not be displayed as an image/u);
+      /matches its recorded digest but could not be displayed\.$/u);
     assert.equal(undrawable.container.querySelector(".evidence-artifact img"), null, "no broken image is left on screen");
     assert.equal(undrawable.container.querySelector('.evidence-artifact [role="alert"] button'), null,
       "the same bytes will not decode on a retry");
@@ -269,12 +313,12 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
   }
 });
 
-test("URI-only, video, and non-raster evidence keep a labelled external link, and mixed decisions show both", async () => {
+test("URI-only and non-raster evidence keep a labelled external link, and mixed decisions show both", async () => {
   domWindow.localStorage.clear();
   const view = await mount(sessionWith([
     artifactItem(),
     { evidenceId: "legacy", uri: "https://evidence.example/legacy.png", sha256: "1".repeat(64) },
-    artifactItem({ evidenceId: "clip", artifactId: "art_clip", mediaType: "video/webm" }),
+    { evidenceId: "clip", uri: "https://evidence.example/clip.webm", sha256: "2".repeat(64), mediaType: "video/webm" },
     artifactItem({ evidenceId: "vector", artifactId: "art_svg", mediaType: "image/svg+xml" }),
   ]), async () => new Blob([PNG]));
   try {

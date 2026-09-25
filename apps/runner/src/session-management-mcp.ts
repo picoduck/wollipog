@@ -12,7 +12,7 @@ import {
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
-import { readImageFileForAttach } from "./session-artifact-file.js";
+import { readMediaFileForAttach } from "./session-artifact-file.js";
 import { VERSION } from "./version.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -304,8 +304,9 @@ const ARTIFACT_UPLOAD_TIMEOUT_MS = 180_000;
 
 /** A pre-v169 control plane has no session-scoped attach route. Refuse by name instead of letting
  * the upload 404, and never fall back to the base64 tool argument this tool exists to replace. */
-async function sessionArtifactFileAttachCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach;
+async function sessionArtifactFileAttachCompatibilityError(deps: McpDeps, video = false): Promise<ToolResult | null> {
+  const required = video ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach
+    : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach;
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
@@ -1642,11 +1643,11 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "attach_session_artifact",
-    description: "Attach an image file from disk to your own session as a screenshot artifact. Pass the file's absolute path; the file is read on the runner host and uploaded directly, so its bytes never enter your context. Returns only the artifactId, mediaType, sizeBytes, and sha256 — cite exactly those in a ui_evidence_approval evidence item to make it reviewable by an Orchestrator. Use this instead of create_workflow_artifact for any image: never base64 an image into a tool argument. PNG, JPEG, GIF, or WebP, up to 8 MiB. Subject to session permissions and governance policies.",
+    description: "Attach an image or short video file from disk to your own session. The runner uploads it directly, so its bytes never enter your context. Returns only metadata. Images (PNG, JPEG, GIF, WebP) are limited to 8 MiB; MP4 and WebM videos to 32 MiB. Cite image artifactId, mediaType, and sha256 in UI evidence for Orchestrator review; video evidence still routes to a human. Never base64 media into a tool argument. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Absolute path of a regular image file on the runner host" },
+        path: { type: "string", description: "Absolute path of a regular image or video file on the runner host" },
         name: { type: "string", description: "Display name; defaults to the file name" },
         sessionId: { type: "string", description: "Only for a paired-device caller. A session credential always attaches to its own session." },
       },
@@ -1667,12 +1668,16 @@ export const TOOLS: McpTool[] = [
       }
       const incompatible = await sessionArtifactFileAttachCompatibilityError(deps);
       if (incompatible) return incompatible;
-      const file = await readImageFileForAttach(args.path);
+      const file = await readMediaFileForAttach(args.path);
       if (!file.ok) return errorResult(file.error);
+      if (file.kind === "video") {
+        const videoIncompatible = await sessionArtifactFileAttachCompatibilityError(deps, true);
+        if (videoIncompatible) return videoIncompatible;
+      }
       const r = await cpFetch(
         deps,
         "POST",
-        `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/screenshots`,
+        `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${file.kind === "video" ? "videos" : "screenshots"}`,
         {
           name: typeof args.name === "string" ? args.name.trim() : basename(args.path),
           mimeType: file.mediaType,

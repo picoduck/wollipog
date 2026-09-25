@@ -19762,10 +19762,15 @@ test("artifact-only UI evidence snapshots retain their identity through canonica
       ] });
       assert.ok(linked.ok && linked.data, linked.error);
       assert.deepEqual(linked.data.evidence[0], { ...artifact, uri: `https://evidence.example/${evidenceId}.png` });
+      const video = { ...artifact, mediaType: "video/webm" };
+      const normalizedVideo = normalizeWorkflowDecisionSnapshot({ category: "ui_evidence_approval", evidence: [video] });
+      assert.ok(normalizedVideo.ok && normalizedVideo.data, normalizedVideo.error);
+      assert.deepEqual(normalizedVideo.data.evidence, [video]);
+      assert.deepEqual(normalizeWorkflowDecisionSnapshot(normalizedVideo.data).data, normalizedVideo.data);
       for (const invalid of [
         { evidenceId, sha256 },
         { evidenceId, sha256, artifactId: artifact.artifactId },
-        { ...artifact, mediaType: "video/webm" },
+        { ...artifact, mediaType: "video/avi" },
         { ...artifact, uri: "http://evidence.example/capture.png" },
       ]) {
         assert.equal(normalizeWorkflowDecisionSnapshot({ category: "ui_evidence_approval", evidence: [invalid] }).ok, false);
@@ -20386,10 +20391,50 @@ test("file-based screenshot attach fixes the session, kind, and encoding and bou
     assert.ok(svc.attachSessionScreenshot(session.data.id, body("fifth"), agent,
       { count: 100, bytes: used.bytes + png("fifth").length }).ok, "exactly the limit is admitted");
 
-    // A human's upload is neither counted nor bounded.
+    // A human's upload does not use the agent-specific bound; the general session bound still applies.
     assert.ok(svc.attachSessionScreenshot(session.data.id, body("human"), { kind: "human", id: "owner" }, { count: 0, bytes: 0 }).ok);
     assert.equal(db.sessionAgentScreenshotUsage(session.data.id).count, 4);
+
+    const legacy = svc.createWorkflowArtifact({
+      sessionId: session.data.id, kind: "screenshot", encoding: "base64", ...body("legacy"),
+    }, agent);
+    assert.ok(legacy.ok && legacy.data, legacy.error);
+    const eventCount = db.listEvents(session.data.id, 0, 100).filter((event) => event.payload.kind === "artifact_attached").length;
+    const legacyReplay = svc.attachSessionScreenshot(session.data.id, body("legacy"), agent, limits);
+    assert.equal(legacyReplay.status, 200);
+    assert.equal(legacyReplay.data?.artifactId, legacy.data.artifactId);
+    assert.equal(db.listEvents(session.data.id, 0, 100).filter((event) => event.payload.kind === "artifact_attached").length,
+      eventCount, "replaying a pre-attachment screenshot must not insert a new transcript row");
   } finally {
     db.close();
   }
+});
+
+test("video attachments use private session storage, a video-specific limit, and one durable transcript event", () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+    const session = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+    assert.ok(session.ok && session.data);
+    const id = session.data.id;
+    const agent = { kind: "agent" as const, id };
+    const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
+    const body = (name: string) => ({ name, mimeType: "video/webm", data: webm.toString("base64") });
+    const first = svc.attachSessionVideo(id, body("walkthrough.webm"), agent, { count: 1, bytes: webm.length });
+    assert.ok(first.ok && first.data, first.error);
+    assert.equal(first.data.kind, "video");
+    assert.equal(first.data.metadata?.purpose, "session_attachment");
+    assert.deepEqual(db.readWorkflowArtifactBytes(first.data.artifactId), webm);
+    const replay = svc.attachSessionVideo(id, body("walkthrough.webm"), agent, { count: 1, bytes: webm.length });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.data?.artifactId, first.data.artifactId);
+    assert.equal(svc.attachSessionVideo(id, body("second.webm"), agent, { count: 1, bytes: webm.length }).status, 409);
+    assert.equal(svc.attachSessionVideo(id, body("human.webm"), { kind: "human", id: "owner" },
+      { count: 1, bytes: webm.length }).status, 409, "video limit is shared across authors");
+    assert.equal(svc.attachSessionVideo(id, { ...body("spoof.webm"), mimeType: "video/mp4" }, agent).status, 400);
+    const events = db.listEvents(id, 0, 100).filter((event) => event.payload.kind === "artifact_attached");
+    assert.equal(events.length, 1, "a replay does not duplicate the inline transcript row");
+    assert.equal((events[0]?.payload as { artifact: { artifactId: string } }).artifact.artifactId, first.data.artifactId);
+  } finally { db.close(); }
 });

@@ -4,10 +4,27 @@ import { appendFileSync, mkdtempSync, mkdirSync, rmSync, symlinkSync, truncateSy
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { MAX_PROMPT_IMAGE_BYTES } from "@wollipog/protocol";
-import { readImageFileForAttach, sniffImageMediaType } from "./session-artifact-file.js";
+import { MAX_PROMPT_IMAGE_BYTES, MAX_SESSION_VIDEO_BYTES } from "@wollipog/protocol";
+import { readImageFileForAttach, readMediaFileForAttach, sniffImageMediaType } from "./session-artifact-file.js";
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("pixels")]);
+const WEBM = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
+
+test("video attachment reads a content-typed bounded file without trusting its extension", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "artifact-video-"));
+  try {
+    const file = join(dir, "clip.txt");
+    writeFileSync(file, WEBM);
+    const found = await readMediaFileForAttach(file);
+    assert.equal(found.ok, true);
+    if (found.ok) assert.deepEqual({ kind: found.kind, mediaType: found.mediaType, sizeBytes: found.sizeBytes },
+      { kind: "video", mediaType: "video/webm", sizeBytes: WEBM.length });
+    assert.equal((await readImageFileForAttach(file)).ok, false);
+    truncateSync(file, MAX_SESSION_VIDEO_BYTES + 1);
+    const oversized = await readMediaFileForAttach(file);
+    assert.match(oversized.ok ? "" : oversized.error, /at most 33554432 bytes/u);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
 
 test("the media type comes from the content and unknown content is not an image", () => {
   assert.equal(sniffImageMediaType(PNG), "image/png");
