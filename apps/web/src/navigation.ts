@@ -15,7 +15,7 @@ export type View =
   | { name: "runs" }
   | { name: "pods" }
   | { name: "automations" }
-  | { name: "skills" }
+  | { name: "skills"; id?: string }
   | { name: "usage" }
   | { name: "archived" }
   | { name: "projects"; id?: string }
@@ -193,7 +193,7 @@ export function viewPath(view: View): string {
     case "runs": return "/runs";
     case "pods": return "/pods";
     case "automations": return "/automations";
-    case "skills": return "/skills";
+    case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : "/skills";
     case "usage": return "/usage";
     case "archived": return "/archived";
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : "/projects";
@@ -256,6 +256,11 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (path === "/pods") return { name: "pods" };
   if (path === "/automations") return { name: "automations" };
   if (path === "/skills") return { name: "skills" };
+  const skillMatch = /^\/skills\/~([^/]+)$/.exec(path);
+  if (skillMatch) {
+    const id = decodeResourceId(skillMatch[1]!);
+    return id === null ? null : { name: "skills", id };
+  }
   if (path === "/usage") return { name: "usage" };
   if (path === "/archived") return { name: "archived" };
   if (path === "/settings") return { name: "settings", section: "appearance" };

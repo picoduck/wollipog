@@ -107,8 +107,33 @@ export interface SkillSummary {
   source?: string;
   gitSource?: SkillVersionSummary["gitSource"];
   gitAutoUpdate?: SkillGitAutoUpdate;
+  /** Present while this entry follows a built-in skill the running Wollipog release ships. */
+  builtIn?: { release: string; heldUpdate: SkillBuiltInRelease | null };
+  /** Present on a user-managed skill whose name a built-in skill also uses. */
+  builtInOffer?: SkillBuiltInRelease;
+  /** The signed-in user's recommendation state for a built-in skill. */
+  recommendation?: { dismissed: boolean };
   latestVersion?: SkillVersionSummary | null;
   assignmentCount?: number;
+}
+
+export interface SkillBuiltInRelease { release: string; digest: string }
+
+/** GET /api/skills/:id/built-in-version: the running release's content awaiting review. */
+export interface SkillBuiltInReview {
+  kind: "update" | "adopt";
+  release: string;
+  digest: string;
+  files: SkillFile[];
+  currentVersion: SkillVersionSummary | null;
+  expectedLatestVersionId: string | null;
+  assignmentCount: number;
+  gitAutoUpdate: boolean;
+}
+
+/** A built-in skill is recommended to the signed-in user until it is assigned or they dismiss it. */
+export function skillRecommended(skill: SkillSummary): boolean {
+  return Boolean(skill.builtIn && skill.recommendation && !skill.recommendation.dismissed && !skill.assignmentCount);
 }
 
 export interface SkillGroupView {

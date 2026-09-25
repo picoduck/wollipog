@@ -15,6 +15,9 @@
 
 - `skills/` holds skills shipped to Wollipog users (`using-wollipog`, `orchestrate-issues`). Keep
   them free of repository-specific workflow; they must work in any project.
+- Every release ships `skills/` as built-in Skill Library entries. After changing anything under
+  `skills/`, run `pnpm generate:built-in-skills` and commit the regenerated
+  `apps/control-plane/src/built-in-skills.generated.ts`.
 - `.agents/skills/` holds contributor-only skills for this repository. Read
   `skills/using-wollipog/SKILL.md` when working with Wollipog's agent-facing tools.
 

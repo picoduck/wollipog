@@ -757,7 +757,7 @@ export function Shell() {
           {view.name === "runs" && !disabledExperimentView && <RunsView onNewRun={() => setDialog({ kind: "run" })} />}
           {view.name === "pods" && !disabledExperimentView && <PodsView onNewPod={() => setDialog({ kind: "pod" })} />}
           {view.name === "automations" && <AutomationsView />}
-          {view.name === "skills" && <SkillsView />}
+          {view.name === "skills" && <SkillsView selectedSkillId={view.id} />}
           {view.name === "usage" && <UsageView />}
           {view.name === "archived" && <ArchivedSessionsView />}
           {view.name === "settings" && (

@@ -644,8 +644,6 @@
     "sdot-starting",
     "session-preview",
     "st-done",
-    "st-queued",
-    "st-running",
     "st-stopped",
     "status-authentication-required",
     "status-connecting",

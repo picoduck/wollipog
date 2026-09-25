@@ -2497,6 +2497,35 @@ CREATE TABLE IF NOT EXISTS skill_ownership (
 );
 CREATE INDEX IF NOT EXISTS idx_skill_ownership_scope
   ON skill_ownership(organization_id, owner_kind, owner_id, skill_id);
+
+-- Built-in skills compiled into the running release (scripts/generate-built-in-skills.mjs), one row
+-- per name a release has shipped. skill_id is the library entry that follows release content; it is
+-- NULL while a user-managed skill holds the name, and after the entry is deleted (deleted_at), which
+-- is never undone automatically. offered_* is what the running release ships (NULL once a release
+-- stops shipping it); handled_digest is the release content last applied or accepted, so a later
+-- local edit alone is never mistaken for a release update.
+CREATE TABLE IF NOT EXISTS skill_built_ins (
+  name            TEXT PRIMARY KEY,
+  skill_id        TEXT UNIQUE REFERENCES skills(id) ON DELETE SET NULL,
+  deleted_at      INTEGER,
+  offered_release TEXT,
+  offered_digest  TEXT,
+  handled_digest  TEXT,
+  updated_at      INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skill_built_in_provenance (
+  version_id TEXT PRIMARY KEY,
+  source TEXT NOT NULL
+);
+
+-- Per-user: dismissing a built-in skill's recommendation hides it for that user only.
+CREATE TABLE IF NOT EXISTS skill_recommendation_dismissals (
+  user_id      TEXT NOT NULL,
+  skill_id     TEXT NOT NULL REFERENCES skills(id) ON DELETE CASCADE,
+  dismissed_at INTEGER NOT NULL,
+  PRIMARY KEY (user_id, skill_id)
+);
 `;
 
 /**
@@ -3381,6 +3410,12 @@ export interface SkillGitAutoUpdateView {
   held: { commit: string; reason: SkillGitUpdateHoldReason; scriptPaths: string[]; heldAt: number } | null;
 }
 
+/** A release's built-in skill content, identified by the release that ships it. */
+export interface SkillBuiltInRelease {
+  release: string;
+  digest: string;
+}
+
 export interface SkillView {
   id: string;
   name: string;
@@ -3389,11 +3424,25 @@ export interface SkillView {
   source: string;
   gitSource?: SkillVersionView["gitSource"];
   gitAutoUpdate?: SkillGitAutoUpdateView;
+  /** Present while this entry follows a built-in skill the running release ships. */
+  builtIn?: {
+    release: string;
+    /** The running release's content, waiting for review because the library's latest version has
+     * local changes that an automatic update would replace. */
+    heldUpdate: SkillBuiltInRelease | null;
+  };
+  /** Present on a user-managed skill whose name a built-in skill also uses: the running release's
+   * version can be reviewed and, once accepted, adopted as this entry's built-in content. */
+  builtInOffer?: SkillBuiltInRelease;
+  /** Per requesting user; added by the routes for built-in skills. */
+  recommendation?: { dismissed: boolean };
   latestVersion: SkillVersionSummary | null;
   assignmentCount: number;
   createdAt: number;
   updatedAt: number;
 }
+
+export type BuiltInSkillSeedOutcome = "created" | "updated" | "unchanged" | "held" | "user_managed" | "deleted";
 
 export interface SkillVersionView extends SkillVersionSummary {
   skillId: string;
@@ -3405,6 +3454,8 @@ export interface SkillVersionView extends SkillVersionSummary {
   gitSource?: { url: string; ref: string; subdirectory: string; path: string; commit: string; executablePaths?: string[] };
   machineSource?: { runnerId: string; sourceDirectory: string; name: string; digest: string; importedAt: number;
     context?: AgentContext; providerAccountId?: string };
+  /** The Wollipog release whose built-in content this version is. */
+  builtInSource?: SkillBuiltInRelease;
 }
 
 export interface SkillGroupView {
@@ -7060,6 +7111,12 @@ export class ControlPlaneDb {
       (SELECT COUNT(*) FROM skill_assignments WHERE skill_id=?) +
       (SELECT COUNT(*) FROM skill_group_assignments WHERE group_id=?) AS n`)
       .get(row.id, row.group_id) as { n: number };
+    // Names are unique, so the one built-in row for this name either manages this entry or offers
+    // the running release's version to it.
+    const builtIn = this.stmt(`SELECT skill_id, offered_release, offered_digest, handled_digest
+      FROM skill_built_ins WHERE name=? AND offered_digest IS NOT NULL`).get(row.name) as
+      { skill_id: string | null; offered_release: string; offered_digest: string; handled_digest: string | null } | undefined;
+    const offered = builtIn ? { release: builtIn.offered_release, digest: builtIn.offered_digest } : null;
     return {
       id: row.id,
       name: row.name,
@@ -7068,6 +7125,10 @@ export class ControlPlaneDb {
       source: row.source,
       ...(gitSource ? { gitSource: JSON.parse(gitSource.source) as NonNullable<SkillVersionView["gitSource"]> } : {}),
       ...(gitSource ? { gitAutoUpdate: this.skillGitAutoUpdate(row.id) } : {}),
+      ...(offered && builtIn?.skill_id === row.id ? {
+        builtIn: { release: offered.release, heldUpdate: builtIn.handled_digest === offered.digest ? null : offered },
+      } : {}),
+      ...(offered && builtIn?.skill_id !== row.id ? { builtInOffer: offered } : {}),
       latestVersion: latest
         ? { id: latest.id, digest: latest.digest, createdAt: latest.created_at }
         : null,
@@ -7082,6 +7143,8 @@ export class ControlPlaneDb {
       .get(row.id) as { source: string } | undefined;
     const provenance = this.stmt("SELECT source FROM skill_git_provenance WHERE version_id=?")
       .get(row.id) as { source: string } | undefined;
+    const builtInProvenance = this.stmt("SELECT source FROM skill_built_in_provenance WHERE version_id=?")
+      .get(row.id) as { source: string } | undefined;
     return {
       id: row.id,
       skillId: row.skill_id,
@@ -7091,6 +7154,7 @@ export class ControlPlaneDb {
       note: row.note,
       ...(machineProvenance ? { machineSource: JSON.parse(machineProvenance.source) as NonNullable<SkillVersionView["machineSource"]> } : {}),
       ...(provenance ? { gitSource: JSON.parse(provenance.source) as NonNullable<SkillVersionView["gitSource"]> } : {}),
+      ...(builtInProvenance ? { builtInSource: JSON.parse(builtInProvenance.source) as SkillBuiltInRelease } : {}),
       createdAt: row.created_at,
     };
   }
@@ -7287,6 +7351,7 @@ export class ControlPlaneDb {
       const restored = this.addSkillVersion(skillId, { ...target, note: `Restored from ${target.id}` })!;
       if (target.gitSource) this.stmt("INSERT INTO skill_git_provenance (version_id, source) VALUES (?, ?)").run(restored.id, JSON.stringify(target.gitSource));
       if (target.machineSource) this.stmt("INSERT INTO skill_machine_provenance (version_id, source) VALUES (?, ?)").run(restored.id, JSON.stringify(target.machineSource));
+      if (target.builtInSource) this.stmt("INSERT INTO skill_built_in_provenance (version_id, source) VALUES (?, ?)").run(restored.id, JSON.stringify(target.builtInSource));
       return this.getSkillVersion(restored.id);
     });
   }
@@ -7512,13 +7577,139 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM skill_machine_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       this.stmt("DELETE FROM skill_git_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       this.stmt("DELETE FROM skill_git_auto_updates WHERE skill_id=?").run(skillId);
+      this.stmt("DELETE FROM skill_built_in_provenance WHERE version_id IN (SELECT id FROM skill_versions WHERE skill_id=?)").run(skillId);
       if (!this.stmt("SELECT 1 FROM skills WHERE id=?").get(skillId)) return false;
+      // Deleting a built-in entry declines it: later releases never re-create it.
+      this.stmt("UPDATE skill_built_ins SET skill_id=NULL, deleted_at=?, updated_at=? WHERE skill_id=?")
+        .run(Date.now(), Date.now(), skillId);
+      this.stmt("DELETE FROM skill_recommendation_dismissals WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_assignments WHERE skill_id=?").run(skillId);
       this.stmt("DELETE FROM skill_versions WHERE skill_id=?").run(skillId);
       // skill_ownership cascades from the skills row.
       this.stmt("DELETE FROM skills WHERE id=?").run(skillId);
       return true;
     });
+  }
+
+  /* ----------------------------- Built-in skills ----------------------------- */
+
+  /**
+   * Reconcile one built-in skill the running release ships. A fresh name becomes an unassigned,
+   * organization-owned library entry. An entry that follows release content receives a new version
+   * when the release changes it, so track-latest machines follow and pinned machines keep their
+   * revision; when the library's latest version has local changes, the release content instead
+   * waits for review. A same-name user-managed skill and a deleted built-in entry are never touched.
+   */
+  seedBuiltInSkill(input: {
+    name: string; description: string | null; files: SkillFile[]; manifest: string; digest: string;
+    release: string; now?: number;
+  }): BuiltInSkillSeedOutcome {
+    const now = input.now ?? Date.now();
+    const offered: SkillBuiltInRelease = { release: input.release, digest: input.digest };
+    return this.atomic(() => {
+      this.stmt(`INSERT INTO skill_built_ins (name, offered_release, offered_digest, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(name) DO UPDATE SET offered_release=excluded.offered_release,
+          offered_digest=excluded.offered_digest, updated_at=excluded.updated_at`)
+        .run(input.name, input.release, input.digest, now);
+      const row = this.stmt("SELECT skill_id, deleted_at, handled_digest FROM skill_built_ins WHERE name=?")
+        .get(input.name) as { skill_id: string | null; deleted_at: number | null; handled_digest: string | null };
+      if (row.skill_id) {
+        const skill = this.getSkill(row.skill_id)!;
+        // Content this entry already applied or accepted is not an update, even if edited since.
+        if (row.handled_digest === input.digest) return "unchanged";
+        const latest = skill.latestVersion ? this.getSkillVersion(skill.latestVersion.id) : null;
+        if (latest?.digest === input.digest) {
+          this.stmt("INSERT OR IGNORE INTO skill_built_in_provenance (version_id, source) VALUES (?, ?)")
+            .run(latest.id, JSON.stringify(offered));
+        } else if (latest && !latest.builtInSource) {
+          return "held";
+        } else {
+          const version = this.addSkillVersion(row.skill_id, {
+            files: input.files, manifest: input.manifest, digest: input.digest,
+            note: `Built-in skill from Wollipog ${input.release}`,
+          }, now)!;
+          this.stmt("INSERT INTO skill_built_in_provenance (version_id, source) VALUES (?, ?)")
+            .run(version.id, JSON.stringify(offered));
+        }
+        this.stmt("UPDATE skill_built_ins SET handled_digest=? WHERE name=?").run(input.digest, input.name);
+        return latest?.digest === input.digest ? "unchanged" : "updated";
+      }
+      if (row.deleted_at !== null) return "deleted";
+      if (this.getSkillByName(input.name)) return "user_managed";
+      const skill = this.createSkill({
+        name: input.name, description: input.description, files: input.files, manifest: input.manifest,
+        digest: input.digest, note: `Built-in skill from Wollipog ${input.release}`, now,
+      });
+      this.stmt("UPDATE skills SET source='builtin' WHERE id=?").run(skill.id);
+      this.stmt("INSERT INTO skill_built_in_provenance (version_id, source) VALUES (?, ?)")
+        .run(skill.latestVersion!.id, JSON.stringify(offered));
+      this.stmt("UPDATE skill_built_ins SET skill_id=?, handled_digest=? WHERE name=?")
+        .run(skill.id, input.digest, input.name);
+      return "created";
+    });
+  }
+
+  /** A release that stops shipping a built-in skill leaves its library entry as an ordinary skill. */
+  withdrawBuiltInSkillOffers(shippedNames: readonly string[], now = Date.now()): void {
+    const shipped = new Set(shippedNames);
+    const rows = this.stmt("SELECT name FROM skill_built_ins WHERE offered_digest IS NOT NULL").all() as Array<{ name: string }>;
+    for (const { name } of rows) {
+      if (shipped.has(name)) continue;
+      this.stmt("UPDATE skill_built_ins SET offered_release=NULL, offered_digest=NULL, updated_at=? WHERE name=?").run(now, name);
+    }
+  }
+
+  /**
+   * Commit the running release's reviewed built-in content to a skill: a held update of a built-in
+   * entry, or the adoption of a same-name user-managed skill, which from then on follows releases
+   * like a fresh install. Assignments and machine pins are kept, and Git automatic updates stop so
+   * two upstreams never race. The latest-version fence rejects a stale review.
+   */
+  acceptBuiltInSkillVersion(input: {
+    skillId: string; files: SkillFile[]; manifest: string; digest: string; release: string;
+    expectedLatestVersionId: string | null; now?: number;
+  }): { skill: SkillView; changed: boolean } {
+    const now = input.now ?? Date.now();
+    return this.atomic(() => {
+      const skill = this.getSkill(input.skillId);
+      const offered = skill?.builtIn?.heldUpdate ?? skill?.builtInOffer;
+      if (!skill || !offered || offered.digest !== input.digest || offered.release !== input.release ||
+          (skill.latestVersion?.id ?? null) !== input.expectedLatestVersionId) {
+        throw new SkillImportConflictError("The library or the offered built-in version changed. Review it again.");
+      }
+      const changed = skill.latestVersion?.digest !== input.digest;
+      const versionId = changed
+        ? this.addSkillVersion(skill.id, {
+          files: input.files, manifest: input.manifest, digest: input.digest,
+          note: `Built-in skill from Wollipog ${input.release}`,
+        }, now)!.id
+        : skill.latestVersion!.id;
+      this.stmt("INSERT OR IGNORE INTO skill_built_in_provenance (version_id, source) VALUES (?, ?)")
+        .run(versionId, JSON.stringify(offered));
+      this.stmt("UPDATE skill_built_ins SET skill_id=?, deleted_at=NULL, handled_digest=?, updated_at=? WHERE name=?")
+        .run(skill.id, input.digest, now, skill.name);
+      this.stmt("UPDATE skills SET source='builtin', updated_at=? WHERE id=?").run(now, skill.id);
+      this.stmt(`UPDATE skill_git_auto_updates SET enabled=0, checked_at=NULL, checked_commit=NULL, error=NULL,
+        error_at=NULL, held=NULL, checked_modes=NULL, updated_at=?, revision=revision+1 WHERE skill_id=? AND enabled=1`)
+        .run(now, skill.id);
+      return { skill: this.getSkill(skill.id)!, changed };
+    });
+  }
+
+  /** Built-in skills whose recommendation this user dismissed. */
+  skillRecommendationDismissals(userId: string): Set<string> {
+    const rows = this.stmt("SELECT skill_id FROM skill_recommendation_dismissals WHERE user_id=?")
+      .all(userId) as Array<{ skill_id: string }>;
+    return new Set(rows.map((row) => row.skill_id));
+  }
+
+  setSkillRecommendationDismissed(userId: string, skillId: string, dismissed: boolean, now = Date.now()): void {
+    if (!dismissed) {
+      this.stmt("DELETE FROM skill_recommendation_dismissals WHERE user_id=? AND skill_id=?").run(userId, skillId);
+      return;
+    }
+    this.stmt(`INSERT INTO skill_recommendation_dismissals (user_id, skill_id, dismissed_at) VALUES (?, ?, ?)
+      ON CONFLICT(user_id, skill_id) DO UPDATE SET dismissed_at=excluded.dismissed_at`).run(userId, skillId, now);
   }
 
   listSkillGroups(): SkillGroupView[] {

@@ -274,7 +274,12 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
 
   const memberList = await api(httpBase, MEMBER_TOKEN, "/api/skills");
   assert.equal(memberList.status, 200, "an ordinary member can list skills");
-  assert.deepEqual((await memberList.json() as { skills: unknown[] }).skills, []);
+  // A fresh installation holds only the release's built-in skills, recommended and unassigned.
+  assert.deepEqual((await memberList.json() as { skills: Array<{ name: string; assignmentCount: number; recommendation?: unknown }> })
+    .skills.map(({ name, assignmentCount, recommendation }) => ({ name, assignmentCount, recommendation })), [
+    { name: "orchestrate-issues", assignmentCount: 0, recommendation: { dismissed: false } },
+    { name: "using-wollipog", assignmentCount: 0, recommendation: { dismissed: false } },
+  ]);
 
   const memberCreate = await api(httpBase, MEMBER_TOKEN, "/api/skills", {
     method: "POST",
@@ -336,11 +341,11 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
     ((await (await api(httpBase, FOREIGN_ADMIN_TOKEN, "/api/skills")).json()) as
       { skills: Array<{ name: string }> }).skills.map((skill) => skill.name),
     ["foreign-org-skill"],
-    "a foreign-organization admin's listing excludes the personal organization's skills");
+    "a foreign-organization admin's listing excludes the personal organization's skills, built-in ones included");
   assert.deepEqual(
     ((await (await api(httpBase, MEMBER_TOKEN, "/api/skills")).json()) as
       { skills: Array<{ name: string }> }).skills.map((skill) => skill.name),
-    ["member-skill"],
+    ["member-skill", "orchestrate-issues", "using-wollipog"],
     "the personal-organization member's listing excludes the foreign organization's skills");
 
   const foreignRead = await api(httpBase, FOREIGN_ADMIN_TOKEN, `/api/skills/${memberSkill.id}`);
@@ -371,8 +376,8 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
     "an ordinary member cannot read another member's user-scoped skill");
   assert.deepEqual(
     ((await (await api(httpBase, SECOND_MEMBER_TOKEN, "/api/skills")).json()) as
-      { skills: unknown[] }).skills,
-    [],
+      { skills: Array<{ name: string }> }).skills.map((skill) => skill.name),
+    ["orchestrate-issues", "using-wollipog"],
     "another ordinary member's listing excludes the user-scoped skill");
 
   /* --------------- P1: assignments + the discovery-race fixture (finding 2 setup) --------------- */

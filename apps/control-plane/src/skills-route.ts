@@ -11,6 +11,8 @@ import { registerSkillVersionPolicyRoutes } from "./skill-version-policy-route.j
 import { registerSkillGitRoutes } from "./skill-git-route.js";
 import { registerMachineSkillRoutes } from "./skill-machine-route.js";
 import { registerSkillDriftRoutes } from "./skill-drift-route.js";
+import { registerSkillBuiltInRoutes, withSkillRecommendation } from "./skill-built-in-route.js";
+import type { BuiltInSkill } from "./built-in-skills.js";
 import { listOrphanedSkillCopies } from "./skill-orphan-route.js";
 import { skillStateResponse } from "./skill-edited-copy.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
@@ -298,6 +300,8 @@ export interface SkillsRouteDeps {
   requestHuman(req: FastifyRequest): HumanPrincipal | null;
   requestPrincipal(req: FastifyRequest): AuthPrincipal | null;
   pushSkillsSync: SkillsSyncPusher;
+  /** The running release's built-in skills; their content backs the built-in review routes. */
+  builtInSkills?: readonly BuiltInSkill[];
 }
 
 /** Skill creation ownership defaults exactly like project creation: organization scope for
@@ -327,6 +331,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
   registerMachineSkillRoutes(app, deps);
   registerSkillDriftRoutes(app, deps);
   registerSkillVersionPolicyRoutes(app, deps);
+  registerSkillBuiltInRoutes(app, deps, deps.builtInSkills ?? []);
   const { db, hub, pushSkillsSync } = deps;
 
   /** Re-sync every machine whose desired set may have changed. Runner-scoped assignment
@@ -356,7 +361,12 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
 
   app.get("/api/skills", async (req) => {
     const principal = deps.requestPrincipal(req);
-    return { skills: principal ? db.listSkillsForPrincipal(principal) : [] };
+    if (!principal) return { skills: [] };
+    const dismissed = principal.kind === "human" ? db.skillRecommendationDismissals(principal.userId) : undefined;
+    return {
+      skills: db.listSkillsForPrincipal(principal)
+        .map((skill) => withSkillRecommendation(db, principal, skill, dismissed)),
+    };
   });
 
   app.post("/api/skills", async (req, reply) => {
@@ -408,7 +418,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     if (!skill) return reply.code(404).send({ error: "skill not found" });
     const latestVersion = skill.latestVersion ? db.getSkillVersion(skill.latestVersion.id) : null;
     return {
-      skill,
+      skill: withSkillRecommendation(db, principal, skill),
       latestVersion,
       assignments: db.listSkillAssignments(id)
         .filter((assignment) => canAccessAssignment(principal, assignment)),
@@ -438,7 +448,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
       });
       if (!skill) return reply.code(404).send({ error: "skill not found" });
       pushAffected();
-      return { skill };
+      return { skill: withSkillRecommendation(db, principal, skill) };
     } catch (error) {
       return reply.code(400).send({ error: error instanceof Error ? error.message : "skill update failed" });
     }

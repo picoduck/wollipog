@@ -612,6 +612,14 @@ export function createApiClient(transport: ApiTransport) {
     req<SkillDetailPayload>("/api/skill-git/import", { method: "POST", body: JSON.stringify(body) }),
   setSkillGitAutoUpdate: (id: string, enabled: boolean) =>
     req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}/git-auto-update`, { method: "PUT", body: JSON.stringify({ enabled }) }),
+  setSkillRecommendationDismissed: (id: string, dismissed: boolean) =>
+    req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}/recommendation`, { method: "PUT", body: JSON.stringify({ dismissed }) }),
+  getBuiltInSkillVersion: (id: string) =>
+    req<import("./skills.js").SkillBuiltInReview>(`/api/skills/${encodeURIComponent(id)}/built-in-version`),
+  acceptBuiltInSkillVersion: (id: string, body: { digest: string; expectedLatestVersionId: string | null }) =>
+    req<SkillDetailPayload>(`/api/skills/${encodeURIComponent(id)}/built-in-version`, {
+      method: "POST", body: JSON.stringify({ ...body, accepted: true }),
+    }),
 
   createSkill: (body: { name: string; description?: string; groupId?: string; files: SkillFile[]; note?: string }) =>
     req<SkillDetailPayload>("/api/skills", { method: "POST", body: JSON.stringify(body) }),

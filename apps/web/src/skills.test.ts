@@ -23,6 +23,7 @@ import {
   skillMarkdownBody,
   skillMarkdownFrontmatterName,
   skillMarkdownTemplate,
+  skillRecommended,
   skillsFromPayload,
   validateSkillDraft,
   type RunnerSkillsResponse,
@@ -33,6 +34,17 @@ const skill = (overrides: Partial<SkillSummary> = {}): SkillSummary => ({
   id: "skill-1",
   name: "code-review",
   ...overrides,
+});
+
+test("a built-in skill is recommended until it is assigned or the user dismisses it", () => {
+  const builtIn = { release: "0.28.0", heldUpdate: null };
+  assert.equal(skillRecommended(skill({ builtIn, recommendation: { dismissed: false }, assignmentCount: 0 })), true);
+  assert.equal(skillRecommended(skill({ builtIn, recommendation: { dismissed: false } })), true);
+  assert.equal(skillRecommended(skill({ builtIn, recommendation: { dismissed: false }, assignmentCount: 1 })), false);
+  assert.equal(skillRecommended(skill({ builtIn, recommendation: { dismissed: true }, assignmentCount: 0 })), false);
+  // An older control plane, or an agent credential, reports no per-user state.
+  assert.equal(skillRecommended(skill({ builtIn, assignmentCount: 0 })), false);
+  assert.equal(skillRecommended(skill({ builtInOffer: { release: "0.28.0", digest: "d" }, assignmentCount: 0 })), false);
 });
 
 test("payload normalizers accept wrapped and bare shapes and drop malformed rows", () => {

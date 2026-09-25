@@ -244,6 +244,7 @@ import { principalCanReadWorkflowArtifact } from "./artifact-exports.js";
 import { registerWorkflowArtifactExportRoute } from "./artifact-export-route.js";
 import { registerRunnerCredentialRoutes } from "./runner-credential-route.js";
 import { makeSkillsSyncPusher, registerSkillRoutes } from "./skills-route.js";
+import { builtInSkills, seedBuiltInSkills } from "./built-in-skills.js";
 import { SKILL_GIT_AUTO_UPDATE_SWEEP_MS, SkillGitAutoUpdater, skillGitAutoUpdateIntervalMs } from "./skill-git-auto-update.js";
 import { registerPromptImageRoutes } from "./prompt-image-route.js";
 import {
@@ -2268,7 +2269,21 @@ registerRunnerCredentialRoutes(app, { db, hub, requestHuman });
 
 /* ------------------------------- Skills ---------------------------------- */
 
-registerSkillRoutes(app, { db, hub, requestHuman, requestPrincipal, pushSkillsSync });
+// The release's built-in skills join the library unassigned, so seeding writes nothing to any
+// machine; a changed built-in reaches track-latest machines through the ordinary sync path.
+const releaseBuiltInSkills = builtInSkills();
+try {
+  const outcomes = seedBuiltInSkills(db, releaseBuiltInSkills);
+  app.log.info({ builtInSkills: outcomes }, "reconciled built-in skills");
+  if (Object.values(outcomes).includes("updated")) {
+    for (const runner of db.listRunners()) pushSkillsSync(runner.runnerId);
+  }
+} catch (error) {
+  app.log.error({ err: error }, "built-in skills could not be reconciled; the library is unchanged");
+}
+registerSkillRoutes(app, {
+  db, hub, requestHuman, requestPrincipal, pushSkillsSync, builtInSkills: releaseBuiltInSkills,
+});
 db.skillGitAutoUpdateIntervalMs = skillGitAutoUpdateIntervalMs(process.env.CONTROL_PLANE_SKILL_GIT_UPDATE_INTERVAL_MS);
 const skillGitAutoUpdater = new SkillGitAutoUpdater({ db, intervalMs: db.skillGitAutoUpdateIntervalMs, pushSkillsSync });
 
