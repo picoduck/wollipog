@@ -104,7 +104,7 @@ test("an artifact that matches its digest but cannot be drawn is never shown and
   await openReview(page, "items=3&artifacts=undecodable");
   const broken = page.locator(".evidence-review-item", { hasText: "viewport-2" });
   await broken.scrollIntoViewIfNeeded();
-  await expect(broken.getByRole("alert")).toContainText("matches its recorded digest but could not be displayed");
+  await expect(broken.getByRole("alert")).toHaveText(/matches its recorded digest but could not be displayed\.$/u);
   // No broken-image placeholder is left on screen, and nothing offers to enlarge it.
   await expect(broken.locator("img:visible")).toHaveCount(0);
   await expect(broken.getByRole("button", { name: /Enlarge Evidence/ })).toHaveCount(0);

@@ -215,6 +215,8 @@ test("PROTOCOL_VERSION is 186", () => {
   assert.equal(runnerSupportsProtocol(185, "skillKeptAsideCopies"), true);
   assert.equal(runnerSupportsProtocol(183, "wslMachineSkillAdoption"), false);
   assert.equal(runnerSupportsProtocol(184, "wslMachineSkillAdoption"), true);
+  assert.equal(runnerSupportsProtocol(185, "sessionVideoArtifactAttach"), false);
+  assert.equal(runnerSupportsProtocol(186, "sessionVideoArtifactAttach"), true);
   assert.equal(runnerSupportsProtocol(181, "nativeWindowsMachineSkillAdoption"), false);
   assert.equal(runnerSupportsProtocol(182, "nativeWindowsMachineSkillAdoption"), true);
   assert.equal(runnerSupportsProtocol(182, "skillDrift"), false);

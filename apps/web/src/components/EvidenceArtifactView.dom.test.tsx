@@ -246,7 +246,7 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
   try {
     await undrawable.decode("error");
     assert.match(undrawable.container.querySelector('.evidence-artifact [role="alert"]')?.textContent ?? "",
-      /matches its recorded digest but could not be displayed/u);
+      /matches its recorded digest but could not be displayed\.$/u);
     assert.equal(undrawable.container.querySelector(".evidence-artifact img"), null, "no broken image is left on screen");
     assert.equal(undrawable.container.querySelector('.evidence-artifact [role="alert"] button'), null,
       "the same bytes will not decode on a retry");

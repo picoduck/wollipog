@@ -8816,7 +8816,9 @@ export class SessionsService {
     // A replay is answered before the bounds are consulted: it stores nothing new, so a session at
     // its limit can still recover the id of an upload whose response it never received.
     if (existing) {
-      this.ensureAttachmentEvent(sessionId, existing);
+      // Older screenshots had no attachment purpose or transcript event. A retry must not make
+      // that historical image appear as a newly attached artifact at the end of the transcript.
+      if (existing.metadata?.purpose === "session_attachment") this.ensureAttachmentEvent(sessionId, existing);
       return ok(existing, 200);
     }
     if (actor.kind === "agent" || kind === "video") {
