@@ -1669,11 +1669,19 @@ export class SessionManager {
 
   /** Every runner-created identity remains protected even while a sibling is selected or its
    * cleanup is pending. Attached operator worktrees deliberately stay outside this boundary.
-   * Public because launch provisioning needs the same set the driver's veto uses. */
+   * Public because launch provisioning needs the same set the driver's veto uses.
+   *
+   * The session's own default worktree is also pinned to its branch (#1650): its identity is
+   * `agent/<session-id>`, re-proved before every turn, so switching it would park the session in
+   * worktree recovery. A worktree the session created or attached for another branch is not. */
   managedWorktreeProtections(meta: SessionMeta): ManagedWorktreeProtection[] {
     return this.attributedWorktrees(meta)
       .filter((worktree) => worktree.source !== "attached")
-      .map((worktree) => ({ worktreePath: worktree.path, repoPath: meta.repoPath }));
+      .map((worktree) => ({
+        worktreePath: worktree.path,
+        repoPath: meta.repoPath,
+        ...(worktree.source === "legacy" ? { pinnedBranch: worktree.branch } : {}),
+      }));
   }
 
   /**

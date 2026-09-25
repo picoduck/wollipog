@@ -1252,9 +1252,11 @@ test("create_session fails closed on explicit effort with an older control plane
 
 test("create_session polls an exact pending spawn approval until it can create the child", async () => {
   let attempts = 0;
-  const { deps, calls } = makeDeps(() => ++attempts === 1
-    ? { status: 428, body: { error: "Child creation requires approval" } }
-    : { status: 201, body: { id: "s_child", parentSessionId: SELF_ID } });
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/compatibility")
+    ? { status: 200, body: { protocolVersion: 185, spawnApprovalAbandonmentMs: 600_000 } }
+    : ++attempts === 1
+      ? { status: 428, body: { error: "Child creation requires approval" } }
+      : { status: 201, body: { id: "s_child", parentSessionId: SELF_ID } });
   const sleeps: number[] = [];
   deps.sleep = async (ms) => { sleeps.push(ms); };
   const result = await callTool(deps, "create_session", {
@@ -1262,7 +1264,9 @@ test("create_session polls an exact pending spawn approval until it can create t
   });
   assert.equal(result.isError, undefined);
   assert.equal(resultJson(result).session.id, "s_child");
-  assert.deepEqual(calls[0]!.body, calls[1]!.body);
+  const creates = calls.filter((call) => call.method === "POST");
+  assert.equal(creates.length, 2);
+  assert.deepEqual(creates[0]!.body, creates[1]!.body);
   assert.deepEqual(sleeps, [1000]);
 });
 
@@ -1274,32 +1278,56 @@ test("create tools return the control plane's retry instruction when an approval
     { name: "create_run", args: { runnerId: "r", workspaceId: "w", agentIds: ["a"], task: "Build" }, created: { run: { id: "run" }, sessions: [] } },
     { name: "create_workflow_run", args: { runnerId: "r", workspaceId: "w", workflowId: "workflow", task: "Build" }, created: { run: { id: "run" }, sessions: [] } },
   ];
-  for (const { name, args, created } of cases) {
-    let approved = false;
-    let clock = 0;
-    const { deps, calls } = makeDeps(() => approved
-      ? { status: 201, body: created }
-      : { status: 428, body: { error: pending } });
-    deps.now = () => clock;
-    deps.sleep = async (ms) => { clock += ms; };
+  // Each control plane generation answers the fence probe differently: a newer one publishes the
+  // spawn fence it enforces; an older one (or one that cannot be reached) enforces the 30 s hook
+  // fence, so the note must keep quoting that.
+  const hookFence = /Do not wait for the approval first: if no identical request arrives within 30 s, the approval is withdrawn as abandoned\.$/;
+  const controlPlanes = [
+    { label: "newer", compatibility: { status: 200, body: { protocolVersion: 185, spawnApprovalAbandonmentMs: 600_000 } },
+      withdrawal: /Do not wait for the approval first or end your turn: the approval is withdrawn as abandoned if no identical request arrives within 600 s, and shortly after this session's turn ends\.$/ },
+    { label: "older", compatibility: { status: 200, body: { protocolVersion: 185 } }, withdrawal: hookFence },
+    { label: "unreachable", compatibility: { status: 503, body: { error: "unavailable" } }, withdrawal: hookFence },
+    { label: "malformed", compatibility: { status: 200, body: { protocolVersion: 185, spawnApprovalAbandonmentMs: "600000" } },
+      withdrawal: hookFence },
+  ];
+  for (const controlPlane of controlPlanes) {
+    for (const { name, args, created } of cases) {
+      const label = `${name} against a ${controlPlane.label} control plane`;
+      let approved = false;
+      let clock = 0;
+      const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/compatibility")
+        ? controlPlane.compatibility
+        : approved
+          ? { status: 201, body: created }
+          : { status: 428, body: { error: pending } });
+      deps.now = () => clock;
+      deps.sleep = async (ms) => { clock += ms; };
 
-    const result = await callTool(deps, name, args);
-    assert.equal(result.isError, true, name);
-    const text = resultText(result);
-    assert.ok(text.startsWith(`HTTP 428: ${pending}`), `${name} surfaces the control plane text: ${text}`);
-    assert.match(text, new RegExp(`As your next action, repeat the same ${name} call`));
-    assert.match(text, /Do not wait for the approval first: if no identical request arrives within 30 s, the approval is withdrawn as abandoned/);
-    assert.equal(text.includes("wollipog session create"), name === "create_session", name);
-    assert.match(TOOLS.find((tool) => tool.name === name)!.description, /repeat the identical call immediately/, name);
-    assert.ok(clock <= SPAWN_APPROVAL_POLL_WINDOW_MS, `${name} returned within the window`);
-    assert.equal(calls.length, SPAWN_APPROVAL_POLL_WINDOW_MS / 1000 + 1, name);
-    const polled = calls.length;
+      const result = await callTool(deps, name, args);
+      assert.equal(result.isError, true, label);
+      const text = resultText(result);
+      assert.ok(text.startsWith(`HTTP 428: ${pending}`), `${label} surfaces the control plane text: ${text}`);
+      assert.match(text, new RegExp(`As your next action, repeat the same ${name} call`), label);
+      assert.match(text, controlPlane.withdrawal, label);
+      assert.equal(text.includes("wollipog session create"), name === "create_session", label);
+      assert.match(TOOLS.find((tool) => tool.name === name)!.description,
+        /stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn/, label);
+      assert.ok(clock <= SPAWN_APPROVAL_POLL_WINDOW_MS, `${label} returned within the window`);
+      const creates = () => calls.filter((call) => call.method === "POST");
+      assert.equal(creates().length, SPAWN_APPROVAL_POLL_WINDOW_MS / 1000 + 1, label);
+      const probes = calls.filter((call) => call.url === `${CP_URL}/api/compatibility`);
+      assert.equal(probes.length, 1, `${label} probes the fence once`);
+      assert.equal(calls.length, creates().length + 1, label);
+      assert.equal(probes[0]!.method, "GET", label);
+      assert.equal(probes[0]!.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER], SELF_ID, `${label} probes as the calling session`);
+      const polled = calls.length;
 
-    approved = true;
-    const retried = await callTool(deps, name, args);
-    assert.equal(retried.isError, undefined, name);
-    assert.equal(calls.length, polled + 1, name);
-    assert.deepEqual(calls.map((call) => call.body), Array(calls.length).fill(calls[0]!.body), name);
+      approved = true;
+      const retried = await callTool(deps, name, args);
+      assert.equal(retried.isError, undefined, label);
+      assert.equal(calls.length, polled + 1, `${label} creates on the identical retry without probing`);
+      assert.deepEqual(creates().map((call) => call.body), Array(creates().length).fill(creates()[0]!.body), label);
+    }
   }
 });
 
@@ -1376,15 +1404,18 @@ test("run creation tools keep the exact batch request alive until spawn approval
     for (const terminal of [201, 403]) {
       let remaining = 2;
       let sleeps = 0;
-      const { deps, calls } = makeDeps(() => remaining-- > 0
-        ? { status: 428, body: { error: "Child approval required" } }
-        : { status: terminal, body: terminal === 201 ? { run: { id: "run" }, sessions: [] } : { error: "Rejected" } });
+      const { deps, calls } = makeDeps((call) => call.method === "GET"
+        ? { status: 200, body: { protocolVersion: 185, spawnApprovalAbandonmentMs: 600_000 } }
+        : remaining-- > 0
+          ? { status: 428, body: { error: "Child approval required" } }
+          : { status: terminal, body: terminal === 201 ? { run: { id: "run" }, sessions: [] } : { error: "Rejected" } });
       deps.sleep = async (ms) => { assert.equal(ms, 1000); sleeps++; };
       const result = await callTool(deps, name, { runnerId: "r", workspaceId: "w", agentIds: ["a"], workflowId: "workflow", task: "Build" });
       assert.equal(result.isError === true, terminal === 403);
       assert.equal(sleeps, 2);
-      assert.equal(calls.length, 3);
-      assert.deepEqual(calls.map((call) => call.body), Array(3).fill(calls[0]!.body));
+      const creates = calls.filter((call) => call.method === "POST");
+      assert.equal(creates.length, 3);
+      assert.deepEqual(creates.map((call) => call.body), Array(3).fill(creates[0]!.body));
     }
   }
 });
@@ -1743,6 +1774,37 @@ test("attach_session_artifact uploads a file from disk and returns metadata only
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("attach_session_artifact uploads video to the gated route without returning its bytes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "attach-video-tool-"));
+  try {
+    const bytes = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const file = join(dir, "video.txt");
+    writeFileSync(file, bytes);
+    const old = makeDeps((call) => call.url.endsWith("/api/compatibility")
+      ? { status: 200, body: { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach - 1 } }
+      : { status: 201, body: {} });
+    const refused = await callTool(old.deps, "attach_session_artifact", { path: file });
+    assert.equal(refused.isError, true);
+    assert.match(resultText(refused), new RegExp(
+      `requires control plane protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach}`, "u",
+    ));
+    assert.equal(old.calls.some((call) => call.method === "POST"), false);
+
+    const current = makeDeps((call) => call.url.endsWith("/api/compatibility")
+      ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+      : { status: 201, body: { artifactId: "art_video", sessionId: SELF_ID, kind: "video",
+          name: call.body.name, mimeType: call.body.mimeType, sizeBytes: bytes.length, sha256 } });
+    const attached = await callTool(current.deps, "attach_session_artifact", { path: file });
+    assert.equal(attached.isError, undefined, resultText(attached));
+    const upload = current.calls.find((call) => call.method === "POST")!;
+    assert.equal(upload.url, `${CP_URL}/api/sessions/${SELF_ID}/artifacts/videos`);
+    assert.equal(upload.body.mimeType, "video/webm");
+    assert.deepEqual(resultJson(attached).artifact.kind, "video");
+    assert.equal(resultText(attached).includes(bytes.toString("base64")), false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("attach_session_artifact refuses before reading or uploading when the request cannot succeed", async () => {

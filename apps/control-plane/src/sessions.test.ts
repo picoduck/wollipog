@@ -34,6 +34,7 @@ import {
   MAX_UI_SESSION_SUBSCRIPTIONS,
   POLICY_HOOK_ABANDONMENT_MS,
   PROTOCOL_VERSION,
+  SPAWN_APPROVAL_ABANDONMENT_MS,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   SESSION_NAMING_RUNNER_BUDGET_MS,
@@ -2251,6 +2252,198 @@ test("session spawn policy parks the exact child request and creates only after 
     db.close();
   }
 });
+
+/** A live parent asking for approval to create one child, one run fan-out, or one workflow run. */
+function pendingSpawnFixture(kind: "session" | "run" | "workflow") {
+  const harness = makeHarness();
+  const { db, svc } = harness;
+  const parent = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID }).data!;
+  db.updateSessionStatus(parent.id, "running", Date.now());
+  assert.ok(svc.upsertGovernancePolicy({
+    policyId: "ask-child-spawn", name: "Review Child Sessions", effect: "ask", priority: 100,
+    enabled: true, scope: { toolName: "wollipog.create_session" },
+  }).ok);
+  const sessionRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "Requested Child" };
+  const batchRequest = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, task: "Build and review", title: "Requested Batch" };
+  const create = (): { ok: boolean; status: number; error?: string } => kind === "session"
+    ? svc.createSession(sessionRequest, undefined, undefined, false, false, false, { parentSessionId: parent.id })
+    : kind === "run"
+      ? svc.createRun({ ...batchRequest, agentIds: [AGENT_ID, CODEX_APP_AGENT_ID] }, { parentSessionId: parent.id })
+      : svc.createWorkflowRun({ ...batchRequest, workflowId: "builtin:build-review",
+          agentBindings: { claude: AGENT_ID, codex: CODEX_APP_AGENT_ID } },
+        { kind: "agent", id: parent.id }, undefined, { parentSessionId: parent.id });
+  const asked = create();
+  assert.equal(asked.status, 428, asked.error);
+  const requestId = db.getSession(parent.id)!.pendingApproval!.requestId;
+  const approval = () => db.getPolicyHookApproval(parent.id, requestId)!;
+  return { ...harness, parent, create, requestId, approval, sessionRequest, children: kind === "session" ? 1 : 2 };
+}
+
+for (const kind of ["session", "run", "workflow"] as const) {
+  test(`a pending ${kind} spawn approval survives a 60 s gap between identical calls and creates only on the next one`, () => {
+    const { db, svc, hub, parent, create, requestId, approval, sessionRequest, children } = pendingSpawnFixture(kind);
+    try {
+      if (kind === "session") {
+        assert.equal(requestId, `spawn_${createHash("sha256").update(JSON.stringify({
+          request: sessionRequest,
+          parentSessionId: parent.id,
+          ordinal: 0,
+        })).digest("hex")}`, "the request fingerprint is unchanged");
+      }
+      const returnedAt = approval().lastPolledAt;
+      assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + 60_000), 0,
+        "sixty seconds of agent turn-around does not abandon a live parent's spawn approval");
+      assert.equal(approval().status, "pending");
+      assert.equal(create().status, 428, "the identical call still finds the approval pending");
+      assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, requestId);
+
+      const launched = hub.sentOfType("start_session").length;
+      const refreshedAt = approval().lastPolledAt;
+      assert.ok(svc.approve(parent.id, requestId, "allow").ok);
+      assert.equal(svc.reconcilePolicyHookTimeouts(refreshedAt + 60_000), 0);
+      assert.equal(db.childSessionAllocations(parent.id).count, 0, "approval between calls creates no child");
+      assert.equal(hub.sentOfType("start_session").length, launched);
+      assert.equal(db.listRuns().length, 0);
+
+      const created = create();
+      assert.ok(created.ok, created.error);
+      assert.equal(db.childSessionAllocations(parent.id).count, children, "the identical call creates exactly once");
+      assert.equal(hub.sentOfType("start_session").length, launched + children);
+      assert.equal(create().status, 428, "the approval authorized one creation only");
+      assert.equal(db.childSessionAllocations(parent.id).count, children);
+    } finally { db.close(); }
+  });
+}
+
+test("an older runner's within-30 s identical retries still hold a spawn approval and create once", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const { db, svc, parent, create, requestId, approval } = pendingSpawnFixture("session");
+  try {
+    // An older runner still repeats well inside the 30 s it quotes. Each repeat must refresh the
+    // same approval under the newer fence and must never create before approval.
+    for (let retry = 0; retry < 4; retry++) {
+      const before = approval().lastPolledAt;
+      t.mock.timers.tick(POLICY_HOOK_ABANDONMENT_MS - 5_000);
+      assert.equal(svc.reconcilePolicyHookTimeouts(), 0);
+      assert.equal(create().status, 428);
+      assert.equal(approval().lastPolledAt, before + POLICY_HOOK_ABANDONMENT_MS - 5_000, "the retry refreshes liveness");
+      assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, requestId);
+    }
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
+    assert.ok(svc.approve(parent.id, requestId, "allow").ok);
+    assert.ok(create().ok);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1);
+  } finally { db.close(); }
+});
+
+test("a live parent's silent spawn approval is withdrawn at the spawn fence and the retry keeps its 403", () => {
+  const { db, svc, parent, create, requestId, approval } = pendingSpawnFixture("session");
+  try {
+    const returnedAt = approval().lastPolledAt;
+    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + SPAWN_APPROVAL_ABANDONMENT_MS - 1), 0);
+    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + SPAWN_APPROVAL_ABANDONMENT_MS), 1);
+    assert.equal(approval().status, "denied");
+    assert.ok(svc.governanceAudit(parent.id).some((entry) =>
+      entry.requestId === requestId && entry.outcome === "aborted" && entry.actor.id === "policy-hook-abandoned"));
+    const refused = create();
+    assert.equal(refused.status, 403);
+    assert.equal(refused.error, "child session creation was rejected or its approval expired");
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
+  } finally { db.close(); }
+});
+
+test("a spawn approval falls back to the hook fence once its parent's turn settles", () => {
+  const { db, svc, create, parent, approval } = pendingSpawnFixture("session");
+  try {
+    svc.onSessionStatus(parent.id, "idle");
+    assert.equal(approval().resumeStatus, "idle");
+    const returnedAt = approval().lastPolledAt;
+    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + POLICY_HOOK_ABANDONMENT_MS - 1), 0);
+    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + POLICY_HOOK_ABANDONMENT_MS), 1,
+      "nobody is waiting to collect it, so the ordinary 30 s fence applies");
+    assert.equal(approval().status, "denied");
+    assert.equal(create().ok, false);
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
+  } finally { db.close(); }
+});
+
+for (const settle of ["status frame", "runtime snapshot"] as const) {
+  test(`a ${settle} settle that passes a displaced spawn approval still ends its longer fence`, () => {
+    const { db, svc, parent, requestId, approval } = pendingSpawnFixture("session");
+    try {
+      // A non-policy card holds the visible slot, so the idle is not swallowed as a policy resume.
+      assert.ok(db.requeuePolicyHookApproval(parent.id, requestId));
+      db.setPendingApproval(parent.id, { requestId: "permission", title: "Run Command", kind: "permission", options: [] });
+      if (settle === "status frame") svc.onSessionStatus(parent.id, "idle");
+      else svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({ id: parent.id, status: "idle" }));
+      assert.equal(approval().status, "queued");
+      assert.equal(approval().resumeStatus, "idle", "the settled turn is recorded on the open spawn row");
+      const returnedAt = approval().lastPolledAt;
+      assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + POLICY_HOOK_ABANDONMENT_MS), 1,
+        "no agent turn is left to repeat the call, so the 30 s fence applies");
+      assert.equal(approval().status, "denied");
+    } finally { db.close(); }
+  });
+}
+
+test("a control-plane restart restarts the fence so a promptly reconnecting parent keeps its spawn approval", () => {
+  const { db, svc, parent, create, requestId, approval } = pendingSpawnFixture("session");
+  try {
+    // The agent had been between calls for 50 s when the control plane restarted.
+    const startedAt = approval().lastPolledAt + 50_000;
+    db.settleStartupState(startedAt);
+    assert.equal(db.getSession(parent.id)!.status, "stopped", "startup stops the parent provisionally");
+    assert.equal(approval().lastPolledAt, startedAt, "startup restarts the fence for the reconnect");
+    assert.equal(svc.reconcilePolicyHookTimeouts(startedAt + POLICY_HOOK_ABANDONMENT_MS - 1), 0);
+
+    // The runner reconnects and reports the parent still in its turn.
+    db.registerRunner(runnerMeta(), startedAt + 5_000, PROTOCOL_VERSION);
+    db.updateSessionStatus(parent.id, "input_required", startedAt + 5_000);
+    assert.equal(svc.reconcilePolicyHookTimeouts(startedAt + 90_000), 0,
+      "the reconnected live parent is back on the longer spawn fence");
+    const retried = create();
+    assert.equal(retried.status, 428, retried.error);
+    assert.equal(db.getSession(parent.id)!.pendingApproval?.requestId, requestId);
+    assert.ok(svc.approve(parent.id, requestId, "allow").ok);
+    assert.ok(create().ok);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1);
+  } finally { db.close(); }
+});
+
+test("a spawn approval lapses at the ordinary fence when its runner never returns after a restart", () => {
+  const { db, svc, parent, create, approval } = pendingSpawnFixture("session");
+  try {
+    const startedAt = approval().lastPolledAt + 1_000;
+    db.settleStartupState(startedAt);
+    assert.equal(svc.reconcilePolicyHookTimeouts(startedAt + POLICY_HOOK_ABANDONMENT_MS - 1), 0);
+    assert.equal(svc.reconcilePolicyHookTimeouts(startedAt + POLICY_HOOK_ABANDONMENT_MS), 1,
+      "a parent whose runner stays away cannot collect the approval");
+    assert.equal(approval().status, "denied");
+    assert.equal(create().ok, false);
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
+  } finally { db.close(); }
+});
+
+for (const [ending, actorId] of [
+  ["stopped", "session-stopped"],
+  ["archived", "session-stopped"],
+  ["disconnected from its runner", "runner-disconnected"],
+] as const) {
+  test(`a pending spawn approval is withdrawn at once when its parent is ${ending}`, () => {
+    const { db, svc, parent, create, requestId, approval } = pendingSpawnFixture("session");
+    try {
+      if (ending === "stopped") assert.ok(svc.stop(parent.id).ok);
+      else if (ending === "archived") assert.ok(svc.setArchived(parent.id, true).ok);
+      else svc.failRunnerSessions(RUNNER_ID);
+      assert.equal(approval().status, "denied");
+      assert.equal(db.getSession(parent.id)!.pendingApproval, null);
+      assert.ok(svc.governanceAudit(parent.id).some((entry) =>
+        entry.requestId === requestId && entry.outcome === "aborted" && entry.actor.id === actorId));
+      assert.equal(create().ok, false, "a later identical call is refused");
+      assert.equal(db.childSessionAllocations(parent.id).count, 0);
+    } finally { db.close(); }
+  });
+}
 
 function enableOrchestratorFixture(db: ControlPlaneDb): void {
   const meta = runnerMeta();
@@ -15734,6 +15927,35 @@ test("a known runner history epoch change atomically clears the cache and broadc
   assert.ok(artifactIds.every((artifactId) => db.getWorkflowArtifact(artifactId) === null));
 });
 
+test("a runner history reset broadcasts retained attachment rows to open dashboards", () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 0, historyEpoch: 10 })]);
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("attachment"),
+    ]);
+    const input = { name: "proof.png", mimeType: "image/png", data: bytes.toString("base64") };
+    const actor = { kind: "agent" as const, id: "s_box1" };
+    const attached = svc.attachSessionScreenshot("s_box1", input, actor);
+    assert.ok(attached.ok && attached.data, attached.error);
+    const original = db.listEvents("s_box1")[0]!;
+    assert.equal(original.payload.kind, "artifact_attached");
+
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ seq: 0, historyEpoch: 11 })]);
+    assert.deepEqual(db.listEvents("s_box1"), [original]);
+    assert.deepEqual(hub.sessionEventsResetCalls.at(-1), {
+      sessionId: "s_box1", events: [original], eventEpoch: 1,
+    });
+    const retried = svc.attachSessionScreenshot("s_box1", input, actor);
+    assert.equal(retried.status, 200);
+    assert.equal(retried.data?.artifactId, attached.data.artifactId);
+    assert.deepEqual(db.listEvents("s_box1"), [original]);
+  } finally {
+    db.close();
+  }
+});
+
 test("a live session runtime snapshot updates only its owner and preserves session-scoped controls", () => {
   const { db, svc } = makeHarness();
   svc.hydrateRunnerSessions(RUNNER_ID, [
@@ -19705,6 +19927,21 @@ function uiEvidenceReviewHarness(
       },
     };
   };
+  const video = (sessionId: string, label: string) => {
+    const bytes = Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]),
+      Buffer.from("webm"), Buffer.alloc(8),
+    ]);
+    const artifact = svc.attachSessionVideo(sessionId, {
+      name: `${label}.webm`, mimeType: "video/webm", data: bytes.toString("base64"),
+    }, { kind: "agent", id: sessionId });
+    assert.ok(artifact.ok && artifact.data, artifact.error);
+    return {
+      bytes,
+      item: { evidenceId: label, sha256: artifact.data.sha256,
+        artifactId: artifact.data.artifactId, mediaType: "video/webm" },
+    };
+  };
   const request = (childId: string, requestId: string, evidence: unknown[]) => svc.createWorkflowDecision(childId, {
     requestId, resourceKey: `${requestId}-ui`,
     resourceSnapshot: { category: "ui_evidence_approval", evidence } as never,
@@ -19719,7 +19956,7 @@ function uiEvidenceReviewHarness(
     }
     return delivered;
   };
-  return { db, hub, svc, parent: parent.data, createChild, decisions, screenshot, request, review };
+  return { db, hub, svc, parent: parent.data, createChild, decisions, screenshot, video, request, review };
 }
 
 test("campaign policy delivered to a child names no manager tool the child toolset lacks (#1278)", async () => {
@@ -19775,10 +20012,15 @@ test("artifact-only UI evidence snapshots retain their identity through canonica
       ] });
       assert.ok(linked.ok && linked.data, linked.error);
       assert.deepEqual(linked.data.evidence[0], { ...artifact, uri: `https://evidence.example/${evidenceId}.png` });
+      const video = { ...artifact, mediaType: "video/webm" };
+      const normalizedVideo = normalizeWorkflowDecisionSnapshot({ category: "ui_evidence_approval", evidence: [video] });
+      assert.ok(normalizedVideo.ok && normalizedVideo.data, normalizedVideo.error);
+      assert.deepEqual(normalizedVideo.data.evidence, [video]);
+      assert.deepEqual(normalizeWorkflowDecisionSnapshot(normalizedVideo.data).data, normalizedVideo.data);
       for (const invalid of [
         { evidenceId, sha256 },
         { evidenceId, sha256, artifactId: artifact.artifactId },
-        { ...artifact, mediaType: "video/webm" },
+        { ...artifact, mediaType: "video/avi" },
         { ...artifact, uri: "http://evidence.example/capture.png" },
       ]) {
         assert.equal(normalizeWorkflowDecisionSnapshot({ category: "ui_evidence_approval", evidence: [invalid] }).ok, false);
@@ -19894,8 +20136,10 @@ test("unreviewable UI evidence falls back to the human with a specific reason an
     const child = h.createChild("UI Child");
     const other = h.createChild("Other Child");
     const image = h.screenshot(child.id, "after");
+    const clip = h.video(child.id, "clip");
+    assert.deepEqual(h.db.readWorkflowArtifactBytes(clip.item.artifactId), clip.bytes);
     const cases: Array<[string, unknown, string]> = [
-      ["video", { ...image.item, evidenceId: "clip", mediaType: "video/webm" }, "media_video_unsupported"],
+      ["video", clip.item, "media_video_unsupported"],
       ["external", { evidenceId: "after", uri: image.item.uri, sha256: image.item.sha256 }, "provider_untrusted"],
       ["unknown-media", { ...image.item, mediaType: undefined }, "media_unsupported"],
       ["svg", { ...image.item, mediaType: "image/svg+xml" }, "media_unsupported"],
@@ -20399,9 +20643,20 @@ test("file-based screenshot attach fixes the session, kind, and encoding and bou
     assert.ok(svc.attachSessionScreenshot(session.data.id, body("fifth"), agent,
       { count: 100, bytes: used.bytes + png("fifth").length }).ok, "exactly the limit is admitted");
 
-    // A human's upload is neither counted nor bounded.
+    // A human's upload does not use the agent-specific bound; the general session bound still applies.
     assert.ok(svc.attachSessionScreenshot(session.data.id, body("human"), { kind: "human", id: "owner" }, { count: 0, bytes: 0 }).ok);
     assert.equal(db.sessionAgentScreenshotUsage(session.data.id).count, 4);
+
+    const legacy = svc.createWorkflowArtifact({
+      sessionId: session.data.id, kind: "screenshot", encoding: "base64", ...body("legacy"),
+    }, agent);
+    assert.ok(legacy.ok && legacy.data, legacy.error);
+    const eventCount = db.listEvents(session.data.id, 0, 100).filter((event) => event.payload.kind === "artifact_attached").length;
+    const legacyReplay = svc.attachSessionScreenshot(session.data.id, body("legacy"), agent, limits);
+    assert.equal(legacyReplay.status, 200);
+    assert.equal(legacyReplay.data?.artifactId, legacy.data.artifactId);
+    assert.equal(db.listEvents(session.data.id, 0, 100).filter((event) => event.payload.kind === "artifact_attached").length,
+      eventCount, "replaying a pre-attachment screenshot must not insert a new transcript row");
   } finally {
     db.close();
   }
@@ -20874,4 +21129,33 @@ test("only a campaign Orchestrator sees held descendants past Parent Control off
   } finally {
     db.close();
   }
+});
+
+test("video attachments use private session storage, a video-specific limit, and one durable transcript event", () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+    const session = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+    assert.ok(session.ok && session.data);
+    const id = session.data.id;
+    const agent = { kind: "agent" as const, id };
+    const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
+    const body = (name: string) => ({ name, mimeType: "video/webm", data: webm.toString("base64") });
+    const first = svc.attachSessionVideo(id, body("walkthrough.webm"), agent, { count: 1, bytes: webm.length });
+    assert.ok(first.ok && first.data, first.error);
+    assert.equal(first.data.kind, "video");
+    assert.equal(first.data.metadata?.purpose, "session_attachment");
+    assert.deepEqual(db.readWorkflowArtifactBytes(first.data.artifactId), webm);
+    const replay = svc.attachSessionVideo(id, body("walkthrough.webm"), agent, { count: 1, bytes: webm.length });
+    assert.equal(replay.status, 200);
+    assert.equal(replay.data?.artifactId, first.data.artifactId);
+    assert.equal(svc.attachSessionVideo(id, body("second.webm"), agent, { count: 1, bytes: webm.length }).status, 409);
+    assert.equal(svc.attachSessionVideo(id, body("human.webm"), { kind: "human", id: "owner" },
+      { count: 1, bytes: webm.length }).status, 409, "video limit is shared across authors");
+    assert.equal(svc.attachSessionVideo(id, { ...body("spoof.webm"), mimeType: "video/mp4" }, agent).status, 400);
+    const events = db.listEvents(id, 0, 100).filter((event) => event.payload.kind === "artifact_attached");
+    assert.equal(events.length, 1, "a replay does not duplicate the inline transcript row");
+    assert.equal((events[0]?.payload as { artifact: { artifactId: string } }).artifact.artifactId, first.data.artifactId);
+  } finally { db.close(); }
 });

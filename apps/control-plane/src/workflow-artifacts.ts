@@ -4,13 +4,16 @@ import type {
   WorkflowArtifactKind,
   WorkflowArtifactMetadataValue,
 } from "@wollipog/protocol";
-import { EVENT_PAYLOAD_CHUNK_BYTES, MAX_PROMPT_IMAGE_BYTES, PROMPT_IMAGE_MIME_TYPES } from "@wollipog/protocol";
+import { EVENT_PAYLOAD_CHUNK_BYTES, MAX_PROMPT_IMAGE_BYTES, MAX_SESSION_VIDEO_BYTES, PROMPT_IMAGE_MIME_TYPES } from "@wollipog/protocol";
+
+export const SESSION_ARTIFACT_RETENTION_MS = 180 * 24 * 60 * 60_000;
 
 const KIND_CONTRACT: Record<WorkflowArtifactKind, { encoding: CreateWorkflowArtifactRequest["encoding"]; mimeTypes: string[]; maxBytes: number }> = {
   html_preview: { encoding: "utf8", mimeTypes: ["text/html"], maxBytes: 2 * 1024 * 1024 },
   patch: { encoding: "utf8", mimeTypes: ["text/x-diff", "text/plain"], maxBytes: EVENT_PAYLOAD_CHUNK_BYTES },
   review_report: { encoding: "utf8", mimeTypes: ["text/markdown", "text/plain"], maxBytes: 2 * 1024 * 1024 },
   screenshot: { encoding: "base64", mimeTypes: [...PROMPT_IMAGE_MIME_TYPES], maxBytes: MAX_PROMPT_IMAGE_BYTES },
+  video: { encoding: "base64", mimeTypes: ["video/mp4", "video/webm"], maxBytes: MAX_SESSION_VIDEO_BYTES },
   test_log: { encoding: "utf8", mimeTypes: ["text/plain"], maxBytes: EVENT_PAYLOAD_CHUNK_BYTES },
   verdict: { encoding: "json", mimeTypes: ["application/json"], maxBytes: 256 * 1024 },
 };
@@ -23,6 +26,20 @@ export type ArtifactValidation = { ok: true; value: ValidatedWorkflowArtifact } 
  * (a thorough one has tens of captures) and do not limit prompt images or human uploads. */
 export const MAX_SESSION_ATTACHED_SCREENSHOTS = 256;
 export const MAX_SESSION_ATTACHED_SCREENSHOT_BYTES = 512 * 1024 * 1024;
+export const MAX_SESSION_ATTACHED_VIDEOS = 16;
+export const MAX_SESSION_ATTACHED_VIDEO_BYTES = 256 * 1024 * 1024;
+
+export function videoBytesMatchMime(mimeType: string, bytes: Buffer): boolean {
+  if (mimeType === "video/mp4") {
+    return bytes.length >= 16 && bytes.readUInt32BE(0) >= 16 &&
+      bytes.subarray(4, 8).toString("ascii") === "ftyp" &&
+      ["isom", "iso2", "mp41", "mp42", "avc1", "M4V ", "dash"].includes(bytes.subarray(8, 12).toString("ascii"));
+  }
+  // EBML alone also identifies Matroska. Require the WebM DocType in the bounded header.
+  return mimeType === "video/webm" && bytes.length >= 16 &&
+    bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])) &&
+    bytes.subarray(4, Math.min(bytes.length, 4096)).includes(Buffer.from("webm"));
+}
 
 export function screenshotBytesMatchMime(mimeType: string, bytes: Buffer): boolean {
   if (mimeType === "image/png") {
@@ -65,13 +82,16 @@ export function validateWorkflowArtifact(input: unknown): ArtifactValidation {
   let bytes: Buffer;
   if (contract.encoding === "base64") {
     if (data.length > Math.ceil(contract.maxBytes / 3) * 4) return { ok: false, error: `${raw.kind} artifact exceeds its size limit` };
-    if (!data || data.length % 4 !== 0 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(data)) {
+    if (!data || data.length % 4 !== 0 || /[^A-Za-z0-9+/=]/u.test(data)) {
       return { ok: false, error: "artifact data is not canonical base64" };
     }
     bytes = Buffer.from(data, "base64");
     if (bytes.toString("base64") !== data) return { ok: false, error: "artifact data is not canonical base64" };
-    if (!screenshotBytesMatchMime(raw.mimeType as string, bytes)) {
+    if (raw.kind === "screenshot" && !screenshotBytesMatchMime(raw.mimeType as string, bytes)) {
       return { ok: false, error: "screenshot bytes do not match the declared MIME type" };
+    }
+    if (raw.kind === "video" && !videoBytesMatchMime(raw.mimeType as string, bytes)) {
+      return { ok: false, error: "video bytes do not match the declared MIME type" };
     }
   } else if (contract.encoding === "json") {
     if (data.length > contract.maxBytes) return { ok: false, error: `${raw.kind} artifact exceeds its size limit` };

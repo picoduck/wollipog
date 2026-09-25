@@ -11,6 +11,7 @@ import { fileURLToPath } from "node:url";
 import {
   CONTROL_PLANE_API_VERSION,
   PROTOCOL_VERSION,
+  SPAWN_APPROVAL_ABANDONMENT_MS,
   WOLLIPOG_CONTROL_PLANE_SERVICE,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   type ControlPlaneInstanceInfo,
@@ -487,6 +488,11 @@ test("two real control planes isolate identical ids and persist identity and dat
     },
   });
   assert.equal(scopedAgentCompatibility.status, 200, "a user-scoped session credential can preflight its CLI");
+  assert.equal(
+    (await scopedAgentCompatibility.json() as { spawnApprovalAbandonmentMs?: unknown }).spawnApprovalAbandonmentMs,
+    SPAWN_APPROVAL_ABANDONMENT_MS,
+    "the session credential reads the spawn-approval fence its create tools quote",
+  );
   const unauthenticated = await fetch(`http://127.0.0.1:${firstPort}/api/instance`, {
     headers: { "x-forwarded-for": "203.0.113.42" },
   });

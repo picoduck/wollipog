@@ -1,14 +1,14 @@
-/** Reads one image file for `attach_session_artifact`. The file's bytes go from disk to the control
+/** Reads one image or video file for `attach_session_artifact`. The file's bytes go from disk to the control
  * plane; nothing returned from here except the media type, size, and digest may reach a model. */
 
 import { createHash } from "node:crypto";
 import { constants } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
-import { MAX_PROMPT_IMAGE_BYTES } from "@wollipog/protocol";
+import { MAX_PROMPT_IMAGE_BYTES, MAX_SESSION_VIDEO_BYTES } from "@wollipog/protocol";
 
 export type ImageFileRead =
-  | { ok: true; bytes: Buffer; mediaType: string; sizeBytes: number; sha256: string }
+  | { ok: true; bytes: Buffer; mediaType: string; sizeBytes: number; sha256: string; kind: "screenshot" | "video" }
   | { ok: false; error: string };
 
 /** The media type is read from the content, never from the file name: a `.png` that holds something
@@ -26,6 +26,17 @@ export function sniffImageMediaType(bytes: Buffer): string | null {
   return null;
 }
 
+export function sniffVideoMediaType(bytes: Buffer): string | null {
+  if (bytes.length >= 16 && bytes.readUInt32BE(0) >= 16 &&
+      bytes.subarray(4, 8).toString("ascii") === "ftyp" &&
+      ["isom", "iso2", "mp41", "mp42", "avc1", "M4V ", "dash"].includes(bytes.subarray(8, 12).toString("ascii"))) {
+    return "video/mp4";
+  }
+  if (bytes.length >= 16 && bytes.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3])) &&
+      bytes.subarray(4, Math.min(bytes.length, 4096)).includes(Buffer.from("webm"))) return "video/webm";
+  return null;
+}
+
 function failure(path: string, error: unknown): ImageFileRead {
   const code = (error as NodeJS.ErrnoException)?.code;
   if (code === "ENOENT" || code === "ENOTDIR") return { ok: false, error: `file not found: ${path}` };
@@ -34,8 +45,9 @@ function failure(path: string, error: unknown): ImageFileRead {
   return { ok: false, error: `could not read ${path}: ${code ?? (error as Error)?.message ?? String(error)}` };
 }
 
-export async function readImageFileForAttach(
+async function readFileForAttach(
   path: string,
+  allowVideo: boolean,
   /** Test seam: runs after the size is checked and before the read, where a writer could race. */
   afterSizeCheck?: () => void | Promise<void>,
 ): Promise<ImageFileRead> {
@@ -62,17 +74,18 @@ export async function readImageFileForAttach(
     const info = await handle.stat();
     if (!info.isFile()) return { ok: false, error: `not a regular file: ${path}` };
     if (info.size === 0) return { ok: false, error: `file is empty: ${path}` };
-    if (info.size > MAX_PROMPT_IMAGE_BYTES) {
+    const maxBytes = allowVideo ? MAX_SESSION_VIDEO_BYTES : MAX_PROMPT_IMAGE_BYTES;
+    if (info.size > maxBytes) {
       return {
         ok: false,
-        error: `file is ${info.size} bytes; an attached image may be at most ${MAX_PROMPT_IMAGE_BYTES} bytes: ${path}`,
+        error: `file is ${info.size} bytes; an attached ${allowVideo ? "video" : "image"} may be at most ${maxBytes} bytes: ${path}`,
       };
     }
     await afterSizeCheck?.();
     // Read into a buffer sized from the size just checked, plus one byte to detect growth.
     // `readFile()` would take its own fstat and allocate whatever the file had become by then, so a
     // file grown after the check above could make this process allocate without bound.
-    const buffer = Buffer.allocUnsafe(Math.min(info.size, MAX_PROMPT_IMAGE_BYTES) + 1);
+    const buffer = Buffer.allocUnsafe(Math.min(info.size, maxBytes) + 1);
     let length = 0;
     while (length < buffer.length) {
       const { bytesRead } = await handle.read(buffer, length, buffer.length - length, length);
@@ -84,9 +97,12 @@ export async function readImageFileForAttach(
     if (bytes.length !== info.size) {
       return { ok: false, error: `file changed size while it was being read; attach it once it is complete: ${path}` };
     }
-    const mediaType = sniffImageMediaType(bytes);
+    const mediaType = sniffImageMediaType(bytes) ?? (allowVideo ? sniffVideoMediaType(bytes) : null);
     if (!mediaType) {
-      return { ok: false, error: `file content is not a PNG, JPEG, GIF, or WebP image: ${path}` };
+      return { ok: false, error: `file content is not a PNG, JPEG, GIF, or WebP image${allowVideo ? ", MP4, or WebM video" : ""}: ${path}` };
+    }
+    if (mediaType.startsWith("image/") && bytes.length > MAX_PROMPT_IMAGE_BYTES) {
+      return { ok: false, error: `an attached image may be at most ${MAX_PROMPT_IMAGE_BYTES} bytes: ${path}` };
     }
     return {
       ok: true,
@@ -94,10 +110,19 @@ export async function readImageFileForAttach(
       mediaType,
       sizeBytes: bytes.length,
       sha256: createHash("sha256").update(bytes).digest("hex"),
+      kind: mediaType.startsWith("video/") ? "video" : "screenshot",
     };
   } catch (error) {
     return failure(path, error);
   } finally {
     await handle.close().catch(() => {});
   }
+}
+
+export function readImageFileForAttach(path: string, afterSizeCheck?: () => void | Promise<void>): Promise<ImageFileRead> {
+  return readFileForAttach(path, false, afterSizeCheck);
+}
+
+export function readMediaFileForAttach(path: string, afterSizeCheck?: () => void | Promise<void>): Promise<ImageFileRead> {
+  return readFileForAttach(path, true, afterSizeCheck);
 }

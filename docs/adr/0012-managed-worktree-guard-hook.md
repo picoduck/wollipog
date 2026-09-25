@@ -1028,6 +1028,57 @@ Because the inventory now changes under a running child by design, the driver bi
 decision and emulated mode at spawn, as it already does for the routine-operation supplement; the
 control-channel veto keeps reading the live inventory.
 
+## The session's own branch (#1650)
+
+The veto was scoped to worktree lifecycle, so `git checkout -b` inside a session's own default
+worktree ran without comment. That worktree's identity is its `agent/<session-id>` branch, which
+the runner re-proves before every turn, so the next turn parked the session in worktree recovery.
+In an Orchestrator campaign the child then looked idle with no pending request and never acted on
+an approved decision.
+
+Each protection entry for the session's default (`legacy`-source) worktree now carries
+`pinnedBranch`, and the protections document writes it as an optional field within version 1 (a
+document without it pins nothing, so a sidecar started before the change keeps its old meaning).
+`gitBranchVerdict` refuses, with `MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL`, a Git command whose
+repository is that worktree and which would move it off the pinned branch: `checkout` or `switch` to
+another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detach`, `-d`);
+`branch -m` renaming the branch; `stash branch`; and a forge CLI's `gh pr checkout` or
+`glab mr checkout`. The refusal names `wollipog worktree create --branch <name>`.
+
+- The repository is placed the way Git finds it: from the shell's directory after `-C`, or from a
+  `--git-dir` that names a worktree's own `.git` or its administrative directory (mapped back
+  through that directory's `gitdir` file). The innermost protected root decides, and a directory
+  beneath the worktree that holds its own `.git` (a fixture, a nested clone) is not the worktree.
+- Restoring files is not a switch: `checkout -- <path>`, `checkout <tree-ish> <path>…`,
+  `checkout -p`, `--ours`/`--theirs`, and `--pathspec-from-file`. `checkout HEAD` stays on the
+  branch. Switching back to the pinned branch is always allowed, which is the documented manual
+  recovery.
+- A lone `checkout <name>` follows Git's own order (`parse_branchname_arg`): a commit first, then a
+  remote-tracking branch to create a local one from, then a path. Revision syntax (`~`, `^`, `@{…}`,
+  `A...B`, `:/text`, a `git describe` name ending `-g<id>`) and the pseudo-refs beside `HEAD`
+  (`ORIG_HEAD`, `FETCH_HEAD`, …) are commits; a spelling no ref can have is a path; any other name
+  is a commit exactly when a ref of that name exists — the full name itself, `refs/`, tags, heads,
+  remotes, a remote's `HEAD`, or (unless `--no-guess`) a remote-tracking branch of that name — and a
+  path otherwise, whether or not it is on disk (a deleted tracked file is restored from the index).
+  Option values (`--conflict <style>`, `--pathspec-from-file <file>`) are not operands. That lookup
+  is the only Git state the classifier reads: loose refs and packed-refs, as plain files. A reftable
+  store, an oversized or unreadable ref store, more remotes than it scans, and a name that could
+  abbreviate an object id count as a commit, and the refusal says to name a path after `--` or use
+  `git restore`. `checkout.guess` in Git configuration is not read, so a disabled guess is still
+  treated as on.
+- A command this code cannot place — an unresolved `-C`, an unresolved target branch — is left
+  alone. A branch switch is recoverable, and refusing unreadable Git commands would refuse
+  ordinary work; the destructive vetoes above keep their fail-closed rule.
+- A worktree the session created for another branch carries no pin, so branch work there is
+  unaffected. A switch there still fails the next turn's verification and enters worktree
+  recovery; making that visible and recoverable is the control plane's side of #1650, not the
+  guard's.
+- An Orchestrator's list includes every runner-created worktree (#1473), pins included, so it may
+  restore a child's worktree to the child's branch but not move it to another one.
+- Not recognised: plumbing that rewrites `HEAD` directly (`symbolic-ref`, `update-ref`),
+  `rebase <upstream> <branch>`, `bisect`, and a `GIT_DIR` set in the environment. None is how an
+  agent starts work on another branch, which is the failure this closes.
+
 ## Consequences
 
 - Auto, Accept Edits, Ask Every Time, Full Access, and Don't Ask behave in a worktree session

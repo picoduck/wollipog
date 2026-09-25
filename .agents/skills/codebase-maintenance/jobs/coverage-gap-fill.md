@@ -32,7 +32,16 @@ Rank the candidate list by **uncovered branches**, not by line percentage. Under
 entries; a small security module can read as 73–81% line coverage while every executable branch
 is taken. One run's four top-ranked "security" candidates by line percentage were entirely this
 artifact, and ranking by branch misses surfaced all three real findings and none of the noise.
-Confirm a line-coverage gap against `BRDA` records before reading the source.
+Confirm a line-coverage gap against `BRDA` records before reading the source. The inverse
+also holds: a non-zero `DA` count on the lines inside a guarded block does not prove the guard's
+branch ran, because `DA` follows function hits. Only a `BRDA` record with a non-zero taken count
+proves the branch. #592 called `durable-command-store.ts:110` covered on the strength of its `DA`
+counts; the mismatch branch had never been taken.
+
+Run the coverage command with a TAP reporter beside the lcov one
+(`--test-reporter=tap --test-reporter-destination=<scratch>/tap.txt`). One run exited 1 with an
+empty `lcov.info`, nothing on stderr, and every test reported passing, which left nothing to
+diagnose; the TAP stream is the record that survives that failure.
 
 When a finding rests on a mutation probe (the real module against a copy with one guard removed),
 write the probe files in the run's scratch directory with the `.mts` extension and run them from

@@ -9,9 +9,12 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   addPendingRequest, removePendingRequest, pendingRequests, parentControlRequestEligible,
   CODEX_APP_SERVER_IMAGE_MIME_TYPES,
   MAX_PROMPT_IMAGE_BYTES,
+  MAX_SESSION_VIDEO_BYTES,
   PROMPT_IMAGE_MIME_TYPES,
   archiveRequiresStop,
   POLICY_HOOK_ABANDONMENT_MS,
+  SPAWN_APPROVAL_ABANDONMENT_MS,
+  SPAWN_APPROVAL_REQUEST_ID_PREFIX,
   isGuardrailApproval,
   MAX_UI_SESSION_SUBSCRIPTIONS,
   isPromptImageReference,
@@ -162,6 +165,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
 import {
   MAX_PENDING_STEERING_RESOLUTION_REPLAYS,
   MAX_UNRESOLVED_STEERING_ATTEMPTS,
+  SessionArtifactQuotaError,
   type AgentLaunch,
   type CampaignContinuationRecord,
   type ControlPlaneDb,
@@ -214,6 +218,8 @@ import {
 import {
   MAX_SESSION_ATTACHED_SCREENSHOTS,
   MAX_SESSION_ATTACHED_SCREENSHOT_BYTES,
+  MAX_SESSION_ATTACHED_VIDEOS,
+  MAX_SESSION_ATTACHED_VIDEO_BYTES,
   screenshotBytesMatchMime,
   validateWorkflowArtifact,
 } from "./workflow-artifacts.js";
@@ -594,7 +600,7 @@ export function normalizeWorkflowDecisionSnapshot(
     // Without an external link, the human fallback must have an artifact the browser can display.
     // The Orchestrator still applies its own stricter client and artifact checks before delivery.
     if (item.uri === undefined && (!item.artifactId ||
-        !(PROMPT_IMAGE_MIME_TYPES as readonly string[]).includes(item.mediaType as string))) return [];
+        ![...PROMPT_IMAGE_MIME_TYPES, "video/mp4", "video/webm"].includes(item.mediaType as string))) return [];
     // Optional fields are emitted only when present so a pre-v167 snapshot keeps its digest.
     return [{
       evidenceId: item.evidenceId,
@@ -2460,6 +2466,7 @@ export class SessionsService {
     for (const abandoned of this.db.listAbandonedPolicyHookApprovals(
       now - POLICY_HOOK_ABANDONMENT_MS,
       sessionId,
+      now - SPAWN_APPROVAL_ABANDONMENT_MS,
     )) {
       const before = this.db.getSession(abandoned.sessionId);
       rememberCampaign(before);
@@ -3077,7 +3084,7 @@ export class SessionsService {
       parentSessionId,
       ordinal: this.db.childSessionAllocations(parentSessionId).count,
     })).digest("hex");
-    const requestId = `spawn_${fingerprint}`;
+    const requestId = `${SPAWN_APPROVAL_REQUEST_ID_PREFIX}${fingerprint}`;
     this.reconcilePolicyHookTimeouts(now, parentSessionId);
     const stored = this.db.getPolicyHookApproval(parentSessionId, requestId);
     if (stored) {
@@ -8957,34 +8964,64 @@ export class SessionsService {
       bytes: MAX_SESSION_ATTACHED_SCREENSHOT_BYTES,
     },
   ): ServiceResult<WorkflowArtifactView> {
+    return this.attachSessionMedia(sessionId, body, actor, "screenshot", limits);
+  }
+
+  attachSessionVideo(
+    sessionId: string,
+    body: { name?: unknown; mimeType?: unknown; data?: unknown; metadata?: unknown } | null | undefined,
+    actor: GovernanceActor,
+    limits: { count: number; bytes: number } = {
+      count: MAX_SESSION_ATTACHED_VIDEOS,
+      bytes: MAX_SESSION_ATTACHED_VIDEO_BYTES,
+    },
+  ): ServiceResult<WorkflowArtifactView> {
+    return this.attachSessionMedia(sessionId, body, actor, "video", limits);
+  }
+
+  private attachSessionMedia(
+    sessionId: string,
+    body: { name?: unknown; mimeType?: unknown; data?: unknown; metadata?: unknown } | null | undefined,
+    actor: GovernanceActor,
+    kind: "screenshot" | "video",
+    limits: { count: number; bytes: number },
+  ): ServiceResult<WorkflowArtifactView> {
     const validated = validateWorkflowArtifact({
       sessionId,
-      kind: "screenshot",
+      kind,
       encoding: "base64",
       name: body?.name,
       mimeType: body?.mimeType,
       data: body?.data,
-      ...(body?.metadata !== undefined ? { metadata: body.metadata } : {}),
+      metadata: body?.metadata === undefined ? { purpose: "session_attachment" }
+        : body.metadata && typeof body.metadata === "object" && !Array.isArray(body.metadata)
+          ? { ...body.metadata, purpose: "session_attachment" } : body.metadata,
     });
     if (!validated.ok) return fail(validated.error, 400);
     if (!this.db.getSession(sessionId)) return fail("session not found", 404);
-    const existing = this.db.findAttachedScreenshot(
-      sessionId, validated.value.sha256, validated.value.name, validated.value.mimeType, actor,
-    );
+    const existing = kind === "screenshot"
+      ? this.db.findAttachedScreenshot(sessionId, validated.value.sha256, validated.value.name, validated.value.mimeType, actor)
+      : this.db.findAttachedVideo(sessionId, validated.value.sha256, validated.value.name, validated.value.mimeType, actor);
     // A replay is answered before the bounds are consulted: it stores nothing new, so a session at
     // its limit can still recover the id of an upload whose response it never received.
-    if (existing) return ok(existing, 200);
-    if (actor.kind === "agent") {
-      const usage = this.db.sessionAgentScreenshotUsage(sessionId);
+    if (existing) {
+      // Older screenshots had no attachment purpose or transcript event. A retry must not make
+      // that historical image appear as a newly attached artifact at the end of the transcript.
+      if (existing.metadata?.purpose === "session_attachment") this.ensureAttachmentEvent(sessionId, existing);
+      return ok(existing, 200);
+    }
+    if (actor.kind === "agent" || kind === "video") {
+      const usage = kind === "screenshot"
+        ? this.db.sessionAgentScreenshotUsage(sessionId) : this.db.sessionVideoUsage(sessionId);
       if (usage.count >= limits.count) {
         return fail(
-          `this session already has ${usage.count} attached screenshots; at most ${limits.count} may be attached to one session`,
+          `this session already has ${usage.count} attached ${kind === "video" ? "videos" : "screenshots"}; at most ${limits.count} may be attached to one session`,
           409,
         );
       }
       if (usage.bytes + validated.value.sizeBytes > limits.bytes) {
         return fail(
-          `attaching this file would exceed the ${limits.bytes}-byte limit on screenshots attached to one session (${usage.bytes} bytes used)`,
+          `attaching this file would exceed the ${limits.bytes}-byte limit on ${kind === "video" ? "videos" : "screenshots"} attached to one session (${usage.bytes} bytes used)`,
           409,
         );
       }
@@ -8992,12 +9029,20 @@ export class SessionsService {
     const created = this.storeWorkflowArtifact(validated.value, actor);
     if (!created.ok || !created.data) return fail(created.error!, created.status);
     const { data: _bytes, ...view } = created.data;
+    this.ensureAttachmentEvent(sessionId, view);
     return ok(view, 201);
+  }
+
+  private ensureAttachmentEvent(sessionId: string, artifact: WorkflowArtifactView): void {
+    if (this.db.hasAttachmentEvent(sessionId, artifact.artifactId)) return;
+    const event = this.db.appendEvent(sessionId, { kind: "artifact_attached", artifact }, Date.now());
+    this.hub.sessionEvent(event);
   }
 
   createWorkflowArtifact(input: unknown, actor: GovernanceActor = { kind: "human", id: "local" }): ServiceResult<WorkflowArtifact> {
     const validated = validateWorkflowArtifact(input);
     if (!validated.ok) return fail(validated.error, 400);
+    if (validated.value.kind === "video") return fail("video artifacts use the session video attachment route", 400);
     return this.storeWorkflowArtifact(validated.value, actor);
   }
 
@@ -9025,7 +9070,12 @@ export class SessionsService {
       ...(value.metadata ? { metadata: value.metadata } : {}),
       createdAt: Date.now(),
     };
-    this.db.createWorkflowArtifact(artifact);
+    try {
+      this.db.createWorkflowArtifact(artifact);
+    } catch (error) {
+      if (error instanceof SessionArtifactQuotaError) return fail(error.message, 409);
+      throw error;
+    }
     if (artifact.runId) {
       const updated = this.db.getRun(artifact.runId);
       if (updated) this.hub.runChanged(updated);
@@ -10406,6 +10456,7 @@ export class SessionsService {
     if (status !== "idle" && !isTerminal(status)) {
       this.db.clearPolicyResumeStatus(sessionId);
     }
+    if (status === "idle") this.db.noteSpawnApprovalsSettled(sessionId);
     const childAttention = !isTerminal(status) && pendingRequests(session.pendingApproval).some(
       (request) => request.ownerToolUseId || request.kind === "workflow_decision",
     );
@@ -11422,7 +11473,7 @@ export class SessionsService {
     for (const [index, { snap, campaignBefore }] of terminalBatch.entries()) {
       if (terminalHistories[index]?.reset) {
         const reset = this.db.getSession(snap.id)!;
-        this.hub.sessionEventsReset(snap.id, [], reset.eventEpoch ?? 0);
+        this.hub.sessionEventsReset(snap.id, this.db.listEvents(snap.id), reset.eventEpoch ?? 0);
         if (snap.seq > 0) this.rehydrate.add(snap.id);
       }
       this.gateOnPolicy(snap.id, now);
@@ -11485,7 +11536,7 @@ export class SessionsService {
         const history = this.db.updateSessionFromSnapshot(snap.id, snap, now);
         if (history?.reset) {
           const reset = this.db.getSession(snap.id)!;
-          this.hub.sessionEventsReset(snap.id, [], reset.eventEpoch ?? 0);
+          this.hub.sessionEventsReset(snap.id, this.db.listEvents(snap.id), reset.eventEpoch ?? 0);
           if (snap.seq > 0) this.rehydrate.add(snap.id);
         }
       } else {
@@ -11588,13 +11639,15 @@ export class SessionsService {
       this.db.clearPolicyResumeStatus(snapshot.id);
     } else if (runtimeSnapshot.status === "idle" && hasPolicyApproval(existing.pendingApproval)) {
       this.db.notePolicyResumeStatus(snapshot.id, "idle");
-    } else if (runtimeSnapshot.status !== "idle") {
+    } else if (runtimeSnapshot.status === "idle") {
+      this.db.noteSpawnApprovalsSettled(snapshot.id);
+    } else {
       this.db.clearPolicyResumeStatus(snapshot.id);
     }
     const history = this.db.updateSessionFromSnapshot(snapshot.id, runtimeSnapshot, now);
     if (history?.reset) {
       const reset = this.db.getSession(snapshot.id)!;
-      this.hub.sessionEventsReset(snapshot.id, [], reset.eventEpoch ?? 0);
+      this.hub.sessionEventsReset(snapshot.id, this.db.listEvents(snapshot.id), reset.eventEpoch ?? 0);
       this.rehydrate.add(snapshot.id);
       void this.hydrateHistory(snapshot.id);
     }
@@ -11767,7 +11820,7 @@ export class SessionsService {
           if (!reconciled) return;
           eventEpoch = reconciled.eventEpoch;
           if (reconciled.reset) {
-            this.hub.sessionEventsReset(sessionId, [], eventEpoch);
+            this.hub.sessionEventsReset(sessionId, this.db.listEvents(sessionId), eventEpoch);
             if (afterSeq !== 0) {
               this.rehydrate.add(sessionId);
               return;

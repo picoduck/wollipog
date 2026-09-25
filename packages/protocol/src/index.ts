@@ -574,7 +574,9 @@
 //      they keep one aside, and accept a correlated `skill_kept_aside` read and a confirmed,
 //      observation-fenced discard. Older control planes drop the unknown field, and older runners
 //      report no kept-aside copies rather than a false empty result.
-export const PROTOCOL_VERSION = 185;
+// 186: sessions may attach bounded MP4/WebM video artifacts from a file. Older control planes
+//      understand only screenshot attachments and must never receive a video upload.
+export const PROTOCOL_VERSION = 186;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -631,6 +633,16 @@ export {
 /** A durable hook approval is abandoned only after its sidecar has stopped heartbeating longer
  * than the runner's complete bounded transport-retry window. Human askTimeout remains separate. */
 export const POLICY_HOOK_ABANDONMENT_MS = 30_000;
+/** A pending child-creation approval is refreshed only by the agent repeating its identical create
+ * call, so the gap it must survive is the agent's own turn-around (model latency, compaction,
+ * provider backoff), not a sidecar's transport retry. It gets this longer fence while the parent's
+ * turn is still live; once the parent settles, the ordinary POLICY_HOOK_ABANDONMENT_MS fence
+ * applies, and stopping, archiving, or losing the parent's runner withdraws it at once. The
+ * control plane publishes the value it enforces in `/api/compatibility` as
+ * `spawnApprovalAbandonmentMs`; clients read it from there rather than from this constant. */
+export const SPAWN_APPROVAL_ABANDONMENT_MS = 600_000;
+/** Control-plane request ids for child-creation approvals; tool-call hook ids use `hook_`. */
+export const SPAWN_APPROVAL_REQUEST_ID_PREFIX = "spawn_";
 /** Maximum number of managed background jobs projected into one SessionView. */
 export const MANAGED_BACKGROUND_JOB_VIEW_LIMIT = 128;
 
@@ -800,6 +812,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** Control plane serves the session-scoped screenshot attach route. Checked by the runner's
    * attach_session_artifact tool against the connected control plane, not against a runner. */
   sessionArtifactFileAttach: 169,
+  sessionVideoArtifactAttach: 186,
   worktreeSetup: 141,
   worktreeTeardownPorts: 145,
   worktreeSetupConfig: 146,
@@ -3630,7 +3643,7 @@ export type WorkflowDecisionResourceSnapshot =
       category: "ui_evidence_approval";
       evidence: Array<{
         evidenceId: string;
-        /** HTTPS link for external evidence. An artifact-backed raster image may omit it. */
+        /** HTTPS link for external evidence. An artifact-backed image or video may omit it. */
         uri?: string;
         sha256: string;
         /** First-class Session artifact holding the exact bytes. Only artifact-backed evidence can
@@ -4542,6 +4555,8 @@ export type SessionEventPayload =
       };
     }
   | { kind: "agent_message"; text: string; final?: boolean; messageId?: string; parentToolUseId?: string }
+  /** Control-plane-authored row for a file attachment. Bytes remain in the private artifact store. */
+  | { kind: "artifact_attached"; artifact: WorkflowArtifactView }
   /** Content-free evidence that a response delivered as message chunks reached a successful turn
    * boundary. Completion-only responses continue to use `agent_message.final` instead. */
   | { kind: "agent_response_completed" }
@@ -6276,7 +6291,8 @@ export interface RelayPodResult {
   appendedEntry?: PodContextEntry;
 }
 
-export type WorkflowArtifactKind = "html_preview" | "patch" | "review_report" | "screenshot" | "test_log" | "verdict";
+export type WorkflowArtifactKind = "html_preview" | "patch" | "review_report" | "screenshot" | "video" | "test_log" | "verdict";
+export const MAX_SESSION_VIDEO_BYTES = 32 * 1024 * 1024;
 export type WorkflowArtifactEncoding = "utf8" | "base64" | "json";
 export type WorkflowArtifactMetadataValue = string | number | boolean | null;
 
@@ -6324,6 +6340,9 @@ export interface AttachSessionScreenshotRequest {
   data: string;
   metadata?: Record<string, WorkflowArtifactMetadataValue>;
 }
+
+/** Body of POST /api/sessions/:id/artifacts/videos; the route fixes kind and encoding. */
+export type AttachSessionVideoRequest = AttachSessionScreenshotRequest;
 
 /* -------------------------- Durable workflows --------------------------- */
 

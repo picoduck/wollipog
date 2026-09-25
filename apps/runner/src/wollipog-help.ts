@@ -99,8 +99,8 @@ export function artifactHelp(): string {
     "Usage: wollipog artifact <command> [options]",
     "  artifact attach --file <path> [--name <display-name>] [--session <session-id>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "Reads an image file (PNG, JPEG, GIF, or WebP, up to 8 MiB) on this host and attaches it to the session as a screenshot artifact. The media type is taken from the file's content, not its name.",
-    "Prints only the artifactId, mediaType, sizeBytes, and sha256 — never the file's bytes. Cite exactly those values in a ui_evidence_approval evidence item to make it reviewable by an Orchestrator.",
+    "Reads an image (PNG, JPEG, GIF, or WebP, up to 8 MiB) or video (MP4 or WebM, up to 32 MiB) and attaches it to the session. The media type is taken from the file's content, not its name.",
+    "Prints only the artifactId, mediaType, sizeBytes, and sha256 — never the file's bytes. Images may be cited in ui_evidence_approval for Orchestrator review; video evidence is reviewed by a human.",
     "An injected agent session attaches to itself and cannot name another session. A relative --file is resolved against the current directory.",
   ].join("\n");
 }

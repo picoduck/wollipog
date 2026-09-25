@@ -12,7 +12,7 @@ import {
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
-import { readImageFileForAttach } from "./session-artifact-file.js";
+import { readMediaFileForAttach } from "./session-artifact-file.js";
 import { VERSION } from "./version.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -304,8 +304,9 @@ const ARTIFACT_UPLOAD_TIMEOUT_MS = 180_000;
 
 /** A pre-v169 control plane has no session-scoped attach route. Refuse by name instead of letting
  * the upload 404, and never fall back to the base64 tool argument this tool exists to replace. */
-async function sessionArtifactFileAttachCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
-  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach;
+async function sessionArtifactFileAttachCompatibilityError(deps: McpDeps, video = false): Promise<ToolResult | null> {
+  const required = video ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach
+    : RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach;
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
     const result = await cpFetch(deps, "GET", "/api/compatibility");
@@ -342,24 +343,46 @@ async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): 
       );
 }
 
+/** Bounds the fence probe so it cannot push a create call toward the harness's tool timeout. */
+const SPAWN_APPROVAL_FENCE_PROBE_TIMEOUT_MS = 5_000;
+
+/** The silence a pending child approval survives between identical create calls, as the connected
+ * control plane enforces it. A control plane that does not publish it (or cannot be asked) applies
+ * the ordinary POLICY_HOOK_ABANDONMENT_MS fence to spawn approvals, so null means "quote that". */
+async function publishedSpawnApprovalAbandonmentMs(deps: McpDeps): Promise<number | null> {
+  const result = await cpFetch(deps, "GET", "/api/compatibility", undefined,
+    Math.min(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, SPAWN_APPROVAL_FENCE_PROBE_TIMEOUT_MS));
+  const value = result.ok ? result.data?.spawnApprovalAbandonmentMs : undefined;
+  return Number.isSafeInteger(value) && value >= 1_000 ? value : null;
+}
+
 /** Keep the exact invocation alive while its CP-owned child approval is pending, including
- * run fan-out. Each identical retry refreshes the durable approval's abandonment fence: the control
- * plane rejects an approval nobody has retried for POLICY_HOOK_ABANDONMENT_MS. Polling stops after
- * SPAWN_APPROVAL_POLL_WINDOW_MS so the call returns before the harness times it out; the result tells
- * the agent to repeat the request at once, which keeps the fence alive across calls. `retry` names
+ * run fan-out. Each identical retry refreshes the durable approval's abandonment fence. Polling
+ * stops after SPAWN_APPROVAL_POLL_WINDOW_MS so the call returns before the harness times it out; the
+ * result tells the agent to repeat the request and quotes the fence the control plane publishes,
+ * falling back to POLICY_HOOK_ABANDONMENT_MS for a control plane that predates the longer spawn
+ * fence. The probe starts with the first 428 so it completes inside the poll window. `retry` names
  * that request as the caller can issue it. */
 async function createWithSpawnApproval(deps: McpDeps, retry: string, path: string, body: unknown) {
   const now = deps.now ?? Date.now;
   const deadline = now() + SPAWN_APPROVAL_POLL_WINDOW_MS;
   let result = await cpFetch(deps, "POST", path, body);
+  let fence: Promise<number | null> | undefined;
   while (!result.ok && result.status === 428) {
+    fence ??= publishedSpawnApprovalAbandonmentMs(deps);
     if (now() + SPAWN_APPROVAL_POLL_INTERVAL_MS > deadline) {
+      const fenceMs = await fence;
+      const withdrawal = fenceMs === null
+        ? `Do not wait for the approval first: if no identical request arrives within ` +
+          `${POLICY_HOOK_ABANDONMENT_MS / 1000} s, the approval is withdrawn as abandoned.`
+        : `Do not wait for the approval first or end your turn: the approval is withdrawn as abandoned if no ` +
+          `identical request arrives within ${Math.floor(fenceMs / 1000)} s, and shortly after this session's ` +
+          `turn ends.`;
       return {
         ...result,
         message: `${result.message} Still pending after ${SPAWN_APPROVAL_POLL_WINDOW_MS / 1000} s. As your next ` +
           `action, repeat ${retry} with identical arguments to keep waiting; once approved, that identical request ` +
-          `succeeds. Do not wait for the approval first: if no identical request arrives within ` +
-          `${POLICY_HOOK_ABANDONMENT_MS / 1000} s, the approval is withdrawn as abandoned.`,
+          `succeeds. ${withdrawal}`,
       };
     }
     if (!await cancellableSleep(deps, SPAWN_APPROVAL_POLL_INTERVAL_MS)) {
@@ -1584,7 +1607,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "create_workflow_run",
-    description: "Create a role-bound workflow run whose workers wait for exact node dispatch. A pending human approval returns after about 45 seconds; repeat the identical call immediately to keep it alive. Subject to session permissions and governance policies.",
+    description: "Create a role-bound workflow run whose workers wait for exact node dispatch. A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1650,11 +1673,11 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "attach_session_artifact",
-    description: "Attach an image file from disk to your own session as a screenshot artifact. Pass the file's absolute path; the file is read on the runner host and uploaded directly, so its bytes never enter your context. Returns only the artifactId, mediaType, sizeBytes, and sha256 — cite exactly those in a ui_evidence_approval evidence item to make it reviewable by an Orchestrator. Use this instead of create_workflow_artifact for any image: never base64 an image into a tool argument. PNG, JPEG, GIF, or WebP, up to 8 MiB. Subject to session permissions and governance policies.",
+    description: "Attach an image or short video file from disk to your own session. The runner uploads it directly, so its bytes never enter your context. Returns only metadata. Images (PNG, JPEG, GIF, WebP) are limited to 8 MiB; MP4 and WebM videos to 32 MiB. Cite image artifactId, mediaType, and sha256 in UI evidence for Orchestrator review; video evidence still routes to a human. Never base64 media into a tool argument. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
-        path: { type: "string", description: "Absolute path of a regular image file on the runner host" },
+        path: { type: "string", description: "Absolute path of a regular image or video file on the runner host" },
         name: { type: "string", description: "Display name; defaults to the file name" },
         sessionId: { type: "string", description: "Only for a paired-device caller. A session credential always attaches to its own session." },
       },
@@ -1675,12 +1698,16 @@ export const TOOLS: McpTool[] = [
       }
       const incompatible = await sessionArtifactFileAttachCompatibilityError(deps);
       if (incompatible) return incompatible;
-      const file = await readImageFileForAttach(args.path);
+      const file = await readMediaFileForAttach(args.path);
       if (!file.ok) return errorResult(file.error);
+      if (file.kind === "video") {
+        const videoIncompatible = await sessionArtifactFileAttachCompatibilityError(deps, true);
+        if (videoIncompatible) return videoIncompatible;
+      }
       const r = await cpFetch(
         deps,
         "POST",
-        `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/screenshots`,
+        `/api/sessions/${encodeURIComponent(sessionId)}/artifacts/${file.kind === "video" ? "videos" : "screenshots"}`,
         {
           name: typeof args.name === "string" ? args.name.trim() : basename(args.path),
           mimeType: file.mediaType,
@@ -1913,7 +1940,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_session",
     description:
-      "Start a child session with an optional model and reasoning effort applied before its initial task. Unsupported model/effort pairs fail before launch; omitting effort preserves saved/default resolution. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports the effective model, effort, and each guardrail as a value or null (none). A pending human approval returns after about 45 seconds; repeat the identical call immediately to keep it alive. Subject to session permissions and governance policies.",
+      "Start a child session with an optional model and reasoning effort applied before its initial task. Unsupported model/effort pairs fail before launch; omitting effort preserves saved/default resolution. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports the effective model, effort, and each guardrail as a value or null (none). A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2099,7 +2126,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_run",
     description:
-      "Start a multi-agent run: the same task fanned out to several agents in isolated worktrees. A pending human approval returns after about 45 seconds; repeat the identical call immediately to keep it alive. Subject to session permissions and governance policies.",
+      "Start a multi-agent run: the same task fanned out to several agents in isolated worktrees. A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {

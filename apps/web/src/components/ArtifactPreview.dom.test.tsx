@@ -79,3 +79,36 @@ test("artifact preview fences stale loads and revokes its selected image URL on 
     container.remove();
   }
 });
+
+test("verified video artifacts render a private inline player and release their URL", async () => {
+  const bytes = new Uint8Array([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84, 0x77, 0x65, 0x62, 0x6d]);
+  const item: WorkflowArtifactView = { ...artifact("clip", bytes), kind: "video", name: "clip.webm", mimeType: "video/webm" };
+  const priorExport = api.artifactExport;
+  const priorCreate = URL.createObjectURL;
+  const priorRevoke = URL.revokeObjectURL;
+  const revoked: string[] = [];
+  api.artifactExport = async () => new Blob([bytes], { type: "video/webm" });
+  URL.createObjectURL = () => "blob:private-video";
+  URL.revokeObjectURL = (value) => { revoked.push(value); };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ArtifactPreview artifact={item} />));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    const video = container.querySelector("video.artifact-preview-video");
+    assert.equal(video?.getAttribute("src"), "blob:private-video");
+    assert.equal(video?.hasAttribute("controls"), true);
+    assert.equal(video?.hasAttribute("playsinline"), true);
+    await act(async () => video?.dispatchEvent(new domWindow.Event("error") as unknown as Event));
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "",
+      /This video could not be played in this browser\./u);
+    await act(async () => root.unmount());
+    assert.deepEqual(revoked, ["blob:private-video"]);
+  } finally {
+    api.artifactExport = priorExport;
+    URL.createObjectURL = priorCreate;
+    URL.revokeObjectURL = priorRevoke;
+    container.remove();
+  }
+});

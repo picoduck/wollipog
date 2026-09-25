@@ -40,6 +40,7 @@ test("orchestrator credentials expose only session management and governance rea
     ["POST", "/api/sessions/:id/parent-control-policy"],
     ["PUT", "/api/governance/policies/:policyId"], ["POST", "/api/artifacts/screenshots"],
     ["POST", "/api/sessions/:id/artifacts/screenshots"],
+    ["POST", "/api/sessions/:id/artifacts/videos"],
     ["POST", "/api/workflow-instances/:instanceId/nodes/:nodeId/dispatch"],
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), false, route);
 });

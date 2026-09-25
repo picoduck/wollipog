@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { MAX_PROMPT_IMAGE_BYTES, PROMPT_IMAGE_MIME_TYPES, type WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
+import { MAX_PROMPT_IMAGE_BYTES, MAX_SESSION_VIDEO_BYTES, PROMPT_IMAGE_MIME_TYPES, type WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import { sha256Hex } from "../artifact-preview.js";
@@ -17,12 +17,12 @@ export function evidenceStatusBlocksReview(status: EvidenceArtifactStatus): bool
   return status === "pending" || status === "loading" || status === "mismatch" || status === "unavailable";
 }
 
-/** Only an artifact-backed raster image is shown in place. Other evidence needs an external link
+/** Only an artifact-backed image or browser-playable video is shown in place. Other evidence needs an external link
  * to be reviewable; an item with neither a renderable artifact nor a link is blocked. */
 export function isRenderableEvidence(item: EvidenceItem): item is EvidenceItem & { artifactId: string; mediaType: string } {
   return typeof item.artifactId === "string" && item.artifactId.length > 0 &&
     typeof item.mediaType === "string" &&
-    (PROMPT_IMAGE_MIME_TYPES as readonly string[]).includes(item.mediaType.toLowerCase());
+    [...PROMPT_IMAGE_MIME_TYPES, "video/mp4", "video/webm"].includes(item.mediaType.toLowerCase());
 }
 
 // A decision can carry 32 items. Loading waits for an item to approach the viewport, and even then
@@ -65,6 +65,7 @@ export function EvidenceArtifactView({
   const [visible, setVisible] = useState(typeof IntersectionObserver === "undefined");
   const [attempt, setAttempt] = useState(0);
   const [enlarged, setEnlarged] = useState(false);
+  const isVideo = item.mediaType.toLowerCase().startsWith("video/");
   const containerRef = useRef<HTMLDivElement>(null);
   const enlargeRef = useRef<HTMLButtonElement>(null);
   const onStatusChangeRef = useRef(onStatusChange);
@@ -106,7 +107,7 @@ export function EvidenceArtifactView({
           retryable: !gone,
         };
       }
-      if (blob.size > MAX_PROMPT_IMAGE_BYTES) {
+      if (blob.size > (isVideo ? MAX_SESSION_VIDEO_BYTES : MAX_PROMPT_IMAGE_BYTES)) {
         return { status: "unavailable", reason: "This artifact is too large to show here.", retryable: false };
       }
       // Without SubtleCrypto (plain HTTP on a non-localhost origin) the bytes cannot be checked, and
@@ -159,7 +160,7 @@ export function EvidenceArtifactView({
     setState((current) => current.status === "decoding" || current.status === "ready"
       ? {
           status: "unavailable",
-          reason: "This artifact matches its recorded digest but could not be displayed as an image.",
+          reason: "This artifact matches its recorded digest but could not be displayed.",
           retryable: false,
         }
       : current);
@@ -172,7 +173,18 @@ export function EvidenceArtifactView({
       {(state.status === "pending" || state.status === "loading" || state.status === "decoding") && (
         <p className="evidence-artifact-state muted" role="status">Loading evidence…</p>
       )}
-      {imageUrl && (
+      {imageUrl && (isVideo ? (
+        <video className="evidence-artifact-video" src={imageUrl} controls playsInline preload="auto"
+          aria-label={`Play Evidence: ${item.evidenceId}`} hidden={state.status !== "ready"}
+          onLoadedMetadata={(event) => {
+            if (!(event.currentTarget.videoWidth > 0 && event.currentTarget.videoHeight > 0)) onImageError();
+          }}
+          onLoadedData={(event) => {
+            if (event.currentTarget.videoWidth > 0 && event.currentTarget.videoHeight > 0) onImageLoad();
+            else onImageError();
+          }}
+          onError={onImageError} />
+      ) : (
         <>
           {/* Mounted while decoding so the browser attempts the draw, but hidden and inert until it
               succeeds: a broken image must never look like evidence that was shown. */}
@@ -198,7 +210,7 @@ export function EvidenceArtifactView({
             </Modal>
           )}
         </>
-      )}
+      ))}
       {state.status === "mismatch" && (
         <p className="evidence-artifact-state form-error" role="alert">
           This artifact does not match the digest recorded in the request, so it is not shown.

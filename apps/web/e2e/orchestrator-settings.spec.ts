@@ -12,6 +12,7 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
     await expect(page.getByRole("heading", { name: "Decision Delegation", exact: true })).toBeVisible();
     await expect(page.getByText("Human-Only Decisions", { exact: true })).toBeVisible();
     await expect(page.getByText(/provider may retain them in provider-local transcripts or media logs/)).toBeVisible();
+    await expect(page.getByText(/Video evidence requires human review, including video attached as a Session artifact/)).toBeVisible();
     await expect(page.getByRole("spinbutton", { name: "Maximum Concurrent Children" })).toHaveValue("4");
     await expect(page.getByRole("radiogroup", { name: "Strict Project Isolation" })
       .getByRole("radio", { name: "Disabled" })).toBeChecked();

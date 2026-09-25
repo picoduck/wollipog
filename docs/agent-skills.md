@@ -548,6 +548,15 @@ Native Windows deployment uses directory junctions. For WSL deployment, the Wind
 a fixed in-distribution adapter; standalone WSL runners report Linux and use the Linux path. Later
 sections describe that broader target design.
 
+## Wollipog Skills
+
+The repository's [`skills`](../skills) directory holds agent skills for Wollipog users:
+`using-wollipog`, a compact reference for Wollipog's agent-facing CLI and MCP tools, and
+`orchestrate-issues`, which runs Orchestrator issue campaigns and requires `using-wollipog`. Import
+them with **Import from Git** using this repository, a release tag, and the subdirectory `skills`;
+like any import, they have no assignments until you add one. Skills under `.agents/skills` are for
+contributors to this repository and are not intended for import.
+
 This document describes a planned feature that lets users manage a library of agent skills in
 Wollipog and deploy them to the Machines they have connected. A skill is a directory tree containing
 a `SKILL.md` file plus optional supporting files (for example harness sidecars such as

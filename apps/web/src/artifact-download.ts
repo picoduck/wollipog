@@ -21,6 +21,7 @@ export function artifactDownloadFilename(kind: WorkflowArtifactKind, mimeType: s
     ? mimeType === "image/png" ? "png"
       : mimeType === "image/jpeg" || mimeType === "image/jpg" ? "jpg"
         : mimeType === "image/gif" ? "gif" : mimeType === "image/webp" ? "webp" : "bin"
+    : kind === "video" ? mimeType === "video/mp4" ? "mp4" : mimeType === "video/webm" ? "webm" : "bin"
     : kind === "html_preview" ? "html"
       : kind === "patch" ? "patch"
       : kind === "review_report" ? "md"

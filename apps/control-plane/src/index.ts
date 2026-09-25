@@ -36,6 +36,7 @@ import {
 } from "./automation-trigger-ingress.js";
 import {
   PROTOCOL_VERSION,
+  SPAWN_APPROVAL_ABANDONMENT_MS,
   POLICY_HOOK_POLL_CAPABILITY,
   SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
   parseMessage,
@@ -69,6 +70,7 @@ import {
   type DispatchWorkflowNodeRequest,
   type CreateWorkflowArtifactRequest,
   type AttachSessionScreenshotRequest,
+  type AttachSessionVideoRequest,
   type CreateSessionRequest,
   type DescendantRequestResolution,
   type CreateWorkflowDecisionRequest,
@@ -112,6 +114,7 @@ import {
   type UpdatePodOrchestrationRequest,
   type UpdateAutomationRequest,
 } from "@wollipog/protocol";
+import { SESSION_ARTIFACT_RETENTION_MS } from "./workflow-artifacts.js";
 import { OutboundEventsService } from "./outbound-events.js";
 import {
   nativeTuiCreationError,
@@ -1742,7 +1745,12 @@ app.get("/healthz", async () => ({
   service: CONTROL_PLANE_SERVICE,
 }));
 
-app.get("/api/compatibility", async () => ({ protocolVersion: PROTOCOL_VERSION }));
+// `spawnApprovalAbandonmentMs` is the enforced silence a pending child-creation approval survives
+// while its parent's turn is live; create tools quote it instead of a client-side constant.
+app.get("/api/compatibility", async () => ({
+  protocolVersion: PROTOCOL_VERSION,
+  spawnApprovalAbandonmentMs: SPAWN_APPROVAL_ABANDONMENT_MS,
+}));
 
 registerManagedDesktopRoutes(app, MANAGED_DESKTOP_IDENTITY, {
   trustedLoopback,
@@ -5497,6 +5505,12 @@ app.post("/api/sessions/:id/artifacts/screenshots", { bodyLimit: 11 * 1024 * 102
   return respond(reply, svc.attachSessionScreenshot(id, body, workflowActor(req)));
 });
 
+app.post("/api/sessions/:id/artifacts/videos", { bodyLimit: 44 * 1024 * 1024 }, async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const body = (req.body ?? {}) as Partial<AttachSessionVideoRequest>;
+  return respond(reply, svc.attachSessionVideo(id, body, workflowActor(req)));
+});
+
 app.get("/api/artifacts/:artifactId", async (req, reply) =>
   respond(reply, svc.workflowArtifact((req.params as { artifactId: string }).artifactId)),
 );
@@ -5687,6 +5701,8 @@ const artifactMaintenanceTimer = setInterval(() => {
     db.pruneSessionCommandInvocations(now - SESSION_COMMAND_INVOCATION_RETENTION_MS, 1_000);
     db.compactSteeringAttempts(now, 1_000);
     db.collectExpiredPreparedPromptImages(now, 1_000);
+    const expiredAttachments = db.pruneExpiredSessionAttachments(now - SESSION_ARTIFACT_RETENTION_MS, 1_000);
+    if (expiredAttachments) app.log.info({ event: "session_artifacts_expired", count: expiredAttachments }, "session attachments expired");
     db.collectOrphanedSteeringPromptImages(1_000);
     db.collectOrphanedEventPayloadArtifacts(1_000);
     db.collectWorkflowArtifactBlobs(1_000);

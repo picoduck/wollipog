@@ -11,6 +11,13 @@
   user-authored content in normal sentence case.
 - Accessible names for controls must match the visible convention even when the control is icon-only.
 
+## Agent Skills
+
+- `skills/` holds skills shipped to Wollipog users (`using-wollipog`, `orchestrate-issues`). Keep
+  them free of repository-specific workflow; they must work in any project.
+- `.agents/skills/` holds contributor-only skills for this repository. Read
+  `skills/using-wollipog/SKILL.md` when working with Wollipog's agent-facing tools.
+
 ## GitHub Issues
 
 - When asked to draft, report, log, file, or create a GitHub issue, read and follow

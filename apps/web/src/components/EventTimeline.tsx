@@ -1,4 +1,4 @@
-import type { AgentDriverKind, ReviewRiskLevel } from "@wollipog/protocol";
+import type { AgentDriverKind, ReviewRiskLevel, WorkflowArtifactView } from "@wollipog/protocol";
 import { createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import { isWorkspaceReference, normalizeSourcePath, type AgentQuestion, type PlanEntry, type SessionView, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
@@ -26,6 +26,7 @@ import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
 import { EditIcon, FolderUpIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { PromptImageView } from "./PromptImageView.js";
+import { ArtifactPreview } from "./ArtifactPreview.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { SessionTimelineQuestionRegion } from "./SessionApproval.js";
@@ -33,6 +34,27 @@ import { StructuredQuestionText, structuredQuestionSummary } from "./StructuredQ
 import type { ConversationForkAvailability } from "../session-actions.js";
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
+
+function TranscriptArtifact({ artifact }: { artifact: WorkflowArtifactView }) {
+  const [load, setLoad] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (load || artifact.kind === "video" || !ref.current) return;
+    if (typeof IntersectionObserver === "undefined") { setLoad(true); return; }
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) { setLoad(true); observer.disconnect(); }
+    }, { rootMargin: "240px" });
+    observer.observe(ref.current);
+    return () => observer.disconnect();
+  }, [artifact.kind, load]);
+  return (
+    <div className="tl-artifact" ref={ref}>
+      <div className="tl-artifact-head"><strong>{artifact.name}</strong><span>{artifact.kind === "video" ? "Video" : "Image"} · {artifact.sizeBytes.toLocaleString()} Bytes</span></div>
+      {artifact.kind === "video" && !load && <button className="btn ghost sm" type="button" onClick={() => setLoad(true)}>Load Video</button>}
+      {load && <ArtifactPreview artifact={artifact} />}
+    </div>
+  );
+}
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 export interface TimelineRevealRequest {
@@ -1703,6 +1725,8 @@ const TimelineRow = memo(function TimelineRow({
   const mediaSettled = timelineMediaSettled(item, sessionActive);
   const handoff = useContext(HandoffContext);
   switch (item.kind) {
+    case "artifact_attached":
+      return <TranscriptArtifact artifact={item.artifact} />;
     case "checkpoint":
       return (
         <div

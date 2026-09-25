@@ -104,6 +104,14 @@ filesystem retirement aimed at runner-owned paths while ordinary work beneath th
 available. A deferred worktree is reported with the provider boundary it is waiting for; that is a
 durable retirement request, not a failed cleanup or an invitation to force-remove the path.
 
+A session's own default worktree is also pinned to its `agent/<session-id>` branch, because that
+branch is re-proved before every turn (below). The same guard refuses a Git command run inside it
+that would switch, detach, or rename that branch — `git checkout -b`, `git switch -c`,
+`git switch <other-branch>`, `git branch -m`, `git stash branch`, and `gh pr checkout` — and
+points the agent to `wollipog worktree create --branch <name>` instead. Restoring files and
+switching back to the session's own branch stay available, and a worktree the session created for
+another branch is not pinned.
+
 Because a worktree can still disappear outside Wollipog, every launch that carries a persisted
 worktree re-proves it immediately before the provider process is created — start, resume, worktree
 rebind, and queued app-server recovery alike, and on every execution target, since container
@@ -843,7 +851,10 @@ Video (`media_video_unsupported`), unknown or non-raster media (`media_unsupport
 that lives only behind a URI (`provider_untrusted`) always go to the human. The control plane never
 fetches a child-supplied URL; the URI is display material for the human reviewer only. A screenshot
 Session artifact can be submitted without a URI when it names its `artifactId`, raster `mediaType`,
-and SHA-256. URI-only evidence still requires a safe HTTPS link. Campaign-level
+and SHA-256. A first-class MP4 or WebM Session artifact can also be submitted without a URI, but
+video remains human-owned: no installed Orchestrator client is audited to deliver its motion to the
+model, so an artifact and a matching digest alone cannot create a review receipt. URI-only evidence
+still requires a safe HTTPS link. Campaign-level
 unavailability is reported as `uiEvidenceReview.reasonCode` and `reason` on the campaign projection.
 A human fallback is scoped to that one decision: other children and other assigned categories are
 unaffected.
@@ -1007,4 +1018,4 @@ Runners connected to older control planes do not inject the general surface. WSL
 withhold the Orchestrator capability unless both peers negotiate v124 and fresh discovery proves the
 complete target-local launcher contract.
 
-See [Using Wollipog](../.agents/skills/using-wollipog/SKILL.md) for the compact agent-facing skill.
+See [Using Wollipog](../skills/using-wollipog/SKILL.md) for the compact agent-facing skill.
