@@ -20710,3 +20710,90 @@ test("a resume held before its runner downgraded is sent once on the ordinary pa
     db.close();
   }
 });
+
+test("a revoked or superseded decision withdraws a resume still waiting in the outbox (#1650)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  try {
+    const pendingAgain = (commandId: string) => db.raw().prepare(
+      "UPDATE session_prompt_commands SET state='pending', next_attempt_at=? WHERE command_id=?",
+    ).run(Date.now() + 60_000, commandId);
+
+    // Staged but not yet handed to the runner, then revoked by a policy change.
+    const revoked = f.requestMerge(1656);
+    svc.onSessionStatus(child.id, "idle");
+    f.approve(revoked.occurrenceId);
+    const [staged] = f.resolutionPrompts(revoked.occurrenceId);
+    assert.ok(staged);
+    pendingAgain(staged.commandId);
+    assert.ok(svc.setParentControlPolicy(root.id, {
+      implementation_question: "orchestrator", pr_merge: "human", merged_branch_deletion: "orchestrator",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+    }, 1).ok);
+    assert.equal(db.workflowDecisionByOccurrence(revoked.occurrenceId)?.status, "revoked");
+    assert.equal(f.resumeState(revoked.occurrenceId), "abandoned");
+    assert.equal(db.getSessionPromptCommand(staged.commandId)?.errorCode, "COMMAND_CANCELLED");
+    assert.ok(db.getSessionPromptCommand(staged.commandId)?.dismissedAt !== undefined);
+    svc.retryDuePrompts(Date.now() + 120_000);
+    assert.equal(f.resolutionPrompts(revoked.occurrenceId).length, 1, "the revoked outcome is never sent again");
+
+    // Superseded by the child's own newer request for the same resource.
+    assert.ok(svc.setParentControlPolicy(root.id, {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+    }, 2).ok);
+    const superseded = f.requestMerge(1657);
+    svc.onSessionStatus(child.id, "idle");
+    f.approve(superseded.occurrenceId);
+    const [stale] = f.resolutionPrompts(superseded.occurrenceId);
+    assert.ok(stale);
+    pendingAgain(stale.commandId);
+    const replacement = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-1657-again", resourceKey: "picoduck/wollipog#1657",
+      resourceSnapshot: { ...superseded.resourceSnapshot, headSha: "d".repeat(40),
+        requiredChecks: { ...(superseded.resourceSnapshot as { requiredChecks: object }).requiredChecks, headSha: "d".repeat(40) } } as never,
+    });
+    assert.ok(replacement.ok, replacement.error);
+    assert.equal(db.workflowDecisionByOccurrence(superseded.occurrenceId)?.status, "superseded");
+    assert.equal(f.resumeState(superseded.occurrenceId), "abandoned");
+    svc.retryDuePrompts(Date.now() + 180_000);
+    assert.equal(f.resolutionPrompts(superseded.occurrenceId).length, 1);
+
+    // A command the runner may already hold cannot be recalled; it stays in flight.
+    const sent = f.requestMerge(1658);
+    svc.onSessionStatus(child.id, "idle");
+    f.approve(sent.occurrenceId);
+    assert.ok(svc.setParentControlPolicy(root.id, {
+      implementation_question: "orchestrator", pr_merge: "human", merged_branch_deletion: "orchestrator",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+    }, 3).ok);
+    assert.equal(f.resumeState(sent.occurrenceId), "delivering");
+  } finally {
+    db.close();
+  }
+});
+
+test("a runner that no longer reports recovery cannot keep a resume held (#1650)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child, recovery } = f;
+  try {
+    const merge = f.requestMerge(1659);
+    svc.onSessionStatus(child.id, "idle");
+    f.runnerReports(recovery, "input_required");
+    f.approve(merge.occurrenceId);
+    assert.equal(f.resumeState(merge.occurrenceId), "held");
+    // A pre-v161 runner omits the field, so the stored recovery record is never cleared.
+    db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.worktreeRecovery - 1);
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath,
+    }));
+    assert.ok(db.getSession(child.id)?.worktreeRecovery, "the stale record survives the older snapshot");
+    svc.retryDuePrompts(Date.now() + 5_000);
+    assert.notEqual(f.resumeState(merge.occurrenceId), "held", "the ordinary path settles it instead of holding forever");
+    const settled = f.resumeState(merge.occurrenceId);
+    svc.retryDuePrompts(Date.now() + 10_000);
+    assert.equal(f.resumeState(merge.occurrenceId), settled);
+  } finally {
+    db.close();
+  }
+});

@@ -7546,7 +7546,10 @@ export class SessionsService {
     const held = this.db.heldWorkflowDecisionResumes(sessionId);
     if (!held.length) return;
     const session = this.db.getSession(sessionId);
-    if (session?.worktreeRecovery) return;
+    // Only a runner that reports recovery also reports it cleared. After a downgrade the stored
+    // record is stale forever, so it must not hold the resume; the ordinary path settles it.
+    if (session?.worktreeRecovery &&
+        runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "worktreeRecovery")) return;
     for (const resume of held) {
       const decision = this.db.workflowDecisionByOccurrence(resume.occurrenceId);
       // A stopped child, or a decision revoked or superseded meanwhile, has nothing to resume.

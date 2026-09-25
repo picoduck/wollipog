@@ -14747,6 +14747,9 @@ export class ControlPlaneDb {
         `UPDATE workflow_decisions SET status='superseded', resolved_at=?
          WHERE session_id=? AND category=? AND resource_key=? AND status IN ('pending','approved')`,
       ).run(input.createdAt, input.sessionId, input.category, input.resourceKey);
+      for (const { occurrence_id: occurrenceId } of superseded) {
+        this.retireWorkflowDecisionResume(occurrenceId, input.createdAt);
+      }
       this.stmt(
         `INSERT INTO workflow_decisions
          (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
@@ -14991,12 +14994,35 @@ export class ControlPlaneDb {
     return worktreeRecovery ? sessionHolds({ worktreeRecovery }, this.heldWorkflowDecisionResumes(sessionId)) : [];
   }
 
-  markWorkflowDecisionRevoked(occurrenceId: string, now: number): WorkflowDecisionView | null {
+  /**
+   * A revoked or superseded decision is not announced afterward (#1650). An owed resume is
+   * abandoned. A resume still waiting in the outbox is withdrawn and its row retired. A command
+   * already handed to the runner cannot be recalled: at-least-once transport leaves that to the
+   * resume's own text, which defers to the decision record, and the record now says revoked.
+   */
+  private retireWorkflowDecisionResume(occurrenceId: string, now: number): void {
+    const row = this.stmt(
+      "SELECT session_id, resume_state, resume_command_id FROM workflow_decisions WHERE occurrence_id=?",
+    ).get(occurrenceId) as {
+      session_id: string; resume_state: WorkflowDecisionResumeState | null; resume_command_id: string | null;
+    } | undefined;
+    if (!row) return;
+    const withdrawn = row.resume_state === "delivering" && row.resume_command_id !== null &&
+      this.cancelPendingSessionPromptCommand(row.session_id, row.resume_command_id, now) === "cancelled";
+    if (withdrawn) this.dismissTerminalSessionPromptCommand(row.session_id, row.resume_command_id!, now);
+    if (row.resume_state !== "held" && !withdrawn) return;
     this.stmt(
-      `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?),
-         resume_state=CASE WHEN resume_state='held' THEN 'abandoned' ELSE resume_state END
-       WHERE occurrence_id=? AND status IN ('pending','approved')`,
+      `UPDATE workflow_decisions SET resume_state='abandoned', resume_command_id=NULL, resume_updated_at=?
+       WHERE occurrence_id=?`,
     ).run(now, occurrenceId);
+  }
+
+  markWorkflowDecisionRevoked(occurrenceId: string, now: number): WorkflowDecisionView | null {
+    const revoked = Number(this.stmt(
+      `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
+       WHERE occurrence_id=? AND status IN ('pending','approved')`,
+    ).run(now, occurrenceId).changes) === 1;
+    if (revoked) this.retireWorkflowDecisionResume(occurrenceId, now);
     this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
     return this.workflowDecisionByOccurrence(occurrenceId);
   }

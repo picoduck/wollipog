@@ -779,9 +779,13 @@ with no pending request. Before, its decision resume was dropped and nothing tol
   in one transaction, conditional on the resume still being held. Holding a resume and retiring its
   not-sent row are also one transaction, and the sweep applies any receipt a restart left
   unapplied, so a restart can neither lose an owed resume nor send it twice. A resume held for a
-  child that stops, or for a decision later revoked or superseded, is abandoned. Settling the card
-  leaves a recovering child's status as the runner reported it, instead of marking it running or
-  idle. Older runners keep the ordinary prompt path.
+  child that stops, or for a decision later revoked or superseded, is abandoned. Revocation or
+  supersession also withdraws a resume still waiting in the outbox. One already handed to the
+  runner cannot be recalled, but its text defers to the decision record, which now says revoked.
+  Settling the card leaves a recovering child's status as the runner reported it, instead of
+  marking it running or idle. Older runners keep the ordinary prompt path. A resume held before its
+  runner downgraded is settled on that path rather than held on a recovery record the older runner
+  never clears.
 - **The parent sees the hold.** A session's `holds` list what keeps its next turn from starting,
   with a stable `holdId`, a reason, the `recoveryAction` that clears it, and any `heldResumes`.
   MCP `get_session` returns them together with `worktreeRecovery`. `list_descendant_requests` lists
