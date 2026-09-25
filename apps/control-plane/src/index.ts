@@ -1268,7 +1268,21 @@ app.register(async (instance) => {
         }
         break;
       case "session_runtime_updated":
-        svc.applySessionRuntimeUpdate(runnerId!, msg.snapshot);
+        {
+          const startedAt = performance.now();
+          svc.applySessionRuntimeUpdate(runnerId!, msg.snapshot);
+          const durationMs = performance.now() - startedAt;
+          if (durationMs >= 250) {
+            app.log.warn({
+              event: "session_runtime_update_slow",
+              entryPoint: "runner_socket",
+              runnerId,
+              sessionId: msg.snapshot.id,
+              snapshotSeq: msg.snapshot.seq,
+              durationMs: Math.round(durationMs),
+            }, "session runtime update blocked the control plane");
+          }
+        }
         break;
       case "governance_tripped":
         if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "governanceTripReporting")) {

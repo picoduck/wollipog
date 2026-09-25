@@ -6383,9 +6383,10 @@ export class SessionsService {
   }
 
   private campaignAttentionController(session: SessionView | null): SessionView | null {
-    return session?.parentSessionId
-      ? this.orchestratorCampaignController(this.db.getSession(session.parentSessionId))
-      : null;
+    if (!session?.parentSessionId) return null;
+    const controllerId = this.db.activeCampaignControllerId(session.parentSessionId);
+    const controller = controllerId ? this.db.getSession(controllerId) : null;
+    return controller?.orchestratorPolicy ? controller : null;
   }
 
   private publishCampaignAttentionTransition(before: SessionView | null): void {
@@ -11363,7 +11364,8 @@ export class SessionsService {
   applySessionRuntimeUpdate(runnerId: string, snapshot: SessionSnapshot): void {
     const existing = this.db.getSession(snapshot.id);
     if (!existing || existing.runnerId !== runnerId || this.db.isTombstoned(snapshot.id)) return;
-    const campaignBefore = this.campaignAttentionController(existing);
+    const campaignBefore = this.db.isRepeatedRuntimeSnapshot(snapshot.id, snapshot)
+      ? null : this.campaignAttentionController(existing);
     if (existing.archived && !isTerminal(snapshot.status) && !this.db.hasSessionStopIntent(snapshot.id)) {
       this.requestStop(existing, Date.now(), true);
       return;
