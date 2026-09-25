@@ -1055,14 +1055,17 @@ another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detac
   recovery.
 - A lone `checkout <name>` follows Git's own order (`parse_branchname_arg`): a commit first, then a
   remote-tracking branch to create a local one from, then a path. Revision syntax (`~`, `^`, `@{…}`,
-  `A...B`, `:/text`) and the pseudo-refs beside `HEAD` (`ORIG_HEAD`, `FETCH_HEAD`, …) are commits;
-  a spelling no ref can have is a path; any other name is a commit exactly when a ref of that name
-  exists — the full name itself, `refs/`, tags, heads, remotes, a remote's `HEAD`, or a
-  remote-tracking branch of that name — and a path otherwise, whether or not it is on disk (a
-  deleted tracked file is restored from the index). That lookup is the only Git state the
-  classifier reads: loose refs and packed-refs, as plain files. A reftable store, an oversized or
-  unreadable ref store, and a name that could abbreviate an object id count as a commit, and the
-  refusal says to name a path after `--` or use `git restore`.
+  `A...B`, `:/text`, a `git describe` name ending `-g<id>`) and the pseudo-refs beside `HEAD`
+  (`ORIG_HEAD`, `FETCH_HEAD`, …) are commits; a spelling no ref can have is a path; any other name
+  is a commit exactly when a ref of that name exists — the full name itself, `refs/`, tags, heads,
+  remotes, a remote's `HEAD`, or (unless `--no-guess`) a remote-tracking branch of that name — and a
+  path otherwise, whether or not it is on disk (a deleted tracked file is restored from the index).
+  Option values (`--conflict <style>`, `--pathspec-from-file <file>`) are not operands. That lookup
+  is the only Git state the classifier reads: loose refs and packed-refs, as plain files. A reftable
+  store, an oversized or unreadable ref store, more remotes than it scans, and a name that could
+  abbreviate an object id count as a commit, and the refusal says to name a path after `--` or use
+  `git restore`. `checkout.guess` in Git configuration is not read, so a disabled guess is still
+  treated as on.
 - A command this code cannot place — an unresolved `-C`, an unresolved target branch — is left
   alone. A branch switch is recoverable, and refusing unreadable Git commands would refuse
   ordinary work; the destructive vetoes above keep their fail-closed rule.

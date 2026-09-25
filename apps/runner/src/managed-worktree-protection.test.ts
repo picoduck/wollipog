@@ -968,6 +968,11 @@ test("switching a session's own worktree off its branch is refused with a pointe
     "git checkout refs/heads/agent/s_own",
     "git checkout origin/agent/s_own",
     "git checkout ORIG_HEAD",
+    // A `git describe` name resolves to the commit it abbreviates.
+    "git checkout v0.27.0-97-gde3bb27f",
+    // `--conflict` takes its style as a value, so `main` is still the lone operand.
+    "git checkout --conflict diff3 main",
+    "git checkout --conflict=diff3 main",
     "git checkout FETCH_HEAD",
     "git switch -c fix/issue-1650-guard",
     "git switch -C fix/issue-1650-guard",
@@ -1018,6 +1023,7 @@ test("switching a session's own worktree off its branch is refused with a pointe
 test("restoring files and returning a session's own worktree to its branch stay available (#1650)", () => {
   for (const command of [
     `git switch ${ownBranch}`,
+    `git switch --conflict diff3 ${ownBranch}`,
     `git checkout ${ownBranch}`,
     `git checkout -B ${ownBranch}`,
     "git checkout",
@@ -1141,6 +1147,18 @@ test("a lone checkout operand is a file only when Git would read it as one (#165
   assert.equal(verdict("git checkout refs/heads/feature"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
   assert.equal(verdict("git checkout remote-only"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
   assert.equal(verdict("git checkout README"), null);
+  // `--no-guess` turns remote-branch guessing off, so a tracked file sharing a remote branch's name
+  // is restored rather than refused.
+  writeFileSync(join(worktree, "remote-only"), "a tracked file named like a remote branch");
+  assert.equal(verdict("git checkout --no-guess remote-only"), null);
+  assert.equal(verdict("git checkout --no-guess --guess remote-only"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  // A remote list too long to scan cannot rule a guess out.
+  for (let remote = 0; remote <= 256; remote += 1) {
+    mkdirSync(join(repo, ".git", "refs", "remotes", `mirror-${remote}`), { recursive: true });
+  }
+  assert.equal(verdict("git checkout README"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  assert.equal(verdict("git checkout --no-guess README"), null);
+  assert.equal(verdict("git checkout -- README"), null);
 
   // A `--git-dir` naming the worktree's administrative directory is the worktree. Spelled
   // absolutely it names the worktree registry, which the registry veto already refuses outright;

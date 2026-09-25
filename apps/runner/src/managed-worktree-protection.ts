@@ -846,11 +846,12 @@ function pinnedWorktreeAt(
 }
 
 /**
- * Revision syntax: a commit reached from another (`~`, `^`, `@{…}`, `A...B`) or found by its
- * message (`:/text`), and the pseudo-refs Git keeps beside `HEAD` (`ORIG_HEAD`, `FETCH_HEAD`, …).
- * A lone `checkout` operand spelled this way switches or detaches.
+ * Revision syntax: a commit reached from another (`~`, `^`, `@{…}`, `A...B`), found by its message
+ * (`:/text`), or named by `git describe` (`v1.2-3-g<abbreviated id>`), and the pseudo-refs Git keeps
+ * beside `HEAD` (`ORIG_HEAD`, `FETCH_HEAD`, …). A lone `checkout` operand spelled this way switches
+ * or detaches.
  */
-const REVISION_SYNTAX = /[~^]|@\{|\.\.\.|^:\/|^(?:[A-Z]+_)+HEAD$/u;
+const REVISION_SYNTAX = /[~^]|@\{|\.\.\.|^:\/|-g[0-9a-fA-F]{4,}$|^(?:[A-Z]+_)+HEAD$/u;
 
 /**
  * A spelling no ref can have (`git check-ref-format`): a component starting with `.`, `..`, a space
@@ -864,8 +865,9 @@ const PATH_ONLY_SPELLING =
 const MAX_PACKED_REFS_BYTES = 8 * 1024 * 1024;
 /** Git's own pointer files are a line or two; a larger one is not what it claims to be. */
 const MAX_GIT_POINTER_BYTES = 64 * 1024;
-/** Remotes inspected for a remote-tracking branch `checkout` would create a local one from. */
-const MAX_REMOTES = 64;
+/** Remotes inspected for a remote-tracking branch `checkout` would create a local one from; past
+ * this many the answer is unknown, and the operand is treated as a commit. */
+const MAX_REMOTES = 256;
 
 function isFile(path: string): boolean {
   try {
@@ -915,7 +917,7 @@ function gitDirectories(worktreePath: string): { gitDir: string; common: string 
  * an oversized packed-refs, an I/O error — and a name that could abbreviate an object id count as
  * a commit, so the command is refused with advice to name the path after `--` instead.
  */
-function mayNameCommit(name: string, worktreePath: string): boolean {
+function mayNameCommit(name: string, worktreePath: string, guess: boolean): boolean {
   if (/^[0-9a-f]{4,64}$/iu.test(name)) return true;
   try {
     const directories = gitDirectories(worktreePath);
@@ -929,11 +931,12 @@ function mayNameCommit(name: string, worktreePath: string): boolean {
       `refs/remotes/${name}/HEAD`,
     ];
     if (candidates.some((ref) => isFile(join(common, ref)) || isFile(join(gitDir, ref)))) return true;
-    // `checkout <name>` with no such commit creates `<name>` from a remote's branch of that name.
+    // `checkout <name>` with no such commit creates `<name>` from a remote's branch of that name,
+    // unless `--no-guess` turned that off.
     const remotes = join(common, "refs", "remotes");
-    if (isDirectory(remotes) &&
-        readdirSync(remotes).slice(0, MAX_REMOTES).some((remote) => isFile(join(remotes, remote, name)))) {
-      return true;
+    if (guess && isDirectory(remotes)) {
+      const names = readdirSync(remotes);
+      if (names.length > MAX_REMOTES || names.some((remote) => isFile(join(remotes, remote, name)))) return true;
     }
     const packed = join(common, "packed-refs");
     if (!isFile(packed)) return false;
@@ -942,7 +945,7 @@ function mayNameCommit(name: string, worktreePath: string): boolean {
       const ref = /^[0-9a-f]{40,64} (refs\/\S+)$/u.exec(line)?.[1];
       if (ref === undefined) return false;
       if (candidates.includes(ref)) return true;
-      if (!ref.startsWith("refs/remotes/")) return false;
+      if (!guess || !ref.startsWith("refs/remotes/")) return false;
       const tracking = ref.slice("refs/remotes/".length);
       const slash = tracking.indexOf("/");
       return slash > 0 && tracking.slice(slash + 1) === name;
@@ -959,10 +962,10 @@ function mayNameCommit(name: string, worktreePath: string): boolean {
  * have is a path, and any other name is a path exactly when no ref of that name exists — whether or
  * not it is on disk, since a deleted tracked file is restored from the index the same way.
  */
-function checkoutOperandIsPath(value: string, worktreePath: string): boolean {
+function checkoutOperandIsPath(value: string, worktreePath: string, guess: boolean): boolean {
   if (value === "-" || REVISION_SYNTAX.test(value)) return false;
   if (PATH_ONLY_SPELLING.test(value)) return true;
-  return !mayNameCommit(value, worktreePath);
+  return !mayNameCommit(value, worktreePath, guess);
 }
 
 /**
@@ -999,6 +1002,8 @@ function checkoutMovesBranch(
   const operands: Array<string | null> = [];
   let pathspecs = false;
   let detach = false;
+  // Remote-branch guessing is on unless `--no-guess` (the last of the two wins, as in Git).
+  let guess = true;
   // `undefined` while no new branch is named; `null` for a name this code cannot resolve.
   let created: string | null | undefined;
   for (let index = 0; index < words.length; index += 1) {
@@ -1019,9 +1024,17 @@ function checkoutMovesBranch(
         if (orphan.attached == null) index += 1;
       } else if (longOption(value, "--detach", 3)) {
         detach = true;
-      } else if (longOption(value, "--patch", 6) || longOption(value, "--pathspec-from-file", 13) ||
-          longOption(value, "--ours", 4) || longOption(value, "--theirs", 4)) {
+      } else if (longOption(value, "--patch", 6) || longOption(value, "--ours", 4) ||
+          longOption(value, "--theirs", 4)) {
         pathspecs = true;
+      } else if (value === "--no-guess" || value === "--guess") {
+        guess = value === "--guess";
+      } else {
+        // `--pathspec-from-file` restores files; it and `--conflict` take a value, attached or next.
+        const fromFile = longOption(value, "--pathspec-from-file", 13);
+        const valued = fromFile ?? longOption(value, "--conflict", 4);
+        if (fromFile) pathspecs = true;
+        if (valued && valued.attached == null) index += 1;
       }
       continue;
     }
@@ -1050,7 +1063,7 @@ function checkoutMovesBranch(
   const target = operands[0];
   // `HEAD` alone stays on the current branch; `@`, its synonym elsewhere, detaches here.
   if (target == null || target === pinned.pinnedBranch || target === "HEAD") return false;
-  return !checkoutOperandIsPath(target, pinned.worktreePath);
+  return !checkoutOperandIsPath(target, pinned.worktreePath, guess);
 }
 
 function switchMovesBranch(
@@ -1073,6 +1086,8 @@ function switchMovesBranch(
         longOption(value, "--orphan", 4);
       if (create) return createdBranch(create.attached, words[index + 1], cwd, environment) !== pinnedBranch;
       if (longOption(value, "--detach", 4)) return true;
+      // `--conflict` takes its style as the next word when it is not attached.
+      if (longOption(value, "--conflict", 4)?.attached === null) index += 1;
       continue;
     }
     if (value.startsWith("-") && value !== "-") {
