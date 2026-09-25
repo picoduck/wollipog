@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { validateWorkflowArtifact } from "./workflow-artifacts.js";
+import { validateWorkflowArtifact, videoBytesMatchMime } from "./workflow-artifacts.js";
 
 const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(12)]);
 const webm = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
@@ -34,6 +34,47 @@ test("video validation accepts MP4 and WebM signatures and rejects spoofed or ov
   assert.match((make("video/mp4", webm) as { error: string }).error, /declared MIME type/u);
   assert.match((make("video/webm", Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3]), Buffer.from("matroska")])) as { error: string }).error, /declared MIME type/u);
   assert.match((make("video/mp4", Buffer.concat([mp4, Buffer.alloc(32 * 1024 * 1024 + 1 - mp4.length)])) as { error: string }).error, /size limit/u);
+});
+
+test("WebM validation reads the bounded EBML DocType element", () => {
+  const signature = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
+  const docType = (value: string) => Buffer.concat([Buffer.from([0x42, 0x82, 0x80 | value.length]), Buffer.from(value)]);
+  const header = (...elements: Buffer[]) => {
+    const content = Buffer.concat(elements);
+    assert.ok(content.length < 127);
+    return Buffer.concat([signature, Buffer.from([0x80 | content.length]), content]);
+  };
+  const accepts = (bytes: Buffer) => videoBytesMatchMime("video/webm", bytes);
+  const version = Buffer.from([0x42, 0x86, 0x81, 0x01]);
+
+  assert.equal(accepts(header(version, docType("webm"))), true, "DocType may follow another EBML header element");
+  assert.equal(accepts(Buffer.concat([header(docType("matroska")), Buffer.from("webm")])), false,
+    "a WebM string after the Matroska header is not the DocType");
+  assert.equal(accepts(header(Buffer.from([0xec, 0x84]), Buffer.from("webm"))), false,
+    "a WebM string in another header element is not the DocType");
+  assert.equal(accepts(header(version)), false, "DocType is required");
+  assert.equal(accepts(header(Buffer.from([0x42, 0x82, 0x84, 0xf7, 0xe5, 0xe2, 0xed]))), false,
+    "the DocType bytes must exactly match webm");
+  assert.equal(accepts(header(docType("webm"), docType("matroska"))), false, "duplicate DocTypes are ambiguous");
+  assert.equal(accepts(Buffer.concat([signature, Buffer.from([0xff]), docType("webm")])), false,
+    "an unknown-sized header cannot bound DocType parsing");
+  assert.equal(accepts(Buffer.concat([signature, Buffer.from([0x89]), docType("webm")])), false,
+    "a header that claims bytes beyond the upload is truncated");
+  assert.equal(accepts(Buffer.concat([signature, Buffer.from([0x87, 0x42, 0x82, 0x85]), Buffer.from("webm")])), false,
+    "a DocType that extends past its parent is invalid");
+  assert.equal(accepts(Buffer.concat([signature, Buffer.from([0x87, 0x00]), docType("webm")])), false,
+    "an invalid child ID is rejected");
+  assert.equal(accepts(Buffer.concat([signature, Buffer.from([0x87, 0xec, 0xff]), Buffer.from("webm")])), false,
+    "an unknown-sized child cannot hide a WebM string");
+
+  const size2 = (size: number) => Buffer.from([0x40 | (size >> 8), size & 0xff]);
+  const largeHeader = Buffer.concat([
+    signature, size2(4090), Buffer.from([0xec]), size2(4080), Buffer.alloc(4080), docType("webm"),
+  ]);
+  assert.equal(largeHeader.length, 4096);
+  assert.equal(accepts(largeHeader), true, "a valid DocType at the header bound is accepted");
+  assert.equal(accepts(Buffer.concat([signature, size2(4091), largeHeader.subarray(6), Buffer.alloc(1)])), false,
+    "an EBML header beyond the bounded scan is rejected");
 });
 
 test("artifact validation rejects ambiguous encodings, spoofed images, invalid JSON, and oversized data", () => {
