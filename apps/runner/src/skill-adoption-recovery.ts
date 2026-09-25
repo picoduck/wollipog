@@ -1,6 +1,6 @@
 import {
   closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, opendirSync,
-  readFileSync, readlinkSync, realpathSync, renameSync, symlinkSync, writeFileSync,
+  readFileSync, readlinkSync, realpathSync, symlinkSync, writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
 import {
@@ -8,7 +8,8 @@ import {
   type SkillAdoptionRecoveryResultMessage,
 } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
-import { inspectSkillTree, openSkillDirectory } from "./skill-snapshots.js";
+import { linuxNoReplaceRename, type NoReplaceRename } from "./linux-skill-rename.js";
+import { inspectSkillTree, openResolvedSkillDirectory, openSkillDirectory } from "./skill-snapshots.js";
 import type { RunnerProviderAccount } from "./config.js";
 import {
   platformSkillAdoptionHelper,
@@ -371,6 +372,8 @@ export interface RestoreSkillAdoptionRecoveryOptions {
   checkpoint?: (stage: RestoreStage) => void;
   /** Test seam replacing the platform's fixed native helper; not an RPC input. */
   helper?: SkillAdoptionPlatformHelper;
+  /** Test seam replacing Linux's fixed no-replace rename helper; not an RPC input. */
+  noReplaceRename?: () => NoReplaceRename;
 }
 
 type RestoreResult = {
@@ -445,17 +448,32 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
     return { status: "blocked", operation: initial, error: initial.detail };
   }
 
+  // Resolved before anything is written, so a runner that cannot refuse to replace changes nothing.
+  let rename: NoReplaceRename;
+  try { rename = (options.noReplaceRename ?? linuxNoReplaceRename)(); }
+  catch {
+    return { status: "blocked", operation: initial,
+      error: "This runner cannot move files without risking a replacement, so restore changed nothing." };
+  }
+
   let parent: number | undefined;
   let backup: number | undefined;
   let original: number | undefined;
   try {
     const scope = matches[0]!.scope;
+    // Each root is resolved once; every later open walks it without following any component.
     const home = realpathSync(scope.home);
     const dataDir = realpathSync(options.dataDir);
-    parent = openSkillDirectory(home, scope.localSourceDirectory, true);
+    parent = openResolvedSkillDirectory(home, scope.localSourceDirectory, true);
     backup = openSync(`${fdPath(parent)}/${JOURNAL_PREFIX}${options.operationId}`, directoryFlags);
     const parsed = parseIntent(readJsonFile(backup, "intent.json"), options.operationId, scope);
     if (!parsed || identity(parent) !== parsed.parentIdentity) throw new Error();
+    const journalRelative = `${scope.localSourceDirectory}/${JOURNAL_PREFIX}${options.operationId}`;
+    const journalIdentity = identity(backup);
+    const checkPath = (relative: string, expected: string) => {
+      const fd = openResolvedSkillDirectory(home, relative);
+      try { if (identity(fd) !== expected) throw new Error(); } finally { closeSync(fd); }
+    };
     original = openSync(`${fdPath(backup)}/original`, directoryFlags);
     if (identity(original) !== parsed.sourceIdentity ||
         skillVersionDigest(inspectSkillTree(original, true).files) !== parsed.digest) throw new Error();
@@ -473,7 +491,10 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
       if (preservedLinkKind !== "absent" || !managedLinkText(readlinkSync(sourcePath), target, canonicalLink)) {
         throw new Error();
       }
-      renameSync(sourcePath, managedLinkPath);
+      // The managed link may only move into the journal that recovery inspection will find.
+      checkPath(scope.localSourceDirectory, parsed.parentIdentity);
+      checkPath(journalRelative, journalIdentity);
+      rename(parent, parsed.name, backup, "managed-link");
       fsyncSync(parent); fsyncSync(backup);
       sourceKind = "absent";
       preservedLinkKind = "symlink";
@@ -487,13 +508,23 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
       options.checkpoint?.("managed_link_preserved");
     } else if (preservedLinkKind !== "absent") throw new Error();
     if (sourceKind !== "absent") throw new Error();
-    const originalPath = join(home, scope.localSourceDirectory,
-      `${JOURNAL_PREFIX}${options.operationId}`, "original");
+    const originalRelative = `${journalRelative}/original`;
+    const originalPath = join(home, originalRelative);
+    // The recovery link's text is a path, so the harness directory and journal it names must be
+    // the pinned ones, both before and after publication.
+    checkPath(scope.localSourceDirectory, parsed.parentIdentity);
+    checkPath(originalRelative, parsed.sourceIdentity);
     // symlink() is the portable Node primitive with no-replace semantics: any last-instant file,
     // link, or directory at the source name makes it fail with EEXIST and remains untouched.
     symlinkSync(originalPath, sourcePath, "dir");
     fsyncSync(parent);
     options.checkpoint?.("recovery_link_created");
+    checkPath(scope.localSourceDirectory, parsed.parentIdentity);
+    checkPath(originalRelative, parsed.sourceIdentity);
+    // Restored means the source path, followed, reaches the preserved original, never a dangling link.
+    const published = openSync(join(home, scope.localSourceDirectory, parsed.name),
+      constants.O_RDONLY | constants.O_DIRECTORY);
+    try { if (identity(published) !== parsed.sourceIdentity) throw new Error(); } finally { closeSync(published); }
     if (readlinkSync(sourcePath) !== originalPath || identity(original) !== parsed.sourceIdentity ||
         skillVersionDigest(inspectSkillTree(original, true).files) !== parsed.digest) throw new Error();
     writeRecord(backup, "restored.json", { sourceIdentity: parsed.sourceIdentity, digest: parsed.digest });

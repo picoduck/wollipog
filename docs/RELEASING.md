@@ -31,6 +31,12 @@ finished bytes to the compatible `agent-manager-runner-<triple>[.exe]` alias. In
 signing happen only once, before the copy, so each pair is byte-identical. Both names run `--version`
 natively before upload.
 
+The runner SEA embeds fixed skill-adoption helpers compiled on the build host. macOS legs compile the
+snapshot helper with `/usr/bin/clang`. Linux legs compile the no-replace rename helper
+(`apps/runner/native/linux-skill-rename.c`) with `/usr/bin/cc -static`, which needs a C compiler and
+the static C library; the `build-essential` packages the Linux legs install provide both. CI's
+`--bundle-only` runner check compiles the same static helper on every pull request.
+
 Each matrix job also publishes the **headless control plane**: the exact injected and signed
 sidecar bytes are copied to `apps/control-plane/dist-bin/wollipog-control-plane-<triple>[.exe]`,
 run natively with `--version` against `APP_RELEASE_VERSION`, compared byte for byte with the

@@ -294,13 +294,30 @@ no-follow descriptors with the existing snapshot bounds. Both must match the app
 the source must retain its discovery generation and directory identity. Store/source overlap is
 rejected. The engine supports original agent-invocable content only; manual variants fail closed.
 
+The home and data directories are resolved once. Every later open walks the resolved path without
+following any component, so the verified store version and the published link text come from the
+same root.
+
 Before moving the source, it creates a private mode-0700 sibling directory named
 `.wollipog-adoption-<uuid>` with a mode-0600 `intent.json` describing source/parent/target identities
-and digest. It flushes content, directory ancestry and the journal, then renames the original into
-that directory as `original` on the same filesystem. It checks the preserved identity/content again,
-records `preserved.json`, and exclusively creates the managed store-target symlink. A newly occupied
-source path makes publication fail; it is never overwritten. `linked.json` records completion.
-Normal serialized reconciliation can subsequently route a harness link through the canonical link.
+and digest. It flushes content, directory ancestry and the journal, and verifies the journal's path
+and identity. It then moves the original into that directory as `original` on the same filesystem
+with `renameat2(RENAME_NOREPLACE)`, so an entry created at the destination is never replaced. It
+checks the preserved identity/content again, records `preserved.json`, verifies the parent, journal,
+and store paths, and exclusively creates the managed store-target symlink, then verifies them again.
+A newly occupied source path makes publication fail; it is never overwritten. `linked.json` records
+completion. Normal serialized reconciliation can subsequently route a harness link through the
+canonical link.
+
+Node has no rename that refuses to replace, so that one call is made by a fixed, runner-owned helper
+(`apps/runner/native/linux-skill-rename.c`). It receives the two directories the runner already holds
+as descriptors and makes no other system call. Packaged Linux runners embed it, statically linked, and
+verify it by digest when they extract it. Source checkouts compile it on first use with `/usr/bin/cc`,
+so building or running the runner from source on Linux needs a C compiler. A runner that cannot
+resolve the helper refuses adoption before creating a journal and blocks restore without changing
+anything. A kernel or filesystem without
+`RENAME_NOREPLACE` stops the transaction with only the intent-only journal, never falling back to a
+plain rename.
 
 First adoption has a short gap between source preservation and link publication; it is not an
 atomic directory-to-symlink exchange. `recovery_required` means inspect the operation before any retry
@@ -441,9 +458,12 @@ Every platform treats inspection failures the same way:
 Intent-only and already-restored states need no mutation. A restore requires an explicit per-operation
 confirmation. It reopens the journal and parent through pinned no-follow descriptors, verifies the
 preserved inode and full digest, and writes durable, retry-safe checkpoints. An active managed link is
-moved into the journal first. An exclusive recovery link then exposes the journal's verified `original`
-at the vacated source name. Link creation fails on any last-instant file, link, or directory occupant;
-nothing at the source name is unlinked, recursively deleted, or overwritten. A changed parent,
+moved into the journal first, with a rename that refuses to replace, after the parent and journal
+paths are verified. An exclusive recovery link then exposes the journal's verified `original` at the
+vacated source name. The parent and `original` paths are verified before and after that link is
+published, and `restored` is reported only once the source path, followed, reaches the preserved
+original. Link creation fails on any last-instant file, link, or directory occupant; nothing at the
+source name is unlinked, recursively deleted, or overwritten. A changed parent, relocated journal,
 malformed record, target mismatch, or race stops safely. Every checkpoint is retryable, including a
 process interruption after the managed-link move or recovery-link publication. The original retains
 its inode, bytes, and source metadata inside the private journal, and both it and the prior managed link

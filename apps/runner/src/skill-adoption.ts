@@ -1,15 +1,16 @@
 /** Internal source-preservation transaction. Not registered as a runner/RPC command. Linux runs
- * it in-process through descriptor paths; macOS and Windows delegate the same steps to their fixed
- * native helpers.
+ * it in-process through descriptor paths, with a fixed native helper only for the no-replace move;
+ * macOS and Windows delegate the same steps to their fixed native helpers.
  * The caller must serialize this with reconcile/GC, own the provider-HOME lease, and supply
  * a fresh durable-library/explicit-assignment authorization fence. No preflight report is a grant. */
 import { randomUUID } from "node:crypto";
-import { closeSync, constants, fsyncSync, fstatSync, mkdirSync, openSync, readlinkSync, realpathSync, renameSync, symlinkSync, writeFileSync } from "node:fs";
+import { closeSync, constants, fsyncSync, fstatSync, mkdirSync, openSync, readlinkSync, realpathSync, symlinkSync, writeFileSync } from "node:fs";
 import { join, sep } from "node:path";
 import { validSkillName, type AgentDefinition, type MachineSkillCandidate } from "@wollipog/protocol";
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
+import { linuxNoReplaceRename, type NoReplaceRename } from "./linux-skill-rename.js";
 import { platformSkillAdoptionHelper, type SkillAdoptionPlatformHelper } from "./skill-adoption-platform.js";
-import { directoryGeneration, inspectSkillTree, openSkillDirectory } from "./skill-snapshots.js";
+import { directoryGeneration, inspectSkillTree, openResolvedSkillDirectory } from "./skill-snapshots.js";
 import { SKILL_DIRS } from "./skills.js";
 
 type Stage = "intent_durable" | "source_preserved" | "link_created";
@@ -32,6 +33,8 @@ export interface SkillAdoptionOptions {
   checkpoint?: (stage: Stage) => void;
   /** Test seam replacing the platform's fixed native helper; not an RPC input. */
   helper?: SkillAdoptionPlatformHelper;
+  /** Test seam replacing Linux's fixed no-replace rename helper; not an RPC input. */
+  noReplaceRename?: () => NoReplaceRename;
 }
 export type SkillAdoptionResult =
   | { status: "rejected"; error: string }
@@ -64,10 +67,11 @@ function validRequest(options: SkillAdoptionOptions): boolean {
   return allowed.has(candidate.sourceDirectory);
 }
 
-/** Preserve the original by same-filesystem rename, then exclusively publish an untransformed
- * store-target link. Never unlink, recursively delete, overwrite a source, or auto-restore over
- * a newly occupied path. Interrupted operations leave a private journal and recoverable original.
- * A later serialized reconciler can route harness links through the canonical link as usual. */
+/** Preserve the original by a same-filesystem rename that refuses to replace, then exclusively
+ * publish an untransformed store-target link. Never unlink, recursively delete, overwrite a source,
+ * or auto-restore over a newly occupied path. Interrupted operations leave a private journal and
+ * recoverable original. A later serialized reconciler can route harness links through the canonical
+ * link as usual. */
 export function adoptMachineSkill(options: SkillAdoptionOptions): SkillAdoptionResult {
   const platform = options.platform ?? process.platform;
   if (platform === "linux") return adoptLinuxSkill(options);
@@ -122,6 +126,10 @@ function adoptLinuxSkill(options: SkillAdoptionOptions): SkillAdoptionResult {
   try {
     guard(options.acquireProviderHomeLease);
     guard(options.assertAuthorized);
+    // Resolved before anything is written, so a runner that cannot refuse to replace creates no journal.
+    const rename = (options.noReplaceRename ?? linuxNoReplaceRename)();
+    // Each root is resolved once and then opened without following any component, so the pinned
+    // directories are exactly the ones whose paths become link text.
     const home = realpathSync(options.home);
     const dataDir = realpathSync(options.dataDir);
     const localSourceDirectory = options.localSourceDirectory ?? candidate.sourceDirectory;
@@ -129,12 +137,12 @@ function adoptLinuxSkill(options: SkillAdoptionOptions): SkillAdoptionResult {
     const targetRelative = `skills/store/${candidate.name}/${digest}`;
     const targetPath = join(dataDir, targetRelative);
     if (targetPath === sourcePath || targetPath.startsWith(sourcePath + sep) || sourcePath.startsWith(targetPath + sep)) throw new Error();
-    const parent = keep(openSkillDirectory(home, localSourceDirectory, true));
+    const parent = keep(openResolvedSkillDirectory(home, localSourceDirectory, true));
     const source = keep(openSync(`${fdPath(parent)}/${candidate.name}`, flags));
-    const target = keep(openSkillDirectory(dataDir, targetRelative, true));
+    const target = keep(openResolvedSkillDirectory(dataDir, targetRelative, true));
     const parentIdentity = identity(parent), sourceIdentity = identity(source), targetIdentity = identity(target);
     const checkPath = (root: string, relative: string, expected: string) => {
-      const fd = openSkillDirectory(root, relative);
+      const fd = openResolvedSkillDirectory(root, relative);
       try { if (identity(fd) !== expected) throw new Error(); } finally { closeSync(fd); }
     };
     const checkContent = (fd: number, rejectExecutable = false) => {
@@ -161,6 +169,9 @@ function adoptLinuxSkill(options: SkillAdoptionOptions): SkillAdoptionResult {
     mkdirSync(`${fdPath(parent)}/${backupName}`, { mode: 0o700 });
     recovery = { operationId, backupDirectory: `${candidate.sourceDirectory}/${backupName}` };
     const backup = keep(openSync(`${fdPath(parent)}/${backupName}`, flags));
+    const backupIdentity = identity(backup);
+    const backupRelative = `${localSourceDirectory}/${backupName}`;
+    const originalRelative = `${backupRelative}/original`;
     record(backup, "intent.json", {
       format: candidate.providerAccountId ? 2 : 1,
       operationId,
@@ -183,8 +194,10 @@ function adoptLinuxSkill(options: SkillAdoptionOptions): SkillAdoptionResult {
     // actual write: both rename endpoints are anchored to held directory descriptors.
     checkSource();
     checkPath(dataDir, targetRelative, targetIdentity);
+    // The original may only move into the journal that recovery inspection will find.
+    checkPath(home, backupRelative, backupIdentity);
     guard(options.assertAuthorized);
-    renameSync(`${fdPath(parent)}/${candidate.name}`, `${fdPath(backup)}/original`);
+    rename(parent, candidate.name, backup, "original");
     fsyncSync(backup); fsyncSync(parent);
     options.checkpoint?.("source_preserved");
     const preserved = keep(openSync(`${fdPath(backup)}/original`, flags));
@@ -192,6 +205,7 @@ function adoptLinuxSkill(options: SkillAdoptionOptions): SkillAdoptionResult {
     checkContent(preserved, true);
     record(backup, "preserved.json", { sourceIdentity, digest });
     checkPath(home, localSourceDirectory, parentIdentity);
+    checkPath(home, originalRelative, sourceIdentity);
     checkPath(dataDir, targetRelative, targetIdentity);
     checkContent(target);
     guard(options.assertAuthorized);
@@ -200,6 +214,7 @@ function adoptLinuxSkill(options: SkillAdoptionOptions): SkillAdoptionResult {
     fsyncSync(parent);
     options.checkpoint?.("link_created");
     checkPath(home, localSourceDirectory, parentIdentity);
+    checkPath(home, originalRelative, sourceIdentity);
     checkPath(dataDir, targetRelative, targetIdentity);
     checkContent(target);
     if (readlinkSync(`${fdPath(parent)}/${candidate.name}`) !== targetPath) throw new Error();

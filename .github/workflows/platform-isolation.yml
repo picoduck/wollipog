@@ -70,6 +70,21 @@ jobs:
           echo "the bubblewrap enforcement test must run rather than skip on this job" >&2
           exit 1
 
+      # Linux adoption moves files through the fixed renameat2(RENAME_NOREPLACE) helper, compiled
+      # here from source, so its transaction, restore, and helper tests must run rather than skip.
+      - name: Verify Native Linux Skill Adoption
+        if: startsWith(matrix.os, 'ubuntu-')
+        shell: bash
+        run: |
+          set -uo pipefail
+          status=0
+          output=$(node --import tsx --test --test-reporter=tap apps/runner/src/linux-skill-rename.test.ts apps/runner/src/skill-adoption.test.ts apps/runner/src/skill-adoption-recovery.test.ts < /dev/null) || status=$?
+          printf '%s\n' "$output"
+          if [ "$status" -ne 0 ]; then exit "$status"; fi
+          if printf '%s' "$output" | grep -q '^# skipped 0$'; then exit 0; fi
+          echo "the native Linux adoption tests must run rather than skip on this job" >&2
+          exit 1
+
       # The Seatbelt half of the hook-state mask (#1336) can only run here, so it must not skip.
       - name: Verify Guard State Seatbelt Boundary
         if: matrix.os == 'macos-latest'
