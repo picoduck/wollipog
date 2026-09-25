@@ -11,26 +11,28 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import {
-  SKILL_MAX_FILES,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
-  validSkillFilePath,
   validSkillName,
   type SkillDriftState,
   type SkillFile,
-  type SkillInvocationPolicy,
 } from "@wollipog/protocol";
-import { manualInvocationVariantFiles, withoutManualInvocationFrontmatter } from "@wollipog/protocol/skill-invocation";
-import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
-import { SkillImportConflictError, type RunnerSkillStateRecord } from "./db.js";
+import { SkillImportConflictError } from "./db.js";
 import type { SkillsRouteDeps } from "./skills-route.js";
 import { resolveDesiredSkillSnapshot, validateSkillPayload, type ValidatedSkillPayload } from "./skills.js";
+import {
+  DIGEST,
+  manualSource,
+  readDriftCopy,
+  refreshRunnerSkillState,
+  restoreDriftCopy,
+  type DriftTarget,
+  type EditedCopyLock,
+} from "./skill-edited-copy.js";
+import { registerSkillOrphanRoutes } from "./skill-orphan-route.js";
 
-const DIGEST = /^[0-9a-f]{64}$/;
 const PREVIEW_TTL_MS = 10 * 60_000;
 const MAX_PREVIEWS = 8;
-
-interface DriftTarget { name: string; digest: string; variant: SkillInvocationPolicy }
 
 interface DriftPreview {
   id: string;
@@ -55,34 +57,10 @@ function parseTarget(body: unknown): DriftTarget | null {
     : null;
 }
 
-function runnerError(value: unknown): string {
-  return typeof value === "string" && value.length > 0
-    ? value.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, 300)
-    : "The machine refused the request.";
-}
-
-function validReadFiles(value: unknown): value is SkillFile[] {
-  return Array.isArray(value) && value.length <= SKILL_MAX_FILES && value.every((file) =>
-    file && typeof file === "object" && typeof (file as SkillFile).path === "string" &&
-    validSkillFilePath((file as SkillFile).path) && typeof (file as SkillFile).content === "string" &&
-    ((file as SkillFile).encoding === "utf8" || (file as SkillFile).encoding === "base64"));
-}
-
-/** Source files for a Manual Only copy: remove exactly the injected frontmatter line, and prove the
- * runner would publish those source files as the identical observed copy. */
-function manualSource(files: SkillFile[], observedDigest: string): SkillFile[] | null {
-  const skillMd = files.find((file) => file.path === "SKILL.md");
-  if (!skillMd) return null;
-  const source = withoutManualInvocationFrontmatter(Buffer.from(skillMd.content, skillMd.encoding).toString("utf8"));
-  if (source === null) return null;
-  const sourceFiles = files.map((file) => file === skillMd ? { path: file.path, content: source, encoding: "utf8" as const } : file);
-  return skillVersionDigest(manualInvocationVariantFiles(sourceFiles)) === observedDigest ? sourceFiles : null;
-}
-
 export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRouteDeps): void {
   const { db, hub } = deps;
   const previews = new Map<string, DriftPreview>();
-  let pending = false;
+  const lock: EditedCopyLock = { pending: false };
   const purge = () => { for (const [id, preview] of previews) if (preview.expires <= Date.now()) previews.delete(id); };
   const timer = setInterval(purge, 60_000); timer.unref();
   app.addHook("onClose", async () => { clearInterval(timer); previews.clear(); });
@@ -119,17 +97,7 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
   const reported = (runnerId: string, target: DriftTarget): SkillDriftState | undefined =>
     db.getRunnerSkillState(runnerId)?.drift.find((entry) => entry.name === target.name &&
       entry.digest === target.digest && entry.variant === target.variant);
-  /** Refresh this machine's authoritative state so the caller sees the resolved drift. */
-  const refreshState = async (runnerId: string): Promise<RunnerSkillStateRecord | null> => {
-    try {
-      const requestId = `skills_${randomUUID().slice(0, 8)}`;
-      const result = await deps.pushSkillsSync.request(runnerId, requestId);
-      if (result.type === "skills_state") db.setRunnerSkillState(runnerId, result, Date.now());
-    } catch {
-      // The runner still reports converged state on its own; the caller can refresh later.
-    }
-    return db.getRunnerSkillState(runnerId);
-  };
+  const refreshState = (runnerId: string) => refreshRunnerSkillState(deps, runnerId);
   /** Authority is rechecked after every runner await before any machine or library data is returned. */
   const stillAuthorized = (req: FastifyRequest, reply: FastifyReply, runnerId: string, owner: string, skillId: string) => {
     const current = authorize(req, reply, runnerId);
@@ -140,37 +108,9 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
     }
     return current;
   };
-  const readOnRunner = async (runnerId: string, target: DriftTarget) => {
-    const requestId = randomUUID();
-    const result = await hub.requestFromRunner(runnerId, requestId, {
-      type: "skill_drift", runnerId, requestId, operation: "read", ...target,
-    });
-    if (result.type !== "skill_drift_result" || result.runnerId !== runnerId || result.requestId !== requestId) {
-      throw new Error("unexpected runner reply");
-    }
-    if (result.status === "read") {
-      if (typeof result.observedDigest !== "string" || !DIGEST.test(result.observedDigest) ||
-          !validReadFiles(result.files) || skillVersionDigest(result.files) !== result.observedDigest) {
-        throw new Error("invalid runner read");
-      }
-      return { status: "read" as const, observedDigest: result.observedDigest, files: result.files };
-    }
-    if (result.status === "not_needed") return { status: "not_needed" as const };
-    if (result.status === "rejected") return { status: "rejected" as const, error: runnerError(result.error) };
-    throw new Error("unexpected runner reply");
-  };
-  const restoreOnRunner = async (runnerId: string, target: DriftTarget, observedDigest: string | null, files?: SkillFile[]) => {
-    const requestId = randomUUID();
-    const result = await hub.requestFromRunner(runnerId, requestId, {
-      type: "skill_drift", runnerId, requestId, operation: "restore", ...target, observedDigest,
-      ...(files ? { files } : {}), confirmation: "explicit",
-    });
-    if (result.type !== "skill_drift_result" || result.runnerId !== runnerId || result.requestId !== requestId ||
-        !["restored", "not_needed", "rejected"].includes(result.status)) throw new Error("unexpected runner reply");
-    return result.status === "rejected"
-      ? { status: "rejected" as const, error: runnerError(result.error) }
-      : { status: result.status as "restored" | "not_needed" };
-  };
+  const readOnRunner = (runnerId: string, target: DriftTarget) => readDriftCopy(hub, runnerId, target);
+  const restoreOnRunner = (runnerId: string, target: DriftTarget, observedDigest: string | null, files?: SkillFile[]) =>
+    restoreDriftCopy(hub, runnerId, target, observedDigest, files);
 
   app.post("/api/runners/:id/skill-drift/preview", async (req, reply) => {
     purge();
@@ -187,10 +127,10 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
     if (!drift.observedDigest) {
       return reply.code(409).send({ error: "The edited copy is no longer valid skill content, so it cannot be imported. Restore the library version instead." });
     }
-    if (pending) return reply.code(429).send({ error: "Another edited-copy operation is in progress." });
+    if (lock.pending) return reply.code(429).send({ error: "Another edited-copy operation is in progress." });
     for (const [id, preview] of previews) if (preview.owner === ownerKey(principal)) previews.delete(id);
     if (previews.size >= MAX_PREVIEWS) return reply.code(429).send({ error: "Too many edited-copy reviews are open. Try again shortly." });
-    pending = true;
+    lock.pending = true;
     try {
       const result = await readOnRunner(runnerId, target);
       if (!stillAuthorized(req, reply, runnerId, ownerKey(principal), skill.id)) return;
@@ -230,7 +170,7 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
       };
     } catch {
       return reply.code(502).send({ error: "The edited copy could not be read or failed validation. Sync the machine and try again." });
-    } finally { pending = false; }
+    } finally { lock.pending = false; }
   });
 
   app.post("/api/skill-drift/:id/import", async (req, reply) => {
@@ -251,14 +191,14 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
     // Commit only what the machine still holds: an edit made after the review would otherwise stay
     // held on the machine while the library published the older one.
     if (!available(preview.runnerId, reply)) return;
-    if (pending) return reply.code(429).send({ error: "Another edited-copy operation is in progress." });
-    pending = true;
+    if (lock.pending) return reply.code(429).send({ error: "Another edited-copy operation is in progress." });
+    lock.pending = true;
     let current: Awaited<ReturnType<typeof readOnRunner>>;
     try {
       current = await readOnRunner(preview.runnerId, preview.target);
     } catch {
       return reply.code(502).send({ error: "The edited copy could not be read again. Sync the machine and review it again." });
-    } finally { pending = false; }
+    } finally { lock.pending = false; }
     if (!stillAuthorized(req, reply, preview.runnerId, preview.owner, preview.skillId)) return;
     if (previews.get(preview.id) !== preview) return reply.code(409).send({ error: "The review changed or expired. Review the edited copy again." });
     if (current.status !== "read" || current.observedDigest !== preview.observedDigest) {
@@ -300,17 +240,17 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
     let released = false;
     let warning: string | undefined;
     if (!deployedHere) {
-      if (pending || !hub.isRunnerOnline(preview.runnerId)) {
+      if (lock.pending || !hub.isRunnerOnline(preview.runnerId)) {
         warning = "The edit was imported, but the machine did not release its edited copy. Use Restore Library Version to release it.";
       } else {
-        pending = true;
+        lock.pending = true;
         try {
           const result = await restoreOnRunner(preview.runnerId, preview.target, preview.observedDigest);
           released = result.status !== "rejected";
           if (result.status === "rejected") warning = `The edit was imported, but the machine kept its edited copy: ${result.error}`;
         } catch {
           warning = "The edit was imported, but the machine did not confirm releasing its edited copy. Sync it to check.";
-        } finally { pending = false; }
+        } finally { lock.pending = false; }
       }
     }
     const state = await refreshState(preview.runnerId);
@@ -347,8 +287,8 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
     if ((drift.observedDigest ?? null) !== observedDigest) {
       return reply.code(409).send({ error: "The edited copy changed after you reviewed it. Review it again before restoring." });
     }
-    if (pending) return reply.code(429).send({ error: "Another edited-copy operation is in progress." });
-    pending = true;
+    if (lock.pending) return reply.code(429).send({ error: "Another edited-copy operation is in progress." });
+    lock.pending = true;
     let result: Awaited<ReturnType<typeof restoreOnRunner>>;
     try {
       // With the library version, the runner rebuilds the copy in place. Without it (the skill was
@@ -357,11 +297,13 @@ export function registerSkillDriftRoutes(app: FastifyInstance, deps: SkillsRoute
       result = await restoreOnRunner(runnerId, target, observedDigest, library?.files);
     } catch {
       return reply.code(502).send({ error: "The machine did not confirm the restore. Sync it and review the edited copy again." });
-    } finally { pending = false; }
+    } finally { lock.pending = false; }
     if (!stillAuthorized(req, reply, runnerId, ownerKey(principal), skill.id)) return;
     if (result.status === "rejected") return reply.code(409).send({ error: result.error });
     const state = await refreshState(runnerId);
     if (!stillAuthorized(req, reply, runnerId, ownerKey(principal), skill.id)) return;
     return { status: result.status, state };
   });
+
+  registerSkillOrphanRoutes(app, deps, lock);
 }

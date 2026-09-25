@@ -13086,6 +13086,15 @@ body.shell-dock-dragging * {
 .skills-drift li { overflow-wrap: anywhere; }
 .skills-drift-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .skills-drift-actions .btn { white-space: normal; }
+.skills-orphans { margin: 0; padding: 0; list-style: none; display: grid; gap: 12px; }
+.skills-orphans li { display: grid; gap: 6px; min-width: 0; overflow-wrap: anywhere; }
+.skills-orphans li + li { border-top: 1px dashed var(--border); padding-top: 12px; }
+.skills-orphan-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.skills-orphan-facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 6px 14px; margin: 0; }
+.skills-orphan-facts div { min-width: 0; }
+.skills-orphan-facts .skills-orphan-entry { grid-column: 1 / -1; }
+.skills-orphan-facts dt { color: var(--text-dim); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .04em; }
+.skills-orphan-facts dd { margin: 2px 0 0; overflow-wrap: anywhere; }
 .skills-hint { color: var(--text-dim); font-size: var(--text-sm); line-height: 1.5; margin: 0; }
 .skills-target-unavailable { border-left: 2px solid var(--warning); padding-left: 8px; overflow-wrap: anywhere; }
 

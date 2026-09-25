@@ -73,9 +73,9 @@ owner/admin actions:
   unreviewed edit. The runner builds the library version in a staging directory, verifies it, and
   swaps it in with two renames (a harness can briefly see no directory between them). It checks
   the copy again after moving it aside and puts it back if it changed. It checks once more before
-  deleting it and keeps it if a writer that still had a file open changed it. A copy that was
-  reported as unreadable has no digest to check against, so it is moved aside into the store
-  instead of being deleted. If the
+  deleting it and keeps it aside if a writer that still had a file open changed it. A copy that was
+  reported as unreadable has no digest to check against, so it is kept aside in the store instead
+  of being deleted (see Orphaned Copies). If the
   library no longer has that version, the copy is discarded instead. The next reconciliation
   releases the hold and converges to the assigned version.
 
@@ -88,7 +88,55 @@ Manual Only copy whose source set its own `disable-model-invocation` key cannot 
 its agent-invocation sibling. It is then reported as drift even if unedited; restoring it
 republishes the missing sibling. If a skill is deleted
 from the library while a machine holds an edited copy, the runner keeps the copy and its links, and
-the Skills view cannot show it until a skill with that name exists again.
+the Skills view lists the copy under Orphaned Copies.
+
+### Orphaned Copies
+
+Two kinds of edited copy have no library skill page to appear on. While any machine reports one,
+the skill list starts with an **Orphaned Copies** entry that lists them per machine:
+
+- **Kept-aside copies.** When a restore replaces a copy that was reported as unreadable, when a
+  writer that still had a file open changes the replaced copy after the swap, or when a failed swap
+  cannot put a copy back, the runner moves the copy to `<dataDir>/skills/store/.drift-<id>` instead
+  of deleting it. Before the move, a protocol 184 runner records which skill, version, and variant
+  the copy came from, and when, in `.drift-<id>.json` beside it. It reports every kept-aside copy in
+  the additive `skills_state.keptAside` field on each reconciliation. A copy kept aside by a
+  protocol 183 runner has no record. Its skill name is read from its `SKILL.md` frontmatter when it
+  is readable, and its version and time show as unknown. Store GC never removes either entry.
+- **Edited copies of deleted skills.** A drifted copy whose skill no longer exists in the library.
+  The runner keeps its links while they serve it. It moves back to a skill's Deployment section
+  when a skill with the same name exists again.
+
+Each entry shows the skill name, the version the copy came from, its invocation variant, when it
+was kept aside, whether it is readable skill content, and a kept-aside copy's store entry. A copy of
+a skill the viewer cannot access is not listed. Owners and admins have two actions:
+
+- **Review and Import** reads the copy through a correlated runner command and shows every file.
+  When a library skill has the copy's name, the review is a diff against its latest version, and the
+  import adds a new version once the diff is accepted. Otherwise the import creates a new skill with
+  no assignments. The rules of **Import Edit as New Version** apply: a Manual Only copy loses only
+  its injected line and must reproduce its bytes exactly, and the files must pass library validation
+  (including the frontmatter name). The copy is read again at commit and must still have the
+  reviewed digest, and a library change since the review refuses the import. Because the library
+  then holds exactly those bytes, the machine discards its copy under the same observation fence.
+  A copy kept aside before records existed is imported exactly as stored.
+- **Discard Copy** requires confirmation and names the observation the machine reported. For a
+  readable copy that is its content digest. For a copy that cannot be read as skill content it is a
+  fingerprint of every entry's path, type, identity, size, and modification and change times, never
+  its contents. The runner computes the observation again and deletes nothing if it differs.
+  Deletion never follows a symlink inside the copy, and on Linux every directory is removed through
+  its own no-follow descriptor. An unreadable tree of more than 4,096 entries has no fingerprint
+  and must be removed on the machine itself. Discarding an edited copy of a deleted skill is a drift
+  restore without library files, so its links are removed like any undesired skill's. If that copy
+  is unreadable, it is kept aside instead and then listed as a kept-aside copy.
+
+Older runners report no kept-aside copies, and the per-machine API labels their state
+`keptAsideReporting: "unsupported"` so an empty list is not presented as verified. A protocol 183
+runner's edited copies of deleted skills are still listed and can be resolved. Older control planes
+ignore the new field. Limitations: a fingerprint relies on file change times, so a same-size rewrite
+within the same filesystem timestamp tick as the reported observation could go unnoticed; kernels
+with fine-grained change times close that window. A runner reports at most 256 kept-aside copies,
+oldest first.
 
 ## Assignable Group API
 
@@ -638,8 +686,9 @@ on every registration, which makes durability trivial (no receipt outbox needed)
 - Manifest cache checks and reconciliation share the same native-harness/manual-variant policy, so
   discovery changes fail closed instead of letting the two phases disagree about required content.
 - **Runner→CP `skills_state`** — deployed digests, link health, conflicts, unmanaged skills, the
-  pass's bounded managed-link removals, and (protocol 183) drifted store copies. Deployed state,
-  unmanaged inventory, drift, and the pass error are authoritative full replacements modeled on
+  pass's bounded managed-link removals, (protocol 183) drifted store copies, and (protocol 184)
+  kept-aside copies. Deployed state, unmanaged inventory, drift, kept-aside copies, and the pass
+  error are authoritative full replacements modeled on
   `SubscriptionUsageInventoryMessage`. Removals
   are instead a latest-event projection: each non-empty report replaces the prior event and gets
   its own `removalsUpdatedAt`; a later empty or omitted field retains that event and timestamp.
@@ -690,6 +739,8 @@ Git backs the library as an **upstream source**, not as the distribution transpo
    link. Resolves pre-existing drift immediately.
 2. **Drift detection** (implemented; see Drift Detection above) — a hand-edited deployed copy
    surfaces as a Drift status with **Import Edit as New Version** and **Restore Library Version**.
+   Copies kept aside by a restore and edited copies of deleted skills are listed under Orphaned
+   Copies, where they can be imported or discarded.
 3. **Skill lint** — validate frontmatter, name/directory match, size limits, broken relative
    references, sidecar consistency; hard failures block deploy.
 4. **Usage analytics** — count skill invocations per skill/machine/agent from session events to

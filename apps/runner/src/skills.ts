@@ -74,6 +74,7 @@ import {
   type DeployedSkillState,
   type SkillFile,
   type SkillDriftState,
+  type SkillKeptAsideCopy,
   type SkillLinkRemoval,
   type SkillsStateMessage,
   type SkillSyncEntry,
@@ -93,6 +94,7 @@ import {
   STORE_VERSION_NAME,
   type StoreDriftScan,
 } from "./skill-store-copy.js";
+import { scanKeptAsideCopies } from "./skill-kept-aside.js";
 import { replaceWindowsSkillJunction } from "./windows-skill-junction.js";
 import { validWslDistroName } from "./wsl-context.js";
 
@@ -221,6 +223,8 @@ export interface ReconcileSkillsResult {
   removedLinks: SkillLinkRemoval[];
   /** Base pass only: every drifted store copy. Absent when the store could not be verified. */
   drift?: SkillDriftState[];
+  /** Base pass only: every edited copy a restore kept aside. Absent when the store could not be verified. */
+  keptAside?: SkillKeptAsideCopy[];
   /** Runner-internal, never sent: scan-time digests of unedited copies, keyed `<name>/<version>`. */
   movableCopies?: Record<string, string>;
 }
@@ -278,12 +282,14 @@ export function mergeReconcileSkillsResults(
   const errors = [left.error, right.error].filter((value): value is string => !!value);
   const drift = left.drift || right.drift ? [...left.drift ?? [], ...right.drift ?? []] : undefined;
   const movable = left.movableCopies ?? right.movableCopies;
+  const keptAside = left.keptAside ?? right.keptAside;
   return {
     deployed,
     unmanaged,
     removedLinks: [...left.removedLinks, ...right.removedLinks],
     error: [...new Set(errors)].join("; ") || undefined,
     ...(drift ? { drift } : {}),
+    ...(keptAside ? { keptAside } : {}),
     ...(movable ? { movableCopies: movable } : {}),
   };
 }
@@ -302,6 +308,7 @@ export function skillsStateMessage(
     unmanaged: result.unmanaged,
     removals: result.removedLinks,
     ...(result.drift === undefined ? {} : { drift: result.drift }),
+    ...(result.keptAside === undefined ? {} : { keptAside: result.keptAside }),
     ...(result.error === undefined ? {} : { error: result.error }),
   };
 }
@@ -1514,6 +1521,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const desiredCopies = new Map(ready.map(({ entry, manualNeeded }) =>
     [entry.name, { digest: entry.versionDigest, manual: manualNeeded }]));
   let scan: StoreDriftScan | undefined;
+  let keptAside: SkillKeptAsideCopy[] | undefined;
   if (manageCanonical) {
     scan = scanStoreDrift(realStoreRoot, {
       desired: new Map(ready.map(({ entry }) => [entry.name, entry.versionDigest])),
@@ -1522,6 +1530,10 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     drift = classifyStoreDrift(scan, desiredCopies,
       linkedStoreVersionKeys(home, realStoreRoot, platform, options.harnessDirectories, options.liveLinkDirectories));
     for (const name of drift.held) storeKeep.set(name, "all");
+    keptAside = scanKeptAsideCopies(realStoreRoot, {
+      skillName: (skillMd) => parseSkillFrontmatter(skillMd).name,
+      ...(options.log ? { log: options.log } : {}),
+    });
   }
   const heldNames = new Set<string>(drift?.held ?? options.heldSkillNames ?? []);
   /** A copy may stop being served or be collected only while it still matches its version or its
@@ -1640,6 +1652,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         removedLinks: [],
         error: `${detail}${foundForeignSymlink ? ` ${scanDetail}` : ""}`,
         ...(drift ? { drift: drift.report } : {}),
+        ...(keptAside ? { keptAside } : {}),
         ...(scan && drift ? { movableCopies: movableCopies(scan, drift.report) } : {}),
       }, options.providerAccountId);
     }
@@ -2010,6 +2023,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     }, options.harnessDirectories),
     removedLinks,
     ...(drift || lateDrift.length ? { drift: [...drift?.report ?? [], ...lateDrift] } : {}),
+    ...(keptAside ? { keptAside } : {}),
     ...(scan ? { movableCopies: movableCopies(scan, [...drift?.report ?? [], ...lateDrift]) } : {}),
   }, options.providerAccountId);
 }

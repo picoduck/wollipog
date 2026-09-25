@@ -569,7 +569,12 @@
 //      through the fixed in-distro helper, which takes the distro HOME lease itself. Recovery
 //      operations from a WSL distro carry an optional `context`; the runner reports them only to a
 //      control plane at this version, and older runners keep refusing WSL adoption.
-export const PROTOCOL_VERSION = 184;
+// 185: runners report every edited copy a restore kept aside in the store (`.drift-<id>`) in the
+//      additive `skills_state.keptAside` field, record the skill, version, variant, and time when
+//      they keep one aside, and accept a correlated `skill_kept_aside` read and a confirmed,
+//      observation-fenced discard. Older control planes drop the unknown field, and older runners
+//      report no kept-aside copies rather than a false empty result.
+export const PROTOCOL_VERSION = 185;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -830,6 +835,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v183 runners report hand-edited store copies in `skills_state.drift`, hold them, and accept
    * correlated `skill_drift` read and restore commands. */
   skillDrift: 183,
+  /** v184 runners report edited copies kept aside in the store in `skills_state.keptAside` and
+   * accept correlated `skill_kept_aside` read and discard commands. */
+  skillKeptAsideCopies: 185,
   sessionAgentNaming: 93,
   sessionCustomModelNaming: 94,
   sessionNamingTargets: 95,
@@ -1451,6 +1459,58 @@ export interface SkillDriftResultMessage {
   /** `not_needed` means the copy matches its version again. */
   status: "read" | "restored" | "not_needed" | "rejected";
   /** read only: the copy's files exactly as stored (Manual Only transform included). */
+  files?: SkillFile[];
+  observedDigest?: string;
+  error?: string;
+}
+
+/** An edited store copy the runner moved aside instead of deleting (protocol v184): a restore
+ * replaced a copy that could not be read, a writer changed the replaced copy after the swap, or the
+ * swap could not be completed. It stays at `<dataDir>/skills/store/.drift-<id>`, served by no link,
+ * until an owner or admin imports or discards it. */
+export interface SkillKeptAsideCopy {
+  /** Lowercase UUID of the store entry `.drift-<id>`. */
+  id: string;
+  /** Skill the copy belonged to. A copy kept aside before v184 has no record, so its name is read
+   * from its SKILL.md frontmatter when the copy is readable, and is otherwise absent. */
+  name?: string;
+  /** Version digest and variant the copy was published as; absent for a copy kept aside before v184. */
+  digest?: string;
+  variant?: SkillInvocationPolicy;
+  /** Epoch milliseconds when the runner kept the copy aside; absent before v184. */
+  keptAsideAt?: number;
+  /** Canonical manifest digest of the copy as it is now. Absent when it is not readable skill content. */
+  observedDigest?: string;
+  /** Only when `observedDigest` is absent: a fingerprint of the unreadable tree's entry names, types,
+   * sizes, identities, and change times (never its contents). A discard must name it. Absent too
+   * when the tree exceeds the fingerprint bounds, in which case it cannot be discarded remotely. */
+  observedFingerprint?: string;
+  /** Sanitized human-readable explanation, including why the copy cannot be read. */
+  detail?: string;
+}
+
+/** Correlated command for one kept-aside copy (protocol v184). `read` returns its bounded files;
+ * `discard` requires explicit confirmation and names the reviewed observation, and the runner
+ * deletes the copy only while it still matches. */
+export interface SkillKeptAsideMessage {
+  type: "skill_kept_aside";
+  runnerId: string;
+  requestId: string;
+  operation: "read" | "discard";
+  id: string;
+  /** discard only: exactly one of these, as the copy was reported and reviewed. */
+  observedDigest?: string;
+  observedFingerprint?: string;
+  confirmation?: "explicit";
+}
+
+export interface SkillKeptAsideResultMessage {
+  type: "skill_kept_aside_result";
+  runnerId: string;
+  requestId: string;
+  /** `not_found` means the runner no longer has that copy. */
+  status: "read" | "discarded" | "not_found" | "rejected";
+  /** read only: the copy's files exactly as stored. */
   files?: SkillFile[];
   observedDigest?: string;
   error?: string;
@@ -7292,6 +7352,7 @@ export type RunnerToControlPlane =
   | SkillAdoptionResultMessage
   | SkillAdoptionRecoveryResultMessage
   | SkillDriftResultMessage
+  | SkillKeptAsideResultMessage
   | SkillsSyncNeedMessage
   | DurableSessionCommandResultMessage
   | DurableSessionCommandUpdateMessage
@@ -8087,6 +8148,9 @@ export interface SkillsStateMessage {
   /** v183 authoritative full replacement: every drifted store copy on this machine. Older runners
    * omit it and older control planes ignore it. */
   drift?: SkillDriftState[];
+  /** v184 authoritative full replacement: every edited copy kept aside in the store. Older runners
+   * omit it and older control planes ignore it. */
+  keptAside?: SkillKeptAsideCopy[];
   error?: string;
 }
 
@@ -8916,6 +8980,7 @@ export type ControlPlaneToRunner =
   | SkillAdoptionMessage
   | SkillAdoptionRecoveryMessage
   | SkillDriftMessage
+  | SkillKeptAsideMessage
   | SkillsSyncManifestMessage
   | SkillsSyncContentMessage
   | SkillsSyncCompleteMessage

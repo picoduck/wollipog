@@ -7,6 +7,9 @@ import {
   groupSkillList,
   invocationLabel,
   normalizeRemovalReporting,
+  orphanedCopyKey,
+  orphanedCopyRef,
+  reportedOrphanedCopies,
   reportedSkillDrift,
   reportedSkillLinkRemovals,
   reportedUnmanagedSkills,
@@ -22,6 +25,7 @@ import {
   skillMarkdownTemplate,
   skillsFromPayload,
   validateSkillDraft,
+  type RunnerSkillsResponse,
   type SkillSummary,
 } from "./skills.js";
 
@@ -312,4 +316,26 @@ test("SKILL.md helpers read and strip frontmatter the same line-based way", () =
   assert.equal(skillMarkdownBody(markdown), "# Usage\n");
   assert.equal(skillMarkdownBody("plain body"), "plain body");
   assert.equal(skillMarkdownFrontmatterName(skillMarkdownTemplate("my-skill", "Does things")), "my-skill");
+});
+
+test("orphaned copies are read defensively and addressed without paths", () => {
+  const response = {
+    desired: [], reported: null,
+    orphaned: [
+      { kind: "kept_aside", id: "0f0e0d0c-0b0a-4908-8706-050403020100", name: "notes" },
+      { kind: "deleted_skill", name: "retired", digest: "d".repeat(64), variant: "manual" },
+      { kind: "deleted_skill", name: "broken", digest: "d".repeat(64), variant: "other" },
+      { kind: "unknown" },
+      null,
+    ],
+  } as unknown as RunnerSkillsResponse;
+  const copies = reportedOrphanedCopies(response);
+  assert.deepEqual(copies.map((copy) => orphanedCopyRef(copy)), [
+    { kind: "kept_aside", id: "0f0e0d0c-0b0a-4908-8706-050403020100" },
+    { kind: "deleted_skill", name: "retired", digest: "d".repeat(64), variant: "manual" },
+  ]);
+  assert.deepEqual(copies.map(orphanedCopyKey), [
+    "kept:0f0e0d0c-0b0a-4908-8706-050403020100", `deleted:retired:manual:${"d".repeat(64)}`,
+  ]);
+  assert.deepEqual(reportedOrphanedCopies(undefined), []);
 });

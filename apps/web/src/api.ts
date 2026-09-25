@@ -588,6 +588,22 @@ export function createApiClient(transport: ApiTransport) {
     req<import("./skills.js").SkillDriftResolution>(`/api/runners/${encodeURIComponent(runnerId)}/skill-drift/restore`, {
       method: "POST", body: JSON.stringify({ ...copy, observedDigest, confirmation: "explicit" }),
     }),
+  previewOrphanedSkillCopy: (runnerId: string, copy: import("./skills.js").OrphanedSkillCopyRef) =>
+    req<import("./skills.js").OrphanedSkillCopyPreview>(`/api/runners/${encodeURIComponent(runnerId)}/orphaned-skill-copies/preview`, {
+      method: "POST", body: JSON.stringify(copy),
+    }),
+  importOrphanedSkillCopy: (previewId: string, acceptUpdate: boolean) =>
+    req<import("./skills.js").OrphanedSkillCopyResolution>(`/api/orphaned-skill-copies/${encodeURIComponent(previewId)}/import`, {
+      method: "POST", body: JSON.stringify({ acceptUpdate }),
+    }),
+  discardOrphanedSkillCopyPreview: (previewId: string) =>
+    req<void>(`/api/orphaned-skill-copies/${encodeURIComponent(previewId)}`, { method: "DELETE" }),
+  /** The observation is exactly what the machine reported and the user confirmed. */
+  discardOrphanedSkillCopy: (runnerId: string, copy: import("./skills.js").OrphanedSkillCopyRef,
+    observation: { observedDigest: string | null } | { observedFingerprint: string }) =>
+    req<import("./skills.js").OrphanedSkillCopyResolution>(`/api/runners/${encodeURIComponent(runnerId)}/orphaned-skill-copies/discard`, {
+      method: "POST", body: JSON.stringify({ ...copy, ...observation, confirmation: "explicit" }),
+    }),
 
   previewGitSkills: (source: import("./skills.js").SkillGitSource) =>
     req<import("./skills.js").SkillGitPreview>("/api/skill-git/preview", { method: "POST", body: JSON.stringify(source) }),

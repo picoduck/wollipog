@@ -11,6 +11,7 @@ import { registerSkillVersionPolicyRoutes } from "./skill-version-policy-route.j
 import { registerSkillGitRoutes } from "./skill-git-route.js";
 import { registerMachineSkillRoutes } from "./skill-machine-route.js";
 import { registerSkillDriftRoutes } from "./skill-drift-route.js";
+import { listOrphanedSkillCopies } from "./skill-orphan-route.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   SKILL_MAX_TOTAL_BYTES,
@@ -727,6 +728,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
     const id = (req.params as { id: string }).id;
     const runner = db.getRunner(id);
     if (!runner) return reply.code(404).send({ error: "runner not found" });
+    const principal = deps.requestPrincipal(req);
     return {
       // File contents stay out of the listing; the digest + targets are what the UI compares.
       desired: resolveDesiredSkills(db, id).map((entry) => ({
@@ -741,6 +743,9 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
       ) ? "supported" : "unsupported",
       // An older runner never reports drift, so an empty list from it proves nothing.
       driftReporting: runnerSupportsProtocol(runner.protocolVersion, "skillDrift") ? "supported" : "unsupported",
+      // Likewise for copies a restore kept aside, which only a v184 runner reports.
+      keptAsideReporting: runnerSupportsProtocol(runner.protocolVersion, "skillKeptAsideCopies") ? "supported" : "unsupported",
+      orphaned: principal ? listOrphanedSkillCopies(db, principal, id) : [],
     };
   });
 

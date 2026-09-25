@@ -90,6 +90,7 @@ import {
   type DeployedSkillState,
   type SkillDriftState,
   type SkillFile,
+  type SkillKeptAsideCopy,
   type SkillInvocationPolicy,
   type SkillLinkRemoval,
   type UnmanagedSkillInfo,
@@ -3488,6 +3489,46 @@ export function normalizeSkillDrift(value: unknown): SkillDriftState[] {
   return [...normalized.filter((entry) => entry.held), ...normalized.filter((entry) => !entry.held)];
 }
 
+const RUNNER_SKILL_KEPT_ASIDE_LIMIT = 256;
+const KEPT_ASIDE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/** Keep only well-formed kept-aside copies, one per store entry; unknown properties never reach
+ * storage or the UI. A copy names at most one observation: its content digest when it is readable,
+ * otherwise its change fingerprint. */
+export function normalizeSkillKeptAside(value: unknown): SkillKeptAsideCopy[] {
+  if (!Array.isArray(value)) return [];
+  const digest = (candidate: unknown) => typeof candidate === "string" && /^[0-9a-f]{64}$/.test(candidate);
+  const normalized: SkillKeptAsideCopy[] = [];
+  const seen = new Set<string>();
+  for (const candidate of value) {
+    if (normalized.length >= RUNNER_SKILL_KEPT_ASIDE_LIMIT) break;
+    const entry = candidate as Partial<Record<keyof SkillKeptAsideCopy, unknown>> | null;
+    if (!entry || typeof entry.id !== "string" || !KEPT_ASIDE_ID.test(entry.id) || seen.has(entry.id) ||
+        (entry.name !== undefined && (typeof entry.name !== "string" || !validSkillName(entry.name))) ||
+        (entry.digest !== undefined && !digest(entry.digest)) ||
+        (entry.variant !== undefined && entry.variant !== "agent" && entry.variant !== "manual") ||
+        (entry.keptAsideAt !== undefined && (!Number.isSafeInteger(entry.keptAsideAt) || (entry.keptAsideAt as number) < 0)) ||
+        (entry.observedDigest !== undefined && !digest(entry.observedDigest)) ||
+        (entry.observedFingerprint !== undefined && (!digest(entry.observedFingerprint) || entry.observedDigest !== undefined)) ||
+        (entry.detail !== undefined && typeof entry.detail !== "string")) continue;
+    seen.add(entry.id);
+    const detail = typeof entry.detail === "string"
+      ? entry.detail.replace(/[\p{Cc}\p{Cf}\s]+/gu, " ").trim().slice(0, RUNNER_SKILL_DRIFT_DETAIL_LIMIT)
+      : "";
+    normalized.push({
+      id: entry.id,
+      ...(typeof entry.name === "string" ? { name: entry.name } : {}),
+      ...(typeof entry.digest === "string" ? { digest: entry.digest } : {}),
+      ...(entry.variant === "agent" || entry.variant === "manual" ? { variant: entry.variant } : {}),
+      ...(typeof entry.keptAsideAt === "number" ? { keptAsideAt: entry.keptAsideAt } : {}),
+      ...(typeof entry.observedDigest === "string" ? { observedDigest: entry.observedDigest } : {}),
+      ...(typeof entry.observedFingerprint === "string" ? { observedFingerprint: entry.observedFingerprint } : {}),
+      ...(detail ? { detail } : {}),
+    });
+  }
+  return normalized;
+}
+
 /** The runner-reported deployment state for one machine plus a bounded latest-removal event. */
 export interface RunnerSkillStateRecord {
   runnerId: string;
@@ -3497,6 +3538,8 @@ export interface RunnerSkillStateRecord {
   removalsUpdatedAt?: number;
   /** Authoritative drifted store copies from a v183 runner; empty for older runners. */
   drift: SkillDriftState[];
+  /** Authoritative kept-aside store copies from a v184 runner; empty for older runners. */
+  keptAside: SkillKeptAsideCopy[];
   error?: string;
   updatedAt: number;
 }
@@ -7375,7 +7418,7 @@ export class ControlPlaneDb {
 
   /** Accept the exact preview without reading or modifying the source machine. */
   importMachineSkill(input: {
-    name: string; description: string | null; files: SkillFile[]; manifest: string; digest: string;
+    name: string; description: string | null; files: SkillFile[]; manifest: string; digest: string; note?: string;
     source: NonNullable<SkillVersionView["machineSource"]>; scope: ResourceScope; expectedVersionId: string | null;
   }): SkillView {
     return this.atomic(() => {
@@ -7676,11 +7719,11 @@ export class ControlPlaneDb {
     });
   }
 
-  /** Persist a runner report. Deployment, unmanaged inventory, drift, and error are full
-   * replacement; removals are a bounded latest-event projection. A non-empty event replaces and
-   * timestamps history, while an empty or omitted field retains the prior event for operator
-   * visibility. Drift is accepted only from runners that negotiated it, so an older runner can
-   * never produce a drift result. */
+  /** Persist a runner report. Deployment, unmanaged inventory, drift, kept-aside copies, and error
+   * are full replacement; removals are a bounded latest-event projection. A non-empty event replaces
+   * and timestamps history, while an empty or omitted field retains the prior event for operator
+   * visibility. Drift and kept-aside copies are accepted only from runners that negotiated them, so
+   * an older runner can never produce either result. */
   setRunnerSkillState(
     runnerId: string,
     state: {
@@ -7688,12 +7731,15 @@ export class ControlPlaneDb {
       unmanaged: UnmanagedSkillInfo[];
       removals?: SkillLinkRemoval[];
       drift?: SkillDriftState[];
+      keptAside?: SkillKeptAsideCopy[];
       error?: string;
     },
     now = Date.now(),
   ): void {
-    const drift = runnerSupportsProtocol(this.getRunner(runnerId)?.protocolVersion, "skillDrift")
-      ? normalizeSkillDrift(state.drift)
+    const protocolVersion = this.getRunner(runnerId)?.protocolVersion;
+    const drift = runnerSupportsProtocol(protocolVersion, "skillDrift") ? normalizeSkillDrift(state.drift) : [];
+    const keptAside = runnerSupportsProtocol(protocolVersion, "skillKeptAsideCopies")
+      ? normalizeSkillKeptAside(state.keptAside)
       : [];
     const previous = this.getRunnerSkillState(runnerId);
     const incomingRemovals = normalizeSkillLinkRemovals(state.removals);
@@ -7710,6 +7756,7 @@ export class ControlPlaneDb {
       ...(removals.length === 0 ? {} : { removals }),
       ...(removalsUpdatedAt === undefined ? {} : { removalsUpdatedAt }),
       ...(drift.length === 0 ? {} : { drift }),
+      ...(keptAside.length === 0 ? {} : { keptAside }),
       ...(state.error === undefined ? {} : { error: state.error }),
     }), now);
   }
@@ -7726,6 +7773,7 @@ export class ControlPlaneDb {
       removals?: SkillLinkRemoval[];
       removalsUpdatedAt?: number;
       drift?: unknown;
+      keptAside?: unknown;
       error?: string;
     }>(row.state);
     const removals = normalizeSkillLinkRemovals(parsed?.removals);
@@ -7739,6 +7787,7 @@ export class ControlPlaneDb {
       removals,
       ...(removalsUpdatedAt === undefined ? {} : { removalsUpdatedAt }),
       drift: normalizeSkillDrift(parsed?.drift),
+      keptAside: normalizeSkillKeptAside(parsed?.keptAside),
       ...(parsed?.error === undefined ? {} : { error: parsed.error }),
       updatedAt: row.updated_at,
     };

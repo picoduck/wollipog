@@ -1522,6 +1522,11 @@ app.register(async (instance) => {
           hub.resolveRunnerRequest(msg, runnerId);
         }
         break;
+      case "skill_kept_aside_result":
+        if (runnerId === msg.runnerId && runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "skillKeptAsideCopies")) {
+          hub.resolveRunnerRequest(msg, runnerId);
+        }
+        break;
       case "skill_adoption_recovery_result":
         if (runnerId === msg.runnerId && runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "machineSkillAdoptionRecovery")) {
           hub.resolveRunnerRequest(msg, runnerId);

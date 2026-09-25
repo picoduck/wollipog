@@ -320,3 +320,34 @@ test("drift is authoritative replacement, normalized, and accepted only from run
   assert.equal(late[0]!.name, "late-held");
   assert.equal(late.length, 1 + 256);
 });
+
+test("kept-aside copies are authoritative replacement, normalized, and accepted only from runners that negotiated them", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const register = (runnerId: string, protocolVersion: number) => db.registerRunner(
+    { runnerId, hostname: runnerId, os: "linux", version: "1", agents: [], workspaces: [] }, 1, protocolVersion);
+  register("runner-current", RUNNER_CAPABILITY_MIN_PROTOCOL.skillKeptAsideCopies);
+  register("runner-old", RUNNER_CAPABILITY_MIN_PROTOCOL.skillKeptAsideCopies - 1);
+  const id = "0f0e0d0c-0b0a-4908-8706-050403020100";
+  const keptAside = [
+    { id, name: "alpha", digest: "a".repeat(64), variant: "manual" as const, keptAsideAt: 7, observedDigest: "b".repeat(64),
+      detail: "Kept\u0000 aside.", extra: "dropped" },
+    { id, name: "duplicate" },
+    { id: "not-a-uuid" },
+    { id: "1f0e0d0c-0b0a-4908-8706-050403020100", name: "../escape" },
+    { id: "2f0e0d0c-0b0a-4908-8706-050403020100", observedDigest: "b".repeat(64), observedFingerprint: "c".repeat(64) },
+    { id: "3f0e0d0c-0b0a-4908-8706-050403020100", keptAsideAt: -1 },
+    { id: "4f0e0d0c-0b0a-4908-8706-050403020100", observedFingerprint: "c".repeat(64) },
+  ];
+  db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [], keptAside: keptAside as never }, 10);
+  assert.deepEqual(db.getRunnerSkillState("runner-current")!.keptAside, [
+    { id, name: "alpha", digest: "a".repeat(64), variant: "manual", keptAsideAt: 7, observedDigest: "b".repeat(64), detail: "Kept aside." },
+    { id: "4f0e0d0c-0b0a-4908-8706-050403020100", observedFingerprint: "c".repeat(64) },
+  ]);
+  db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [] }, 20);
+  assert.deepEqual(db.getRunnerSkillState("runner-current")!.keptAside, [], "a later report without the field clears it");
+  db.setRunnerSkillState("runner-old", { deployed: [], unmanaged: [], keptAside: keptAside as never }, 30);
+  assert.deepEqual(db.getRunnerSkillState("runner-old")!.keptAside, [], "an older runner can never produce a kept-aside result");
+  const many = Array.from({ length: 300 }, (_, index) => ({ id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}` }));
+  db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [], keptAside: many }, 40);
+  assert.equal(db.getRunnerSkillState("runner-current")!.keptAside.length, 256);
+});

@@ -387,3 +387,137 @@ test("SkillsView shows Drift for an edited deployed copy and resolves it by impo
   await act(async () => root.unmount());
   container.remove();
 });
+
+test("SkillsView lists orphaned copies per machine and resolves them by review and import or fenced discard", async () => {
+  const keptId = "0f0e0d0c-0b0a-4908-8706-050403020100";
+  const unreadableId = "1f0e0d0c-0b0a-4908-8706-050403020100";
+  const digest = "d".repeat(64);
+  const orphaned: RunnerSkillsResponse = {
+    removalReporting: "supported",
+    driftReporting: "supported",
+    keptAsideReporting: "supported",
+    desired: [],
+    reported: { deployed: [], unmanaged: [], updatedAt: 1_700_000_000_000 },
+    orphaned: [
+      { kind: "kept_aside", id: keptId, name: "notes", digest, variant: "manual", keptAsideAt: 1_700_000_000_000,
+        observedDigest: "e".repeat(64), detail: "A restore kept this edited copy aside in the skill store instead of deleting it." },
+      { kind: "kept_aside", id: unreadableId, observedFingerprint: "f".repeat(64),
+        detail: "An earlier runner kept this edited copy aside without recording the skill version it came from." },
+      { kind: "deleted_skill", name: "retired", digest, variant: "agent", observedDigest: "a".repeat(64), held: true },
+    ],
+  };
+  let current = orphaned;
+  const calls: string[] = [];
+  const confirmations: string[] = [];
+  const skillMd = "---\nname: notes\n---\nKeep notes.\n";
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [{ id: "skill-1", name: "code-review", latestVersion: { id: "v1", digest } }] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async () => ({ skill: { id: "skill-1", name: "code-review", latestVersion: { id: "v1", digest } },
+      latestVersion: { id: "v1", digest, files: [{ path: "SKILL.md", content: skillMd, encoding: "utf8" as const }] } }),
+    listSkillAssignments: async () => ({ assignments: [] }),
+    getMachineSkillVersionPolicy: async () => ({ policy: null }),
+    runnerSkills: async () => current,
+    syncRunnerSkills: async () => current.reported!,
+    previewOrphanedSkillCopy: async (runnerId: string, copy: { kind: string; id?: string }) => {
+      calls.push(`preview:${runnerId}:${copy.kind}:${copy.id}`);
+      return {
+        previewId: "review-1", copy: { ...copy, observedDigest: "e".repeat(64) }, name: "notes",
+        files: [{ path: "SKILL.md", content: `${skillMd}Recovered edit.\n`, encoding: "utf8" }],
+        previousFiles: [], digest: "e".repeat(64), importable: true, disposition: "new", assignmentCount: 0,
+      };
+    },
+    discardOrphanedSkillCopyPreview: async () => { calls.push("discard-preview"); },
+    importOrphanedSkillCopy: async (previewId: string, acceptUpdate: boolean) => {
+      calls.push(`import:${previewId}:${acceptUpdate}`);
+      current = { ...orphaned, orphaned: orphaned.orphaned!.slice(1) };
+      return { released: true, state: current.reported };
+    },
+    discardOrphanedSkillCopy: async (runnerId: string, copy: { kind: string; id?: string; name?: string }, observation: object) => {
+      calls.push(`discard:${runnerId}:${copy.kind}:${copy.id ?? copy.name}:${JSON.stringify(observation)}`);
+      current = { ...orphaned, orphaned: [] };
+      return { status: "discarded", state: current.reported };
+    },
+  } as unknown as ApiClient;
+  const feedback = {
+    confirm: async (options: { title: string; message: string; confirmLabel?: string }) => {
+      confirmations.push(`${options.title}|${options.confirmLabel}`);
+      return true;
+    },
+    showToast: () => -1,
+    showUndo: () => -1,
+    dismissToast: () => undefined,
+  };
+
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "skills-orphans", runtimeKey: "skills-orphans:1", createSocket: () => socket, close() {},
+  };
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <FeedbackContext.Provider value={feedback as never}>
+          <StoreProvider connection={connection} navigation={navigation}>
+            <SkillsWhenReady />
+          </StoreProvider>
+        </FeedbackContext.Provider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+    });
+  });
+  await act(settle);
+  const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .filter((candidate) => candidate.textContent?.trim() === label);
+  const entry = [...container.querySelectorAll<HTMLButtonElement>(".skills-item")]
+    .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
+  assert.ok(entry, "the skill list offers the orphaned copies independent of any library skill");
+  assert.match(entry!.textContent ?? "", /Orphaned Copies3/);
+  await act(async () => { entry!.click(); });
+  await act(settle);
+  const machine = container.querySelector('[aria-label="Orphaned Copies"] .skills-machine');
+  assert.match(machine?.textContent ?? "", /Build Machine/);
+  const items = [...machine!.querySelectorAll(".skills-orphans li")];
+  assert.equal(items.length, 3);
+  assert.match(items[0]!.textContent ?? "", /notes.*Kept Aside.*Manual Only.*dddddddddddd.*Readable.*\.drift-0f0e0d0c/);
+  assert.match(items[1]!.textContent ?? "", /Unidentified Copy.*Kept Aside.*Unknown.*Unreadable/);
+  assert.match(items[2]!.textContent ?? "", /retired.*Deleted Skill.*Agent Invocable.*links still serve the copy/);
+  assert.equal(button("Review and Import")[1]!.disabled, true, "an unreadable copy cannot be reviewed");
+  assert.equal(button("Discard Copy")[1]!.disabled, false, "a fingerprinted unreadable copy can be discarded");
+
+  await act(async () => { button("Review and Import")[0]!.click(); });
+  await act(settle);
+  const dialog = container.querySelector('[role="dialog"]');
+  assert.ok(dialog, "Review and Import opens a review dialog");
+  assert.match(dialog!.textContent ?? "", /Recovered edit\./);
+  assert.match(dialog!.textContent ?? "", /creates it with no assignments/);
+  const importButton = [...dialog!.querySelectorAll<HTMLButtonElement>("button")]
+    .find((candidate) => candidate.textContent?.trim() === "Import as New Skill");
+  assert.equal(importButton?.disabled, false, "a new skill needs no diff acceptance");
+  await act(async () => { importButton!.click(); });
+  await act(settle);
+  assert.equal(container.querySelector('[role="dialog"]'), null);
+  assert.equal(container.querySelectorAll(".skills-orphans li").length, 2);
+
+  await act(async () => { button("Discard Copy")[0]!.click(); });
+  await act(settle);
+  assert.deepEqual(confirmations, ["Discard this unidentified kept-aside copy?|Discard Copy"]);
+  assert.deepEqual(calls, [
+    `preview:runner-1:kept_aside:${keptId}`,
+    "import:review-1:false",
+    `discard:runner-1:kept_aside:${unreadableId}:{"observedFingerprint":"${"f".repeat(64)}"}`,
+  ]);
+  assert.match(container.querySelector('[aria-label="Orphaned Copies"]')?.textContent ?? "", /No orphaned copies are reported\./);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
