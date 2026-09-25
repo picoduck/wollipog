@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import fs from "node:fs";
 import { tmpdir } from "node:os";
@@ -442,24 +442,50 @@ test("a Windows restore recovers an adopted harness skill after reconciliation r
     assert.equal(junctionTarget(canonical), canonicalTarget, "the canonical junction is never touched");
   });
 
+// Hold a path open with no sharing, so any other open fails with a sharing violation: a real
+// "exists but cannot be read" failure that, unlike a deny ACE, backup-privileged runners cannot bypass.
+const EXCLUSIVE_LOCK_SCRIPT = [
+  "$signature = '[DllImport(\"kernel32.dll\", SetLastError = true, CharSet = CharSet.Unicode)] public static extern " +
+    "Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, " +
+    "uint disposition, uint flags, IntPtr template);'",
+  "$kernel = Add-Type -MemberDefinition $signature -Name ExclusiveLock -Namespace WollipogTest -PassThru",
+  "$handle = $kernel::CreateFileW($env:WOLLIPOG_TEST_LOCK_PATH, [uint32]2147483648, 0, [IntPtr]::Zero, 3, 33554432, " +
+    "[IntPtr]::Zero)",
+  "if ($handle.IsInvalid) { exit 1 }",
+  "[Console]::Out.WriteLine('held'); [Console]::Out.Flush()",
+  "[void][Console]::In.ReadLine()",
+  "$handle.Dispose()",
+].join("\n");
+
+async function holdExclusive(path: string): Promise<() => Promise<void>> {
+  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
+    Buffer.from(EXCLUSIVE_LOCK_SCRIPT, "utf16le").toString("base64")],
+  { env: { ...process.env, WOLLIPOG_TEST_LOCK_PATH: path }, stdio: ["pipe", "pipe", "inherit"], windowsHide: true });
+  child.stdout.setEncoding("utf8");
+  let output = "";
+  await new Promise<void>((resolve, reject) => {
+    child.stdout.on("data", (chunk: string) => { output += chunk; if (output.includes("held")) resolve(); });
+    child.on("exit", (code) => reject(new Error(`the exclusive lock helper exited with ${code}`)));
+  });
+  return async () => { child.stdin.end("\n"); await once(child, "exit"); };
+}
+
 test("an unreadable Windows harness directory, journal, or intent record fails inspection instead of looking empty",
-  native, (t) => {
+  native, async (t) => {
     const f = fixture(t);
     const adopted = adoptMachineSkill(f.options);
     assert.equal(adopted.status, "adopted", JSON.stringify(adopted));
     if (adopted.status !== "adopted") return;
     const list = () => listSkillAdoptionRecovery(f.home, f.dataDir, agents);
     const journal = join(f.home, adopted.backupDirectory);
-    const icacls = (...args: string[]) => execFileSync("icacls", args, { stdio: "ignore", windowsHide: true });
     for (const locked of [f.parent, journal, join(journal, "intent.json")]) {
-      // Everyone (S-1-1-0) is denied read access; the helper never enables backup privileges.
-      icacls(locked, "/deny", "*S-1-1-0:(R)");
+      const release = await holdExclusive(locked);
       try {
         assert.deepEqual(list(), { operations: [], truncated: true }, locked);
         const restored = f.restore(adopted.operationId);
         assert.equal(restored.status, "blocked", JSON.stringify(restored));
         assert.match(restored.error ?? "", /\.codex\/skills could not be inspected/u);
-      } finally { icacls(locked, "/remove:d", "*S-1-1-0"); }
+      } finally { await release(); }
     }
     assert.deepEqual(list().operations.map((entry) => entry.state), ["managed_linked"]);
     // A missing or junctioned harness directory holds no journals and keeps the list complete.
