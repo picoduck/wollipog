@@ -611,6 +611,10 @@ const EMPTY_DESCENDANT_REQUESTS: readonly DescendantRequestView[] = Object.freez
 const EMPTY_BLOCKED_CHILDREN: readonly DescendantBlockedChildView[] = Object.freeze([]);
 const EMPTY_HELD_CHILDREN: readonly CampaignHeldChild[] = Object.freeze([]);
 
+function sameStrings(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 type ActiveDescendantRequestPoll = {
   controller: AbortController;
   timeout: number;
@@ -892,11 +896,14 @@ function SessionDetailLoaded({
   // list and the count move together. Titles prefer the live session store and fall back to the
   // held descendants the request poll reports, then to the id (#1760).
   const heldChildren = session.orchestratorCampaign?.heldChildren ?? EMPTY_HELD_CHILDREN;
-  const heldChildStoreTitles = useStoreSelector((s) =>
-    heldChildren.map((child) => s.sessions.get(child.sessionId)?.title ?? "").join("\u0000"));
+  // Compared element-wise so an unrelated store update keeps the same array and skips a re-render.
+  const heldChildStoreTitles = useStoreSelector(
+    (s) => heldChildren.map((child) => s.sessions.get(child.sessionId)?.title ?? ""),
+    sameStrings,
+  );
   const heldChildTitle = useCallback((childSessionId: string) => {
     const index = heldChildren.findIndex((child) => child.sessionId === childSessionId);
-    const stored = index >= 0 ? heldChildStoreTitles.split("\u0000")[index] : undefined;
+    const stored = index >= 0 ? heldChildStoreTitles[index] : undefined;
     return stored || blockedDescendants.find((child) => child.sessionId === childSessionId)?.sessionTitle;
   }, [blockedDescendants, heldChildStoreTitles, heldChildren]);
   const ownStandaloneApproval = standaloneApprovalForReview(session.pendingApproval);
