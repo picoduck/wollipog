@@ -13087,6 +13087,7 @@ body.shell-dock-dragging * {
 .skills-drift-actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 6px; }
 .skills-drift-actions .btn { white-space: normal; }
 .skills-hint { color: var(--text-dim); font-size: var(--text-sm); line-height: 1.5; margin: 0; }
+.skills-target-unavailable { border-left: 2px solid var(--warning); padding-left: 8px; overflow-wrap: anywhere; }
 
 @media (max-width: 760px) {
   .skills-view { padding: 14px; }

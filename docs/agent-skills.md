@@ -681,7 +681,8 @@ Git backs the library as an **upstream source**, not as the distribution transpo
   cwd. Gate exactly like `includeClaudeUserCommandsForTarget()` and report "unavailable on this
   target" honestly. The New Session dialog says so when such a target is selected, and a container
   or cloud session on a Machine with skills assigned to its agent shows a "Skills Unavailable on
-  This Target" notice naming them. Mounting the skills root into containers is a deliberate later
+  This Target" notice naming them. In the Skills view, each Machine that advertises container or
+  cloud targets carries a note in the Machine × Agents matrix naming those targets. Mounting the skills root into containers is a deliberate later
   decision.
 - **Provider-home concurrency.** Content is verified and materialized in the runner-local store
   before the reconciler requests the process-lifetime `ProviderHomeLeaseRegistry` lease. Every

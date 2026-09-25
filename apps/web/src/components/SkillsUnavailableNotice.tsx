@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { ExecutionTargetRef } from "@wollipog/protocol";
+import type { ExecutionTargetDefinition, ExecutionTargetRef } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import type { RunnerDesiredSkill } from "../skills.js";
 
@@ -13,6 +13,12 @@ export function managedSkillsAvailableForTarget(adapter: TargetAdapter): boolean
 
 export const SKILLS_UNAVAILABLE_ON_TARGET =
   "Managed skills from this Machine are unavailable on container and cloud targets, because only the workspace is mounted.";
+
+/** Names of a Machine's advertised execution targets that cannot see its managed skills, in the
+ * runner's order. Empty for host-only Machines and for runners that advertise no targets. */
+export function targetsWithoutManagedSkills(targets: Pick<ExecutionTargetDefinition, "name" | "adapter">[] | undefined): string[] {
+  return (targets ?? []).filter((target) => !managedSkillsAvailableForTarget(target.adapter)).map((target) => target.name);
+}
 
 /** Skill names this Machine would deploy for the session's agent. A missing agent id matches any
  * target so an older session still reports the absence instead of hiding it. */

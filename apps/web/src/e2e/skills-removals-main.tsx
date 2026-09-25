@@ -1,6 +1,6 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import { RUNNER_CAPABILITY_MIN_PROTOCOL, type ControlPlaneToUi, type RunnerView } from "@wollipog/protocol";
+import { RUNNER_CAPABILITY_MIN_PROTOCOL, type ControlPlaneToUi, type ExecutionTargetDefinition, type RunnerView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -16,6 +16,12 @@ const macosAdoption = new URLSearchParams(location.search).has("macosAdoption");
 const windowsAdoption = new URLSearchParams(location.search).has("windowsAdoption");
 // Drift resolution runs against the real API client so the spec can route and assert each request.
 const drift = new URLSearchParams(location.search).has("drift");
+// #1714: Build Machine offers container and cloud targets; Other Machine stays host-only.
+const targets = new URLSearchParams(location.search).has("targets");
+const hostTarget = (runnerId: string): ExecutionTargetDefinition => ({
+  id: `${runnerId}-host`, runnerId, name: "Runner Host · worktree", kind: "local", workspaceStrategy: "worktree", adapter: "host",
+  boundaries: { filesystem: "worktree", network: "inherit", secrets: "runner_local", billing: "agent_account" }, available: true,
+});
 
 const runner: RunnerView = {
   runnerId: "runner-1",
@@ -47,6 +53,17 @@ const runner: RunnerView = {
     { id: "acct-work", label: "Work Account", provider: "claude" as const, authStatus: "authenticated" as const },
     { id: "acct-personal", label: "Personal Account", provider: "claude" as const, authStatus: "authenticated" as const },
   ] } : {}),
+  ...(targets ? { executionTargets: [
+    hostTarget("runner-1"),
+    {
+      id: "runner-1-container", runnerId: "runner-1", name: "Offline Container", kind: "container", workspaceStrategy: "worktree",
+      adapter: "container", boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" }, available: true,
+    },
+    {
+      id: "runner-1-cloud", runnerId: "runner-1", name: "Cloud Sandbox", kind: "cloud", workspaceStrategy: "worktree",
+      adapter: "cloud", boundaries: { filesystem: "snapshot", network: "deny", secrets: "none", billing: "none" }, available: true,
+    },
+  ] satisfies ExecutionTargetDefinition[] } : {}),
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
@@ -80,6 +97,7 @@ const snapshot: ControlPlaneToUi = {
     projects: false,
   },
   runners: [runner, ...(new URLSearchParams(location.search).has("matrix") ? [{ ...runner, runnerId: "runner-2", displayName: "Other Machine",
+    ...(targets ? { executionTargets: [hostTarget("runner-2")] } : {}),
     status: new URLSearchParams(location.search).has("onlineMatrix") ? "online" as const : "offline" as const }] : [])],
   boxes: [],
   sessions: [],
