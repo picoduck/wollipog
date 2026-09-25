@@ -10,6 +10,7 @@ import {
 } from "../artifact-preview.js";
 import { requestBlobDownload } from "../transcript-download.js";
 import { Markdown } from "./Markdown.js";
+import { useTranscriptImageCache } from "./TranscriptImageCache.js";
 
 type LoadedPreview =
   | { kind: "html"; source: string; blob: Blob }
@@ -23,6 +24,7 @@ function decodeUtf8(bytes: ArrayBuffer): string {
 /** Explicit, authenticated artifact materialization shared by run detail and the Browser panel. */
 export function ArtifactPreview({ artifact }: { artifact: WorkflowArtifactView }) {
   const api = useApi();
+  const transcriptImageCache = useTranscriptImageCache();
   const [loaded, setLoaded] = useState<LoadedPreview | null>(null);
   const [busy, setBusy] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -43,20 +45,26 @@ export function ArtifactPreview({ artifact }: { artifact: WorkflowArtifactView }
       return () => { requestRef.current++; };
     }
 
-    void api.artifactExport(artifact.artifactId).then(async (blob) => {
-      const bytes = await verifyArtifactPreviewBlob(artifact, blob);
+    void (async () => {
+      const cachedImage = previewClass === "image" && transcriptImageCache;
+      const blob = cachedImage
+        ? await cachedImage.load(artifact, api.artifactExport)
+        : await api.artifactExport(artifact.artifactId);
+      const bytes = cachedImage ? null : await verifyArtifactPreviewBlob(artifact, blob);
       if (requestRef.current !== request) return;
       if (previewClass === "image" || previewClass === "video") {
-        objectUrl = URL.createObjectURL(new Blob([bytes], { type: artifact.mimeType }));
+        objectUrl = URL.createObjectURL(bytes
+          ? new Blob([bytes], { type: artifact.mimeType })
+          : blob);
         setLoaded({ kind: previewClass, objectUrl, blob });
       } else {
-        let text = decodeUtf8(bytes);
+        let text = decodeUtf8(bytes!);
         if (previewClass === "json") text = JSON.stringify(JSON.parse(text) as unknown, null, 2);
         setLoaded(previewClass === "html"
           ? { kind: "html", source: sandboxHtmlDocument(text), blob }
           : { kind: previewClass, text, blob });
       }
-    }).catch((cause: unknown) => {
+    })().catch((cause: unknown) => {
       if (requestRef.current === request) setError(cause instanceof Error ? cause.message : String(cause));
     }).finally(() => {
       if (requestRef.current === request) setBusy(false);
@@ -66,7 +74,7 @@ export function ArtifactPreview({ artifact }: { artifact: WorkflowArtifactView }
       requestRef.current++;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [api, artifact]);
+  }, [api, artifact, transcriptImageCache]);
 
   const download = async () => {
     if (downloadBusy) return;

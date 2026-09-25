@@ -402,13 +402,24 @@ function Fixture() {
     context: standaloneTemplate.context,
     ...(session.pendingApproval ? {} : { resolvedOptionId: "trust", resolutionReason: "submitted" as const }),
   }] : [];
-  const artifactTimelineItems: TimelineItem[] = scenario === "artifact-timeline" ? [{
-    kind: "artifact_attached", id: 26, createdAt: Date.now(), artifact: {
-      artifactId: "art_clip", sessionId: session.id, kind: "video", name: "Session Walkthrough.webm",
-      mimeType: "video/webm", encoding: "base64", sizeBytes: artifactBytes.get("art_clip")?.byteLength ?? 0,
-      sha256: artifactDigests.get("art_clip")!, createdBy: { kind: "agent", id: session.id }, createdAt: Date.now(),
+  const artifactTimelineItems: TimelineItem[] = scenario === "artifact-timeline" ? [
+    ...(artifactMode === "ready" ? Array.from({ length: 24 }, (_, index): TimelineItem =>
+      ({ kind: "user_message", id: 100 + index, text: `Earlier transcript message ${index + 1}` })) : []),
+    {
+      kind: "artifact_attached", id: 26, createdAt: Date.now(), artifact: {
+        artifactId: artifactMode === "ready" ? "art_1" : "art_clip", sessionId: session.id,
+        kind: artifactMode === "ready" ? "screenshot" : "video",
+        name: artifactMode === "ready" ? "Session Screenshot.png" : "Session Walkthrough.webm",
+        mimeType: artifactMode === "ready" ? "image/png" : "video/webm", encoding: "base64",
+        sizeBytes: artifactBytes.get(artifactMode === "ready" ? "art_1" : "art_clip")?.byteLength ?? 0,
+        sha256: artifactDigests.get(artifactMode === "ready" ? "art_1" : "art_clip")!,
+        createdBy: { kind: "agent", id: session.id }, createdAt: Date.now(),
+      },
     },
-  }] : [];
+    ...(artifactMode === "ready" ? Array.from({ length: 40 }, (_, index): TimelineItem =>
+      ({ kind: "user_message", id: 200 + index, text: `Later transcript message ${index + 1}` })) : []),
+  ] : [];
+  const artifactTimelineScrollRef = useRef<HTMLDivElement>(null);
 
   return (
     <ApiProvider client={client}>
@@ -445,8 +456,9 @@ function Fixture() {
               )}
               <div className="detail-main">
                 <div className="detail-reader">
-                  <div className="detail-scroll measured-virtual-scroll" role="region" aria-label="Session Activity">
-                    {Array.from({ length: 24 }, (_, index) => (
+                  <div className="detail-scroll measured-virtual-scroll" role="region" aria-label="Session Activity"
+                    ref={artifactTimelineScrollRef}>
+                    {Array.from({ length: scenario === "artifact-timeline" ? 0 : 24 }, (_, index) => (
                       <div className={`tl-row ${index % 2 ? "agent" : "user"}`} key={index}>
                         <div className={index % 2 ? "bubble agent-bubble" : "bubble user-bubble"}>
                           Transcript message {index + 1}
@@ -456,6 +468,8 @@ function Fixture() {
                     {(scenario === "standalone" || scenario === "worker" || scenario === "artifact-timeline") && (
                       <EventTimeline
                         items={scenario === "artifact-timeline" ? artifactTimelineItems : standaloneTimelineItems}
+                        scrollRef={scenario === "artifact-timeline" ? artifactTimelineScrollRef : undefined}
+                        historyKey={scenario === "artifact-timeline" ? `${session.id}:0` : undefined}
                         approvalContext={session.pendingApproval ? {
                           sessionId: session.id,
                           requestId: session.pendingApproval.requestId,
