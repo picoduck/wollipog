@@ -1553,11 +1553,13 @@ test("a queued prompt held behind a handoff waiting on background work is a hold
   assert.match(hold!.reason, /waits for 1 background job with no terminal status \(a monitor started at 2026-09-25T00:12Z\)\./u);
   assert.match(hold!.recoveryAction, /Wait for the unfinished background job to end/u);
   assert.match(hold!.recoveryAction, /restart_session/u);
-  // Both costs of the bounded way out are stated, not discovered: the runner's restart path
-  // rejects the queued prompts, and the control plane revokes unconsumed approvals.
-  assert.match(hold!.recoveryAction, /discards the queued message, which must be sent again/u);
-  assert.match(hold!.recoveryAction, /revokes any approved workflow decision/u);
-  assert.doesNotMatch(hold!.recoveryAction, /keeps the queued/u);
+  // Every cost of the bounded way out is stated, not discovered: an explicit restart carries no
+  // background work forward, the runner rejects the queued prompts, and the control plane revokes
+  // unconsumed approvals.
+  assert.match(hold!.recoveryAction, /background job end and no undelivered result is recovered/u);
+  assert.match(hold!.recoveryAction, /the queued message is discarded and must be sent again/u);
+  assert.match(hold!.recoveryAction, /is revoked and must be requested again/u);
+  assert.doesNotMatch(hold!.recoveryAction, /keeps the queued|recovers the/u);
   assert.equal(Object.hasOwn(hold!, "heldResumes"), false);
 
   const several = sessionHolds({ queueHold: {
@@ -1568,7 +1570,8 @@ test("a queued prompt held behind a handoff waiting on background work is a hold
   assert.match(several[0]!.reason, /^The 3 queued messages cannot start: the provider must first switch to provider account work@example\.com/u);
   assert.match(several[0]!.reason, /2 background jobs with no terminal status \(the oldest, a subagent started at 1970-01-01T00:00Z\)/u);
   assert.match(several[0]!.recoveryAction, /If they never end/u);
-  assert.match(several[0]!.recoveryAction, /discards the queued messages, which must be sent again/u);
+  assert.match(several[0]!.recoveryAction, /background jobs end and no undelivered result is recovered/u);
+  assert.match(several[0]!.recoveryAction, /the queued messages are discarded and must be sent again/u);
   assert.deepEqual(several[0]?.heldResumes, [{ kind: "workflow_decision_resolution", occurrenceId: "wd_9", since: 9 }]);
 
   // Both holds can coexist, and each keeps its own identity and reason.

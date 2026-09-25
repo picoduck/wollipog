@@ -5689,18 +5689,22 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
 }
 
 /** What clears a queue hold. Waiting is the ordinary way; a restart is the bounded way out of a
- * job that never ends, and its costs are stated so nobody is surprised: the runner's restart path
- * rejects every prompt still in the queue ("session restart discarded the queued command"), and a
- * restart revokes approved decisions the session has not consumed. */
+ * job that never ends, and its costs are stated so nobody is surprised. An explicit restart builds
+ * fresh session metadata (no background jobs or orphan marker are carried, and a Claude Code or
+ * Codex exec conversation is not resumed), so the provider's background work ends with it and no
+ * undelivered result comes back; the runner's restart path rejects every prompt still in the queue
+ * ("session restart discarded the queued command"); and the control plane revokes approved
+ * decisions the session has not consumed. */
 export function queueHoldRecoveryAction(hold: SessionQueueHoldView): string {
   const one = hold.unfinishedBackgroundJobs === 1;
   const jobs = one ? "job" : "jobs";
   const messages = hold.queuedPrompts === 1 ? "message" : "messages";
   return `Wait for the unfinished background ${jobs} to end; the handoff and the queued ${messages} then proceed on their own. ` +
     `If ${one ? "it never ends" : "they never end"} (a monitor whose condition never fires ends only with its provider process), ` +
-    "restart the session with restart_session: that retires the provider and recovers the " +
-    `${jobs} as orphaned work, but it discards the queued ${messages}, which must be sent again, and revokes ` +
-    "any approved workflow decision the session has not yet consumed, which must be requested again.";
+    "restart the session with restart_session, knowing what that costs: the provider and its background " +
+    `${jobs} end and no undelivered result is recovered, the queued ${messages} ${hold.queuedPrompts === 1 ? "is" : "are"} ` +
+    "discarded and must be sent again, and any approved workflow decision the session has not yet consumed " +
+    "is revoked and must be requested again.";
 }
 
 /**
