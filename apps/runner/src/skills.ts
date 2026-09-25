@@ -223,8 +223,11 @@ export interface ReconcileSkillsResult {
   removedLinks: SkillLinkRemoval[];
   /** Base pass only: every drifted store copy. Absent when the store could not be verified. */
   drift?: SkillDriftState[];
-  /** Base pass only: every edited copy a restore kept aside. Absent when the store could not be verified. */
+  /** Base pass only: every edited copy a restore kept aside, up to the report bound. Absent when the
+   * store could not be verified. */
   keptAside?: SkillKeptAsideCopy[];
+  /** Base pass only: kept-aside copies beyond the report bound. */
+  keptAsideOmitted?: number;
   /** Runner-internal, never sent: scan-time digests of unedited copies, keyed `<name>/<version>`. */
   movableCopies?: Record<string, string>;
 }
@@ -283,6 +286,7 @@ export function mergeReconcileSkillsResults(
   const drift = left.drift || right.drift ? [...left.drift ?? [], ...right.drift ?? []] : undefined;
   const movable = left.movableCopies ?? right.movableCopies;
   const keptAside = left.keptAside ?? right.keptAside;
+  const keptAsideOmitted = left.keptAsideOmitted ?? right.keptAsideOmitted;
   return {
     deployed,
     unmanaged,
@@ -290,6 +294,7 @@ export function mergeReconcileSkillsResults(
     error: [...new Set(errors)].join("; ") || undefined,
     ...(drift ? { drift } : {}),
     ...(keptAside ? { keptAside } : {}),
+    ...(keptAsideOmitted ? { keptAsideOmitted } : {}),
     ...(movable ? { movableCopies: movable } : {}),
   };
 }
@@ -309,6 +314,7 @@ export function skillsStateMessage(
     removals: result.removedLinks,
     ...(result.drift === undefined ? {} : { drift: result.drift }),
     ...(result.keptAside === undefined ? {} : { keptAside: result.keptAside }),
+    ...(result.keptAsideOmitted ? { keptAsideOmitted: result.keptAsideOmitted } : {}),
     ...(result.error === undefined ? {} : { error: result.error }),
   };
 }
@@ -1521,7 +1527,7 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
   const desiredCopies = new Map(ready.map(({ entry, manualNeeded }) =>
     [entry.name, { digest: entry.versionDigest, manual: manualNeeded }]));
   let scan: StoreDriftScan | undefined;
-  let keptAside: SkillKeptAsideCopy[] | undefined;
+  let keptAside: ReturnType<typeof scanKeptAsideCopies> | undefined;
   if (manageCanonical) {
     scan = scanStoreDrift(realStoreRoot, {
       desired: new Map(ready.map(({ entry }) => [entry.name, entry.versionDigest])),
@@ -1652,7 +1658,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
         removedLinks: [],
         error: `${detail}${foundForeignSymlink ? ` ${scanDetail}` : ""}`,
         ...(drift ? { drift: drift.report } : {}),
-        ...(keptAside ? { keptAside } : {}),
+        ...(keptAside ? { keptAside: keptAside.copies } : {}),
+        ...(keptAside?.omitted ? { keptAsideOmitted: keptAside.omitted } : {}),
         ...(scan && drift ? { movableCopies: movableCopies(scan, drift.report) } : {}),
       }, options.providerAccountId);
     }
@@ -2023,7 +2030,8 @@ export async function reconcileSkills(options: ReconcileSkillsOptions): Promise<
     }, options.harnessDirectories),
     removedLinks,
     ...(drift || lateDrift.length ? { drift: [...drift?.report ?? [], ...lateDrift] } : {}),
-    ...(keptAside ? { keptAside } : {}),
+    ...(keptAside ? { keptAside: keptAside.copies } : {}),
+    ...(keptAside?.omitted ? { keptAsideOmitted: keptAside.omitted } : {}),
     ...(scan ? { movableCopies: movableCopies(scan, [...drift?.report ?? [], ...lateDrift]) } : {}),
   }, options.providerAccountId);
 }

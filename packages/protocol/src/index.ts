@@ -8148,9 +8148,11 @@ export interface SkillsStateMessage {
   /** v183 authoritative full replacement: every drifted store copy on this machine. Older runners
    * omit it and older control planes ignore it. */
   drift?: SkillDriftState[];
-  /** v184 authoritative full replacement: every edited copy kept aside in the store. Older runners
-   * omit it and older control planes ignore it. */
+  /** v184 authoritative full replacement: every edited copy kept aside in the store, oldest first, up
+   * to a bound. Older runners omit it and older control planes ignore it. */
   keptAside?: SkillKeptAsideCopy[];
+  /** v184: kept-aside copies beyond that bound, so an omitted copy is still accounted for. */
+  keptAsideOmitted?: number;
   error?: string;
 }
 

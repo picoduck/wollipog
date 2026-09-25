@@ -1,6 +1,7 @@
 import { runnerSupportsProtocol, type RunnerView } from "@wollipog/protocol";
 import {
   invocationLabel,
+  omittedKeptAsideCopies,
   orphanedCopyKey,
   reportedOrphanedCopies,
   type OrphanedSkillCopy,
@@ -50,6 +51,7 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
       {runners.map((runner) => {
         const machine = machineSkills[runner.runnerId];
         const copies = reportedOrphanedCopies(machine);
+        const omitted = omittedKeptAsideCopies(machine);
         const keptAsideUnsupported = machine?.keptAsideReporting === "unsupported";
         return (
           <article className="skills-machine" key={runner.runnerId} aria-label={machineLabels.get(runner.runnerId) ?? runner.runnerId}>
@@ -66,7 +68,7 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
             </div>
             {!machine && <p className="skills-hint">Skills status has not loaded.</p>}
             {machine?.loadError && <p className="skills-hint">{machine.loadError}</p>}
-            {machine && !machine.loadError && copies.length === 0 && (
+            {machine && !machine.loadError && copies.length === 0 && omitted === 0 && (
               <p className="skills-hint">{keptAsideUnsupported
                 ? "No edited copies of deleted skills are reported."
                 : "No orphaned copies are reported."}</p>
@@ -119,6 +121,12 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
                   );
                 })}
               </ul>
+            )}
+            {omitted > 0 && (
+              <p className="skills-hint">
+                {omitted === 1 ? "1 more kept-aside copy is" : `${omitted} more kept-aside copies are`} not listed.
+                Resolve listed copies, or remove copies on the machine, to list the rest.
+              </p>
             )}
             {runner.status === "online" && copies.some((copy) => !canResolveOrphanedCopy(runner, copy)) && (
               <p className="skills-hint">Update this machine's runner to resolve these copies here.</p>

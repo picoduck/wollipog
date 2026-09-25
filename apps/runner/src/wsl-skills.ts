@@ -300,6 +300,7 @@ export function mergeWslSkillsResult(
     // WSL links resolve into the same native store, whose copies the native pass verified; a distro
     // whose own links still serve an edited copy holds that skill as well.
     ...(native.keptAside ? { keptAside: native.keptAside } : {}),
+    ...(native.keptAsideOmitted ? { keptAsideOmitted: native.keptAsideOmitted } : {}),
     ...(native.drift || wsl.lateDrift?.length ? { drift: [
       ...holdSkillDrift(native.drift ?? [], new Set(wsl.heldSkillNames ?? [])),
       ...(wsl.lateDrift ?? []).filter((late) => !native.drift?.some((entry) => entry.name === late.name &&

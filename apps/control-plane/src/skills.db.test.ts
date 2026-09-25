@@ -348,6 +348,12 @@ test("kept-aside copies are authoritative replacement, normalized, and accepted 
   db.setRunnerSkillState("runner-old", { deployed: [], unmanaged: [], keptAside: keptAside as never }, 30);
   assert.deepEqual(db.getRunnerSkillState("runner-old")!.keptAside, [], "an older runner can never produce a kept-aside result");
   const many = Array.from({ length: 300 }, (_, index) => ({ id: `00000000-0000-4000-8000-${String(index).padStart(12, "0")}` }));
-  db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [], keptAside: many }, 40);
+  db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [], keptAside: many, keptAsideOmitted: 5 }, 40);
   assert.equal(db.getRunnerSkillState("runner-current")!.keptAside.length, 256);
+  assert.equal(db.getRunnerSkillState("runner-current")!.keptAsideOmitted, 5 + 44,
+    "copies the runner or the storage bound left out are counted, never dropped silently");
+  db.setRunnerSkillState("runner-current", { deployed: [], unmanaged: [], keptAside: [], keptAsideOmitted: -3 }, 50);
+  assert.equal(db.getRunnerSkillState("runner-current")!.keptAsideOmitted, undefined);
+  db.setRunnerSkillState("runner-old", { deployed: [], unmanaged: [], keptAsideOmitted: 7 }, 60);
+  assert.equal(db.getRunnerSkillState("runner-old")!.keptAsideOmitted, undefined);
 });

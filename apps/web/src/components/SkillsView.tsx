@@ -28,6 +28,7 @@ import {
   groupSkillList,
   invocationLabel,
   normalizeRemovalReporting,
+  omittedKeptAsideCopies,
   orphanedCopyKey,
   orphanedCopyRef,
   reportedOrphanedCopies,
@@ -362,7 +363,8 @@ export function SkillsView() {
   };
 
   const orphanCount = useMemo(() => runners.reduce((count, runner) =>
-    count + reportedOrphanedCopies(machineSkills[runner.runnerId]).length, 0), [machineSkills, runners]);
+    count + reportedOrphanedCopies(machineSkills[runner.runnerId]).length + omittedKeptAsideCopies(machineSkills[runner.runnerId]),
+  0), [machineSkills, runners]);
 
   const orphanResolved = async (result: OrphanedSkillCopyResolution) => {
     if (result.warning) showToast(result.warning, { tone: "error" });

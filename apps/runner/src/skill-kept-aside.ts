@@ -23,7 +23,6 @@ import {
   unlinkSync,
   writeFileSync,
   type BigIntStats,
-  type Stats,
 } from "node:fs";
 import { join } from "node:path";
 import { validSkillName, type SkillInvocationPolicy, type SkillKeptAsideCopy } from "@wollipog/protocol";
@@ -105,45 +104,95 @@ function isRealDirectory(path: string): boolean {
   }
 }
 
-/**
- * Change fingerprint of a copy that cannot be read as skill content, so it has no content digest to
- * fence a discard on. It covers every entry's path, type, identity, mode, size, and modification and
- * change times, plus each symlink's own target text. It never opens a file or follows a link. Any
+/** One entry's identity and change state: type, device, inode, mode, size, modification and change
+ * times, and a symlink's own target text. Never its contents. */
+function entryStamp(path: string, stat: BigIntStats): string {
+  const type = stat.isSymbolicLink() ? "l" : stat.isDirectory() ? "d" : stat.isFile() ? "f" : "o";
+  return JSON.stringify([
+    type, String(stat.dev), String(stat.ino), String(stat.mode), String(stat.size), String(stat.mtimeNs), String(stat.ctimeNs),
+    type === "l" ? readlinkSync(path, { encoding: "buffer" }).toString("base64") : "",
+  ]);
+}
+
+/** The stamp of every entry of a kept-aside copy, keyed by its path relative to the copy ("" is the
+ * copy itself). The walk never follows a symlink: on Linux every directory is listed through its own
+ * no-follow descriptor, and elsewhere each directory's identity is checked again after the walk. Any
  * write, rename, or replacement inside the tree changes a change time, which a writer cannot set back.
- * Undefined when the tree is larger than the bound or changes while it is walked.
- */
-export function keptAsideFingerprint(dir: string): string | undefined {
-  const hash = createHash("sha256");
-  let entries = 0;
-  const record = (path: string, relative: string, stat: BigIntStats): void => {
-    const type = stat.isSymbolicLink() ? "l" : stat.isDirectory() ? "d" : stat.isFile() ? "f" : "o";
-    hash.update(`${JSON.stringify([
-      relative, type, String(stat.dev), String(stat.ino), String(stat.mode), String(stat.size),
-      String(stat.mtimeNs), String(stat.ctimeNs),
-      type === "l" ? readlinkSync(path, { encoding: "buffer" }).toString("base64") : "",
-    ])}\n`);
-  };
-  const visit = (path: string, prefix: string): void => {
-    for (const name of readdirSync(path).sort()) {
-      if (++entries > FINGERPRINT_MAX_ENTRIES) throw new Error("too many entries");
-      const child = join(path, name);
+ * Undefined when the tree is larger than the bound or changes while it is walked. */
+export function keptAsideStamps(
+  dir: string,
+  options: { anchored?: boolean; /** Test seam: runs before a subdirectory is listed. */ beforeList?: (relative: string) => void } = {},
+): Map<string, string> | undefined {
+  const anchored = options.anchored ?? process.platform === "linux";
+  const stamps = new Map<string, string>();
+  const visited: { path: string; stat: BigIntStats }[] = [];
+  const visit = (base: string, prefix: string): void => {
+    for (const name of readdirSync(base).sort()) {
+      if (stamps.size > FINGERPRINT_MAX_ENTRIES) throw new Error("too many entries");
+      const child = anchored ? `${base}/${name}` : join(base, name);
       const stat = lstatSync(child, { bigint: true });
-      record(child, prefix + name, stat);
-      if (stat.isDirectory()) visit(child, `${prefix}${name}/`);
+      stamps.set(prefix + name, entryStamp(child, stat));
+      if (!stat.isDirectory()) continue;
+      options.beforeList?.(prefix + name);
+      if (!anchored) {
+        visited.push({ path: child, stat });
+        visit(child, `${prefix}${name}/`);
+        continue;
+      }
+      const fd = openSync(child, DIRECTORY_FLAGS);
+      try {
+        const opened = fstatSync(fd, { bigint: true });
+        if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error("a directory changed while it was walked");
+        visit(`/proc/self/fd/${fd}`, `${prefix}${name}/`);
+      } finally {
+        closeSync(fd);
+      }
     }
   };
   try {
     const root = lstatSync(dir, { bigint: true });
     if (!root.isDirectory()) return undefined;
-    record(dir, "", root);
-    visit(dir, "");
-    return hash.digest("hex");
+    stamps.set("", entryStamp(dir, root));
+    if (anchored) {
+      const fd = openSync(dir, DIRECTORY_FLAGS);
+      try {
+        const opened = fstatSync(fd, { bigint: true });
+        if (opened.dev !== root.dev || opened.ino !== root.ino) return undefined;
+        visit(`/proc/self/fd/${fd}`, "");
+      } finally {
+        closeSync(fd);
+      }
+    } else {
+      visited.push({ path: dir, stat: root });
+      visit(dir, "");
+      for (const { path, stat } of visited) {
+        const now = lstatSync(path, { bigint: true });
+        if (!now.isDirectory() || now.dev !== stat.dev || now.ino !== stat.ino) return undefined;
+      }
+    }
+    return stamps;
   } catch {
     return undefined;
   }
 }
 
-function unlinkEntry(path: string, stat: Stats): void {
+export function sameKeptAsideStamps(left: ReadonlyMap<string, string>, right: ReadonlyMap<string, string>): boolean {
+  return left.size === right.size && [...left].every(([path, stamp]) => right.get(path) === stamp);
+}
+
+/**
+ * Change fingerprint of a copy that cannot be read as skill content, so it has no content digest to
+ * fence a discard on: a digest of every entry's stamp (see keptAsideStamps). Undefined when the tree is
+ * larger than the bound or changes while it is walked.
+ */
+export function keptAsideFingerprint(dir: string, stamps = keptAsideStamps(dir)): string | undefined {
+  if (!stamps) return undefined;
+  const hash = createHash("sha256");
+  for (const path of [...stamps.keys()].sort()) hash.update(`${JSON.stringify([path, stamps.get(path)])}\n`);
+  return hash.digest("hex");
+}
+
+function unlinkEntry(path: string, stat: BigIntStats): void {
   try {
     unlinkSync(path);
   } catch (error) {
@@ -153,53 +202,66 @@ function unlinkEntry(path: string, stat: Stats): void {
   }
 }
 
-/** Delete a kept-aside tree without following any symlink inside it: links are unlinked, never
- * traversed. On Linux every directory is addressed through its own no-follow descriptor, so replacing
- * a directory with a symlink mid-removal cannot redirect it. Elsewhere each directory's identity is
- * checked immediately before it is listed. Throws on the first failure and leaves the rest in place. */
+/** Delete a kept-aside tree, but only entries that still have the stamp they had when the discard was
+ * verified. Each entry is checked immediately before it is removed, and an entry that changed, appeared,
+ * or turned into something else stops the removal and is kept, together with everything not yet
+ * removed. Links are unlinked, never traversed. On Linux every directory is addressed through its own
+ * no-follow descriptor. Elsewhere a directory swapped for a link after its check lists entries that do
+ * not match their stamps, so nothing it reaches is removed. Throws when it stops. */
 export function removeKeptAsideTree(
   dir: string,
-  options: { anchored?: boolean; /** Test seam: runs after a subdirectory is inspected. */ afterInspect?: (name: string) => void } = {},
+  expected: ReadonlyMap<string, string>,
+  options: {
+    anchored?: boolean;
+    /** Test seams: after an entry is verified, and before a verified subdirectory is listed. */
+    afterVerify?: (relative: string) => void;
+    beforeList?: (relative: string) => void;
+  } = {},
 ): void {
   const anchored = options.anchored ?? process.platform === "linux";
-  const empty = (base: string): void => {
+  const verified = (path: string, relative: string): BigIntStats => {
+    const stat = lstatSync(path, { bigint: true });
+    if (expected.get(relative) !== entryStamp(path, stat)) throw new Error("the copy changed while it was discarded");
+    options.afterVerify?.(relative);
+    return stat;
+  };
+  const empty = (base: string, prefix: string): void => {
+    options.beforeList?.(prefix);
     for (const name of readdirSync(base)) {
       const child = anchored ? `${base}/${name}` : join(base, name);
-      const stat = lstatSync(child);
+      const stat = verified(child, prefix + name);
       if (!stat.isDirectory()) {
         unlinkEntry(child, stat);
         continue;
       }
-      options.afterInspect?.(name);
       if (anchored) {
         const fd = openSync(child, DIRECTORY_FLAGS);
         try {
-          const opened = fstatSync(fd);
-          if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error("a directory changed while it was removed");
-          empty(`/proc/self/fd/${fd}`);
+          const opened = fstatSync(fd, { bigint: true });
+          if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error("a directory changed while it was discarded");
+          empty(`/proc/self/fd/${fd}`, `${prefix}${name}/`);
         } finally {
           closeSync(fd);
         }
       } else {
-        const now = lstatSync(child);
-        if (!now.isDirectory() || now.dev !== stat.dev || now.ino !== stat.ino) {
-          throw new Error("a directory changed while it was removed");
-        }
-        empty(child);
+        empty(child, `${prefix}${name}/`);
       }
       rmdirSync(child);
     }
   };
+  const root = verified(dir, "");
+  if (!root.isDirectory()) throw new Error("the copy is not a directory");
   if (anchored) {
     const fd = openSync(dir, DIRECTORY_FLAGS);
     try {
-      empty(`/proc/self/fd/${fd}`);
+      const opened = fstatSync(fd, { bigint: true });
+      if (opened.dev !== root.dev || opened.ino !== root.ino) throw new Error("the copy changed while it was discarded");
+      empty(`/proc/self/fd/${fd}`, "");
     } finally {
       closeSync(fd);
     }
   } else {
-    if (!isRealDirectory(dir)) throw new Error("the copy is not a directory");
-    empty(dir);
+    empty(dir, "");
   }
   rmdirSync(dir);
 }
@@ -238,16 +300,17 @@ export function describeKeptAsideCopy(
   };
 }
 
-/** Every kept-aside copy in the store, oldest first (copies without a record last), bounded. */
+/** Every kept-aside copy in the store, oldest first (copies without a record last), bounded. `omitted`
+ * counts the copies beyond the bound, so none is left unaccounted for. */
 export function scanKeptAsideCopies(
   storeRoot: string,
   options: { skillName?: (skillMd: string) => string | undefined; log?: (message: string) => void } = {},
-): SkillKeptAsideCopy[] {
+): { copies: SkillKeptAsideCopy[]; omitted: number } {
   let entries: string[];
   try {
     entries = readdirSync(storeRoot);
   } catch {
-    return [];
+    return { copies: [], omitted: 0 };
   }
   const found = entries.flatMap((entry) => {
     const id = KEPT_ASIDE_ENTRY.exec(entry)?.[1];
@@ -257,6 +320,9 @@ export function scanKeptAsideCopies(
   if (found.length > KEPT_ASIDE_REPORT_LIMIT) {
     options.log?.(`skill store: reporting the oldest ${KEPT_ASIDE_REPORT_LIMIT} of ${found.length} kept-aside copies`);
   }
-  return found.slice(0, KEPT_ASIDE_REPORT_LIMIT).map(({ id, record }) =>
-    describeKeptAsideCopy(storeRoot, id, { ...(record ? { record } : {}), ...(options.skillName ? { skillName: options.skillName } : {}) }));
+  return {
+    copies: found.slice(0, KEPT_ASIDE_REPORT_LIMIT).map(({ id, record }) =>
+      describeKeptAsideCopy(storeRoot, id, { ...(record ? { record } : {}), ...(options.skillName ? { skillName: options.skillName } : {}) })),
+    omitted: Math.max(0, found.length - KEPT_ASIDE_REPORT_LIMIT),
+  };
 }

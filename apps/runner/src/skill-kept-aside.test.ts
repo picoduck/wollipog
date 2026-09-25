@@ -19,7 +19,9 @@ import type { AgentDefinition, SkillFile, SkillKeptAsideMessage, SkillSyncEntry,
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import { handleSkillDrift, handleSkillKeptAside } from "./skill-drift.js";
 import {
+  KEPT_ASIDE_REPORT_LIMIT,
   keptAsideFingerprint,
+  keptAsideStamps,
   readKeptAsideRecord,
   removeKeptAsideTree,
   scanKeptAsideCopies,
@@ -209,7 +211,7 @@ test("a copy kept aside before records existed is reported with the name its SKI
     writeFileSync(join(store(roots), `.drift-${unnamed}.json`), JSON.stringify({
       version: 1, name: "gamma", digest: "c".repeat(64), variant: "agent", keptAsideAt: 5,
     }));
-    assert.deepEqual(scanKeptAsideCopies(store(roots)).map((copy) => copy.id), [unnamed, legacy]);
+    assert.deepEqual(scanKeptAsideCopies(store(roots)).copies.map((copy) => copy.id), [unnamed, legacy]);
     // A malformed record reads as absent rather than trusted.
     writeFileSync(join(store(roots), `.drift-${unnamed}.json`), JSON.stringify({ version: 1, name: "../x", digest: "c", variant: "agent", keptAsideAt: 5 }));
     assert.equal(readKeptAsideRecord(store(roots), unnamed), undefined);
@@ -248,7 +250,7 @@ test("the kept-aside command reads a readable copy and refuses anything else", a
     symlinkSync(outside, join(store(roots), `.drift-${linked}`));
     assert.equal(handleSkillKeptAside({ message: { ...read, id: linked }, runnerId: "runner-1", dataDir: roots.dataDir }).status,
       "not_found");
-    assert.equal(scanKeptAsideCopies(store(roots)).some((copy) => copy.id === linked), false);
+    assert.equal(scanKeptAsideCopies(store(roots)).copies.some((copy) => copy.id === linked), false);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
@@ -327,7 +329,7 @@ test("an unreadable kept-aside copy is discarded against its fingerprint without
   }
 });
 
-test("removal with and without descriptor anchoring unlinks symlinks instead of traversing them", () => {
+test("removal unlinks symlinks, removes only verified entries, and never lists through a swapped directory", () => {
   const root = mkdtempSync(join(tmpdir(), "runner-kept-aside-remove-"));
   try {
     const outside = join(root, "outside");
@@ -338,24 +340,137 @@ test("removal with and without descriptor anchoring unlinks symlinks instead of 
       mkdirSync(join(dir, "a", "b"), { recursive: true });
       writeFileSync(join(dir, "a", "b", "file.txt"), "x");
       symlinkSync(outside, join(dir, "a", "link"));
-      removeKeptAsideTree(dir, { anchored });
+      const stamps = keptAsideStamps(dir, { anchored })!;
+      assert.ok(stamps.has("a/link") && stamps.has("a/b/file.txt"));
+      removeKeptAsideTree(dir, stamps, { anchored });
       assert.equal(existsSync(dir), false);
       assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep\n");
 
-      // A directory swapped for a symlink after it was inspected is refused, never traversed.
+      // An entry that changed or appeared after verification stops the removal and is kept.
+      const changed = join(root, `changed-${anchored}`);
+      mkdirSync(join(changed, "sub"), { recursive: true });
+      writeFileSync(join(changed, "sub", "file.txt"), "reviewed");
+      writeFileSync(join(changed, "z-last.txt"), "reviewed");
+      const reviewed = keptAsideStamps(changed, { anchored })!;
+      writeFileSync(join(changed, "sub", "file.txt"), "written after review");
+      assert.throws(() => removeKeptAsideTree(changed, reviewed, { anchored }), /changed while it was discarded/);
+      assert.equal(readFileSync(join(changed, "sub", "file.txt"), "utf8"), "written after review");
+      const added = keptAsideStamps(changed, { anchored })!;
+      writeFileSync(join(changed, "sub", "new.txt"), "new");
+      assert.throws(() => removeKeptAsideTree(changed, added, { anchored }));
+      assert.ok(existsSync(join(changed, "sub", "new.txt")));
+
+      // A directory swapped for a symlink after its check lists nothing it may remove.
       const swapped = join(root, `swapped-${anchored}`);
       mkdirSync(join(swapped, "sub"), { recursive: true });
       writeFileSync(join(swapped, "sub", "file.txt"), "x");
-      assert.throws(() => removeKeptAsideTree(swapped, { anchored, afterInspect: (name) => {
-        if (name !== "sub") return;
+      const before = keptAsideStamps(swapped, { anchored })!;
+      assert.throws(() => removeKeptAsideTree(swapped, before, { anchored, beforeList: (relative) => {
+        if (relative !== "sub/") return;
         renameSync(join(swapped, "sub"), join(root, `moved-${anchored}`));
         symlinkSync(outside, join(swapped, "sub"));
       } }));
-      assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep\n");
-      assert.ok(existsSync(join(root, `moved-${anchored}`, "file.txt")));
+      assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep\n", "nothing outside the copy is removed");
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a stamp walk never follows a directory swapped for a symlink", () => {
+  const root = mkdtempSync(join(tmpdir(), "runner-kept-aside-stamps-"));
+  try {
+    const outside = join(root, "outside");
+    mkdirSync(outside);
+    writeFileSync(join(outside, "secret-name.txt"), "outside\n");
+    for (const anchored of [true, false]) {
+      const dir = join(root, `copy-${anchored}`);
+      mkdirSync(join(dir, "sub"), { recursive: true });
+      writeFileSync(join(dir, "sub", "file.txt"), "x");
+      const stamps = keptAsideStamps(dir, { anchored, beforeList: (relative) => {
+        if (relative !== "sub") return;
+        renameSync(join(dir, "sub"), join(root, `moved-${anchored}`));
+        symlinkSync(outside, join(dir, "sub"));
+      } });
+      assert.equal(stamps?.has("sub/secret-name.txt") ?? false, false, "the outside tree is never walked");
+      if (!anchored) assert.equal(stamps, undefined, "a directory swapped during the walk invalidates it");
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a kept-aside copy changed after its fence check, or during removal, is kept", async () => {
+  const roots = makeRoots();
+  try {
+    await reconcile(roots, []);
+    const id = randomUUID();
+    const dir = join(store(roots), `.drift-${id}`);
+    mkdirSync(join(dir, "reference"), { recursive: true });
+    for (const file of skillFiles("beta")) writeFileSync(join(dir, file.path), file.content);
+    const observedDigest = skillVersionDigest(skillFiles("beta"));
+    const run = (hooks: Parameters<typeof handleSkillKeptAside>[0]["hooks"]) =>
+      handleSkillKeptAside({ message: discard(id, { observedDigest }), runnerId: "runner-1", dataDir: roots.dataDir, hooks });
+
+    const late = run({ beforeRemove: () => writeFileSync(join(dir, "SKILL.md"), "late write\n") });
+    assert.equal(late.status, "rejected");
+    assert.equal(readFileSync(join(dir, "SKILL.md"), "utf8"), "late write\n", "a write after the fence check is never discarded");
+
+    for (const file of skillFiles("beta")) writeFileSync(join(dir, file.path), file.content);
+    const during = run({ removal: { afterVerify: (relative) => {
+      if (relative === "SKILL.md") writeFileSync(join(dir, "reference", "notes.md"), "written mid-removal\n");
+    } } });
+    assert.equal(during.status, "rejected");
+    assert.match(during.error ?? "", /could not be removed completely/);
+    assert.equal(readFileSync(join(dir, "reference", "notes.md"), "utf8"), "written mid-removal\n");
+    const [still] = (await reconcile(roots, [])).keptAside ?? [];
+    assert.equal(still?.id, id, "what remains is still reported");
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("a restore that finds its discarded copy changing during removal keeps the rest aside with its record", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [agentTarget]);
+    await reconcile(roots, [alpha]);
+    const copy = join(store(roots), "alpha", alpha.versionDigest);
+    writeFileSync(join(copy, "SKILL.md"), "edited\n");
+    const observedDigest = (await reconcile(roots, [alpha])).drift?.[0]?.observedDigest;
+    let quarantined = "";
+    const restored = handleSkillDrift({
+      message: { type: "skill_drift", runnerId: "runner-1", requestId: "restore", operation: "restore",
+        name: "alpha", digest: alpha.versionDigest, variant: "agent", observedDigest, files: alpha.files, confirmation: "explicit" },
+      runnerId: "runner-1",
+      dataDir: roots.dataDir,
+      hooks: {
+        beforeDiscard: (path) => { quarantined = path; },
+        removal: { afterVerify: (relative) => {
+          if (relative === "SKILL.md") writeFileSync(join(quarantined, "reference", "notes.md"), "written mid-removal\n");
+        } },
+      },
+    });
+    assert.equal(restored.status, "restored");
+    assert.equal(readFileSync(join(quarantined, "reference", "notes.md"), "utf8"), "written mid-removal\n");
+    const [kept] = (await reconcile(roots, [alpha])).keptAside ?? [];
+    assert.equal(kept?.name, "alpha", "the preserved remainder stays identified by its record");
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("copies beyond the report bound are counted, not dropped silently", async () => {
+  const roots = makeRoots();
+  try {
+    await reconcile(roots, []);
+    for (let index = 0; index < KEPT_ASIDE_REPORT_LIMIT + 2; index += 1) mkdirSync(join(store(roots), `.drift-${randomUUID()}`));
+    const result = await reconcile(roots, []);
+    assert.equal(result.keptAside?.length, KEPT_ASIDE_REPORT_LIMIT);
+    assert.equal(result.keptAsideOmitted, 2);
+    assert.equal(skillsStateMessage("runner-1", result).keptAsideOmitted, 2);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
   }
 });
 

@@ -31,8 +31,10 @@ import {
   KEPT_ASIDE_ID,
   keptAsideDirectory,
   keptAsideFingerprint,
+  keptAsideStamps,
   removeKeptAsideRecord,
   removeKeptAsideTree,
+  sameKeptAsideStamps,
   writeKeptAsideRecord,
 } from "./skill-kept-aside.js";
 
@@ -87,8 +89,12 @@ export function handleSkillDrift(options: {
   runnerId: string;
   dataDir: string;
   log?: (message: string) => void;
-  /** Test seams around the swap. */
-  hooks?: { beforeQuarantine?: () => void; beforeDiscard?: (quarantine: string) => void };
+  /** Test seams around the swap and the removal. */
+  hooks?: {
+    beforeQuarantine?: () => void;
+    beforeDiscard?: (quarantine: string) => void;
+    removal?: Parameters<typeof removeKeptAsideTree>[2];
+  };
 }): SkillDriftResultMessage {
   const { message } = options;
   const reply = (value: Omit<SkillDriftResultMessage, "type" | "runnerId" | "requestId">): SkillDriftResultMessage => ({
@@ -207,8 +213,11 @@ export function handleSkillDrift(options: {
     options.log?.(`skill ${name}: the unreadable edited copy ${dirName} was moved aside to ${quarantine}`);
     return reply({ status: "restored" });
   }
+  const stamps = keptAsideStamps(quarantine);
   const discarded = readStoreSkillCopy(quarantine);
-  if ((discarded.readable ? discarded.digest : null) !== message.observedDigest) {
+  const settled = keptAsideStamps(quarantine);
+  if ((discarded.readable ? discarded.digest : null) !== message.observedDigest ||
+      !stamps || !settled || !sameKeptAsideStamps(stamps, settled)) {
     // A writer that still held a file open wrote after the swap: keep those bytes.
     options.log?.(`skill ${name}: the replaced copy changed after the swap and is preserved at ${quarantine}`);
     return reply({ status: "restored" });
@@ -217,25 +226,28 @@ export function handleSkillDrift(options: {
     if (treeContainsSymlink(quarantine)) {
       options.log?.(`skill ${name}: retained the discarded copy for inspection because it contains a symlink`);
     } else {
-      rmSync(quarantine, { recursive: true, force: true });
+      // Every entry is checked against the verified state immediately before it is removed, so a write
+      // that lands during the removal is kept aside with whatever was not yet removed.
+      removeKeptAsideTree(quarantine, settled, options.hooks?.removal ?? {});
       removeKeptAsideRecord(storeRoot, quarantineId);
     }
   } catch (error) {
-    options.log?.(`skill ${name}: could not remove the discarded copy: ${errorText(error)}`);
+    options.log?.(`skill ${name}: could not remove the discarded copy, which is preserved at ${quarantine}: ${errorText(error)}`);
   }
   return reply({ status: "restored" });
 }
 
 /** Read or discard one copy a restore kept aside. A discard needs explicit confirmation and deletes
  * the copy only while it still matches the reviewed observation: its content digest, or for a copy
- * that cannot be read as skill content, its change fingerprint. */
+ * that cannot be read as skill content, its change fingerprint. The removal re-verifies each entry
+ * against that verified state immediately before removing it. */
 export function handleSkillKeptAside(options: {
   message: SkillKeptAsideMessage;
   runnerId: string;
   dataDir: string;
   log?: (message: string) => void;
-  /** Test seam between the fence check and the removal. */
-  hooks?: { beforeRemove?: (dir: string) => void };
+  /** Test seams between the fence check and the removal, and inside the removal. */
+  hooks?: { beforeRemove?: (dir: string) => void; removal?: Parameters<typeof removeKeptAsideTree>[2] };
 }): SkillKeptAsideResultMessage {
   const { message } = options;
   const reply = (value: Omit<SkillKeptAsideResultMessage, "type" | "runnerId" | "requestId">): SkillKeptAsideResultMessage => ({
@@ -268,20 +280,24 @@ export function handleSkillKeptAside(options: {
   }
   const dir = keptAsideDirectory(storeRoot, id);
   if (!realDirectoryInside(dir, storeRoot)) return reply({ status: "not_found" });
-  const copy = readStoreSkillCopy(dir);
   if (operation === "read") {
+    const copy = readStoreSkillCopy(dir);
     if (!copy.readable) return reject(`The kept-aside copy cannot be read as skill content: ${copy.reason}.`);
     return reply({ status: "read", files: copy.files, observedDigest: copy.digest });
   }
-  const unchanged = copy.readable
+  // The content digest is trusted only for the entry state that was stamped on both sides of the read.
+  const stamps = keptAsideStamps(dir);
+  const copy = readStoreSkillCopy(dir);
+  const settled = keptAsideStamps(dir);
+  const unchanged = !!stamps && !!settled && sameKeptAsideStamps(stamps, settled) && (copy.readable
     ? message.observedDigest === copy.digest
-    : message.observedFingerprint !== undefined && keptAsideFingerprint(dir) === message.observedFingerprint;
-  if (!unchanged) {
+    : message.observedFingerprint !== undefined && keptAsideFingerprint(dir, settled) === message.observedFingerprint);
+  if (!unchanged || !settled) {
     return reject("The kept-aside copy changed after it was reviewed. Refresh the machine state and review it again.");
   }
   options.hooks?.beforeRemove?.(dir);
   try {
-    removeKeptAsideTree(dir);
+    removeKeptAsideTree(dir, settled, options.hooks?.removal ?? {});
   } catch (error) {
     options.log?.(`skill store: could not remove the kept-aside copy .drift-${id}: ${errorText(error)}`);
     return reject(`The kept-aside copy could not be removed completely: ${errorText(error)}. Refresh the machine state to see what remains.`);

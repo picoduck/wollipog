@@ -3492,6 +3492,10 @@ export function normalizeSkillDrift(value: unknown): SkillDriftState[] {
 const RUNNER_SKILL_KEPT_ASIDE_LIMIT = 256;
 const KEPT_ASIDE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
+function keptAsideOmittedCount(value: unknown): number {
+  return Number.isSafeInteger(value) && (value as number) > 0 ? value as number : 0;
+}
+
 /** Keep only well-formed kept-aside copies, one per store entry; unknown properties never reach
  * storage or the UI. A copy names at most one observation: its content digest when it is readable,
  * otherwise its change fingerprint. */
@@ -3540,6 +3544,8 @@ export interface RunnerSkillStateRecord {
   drift: SkillDriftState[];
   /** Authoritative kept-aside store copies from a v184 runner; empty for older runners. */
   keptAside: SkillKeptAsideCopy[];
+  /** Kept-aside copies the runner or this record's bound left out of `keptAside`. */
+  keptAsideOmitted?: number;
   error?: string;
   updatedAt: number;
 }
@@ -7732,15 +7738,20 @@ export class ControlPlaneDb {
       removals?: SkillLinkRemoval[];
       drift?: SkillDriftState[];
       keptAside?: SkillKeptAsideCopy[];
+      keptAsideOmitted?: number;
       error?: string;
     },
     now = Date.now(),
   ): void {
     const protocolVersion = this.getRunner(runnerId)?.protocolVersion;
     const drift = runnerSupportsProtocol(protocolVersion, "skillDrift") ? normalizeSkillDrift(state.drift) : [];
-    const keptAside = runnerSupportsProtocol(protocolVersion, "skillKeptAsideCopies")
-      ? normalizeSkillKeptAside(state.keptAside)
-      : [];
+    const keptAsideSupported = runnerSupportsProtocol(protocolVersion, "skillKeptAsideCopies");
+    const keptAside = keptAsideSupported ? normalizeSkillKeptAside(state.keptAside) : [];
+    // Entries this record dropped are counted with the ones the runner already left out.
+    const keptAsideOmitted = keptAsideSupported
+      ? keptAsideOmittedCount(state.keptAsideOmitted) +
+        Math.max(0, (Array.isArray(state.keptAside) ? state.keptAside.length : 0) - RUNNER_SKILL_KEPT_ASIDE_LIMIT)
+      : 0;
     const previous = this.getRunnerSkillState(runnerId);
     const incomingRemovals = normalizeSkillLinkRemovals(state.removals);
     const removals = incomingRemovals.length > 0 ? incomingRemovals : previous?.removals ?? [];
@@ -7757,6 +7768,7 @@ export class ControlPlaneDb {
       ...(removalsUpdatedAt === undefined ? {} : { removalsUpdatedAt }),
       ...(drift.length === 0 ? {} : { drift }),
       ...(keptAside.length === 0 ? {} : { keptAside }),
+      ...(keptAsideOmitted === 0 ? {} : { keptAsideOmitted }),
       ...(state.error === undefined ? {} : { error: state.error }),
     }), now);
   }
@@ -7774,6 +7786,7 @@ export class ControlPlaneDb {
       removalsUpdatedAt?: number;
       drift?: unknown;
       keptAside?: unknown;
+      keptAsideOmitted?: unknown;
       error?: string;
     }>(row.state);
     const removals = normalizeSkillLinkRemovals(parsed?.removals);
@@ -7788,6 +7801,7 @@ export class ControlPlaneDb {
       ...(removalsUpdatedAt === undefined ? {} : { removalsUpdatedAt }),
       drift: normalizeSkillDrift(parsed?.drift),
       keptAside: normalizeSkillKeptAside(parsed?.keptAside),
+      ...(keptAsideOmittedCount(parsed?.keptAsideOmitted) ? { keptAsideOmitted: keptAsideOmittedCount(parsed?.keptAsideOmitted) } : {}),
       ...(parsed?.error === undefined ? {} : { error: parsed.error }),
       updatedAt: row.updated_at,
     };

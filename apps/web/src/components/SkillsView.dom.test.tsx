@@ -397,7 +397,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
     driftReporting: "supported",
     keptAsideReporting: "supported",
     desired: [],
-    reported: { deployed: [], unmanaged: [], updatedAt: 1_700_000_000_000 },
+    reported: { deployed: [], unmanaged: [], keptAsideOmitted: 2, updatedAt: 1_700_000_000_000 },
     orphaned: [
       { kind: "kept_aside", id: keptId, name: "notes", digest, variant: "manual", keptAsideAt: 1_700_000_000_000,
         observedDigest: "e".repeat(64), detail: "A restore kept this edited copy aside in the skill store instead of deleting it." },
@@ -436,7 +436,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
     },
     discardOrphanedSkillCopy: async (runnerId: string, copy: { kind: string; id?: string; name?: string }, observation: object) => {
       calls.push(`discard:${runnerId}:${copy.kind}:${copy.id ?? copy.name}:${JSON.stringify(observation)}`);
-      current = { ...orphaned, orphaned: [] };
+      current = { ...orphaned, reported: { ...orphaned.reported!, keptAsideOmitted: 0 }, orphaned: [] };
       return { status: "discarded", state: current.reported };
     },
   } as unknown as ApiClient;
@@ -481,7 +481,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
   const entry = [...container.querySelectorAll<HTMLButtonElement>(".skills-item")]
     .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
   assert.ok(entry, "the skill list offers the orphaned copies independent of any library skill");
-  assert.match(entry!.textContent ?? "", /Orphaned Copies3/);
+  assert.match(entry!.textContent ?? "", /Orphaned Copies5/, "copies beyond the runner's bound are counted");
   await act(async () => { entry!.click(); });
   await act(settle);
   const machine = container.querySelector('[aria-label="Orphaned Copies"] .skills-machine');
@@ -491,6 +491,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
   assert.match(items[0]!.textContent ?? "", /notes.*Kept Aside.*Manual Only.*dddddddddddd.*Readable.*\.drift-0f0e0d0c/);
   assert.match(items[1]!.textContent ?? "", /Unidentified Copy.*Kept Aside.*Unknown.*Unreadable/);
   assert.match(items[2]!.textContent ?? "", /retired.*Deleted Skill.*Agent Invocable.*links still serve the copy/);
+  assert.match(machine!.textContent ?? "", /2 more kept-aside copies are not listed\./);
   assert.equal(button("Review and Import")[1]!.disabled, true, "an unreadable copy cannot be reviewed");
   assert.equal(button("Discard Copy")[1]!.disabled, false, "a fingerprinted unreadable copy can be discarded");
 

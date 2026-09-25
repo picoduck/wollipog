@@ -73,7 +73,8 @@ owner/admin actions:
   unreviewed edit. The runner builds the library version in a staging directory, verifies it, and
   swaps it in with two renames (a harness can briefly see no directory between them). It checks
   the copy again after moving it aside and puts it back if it changed. It checks once more before
-  deleting it and keeps it aside if a writer that still had a file open changed it. A copy that was
+  deleting it, and each entry again just before removing it, and keeps aside whatever a writer that
+  still had a file open changed. A copy that was
   reported as unreadable has no digest to check against, so it is kept aside in the store instead
   of being deleted (see Orphaned Copies). If the
   library no longer has that version, the copy is discarded instead. The next reconciliation
@@ -123,10 +124,12 @@ a skill the viewer cannot access is not listed. Owners and admins have two actio
 - **Discard Copy** requires confirmation and names the observation the machine reported. For a
   readable copy that is its content digest. For a copy that cannot be read as skill content it is a
   fingerprint of every entry's path, type, identity, size, and modification and change times, never
-  its contents. The runner computes the observation again and deletes nothing if it differs.
-  Deletion never follows a symlink inside the copy, and on Linux every directory is removed through
-  its own no-follow descriptor. An unreadable tree of more than 4,096 entries has no fingerprint
-  and must be removed on the machine itself. Discarding an edited copy of a deleted skill is a drift
+  its contents. The runner computes the observation again and deletes nothing if it differs. It
+  then checks each entry against that state just before removing it: an entry that changed or
+  appeared stops the removal, and it is kept, with everything not yet removed, and listed again.
+  Deletion never follows a symlink inside the copy, and on Linux every directory is walked and
+  removed through its own no-follow descriptor. An unreadable tree of more than 4,096 entries has no
+  fingerprint and must be removed on the machine itself. Discarding an edited copy of a deleted skill is a drift
   restore without library files, so its links are removed like any undesired skill's. If that copy
   is unreadable, it is kept aside instead and then listed as a kept-aside copy.
 
@@ -135,8 +138,9 @@ Older runners report no kept-aside copies, and the per-machine API labels their 
 runner's edited copies of deleted skills are still listed and can be resolved. Older control planes
 ignore the new field. Limitations: a fingerprint relies on file change times, so a same-size rewrite
 within the same filesystem timestamp tick as the reported observation could go unnoticed; kernels
-with fine-grained change times close that window. A runner reports at most 256 kept-aside copies,
-oldest first.
+with fine-grained change times close that window. A runner lists at most 256 kept-aside copies,
+oldest first, and reports how many more it has. Resolve listed copies, or remove copies on the
+machine, to list the rest.
 
 ## Assignable Group API
 

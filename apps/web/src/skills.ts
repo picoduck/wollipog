@@ -151,6 +151,8 @@ export interface ReportedSkillsState {
   removals?: SkillLinkRemoval[];
   removalsUpdatedAt?: number;
   drift?: SkillDriftState[];
+  /** Kept-aside copies beyond the runner's report bound; they are not listed individually. */
+  keptAsideOmitted?: number;
   error?: string;
   updatedAt?: number;
 }
@@ -265,6 +267,12 @@ export function reportedOrphanedCopies(response: RunnerSkillsResponse | undefine
     ? typeof copy.id === "string"
     : copy.kind === "deleted_skill" && typeof copy.name === "string" && typeof copy.digest === "string" &&
       (copy.variant === "agent" || copy.variant === "manual")));
+}
+
+/** Kept-aside copies a machine could not list individually. */
+export function omittedKeptAsideCopies(response: RunnerSkillsResponse | undefined): number {
+  const count = response?.reported?.keptAsideOmitted;
+  return typeof count === "number" && Number.isSafeInteger(count) && count > 0 ? count : 0;
 }
 
 export function orphanedCopyRef(copy: OrphanedSkillCopy): OrphanedSkillCopyRef {
