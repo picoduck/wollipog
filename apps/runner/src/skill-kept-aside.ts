@@ -273,9 +273,11 @@ export interface KeptAsideRemovalHooks {
  * there. A file is unlinked while a handle to it is held; if its size or modification time moved since
  * the check, a write landed first, and those bytes are written back. Any change, addition, or
  * replacement stops the removal and keeps the entry and everything not yet removed. Links are unlinked,
- * never traversed. On Linux every directory is addressed through its own no-follow descriptor.
- * Elsewhere a directory swapped for a link after its check lists entries that do not match their
- * stamps, so nothing it reaches is removed. Throws when it stops. */
+ * never traversed. Before a directory is listed and before every rename, unlink, or rmdir, each
+ * directory from the copy down to the current one must still be the same real directory in its place,
+ * so nothing is removed from a directory moved out of the copy or reached through a link planted in its
+ * place. On Linux every directory is also addressed through its own no-follow descriptor. Throws when
+ * it stops. */
 export function removeKeptAsideTree(
   dir: string,
   expected: ReadonlyMap<string, string>,
@@ -289,9 +291,18 @@ export function removeKeptAsideTree(
     options.afterVerify?.(relative);
     return stat;
   };
-  const removeEntry = (base: string, name: string, relative: string): void => {
+  /** Each directory from the copy down: the path it is checked at and its identity. */
+  type Level = { path: string; dev: bigint; ino: bigint };
+  const inPlace = (chain: readonly Level[]): void => {
+    for (const level of chain) {
+      const now = lstatSync(level.path, { bigint: true });
+      if (!now.isDirectory() || now.dev !== level.dev || now.ino !== level.ino) throw new CopyChanged();
+    }
+  };
+  const removeEntry = (base: string, name: string, relative: string, chain: readonly Level[]): void => {
     const original = childPath(base, name);
     const aside = childPath(base, `${DISCARD_PREFIX}${randomUUID()}`);
+    inPlace(chain);
     renameSync(original, aside);
     let stat: BigIntStats;
     let fd: number | undefined;
@@ -314,6 +325,7 @@ export function removeKeptAsideTree(
     }
     try {
       options.beforeUnlink?.(relative);
+      inPlace(chain);
       unlinkSync(aside);
       const after = fstatSync(fd, { bigint: true });
       if (after.size !== stat.size || after.mtimeNs !== stat.mtimeNs) {
@@ -325,45 +337,50 @@ export function removeKeptAsideTree(
       closeSync(fd);
     }
   };
-  const empty = (base: string, prefix: string): void => {
+  const empty = (base: string, prefix: string, chain: readonly Level[]): void => {
     options.beforeList?.(prefix);
+    inPlace(chain);
     for (const name of readdirSync(base)) {
       const child = childPath(base, name);
       const stat = verified(child, prefix + name);
       if (!stat.isDirectory()) {
-        removeEntry(base, name, prefix + name);
+        removeEntry(base, name, prefix + name, chain);
         continue;
       }
+      const inner = [...chain, { path: child, dev: stat.dev, ino: stat.ino }];
       if (anchored) {
         const fd = openSync(child, DIRECTORY_FLAGS);
         try {
           const opened = fstatSync(fd, { bigint: true });
           if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new CopyChanged();
-          empty(`/proc/self/fd/${fd}`, `${prefix}${name}/`);
+          empty(`/proc/self/fd/${fd}`, `${prefix}${name}/`, inner);
         } finally {
           closeSync(fd);
         }
       } else {
-        empty(child, `${prefix}${name}/`);
+        empty(child, `${prefix}${name}/`, inner);
       }
       // Fails, and keeps it, if anything appeared in it meanwhile.
+      inPlace(inner);
       rmdirSync(child);
     }
   };
   const root = verified(dir, "");
   if (!root.isDirectory()) throw new Error("the copy is not a directory");
+  const chain = [{ path: dir, dev: root.dev, ino: root.ino }];
   if (anchored) {
     const fd = openSync(dir, DIRECTORY_FLAGS);
     try {
       const opened = fstatSync(fd, { bigint: true });
       if (opened.dev !== root.dev || opened.ino !== root.ino) throw new CopyChanged();
-      empty(`/proc/self/fd/${fd}`, "");
+      empty(`/proc/self/fd/${fd}`, "", chain);
     } finally {
       closeSync(fd);
     }
   } else {
-    empty(dir, "");
+    empty(dir, "", chain);
   }
+  inPlace(chain);
   rmdirSync(dir);
 }
 

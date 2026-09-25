@@ -374,6 +374,23 @@ test("removal unlinks symlinks, removes only verified entries, and never lists t
         symlinkSync(outside, join(swapped, "sub"));
       } }));
       assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep\n", "nothing outside the copy is removed");
+
+      // A verified directory moved out of the copy, with a link to it left in its place, is not
+      // followed: its files are not removed from their new location.
+      for (const seam of ["beforeList", "afterVerify"] as const) {
+        const copy = join(root, `relocated-${anchored}-${seam}`);
+        const away = join(root, `away-${anchored}-${seam}`);
+        mkdirSync(join(copy, "sub"), { recursive: true });
+        writeFileSync(join(copy, "sub", "file.txt"), "reviewed");
+        const reviewed = keptAsideStamps(copy, { anchored })!;
+        const relocate = (relative: string) => {
+          if (relative !== (seam === "beforeList" ? "sub/" : "sub/file.txt")) return;
+          renameSync(join(copy, "sub"), away);
+          symlinkSync(away, join(copy, "sub"));
+        };
+        assert.throws(() => removeKeptAsideTree(copy, reviewed, { anchored, [seam]: relocate }), /changed while it was discarded/);
+        assert.equal(readFileSync(join(away, "file.txt"), "utf8"), "reviewed", `${seam}: the relocated files are kept`);
+      }
     }
   } finally {
     rmSync(root, { recursive: true, force: true });
