@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, matchesGlob, normalize, parse as parsePath, resolve, sep } from "node:path";
 import { parse, type ParseEntry } from "shell-quote";
@@ -847,9 +847,10 @@ function pinnedWorktreeAt(
 
 /**
  * Revision syntax: a commit reached from another (`~`, `^`, `@{…}`, `A...B`) or found by its
- * message (`:/text`). A lone `checkout` operand spelled this way switches or detaches.
+ * message (`:/text`), and the pseudo-refs Git keeps beside `HEAD` (`ORIG_HEAD`, `FETCH_HEAD`, …).
+ * A lone `checkout` operand spelled this way switches or detaches.
  */
-const REVISION_SYNTAX = /[~^]|@\{|\.\.\.|^:\//u;
+const REVISION_SYNTAX = /[~^]|@\{|\.\.\.|^:\/|^(?:[A-Z]+_)+HEAD$/u;
 
 /**
  * A spelling no ref can have (`git check-ref-format`): a component starting with `.`, `..`, a space
@@ -857,16 +858,26 @@ const REVISION_SYNTAX = /[~^]|@\{|\.\.\.|^:\//u;
  * `.lock`. Once revision syntax is ruled out, such an operand can only be a path or pathspec.
  */
 const PATH_ONLY_SPELLING =
-  /(?:^|\/)\.|\.\.|[\u0000-\u0020\u007f:?*[\\]|^\/|\/$|\/\/|\.$|\.lock(?:\/|$)/u;
+  /(?:^|\/)\.|\.\.|[\u0000- \u007f:?*[\\]|^\/|\/$|\/\/|\.$|\.lock(?:\/|$)/u;
 
 /** A packed-refs file larger than this is not read; the operand is then treated as a commit. */
 const MAX_PACKED_REFS_BYTES = 8 * 1024 * 1024;
 /** Git's own pointer files are a line or two; a larger one is not what it claims to be. */
 const MAX_GIT_POINTER_BYTES = 64 * 1024;
+/** Remotes inspected for a remote-tracking branch `checkout` would create a local one from. */
+const MAX_REMOTES = 64;
 
 function isFile(path: string): boolean {
   try {
     return statSync(path).isFile();
+  } catch {
+    return false;
+  }
+}
+
+function isDirectory(path: string): boolean {
+  try {
+    return statSync(path).isDirectory();
   } catch {
     return false;
   }
@@ -879,10 +890,11 @@ function readGitPointer(path: string): string | null {
 }
 
 /**
- * The shared Git directory a linked worktree's refs live in: its `.git` file names its
- * administrative directory, whose `commondir` names the repository's `.git`.
+ * A worktree's own Git directory and the shared one its refs live in: its `.git` file names its
+ * administrative directory, whose `commondir` names the repository's `.git`. Null when either
+ * cannot be found, which callers treat as unreadable.
  */
-function commonGitDirectory(worktreePath: string): string | null {
+function gitDirectories(worktreePath: string): { gitDir: string; common: string } | null {
   const dotGit = join(worktreePath, ".git");
   const pointer = readGitPointer(dotGit);
   let gitDir = dotGit;
@@ -891,32 +903,50 @@ function commonGitDirectory(worktreePath: string): string | null {
     if (target === undefined) return null;
     gitDir = resolve(worktreePath, target);
   }
-  const common = readGitPointer(join(gitDir, "commondir"));
-  return common === null ? gitDir : resolve(gitDir, common);
+  const commonPointer = readGitPointer(join(gitDir, "commondir"));
+  const common = commonPointer === null ? gitDir : resolve(gitDir, commonPointer);
+  return isDirectory(gitDir) && isDirectory(common) ? { gitDir, common } : null;
 }
 
 /**
- * Whether a lone `checkout` operand that exists on disk may still name a commit, which Git prefers
- * over the path. This is the one place the classifier reads Git state, and only the shared ref
- * store's plain files: loose refs and packed-refs. Whatever it cannot read — a reftable store, an
- * oversized packed-refs, an I/O error — and a name that could abbreviate an object id count as a
- * commit, so the command is refused with advice to name the path after `--` instead.
+ * Whether Git would resolve a lone `checkout` operand to a commit, or create a local branch for it
+ * from a remote-tracking one. This is the one place the classifier reads Git state, and only the
+ * ref store's plain files: loose refs and packed-refs. Whatever it cannot read — a reftable store,
+ * an oversized packed-refs, an I/O error — and a name that could abbreviate an object id count as
+ * a commit, so the command is refused with advice to name the path after `--` instead.
  */
 function mayNameCommit(name: string, worktreePath: string): boolean {
   if (/^[0-9a-f]{4,64}$/iu.test(name)) return true;
   try {
-    const common = commonGitDirectory(worktreePath);
-    if (common === null || existsSync(join(common, "reftable"))) return true;
-    // Git's own order for a short name, the remote-tracking HEAD included.
-    const candidates = ["", "tags/", "heads/", "remotes/"].map((prefix) => `refs/${prefix}${name}`)
-      .concat(`refs/remotes/${name}/HEAD`);
-    if (candidates.some((ref) => isFile(join(common, ref)))) return true;
+    const directories = gitDirectories(worktreePath);
+    if (directories === null || existsSync(join(directories.common, "reftable"))) return true;
+    const { gitDir, common } = directories;
+    // Git's own order for a short name: the full name itself, then refs/, tags, heads, remotes,
+    // and a remote's HEAD. Per-worktree refs live in the worktree's own directory.
+    const candidates = [
+      ...(name.startsWith("refs/") ? [name] : []),
+      `refs/${name}`, `refs/tags/${name}`, `refs/heads/${name}`, `refs/remotes/${name}`,
+      `refs/remotes/${name}/HEAD`,
+    ];
+    if (candidates.some((ref) => isFile(join(common, ref)) || isFile(join(gitDir, ref)))) return true;
+    // `checkout <name>` with no such commit creates `<name>` from a remote's branch of that name.
+    const remotes = join(common, "refs", "remotes");
+    if (isDirectory(remotes) &&
+        readdirSync(remotes).slice(0, MAX_REMOTES).some((remote) => isFile(join(remotes, remote, name)))) {
+      return true;
+    }
     const packed = join(common, "packed-refs");
     if (!isFile(packed)) return false;
     if (statSync(packed).size > MAX_PACKED_REFS_BYTES) return true;
-    const refs = new Set(readFileSync(packed, "utf8").split("\n").flatMap((line) =>
-      /^[0-9a-f]{40,64} (refs\/\S+)$/u.exec(line)?.slice(1) ?? []));
-    return candidates.some((ref) => refs.has(ref));
+    return readFileSync(packed, "utf8").split("\n").some((line) => {
+      const ref = /^[0-9a-f]{40,64} (refs\/\S+)$/u.exec(line)?.[1];
+      if (ref === undefined) return false;
+      if (candidates.includes(ref)) return true;
+      if (!ref.startsWith("refs/remotes/")) return false;
+      const tracking = ref.slice("refs/remotes/".length);
+      const slash = tracking.indexOf("/");
+      return slash > 0 && tracking.slice(slash + 1) === name;
+    });
   } catch {
     return true;
   }
@@ -924,21 +954,15 @@ function mayNameCommit(name: string, worktreePath: string): boolean {
 
 /**
  * Whether a lone `checkout` operand is a file to restore rather than a commit to switch to. Git
- * decides by trying a commit first, then a path (`parse_branchname_arg`), and this follows it:
- * revision syntax is a commit; a spelling no ref can have is a path; any other name is a path only
- * if it exists on disk and no ref of that name exists. A deleted file named alone therefore reads
- * as a commit, which is why the refusal says how to restore one.
+ * tries a commit first, then a remote-tracking branch to create one from, then a path
+ * (`parse_branchname_arg`), and this follows it: revision syntax is a commit, a spelling no ref can
+ * have is a path, and any other name is a path exactly when no ref of that name exists — whether or
+ * not it is on disk, since a deleted tracked file is restored from the index the same way.
  */
-function checkoutOperandIsPath(value: string, cwd: string, worktreePath: string): boolean {
+function checkoutOperandIsPath(value: string, worktreePath: string): boolean {
   if (value === "-" || REVISION_SYNTAX.test(value)) return false;
   if (PATH_ONLY_SPELLING.test(value)) return true;
-  let onDisk: boolean;
-  try {
-    onDisk = existsSync(isAbsolute(value) ? value : resolve(cwd, value));
-  } catch {
-    onDisk = false;
-  }
-  return onDisk && !mayNameCommit(value, worktreePath);
+  return !mayNameCommit(value, worktreePath);
 }
 
 /**
@@ -1026,7 +1050,7 @@ function checkoutMovesBranch(
   const target = operands[0];
   // `HEAD` alone stays on the current branch; `@`, its synonym elsewhere, detaches here.
   if (target == null || target === pinned.pinnedBranch || target === "HEAD") return false;
-  return !checkoutOperandIsPath(target, cwd, pinned.worktreePath);
+  return !checkoutOperandIsPath(target, pinned.worktreePath);
 }
 
 function switchMovesBranch(
@@ -1160,8 +1184,19 @@ function forgeCheckoutVerdict(
   environment: ReadonlyMap<string, string>,
   protections: readonly ManagedWorktreeProtection[],
 ): Verdict {
-  const group = word(words[0], cwd, environment);
-  const action = word(words[1], cwd, environment);
+  // The first two positional words, past options: `gh -R owner/repo pr checkout 1` still checks out
+  // into the current repository. `-R`/`--repo` is the one option either CLI gives a separate value.
+  const positional: Array<string | null> = [];
+  for (let index = 0; index < words.length && positional.length < 2; index += 1) {
+    const value = word(words[index], cwd, environment);
+    if (value === "-R" || value === "--repo") {
+      index += 1;
+      continue;
+    }
+    if (value?.startsWith("-")) continue;
+    positional.push(value);
+  }
+  const [group, action] = positional;
   const checkout = executable === "gh" ? group === "pr" && action === "checkout"
     : executable === "glab" && group === "mr" && action === "checkout";
   return checkout && pinnedWorktreeAt(cwd, protections)?.pinnedBranch ? "branch" : null;
@@ -1414,9 +1449,9 @@ function commandVerdict(
  * detaches, or renames that branch (`gitBranchVerdict`) is refused with a pointer to
  * `wollipog worktree create`, instead of silently parking the session in worktree recovery. Only a
  * protection carrying `pinnedBranch` is judged this way; a worktree the session created for
- * another branch is not. Git prefers a commit to a path for a lone `checkout` operand, so for one
- * that also exists on disk that judgement reads the worktree's ref store (`mayNameCommit`): the
- * only Git state this module reads, and only as plain files.
+ * another branch is not. Git prefers a commit to a path for a lone `checkout` operand, so that
+ * judgement reads the worktree's ref store (`mayNameCommit`): the only Git state this module reads,
+ * and only as plain files.
  *
  * What an operand RESOLVES to is the other half (#1324). A command is judged in the environment the
  * provider's shell starts from — the one the runner passed it, which is where

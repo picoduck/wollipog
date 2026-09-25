@@ -1053,14 +1053,16 @@ another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detac
   `checkout -p`, `--ours`/`--theirs`, and `--pathspec-from-file`. `checkout HEAD` stays on the
   branch. Switching back to the pinned branch is always allowed, which is the documented manual
   recovery.
-- A lone `checkout <name>` follows Git's own order (`parse_branchname_arg`), which tries a commit
-  before a path. Revision syntax (`~`, `^`, `@{…}`, `A...B`, `:/text`) is a commit; a spelling no
-  ref can have is a path; any other name is a path only when it exists on disk and no ref of that
-  name exists. That last check is the only Git state the classifier reads: loose refs and
-  packed-refs in the worktree's shared Git directory, as plain files. A reftable store, an
-  oversized or unreadable ref store, and a name that could abbreviate an object id all count as a
-  commit. A deleted file named alone therefore reads as a commit too, and the refusal says to name
-  it after `--` or use `git restore`.
+- A lone `checkout <name>` follows Git's own order (`parse_branchname_arg`): a commit first, then a
+  remote-tracking branch to create a local one from, then a path. Revision syntax (`~`, `^`, `@{…}`,
+  `A...B`, `:/text`) and the pseudo-refs beside `HEAD` (`ORIG_HEAD`, `FETCH_HEAD`, …) are commits;
+  a spelling no ref can have is a path; any other name is a commit exactly when a ref of that name
+  exists — the full name itself, `refs/`, tags, heads, remotes, a remote's `HEAD`, or a
+  remote-tracking branch of that name — and a path otherwise, whether or not it is on disk (a
+  deleted tracked file is restored from the index). That lookup is the only Git state the
+  classifier reads: loose refs and packed-refs, as plain files. A reftable store, an oversized or
+  unreadable ref store, and a name that could abbreviate an object id count as a commit, and the
+  refusal says to name a path after `--` or use `git restore`.
 - A command this code cannot place — an unresolved `-C`, an unresolved target branch — is left
   alone. A branch switch is recoverable, and refusing unreadable Git commands would refuse
   ordinary work; the destructive vetoes above keep their fail-closed rule.

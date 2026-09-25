@@ -967,6 +967,8 @@ test("switching a session's own worktree off its branch is refused with a pointe
     "git checkout ':/fix the guard'",
     "git checkout refs/heads/agent/s_own",
     "git checkout origin/agent/s_own",
+    "git checkout ORIG_HEAD",
+    "git checkout FETCH_HEAD",
     "git switch -c fix/issue-1650-guard",
     "git switch -C fix/issue-1650-guard",
     "git switch -cfix/issue-1650-guard",
@@ -987,6 +989,9 @@ test("switching a session's own worktree off its branch is refused with a pointe
     // A forge CLI's checkout switches the repository in the current directory.
     "gh pr checkout 1749",
     "gh pr checkout 1749 --detach",
+    "gh -R owner/repo pr checkout 1749",
+    "gh pr --repo owner/repo checkout 1749",
+    "glab -R group/project mr checkout 12",
     "glab mr checkout 12",
     // Git's own options before the subcommand do not hide it.
     "git --no-pager -c core.pager=cat checkout -b fix/x",
@@ -1040,6 +1045,7 @@ test("restoring files and returning a session's own worktree to its branch stay 
     "git stash push -m wip",
     "git worktree add -b fix/elsewhere ../elsewhere",
     "gh pr view 1749",
+    "gh -R owner/repo pr view 1749",
     "gh pr create --fill",
     "glab mr view 12",
     // A switch this code cannot place is not refused: a branch switch is recoverable.
@@ -1111,15 +1117,29 @@ test("a lone checkout operand is a file only when Git would read it as one (#165
   assert.equal(verdict("git checkout README"), null);
   assert.equal(verdict("git checkout docs"), null);
   assert.equal(verdict("git checkout docs/guide.md"), null);
-  // ...while a name that is both switches to the branch, as does one that exists only as a branch.
+  // ...including a deleted tracked file, which Git restores from the index...
+  rmSync(join(worktree, "README"));
+  assert.equal(verdict("git checkout README"), null);
+  git(worktree, "checkout", "--", "README");
+  // ...and a name that is nothing at all only makes Git fail, so it is not a switch either.
+  assert.equal(verdict("git checkout no-such-branch"), null);
+  // A name that is both a file and a branch switches to the branch.
   assert.equal(verdict("git checkout feature"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
-  assert.equal(verdict("git checkout no-such-branch"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
   assert.equal(verdict("git checkout cafe"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL,
     "a name that could abbreviate an object id is treated as a commit");
   assert.equal(verdict("git checkout -- feature"), null, "the explicit restore form stays available");
+  // A full refname is looked up as itself, even when a path of the same spelling exists.
+  mkdirSync(join(worktree, "refs", "heads"), { recursive: true });
+  writeFileSync(join(worktree, "refs", "heads", "feature"), "a path spelled like a ref");
+  assert.equal(verdict("git checkout refs/heads/feature"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  // A remote-tracking branch is one Git would create a local branch from and switch to.
+  git(repo, "update-ref", "refs/remotes/origin/remote-only", "HEAD");
+  assert.equal(verdict("git checkout remote-only"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
   // Packed refs are refs too.
   git(repo, "pack-refs", "--all");
   assert.equal(verdict("git checkout feature"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  assert.equal(verdict("git checkout refs/heads/feature"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  assert.equal(verdict("git checkout remote-only"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
   assert.equal(verdict("git checkout README"), null);
 
   // A `--git-dir` naming the worktree's administrative directory is the worktree. Spelled
