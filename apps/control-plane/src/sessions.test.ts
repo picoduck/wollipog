@@ -5070,14 +5070,23 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
-  await t.test("a landed Claude Code merge stays armed after a stale snapshot or terminal parent", async () => {
-    for (const mismatch of ["snapshot", "terminal"] as const) {
+  await t.test("a landed Claude Code merge stays armed after pre-proof reconciliation rejection", async () => {
+    for (const mismatch of ["snapshot", "terminal", "revision", "ancestry", "authority"] as const) {
       const { db, hub, svc, parent, child, arm } = setup(AGENT_ID);
       try {
-        const armed = await arm(mismatch === "snapshot" ? 1454 : 1455);
+        const armed = await arm(1454 + ["snapshot", "terminal", "revision", "ancestry", "authority"].indexOf(mismatch));
         const seen: ReconcileWorkflowActionMessage[] = [];
         hub.requestHandler = forgeProof(child, armed, () => true, seen);
         if (mismatch === "terminal") db.updateSessionStatus(parent.id, "stopped", Date.now());
+        if (mismatch === "revision") db.raw().prepare(
+          "UPDATE workflow_decisions SET policy_revision=policy_revision+1 WHERE occurrence_id=?",
+        ).run(armed.decision.occurrenceId);
+        if (mismatch === "ancestry") db.raw().prepare(
+          "UPDATE workflow_decisions SET controlling_session_id=? WHERE occurrence_id=?",
+        ).run(child.id, armed.decision.occurrenceId);
+        if (mismatch === "authority") db.raw().prepare(
+          "UPDATE workflow_decisions SET authority='human' WHERE occurrence_id=?",
+        ).run(armed.decision.occurrenceId);
         const snapshot = mismatch === "snapshot"
           ? { ...armed.snapshot, headSha: "f".repeat(40),
               requiredChecks: { ...armed.snapshot.requiredChecks, headSha: "f".repeat(40) } }
@@ -5092,6 +5101,15 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
           entry.requestId === armed.decision.occurrenceId && entry.outcome === "revoked").length, 0);
 
         if (mismatch === "terminal") db.updateSessionStatus(parent.id, "running", Date.now());
+        if (mismatch === "revision") db.raw().prepare(
+          "UPDATE workflow_decisions SET policy_revision=policy_revision-1 WHERE occurrence_id=?",
+        ).run(armed.decision.occurrenceId);
+        if (mismatch === "ancestry") db.raw().prepare(
+          "UPDATE workflow_decisions SET controlling_session_id=? WHERE occurrence_id=?",
+        ).run(parent.id, armed.decision.occurrenceId);
+        if (mismatch === "authority") db.raw().prepare(
+          "UPDATE workflow_decisions SET authority='orchestrator' WHERE occurrence_id=?",
+        ).run(armed.decision.occurrenceId);
         const recovered = await svc.reconcileWorkflowDecision(
           child.id, armed.decision.occurrenceId, { resourceSnapshot: armed.snapshot }, () => true,
         );
