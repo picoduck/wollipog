@@ -33,6 +33,7 @@ const FRONTMATTER_MAX_LINES = 128;
 // Earlier releases stored name and description cut hard at this many UTF-16 units; the startup
 // repair below recognises exactly that cut.
 const LEGACY_FRONTMATTER_VALUE_MAX_CHARS = 280;
+const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 
 /** The unbounded `name:` / `description:` values of a closed SKILL.md frontmatter block. */
 function readRawSkillFrontmatter(content: string): { name?: string; description?: string } {
@@ -83,8 +84,10 @@ export function repairLegacySkillDescriptions(db: ControlPlaneDb, now = Date.now
     const bytes = skillMd ? decodedBytes(skillMd) : null;
     if (!bytes) continue;
     const full = readRawSkillFrontmatter(bytes.toString("utf8")).description;
-    if (!full || full.length <= LEGACY_FRONTMATTER_VALUE_MAX_CHARS ||
-        full.slice(0, LEGACY_FRONTMATTER_VALUE_MAX_CHARS) !== skill.description) continue;
+    if (!full || full.length <= LEGACY_FRONTMATTER_VALUE_MAX_CHARS) continue;
+    // A cut that split a surrogate pair was persisted with U+FFFD in place of the lone half.
+    const legacyCut = full.slice(0, LEGACY_FRONTMATTER_VALUE_MAX_CHARS);
+    if (skill.description !== legacyCut && skill.description !== legacyCut.replace(LONE_SURROGATE, "\uFFFD")) continue;
     db.updateSkill(skill.id, { description: shortenAtWordBoundary(full, SKILL_DESCRIPTION_MAX_CHARS) }, now);
     repaired.push(skill.name);
   }

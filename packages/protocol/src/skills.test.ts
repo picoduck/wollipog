@@ -179,6 +179,8 @@ test("shortenAtWordBoundary keeps text that fits and otherwise cuts between word
   assert.equal([...shortenAtWordBoundary("word ".repeat(400), 1024)].length <= 1024, true);
   // A single word longer than the bound has no boundary, so it is cut inside, still marked.
   assert.equal(shortenAtWordBoundary("x".repeat(10), 5), "xxxx…");
-  // Code points, not UTF-16 units, so an astral character is never split.
-  assert.equal(shortenAtWordBoundary("😀😀😀 😀😀", 4), "😀😀😀…");
+  // The bound is UTF-16 units, like the library API's length check, and a surrogate pair is never split.
+  assert.equal(shortenAtWordBoundary("😀😀😀 😀😀", 8), "😀😀😀…");
+  assert.equal(shortenAtWordBoundary("😀".repeat(10), 6), "😀😀…");
+  assert.ok(shortenAtWordBoundary("😀".repeat(600), 1024).length <= 1024);
 });

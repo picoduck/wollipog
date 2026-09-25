@@ -347,9 +347,17 @@ test("startup restores descriptions an earlier release cut at 280 characters and
     assert.ok(exact.ok);
     const exactSkill = db.createSkill({ ...exact, description: exact.description, now: 160 });
 
+    // An old cut that split a surrogate pair was persisted with U+FFFD in place of the lone half.
+    const emojiText = `${"a".repeat(279)}😀 and more words after the emoji`;
+    const emoji = validateSkillPayload({ name: "emoji-skill", files: describedFiles("emoji-skill", emojiText) });
+    assert.ok(emoji.ok);
+    const emojiSkill = db.createSkill({ ...emoji, description: emojiText.slice(0, 280), now: 170 });
+    assert.equal(db.getSkill(emojiSkill.id)!.description, `${"a".repeat(279)}\uFFFD`);
+
     const versionsBefore = db.listSkills().map((skill) => [skill.name, skill.latestVersion!.id, skill.latestVersion!.digest]);
 
-    assert.deepEqual(repairLegacySkillDescriptions(db, 200), ["git-skill", "huge-skill", "orchestrate-issues"]);
+    assert.deepEqual(repairLegacySkillDescriptions(db, 200), ["emoji-skill", "git-skill", "huge-skill", "orchestrate-issues"]);
+    assert.equal(db.getSkill(emojiSkill.id)!.description, emojiText);
     assert.equal(db.getSkill(builtIn.id)!.description, fullBuiltIn);
     assert.equal(db.getSkill(gitSkill.id)!.description, gitText);
     const hugeDescription = db.getSkill(hugeSkill.id)!.description!;

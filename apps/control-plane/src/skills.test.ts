@@ -44,6 +44,11 @@ test("readSkillFrontmatter bounds values and tolerates a BOM", () => {
   assert.ok(bounded.endsWith("…"));
   assert.ok(words.startsWith(bounded.slice(0, -1)));
   assert.match(words.slice(bounded.length - 1), /^[\s.,]/);
+  // The inferred description obeys the same UTF-16 limit the explicit-description API enforces.
+  const wide = validateSkillPayload({ name: "wide", files: [{ path: "SKILL.md", encoding: "utf8",
+    content: `---\nname: wide\ndescription: ${"😀".repeat(600)}\n---\n` }] });
+  assert.ok(wide.ok);
+  assert.ok(wide.description!.length <= 1024);
 });
 
 /* ------------------------------- Validation ------------------------------ */
