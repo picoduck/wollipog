@@ -9,6 +9,7 @@ import fc from "fast-check";
 import {
   GUARD_STATE_REFUSAL,
   GUARD_STATE_UNINSPECTABLE_PREFIX,
+  MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL,
   MANAGED_WORKTREE_REFUSAL,
   MANAGED_WORKTREE_UNRESOLVED_REFUSAL,
   commandTargetsGuardState,
@@ -77,6 +78,39 @@ test("a destructive command against a protected worktree is denied with the mana
     permissionDecision: "deny",
     permissionDecisionReason: MANAGED_WORKTREE_REFUSAL,
   });
+});
+
+test("a session's own worktree keeps its pinned branch through the protections document (#1650)", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const created = "/repo-worktrees/session-a.requested/created";
+  writeManagedWorktreeGuardProtections(f.protectionsFile, [
+    { worktreePath: WORKTREE, repoPath: REPO, pinnedBranch: "agent/session-a" },
+    { worktreePath: created, repoPath: REPO },
+  ]);
+  assert.deepEqual(readManagedWorktreeGuardProtections(f.protectionsFile), [
+    { worktreePath: WORKTREE, repoPath: REPO, pinnedBranch: "agent/session-a" },
+    { worktreePath: created, repoPath: REPO },
+  ]);
+  const switched = runManagedWorktreeGuardDecision(
+    hookInput({ tool_input: { command: "git checkout -b fix/issue-1650-x" } }), f.protectionsFile);
+  assert.equal(switched.exitCode, 0);
+  assert.equal(JSON.parse(switched.stdout).hookSpecificOutput.permissionDecisionReason,
+    MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  assert.deepEqual(runManagedWorktreeGuardDecision(
+    hookInput({ cwd: created, tool_input: { command: "git checkout -b fix/issue-1650-x" } }), f.protectionsFile),
+  { stdout: "", stderr: "", exitCode: 0 }, "the worktree the session created for its branch is unaffected");
+
+  // A document written before #1650 pins nothing, so the same switch is left alone.
+  writeFileSync(f.protectionsFile, JSON.stringify({ version: 1, protections: [{ worktreePath: WORKTREE, repoPath: REPO }] }));
+  assert.deepEqual(runManagedWorktreeGuardDecision(
+    hookInput({ tool_input: { command: "git switch -c fix/issue-1650-x" } }), f.protectionsFile),
+  { stdout: "", stderr: "", exitCode: 0 });
+  // An unusable pin is an unreadable list, which blocks like any other.
+  writeFileSync(f.protectionsFile, JSON.stringify({
+    version: 1, protections: [{ worktreePath: WORKTREE, repoPath: REPO, pinnedBranch: 7 }],
+  }));
+  assert.equal(runManagedWorktreeGuardDecision(hookInput(), f.protectionsFile).exitCode, 2);
 });
 
 test("the guard resolves a worktree path held in its own environment (#1324)", (t) => {

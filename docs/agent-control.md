@@ -104,6 +104,14 @@ filesystem retirement aimed at runner-owned paths while ordinary work beneath th
 available. A deferred worktree is reported with the provider boundary it is waiting for; that is a
 durable retirement request, not a failed cleanup or an invitation to force-remove the path.
 
+A session's own default worktree is also pinned to its `agent/<session-id>` branch, because that
+branch is re-proved before every turn (below). The same guard refuses a Git command run inside it
+that would switch, detach, or rename that branch — `git checkout -b`, `git switch -c`,
+`git switch <other-branch>`, `git branch -m`, and `git stash branch` — and points the agent to
+`wollipog worktree create --branch <name>` instead. Restoring files and switching back to the
+session's own branch stay available, and a worktree the session created for another branch is not
+pinned.
+
 Because a worktree can still disappear outside Wollipog, every launch that carries a persisted
 worktree re-proves it immediately before the provider process is created — start, resume, worktree
 rebind, and queued app-server recovery alike, and on every execution target, since container

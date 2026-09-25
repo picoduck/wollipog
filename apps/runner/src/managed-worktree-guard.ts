@@ -82,7 +82,11 @@ export function managedWorktreeGuardProtectionsDocument(
 ): string {
   return JSON.stringify({
     version: PROTECTIONS_VERSION,
-    protections: protections.map(({ worktreePath, repoPath }) => ({ worktreePath, repoPath })),
+    protections: protections.map(({ worktreePath, repoPath, pinnedBranch }) => ({
+      worktreePath,
+      repoPath,
+      ...(pinnedBranch ? { pinnedBranch } : {}),
+    })),
   });
 }
 
@@ -129,12 +133,18 @@ export function parseManagedWorktreeGuardProtections(contents: string): ManagedW
   if (!Array.isArray(document.protections)) throw new Error("protections document has no protection list");
   return document.protections.map((entry) => {
     if (!entry || typeof entry !== "object") throw new Error("protection entry is not an object");
-    const { worktreePath, repoPath } = entry as { worktreePath?: unknown; repoPath?: unknown };
+    const { worktreePath, repoPath, pinnedBranch } = entry as {
+      worktreePath?: unknown; repoPath?: unknown; pinnedBranch?: unknown;
+    };
     if (typeof worktreePath !== "string" || !worktreePath ||
         typeof repoPath !== "string" || !repoPath) {
       throw new Error("protection entry is missing a path");
     }
-    return { worktreePath, repoPath };
+    // Optional within version 1: a document written before #1650 pins nothing.
+    if (pinnedBranch !== undefined && (typeof pinnedBranch !== "string" || !pinnedBranch)) {
+      throw new Error("protection entry has an unusable pinned branch");
+    }
+    return { worktreePath, repoPath, ...(pinnedBranch ? { pinnedBranch } : {}) };
   });
 }
 

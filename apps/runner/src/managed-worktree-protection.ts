@@ -1,6 +1,6 @@
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
-import { basename, dirname, isAbsolute, matchesGlob, normalize, parse as parsePath, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, matchesGlob, normalize, parse as parsePath, resolve, sep } from "node:path";
 import { parse, type ParseEntry } from "shell-quote";
 
 const MAX_COMMAND_LENGTH = 32_768;
@@ -26,9 +26,24 @@ export const MANAGED_WORKTREE_UNRESOLVED_REFUSAL =
 export const MANAGED_WORKTREE_ESCAPE_REFUSAL =
   "Wollipog keeps this shell inside its managed worktree, and this cd would leave it, so the command was not run. Name files outside the worktree by absolute path instead of changing directory; to retire the worktree itself, use discard_worktree.";
 
+/**
+ * Refusal for a Git command that would move a session's own worktree off the branch it is verified
+ * on before every turn (#1650). Nothing refused it before, and the session then stopped receiving
+ * prompts until someone restored the branch by hand.
+ */
+export const MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL =
+  "Wollipog verifies before every turn that this session's own worktree is still on the branch it was created with, so this command, which would switch, detach, or rename that worktree's branch, was not run: the session would stop receiving prompts until its worktree was recovered. To work on another branch, create a separate worktree with `wollipog worktree create --branch <name>` (or the create_worktree tool) and use the absolute path it returns. Switching this worktree back to its own branch is always allowed; to restore a file rather than switch branches, name it after `--` (`git checkout -- <path>`) or use `git restore <path>`.";
+
 export interface ManagedWorktreeProtection {
   worktreePath: string;
   repoPath: string;
+  /**
+   * The branch a Git command run inside this worktree must leave it on (#1650). Set only for a
+   * session's own default worktree (`agent/<session-id>`), whose branch is its identity: switching
+   * it parks the session in worktree recovery. A worktree the session created for another branch
+   * carries none, so ordinary branch work there is unaffected.
+   */
+  pinnedBranch?: string;
 }
 
 /**
@@ -45,14 +60,14 @@ type ShellToken = ParseEntry | ExpandedField;
 
 /**
  * What one command, segment, or operand amounts to: it reaches a protected root (`protected`), it
- * changes directory out of one (`escape`), it is destructive but its target cannot be placed
- * (`unresolved`), or neither (`null`). `protected` and `escape` both refuse outright; they differ
- * only in the message.
+ * changes directory out of one (`escape`), it moves a pinned worktree off its branch (`branch`), it
+ * is destructive but its target cannot be placed (`unresolved`), or neither (`null`). `protected`,
+ * `escape`, and `branch` all refuse outright; they differ only in the message.
  */
-type Verdict = "protected" | "escape" | "unresolved" | null;
+type Verdict = "protected" | "escape" | "branch" | "unresolved" | null;
 
-function refuses(verdict: Verdict): verdict is "protected" | "escape" {
-  return verdict === "protected" || verdict === "escape";
+function refuses(verdict: Verdict): verdict is "protected" | "escape" | "branch" {
+  return verdict === "protected" || verdict === "escape" || verdict === "branch";
 }
 
 /**
@@ -303,6 +318,7 @@ function globTargetsProtected(
  */
 function physicalProtections(protections: readonly ManagedWorktreeProtection[]): ManagedWorktreeProtection[] {
   return protections.map((protection) => ({
+    ...protection,
     worktreePath: canonicalPath(normalize(protection.worktreePath)),
     repoPath: canonicalPath(normalize(protection.repoPath)),
   }));
@@ -794,6 +810,252 @@ function gitWorktreeVerdict(
   return operandVerdict(operands[0], cwd, environment, protections);
 }
 
+/** Git's own options that take the following word as their value. */
+const GIT_VALUE_OPTIONS = ["-c", "--config-env", "--work-tree", "--namespace", "--super-prefix"];
+
+/**
+ * The pinned worktree a Git command run from `cwd` acts on, or null. Git takes its repository from
+ * the nearest `.git` above the working directory, so a directory beneath the worktree that holds a
+ * repository of its own (a test fixture, a nested clone) is that repository and not the worktree;
+ * the innermost protected root wins for the same reason. Both spellings of the directory are tried,
+ * as everywhere else here, because a worktree can be registered through a symlinked prefix.
+ */
+function pinnedWorktreeAt(
+  cwd: string,
+  protections: readonly ManagedWorktreeProtection[],
+): ManagedWorktreeProtection | null {
+  if (cwd === UNKNOWN_CWD) return null;
+  for (const [location, roots] of [
+    [normalize(cwd), protections],
+    [physicalCwd(cwd), physicalProtections(protections)],
+  ] as const) {
+    const innermost = roots.filter(({ worktreePath }) => pathContains(worktreePath, location))
+      .sort((left, right) => right.worktreePath.length - left.worktreePath.length)[0];
+    if (!innermost?.pinnedBranch) continue;
+    const root = normalize(innermost.worktreePath);
+    let nested = false;
+    for (let current = location; current !== root && pathContains(root, current); current = dirname(current)) {
+      if (existsSync(join(current, ".git"))) {
+        nested = true;
+        break;
+      }
+    }
+    if (!nested) return innermost;
+  }
+  return null;
+}
+
+/**
+ * A spelling `git check-ref-format --branch` rejects: a component starting with `.`, `..`, a space
+ * or control character, one of `~^:?*[\`, a leading, trailing, or doubled `/`, a trailing `.` or
+ * `.lock`, `@{`, or a leading `-`. Such an operand can only be a path or pathspec.
+ */
+const NOT_A_BRANCH_NAME =
+  /(?:^|\/)\.|\.\.|[\u0000- \u007f~^:?*[\\]|^\/|\/$|\/\/|\.$|\.lock(?:\/|$)|@\{|^-/u;
+
+/**
+ * Whether a lone `checkout` operand reads as a file to restore rather than a branch to switch to.
+ * The classifier reads no Git state, so it cannot ask which one Git would pick: something no
+ * branch can be called, or something that exists on disk, is a file, and anything else is a
+ * branch. A deleted file named alone therefore reads as a branch, which is why the refusal says
+ * how to restore one.
+ */
+function checkoutOperandNamesPath(value: string, cwd: string): boolean {
+  if (NOT_A_BRANCH_NAME.test(value)) return true;
+  try {
+    return existsSync(isAbsolute(value) ? value : resolve(cwd, value));
+  } catch {
+    return false;
+  }
+}
+
+/** The new branch an option such as `-b`/`--orphan` names: attached, or the following word. */
+function createdBranch(
+  attached: string | null,
+  next: ShellToken | undefined,
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+): string | null {
+  return attached || word(next, cwd, environment);
+}
+
+function checkoutMovesBranch(
+  words: readonly ShellToken[],
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+  pinnedBranch: string,
+): boolean {
+  const operands: Array<string | null> = [];
+  let pathspecs = false;
+  let detach = false;
+  // `undefined` while no new branch is named; `null` for a name this code cannot resolve.
+  let created: string | null | undefined;
+  for (let index = 0; index < words.length; index += 1) {
+    const value = word(words[index], cwd, environment);
+    if (value === "--") {
+      // `checkout [<tree-ish>] -- <path>…` restores files; a bare trailing `--` only ends options.
+      pathspecs = index + 1 < words.length;
+      break;
+    }
+    if (value == null) {
+      operands.push(null);
+      continue;
+    }
+    if (value.startsWith("--")) {
+      const orphan = longOption(value, "--orphan", 5);
+      if (orphan) {
+        created = createdBranch(orphan.attached, words[index + 1], cwd, environment);
+        if (orphan.attached == null) index += 1;
+      } else if (longOption(value, "--detach", 3)) {
+        detach = true;
+      } else if (longOption(value, "--patch", 6) || longOption(value, "--pathspec-from-file", 13) ||
+          longOption(value, "--ours", 4) || longOption(value, "--theirs", 4)) {
+        pathspecs = true;
+      }
+      continue;
+    }
+    if (value.startsWith("-") && value !== "-") {
+      // A short-option cluster. `-b` and `-B` take the new branch's name, attached or as the next word.
+      const letters = value.slice(1);
+      const create = [...letters].findIndex((letter) => letter === "b" || letter === "B");
+      if (create >= 0) {
+        const attached = letters.slice(create + 1);
+        created = createdBranch(attached || null, words[index + 1], cwd, environment);
+        if (!attached) index += 1;
+      } else if (letters.includes("p")) {
+        pathspecs = true;
+      }
+      continue;
+    }
+    operands.push(value);
+  }
+  if (pathspecs) return false;
+  if (created !== undefined) return created !== pinnedBranch;
+  if (detach) return true;
+  // No operand switches nothing, and several are `<tree-ish> <path>…`, which restores files.
+  if (operands.length !== 1) return false;
+  const target = operands[0];
+  if (target == null || target === pinnedBranch || target === "HEAD" || target === "@") return false;
+  return target === "-" || !checkoutOperandNamesPath(target, cwd);
+}
+
+function switchMovesBranch(
+  words: readonly ShellToken[],
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+  pinnedBranch: string,
+): boolean {
+  // `undefined` while no operand is seen; `null` for one this code cannot resolve.
+  let target: string | null | undefined;
+  for (let index = 0; index < words.length; index += 1) {
+    const value = word(words[index], cwd, environment);
+    if (value == null) {
+      if (target === undefined) target = null;
+      continue;
+    }
+    if (value === "--") continue;
+    if (value.startsWith("--")) {
+      const create = longOption(value, "--create", 4) ?? longOption(value, "--force-create", 8) ??
+        longOption(value, "--orphan", 4);
+      if (create) return createdBranch(create.attached, words[index + 1], cwd, environment) !== pinnedBranch;
+      if (longOption(value, "--detach", 4)) return true;
+      continue;
+    }
+    if (value.startsWith("-") && value !== "-") {
+      const letters = value.slice(1);
+      const create = [...letters].findIndex((letter) => letter === "c" || letter === "C");
+      if (create >= 0) {
+        const attached = letters.slice(create + 1);
+        return createdBranch(attached || null, words[index + 1], cwd, environment) !== pinnedBranch;
+      }
+      if (letters.includes("d")) return true;
+      continue;
+    }
+    if (target === undefined) target = value;
+  }
+  return target != null && target !== pinnedBranch;
+}
+
+function branchRenamesPinned(
+  words: readonly ShellToken[],
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+  pinnedBranch: string,
+): boolean {
+  let move = false;
+  const operands: Array<string | null> = [];
+  for (const token of words) {
+    const value = word(token, cwd, environment);
+    if (value === "--") continue;
+    if (value?.startsWith("--")) {
+      if (longOption(value, "--move", 4)) move = true;
+      continue;
+    }
+    if (value?.startsWith("-") && value !== "-") {
+      if (/[mM]/u.test(value.slice(1))) move = true;
+      continue;
+    }
+    operands.push(value);
+  }
+  if (!move) return false;
+  // `branch -m <new>` renames the branch the worktree is on; `branch -m <old> <new>` names it.
+  if (operands.length === 1) return operands[0] !== pinnedBranch;
+  return operands.length === 2 && operands[0] === pinnedBranch && operands[1] !== pinnedBranch;
+}
+
+/**
+ * Whether a Git command moves a pinned worktree off its branch (#1650): `checkout` or `switch` to
+ * another branch, a new branch, or a detached HEAD; `branch -m` renaming the branch; and
+ * `stash branch`. Restoring files and switching back to the pinned branch are ordinary work, and a
+ * repository that is not a pinned worktree is not this classifier's concern at all. Where the
+ * command cannot be placed (an unresolved `-C`, an unresolved branch name) it is left alone: a
+ * branch switch is recoverable, and refusing what cannot be read would refuse ordinary Git work.
+ */
+function gitBranchVerdict(
+  words: readonly ShellToken[],
+  initialCwd: string,
+  environment: ReadonlyMap<string, string>,
+  protections: readonly ManagedWorktreeProtection[],
+): Verdict {
+  if (!protections.some(({ pinnedBranch }) => pinnedBranch)) return null;
+  let cwd = initialCwd;
+  let index = 0;
+  for (; index < words.length; index += 1) {
+    const value = word(words[index], cwd, environment);
+    if (value === "-C") {
+      cwd = resolvedOperand(words[index + 1], cwd, environment) ?? UNKNOWN_CWD;
+      index += 1;
+      continue;
+    }
+    if (value === "--git-dir" || value?.startsWith("--git-dir=")) {
+      // Git takes its repository from here instead of from the working directory. A worktree's own
+      // `.git` names that worktree; any other directory is a repository this code does not place.
+      const gitDir = value === "--git-dir"
+        ? resolvedOperand(words[index + 1], cwd, environment)
+        : resolvedPath(value.slice("--git-dir=".length), cwd);
+      cwd = gitDir && basename(gitDir) === ".git" ? dirname(gitDir) : UNKNOWN_CWD;
+      if (value === "--git-dir") index += 1;
+      continue;
+    }
+    if (GIT_VALUE_OPTIONS.includes(value ?? "")) {
+      index += 1;
+      continue;
+    }
+    if (value == null || value.startsWith("-")) continue;
+    break;
+  }
+  const subcommand = word(words[index], cwd, environment);
+  if (!["checkout", "switch", "branch", "stash"].includes(subcommand ?? "")) return null;
+  const pinned = pinnedWorktreeAt(cwd, protections);
+  if (!pinned?.pinnedBranch) return null;
+  const rest = words.slice(index + 1);
+  const moves = subcommand === "checkout" ? checkoutMovesBranch(rest, cwd, environment, pinned.pinnedBranch)
+    : subcommand === "switch" ? switchMovesBranch(rest, cwd, environment, pinned.pinnedBranch)
+    : subcommand === "branch" ? branchRenamesPinned(rest, cwd, environment, pinned.pinnedBranch)
+    : word(rest[0], cwd, environment) === "branch";
+  return moves ? "branch" : null;
+}
+
 /**
  * Every reading of a command's words this classifier has to consider.
  *
@@ -906,7 +1168,12 @@ function commandVerdict(
     if (shellInsideManagedRoot(cwd, protections)) return "protected";
     return strongest([verdict, cwd === UNKNOWN_CWD ? "unresolved" : null]);
   }
-  if (executable === "git") return gitWorktreeVerdict(words, cwd, environment, protections);
+  if (executable === "git") {
+    return strongest([
+      gitWorktreeVerdict(words, cwd, environment, protections),
+      gitBranchVerdict(words, cwd, environment, protections),
+    ]);
+  }
   if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd"].includes(executable)) {
     return strongest(removerVerdicts(words, cwd, environment, protections));
   }
@@ -1027,6 +1294,13 @@ function commandVerdict(
  *   observes files a Bash command creates.
  *
  * `managed-worktree-protection.test.ts` pins both halves of this contract.
+ *
+ * One refusal is not about removal (#1650). A session's own default worktree is verified to be on
+ * its `agent/<session-id>` branch before every turn, so a Git command run inside it that switches,
+ * detaches, or renames that branch (`gitBranchVerdict`) is refused with a pointer to
+ * `wollipog worktree create`, instead of silently parking the session in worktree recovery. Only a
+ * protection carrying `pinnedBranch` is judged this way; a worktree the session created for
+ * another branch is not.
  *
  * What an operand RESOLVES to is the other half (#1324). A command is judged in the environment the
  * provider's shell starts from — the one the runner passed it, which is where
@@ -1158,6 +1432,7 @@ export function commandTargetsManagedWorktree(
     const verdict = classify(command, cwd, protections, providerEnvironmentMap(environment), 0);
     if (verdict === "protected") return MANAGED_WORKTREE_REFUSAL;
     if (verdict === "escape") return MANAGED_WORKTREE_ESCAPE_REFUSAL;
+    if (verdict === "branch") return MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL;
     return verdict === "unresolved" ? MANAGED_WORKTREE_UNRESOLVED_REFUSAL : null;
   } catch {
     // Provider-controlled syntax must never escape the guard or crash the runner. If a bounded
