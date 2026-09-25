@@ -744,3 +744,51 @@ test("SkillsView offers a same-name skill the built-in version and adopts it aft
   assert.ok(view.container.querySelector('[aria-label="Built-In Skill"]'));
   await view.unmount();
 });
+
+test("SkillsView follows the route's selected skill, including back to no selection", async () => {
+  const skill = { id: "skill-1", name: "code-review", latestVersion: { id: "v1", digest: "d1" } };
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [skill] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async () => ({ skill, latestVersion: { id: "v1", digest: "d1", files: [] } }),
+    listSkillAssignments: async () => ({ assignments: [] }),
+    runnerSkills: async () => ({ desired: [], reported: null }),
+  } as unknown as ApiClient;
+  let route!: (id: string | undefined) => void;
+  function Routed() {
+    const [id, setId] = React.useState<string | undefined>("skill-1");
+    route = setId;
+    const ready = useStoreSelector((state) => state.snapshotLoaded);
+    return ready ? <SkillsView selectedSkillId={id} /> : null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={{ instanceId: "skills-route", runtimeKey: "skills-route:1", createSocket: () => socket, close() {} }}
+          navigation={navigation}>
+          <Routed />
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+    });
+  });
+  await act(settle);
+  assert.equal(container.querySelector(".skills-detail-head h3")?.textContent, "code-review", "the deep link selects its skill");
+  await act(async () => { route(undefined); });
+  await act(settle);
+  assert.equal(container.querySelector(".skills-detail-head"), null, "the bare Skills route clears the selection");
+  assert.match(container.querySelector(".skills-empty")?.textContent ?? "", /Select a skill/);
+  await act(async () => root.unmount());
+  container.remove();
+});

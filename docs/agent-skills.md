@@ -578,7 +578,10 @@ asset is added. At startup, the control plane reconciles each built-in skill wit
   **Review Built-In Version**. Accepting the diff adds the release content as a new version and turns
   the entry into a built-in skill that later releases update like a fresh install. Its assignments
   and machine pins stay, and its automatic Git updates are turned off, which only the instance
-  owner may do. A hand-managed directory with the same name on a machine is unaffected: assigning
+  owner may do. Only a skill owned by the personal organization, like the built-in entry itself, is
+  offered the built-in version. A private skill or another organization's skill with the name is
+  left as it is; deleting it frees the name, and the next start adds the built-in. A hand-managed
+  directory with the same name on a machine is unaffected: assigning
   the skill there reports the existing Conflict state, and Import from Machine and adoption work as
   for any skill.
 - **Deletion.** Deleting a built-in entry declines it: later releases do not add it back. If the

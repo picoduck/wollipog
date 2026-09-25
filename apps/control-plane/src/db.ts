@@ -7117,6 +7117,11 @@ export class ControlPlaneDb {
       FROM skill_built_ins WHERE name=? AND offered_digest IS NOT NULL`).get(row.name) as
       { skill_id: string | null; offered_release: string; offered_digest: string; handled_digest: string | null } | undefined;
     const offered = builtIn ? { release: builtIn.offered_release, digest: builtIn.offered_digest } : null;
+    // Only an entry with the built-in scope can adopt: converting a private or another
+    // organization's skill would hide the built-in from the rest of the personal organization, and
+    // its deletion would decline the built-in for everyone.
+    const scope = offered && builtIn?.skill_id !== row.id ? this.skillScope(row.id) : null;
+    const adoptable = scope?.organizationId === PERSONAL_ORGANIZATION_ID && scope.owner.kind === "organization";
     return {
       id: row.id,
       name: row.name,
@@ -7128,7 +7133,7 @@ export class ControlPlaneDb {
       ...(offered && builtIn?.skill_id === row.id ? {
         builtIn: { release: offered.release, heldUpdate: builtIn.handled_digest === offered.digest ? null : offered },
       } : {}),
-      ...(offered && builtIn?.skill_id !== row.id ? { builtInOffer: offered } : {}),
+      ...(offered && adoptable ? { builtInOffer: offered } : {}),
       latestVersion: latest
         ? { id: latest.id, digest: latest.digest, createdAt: latest.created_at }
         : null,

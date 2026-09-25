@@ -177,6 +177,28 @@ test("a same-name user-managed skill is never modified by seeding and can adopt 
   }
 });
 
+test("a same-name private or foreign-organization skill is not offered the built-in, so it can never become one", () => {
+  for (const scope of [
+    { organizationId: PERSONAL_ORGANIZATION_ID, owner: { kind: "user" as const, userId: "usr_private" } },
+    { organizationId: "org_foreign", owner: { kind: "organization" as const, organizationId: "org_foreign" } },
+  ]) {
+    const db = ControlPlaneDb.open(":memory:");
+    try {
+      const first = release("1.0.0", "First.");
+      const mine = db.createSkill({ ...release("0.0.1", "Mine."), scope, now: 10 });
+      assert.deepEqual(seedBuiltInSkills(db, [first], 100), { "using-wollipog": "user_managed" });
+      assert.equal(db.getSkill(mine.id)!.builtInOffer, undefined);
+      assert.throws(() => db.acceptBuiltInSkillVersion({ skillId: mine.id, ...first, expectedLatestVersionId: mine.latestVersion!.id }),
+        /changed/);
+      // Its deletion frees the name for the organization-owned built-in instead of declining it.
+      db.deleteSkill(mine.id);
+      assert.deepEqual(seedBuiltInSkills(db, [first], 200), { "using-wollipog": "created" });
+    } finally {
+      db.close();
+    }
+  }
+});
+
 test("adopting identical content records provenance without adding a version", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {

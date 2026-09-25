@@ -204,15 +204,15 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | "built-in-review" | null>(null);
 
-  // The route names the selected skill, so a link such as onboarding's Open Skills selects it.
+  // The route names the selected skill, so a link such as onboarding's Open Skills selects it, and
+  // returning to the bare Skills route (the rail, or history) clears the selection.
   const select = useCallback((skillId: string | null) => {
     setSelectedId(skillId);
     navigate(skillId ? { name: "skills", id: skillId } : { name: "skills" });
   }, [navigate]);
   useEffect(() => {
-    if (!selectedSkillId) return;
-    setShowOrphans(false);
-    setSelectedId(selectedSkillId);
+    if (selectedSkillId) setShowOrphans(false);
+    setSelectedId(selectedSkillId ?? null);
   }, [selectedSkillId]);
 
   /** Only the newest started refresh of each surface may commit (see AutomationsView). */
