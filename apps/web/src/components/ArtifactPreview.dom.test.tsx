@@ -136,9 +136,11 @@ test("transcript screenshot remount reuses verified bytes until credentials or s
   const root = createRoot(container);
   const render = async (session: string, item: WorkflowArtifactView | null) => {
     await act(async () => root.render(
-      <TranscriptImageCacheProvider key={session}>
-        {item && <ArtifactPreview artifact={item} />}
-      </TranscriptImageCacheProvider>,
+      <React.StrictMode>
+        <TranscriptImageCacheProvider key={session}>
+          {item && <ArtifactPreview artifact={item} />}
+        </TranscriptImageCacheProvider>
+      </React.StrictMode>,
     ));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   };

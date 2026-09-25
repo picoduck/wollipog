@@ -14,6 +14,20 @@ export class TranscriptImageCache {
   private inFlight = new Map<string, Promise<Blob>>();
   private retainedBytes = 0;
   private disposed = false;
+  private owners = 0;
+
+  retain(): void {
+    this.owners++;
+  }
+
+  release(): void {
+    this.owners--;
+    // StrictMode replays effect cleanup and setup in one task. Keep its in-flight request and
+    // verified bytes through that replay, but clear them after a real transcript unmount.
+    queueMicrotask(() => {
+      if (this.owners === 0) this.dispose();
+    });
+  }
 
   async load(artifact: WorkflowArtifactView, exportArtifact: (id: string) => Promise<Blob>): Promise<Blob> {
     const key = JSON.stringify([
@@ -79,7 +93,10 @@ export function TranscriptImageCacheProvider({ children, enabled = true }: { chi
     };
   }, [enabled]);
   const cache = useMemo(() => enabled ? new TranscriptImageCache() : null, [api, enabled, credentialEpoch]);
-  useEffect(() => () => cache?.dispose(), [cache]);
+  useEffect(() => {
+    cache?.retain();
+    return () => cache?.release();
+  }, [cache]);
   return <Context.Provider value={cache}>{children}</Context.Provider>;
 }
 
