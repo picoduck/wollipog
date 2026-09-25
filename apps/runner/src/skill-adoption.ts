@@ -127,7 +127,7 @@ function adoptLinuxSkill(options: SkillAdoptionOptions): SkillAdoptionResult {
     guard(options.acquireProviderHomeLease);
     guard(options.assertAuthorized);
     // Resolved before anything is written, so a runner that cannot refuse to replace creates no journal.
-    const rename = (options.noReplaceRename ?? linuxNoReplaceRename)();
+    const rename = options.noReplaceRename ? options.noReplaceRename() : linuxNoReplaceRename(options.dataDir);
     // Each root is resolved once and then opened without following any component, so the pinned
     // directories are exactly the ones whose paths become link text.
     const home = realpathSync(options.home);

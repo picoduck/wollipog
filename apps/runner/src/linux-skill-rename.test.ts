@@ -3,7 +3,7 @@ import { test, type TestContext } from "node:test";
 import fs from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { linuxNoReplaceRename, resolveLinuxSkillRenameHelper } from "./linux-skill-rename.js";
+import { linuxNoReplaceRename, resolveLinuxSkillRenameHelper, stageLinuxSkillRenameHelper } from "./linux-skill-rename.js";
 
 const linux = { skip: process.platform !== "linux" };
 const directoryFlags = fs.constants.O_RDONLY | fs.constants.O_DIRECTORY | fs.constants.O_NOFOLLOW;
@@ -17,7 +17,7 @@ function fixture(t: TestContext) {
   fs.mkdirSync(to);
   const fromFd = fs.openSync(from, directoryFlags), toFd = fs.openSync(to, directoryFlags);
   t.after(() => { fs.closeSync(fromFd); fs.closeSync(toFd); });
-  return { root, from, to, fromFd, toFd, rename: linuxNoReplaceRename() };
+  return { root, from, to, fromFd, toFd, rename: linuxNoReplaceRename(root) };
 }
 
 test("moves an entry between the two held directories without copying it", linux, (t) => {
@@ -63,11 +63,36 @@ test("refuses a missing source and names that are not single entries", linux, (t
   assert.deepEqual(fs.readdirSync(f.to), []);
 });
 
-test("a source checkout compiles one private helper and reuses it", linux, () => {
-  const helper = resolveLinuxSkillRenameHelper();
-  assert.equal(resolveLinuxSkillRenameHelper(), helper);
-  const stat = fs.statSync(helper);
-  assert.equal(stat.mode & 0o777, 0o700);
+test("a source checkout compiles one private helper and reuses it", linux, (t) => {
+  const f = fixture(t);
+  const helper = resolveLinuxSkillRenameHelper(f.root);
+  assert.equal(resolveLinuxSkillRenameHelper(f.root), helper);
+  assert.equal(fs.statSync(helper).mode & 0o777, 0o700);
   assert.equal(fs.statSync(join(helper, "..")).mode & 0o777, 0o700);
-  assert.throws(() => resolveLinuxSkillRenameHelper("darwin"), /requires Linux/u);
+  assert.ok(helper.startsWith(tmpdir()), "the temporary directory is tried first");
+  assert.throws(() => resolveLinuxSkillRenameHelper(f.root, "darwin"), /requires Linux/u);
+});
+
+test("a helper that cannot run where it is staged falls back to the next root", linux, (t) => {
+  const f = fixture(t);
+  const noexec = join(f.root, "noexec"), data = join(f.root, "data");
+  fs.mkdirSync(noexec);
+  fs.mkdirSync(data);
+  const real = resolveLinuxSkillRenameHelper(f.root);
+  // A `noexec` mount accepts the file but refuses to run it; stand in with a copy that cannot start.
+  const helper = stageLinuxSkillRenameHelper([noexec, data], (target) => {
+    if (target.startsWith(noexec)) fs.writeFileSync(target, "#!/nonexistent-interpreter\n", { mode: 0o700 });
+    else fs.copyFileSync(real, target);
+  });
+  assert.ok(helper.startsWith(data + "/"), helper);
+  assert.equal(fs.statSync(join(helper, "..")).mode & 0o777, 0o700);
+  assert.deepEqual(fs.readdirSync(noexec), [], "the unusable staging directory is removed");
+});
+
+test("a helper that runs from no root refuses before anything moves", linux, (t) => {
+  const f = fixture(t);
+  assert.throws(() => stageLinuxSkillRenameHelper([f.root, join(f.root, "missing")], (target) => {
+    fs.writeFileSync(target, "#!/nonexistent-interpreter\n", { mode: 0o700 });
+  }), /cannot run/u);
+  assert.deepEqual(fs.readdirSync(f.root).sort(), ["from", "to"]);
 });

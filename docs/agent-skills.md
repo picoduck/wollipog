@@ -313,9 +313,11 @@ Node has no rename that refuses to replace, so that one call is made by a fixed,
 (`apps/runner/native/linux-skill-rename.c`). It receives the two directories the runner already holds
 as descriptors and makes no other system call. Packaged Linux runners embed it, statically linked, and
 verify it by digest when they extract it. Source checkouts compile it on first use with `/usr/bin/cc`,
-so building or running the runner from source on Linux needs a C compiler. A runner that cannot
-resolve the helper refuses adoption before creating a journal and blocks restore without changing
-anything. A kernel or filesystem without
+so building or running the runner from source on Linux needs a C compiler. The runner stages its copy
+in a private directory under the temporary directory, or under its data directory when the temporary
+directory is mounted `noexec`, and uses it only after a probe run proves that it executes there. A
+runner that cannot stage a working helper refuses adoption before creating a journal and blocks restore
+without changing anything. A kernel or filesystem without
 `RENAME_NOREPLACE` stops the transaction with only the intent-only journal, never falling back to a
 plain rename.
 

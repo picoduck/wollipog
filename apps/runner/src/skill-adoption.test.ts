@@ -152,7 +152,7 @@ test("a parent symlink swap cannot redirect writes outside the pinned parent", l
 test("a last-instant source swap is detected after preservation without deleting either tree", linux, (t) => {
   const f = fixture(t);
   f.options.noReplaceRename = () => {
-    const rename = linuxNoReplaceRename();
+    const rename = linuxNoReplaceRename(f.dataDir);
     return (fromParent, fromName, toParent, toName) => {
       if (toName === "original") {
         fs.renameSync(f.source, f.source + "-user-moved");

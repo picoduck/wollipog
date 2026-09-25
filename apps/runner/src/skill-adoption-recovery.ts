@@ -450,7 +450,7 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
 
   // Resolved before anything is written, so a runner that cannot refuse to replace changes nothing.
   let rename: NoReplaceRename;
-  try { rename = (options.noReplaceRename ?? linuxNoReplaceRename)(); }
+  try { rename = options.noReplaceRename ? options.noReplaceRename() : linuxNoReplaceRename(options.dataDir); }
   catch {
     return { status: "blocked", operation: initial,
       error: "This runner cannot move files without risking a replacement, so restore changed nothing." };
