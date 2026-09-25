@@ -1757,7 +1757,9 @@ test("attach_session_artifact uploads video to the gated route without returning
       : { status: 201, body: {} });
     const refused = await callTool(old.deps, "attach_session_artifact", { path: file });
     assert.equal(refused.isError, true);
-    assert.match(resultText(refused), /requires control plane protocol v184/u);
+    assert.match(resultText(refused), new RegExp(
+      `requires control plane protocol v${RUNNER_CAPABILITY_MIN_PROTOCOL.sessionVideoArtifactAttach}`, "u",
+    ));
     assert.equal(old.calls.some((call) => call.method === "POST"), false);
 
     const current = makeDeps((call) => call.url.endsWith("/api/compatibility")
