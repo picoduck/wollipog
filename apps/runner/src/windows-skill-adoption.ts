@@ -649,8 +649,10 @@ public static class WollipogWindowsSkillAdoption {
           RenameInto(link, backup, "managed-link");
         }
         sourceKind = 0;
-        preservedKind = 2;
-        preservedTarget = sourceTarget;
+        // Validate and record the junction actually moved into the journal, not an earlier read:
+        // either managed shape may have been current at the moment of the move.
+        preservedKind = Probe(preservedPath, root, out identity, out preservedTarget);
+        Require(preservedKind == 2, "the preserved managed link is not a junction");
       }
       if (preservedKind == 2) {
         // The junction already moved into the private journal is ours by either managed shape; the
