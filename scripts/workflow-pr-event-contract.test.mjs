@@ -372,8 +372,10 @@ test("native Linux isolation CI proves the managed-worktree read-only rule again
     "native macOS skill adoption writes into harness homes, so its helper tests must run on the macOS leg");
   assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/windows-skill-adoption\.test\.ts apps\/runner\/src\/skill-adoption-platform\.test\.ts < \/dev\/null/u,
     "native Windows skill adoption writes into harness homes, so its helper tests must run on the Windows leg");
-  assert.equal(platform.match(/grep -q '\^# skipped 0\$'/gu)?.length, 4,
-    "neither sandbox's enforcement test nor the native adoption tests may pass by skipping");
+  assert.match(platform, /if: matrix\.os == 'macos-latest' \|\| matrix\.os == 'windows-latest'\r?\n        shell: bash\r?\n        run: \|\r?\n          set -uo pipefail\r?\n          status=0\r?\n          output=\$\(node --import tsx --test --test-reporter=tap apps\/runner\/src\/skill-kept-aside\.test\.ts apps\/runner\/src\/skill-drift\.test\.ts < \/dev\/null\)/u,
+    "kept-aside discard and restore delete user-edited content, so their tests must run on the macOS and Windows legs (#1725)");
+  assert.equal(platform.match(/grep -q '\^# skipped 0\$'/gu)?.length, 5,
+    "neither sandbox's enforcement test, the native adoption tests, nor the kept-aside removal tests may pass by skipping");
   assert.match(platform, /grep -q '\^# skipped 0\$'/u,
     "a host that cannot create a user namespace must fail the job rather than report skipped coverage");
 });
