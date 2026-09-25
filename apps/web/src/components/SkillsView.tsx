@@ -362,6 +362,9 @@ export function SkillsView() {
     await refreshMachines();
   };
 
+  /** A v183 runner may keep copies aside without reporting them, so its update notice stays reachable. */
+  const keptAsideUnreported = useMemo(() => runners.some((runner) => runnerSupportsProtocol(runner.protocolVersion, "skillDrift") &&
+    !runnerSupportsProtocol(runner.protocolVersion, "skillKeptAsideCopies")), [runners]);
   const orphanCount = useMemo(() => runners.reduce((count, runner) =>
     count + reportedOrphanedCopies(machineSkills[runner.runnerId]).length + omittedKeptAsideCopies(machineSkills[runner.runnerId]),
   0), [machineSkills, runners]);
@@ -442,7 +445,7 @@ export function SkillsView() {
 
       <div className="skills-layout">
         <aside className="skills-list" aria-label="Skills">
-          {(orphanCount > 0 || showOrphans) && (
+          {(orphanCount > 0 || showOrphans || keptAsideUnreported) && (
             <button
               type="button"
               className={`skills-item${showOrphans ? " active" : ""}`}

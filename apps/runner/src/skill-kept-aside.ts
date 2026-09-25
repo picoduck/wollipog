@@ -9,19 +9,22 @@
  * Neither store name is a valid skill name or a `.tmp-` directory, so store GC never reclaims them.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
   constants,
   fstatSync,
+  linkSync,
   lstatSync,
   openSync,
   readSync,
   readdirSync,
   readlinkSync,
+  renameSync,
   rmdirSync,
   unlinkSync,
   writeFileSync,
+  writeSync,
   type BigIntStats,
 } from "node:fs";
 import { join } from "node:path";
@@ -38,6 +41,9 @@ const FINGERPRINT_MAX_ENTRIES = 4096;
 const DIGEST = /^[0-9a-f]{64}$/;
 const DIRECTORY_FLAGS = constants.O_RDONLY | (constants.O_DIRECTORY ?? 0) | (constants.O_NOFOLLOW ?? 0);
 const RECORD_FLAGS = constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0);
+const FILE_FLAGS = RECORD_FLAGS;
+/** Private name an entry is moved to, inside its own directory, just before it is removed. */
+const DISCARD_PREFIX = ".wollipog-discard-";
 
 /** What a restore recorded about the copy it moved aside. */
 export interface KeptAsideRecord {
@@ -202,43 +208,137 @@ function unlinkEntry(path: string, stat: BigIntStats): void {
   }
 }
 
+class CopyChanged extends Error {
+  constructor() {
+    super("the copy changed while it was discarded");
+  }
+}
+
+/** A stamp without its change time, which moving an entry to a private name updates. */
+function stampWithoutChangeTime(stamp: string | undefined): string | undefined {
+  if (stamp === undefined) return undefined;
+  const [type, dev, ino, mode, size, mtime, , target] = JSON.parse(stamp) as string[];
+  return JSON.stringify([type, dev, ino, mode, size, mtime, target]);
+}
+
+/** Put an entry back under its name without ever replacing whatever took that name meanwhile. If the
+ * name is taken, the entry stays under its private name inside the copy, where it is still reported. */
+function putBack(aside: string, original: string): void {
+  try {
+    linkSync(aside, original);
+    unlinkSync(aside);
+  } catch {
+    // Kept under its private name.
+  }
+}
+
+/** Write what an unlinked file still holds back into the copy, under its name or its private name. */
+function preserveFromHandle(fd: number, paths: readonly string[], mode: bigint): void {
+  for (const path of paths) {
+    let out: number;
+    try {
+      out = openSync(path, "wx", Number(mode & 0o777n));
+    } catch {
+      continue;
+    }
+    try {
+      const buffer = Buffer.alloc(1024 * 1024);
+      for (let position = 0; ;) {
+        const read = readSync(fd, buffer, 0, buffer.length, position);
+        if (!read) break;
+        writeSync(out, buffer, 0, read);
+        position += read;
+      }
+    } finally {
+      closeSync(out);
+    }
+    return;
+  }
+}
+
+/** Removal seams for tests. */
+export interface KeptAsideRemovalHooks {
+  anchored?: boolean;
+  /** After an entry is verified under its name. */
+  afterVerify?: (relative: string) => void;
+  /** Before a verified subdirectory is listed. */
+  beforeList?: (relative: string) => void;
+  /** After a file is verified under its private name and opened, before it is unlinked. */
+  beforeUnlink?: (relative: string) => void;
+}
+
 /** Delete a kept-aside tree, but only entries that still have the stamp they had when the discard was
- * verified. Each entry is checked immediately before it is removed, and an entry that changed, appeared,
- * or turned into something else stops the removal and is kept, together with everything not yet
- * removed. Links are unlinked, never traversed. On Linux every directory is addressed through its own
- * no-follow descriptor. Elsewhere a directory swapped for a link after its check lists entries that do
- * not match their stamps, so nothing it reaches is removed. Throws when it stops. */
+ * verified. Each entry is checked under its name, then moved to a private name in the same directory,
+ * so a replacement saved over its name (an editor's atomic save) is never touched, and checked again
+ * there. A file is unlinked while a handle to it is held; if its size or modification time moved since
+ * the check, a write landed first, and those bytes are written back. Any change, addition, or
+ * replacement stops the removal and keeps the entry and everything not yet removed. Links are unlinked,
+ * never traversed. On Linux every directory is addressed through its own no-follow descriptor.
+ * Elsewhere a directory swapped for a link after its check lists entries that do not match their
+ * stamps, so nothing it reaches is removed. Throws when it stops. */
 export function removeKeptAsideTree(
   dir: string,
   expected: ReadonlyMap<string, string>,
-  options: {
-    anchored?: boolean;
-    /** Test seams: after an entry is verified, and before a verified subdirectory is listed. */
-    afterVerify?: (relative: string) => void;
-    beforeList?: (relative: string) => void;
-  } = {},
+  options: KeptAsideRemovalHooks = {},
 ): void {
   const anchored = options.anchored ?? process.platform === "linux";
+  const childPath = (base: string, name: string) => anchored ? `${base}/${name}` : join(base, name);
   const verified = (path: string, relative: string): BigIntStats => {
     const stat = lstatSync(path, { bigint: true });
-    if (expected.get(relative) !== entryStamp(path, stat)) throw new Error("the copy changed while it was discarded");
+    if (expected.get(relative) !== entryStamp(path, stat)) throw new CopyChanged();
     options.afterVerify?.(relative);
     return stat;
+  };
+  const removeEntry = (base: string, name: string, relative: string): void => {
+    const original = childPath(base, name);
+    const aside = childPath(base, `${DISCARD_PREFIX}${randomUUID()}`);
+    renameSync(original, aside);
+    let stat: BigIntStats;
+    let fd: number | undefined;
+    try {
+      stat = lstatSync(aside, { bigint: true });
+      if (stampWithoutChangeTime(entryStamp(aside, stat)) !== stampWithoutChangeTime(expected.get(relative))) throw new CopyChanged();
+      if (stat.isFile()) {
+        fd = openSync(aside, FILE_FLAGS);
+        const opened = fstatSync(fd, { bigint: true });
+        if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new CopyChanged();
+      }
+    } catch (error) {
+      if (fd !== undefined) closeSync(fd);
+      putBack(aside, original);
+      throw error;
+    }
+    if (fd === undefined) {
+      unlinkEntry(aside, stat);
+      return;
+    }
+    try {
+      options.beforeUnlink?.(relative);
+      unlinkSync(aside);
+      const after = fstatSync(fd, { bigint: true });
+      if (after.size !== stat.size || after.mtimeNs !== stat.mtimeNs) {
+        // Written through a handle opened before the discard: keep those bytes.
+        preserveFromHandle(fd, [original, aside], stat.mode);
+        throw new CopyChanged();
+      }
+    } finally {
+      closeSync(fd);
+    }
   };
   const empty = (base: string, prefix: string): void => {
     options.beforeList?.(prefix);
     for (const name of readdirSync(base)) {
-      const child = anchored ? `${base}/${name}` : join(base, name);
+      const child = childPath(base, name);
       const stat = verified(child, prefix + name);
       if (!stat.isDirectory()) {
-        unlinkEntry(child, stat);
+        removeEntry(base, name, prefix + name);
         continue;
       }
       if (anchored) {
         const fd = openSync(child, DIRECTORY_FLAGS);
         try {
           const opened = fstatSync(fd, { bigint: true });
-          if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new Error("a directory changed while it was discarded");
+          if (opened.dev !== stat.dev || opened.ino !== stat.ino) throw new CopyChanged();
           empty(`/proc/self/fd/${fd}`, `${prefix}${name}/`);
         } finally {
           closeSync(fd);
@@ -246,6 +346,7 @@ export function removeKeptAsideTree(
       } else {
         empty(child, `${prefix}${name}/`);
       }
+      // Fails, and keeps it, if anything appeared in it meanwhile.
       rmdirSync(child);
     }
   };
@@ -255,7 +356,7 @@ export function removeKeptAsideTree(
     const fd = openSync(dir, DIRECTORY_FLAGS);
     try {
       const opened = fstatSync(fd, { bigint: true });
-      if (opened.dev !== root.dev || opened.ino !== root.ino) throw new Error("the copy changed while it was discarded");
+      if (opened.dev !== root.dev || opened.ino !== root.ino) throw new CopyChanged();
       empty(`/proc/self/fd/${fd}`, "");
     } finally {
       closeSync(fd);

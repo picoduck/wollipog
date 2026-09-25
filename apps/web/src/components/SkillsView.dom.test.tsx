@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { PROTOCOL_VERSION, type RunnerView, type UiSnapshotMessage } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, type RunnerView, type UiSnapshotMessage } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -518,6 +518,54 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
     `discard:runner-1:kept_aside:${unreadableId}:{"observedFingerprint":"${"f".repeat(64)}"}`,
   ]);
   assert.match(container.querySelector('[aria-label="Orphaned Copies"]')?.textContent ?? "", /No orphaned copies are reported\./);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("SkillsView keeps the orphaned copies entry reachable for a runner that cannot report kept-aside copies", async () => {
+  const older: RunnerSkillsResponse = {
+    removalReporting: "supported", driftReporting: "supported", keptAsideReporting: "unsupported",
+    desired: [], reported: { deployed: [], unmanaged: [], updatedAt: 1_700_000_000_000 }, orphaned: [],
+  };
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    runnerSkills: async () => older,
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "skills-older", runtimeKey: "skills-older:1", createSocket: () => socket, close() {},
+  };
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={connection} navigation={navigation}>
+          <SkillsWhenReady />
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [{ ...runner, protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift }], boxes: [], sessions: [], runs: [], pods: [],
+    });
+  });
+  await act(settle);
+  const entry = [...container.querySelectorAll<HTMLButtonElement>(".skills-item")]
+    .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
+  assert.ok(entry, "an older runner's unreported copies are not hidden behind an empty list");
+  assert.equal(entry!.querySelector(".status-badge"), null, "no count is claimed");
+  await act(async () => { entry!.click(); });
+  await act(settle);
+  assert.match(container.querySelector('[aria-label="Orphaned Copies"]')?.textContent ?? "",
+    /This runner version cannot report copies a restore kept aside\. Update it to list them here\./);
 
   await act(async () => root.unmount());
   container.remove();

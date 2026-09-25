@@ -82,8 +82,18 @@ export async function restoreDriftCopy(
     : { status: result.status as "restored" | "not_needed" };
 }
 
+export type SkillStateResponse = Omit<RunnerSkillStateRecord, "keptAside">;
+
+/** A machine's skill state as API responses carry it. Kept-aside copies are left out: a client sees
+ * them only through the orphaned-copy list, which omits copies of skills it cannot access. */
+export function skillStateResponse(state: RunnerSkillStateRecord | null): SkillStateResponse | null {
+  if (!state) return null;
+  const { keptAside: _listedSeparately, ...response } = state;
+  return response;
+}
+
 /** Refresh one machine's authoritative state so the caller sees a resolved copy. */
-export async function refreshRunnerSkillState(deps: SkillsRouteDeps, runnerId: string): Promise<RunnerSkillStateRecord | null> {
+export async function refreshRunnerSkillState(deps: SkillsRouteDeps, runnerId: string): Promise<SkillStateResponse | null> {
   try {
     const requestId = `skills_${randomUUID().slice(0, 8)}`;
     const result = await deps.pushSkillsSync.request(runnerId, requestId);
@@ -91,5 +101,5 @@ export async function refreshRunnerSkillState(deps: SkillsRouteDeps, runnerId: s
   } catch {
     // The runner still reports converged state on its own; the caller can refresh later.
   }
-  return deps.db.getRunnerSkillState(runnerId);
+  return skillStateResponse(deps.db.getRunnerSkillState(runnerId));
 }

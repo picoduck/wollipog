@@ -321,6 +321,7 @@ test("discard needs confirmation and the reported observation, and the runner fe
   const discarded = await discard(app, { kind: "kept_aside", id: readable, observedDigest, confirmation: "explicit" });
   assert.equal(discarded.statusCode, 200, discarded.body);
   assert.equal(discarded.json().status, "discarded");
+  assert.equal(discarded.json().state.keptAside, undefined, "responses carry kept-aside copies only through the filtered list");
   assert.deepEqual(state.commands.at(-1), { type: "skill_kept_aside", runnerId: "runner-1", requestId: state.commands.at(-1)!.requestId,
     operation: "discard", id: readable, observedDigest, confirmation: "explicit" });
   report({ keptAside: [{ id: unreadable, name: "beta", observedFingerprint }] });

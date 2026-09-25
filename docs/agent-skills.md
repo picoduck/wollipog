@@ -127,6 +127,10 @@ a skill the viewer cannot access is not listed. Owners and admins have two actio
   its contents. The runner computes the observation again and deletes nothing if it differs. It
   then checks each entry against that state just before removing it: an entry that changed or
   appeared stops the removal, and it is kept, with everything not yet removed, and listed again.
+  Each entry is first moved to a private name in its own directory and checked again there, so a
+  file an editor saves over its name meanwhile is never touched. A file is unlinked while the runner
+  holds a handle to it, and bytes written through an already open handle just before the unlink are
+  written back.
   Deletion never follows a symlink inside the copy, and on Linux every directory is walked and
   removed through its own no-follow descriptor. An unreadable tree of more than 4,096 entries has no
   fingerprint and must be removed on the machine itself. Discarding an edited copy of a deleted skill is a drift
@@ -138,7 +142,8 @@ Older runners report no kept-aside copies, and the per-machine API labels their 
 runner's edited copies of deleted skills are still listed and can be resolved. Older control planes
 ignore the new field. Limitations: a fingerprint relies on file change times, so a same-size rewrite
 within the same filesystem timestamp tick as the reported observation could go unnoticed; kernels
-with fine-grained change times close that window. A runner lists at most 256 kept-aside copies,
+with fine-grained change times close that window. As with any deletion, a write through an already
+open handle after its file is unlinked is lost. A runner lists at most 256 kept-aside copies,
 oldest first, and reports how many more it has. Resolve listed copies, or remove copies on the
 machine, to list the rest.
 

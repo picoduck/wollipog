@@ -12,6 +12,7 @@ import { registerSkillGitRoutes } from "./skill-git-route.js";
 import { registerMachineSkillRoutes } from "./skill-machine-route.js";
 import { registerSkillDriftRoutes } from "./skill-drift-route.js";
 import { listOrphanedSkillCopies } from "./skill-orphan-route.js";
+import { skillStateResponse } from "./skill-edited-copy.js";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   SKILL_MAX_TOTAL_BYTES,
@@ -736,7 +737,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
         versionDigest: entry.versionDigest,
         targets: entry.targets,
       })),
-      reported: db.getRunnerSkillState(id),
+      reported: skillStateResponse(db.getRunnerSkillState(id)),
       removalReporting: runnerSupportsProtocol(
         runner.protocolVersion,
         "skillLinkRemovalReporting",
@@ -766,7 +767,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
         return reply.code(502).send({ error: "unexpected runner reply" });
       }
       db.setRunnerSkillState(id, result, Date.now());
-      return { state: db.getRunnerSkillState(id) };
+      return { state: skillStateResponse(db.getRunnerSkillState(id)) };
     } catch (error) {
       if (error instanceof SkillsSyncInProgressError) {
         return reply.code(409).send({ error: error.message });

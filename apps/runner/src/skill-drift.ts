@@ -36,6 +36,7 @@ import {
   removeKeptAsideTree,
   sameKeptAsideStamps,
   writeKeptAsideRecord,
+  type KeptAsideRemovalHooks,
 } from "./skill-kept-aside.js";
 
 const DIGEST = /^[0-9a-f]{64}$/;
@@ -93,7 +94,7 @@ export function handleSkillDrift(options: {
   hooks?: {
     beforeQuarantine?: () => void;
     beforeDiscard?: (quarantine: string) => void;
-    removal?: Parameters<typeof removeKeptAsideTree>[2];
+    removal?: KeptAsideRemovalHooks;
   };
 }): SkillDriftResultMessage {
   const { message } = options;
@@ -247,7 +248,7 @@ export function handleSkillKeptAside(options: {
   dataDir: string;
   log?: (message: string) => void;
   /** Test seams between the fence check and the removal, and inside the removal. */
-  hooks?: { beforeRemove?: (dir: string) => void; removal?: Parameters<typeof removeKeptAsideTree>[2] };
+  hooks?: { beforeRemove?: (dir: string) => void; removal?: KeptAsideRemovalHooks };
 }): SkillKeptAsideResultMessage {
   const { message } = options;
   const reply = (value: Omit<SkillKeptAsideResultMessage, "type" | "runnerId" | "requestId">): SkillKeptAsideResultMessage => ({

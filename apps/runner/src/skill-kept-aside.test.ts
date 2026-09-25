@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
+  closeSync,
   existsSync,
   mkdirSync,
+  openSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
@@ -11,6 +13,7 @@ import {
   rmSync,
   symlinkSync,
   writeFileSync,
+  writeSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -416,7 +419,14 @@ test("a kept-aside copy changed after its fence check, or during removal, is kep
     assert.equal(late.status, "rejected");
     assert.equal(readFileSync(join(dir, "SKILL.md"), "utf8"), "late write\n", "a write after the fence check is never discarded");
 
-    for (const file of skillFiles("beta")) writeFileSync(join(dir, file.path), file.content);
+    const reset = () => {
+      rmSync(dir, { recursive: true, force: true });
+      mkdirSync(join(dir, "reference"), { recursive: true });
+      for (const file of skillFiles("beta")) writeFileSync(join(dir, file.path), file.content);
+    };
+    const leftovers = () => readdirSync(dir).filter((name) => name.startsWith(".wollipog-discard-"));
+
+    reset();
     const during = run({ removal: { afterVerify: (relative) => {
       if (relative === "SKILL.md") writeFileSync(join(dir, "reference", "notes.md"), "written mid-removal\n");
     } } });
@@ -425,6 +435,40 @@ test("a kept-aside copy changed after its fence check, or during removal, is kep
     assert.equal(readFileSync(join(dir, "reference", "notes.md"), "utf8"), "written mid-removal\n");
     const [still] = (await reconcile(roots, [])).keptAside ?? [];
     assert.equal(still?.id, id, "what remains is still reported");
+
+    // A write to the very entry being removed, after its check under its name.
+    reset();
+    const same = run({ removal: { afterVerify: (relative) => {
+      if (relative === "SKILL.md") writeFileSync(join(dir, "SKILL.md"), "written after its own check\n");
+    } } });
+    assert.equal(same.status, "rejected");
+    assert.equal(readFileSync(join(dir, "SKILL.md"), "utf8"), "written after its own check\n");
+    assert.deepEqual(leftovers(), [], "a changed entry goes back under its own name");
+
+    // An editor's atomic save over the name after its check is never touched.
+    reset();
+    const saved = run({ removal: { afterVerify: (relative) => {
+      if (relative !== "SKILL.md") return;
+      writeFileSync(join(dir, ".SKILL.md.swp"), "saved by an editor\n");
+      renameSync(join(dir, ".SKILL.md.swp"), join(dir, "SKILL.md"));
+    } } });
+    assert.equal(saved.status, "rejected");
+    assert.equal(readFileSync(join(dir, "SKILL.md"), "utf8"), "saved by an editor\n");
+    assert.deepEqual(leftovers(), []);
+
+    // A write through a handle opened before the discard lands just before the unlink: kept.
+    reset();
+    const handle = openSync(join(dir, "SKILL.md"), "r+");
+    try {
+      const held = run({ removal: { beforeUnlink: (relative) => {
+        if (relative === "SKILL.md") writeSync(handle, "written through an open handle, longer than before\n", 0);
+      } } });
+      assert.equal(held.status, "rejected");
+    } finally {
+      closeSync(handle);
+    }
+    assert.match(readFileSync(join(dir, "SKILL.md"), "utf8"), /^written through an open handle, longer than before\n/);
+    assert.deepEqual(leftovers(), []);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }

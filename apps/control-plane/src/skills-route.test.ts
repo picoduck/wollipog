@@ -555,6 +555,8 @@ test("POST /api/runners/:id/skills/sync gates offline and capability, persists t
     { kind: "kept_aside", id: keptAsideId, name: "retired", observedDigest: "b".repeat(64) },
     { kind: "deleted_skill", name: "deleted", digest: "a".repeat(64), variant: "agent", held: false },
   ], "orphaned copies are listed per machine, independent of any library skill");
+  assert.equal(keptAside.reported.keptAside, undefined,
+    "raw kept-aside copies never bypass the skill-access filter of the orphaned list");
 
   stubRequest(async () => { throw new RunnerRequestTimeoutError(); });
   const timedOut = await app.inject({ method: "POST", url: "/api/runners/runner-1/skills/sync" });
