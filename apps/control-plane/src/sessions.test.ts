@@ -2302,6 +2302,27 @@ for (const kind of ["session", "run", "workflow"] as const) {
   });
 }
 
+test("an older runner's within-30 s identical retries still hold a spawn approval and create once", (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  const { db, svc, parent, create, requestId, approval } = pendingSpawnFixture("session");
+  try {
+    // An older runner still repeats well inside the 30 s it quotes. Each repeat must refresh the
+    // same approval under the newer fence and must never create before approval.
+    for (let retry = 0; retry < 4; retry++) {
+      const before = approval().lastPolledAt;
+      t.mock.timers.tick(POLICY_HOOK_ABANDONMENT_MS - 5_000);
+      assert.equal(svc.reconcilePolicyHookTimeouts(), 0);
+      assert.equal(create().status, 428);
+      assert.equal(approval().lastPolledAt, before + POLICY_HOOK_ABANDONMENT_MS - 5_000, "the retry refreshes liveness");
+      assert.equal(db.getSession(parent.id)!.pendingApproval!.requestId, requestId);
+    }
+    assert.equal(db.childSessionAllocations(parent.id).count, 0);
+    assert.ok(svc.approve(parent.id, requestId, "allow").ok);
+    assert.ok(create().ok);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1);
+  } finally { db.close(); }
+});
+
 test("a live parent's silent spawn approval is withdrawn at the spawn fence and the retry keeps its 403", () => {
   const { db, svc, parent, create, requestId, approval } = pendingSpawnFixture("session");
   try {
