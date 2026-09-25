@@ -309,6 +309,33 @@ test("a WSL helper run that fails with no output is reported as needing recovery
       [[result.operationId, "managed_linked"]]);
   });
 
+test("a WSL distro that cannot be inspected makes the list incomplete and blocks every restore", local,
+  async (t) => {
+    const f = fixture(t);
+    const adopted = await f.adopt();
+    assert.equal(adopted.status, "adopted", JSON.stringify(adopted));
+    if (adopted.status !== "adopted") return;
+    const inner = localRun(f.home);
+    // The distro answers everything except recovery inspection, as when it stops mid-session.
+    const failing: WslRun = async (context, command, args, options) => {
+      if (command === "python3" && args[0] !== "-c" && JSON.parse(options.stdin ?? "{}").operation === "inspect") {
+        throw Object.assign(new Error("wsl.exe failed"), { stdout: "" });
+      }
+      return inner(context, command, args, options);
+    };
+    const environment = { ...f.environment(), run: failing };
+    const listed = await listSkillAdoptionRecoveryWithWsl(join(f.root, "native"), f.dataDir, agents, [], environment);
+    assert.deepEqual(listed, { operations: [], truncated: true });
+    for (const operationId of [adopted.operationId, "123e4567-e89b-42d3-a456-426614174000"]) {
+      const restored = await restoreSkillAdoptionRecoveryWithWsl({ home: join(f.root, "native"), dataDir: f.dataDir,
+        agents, operationId, acquireProviderHomeLease: () => assert.fail("no restore may start"),
+      }, environment);
+      assert.equal(restored.status, "blocked", JSON.stringify(restored));
+      assert.match(restored.error ?? "", /WSL distro Ubuntu could not be inspected/u);
+    }
+    assert.equal(fs.readlinkSync(f.source), f.target, "nothing was restored");
+  });
+
 test("inherited or WSLENV-forwarded environment variables cannot reach the helper's test checkpoint", local,
   async (t) => {
     const f = fixture(t);

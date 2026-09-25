@@ -451,12 +451,14 @@ function wslScopes(agents: AgentDefinition[]): RecoveryScope[] {
     ({ home: "", sourceDirectory, localSourceDirectory: sourceDirectory, context: { kind: "wsl" as const, distro } })));
 }
 
+/** `failed` marks a distro that could not be inspected. It may hold journals, including a copy of
+ * a listed ID, so callers treat it as incomplete rather than empty. */
 async function wslViews(environment: WslAdoptionEnvironment, scope: RecoveryScope,
-  operationId?: string): Promise<{ views: HelperView[]; truncated: boolean }> {
+  operationId?: string): Promise<{ views: HelperView[]; truncated: boolean; failed?: true }> {
   try {
     return viewsFromFacts(scope,
       await inspectWslSkillRecovery(environment, scope.context!.distro, scope.sourceDirectory, operationId));
-  } catch { return { views: [], truncated: false }; }
+  } catch { return { views: [], truncated: false, failed: true }; }
 }
 
 /** Native recovery plus, on a Windows runner, each WSL distro's harness directories. The bounded
@@ -472,7 +474,8 @@ export async function listSkillAdoptionRecoveryWithWsl(home: string, dataDir: st
   let truncated = collected.truncated;
   for (const scope of wsl ? wslScopes(agents) : []) {
     const found = await wslViews(wsl!, scope);
-    truncated ||= found.truncated;
+    // An uninspected distro makes the list incomplete, and duplicate IDs across it cannot be seen.
+    truncated ||= found.truncated || found.failed === true;
     for (const { view } of found.views) {
       if (operations.length >= SKILL_RECOVERY_SCAN_LIMITS.operations) { truncated = true; break; }
       operations.push(view);
@@ -486,7 +489,13 @@ export async function restoreSkillAdoptionRecoveryWithWsl(options: RestoreSkillA
   if (!wsl || !UUID.test(options.operationId)) return restoreSkillAdoptionRecovery(options);
   const matches: Array<HelperView & { scope: RecoveryScope }> = [];
   for (const scope of wslScopes(options.agents)) {
-    for (const found of (await wslViews(wsl, scope, options.operationId)).views) {
+    const inspected = await wslViews(wsl, scope, options.operationId);
+    // Uniqueness spans every scope, so a distro that cannot be inspected blocks every restore.
+    if (inspected.failed) {
+      return { status: "blocked", error: `The WSL distro ${scope.context!.distro} could not be inspected, so the ` +
+        "recovery operation cannot be confirmed unique. Retry when it is available." };
+    }
+    for (const found of inspected.views) {
       if (found.view.operationId === options.operationId) matches.push({ scope, ...found });
     }
   }
