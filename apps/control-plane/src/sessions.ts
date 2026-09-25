@@ -11287,7 +11287,7 @@ export class SessionsService {
     for (const [index, { snap, campaignBefore }] of terminalBatch.entries()) {
       if (terminalHistories[index]?.reset) {
         const reset = this.db.getSession(snap.id)!;
-        this.hub.sessionEventsReset(snap.id, [], reset.eventEpoch ?? 0);
+        this.hub.sessionEventsReset(snap.id, this.db.listEvents(snap.id), reset.eventEpoch ?? 0);
         if (snap.seq > 0) this.rehydrate.add(snap.id);
       }
       this.gateOnPolicy(snap.id, now);
@@ -11350,7 +11350,7 @@ export class SessionsService {
         const history = this.db.updateSessionFromSnapshot(snap.id, snap, now);
         if (history?.reset) {
           const reset = this.db.getSession(snap.id)!;
-          this.hub.sessionEventsReset(snap.id, [], reset.eventEpoch ?? 0);
+          this.hub.sessionEventsReset(snap.id, this.db.listEvents(snap.id), reset.eventEpoch ?? 0);
           if (snap.seq > 0) this.rehydrate.add(snap.id);
         }
       } else {
@@ -11460,7 +11460,7 @@ export class SessionsService {
     const history = this.db.updateSessionFromSnapshot(snapshot.id, runtimeSnapshot, now);
     if (history?.reset) {
       const reset = this.db.getSession(snapshot.id)!;
-      this.hub.sessionEventsReset(snapshot.id, [], reset.eventEpoch ?? 0);
+      this.hub.sessionEventsReset(snapshot.id, this.db.listEvents(snapshot.id), reset.eventEpoch ?? 0);
       this.rehydrate.add(snapshot.id);
       void this.hydrateHistory(snapshot.id);
     }
@@ -11632,7 +11632,7 @@ export class SessionsService {
           if (!reconciled) return;
           eventEpoch = reconciled.eventEpoch;
           if (reconciled.reset) {
-            this.hub.sessionEventsReset(sessionId, [], eventEpoch);
+            this.hub.sessionEventsReset(sessionId, this.db.listEvents(sessionId), eventEpoch);
             if (afterSeq !== 0) {
               this.rehydrate.add(sessionId);
               return;

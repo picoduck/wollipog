@@ -13263,12 +13263,26 @@ export class ControlPlaneDb {
       ? tailSeq
       : Math.max(tailSeq, before.runner_history_tail_seq, before.hydrated_seq);
     if (reset) {
+      // File attachments are authored by the control plane, not the runner. Keep their original
+      // rows (including ids and timestamps) while replacing only runner-owned history. Compact
+      // their CP sequence so replayed runner pages can append after them without stale gaps.
+      const attachments = this.stmt(
+        `SELECT id, ts FROM session_events
+           WHERE session_id=? AND kind='artifact_attached' AND runner_seq IS NULL
+           ORDER BY seq, id`,
+      ).all(id) as Array<{ id: number; ts: number }>;
       this.stmt(
         `DELETE FROM artifacts WHERE session_id=? AND run_id IS NULL
            AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_event_payload'`,
       ).run(id);
       this.recordChildToolCallPeak(id);
-      this.stmt("DELETE FROM session_events WHERE session_id=?").run(id);
+      this.stmt(
+        "DELETE FROM session_events WHERE session_id=? AND (kind!='artifact_attached' OR runner_seq IS NOT NULL)",
+      ).run(id);
+      const resequence = this.stmt("UPDATE session_events SET seq=? WHERE id=?");
+      for (const [index, attachment] of attachments.entries()) {
+        resequence.run(index + 1, attachment.id);
+      }
       this.stmt("DELETE FROM session_events_fts WHERE session_id=?").run(id);
       this.stmt(
         `UPDATE managed_background_deliveries
@@ -13278,9 +13292,11 @@ export class ControlPlaneDb {
       this.stmt(
         `UPDATE sessions
             SET runner_history_epoch=?, runner_history_tail_seq=?, hydrated_seq=0,
-                message_count=0, last_event_at=NULL, preview=NULL, event_epoch=event_epoch+1
+                message_count=?, last_event_at=?, preview=NULL, event_epoch=event_epoch+1
           WHERE id=?`,
-      ).run(historyEpoch, settledTail, id);
+      ).run(historyEpoch, settledTail, attachments.length,
+        attachments.length ? attachments.reduce((latest, attachment) => Math.max(latest, attachment.ts), 0) : null,
+        id);
     } else if (historyEpoch !== undefined) {
       this.stmt(
         "UPDATE sessions SET runner_history_epoch=?, runner_history_tail_seq=? WHERE id=?",
