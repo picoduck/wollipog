@@ -307,7 +307,7 @@ test("Windows pins the harness directory and journal so neither can move during 
   const journal = join(f.home, ...adopted.backupDirectory.split("/"));
   const intent = JSON.parse(fs.readFileSync(join(journal, "intent.json"), "utf8"));
   const attempts: string[] = [];
-  const run = await atCheckpoint(windowsRestoreSpecification({ home: f.home, localSourceDirectory: ".codex/skills",
+  const run = await atCheckpoint(windowsRestoreSpecification({ home: f.home, canonicalHome: f.home, localSourceDirectory: ".codex/skills",
     dataDir: f.dataDir, operationId: adopted.operationId, name: "alpha", digest: f.options.digest,
     parentIdentity: intent.parentIdentity, sourceIdentity: intent.sourceIdentity }), "restore_intent_durable", "c", () => {
     for (const [from, to] of [[journal, join(f.parent, "relocated-journal")], [f.parent, f.parent + "-moved"]] as const) {
@@ -359,7 +359,7 @@ for (const stage of ["restore_intent_durable", "managed_link_preserved", "recove
     assert.equal(adopted.status, "adopted");
     if (adopted.status !== "adopted") return;
     const intent = JSON.parse(fs.readFileSync(join(f.home, ...adopted.backupDirectory.split("/"), "intent.json"), "utf8"));
-    const run = await atCheckpoint(windowsRestoreSpecification({ home: f.home, localSourceDirectory: ".codex/skills",
+    const run = await atCheckpoint(windowsRestoreSpecification({ home: f.home, canonicalHome: f.home, localSourceDirectory: ".codex/skills",
       dataDir: f.dataDir, operationId: adopted.operationId, name: "alpha", digest: f.options.digest,
       parentIdentity: intent.parentIdentity, sourceIdentity: intent.sourceIdentity }), stage, "f");
     assert.notEqual(run.code, 0);
@@ -405,3 +405,95 @@ test("Windows account-scoped adoption and recovery stay in the selected credenti
   assert.equal(restored.operation?.providerAccountId, "work");
   assert.deepEqual(leased, [accountHome]);
 });
+
+const junctionTarget = (path: string) => fs.readlinkSync(path).replace(/^\\\\\?\\/u, "").replace(/\\+$/u, "")
+  .toLowerCase();
+
+test("a Windows restore recovers an adopted harness skill after reconciliation routes it through the canonical junction",
+  native, async (t) => {
+    const f = fixture(t);
+    const adopted = adoptMachineSkill(f.options);
+    assert.equal(adopted.status, "adopted", JSON.stringify(adopted));
+    if (adopted.status !== "adopted") return;
+    const reconciled = await reconcileSkills({ dataDir: f.dataDir, home: f.home, agents, desired: [f.entry],
+      acquireProviderHomeLease: () => {} });
+    assert.equal(reconciled.error, undefined, JSON.stringify(reconciled));
+    const canonical = join(f.home, ".agents", "skills", "alpha");
+    assert.equal(junctionTarget(f.source), canonical.toLowerCase(),
+      "reconciliation routes the harness junction through the canonical junction");
+    const canonicalTarget = junctionTarget(canonical);
+    const storeVersion = fs.realpathSync(canonical);
+    const states = () => listSkillAdoptionRecovery(f.home, f.dataDir, agents).operations.map((entry) => entry.state);
+    assert.deepEqual(states(), ["managed_linked"]);
+    const elsewhere = join(f.root, "elsewhere");
+    fs.mkdirSync(elsewhere);
+    fs.rmdirSync(canonical);
+    fs.symlinkSync(elsewhere, canonical, "junction");
+    assert.deepEqual(states(), ["blocked"], "a canonical junction naming another directory");
+    assert.equal(f.restore(adopted.operationId).status, "blocked");
+    assert.equal(junctionTarget(f.source), canonical.toLowerCase(), "a blocked restore moves nothing");
+    fs.rmdirSync(canonical);
+    fs.symlinkSync(storeVersion, canonical, "junction");
+    const restored = f.restore(adopted.operationId);
+    assert.equal(restored.status, "restored", JSON.stringify(restored));
+    assert.equal(fs.readFileSync(join(f.source, "SKILL.md"), "utf8"), fs.readFileSync(
+      join(f.home, adopted.backupDirectory, "original", "SKILL.md"), "utf8"));
+    assert.equal(junctionTarget(join(f.home, adopted.backupDirectory, "managed-link")), canonical.toLowerCase());
+    assert.equal(junctionTarget(canonical), canonicalTarget, "the canonical junction is never touched");
+  });
+
+// Hold a path open with no sharing, so any other open fails with a sharing violation: a real
+// "exists but cannot be read" failure that, unlike a deny ACE, backup-privileged runners cannot bypass.
+const EXCLUSIVE_LOCK_SCRIPT = [
+  "$signature = '[DllImport(\"kernel32.dll\", SetLastError = true, CharSet = CharSet.Unicode)] public static extern " +
+    "Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string name, uint access, uint share, IntPtr security, " +
+    "uint disposition, uint flags, IntPtr template);'",
+  "$kernel = Add-Type -MemberDefinition $signature -Name ExclusiveLock -Namespace WollipogTest -PassThru",
+  "$handle = $kernel::CreateFileW($env:WOLLIPOG_TEST_LOCK_PATH, [uint32]2147483648, 0, [IntPtr]::Zero, 3, 33554432, " +
+    "[IntPtr]::Zero)",
+  "if ($handle.IsInvalid) { exit 1 }",
+  "[Console]::Out.WriteLine('held'); [Console]::Out.Flush()",
+  "[void][Console]::In.ReadLine()",
+  "$handle.Dispose()",
+].join("\n");
+
+async function holdExclusive(path: string): Promise<() => Promise<void>> {
+  const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-EncodedCommand",
+    Buffer.from(EXCLUSIVE_LOCK_SCRIPT, "utf16le").toString("base64")],
+  { env: { ...process.env, WOLLIPOG_TEST_LOCK_PATH: path }, stdio: ["pipe", "pipe", "inherit"], windowsHide: true });
+  child.stdout.setEncoding("utf8");
+  let output = "";
+  await new Promise<void>((resolve, reject) => {
+    child.stdout.on("data", (chunk: string) => { output += chunk; if (output.includes("held")) resolve(); });
+    child.on("exit", (code) => reject(new Error(`the exclusive lock helper exited with ${code}`)));
+  });
+  return async () => { child.stdin.end("\n"); await once(child, "exit"); };
+}
+
+test("an unreadable Windows harness directory, journal, or intent record fails inspection instead of looking empty",
+  native, async (t) => {
+    const f = fixture(t);
+    const adopted = adoptMachineSkill(f.options);
+    assert.equal(adopted.status, "adopted", JSON.stringify(adopted));
+    if (adopted.status !== "adopted") return;
+    const list = () => listSkillAdoptionRecovery(f.home, f.dataDir, agents);
+    const journal = join(f.home, adopted.backupDirectory);
+    for (const locked of [f.parent, journal, join(journal, "intent.json")]) {
+      const release = await holdExclusive(locked);
+      try {
+        assert.deepEqual(list(), { operations: [], truncated: true }, locked);
+        const restored = f.restore(adopted.operationId);
+        assert.equal(restored.status, "blocked", JSON.stringify(restored));
+        assert.match(restored.error ?? "", /\.codex\/skills could not be inspected/u);
+      } finally { await release(); }
+    }
+    assert.deepEqual(list().operations.map((entry) => entry.state), ["managed_linked"]);
+    // A missing or junctioned harness directory holds no journals and keeps the list complete.
+    const moved = `${f.parent}-moved`;
+    fs.renameSync(f.parent, moved);
+    assert.deepEqual(list(), { operations: [], truncated: false });
+    fs.symlinkSync(moved, f.parent, "junction");
+    assert.deepEqual(list(), { operations: [], truncated: false });
+    fs.rmdirSync(f.parent);
+    fs.renameSync(moved, f.parent);
+  });

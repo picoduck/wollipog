@@ -346,7 +346,7 @@ test("a macOS restore never reports a dangling recovery link after the harness d
   if (adopted.status !== "adopted") return;
   const intent = JSON.parse(fs.readFileSync(join(f.home, adopted.backupDirectory, "intent.json"), "utf8"));
   const moved = join(f.home, ".codex/moved");
-  const run = await atCheckpoint(f.helper, macosRestoreArguments({ home: f.home, localSourceDirectory: ".codex/skills",
+  const run = await atCheckpoint(f.helper, macosRestoreArguments({ home: f.home, canonicalHome: f.home, localSourceDirectory: ".codex/skills",
     dataDir: f.dataDir, operationId: adopted.operationId, name: "alpha", digest: f.options.digest,
     parentIdentity: intent.parentIdentity, sourceIdentity: intent.sourceIdentity }),
   "restore_intent_durable", "c", () => { fs.renameSync(f.parent, moved); });
@@ -366,7 +366,7 @@ test("a macOS restore never moves the managed link into a relocated journal", na
   const journal = join(f.home, adopted.backupDirectory);
   const intent = JSON.parse(fs.readFileSync(join(journal, "intent.json"), "utf8"));
   const relocated = join(f.parent, "relocated-journal");
-  const run = await atCheckpoint(f.helper, macosRestoreArguments({ home: f.home, localSourceDirectory: ".codex/skills",
+  const run = await atCheckpoint(f.helper, macosRestoreArguments({ home: f.home, canonicalHome: f.home, localSourceDirectory: ".codex/skills",
     dataDir: f.dataDir, operationId: adopted.operationId, name: "alpha", digest: f.options.digest,
     parentIdentity: intent.parentIdentity, sourceIdentity: intent.sourceIdentity }),
   "restore_intent_durable", "c", () => { fs.renameSync(journal, relocated); });
@@ -395,7 +395,7 @@ for (const stage of ["restore_intent_durable", "managed_link_preserved", "recove
     assert.equal(adopted.status, "adopted");
     if (adopted.status !== "adopted") return;
     const intent = JSON.parse(fs.readFileSync(join(f.home, adopted.backupDirectory, "intent.json"), "utf8"));
-    const run = await atCheckpoint(f.helper, macosRestoreArguments({ home: f.home,
+    const run = await atCheckpoint(f.helper, macosRestoreArguments({ home: f.home, canonicalHome: f.home,
       localSourceDirectory: ".codex/skills", dataDir: f.dataDir, operationId: adopted.operationId, name: "alpha",
       digest: f.options.digest, parentIdentity: intent.parentIdentity, sourceIdentity: intent.sourceIdentity }),
     stage, "f");
@@ -445,3 +445,60 @@ test("macOS account-scoped adoption and recovery stay in the selected credential
   assert.equal(restored.operation?.providerAccountId, "work");
   assert.deepEqual(leased, [accountHome]);
 });
+
+test("a macOS restore recovers an adopted harness skill after reconciliation routes it through the canonical link",
+  native, async (t) => {
+    const f = fixture(t);
+    const before = fs.statSync(f.source);
+    const adopted = adoptMachineSkill(f.options);
+    assert.equal(adopted.status, "adopted", JSON.stringify(adopted));
+    if (adopted.status !== "adopted") return;
+    const reconciled = await reconcileSkills({ dataDir: f.dataDir, home: f.home, agents, desired: [f.entry],
+      acquireProviderHomeLease: () => {} });
+    assert.equal(reconciled.error, undefined, JSON.stringify(reconciled));
+    const canonical = join(f.home, ".agents/skills/alpha");
+    assert.equal(fs.readlinkSync(f.source), canonical, "reconciliation routes the harness link through the canonical link");
+    const canonicalTarget = fs.readlinkSync(canonical);
+    const states = () => listSkillAdoptionRecovery(f.home, f.dataDir, agents, [], f.recovery).operations
+      .map((entry) => entry.state);
+    assert.deepEqual(states(), ["managed_linked"]);
+    fs.unlinkSync(canonical);
+    fs.symlinkSync(join(f.dataDir, "skills/store/alpha", "0".repeat(64)), canonical);
+    assert.deepEqual(states(), ["blocked"], "a canonical link naming another version");
+    assert.equal(f.restore(adopted.operationId).status, "blocked");
+    assert.equal(fs.readlinkSync(f.source), canonical, "a blocked restore moves nothing");
+    fs.unlinkSync(canonical);
+    fs.symlinkSync(canonicalTarget, canonical);
+    const restored = f.restore(adopted.operationId);
+    assert.equal(restored.status, "restored", JSON.stringify(restored));
+    assert.equal(fs.statSync(f.source).ino, before.ino);
+    assert.equal(fs.readlinkSync(join(f.home, adopted.backupDirectory, "managed-link")), canonical);
+    assert.equal(fs.readlinkSync(canonical), canonicalTarget, "the canonical link is never touched");
+  });
+
+test("an unreadable macOS harness directory, journal, or intent record fails inspection instead of looking empty",
+  { skip: native.skip || process.getuid?.() === 0 }, (t) => {
+    const f = fixture(t);
+    const adopted = adoptMachineSkill(f.options);
+    assert.equal(adopted.status, "adopted", JSON.stringify(adopted));
+    if (adopted.status !== "adopted") return;
+    const list = () => listSkillAdoptionRecovery(f.home, f.dataDir, agents, [], f.recovery);
+    const journal = join(f.home, adopted.backupDirectory);
+    for (const locked of [f.parent, journal, join(journal, "intent.json")]) {
+      const mode = fs.statSync(locked).mode & 0o777;
+      fs.chmodSync(locked, 0);
+      try {
+        assert.deepEqual(list(), { operations: [], truncated: true }, locked);
+        const restored = f.restore(adopted.operationId);
+        assert.equal(restored.status, "blocked", JSON.stringify(restored));
+        assert.match(restored.error ?? "", /\.codex\/skills could not be inspected/u);
+      } finally { fs.chmodSync(locked, mode); }
+    }
+    assert.deepEqual(list().operations.map((entry) => entry.state), ["managed_linked"]);
+    // A missing or symlinked harness directory holds no journals and keeps the list complete.
+    const moved = `${f.parent}-moved`;
+    fs.renameSync(f.parent, moved);
+    assert.deepEqual(list(), { operations: [], truncated: false });
+    fs.symlinkSync(moved, f.parent);
+    assert.deepEqual(list(), { operations: [], truncated: false });
+  });

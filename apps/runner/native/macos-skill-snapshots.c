@@ -247,8 +247,10 @@ static int open_relative(int root, const char *relative, int durable) {
     if (!strcmp(segment, ".") || !strcmp(segment, "..") || strchr(segment, '\\')) fail();
     int next = openat(current, segment, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
     if (next < 0) {
+      int saved = errno; /* callers tell a missing directory from an unreadable one */
       close(current);
       free(copy);
+      errno = saved;
       return -1;
     }
     if (durable && fsync(current) != 0) fail();
@@ -757,8 +759,16 @@ static int open_real(const char *real) {
   if (current < 0) fail();
   if (!real[1]) return current;
   int next = open_relative(current, real + 1, 0);
+  int saved = errno;
   close(current);
+  errno = saved;
   return next;
+}
+
+/* A missing path, a file where a directory belongs, or a symlinked component (which adoption never
+ * traverses) holds no journal. Any other error means the scope exists but cannot be inspected. */
+static int absent_errno(int value) {
+  return value == ENOENT || value == ENOTDIR || value == ELOOP;
 }
 
 static void check_path(const char *root, const char *relative, const char *expected) {
@@ -779,6 +789,19 @@ static int link_equals(int parent, const char *name, const char *expected) {
   if (length < 0 || (size_t)length >= sizeof(buffer) - 1) return 0;
   buffer[length] = '\0';
   return strcmp(buffer, expected) == 0;
+}
+
+/* The adoption's managed link names the adopted version directly or, once reconciliation routes
+ * the harness through it, names this skill's canonical link whose own text is that version. Both
+ * hops compare link text, as reconciliation does; nothing is followed. */
+static int managed_link(int parent, const char *name, const char *managed, const char *canonical) {
+  if (managed[0] && link_equals(parent, name, managed)) return 1;
+  if (!managed[0] || !canonical[0] || !link_equals(parent, name, canonical)) return 0;
+  char buffer[PATH_MAX + 1];
+  ssize_t length = readlink(canonical, buffer, sizeof(buffer) - 1);
+  if (length < 0 || (size_t)length >= sizeof(buffer) - 1) return 0;
+  buffer[length] = '\0';
+  return strcmp(buffer, managed) == 0;
 }
 
 static enum path_kind entry_kind(int parent, const char *name) {
@@ -995,9 +1018,17 @@ static int extract_field(const char *json, const char *field, char *output, size
 /* Append descriptor-anchored facts for one journal entry, or return 0 when it is not a readable
  * journal. The runner parses the journal and decides the recovery state. */
 static int inspect_journal(struct bytes *output, int parent, const char *entry_name, const char *operation,
-    const char *home_real, const char *data_real, const char *local) {
+    const char *home_real, const char *data_real, const char *local, const char *canonical_dir) {
+  /* An unreadable journal or intent record still holds an operation ID, so it fails the whole
+   * inspection rather than vanish; anything else that is not a readable journal is skipped. */
   int backup = openat(parent, entry_name, DIRECTORY_FLAGS);
-  if (backup < 0) return 0;
+  if (backup < 0) {
+    if (!absent_errno(errno)) fail();
+    return 0;
+  }
+  int intent_fd = openat(backup, "intent.json", O_RDONLY | O_NOFOLLOW | O_NONBLOCK);
+  if (intent_fd < 0 && !absent_errno(errno)) fail();
+  if (intent_fd >= 0) close(intent_fd);
   size_t intent_length = 0;
   char *intent = read_small_file(backup, "intent.json", &intent_length);
   if (!intent) {
@@ -1027,12 +1058,15 @@ static int inspect_journal(struct bytes *output, int parent, const char *entry_n
         close(source);
       }
     } else if (kind == PATH_LINK) {
-      char managed[PATH_MAX], recovery[PATH_MAX];
+      char managed[PATH_MAX], recovery[PATH_MAX], canonical[PATH_MAX];
       if (!data_real || snprintf(managed, sizeof(managed), "%s/skills/store/%s/%s", data_real, skill, digest) >=
           (int)sizeof(managed)) managed[0] = '\0';
+      if (snprintf(canonical, sizeof(canonical), "%s/%s", canonical_dir, skill) >= (int)sizeof(canonical)) {
+        canonical[0] = '\0';
+      }
       if (snprintf(recovery, sizeof(recovery), "%s/%s/%s/original", home_real, local, entry_name) >=
           (int)sizeof(recovery)) fail();
-      role = managed[0] && link_equals(parent, skill, managed) ? LINK_MANAGED
+      role = managed_link(parent, skill, managed, canonical) ? LINK_MANAGED
         : link_equals(parent, skill, recovery) ? LINK_RECOVERY : LINK_FOREIGN;
     }
   }
@@ -1049,20 +1083,24 @@ static int inspect_journal(struct bytes *output, int parent, const char *entry_n
   return 1;
 }
 
-/* inspect HOME LOCAL DATA_DIR [OPERATION]
+/* inspect HOME LOCAL DATA_DIR CANONICAL_DIR [OPERATION]
  * Report descriptor-anchored facts for each bounded journal. The runner parses the journal and
- * decides the recovery state; this helper never mutates anything. */
+ * decides the recovery state; this helper never mutates anything. A missing home or harness
+ * directory reports no journals; one that exists but cannot be opened fails the inspection. */
 static void inspect_recovery(int argc, char **argv) {
-  if (argc != 5 && argc != 6) fail();
-  const char *home = argv[2], *local = argv[3], *data = argv[4];
-  const char *only = argc == 6 ? argv[5] : NULL;
-  if (!valid_relative_directory(local) || (only && !valid_uuid(only))) fail();
+  if (argc != 6 && argc != 7) fail();
+  const char *home = argv[2], *local = argv[3], *data = argv[4], *canonical_dir = argv[5];
+  const char *only = argc == 7 ? argv[6] : NULL;
+  if (!valid_relative_directory(local) || canonical_dir[0] != '/' || (only && !valid_uuid(only))) fail();
   struct bytes output = {0};
   append(&output, "WMS1I", 5);
   char *home_real = realpath(home, NULL);
+  if (!home_real && !absent_errno(errno)) fail();
   char *data_real = realpath(data, NULL);
   int home_fd = home_real ? open_real(home_real) : -1;
+  if (home_real && home_fd < 0 && !absent_errno(errno)) fail();
   int parent = home_fd >= 0 ? open_relative(home_fd, local, 0) : -1;
+  if (home_fd >= 0 && parent < 0 && !absent_errno(errno)) fail();
   if (parent < 0) {
     append_blob(&output, "", 0);
     append_u32(&output, 0);
@@ -1082,7 +1120,7 @@ static void inspect_recovery(int argc, char **argv) {
      * hidden behind the bounded listing scan of a very large harness directory. */
     char entry_name[64];
     snprintf(entry_name, sizeof(entry_name), "%s%s", JOURNAL_PREFIX, only);
-    if (inspect_journal(&output, parent, entry_name, only, home_real, data_real, local)) operations++;
+    if (inspect_journal(&output, parent, entry_name, only, home_real, data_real, local, canonical_dir)) operations++;
     patch_u32(&output, count_offset, operations);
     append_u8(&output, truncated);
     write_all(STDOUT_FILENO, output.data, output.length);
@@ -1112,7 +1150,7 @@ static void inspect_recovery(int argc, char **argv) {
       truncated = 1;
       break;
     }
-    if (inspect_journal(&output, parent, entry->d_name, operation, home_real, data_real, local)) operations++;
+    if (inspect_journal(&output, parent, entry->d_name, operation, home_real, data_real, local, canonical_dir)) operations++;
   }
   if (closedir(directory) != 0) fail();
   patch_u32(&output, count_offset, operations);
@@ -1120,16 +1158,17 @@ static void inspect_recovery(int argc, char **argv) {
   write_all(STDOUT_FILENO, output.data, output.length);
 }
 
-/* restore HOME LOCAL DATA_DIR OPERATION NAME DIGEST PARENT_IDENTITY SOURCE_IDENTITY
+/* restore HOME LOCAL DATA_DIR CANONICAL_DIR OPERATION NAME DIGEST PARENT_IDENTITY SOURCE_IDENTITY
  * Expose only the exact inode/content preserved by a validated journal. The managed link is first
  * moved into the journal, then an exclusive recovery link publishes `original` at the source name.
  * Nothing at that name is unlinked or overwritten; every boundary can be retried. */
 static void restore_recovery(int argc, char **argv) {
-  if (argc != 10) fail();
-  const char *home = argv[2], *local = argv[3], *data = argv[4], *operation = argv[5], *name = argv[6];
-  const char *digest = argv[7], *parent_expected = argv[8], *source_expected = argv[9];
-  if (!valid_relative_directory(local) || !valid_uuid(operation) || !valid_skill_name(name) ||
-      !hex64(digest) || !valid_identity(parent_expected) || !valid_identity(source_expected)) fail();
+  if (argc != 11) fail();
+  const char *home = argv[2], *local = argv[3], *data = argv[4], *canonical_dir = argv[5], *operation = argv[6];
+  const char *name = argv[7], *digest = argv[8], *parent_expected = argv[9], *source_expected = argv[10];
+  if (!valid_relative_directory(local) || canonical_dir[0] != '/' || !valid_uuid(operation) ||
+      !valid_skill_name(name) || !hex64(digest) || !valid_identity(parent_expected) ||
+      !valid_identity(source_expected)) fail();
   char *home_real = realpath(home, NULL);
   char *data_real = realpath(data, NULL);
   if (!home_real || !data_real) fail();
@@ -1158,14 +1197,15 @@ static void restore_recovery(int argc, char **argv) {
   record_once(backup, "restore-intent.json", receipt);
   checkpoint("restore_intent_durable");
 
-  char managed[PATH_MAX], recovery[PATH_MAX];
+  char managed[PATH_MAX], recovery[PATH_MAX], canonical[PATH_MAX];
   if (snprintf(managed, sizeof(managed), "%s/skills/store/%s/%s", data_real, name, digest) >= (int)sizeof(managed) ||
+      snprintf(canonical, sizeof(canonical), "%s/%s", canonical_dir, name) >= (int)sizeof(canonical) ||
       snprintf(recovery, sizeof(recovery), "%s/%s/%s/original", home_real, local, backup_name) >=
         (int)sizeof(recovery)) fail();
   enum path_kind source_kind = entry_kind(parent, name);
   enum path_kind preserved_kind = entry_kind(backup, "managed-link");
   if (source_kind == PATH_LINK) {
-    if (preserved_kind != PATH_ABSENT || !link_equals(parent, name, managed)) fail();
+    if (preserved_kind != PATH_ABSENT || !managed_link(parent, name, managed, canonical)) fail();
     /* Moving the live link is only safe into the journal that recovery inspection will find. */
     check_path(home_real, local, parent_expected);
     check_path(home_real, backup_relative, backup_id);
@@ -1176,10 +1216,14 @@ static void restore_recovery(int argc, char **argv) {
     preserved_kind = PATH_LINK;
   }
   if (preserved_kind == PATH_LINK) {
-    if (!link_equals(backup, "managed-link", managed)) fail();
+    /* The link already moved into the private journal is ours by either managed shape; the
+     * canonical link may have moved on since, and it is never touched. */
+    const char *preserved_text = link_equals(backup, "managed-link", managed) ? managed
+      : link_equals(backup, "managed-link", canonical) ? canonical : NULL;
+    if (!preserved_text) fail();
     struct bytes preserved = {0};
     append(&preserved, "{\"target\":", 10);
-    json_string(&preserved, managed);
+    json_string(&preserved, preserved_text);
     append(&preserved, "}", 2); /* includes the terminator so the record is a C string */
     record_once(backup, "managed-link-preserved.json", (const char *)preserved.data);
     free(preserved.data);

@@ -403,9 +403,9 @@ accepts only from a protocol-184 runner and displays next to the location. Like 
 directories, recovery inspects only distros that currently have a configured agent. If the last agent
 in a distro is removed, its journals stay on disk untouched and are listed again once an agent in that
 distro is configured. A distro that cannot be inspected, including one whose harness directory or
-journal has become unreadable (only a missing directory counts as empty), marks the recovery list as incomplete and
-blocks every restore until it can be, because operation IDs must resolve uniquely across all
-scopes. Account-scoped WSL locations remain import-only, because WSL deployment manages
+journal has become unreadable, marks the recovery list as incomplete and blocks every restore until it
+can be, because operation IDs must resolve uniquely across all scopes. Native scopes follow the same
+rule (see below). Account-scoped WSL locations remain import-only, because WSL deployment manages
 only the distro's own HOME.
 
 ### Adoption recovery inspection and restore
@@ -419,6 +419,25 @@ owner/admin-only, correlated, re-authorized after the runner response, and seria
 reconciliation, and store GC.
 
 Operations report `intent_only`, `source_preserved`, `managed_linked`, `restored`, or `blocked`.
+The source counts as the managed link, and therefore `managed_linked`, in two cases:
+- It names the adopted store version directly.
+- Reconciliation has routed the harness through the canonical link, so the source names this skill's
+  canonical link (`~/.agents/skills/<name>`, or the distro's for WSL), and that canonical link's own
+  text is the adopted version.
+
+Both comparisons are on link text, as reconciliation's own, and restore never touches the canonical
+link. A link naming anything else, including a canonical link that now names another version or is
+missing, stays `blocked`.
+
+Every platform treats inspection failures the same way:
+- A missing home or harness directory holds no journals. So does a path whose component is a file, or a
+  harness directory that is itself a symlink or junction, because adoption never creates journals
+  through one.
+- A directory, journal, or intent record that exists but cannot be read (for example, because of its
+  permissions) marks the recovery list incomplete. It also blocks every restore, naming the location,
+  until it can be read, because an operation ID must be unique across all native and WSL scopes before
+  restore acts on it.
+
 Intent-only and already-restored states need no mutation. A restore requires an explicit per-operation
 confirmation. It reopens the journal and parent through pinned no-follow descriptors, verifies the
 preserved inode and full digest, and writes durable, retry-safe checkpoints. An active managed link is

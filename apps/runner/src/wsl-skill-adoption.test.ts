@@ -137,16 +137,45 @@ test("WSL adoption preserves the original and publishes a link to the translated
   assert.equal((await f.restore(result.operationId)).status, "not_needed");
 });
 
-test("WSL reconciliation routes an adopted harness link through the canonical link", local, async (t) => {
-  const f = fixture(t);
-  assert.equal((await f.adopt()).status, "adopted");
-  const reconciled = await reconcileWslSkills({ dataDir: f.dataDir, ownerHash, agents, desired: [f.entry],
-    allowRemovals: true, run: localRun(f.home), storeRoot: async () => f.storeRoot });
-  assert.equal(reconciled.error, undefined, JSON.stringify(reconciled));
-  assert.equal(reconciled.deployed[0]?.links[0]?.status, "linked", JSON.stringify(reconciled));
-  assert.equal(fs.readlinkSync(f.source), join(fs.realpathSync(f.home), ".agents/skills/alpha"));
-  assert.equal(fs.readlinkSync(join(f.home, ".agents/skills/alpha")), f.target);
-});
+test("WSL recovery restores an adopted harness skill after reconciliation routes it through the canonical link",
+  local, async (t) => {
+    const f = fixture(t);
+    const before = fs.statSync(f.source);
+    const adopted = await f.adopt();
+    assert.equal(adopted.status, "adopted");
+    if (adopted.status !== "adopted") return;
+    const reconciled = await reconcileWslSkills({ dataDir: f.dataDir, ownerHash, agents, desired: [f.entry],
+      allowRemovals: true, run: localRun(f.home), storeRoot: async () => f.storeRoot });
+    assert.equal(reconciled.error, undefined, JSON.stringify(reconciled));
+    assert.equal(reconciled.deployed[0]?.links[0]?.status, "linked", JSON.stringify(reconciled));
+    const canonical = join(fs.realpathSync(f.home), ".agents/skills/alpha");
+    assert.equal(fs.readlinkSync(f.source), canonical);
+    assert.equal(fs.readlinkSync(canonical), f.target);
+    const states = async () => (await f.list()).operations.map((entry) => entry.state);
+    assert.deepEqual(await states(), ["managed_linked"]);
+    fs.unlinkSync(canonical);
+    fs.symlinkSync(`${f.storeRoot}/alpha/${"0".repeat(64)}`, canonical);
+    assert.deepEqual(await states(), ["blocked"], "a canonical link naming another version");
+    assert.equal((await f.restore(adopted.operationId)).status, "blocked");
+    assert.equal(fs.readlinkSync(f.source), canonical, "a blocked restore moves nothing");
+    fs.unlinkSync(canonical);
+    fs.symlinkSync(f.target, canonical);
+    const restored = await f.restore(adopted.operationId);
+    assert.equal(restored.status, "restored", JSON.stringify(restored));
+    assert.equal(fs.statSync(f.source).ino, before.ino);
+    assert.equal(fs.readlinkSync(join(f.home, adopted.backupDirectory, "managed-link")), canonical);
+    assert.equal(fs.readlinkSync(canonical), f.target, "the canonical link is never touched");
+  });
+
+test("a missing or symlinked WSL harness directory holds no journals and keeps the list complete", local,
+  async (t) => {
+    const f = fixture(t);
+    const moved = `${f.parent}-moved`;
+    fs.renameSync(f.parent, moved);
+    assert.deepEqual(await f.list(), { operations: [], truncated: false });
+    fs.symlinkSync(moved, f.parent);
+    assert.deepEqual(await f.list(), { operations: [], truncated: false });
+  });
 
 for (const problem of ["changed-source", "executable", "hard-link", "source-link", "missing-store", "changed-store",
   "group-writable", "account", "native", "unsupported-source", "unauthorized"]) {

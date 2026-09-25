@@ -7,7 +7,7 @@ import type { AgentDefinition } from "@wollipog/protocol";
 import { adoptMachineSkill, type SkillAdoptionOptions } from "./skill-adoption.js";
 import { listSkillAdoptionRecovery, restoreSkillAdoptionRecovery } from "./skill-adoption-recovery.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
-import { cacheSkillSyncEntry } from "./skills.js";
+import { cacheSkillSyncEntry, reconcileSkills } from "./skills.js";
 
 const linux = { skip: process.platform !== "linux" };
 const agents: AgentDefinition[] = [
@@ -30,15 +30,90 @@ function fixture(t: TestContext) {
     runnerId: "runner", requestId: "list" };
   const candidate = snapshots.handle(list).candidates![0]!;
   const snapshot = snapshots.handle({ ...list, operation: "read", candidateId: candidate.id }).snapshot!;
-  cacheSkillSyncEntry(dataDir, agents, { name: "alpha", versionDigest: snapshot.digest,
-    files: snapshot.files, targets: [{ agentId: "codex", invocation: "agent" }] });
+  const entry = { name: "alpha", versionDigest: snapshot.digest, files: snapshot.files,
+    targets: [{ agentId: "codex", invocation: "agent" as const }] };
+  cacheSkillSyncEntry(dataDir, agents, entry);
   const options: SkillAdoptionOptions = { home, dataDir, agents, candidate, digest: snapshot.digest,
     acquireProviderHomeLease: () => undefined, assertAuthorized: () => undefined };
   const recovery = (operationId: string, checkpoint?: (stage: string) => void) =>
     restoreSkillAdoptionRecovery({ home, dataDir, agents, operationId,
       acquireProviderHomeLease: () => undefined, checkpoint });
-  return { home, dataDir, parent, source, options, recovery };
+  return { home, dataDir, parent, source, options, recovery, entry };
 }
+
+async function adoptAndReroute(f: ReturnType<typeof fixture>) {
+  const adopted = adoptMachineSkill(f.options);
+  if (adopted.status !== "adopted") assert.fail(JSON.stringify(adopted));
+  const reconciled = await reconcileSkills({ dataDir: f.dataDir, home: f.home, agents, desired: [f.entry] });
+  assert.equal(reconciled.error, undefined, JSON.stringify(reconciled));
+  const canonical = join(f.home, ".agents/skills/alpha");
+  assert.equal(fs.readlinkSync(f.source), canonical, "reconciliation routes the harness link through the canonical link");
+  return { adopted, canonical, canonicalTarget: fs.readlinkSync(canonical) };
+}
+
+test("restores an adopted harness skill after reconciliation routes it through the canonical link", linux,
+  async (t) => {
+    const f = fixture(t);
+    const before = fs.statSync(f.source);
+    const { adopted, canonical, canonicalTarget } = await adoptAndReroute(f);
+    assert.deepEqual(listSkillAdoptionRecovery(f.home, f.dataDir, agents), { truncated: false,
+      operations: [{ ...listSkillAdoptionRecovery(f.home, f.dataDir, agents).operations[0]!, state: "managed_linked" }] });
+    const restored = f.recovery(adopted.operationId);
+    assert.equal(restored.status, "restored", JSON.stringify(restored));
+    assert.equal(fs.statSync(f.source).ino, before.ino);
+    assert.equal(fs.readFileSync(join(f.source, "payload"), "utf8"), "original bytes");
+    assert.equal(fs.readlinkSync(join(f.home, adopted.backupDirectory, "managed-link")), canonical);
+    assert.equal(fs.readlinkSync(canonical), canonicalTarget, "the canonical link is never touched");
+    assert.equal(f.recovery(adopted.operationId).status, "not_needed");
+  });
+
+test("a rerouted link stays blocked unless its canonical link names the adopted version", linux, async (t) => {
+  const f = fixture(t);
+  const { adopted, canonical, canonicalTarget } = await adoptAndReroute(f);
+  const states = () => listSkillAdoptionRecovery(f.home, f.dataDir, agents).operations.map((entry) => entry.state);
+  fs.unlinkSync(canonical);
+  fs.symlinkSync(join(f.dataDir, "skills/store/alpha", "0".repeat(64)), canonical);
+  assert.deepEqual(states(), ["blocked"], "a canonical link naming another version");
+  assert.equal(f.recovery(adopted.operationId).status, "blocked");
+  fs.unlinkSync(canonical);
+  assert.deepEqual(states(), ["blocked"], "a dangling harness link");
+  assert.equal(f.recovery(adopted.operationId).status, "blocked");
+  assert.equal(fs.readlinkSync(f.source), canonical, "a blocked restore moves nothing");
+  fs.symlinkSync(canonicalTarget, canonical);
+  assert.deepEqual(states(), ["managed_linked"]);
+});
+
+test("an unreadable harness directory, journal, or intent record makes recovery incomplete and blocks restore",
+  { skip: linux.skip || process.getuid?.() === 0 }, (t) => {
+    const f = fixture(t);
+    const adopted = adoptMachineSkill(f.options);
+    if (adopted.status !== "adopted") return assert.fail(JSON.stringify(adopted));
+    const journal = join(f.home, adopted.backupDirectory);
+    for (const locked of [f.parent, journal, join(journal, "intent.json")]) {
+      const mode = fs.statSync(locked).mode & 0o777;
+      fs.chmodSync(locked, 0);
+      try {
+        assert.deepEqual(listSkillAdoptionRecovery(f.home, f.dataDir, agents), { operations: [], truncated: true },
+          locked);
+        const restored = f.recovery(adopted.operationId);
+        assert.equal(restored.status, "blocked", JSON.stringify(restored));
+        assert.match(restored.error ?? "", /\.codex\/skills could not be inspected/u);
+      } finally { fs.chmodSync(locked, mode); }
+    }
+    assert.deepEqual(listSkillAdoptionRecovery(f.home, f.dataDir, agents).operations.map((entry) => entry.state),
+      ["managed_linked"]);
+  });
+
+test("a missing or symlinked harness directory holds no journals and keeps the list complete", linux, (t) => {
+  const f = fixture(t);
+  fs.rmSync(f.parent, { recursive: true });
+  assert.deepEqual(listSkillAdoptionRecovery(f.home, f.dataDir, agents), { operations: [], truncated: false });
+  const elsewhere = join(f.home, "elsewhere");
+  fs.mkdirSync(elsewhere);
+  fs.symlinkSync(elsewhere, f.parent);
+  assert.deepEqual(listSkillAdoptionRecovery(f.home, f.dataDir, agents), { operations: [], truncated: false });
+  assert.match(f.recovery("123e4567-e89b-42d3-a456-426614174000").error ?? "", /not found uniquely/u);
+});
 
 test("lists and restores an adopted source while preserving its managed link in the journal", linux, (t) => {
   const f = fixture(t);

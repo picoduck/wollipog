@@ -17,7 +17,7 @@ import {
   type RecoverySourceFacts,
   type SkillAdoptionPlatformHelper,
 } from "./skill-adoption-platform.js";
-import { SKILL_DIRS } from "./skills.js";
+import { canonicalSkillsDir, SKILL_DIRS } from "./skills.js";
 import {
   inspectWslSkillRecovery,
   restoreWslSkillRecovery,
@@ -136,6 +136,37 @@ function pathKind(parent: number, name: string): "absent" | "directory" | "symli
   }
 }
 
+/** A missing path, a file where a directory belongs, or a symlinked component (which adoption
+ * never traverses) means there is no journal here. Any other error means the scope exists but
+ * cannot be inspected, so it must not be reported as empty. */
+function absentError(error: unknown): boolean {
+  const code = (error as NodeJS.ErrnoException | undefined)?.code;
+  return code === "ENOENT" || code === "ENOTDIR" || code === "ELOOP";
+}
+
+function unreadableError(error: unknown): boolean {
+  return typeof (error as NodeJS.ErrnoException | undefined)?.code === "string" && !absentError(error);
+}
+
+/** Thrown when a scope or journal exists but cannot be read; callers report an incomplete list and
+ * block restore, because an operation ID can only be proven unique across every scope. */
+class UninspectableScope extends Error {}
+
+/** The adoption's managed link names the adopted store version directly or, once reconciliation
+ * routes the harness through the canonical link, names this skill's canonical link whose own text
+ * is that version. Both hops compare link text, as reconciliation does, and nothing is followed. */
+function managedLinkText(text: string, target: string, canonicalLink: string): boolean {
+  if (text === target) return true;
+  if (text !== canonicalLink) return false;
+  try { return lstatSync(canonicalLink).isSymbolicLink() && readlinkSync(canonicalLink) === target; }
+  catch { return false; }
+}
+
+function uninspectableResult(scope: RecoveryScope): RestoreResult {
+  return { status: "blocked", error: `The recovery location ${scope.sourceDirectory} could not be inspected, so the ` +
+    "recovery operation cannot be confirmed unique. Retry when it is readable." };
+}
+
 function recordMatches(parent: number, name: string, expected: unknown): boolean {
   try { return JSON.stringify(readJsonFile(parent, name)) === JSON.stringify(expected); } catch { return false; }
 }
@@ -169,14 +200,15 @@ interface HelperView {
 }
 
 /** Project native helper observations through the same journal validation and state machine as
- * Linux. A journal whose probe does not match its parsed name and digest is never restorable. */
+ * Linux. A journal whose probe does not match its parsed name and digest is never restorable.
+ * `failed` marks a scope the helper could not inspect; it is incomplete, never empty. */
 function helperViews(helper: SkillAdoptionPlatformHelper, scope: RecoveryScope, dataDir: string,
-  operationId?: string): { views: HelperView[]; truncated: boolean } {
+  canonicalHome: string, operationId?: string): { views: HelperView[]; truncated: boolean; failed?: true } {
   let facts;
   try {
-    facts = helper.inspect({ home: scope.home, localSourceDirectory: scope.localSourceDirectory, dataDir,
-      ...(operationId ? { operationId } : {}) });
-  } catch { return { views: [], truncated: false }; }
+    facts = helper.inspect({ home: scope.home, canonicalHome, localSourceDirectory: scope.localSourceDirectory,
+      dataDir, ...(operationId ? { operationId } : {}) });
+  } catch { return { views: [], truncated: false, failed: true }; }
   return viewsFromFacts(scope, facts);
 }
 
@@ -197,15 +229,29 @@ function viewsFromFacts(scope: RecoveryScope, facts: RecoveryDirectoryFacts): { 
   return { views, truncated: facts.truncated };
 }
 
-function operationView(scope: RecoveryScope, dataDir: string,
-  operationId: string): SkillAdoptionRecoveryOperation | null {
+/** Null when this scope holds no valid journal with the ID; throws UninspectableScope when the
+ * harness directory, the journal, or its intent record exists but cannot be read. */
+function operationView(scope: RecoveryScope, dataDir: string, operationId: string,
+  canonicalDir: string): SkillAdoptionRecoveryOperation | null {
   let parent: number | undefined;
   let backup: number | undefined;
   let original: number | null = null;
   try {
-    parent = openSkillDirectory(scope.home, scope.localSourceDirectory);
-    backup = openSync(`${fdPath(parent)}/${JOURNAL_PREFIX}${operationId}`, directoryFlags);
-    const parsed = parseIntent(readJsonFile(backup, "intent.json"), operationId, scope);
+    const readable = <T>(read: () => T): T | null => {
+      try { return read(); }
+      catch (error) {
+        if (unreadableError(error)) throw new UninspectableScope();
+        return null;
+      }
+    };
+    parent = readable(() => openSkillDirectory(scope.home, scope.localSourceDirectory)) ?? undefined;
+    if (parent === undefined) return null;
+    const opened = parent;
+    backup = readable(() => openSync(`${fdPath(opened)}/${JOURNAL_PREFIX}${operationId}`, directoryFlags)) ??
+      undefined;
+    if (backup === undefined) return null;
+    const journal = backup;
+    const parsed = parseIntent(readable(() => readJsonFile(journal, "intent.json")), operationId, scope);
     if (!parsed) return null;
     original = openOptionalDirectory(backup, "original");
     const kind = pathKind(parent, parsed.name);
@@ -218,12 +264,15 @@ function operationView(scope: RecoveryScope, dataDir: string,
       const linkTarget = readlinkSync(`${fdPath(parent)}/${parsed.name}`);
       const originalTarget = join(realpathSync(scope.home), scope.localSourceDirectory,
         `${JOURNAL_PREFIX}${operationId}`, "original");
-      source = { kind: "link", role: linkTarget === join(realpathSync(dataDir), parsed.targetRelative) ? "managed"
-        : linkTarget === originalTarget ? "recovery" : "foreign" };
+      source = { kind: "link", role: managedLinkText(linkTarget, join(realpathSync(dataDir), parsed.targetRelative),
+        join(canonicalDir, parsed.name)) ? "managed" : linkTarget === originalTarget ? "recovery" : "foreign" };
     } else source = { kind };
     return { ...recoveryBase(scope, parsed),
       ...recoveryState(parsed, identity(parent), original === null ? null : identity(original), source) };
-  } catch { return null; }
+  } catch (error) {
+    if (error instanceof UninspectableScope) throw error;
+    return null;
+  }
   finally {
     if (original !== null) closeSync(original);
     if (backup !== undefined) closeSync(backup);
@@ -254,10 +303,12 @@ function collectRecovery(home: string, dataDir: string, agents: AgentDefinition[
   const platform = platformOptions.platform ?? process.platform;
   const helper = platform === "linux" ? null : platformOptions.helper ?? platformSkillAdoptionHelper(platform);
   if (platform !== "linux" && !helper) return { operations, truncated };
+  const canonicalDir = canonicalSkillsDir(home);
   for (const scope of recoveryScopes(home, agents, providerAccounts)) {
     if (helper) {
-      const found = helperViews(helper, scope, dataDir);
-      truncated ||= found.truncated;
+      const found = helperViews(helper, scope, dataDir, home);
+      // An uninspected scope may hold journals, including a copy of a listed ID.
+      truncated ||= found.truncated || found.failed === true;
       for (const { view } of found.views) {
         if (operations.length >= SKILL_RECOVERY_SCAN_LIMITS.operations) { truncated = true; break; }
         operations.push(view);
@@ -266,7 +317,12 @@ function collectRecovery(home: string, dataDir: string, agents: AgentDefinition[
     }
     let parent: number | undefined;
     try {
-      parent = openSkillDirectory(scope.home, scope.localSourceDirectory);
+      try { parent = openSkillDirectory(scope.home, scope.localSourceDirectory); }
+      catch (error) {
+        // A missing harness directory has no journals; one that cannot be read is incomplete.
+        if (!absentError(error)) truncated = true;
+        continue;
+      }
       const dir = opendirSync(fdPath(parent));
       try {
         let raw = 0;
@@ -276,11 +332,13 @@ function collectRecovery(home: string, dataDir: string, agents: AgentDefinition[
           const operationId = entry.name.slice(JOURNAL_PREFIX.length);
           if (!UUID.test(operationId)) continue;
           if (operations.length >= SKILL_RECOVERY_SCAN_LIMITS.operations) { truncated = true; break; }
-          const view = operationView(scope, dataDir, operationId);
+          let view: SkillAdoptionRecoveryOperation | null;
+          try { view = operationView(scope, dataDir, operationId, canonicalDir); }
+          catch { truncated = true; continue; }
           if (view) operations.push(view);
         }
       } finally { dir.closeSync(); }
-    } catch { /* unavailable harness directories have no inspectable recovery operations */ }
+    } catch { truncated = true; }
     finally { if (parent !== undefined) closeSync(parent); }
   }
   return { operations, truncated };
@@ -325,10 +383,14 @@ type RestoreResult = {
  * the runner only selects the unique journal, holds the lease, and reports the resulting state. */
 function restoreWithHelper(options: RestoreSkillAdoptionRecoveryOptions,
   helper: SkillAdoptionPlatformHelper): RestoreResult {
-  const matches = recoveryScopes(options.home, options.agents, options.providerAccounts).flatMap((scope) =>
-    helperViews(helper, scope, options.dataDir, options.operationId).views
-      .filter(({ view }) => view.operationId === options.operationId)
-      .map((found) => ({ scope, ...found })));
+  const matches: Array<HelperView & { scope: RecoveryScope }> = [];
+  for (const scope of recoveryScopes(options.home, options.agents, options.providerAccounts)) {
+    const found = helperViews(helper, scope, options.dataDir, options.home, options.operationId);
+    if (found.failed) return uninspectableResult(scope);
+    for (const match of found.views) {
+      if (match.view.operationId === options.operationId) matches.push({ scope, ...match });
+    }
+  }
   if (matches.length !== 1) return { status: "blocked", error: "The recovery operation was not found uniquely." };
   const { scope, view: initial, parsed } = matches[0]!;
   try { options.acquireProviderHomeLease(scope.home); }
@@ -341,11 +403,12 @@ function restoreWithHelper(options: RestoreSkillAdoptionRecoveryOptions,
   }
   let restored = false;
   try {
-    restored = helper.restore({ home: scope.home, localSourceDirectory: scope.localSourceDirectory,
-      dataDir: options.dataDir, operationId: options.operationId, name: parsed.name, digest: parsed.digest,
-      parentIdentity: parsed.parentIdentity, sourceIdentity: parsed.sourceIdentity });
+    restored = helper.restore({ home: scope.home, canonicalHome: options.home,
+      localSourceDirectory: scope.localSourceDirectory, dataDir: options.dataDir, operationId: options.operationId,
+      name: parsed.name, digest: parsed.digest, parentIdentity: parsed.parentIdentity,
+      sourceIdentity: parsed.sourceIdentity });
   } catch { restored = false; }
-  const operation = helperViews(helper, scope, options.dataDir, options.operationId).views
+  const operation = helperViews(helper, scope, options.dataDir, options.home, options.operationId).views
     .find(({ view }) => view.operationId === options.operationId)?.view ?? initial;
   return restored
     ? { status: "restored", operation }
@@ -363,9 +426,14 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
     return { status: "blocked", error: "Invalid or unsupported recovery operation." };
   }
   if (helper) return restoreWithHelper(options, helper);
-  const matches = recoveryScopes(options.home, options.agents, options.providerAccounts).map((scope) => ({ scope,
-    view: operationView(scope, options.dataDir, options.operationId) }))
-    .filter((entry) => entry.view);
+  const canonicalDir = canonicalSkillsDir(options.home);
+  const matches: Array<{ scope: RecoveryScope; view: SkillAdoptionRecoveryOperation | null }> = [];
+  for (const scope of recoveryScopes(options.home, options.agents, options.providerAccounts)) {
+    let view: SkillAdoptionRecoveryOperation | null;
+    try { view = operationView(scope, options.dataDir, options.operationId, canonicalDir); }
+    catch { return uninspectableResult(scope); }
+    if (view) matches.push({ scope, view });
+  }
   if (matches.length !== 1) return { status: "blocked", error: "The recovery operation was not found uniquely." };
   try { options.acquireProviderHomeLease(matches[0]!.scope.home); }
   catch { return { status: "blocked", error: "The provider home is currently in use." }; }
@@ -398,18 +466,24 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
     const sourcePath = `${fdPath(parent)}/${parsed.name}`;
     const managedLinkPath = `${fdPath(backup)}/managed-link`;
     const target = join(dataDir, parsed.targetRelative);
+    const canonicalLink = join(canonicalDir, parsed.name);
     let sourceKind = pathKind(parent, parsed.name);
     let preservedLinkKind = pathKind(backup, "managed-link");
     if (sourceKind === "symlink") {
-      if (preservedLinkKind !== "absent" || readlinkSync(sourcePath) !== target) throw new Error();
+      if (preservedLinkKind !== "absent" || !managedLinkText(readlinkSync(sourcePath), target, canonicalLink)) {
+        throw new Error();
+      }
       renameSync(sourcePath, managedLinkPath);
       fsyncSync(parent); fsyncSync(backup);
       sourceKind = "absent";
       preservedLinkKind = "symlink";
     }
     if (preservedLinkKind === "symlink") {
-      if (readlinkSync(managedLinkPath) !== target) throw new Error();
-      writeRecord(backup, "managed-link-preserved.json", { target });
+      // The link already moved into the private journal is ours by either managed shape; the
+      // canonical link may have moved on since, and it is never touched.
+      const preserved = readlinkSync(managedLinkPath);
+      if (preserved !== target && preserved !== canonicalLink) throw new Error();
+      writeRecord(backup, "managed-link-preserved.json", { target: preserved });
       options.checkpoint?.("managed_link_preserved");
     } else if (preservedLinkKind !== "absent") throw new Error();
     if (sourceKind !== "absent") throw new Error();
@@ -423,10 +497,9 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
     if (readlinkSync(sourcePath) !== originalPath || identity(original) !== parsed.sourceIdentity ||
         skillVersionDigest(inspectSkillTree(original, true).files) !== parsed.digest) throw new Error();
     writeRecord(backup, "restored.json", { sourceIdentity: parsed.sourceIdentity, digest: parsed.digest });
-    return { status: "restored",
-      operation: operationView(scope, dataDir, options.operationId) ?? initial };
+    return { status: "restored", operation: currentView(scope, dataDir, options.operationId, canonicalDir, initial) };
   } catch {
-    const operation = operationView(matches[0]!.scope, options.dataDir, options.operationId) ?? initial;
+    const operation = currentView(matches[0]!.scope, options.dataDir, options.operationId, canonicalDir, initial);
     return { status: "recovery_required", operation,
       error: "Restore stopped safely. Inspect the journal and source path before retrying." };
   } finally {
@@ -436,14 +509,31 @@ export function restoreSkillAdoptionRecovery(options: RestoreSkillAdoptionRecove
   }
 }
 
-function nativeRecoveryMatchCount(options: RestoreSkillAdoptionRecoveryOptions): number {
+/** The operation's state after a restore attempt, or its initial view when it cannot be re-read. */
+function currentView(scope: RecoveryScope, dataDir: string, operationId: string, canonicalDir: string,
+  initial: SkillAdoptionRecoveryOperation): SkillAdoptionRecoveryOperation {
+  try { return operationView(scope, dataDir, operationId, canonicalDir) ?? initial; } catch { return initial; }
+}
+
+/** Native journals with the ID, or the first native scope that could not be inspected. */
+function nativeRecoveryMatches(options: RestoreSkillAdoptionRecoveryOptions):
+  { count: number; uninspected?: RecoveryScope } {
   const platform = options.platform ?? process.platform;
   const helper = platform === "linux" ? null : options.helper ?? platformSkillAdoptionHelper(platform);
-  if (platform !== "linux" && !helper) return 0;
-  return recoveryScopes(options.home, options.agents, options.providerAccounts).reduce((count, scope) => count + (helper
-    ? helperViews(helper, scope, options.dataDir, options.operationId).views
-      .filter(({ view }) => view.operationId === options.operationId).length
-    : operationView(scope, options.dataDir, options.operationId) ? 1 : 0), 0);
+  if (platform !== "linux" && !helper) return { count: 0 };
+  const canonicalDir = canonicalSkillsDir(options.home);
+  let count = 0;
+  for (const scope of recoveryScopes(options.home, options.agents, options.providerAccounts)) {
+    if (helper) {
+      const found = helperViews(helper, scope, options.dataDir, options.home, options.operationId);
+      if (found.failed) return { count, uninspected: scope };
+      count += found.views.filter(({ view }) => view.operationId === options.operationId).length;
+      continue;
+    }
+    try { if (operationView(scope, options.dataDir, options.operationId, canonicalDir)) count += 1; }
+    catch { return { count, uninspected: scope }; }
+  }
+  return { count };
 }
 
 function wslScopes(agents: AgentDefinition[]): RecoveryScope[] {
@@ -500,7 +590,9 @@ export async function restoreSkillAdoptionRecoveryWithWsl(options: RestoreSkillA
     }
   }
   if (matches.length === 0) return restoreSkillAdoptionRecovery(options);
-  if (matches.length !== 1 || nativeRecoveryMatchCount(options) !== 0) {
+  const native = nativeRecoveryMatches(options);
+  if (native.uninspected) return uninspectableResult(native.uninspected);
+  if (matches.length !== 1 || native.count !== 0) {
     return { status: "blocked", error: "The recovery operation was not found uniquely." };
   }
   const { scope, view: initial, parsed } = matches[0]!;

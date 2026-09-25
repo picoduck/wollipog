@@ -53,6 +53,9 @@ export interface RecoveryDirectoryFacts {
 
 export interface PlatformRestoreRequest {
   home: string;
+  /** The OS home whose `.agents/skills` holds the canonical links reconciliation routes harness
+   * links through; it differs from `home` for a provider-account scope. */
+  canonicalHome: string;
   localSourceDirectory: string;
   dataDir: string;
   operationId: string;
@@ -62,10 +65,18 @@ export interface PlatformRestoreRequest {
   sourceIdentity: string;
 }
 
+export interface PlatformInspectRequest {
+  home: string;
+  canonicalHome: string;
+  localSourceDirectory: string;
+  dataDir: string;
+  operationId?: string;
+}
+
 export interface SkillAdoptionPlatformHelper {
   adopt(request: PlatformAdoptionRequest): PlatformAdoptionOutcome;
-  inspect(request: { home: string; localSourceDirectory: string; dataDir: string; operationId?: string }):
-    RecoveryDirectoryFacts;
+  /** Throws when the scope exists but cannot be inspected; a missing scope is empty. */
+  inspect(request: PlatformInspectRequest): RecoveryDirectoryFacts;
   /** True only after the recovery link and completion record were verified. */
   restore(request: PlatformRestoreRequest): boolean;
 }

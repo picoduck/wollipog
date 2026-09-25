@@ -17,6 +17,7 @@ import {
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import type {
   PlatformAdoptionRequest,
+  PlatformInspectRequest,
   PlatformRestoreRequest,
   RecoveryDirectoryFacts,
   RecoveryJournalFacts,
@@ -255,9 +256,20 @@ export function macosAdoptionArguments(request: PlatformAdoptionRequest): string
     ...(request.providerAccountId ? [request.providerAccountId] : [])];
 }
 
+/** Reconciliation's canonical link directory, spelled exactly as it writes harness link text. */
+function canonicalDirectory(canonicalHome: string): string {
+  return join(canonicalHome, ".agents", "skills");
+}
+
 export function macosRestoreArguments(request: PlatformRestoreRequest): string[] {
-  return ["restore", request.home, request.localSourceDirectory, request.dataDir, request.operationId,
-    request.name, request.digest, request.parentIdentity, request.sourceIdentity];
+  return ["restore", request.home, request.localSourceDirectory, request.dataDir,
+    canonicalDirectory(request.canonicalHome), request.operationId, request.name, request.digest,
+    request.parentIdentity, request.sourceIdentity];
+}
+
+export function macosInspectArguments(request: PlatformInspectRequest): string[] {
+  return ["inspect", request.home, request.localSourceDirectory, request.dataDir,
+    canonicalDirectory(request.canonicalHome), ...(request.operationId ? [request.operationId] : [])];
 }
 
 /** The fixed native helper owns every descriptor-anchored step of macOS adoption and recovery. */
@@ -267,8 +279,7 @@ export function macosSkillAdoptionHelper(helper?: string): SkillAdoptionPlatform
       const run = runMutation(macosAdoptionArguments(request), helper);
       return macosAdoptionOutcome(run.lines, run.succeeded);
     },
-    inspect: (request) => parseMacosRecoveryInspection(runHelper(["inspect", request.home,
-      request.localSourceDirectory, request.dataDir, ...(request.operationId ? [request.operationId] : [])], helper)),
+    inspect: (request) => parseMacosRecoveryInspection(runHelper(macosInspectArguments(request), helper)),
     restore: (request) => {
       const run = runMutation(macosRestoreArguments(request), helper);
       return run.succeeded && run.lines.includes("restored");
