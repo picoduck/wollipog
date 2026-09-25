@@ -805,3 +805,68 @@ test("SkillsView follows the route's selected skill, including back to no select
   await act(async () => root.unmount());
   container.remove();
 });
+
+test("SkillsView keeps following the selection when a mutation finishes after the user moved on", async () => {
+  const builtIn = { id: "skill-a", name: "using-wollipog", builtIn: { release: "0.28.0", heldUpdate: null },
+    recommendation: { dismissed: false }, assignmentCount: 0, latestVersion: { id: "va", digest: "da" } };
+  const other = { id: "skill-b", name: "code-review", latestVersion: { id: "vb", digest: "db" } };
+  let finishDismissal!: () => void;
+  const dismissal = new Promise<void>((resolve) => { finishDismissal = resolve; });
+  const client = {
+    ...api,
+    listSkills: async () => ({ skills: [builtIn, other] }),
+    listSkillGroups: async () => ({ groups: [] }),
+    getSkill: async (id: string) => {
+      const skill = id === builtIn.id ? builtIn : other;
+      return { skill, latestVersion: { ...skill.latestVersion, files: [] } };
+    },
+    listSkillAssignments: async () => ({ assignments: [] }),
+    runnerSkills: async () => ({ desired: [], reported: null }),
+    setSkillRecommendationDismissed: async () => {
+      await dismissal;
+      return { skill: { ...builtIn, recommendation: { dismissed: true } } };
+    },
+  } as unknown as ApiClient;
+  let route!: (id: string | undefined) => void;
+  function Routed() {
+    const [id, setId] = React.useState<string | undefined>(builtIn.id);
+    route = setId;
+    const ready = useStoreSelector((state) => state.snapshotLoaded);
+    return ready ? <SkillsView selectedSkillId={id} /> : null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={{ instanceId: "skills-late", runtimeKey: "skills-late:1", createSocket: () => socket, close() {} }}
+          navigation={navigation}>
+          <Routed />
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: false },
+      runners: [runner], boxes: [], sessions: [], runs: [], pods: [],
+    });
+  });
+  await act(settle);
+  const heading = () => container.querySelector(".skills-detail-head h3")?.textContent;
+  assert.equal(heading(), "using-wollipog");
+  const dismiss = [...container.querySelectorAll<HTMLButtonElement>("button")]
+    .find((candidate) => candidate.textContent?.trim() === "Dismiss Recommendation")!;
+  await act(async () => { dismiss.click(); });
+  await act(async () => { route(other.id); });
+  await act(settle);
+  assert.equal(heading(), "code-review");
+  await act(async () => { finishDismissal(); await dismissal; });
+  await act(settle);
+  assert.equal(heading(), "code-review", "the finished mutation does not bring back the skill the user left");
+  await act(async () => root.unmount());
+  container.remove();
+});

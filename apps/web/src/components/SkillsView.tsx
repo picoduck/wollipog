@@ -204,16 +204,23 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | "built-in-review" | null>(null);
 
+  /** The selection as of now, for async work that finishes after the user moved on. */
+  const selectedRef = useRef(selectedId);
+  const choose = useCallback((skillId: string | null) => {
+    selectedRef.current = skillId;
+    setSelectedId(skillId);
+  }, []);
+
   // The route names the selected skill, so a link such as onboarding's Open Skills selects it, and
   // returning to the bare Skills route (the rail, or history) clears the selection.
   const select = useCallback((skillId: string | null) => {
-    setSelectedId(skillId);
+    choose(skillId);
     navigate(skillId ? { name: "skills", id: skillId } : { name: "skills" });
-  }, [navigate]);
+  }, [choose, navigate]);
   useEffect(() => {
     if (selectedSkillId) setShowOrphans(false);
-    setSelectedId(selectedSkillId ?? null);
-  }, [selectedSkillId]);
+    choose(selectedSkillId ?? null);
+  }, [choose, selectedSkillId]);
 
   /** Only the newest started refresh of each surface may commit (see AutomationsView). */
   const listGeneration = useRef(0);
@@ -228,12 +235,14 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
   }, [api]);
 
   const refreshDetail = useCallback(async (skillId: string) => {
+    // A mutation that finishes after the user selected another skill, or none, refreshes nothing.
+    if (selectedRef.current !== skillId) return;
     const generation = (detailGeneration.current += 1);
     const [detailPayload, assignmentsPayload] = await Promise.all([
       api.getSkill(skillId),
       api.listSkillAssignments(skillId),
     ]);
-    if (generation !== detailGeneration.current) return;
+    if (generation !== detailGeneration.current || selectedRef.current !== skillId) return;
     setDetail(skillFromPayload(detailPayload));
     setAssignments(skillAssignmentsFromPayload(assignmentsPayload));
   }, [api]);
