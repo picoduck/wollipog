@@ -7643,8 +7643,14 @@ button.file-head.source-path-link {
 }
 
 .recommended-skills-notice-list a {
+  color: var(--accent);
   font-family: var(--mono);
   font-size: var(--text-sm);
+  text-decoration: none;
+}
+
+.recommended-skills-notice-list a:hover {
+  text-decoration: underline;
 }
 
 .recommended-skills-notice-actions {
@@ -7665,6 +7671,10 @@ button.file-head.source-path-link {
   .recommended-skills-notice {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .recommended-skills-notice-copy {
+    flex: none;
   }
 }
 
