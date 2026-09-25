@@ -500,23 +500,50 @@ public static class WollipogWindowsSkillAdoption {
     }
   }
 
-  public static Inspection Inspect(string home, string local, string homeLink, string storeLink, string only) {
+  // A missing path, a file where a directory belongs, or a junction component (which adoption never
+  // traverses) holds no journal. Any other failure means the scope exists but cannot be inspected.
+  static bool Absent(Exception error) {
+    var native = error as Win32Exception;
+    if (native != null) return native.NativeErrorCode == ERROR_FILE_NOT_FOUND || native.NativeErrorCode == ERROR_PATH_NOT_FOUND;
+    return error is InvalidOperationException;
+  }
+
+  // The adoption's managed link names the adopted version directly or, once reconciliation routes
+  // the harness through it, names this skill's canonical junction whose own target is that version.
+  // Both hops compare junction targets, as reconciliation does.
+  static bool ManagedTarget(string target, string managed, string canonical) {
+    if (target == null || String.IsNullOrEmpty(managed)) return false;
+    if (WollipogJunctionReparse.SameTarget(target, managed)) return true;
+    if (String.IsNullOrEmpty(canonical) || !WollipogJunctionReparse.SameTarget(target, canonical)) return false;
+    try {
+      string identity, canonicalTarget;
+      return Probe(canonical, canonical, out identity, out canonicalTarget) == 2 && canonicalTarget != null &&
+        WollipogJunctionReparse.SameTarget(canonicalTarget, managed);
+    } catch { return false; }
+  }
+
+  // A missing home or harness directory reports no journals; one that exists but cannot be opened
+  // fails the inspection, so the runner never mistakes it for an empty scope.
+  public static Inspection Inspect(string home, string local, string homeLink, string storeLink, string canonicalDir,
+      string only) {
     Require(ValidRelative(local) && (String.IsNullOrEmpty(only) || Uuid.IsMatch(only)), "invalid inspection");
     var result = new Inspection { ParentIdentity = "", Journals = new List<Journal>(), Truncated = false };
     SafeFileHandle homeHandle;
-    try { homeHandle = WollipogWindowsSkillSnapshots.OpenHome(home); } catch { return result; }
+    try { homeHandle = WollipogWindowsSkillSnapshots.OpenHome(home); }
+    catch (Exception error) { if (Absent(error)) return result; throw; }
     var ancestry = new List<SafeFileHandle>();
     try {
       string parentPath;
       SafeFileHandle parent;
       try { parent = WollipogWindowsSkillSnapshots.OpenRelativeDirectory(homeHandle, local, out parentPath, ancestry); }
-      catch { return result; }
+      catch (Exception error) { if (Absent(error)) return result; throw; }
       var root = WollipogWindowsSkillSnapshots.FinalPath(homeHandle);
       result.ParentIdentity = Identity(parent);
       if (!String.IsNullOrEmpty(only)) {
         // A targeted lookup opens the named journal directly, like Linux restore, so it is never
         // hidden behind the bounded listing scan of a very large harness directory.
-        var targeted = InspectJournal(parentPath, JournalPrefix + only, only, root, local, homeLink, storeLink);
+        var targeted = InspectJournal(parentPath, JournalPrefix + only, only, root, local, homeLink, storeLink,
+          canonicalDir);
         if (targeted != null) result.Journals.Add(targeted);
         return result;
       }
@@ -528,7 +555,7 @@ public static class WollipogWindowsSkillAdoption {
         var operation = entryName.Substring(JournalPrefix.Length);
         if (!Uuid.IsMatch(operation)) continue;
         if (result.Journals.Count >= MAX_RECOVERY_OPERATIONS) { result.Truncated = true; break; }
-        var journal = InspectJournal(parentPath, entryName, operation, root, local, homeLink, storeLink);
+        var journal = InspectJournal(parentPath, entryName, operation, root, local, homeLink, storeLink, canonicalDir);
         if (journal != null) result.Journals.Add(journal);
       }
       return result;
@@ -538,15 +565,18 @@ public static class WollipogWindowsSkillAdoption {
     }
   }
 
-  // Facts for one journal entry, or null when it is not a readable journal directory.
+  // Facts for one journal entry, or null when it is not a journal. An unreadable journal or intent
+  // record still holds an operation ID, so it fails the inspection rather than vanish.
   static Journal InspectJournal(string parentPath, string entryName, string operation, string root, string local,
-      string homeLink, string storeLink) {
+      string homeLink, string storeLink, string canonicalDir) {
     var entryPath = Path.Combine(parentPath, entryName);
     SafeFileHandle backup;
-    try { backup = WollipogWindowsSkillSnapshots.Open(entryPath, true, root); } catch { return null; }
+    try { backup = WollipogWindowsSkillSnapshots.Open(entryPath, true, root); }
+    catch (Exception error) { if (Absent(error)) return null; throw; }
     using (backup) {
       string intent;
       try { intent = new UTF8Encoding(false, true).GetString(ReadRecord(Path.Combine(entryPath, "intent.json"))); }
+      catch (Win32Exception error) { if (!Absent(error)) throw; return null; }
       catch { return null; }
       var journal = new Journal { OperationId = operation, Intent = intent, Name = "", Digest = "",
         OriginalIdentity = "", Kind = 3, SourceIdentity = "", Role = 0 };
@@ -561,10 +591,11 @@ public static class WollipogWindowsSkillAdoption {
         if (journal.Kind == 1) journal.SourceIdentity = identity;
         if (journal.Kind == 2) {
           var managed = String.IsNullOrEmpty(storeLink) ? "" : storeLink + "\\" + journal.Name + "\\" + journal.Digest;
+          var canonical = String.IsNullOrEmpty(canonicalDir) ? "" : canonicalDir + "\\" + journal.Name;
           var recovery = homeLink + "\\" + local.Replace('/', '\\') + "\\" + entryName + "\\original";
           try {
             journal.Role = target == null ? 3
-              : managed.Length > 0 && WollipogJunctionReparse.SameTarget(target, managed) ? 1
+              : ManagedTarget(target, managed, canonical) ? 1
               : homeLink.Length > 0 && WollipogJunctionReparse.SameTarget(target, recovery) ? 2 : 3;
           } catch { journal.Role = 3; }
         }
@@ -574,7 +605,7 @@ public static class WollipogWindowsSkillAdoption {
   }
 
   public static void Restore(string home, string local, string operation, string name, string digest,
-      string parentExpected, string sourceExpected, string managedLink, string recoveryLink) {
+      string parentExpected, string sourceExpected, string managedLink, string canonicalLink, string recoveryLink) {
     Require(ValidRelative(local) && Uuid.IsMatch(operation) &&
       WollipogWindowsSkillSnapshots.SkillName.IsMatch(name) && Hex64.IsMatch(digest) &&
       IdentityPattern.IsMatch(parentExpected) && IdentityPattern.IsMatch(sourceExpected) &&
@@ -606,12 +637,12 @@ public static class WollipogWindowsSkillAdoption {
       int sourceKind = Probe(sourcePath, root, out identity, out sourceTarget);
       int preservedKind = Probe(preservedPath, root, out identity, out preservedTarget);
       if (sourceKind == 2) {
-        Require(preservedKind == 0 && sourceTarget != null &&
-          WollipogJunctionReparse.SameTarget(sourceTarget, managedLink), "the source is not the managed link");
+        Require(preservedKind == 0 && ManagedTarget(sourceTarget, managedLink, canonicalLink),
+          "the source is not the managed link");
         using (var link = OpenRaw(sourcePath, GENERIC_READ | DELETE, FILE_SHARE_READ | FILE_SHARE_WRITE,
             FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)) {
           var current = WollipogJunctionReparse.MountPointTarget(link);
-          Require(current != null && WollipogJunctionReparse.SameTarget(current, managedLink), "the managed link changed");
+          Require(ManagedTarget(current, managedLink, canonicalLink), "the managed link changed");
           // Moving the live link is only safe into the journal that recovery inspection will find.
           CheckPath(root, local, parentExpected);
           CheckPath(root, local + "/" + backupName, Identity(backup));
@@ -622,9 +653,14 @@ public static class WollipogWindowsSkillAdoption {
         preservedTarget = sourceTarget;
       }
       if (preservedKind == 2) {
-        Require(preservedTarget != null && WollipogJunctionReparse.SameTarget(preservedTarget, managedLink),
-          "the preserved managed link changed");
-        WriteRecord(backupPath, "managed-link-preserved.json", "{\"target\":" + JsonString(managedLink) + "}", true);
+        // The junction already moved into the private journal is ours by either managed shape; the
+        // canonical junction may have moved on since, and it is never touched.
+        var preservedText = preservedTarget == null ? null
+          : WollipogJunctionReparse.SameTarget(preservedTarget, managedLink) ? managedLink
+          : !String.IsNullOrEmpty(canonicalLink) && WollipogJunctionReparse.SameTarget(preservedTarget, canonicalLink)
+            ? canonicalLink : null;
+        Require(preservedText != null, "the preserved managed link changed");
+        WriteRecord(backupPath, "managed-link-preserved.json", "{\"target\":" + JsonString(preservedText) + "}", true);
         Checkpoint("managed_link_preserved");
       } else Require(preservedKind == 0, "the preserved managed link is not a junction");
       Require(sourceKind == 0, "the source path is occupied");
@@ -671,13 +707,13 @@ if ($operation -eq 'adopt') {
     [string]$spec.dataDir, [string]$spec.operationId, [string]$spec.providerAccountId, [string]$spec.managedLink)
 } elseif ($operation -eq 'inspect') {
   $result = [WollipogWindowsSkillAdoption]::Inspect([string]$spec.home, [string]$spec.localSourceDirectory,
-    [string]$spec.homeLink, [string]$spec.storeLink, [string]$spec.operationId)
+    [string]$spec.homeLink, [string]$spec.storeLink, [string]$spec.canonicalDir, [string]$spec.operationId)
   [pscustomobject]@{ parentIdentity = $result.ParentIdentity; journals = @($result.Journals);
     truncated = $result.Truncated } | ConvertTo-Json -Depth 5 -Compress
 } elseif ($operation -eq 'restore') {
   [WollipogWindowsSkillAdoption]::Restore([string]$spec.home, [string]$spec.localSourceDirectory,
     [string]$spec.operationId, [string]$spec.name, [string]$spec.digest, [string]$spec.parentIdentity,
-    [string]$spec.sourceIdentity, [string]$spec.managedLink, [string]$spec.recoveryLink)
+    [string]$spec.sourceIdentity, [string]$spec.managedLink, [string]$spec.canonicalLink, [string]$spec.recoveryLink)
 } else { throw 'invalid adoption operation' }
 `;
 
@@ -720,6 +756,11 @@ function optional(value: () => string): string {
   try { return value(); } catch { return ""; }
 }
 
+/** Reconciliation's canonical junction directory, spelled exactly as it writes harness junctions. */
+function canonicalDirectory(canonicalHome: string): string {
+  return win32.join(canonicalHome, ".agents", "skills");
+}
+
 export function windowsAdoptionSpecification(request: PlatformAdoptionRequest): Record<string, unknown> {
   return { operation: "adopt", home: request.home, localSourceDirectory: request.localSourceDirectory,
     sourceDirectory: request.sourceDirectory, name: request.name, generation: request.generation,
@@ -733,6 +774,7 @@ export function windowsRestoreSpecification(request: PlatformRestoreRequest): Re
     operationId: request.operationId, name: request.name, digest: request.digest,
     parentIdentity: request.parentIdentity, sourceIdentity: request.sourceIdentity,
     managedLink: managedLink(request.dataDir, request.name, request.digest),
+    canonicalLink: win32.join(canonicalDirectory(request.canonicalHome), request.name),
     recoveryLink: win32.join(realpathSync(request.home), ...request.localSourceDirectory.split("/"),
       `.wollipog-adoption-${request.operationId}`, "original") };
 }
@@ -755,7 +797,8 @@ export function windowsSkillAdoptionHelper(): SkillAdoptionPlatformHelper {
     inspect: (request) => {
       const result = run({ operation: "inspect", home: request.home,
         localSourceDirectory: request.localSourceDirectory, homeLink: optional(() => realpathSync(request.home)),
-        storeLink: optional(() => storeLink(request.dataDir)), operationId: request.operationId ?? "" });
+        storeLink: optional(() => storeLink(request.dataDir)), canonicalDir: canonicalDirectory(request.canonicalHome),
+        operationId: request.operationId ?? "" });
       if (!result.succeeded) throw new Error("Windows adoption helper failed");
       return parseRecoveryInspection(JSON.parse(result.stdout));
     },

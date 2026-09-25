@@ -201,8 +201,8 @@ test("helper restore leases the scope home, passes journal facts, and reports th
     inspect: (request) => request.localSourceDirectory === ".codex/skills"
       ? facts() : { parentIdentity: null, journals: [], truncated: false },
     restore: (request) => {
-      assert.deepEqual(request, { home: "/home/user", localSourceDirectory: ".codex/skills", dataDir: "/data",
-        operationId, name: "alpha", digest, parentIdentity: "7:1", sourceIdentity: "7:2" });
+      assert.deepEqual(request, { home: "/home/user", canonicalHome: "/home/user", localSourceDirectory: ".codex/skills",
+        dataDir: "/data", operationId, name: "alpha", digest, parentIdentity: "7:1", sourceIdentity: "7:2" });
       restored = true;
       return true;
     },

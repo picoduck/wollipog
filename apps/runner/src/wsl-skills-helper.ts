@@ -961,6 +961,21 @@ def read_link(parent, name):
     try: return os.readlink(name, dir_fd=parent)
     except OSError: return None
 
+def managed_link(target, managed, canonical):
+    # The adoption's managed link names the adopted version directly or, once reconciliation routes
+    # the harness through it, names this skill's canonical link whose own text is that version. Both
+    # hops compare link text, as reconciliation does; nothing is followed.
+    if not managed or target is None: return False
+    if target == managed: return True
+    if target != canonical: return False
+    try: return os.readlink(canonical) == managed
+    except OSError: return False
+
+def absent_error(error):
+    # A missing path, a file where a directory belongs, or a symlinked component (which adoption
+    # never traverses) holds no journal; any other error means the scope cannot be inspected.
+    return isinstance(error, OSError) and error.errno in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
+
 def validate_skill_path(path):
     # Mirrors validSkillFilePath; the exact path participates in the canonical version digest.
     try: units = len(path.encode("utf-16-le")) // 2
@@ -1201,7 +1216,8 @@ def inspect_journal(parent, entry, operation, home, local, store_root):
                 target = read_link(parent, name)
                 managed = store_root + "/" + name + "/" + digest if store_root else None
                 recovery = home + "/" + local + "/" + entry + "/original"
-                journal["Role"] = 1 if managed and target == managed else 2 if target == recovery else 3
+                canonical = home + "/.agents/skills/" + name
+                journal["Role"] = 1 if managed_link(target, managed, canonical) else 2 if target == recovery else 3
         return journal
     finally: os.close(backup)
 
@@ -1211,13 +1227,17 @@ def inspect(spec):
         not UUID.fullmatch(only))): fail("invalid inspection")
     result = {"parentIdentity": "", "journals": [], "truncated": False}
     store_root = store_root_text(spec)
-    # Only a missing path is empty. Any other error (for example EACCES) fails the inspection, so
+    # Only an absent path is empty. Any other error (for example EACCES) fails the inspection, so
     # the runner treats the scope as uninspected instead of hiding its journals.
     try: home_fd, home = open_root(os.environ.get("HOME", ""))
-    except (FileNotFoundError, NotADirectoryError): return result
+    except OSError as error:
+        if absent_error(error): return result
+        raise
     try:
         try: parent = walk(home_fd, local)
-        except (FileNotFoundError, NotADirectoryError): return result
+        except OSError as error:
+            if absent_error(error): return result
+            raise
         try:
             result["parentIdentity"] = identity(parent)
             if only is not None:
@@ -1271,10 +1291,12 @@ def restore(spec):
         record(backup, "restore-intent.json", {"operationId": operation, "sourceIdentity": source_expected}, True)
         checkpoint("restore_intent_durable")
         managed = store_root + "/" + name + "/" + digest
+        canonical = home + "/.agents/skills/" + name
         recovery = home + "/" + original_relative
         source_kind, preserved_kind = entry_kind(parent, name), entry_kind(backup, "managed-link")
         if source_kind == "link":
-            if preserved_kind != "absent" or read_link(parent, name) != managed: fail("the source is not the managed link")
+            if preserved_kind != "absent" or not managed_link(read_link(parent, name), managed, canonical):
+                fail("the source is not the managed link")
             # Moving the live link is only safe into the journal that recovery inspection will find.
             check_path(home_fd, local, parent_expected)
             check_path(home_fd, backup_relative, backup_id)
@@ -1282,8 +1304,11 @@ def restore(spec):
             os.fsync(parent); os.fsync(backup)
             source_kind, preserved_kind = "absent", "link"
         if preserved_kind == "link":
-            if read_link(backup, "managed-link") != managed: fail("the preserved managed link changed")
-            record(backup, "managed-link-preserved.json", {"target": managed}, True)
+            # The link already moved into the private journal is ours by either managed shape; the
+            # canonical link may have moved on since, and it is never touched.
+            preserved = read_link(backup, "managed-link")
+            if preserved not in (managed, canonical): fail("the preserved managed link changed")
+            record(backup, "managed-link-preserved.json", {"target": preserved}, True)
             checkpoint("managed_link_preserved")
         elif preserved_kind != "absent": fail("the preserved managed link is not a link")
         if source_kind != "absent": fail("the source path is occupied")
