@@ -48,6 +48,16 @@ await build({
 });
 console.log("bundled runner ->", bundle);
 
+// Linux adoption moves files with a fixed renameat2(RENAME_NOREPLACE) helper. It is linked
+// statically so the SEA runs on any Linux libc, and it is compiled before the bundle-only exit so
+// CI's bundle check proves the exact release build.
+const linuxRenameHelper = join(buildDir, "linux-skill-rename");
+if (process.platform === "linux") {
+  execFileSync("/usr/bin/cc", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", "-static",
+    join(runner, "native", "linux-skill-rename.c"), "-o", linuxRenameHelper], { stdio: "inherit" });
+  console.log("compiled Linux skill rename helper ->", linuxRenameHelper);
+}
+
 // Stop here when only validating the bundle (CI / quick check).
 if (process.argv.includes("--bundle-only")) {
   console.log("bundle-only: skipping SEA packaging");
@@ -65,6 +75,7 @@ if (process.platform === "darwin") {
   { stdio: "inherit" });
   assets["wollipog/macos-skill-snapshots"] = helper;
 }
+if (process.platform === "linux") assets["wollipog/linux-skill-rename"] = linuxRenameHelper;
 if (process.platform === "win32") {
   const require = createRequire(import.meta.url);
   const packageJson = require.resolve("node-pty/package.json");

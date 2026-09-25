@@ -6,7 +6,9 @@ import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AgentDefinition } from "@wollipog/protocol";
+import { linuxNoReplaceRename } from "./linux-skill-rename.js";
 import { adoptMachineSkill, type SkillAdoptionOptions } from "./skill-adoption.js";
+import { listSkillAdoptionRecovery } from "./skill-adoption-recovery.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
 import { cacheSkillSyncEntry, reconcileSkills } from "./skills.js";
 
@@ -149,20 +151,96 @@ test("a parent symlink swap cannot redirect writes outside the pinned parent", l
 
 test("a last-instant source swap is detected after preservation without deleting either tree", linux, (t) => {
   const f = fixture(t);
-  const rename = fs.renameSync;
-  t.mock.method(fs, "renameSync", (from: fs.PathLike, to: fs.PathLike) => {
-    if (String(to).endsWith("/original")) {
-      rename(f.source, f.source + "-user-moved");
-      fs.mkdirSync(f.source);
-      fs.writeFileSync(join(f.source, "SKILL.md"), "replacement content");
-    }
-    return rename(from, to);
-  });
-  syncBuiltinESMExports();
-  t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+  f.options.noReplaceRename = () => {
+    const rename = linuxNoReplaceRename(f.dataDir);
+    return (fromParent, fromName, toParent, toName) => {
+      if (toName === "original") {
+        fs.renameSync(f.source, f.source + "-user-moved");
+        fs.mkdirSync(f.source);
+        fs.writeFileSync(join(f.source, "SKILL.md"), "replacement content");
+      }
+      rename(fromParent, fromName, toParent, toName);
+    };
+  };
   assert.equal(adoptMachineSkill(f.options).status, "recovery_required");
   assert.match(fs.readFileSync(join(f.source + "-user-moved", "SKILL.md"), "utf8"), /Original instructions/);
   assert.equal(fs.readFileSync(join(f.parent, f.backups()[0]!, "original/SKILL.md"), "utf8"), "replacement content");
+});
+
+test("retargeting the data directory after it is resolved cannot separate the verified store version from the published link",
+  linux, (t) => {
+    const f = fixture(t);
+    // An identical store elsewhere passes every content check, so only the path walk can tell them apart.
+    const other = join(f.root, "other-data");
+    fs.cpSync(join(f.dataDir, "skills"), join(other, "skills"), { recursive: true });
+    const realpath = fs.realpathSync;
+    let retargeted = false;
+    t.mock.method(fs, "realpathSync", (path: fs.PathLike, ...rest: []) => {
+      const resolved = realpath(path, ...rest);
+      if (!retargeted && String(path) === f.dataDir) {
+        retargeted = true;
+        fs.renameSync(f.dataDir, f.dataDir + "-held");
+        fs.symlinkSync(other, f.dataDir);
+      }
+      return resolved;
+    });
+    syncBuiltinESMExports();
+    t.after(() => { t.mock.restoreAll(); syncBuiltinESMExports(); });
+    const result = adoptMachineSkill(f.options);
+    assert.ok(retargeted);
+    assert.equal(result.status, "rejected", JSON.stringify(result));
+    assert.ok(fs.lstatSync(f.source).isDirectory());
+    assert.deepEqual(f.backups(), []);
+  });
+
+test("renaming the journal after its intent is durable stops adoption before the original moves", linux, (t) => {
+  const f = fixture(t);
+  const moved = join(f.parent, ".moved-journal");
+  f.options.checkpoint = (stage) => { if (stage === "intent_durable") fs.renameSync(join(f.parent, f.backups()[0]!), moved); };
+  const result = adoptMachineSkill(f.options);
+  assert.equal(result.status, "recovery_required", JSON.stringify(result));
+  assert.ok(fs.lstatSync(f.source).isDirectory());
+  assert.match(fs.readFileSync(join(f.source, "SKILL.md"), "utf8"), /Original instructions/);
+  assert.deepEqual(fs.readdirSync(moved), ["intent.json"], "the original never moves into a relocated journal");
+});
+
+test("an entry created at the preserving move's destination is never replaced", linux, (t) => {
+  const f = fixture(t);
+  let occupant: fs.Stats | undefined;
+  f.options.checkpoint = (stage) => {
+    if (stage !== "intent_durable") return;
+    const destination = join(f.parent, f.backups()[0]!, "original");
+    fs.mkdirSync(destination);
+    occupant = fs.statSync(destination);
+  };
+  const result = adoptMachineSkill(f.options);
+  assert.equal(result.status, "recovery_required", JSON.stringify(result));
+  assert.ok(fs.lstatSync(f.source).isDirectory());
+  assert.match(fs.readFileSync(join(f.source, "SKILL.md"), "utf8"), /Original instructions/);
+  const destination = join(f.parent, f.backups()[0]!, "original");
+  assert.equal(fs.statSync(destination).ino, occupant!.ino);
+  assert.deepEqual(fs.readdirSync(destination), []);
+});
+
+test("a runner that cannot refuse to replace rejects adoption before creating a journal", linux, (t) => {
+  const f = fixture(t);
+  f.options.noReplaceRename = () => { throw new Error("private helper detail"); };
+  const result = adoptMachineSkill(f.options);
+  assert.equal(result.status, "rejected");
+  assert.doesNotMatch(JSON.stringify(result), /private/);
+  assert.ok(fs.lstatSync(f.source).isDirectory());
+  assert.deepEqual(f.backups(), []);
+});
+
+test("a filesystem without a no-replace move stops with only the intent-only journal", linux, (t) => {
+  const f = fixture(t);
+  f.options.noReplaceRename = () => () => { throw new Error("EINVAL"); };
+  const result = adoptMachineSkill(f.options);
+  assert.equal(result.status, "recovery_required", JSON.stringify(result));
+  assert.ok(fs.lstatSync(f.source).isDirectory());
+  assert.deepEqual(fs.readdirSync(join(f.parent, f.backups()[0]!)), ["intent.json"]);
+  assert.deepEqual(listSkillAdoptionRecovery(f.home, f.dataDir, agents).operations.map((entry) => entry.state),
+    ["intent_only"]);
 });
 
 test("authorization revoked after preservation prevents link publication", linux, (t) => {

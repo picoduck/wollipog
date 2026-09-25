@@ -81,6 +81,11 @@ test("the binary producer injects and signs only the canonical artifact before c
   assert.match(source, /assertRunnerTargetHost\(triple, process\.platform, process\.arch\)/u);
   assert.match(source, /assets\["wollipog\/macos-skill-snapshots"\] = helper/u);
   assert.match(source, /process\.platform === "darwin"[\s\S]*\/usr\/bin\/clang/u);
+  assert.match(source, /process\.platform === "linux"\) assets\["wollipog\/linux-skill-rename"\] = linuxRenameHelper/u);
+  assert.match(source, /"\/usr\/bin\/cc", \[[^\]]*"-static",\s*join\(runner, "native", "linux-skill-rename\.c"\)/u,
+    "Linux SEA runners must carry the statically linked no-replace rename helper");
+  assert.ok(source.indexOf("linux-skill-rename.c") < source.indexOf('process.argv.includes("--bundle-only")'),
+    "the bundle-only CI check must compile the Linux helper");
   assert.match(source,
     /process\.platform === "win32"[\s\S]*assets\["wollipog\/wsl-bwrap-launcher\.c"\]/u,
     "Windows SEA runners must carry the checked-in target-local launcher source used by provisioning",

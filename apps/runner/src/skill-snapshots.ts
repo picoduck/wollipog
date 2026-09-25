@@ -34,9 +34,31 @@ export function directoryGeneration(fd: number): string {
 
 /** Internal Linux primitive: resolve a fixed relative directory through pinned no-follow parents. */
 export function openSkillDirectory(home: string, relative: string, durable = false): number {
+  return openBeneath(() => openSync(realpathSync(home), directoryFlags), relative, durable);
+}
+
+/** The same walk beneath a root the caller resolved once. The root's own components are opened
+ * without following too, so a symlink swapped into its path later fails the open rather than
+ * redirecting it, and the pinned directory is exactly the one the root path names. */
+export function openResolvedSkillDirectory(root: string, relative: string, durable = false): number {
+  const segments = root.split("/").slice(1).filter(Boolean);
+  if (!root.startsWith("/") || segments.some((segment) => segment === "." || segment === "..")) throw new Error();
+  return openBeneath(() => {
+    let fd = openSync("/", directoryFlags);
+    try {
+      for (const segment of segments) {
+        const next = openSync(`${fdPath(fd)}/${segment}`, directoryFlags);
+        closeSync(fd); fd = next;
+      }
+      return fd;
+    } catch (error) { closeSync(fd); throw error; }
+  }, relative, durable);
+}
+
+function openBeneath(openRoot: () => number, relative: string, durable: boolean): number {
   const segments = relative.split("/");
   if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.includes("\\"))) throw new Error();
-  let fd = openSync(realpathSync(home), directoryFlags);
+  let fd = openRoot();
   try {
     for (const segment of segments) {
       const next = openSync(`${fdPath(fd)}/${segment}`, directoryFlags);

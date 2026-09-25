@@ -193,6 +193,48 @@ for (const stage of ["restore_intent_durable", "managed_link_preserved", "recove
   });
 }
 
+test("renaming the journal during restore leaves the managed link at the source path", linux, (t) => {
+  const f = fixture(t);
+  const adopted = adoptMachineSkill(f.options);
+  if (adopted.status !== "adopted") return assert.fail(JSON.stringify(adopted));
+  const managed = fs.readlinkSync(f.source);
+  const restored = f.recovery(adopted.operationId, (stage) => {
+    if (stage === "restore_intent_durable") fs.renameSync(join(f.home, adopted.backupDirectory), join(f.parent, ".moved-journal"));
+  });
+  assert.equal(restored.status, "recovery_required", JSON.stringify(restored));
+  assert.equal(fs.readlinkSync(f.source), managed);
+  assert.equal(fs.existsSync(join(f.parent, ".moved-journal", "managed-link")), false);
+});
+
+for (const stage of ["managed_link_preserved", "recovery_link_created"] as const) {
+  test(`renaming the harness directory at ${stage} never reports restored with a dangling link`, linux, (t) => {
+    const f = fixture(t);
+    const adopted = adoptMachineSkill(f.options);
+    if (adopted.status !== "adopted") return assert.fail(JSON.stringify(adopted));
+    const moved = join(f.home, ".codex/moved-skills");
+    const restored = f.recovery(adopted.operationId, (current) => {
+      if (current === stage) fs.renameSync(f.parent, moved);
+    });
+    assert.equal(restored.status, "recovery_required", JSON.stringify(restored));
+    assert.equal(fs.existsSync(join(moved, "alpha", "payload")), false, "any published link is dangling");
+    assert.equal(fs.readFileSync(join(moved, `.wollipog-adoption-${adopted.operationId}`, "original", "payload"), "utf8"),
+      "original bytes");
+  });
+}
+
+test("a runner that cannot refuse to replace blocks restore without changing anything", linux, (t) => {
+  const f = fixture(t);
+  const adopted = adoptMachineSkill(f.options);
+  if (adopted.status !== "adopted") return assert.fail(JSON.stringify(adopted));
+  const managed = fs.readlinkSync(f.source);
+  const restored = restoreSkillAdoptionRecovery({ home: f.home, dataDir: f.dataDir, agents, operationId: adopted.operationId,
+    acquireProviderHomeLease: () => undefined, noReplaceRename: () => { throw new Error("unavailable"); } });
+  assert.equal(restored.status, "blocked", JSON.stringify(restored));
+  assert.equal(fs.readlinkSync(f.source), managed);
+  assert.deepEqual(fs.readdirSync(join(f.home, adopted.backupDirectory)).sort(),
+    ["intent.json", "linked.json", "original", "preserved.json"]);
+});
+
 test("never overwrites a source occupant and rejects malformed or unsupported requests", linux, (t) => {
   const f = fixture(t);
   f.options.checkpoint = (stage) => {
