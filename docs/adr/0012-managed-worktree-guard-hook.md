@@ -1041,20 +1041,26 @@ Each protection entry for the session's default (`legacy`-source) worktree now c
 document without it pins nothing, so a sidecar started before the change keeps its old meaning).
 `gitBranchVerdict` refuses, with `MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL`, a Git command whose
 repository is that worktree and which would move it off the pinned branch: `checkout` or `switch` to
-another branch, a new branch, `-` or a detached HEAD; `branch -m` renaming the branch; and
-`stash branch`. The refusal names `wollipog worktree create --branch <name>`.
+another branch, a new branch, a revision, `-`, `@`, or a detached HEAD (`--detach`, `-d`);
+`branch -m` renaming the branch; `stash branch`; and a forge CLI's `gh pr checkout` or
+`glab mr checkout`. The refusal names `wollipog worktree create --branch <name>`.
 
 - The repository is placed the way Git finds it: from the shell's directory after `-C`, or from a
-  `--git-dir` that names a worktree's own `.git`. The innermost protected root decides, and a
-  directory beneath the worktree that holds its own `.git` (a fixture, a nested clone) is not the
-  worktree.
+  `--git-dir` that names a worktree's own `.git` or its administrative directory (mapped back
+  through that directory's `gitdir` file). The innermost protected root decides, and a directory
+  beneath the worktree that holds its own `.git` (a fixture, a nested clone) is not the worktree.
 - Restoring files is not a switch: `checkout -- <path>`, `checkout <tree-ish> <path>…`,
-  `checkout -p`, `--ours`/`--theirs`, and `--pathspec-from-file`. Switching back to the pinned
-  branch is always allowed, which is the documented manual recovery.
-- The classifier still reads no Git state, so it cannot ask whether a lone `checkout <name>` names
-  a branch or a file. A spelling `git check-ref-format --branch` rejects, or a path that exists, is
-  a file; anything else is a branch. A deleted file named alone therefore reads as a branch, and the
-  refusal says to name it after `--` or use `git restore`.
+  `checkout -p`, `--ours`/`--theirs`, and `--pathspec-from-file`. `checkout HEAD` stays on the
+  branch. Switching back to the pinned branch is always allowed, which is the documented manual
+  recovery.
+- A lone `checkout <name>` follows Git's own order (`parse_branchname_arg`), which tries a commit
+  before a path. Revision syntax (`~`, `^`, `@{…}`, `A...B`, `:/text`) is a commit; a spelling no
+  ref can have is a path; any other name is a path only when it exists on disk and no ref of that
+  name exists. That last check is the only Git state the classifier reads: loose refs and
+  packed-refs in the worktree's shared Git directory, as plain files. A reftable store, an
+  oversized or unreadable ref store, and a name that could abbreviate an object id all count as a
+  commit. A deleted file named alone therefore reads as a commit too, and the refusal says to name
+  it after `--` or use `git restore`.
 - A command this code cannot place — an unresolved `-C`, an unresolved target branch — is left
   alone. A branch switch is recoverable, and refusing unreadable Git commands would refuse
   ordinary work; the destructive vetoes above keep their fail-closed rule.
@@ -1064,6 +1070,9 @@ another branch, a new branch, `-` or a detached HEAD; `branch -m` renaming the b
   guard's.
 - An Orchestrator's list includes every runner-created worktree (#1473), pins included, so it may
   restore a child's worktree to the child's branch but not move it to another one.
+- Not recognised: plumbing that rewrites `HEAD` directly (`symbolic-ref`, `update-ref`),
+  `rebase <upstream> <branch>`, `bisect`, and a `GIT_DIR` set in the environment. None is how an
+  agent starts work on another branch, which is the failure this closes.
 
 ## Consequences
 

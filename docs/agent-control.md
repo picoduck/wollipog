@@ -107,10 +107,10 @@ durable retirement request, not a failed cleanup or an invitation to force-remov
 A session's own default worktree is also pinned to its `agent/<session-id>` branch, because that
 branch is re-proved before every turn (below). The same guard refuses a Git command run inside it
 that would switch, detach, or rename that branch — `git checkout -b`, `git switch -c`,
-`git switch <other-branch>`, `git branch -m`, and `git stash branch` — and points the agent to
-`wollipog worktree create --branch <name>` instead. Restoring files and switching back to the
-session's own branch stay available, and a worktree the session created for another branch is not
-pinned.
+`git switch <other-branch>`, `git branch -m`, `git stash branch`, and `gh pr checkout` — and
+points the agent to `wollipog worktree create --branch <name>` instead. Restoring files and
+switching back to the session's own branch stay available, and a worktree the session created for
+another branch is not pinned.
 
 Because a worktree can still disappear outside Wollipog, every launch that carries a persisted
 worktree re-proves it immediately before the provider process is created — start, resume, worktree

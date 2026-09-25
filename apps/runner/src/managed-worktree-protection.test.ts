@@ -4,6 +4,8 @@ import fc from "fast-check";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
+import { initRepo } from "./git-test-repo.js";
 import {
   commandTargetsManagedWorktree,
   MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL,
@@ -951,6 +953,20 @@ test("switching a session's own worktree off its branch is refused with a pointe
     "git checkout -t origin/feature",
     "git checkout -",
     "git checkout main --",
+    // `@` detaches where `HEAD` does not, and `-d` is checkout's own short `--detach`.
+    "git checkout @",
+    "git checkout -d",
+    "git checkout -qd",
+    "git checkout -d origin/main",
+    // Revision syntax names a commit, never a file.
+    "git checkout HEAD~1",
+    "git checkout main^",
+    "git checkout @{-1}",
+    "git checkout HEAD@{2}",
+    "git checkout main...feature",
+    "git checkout ':/fix the guard'",
+    "git checkout refs/heads/agent/s_own",
+    "git checkout origin/agent/s_own",
     "git switch -c fix/issue-1650-guard",
     "git switch -C fix/issue-1650-guard",
     "git switch -cfix/issue-1650-guard",
@@ -968,6 +984,10 @@ test("switching a session's own worktree off its branch is refused with a pointe
     "git branch -M renamed",
     `git branch --move ${ownBranch} renamed`,
     "git stash branch fix/from-stash",
+    // A forge CLI's checkout switches the repository in the current directory.
+    "gh pr checkout 1749",
+    "gh pr checkout 1749 --detach",
+    "glab mr checkout 12",
     // Git's own options before the subcommand do not hide it.
     "git --no-pager -c core.pager=cat checkout -b fix/x",
     `git -C ${ownWorktree} switch -c fix/x`,
@@ -997,7 +1017,7 @@ test("restoring files and returning a session's own worktree to its branch stay 
     `git checkout -B ${ownBranch}`,
     "git checkout",
     "git checkout HEAD",
-    "git checkout @",
+    "git checkout HEAD --",
     "git checkout -- apps/runner/src/deleted.ts",
     "git checkout HEAD -- apps/runner/src/deleted.ts",
     "git checkout origin/main apps/runner/src/a.ts apps/runner/src/b.ts",
@@ -1011,7 +1031,7 @@ test("restoring files and returning a session's own worktree to its branch stay 
     "git checkout ./apps",
     "git checkout apps/",
     "git checkout '*.ts'",
-    "git checkout :/README.md",
+    "git checkout ':(glob)**/*.ts'",
     `git checkout ${ownWorktree}/README.md`,
     "git status && git diff",
     "git branch --list",
@@ -1019,6 +1039,9 @@ test("restoring files and returning a session's own worktree to its branch stay 
     "git branch --merged",
     "git stash push -m wip",
     "git worktree add -b fix/elsewhere ../elsewhere",
+    "gh pr view 1749",
+    "gh pr create --fill",
+    "glab mr view 12",
     // A switch this code cannot place is not refused: a branch switch is recoverable.
     'git switch "$UNKNOWN_BRANCH"',
     'git -C "$(mktemp -d)" switch -c fix/x',
@@ -1037,14 +1060,17 @@ test("branch work outside a session's own worktree is unaffected (#1650)", () =>
     "git switch main",
     "git checkout main",
     "git branch -m fix/renamed",
+    "gh pr checkout 1749",
   ]) {
     assert.equal(commandTargetsManagedWorktree(command, created, both), null, `created worktree: ${command}`);
     assert.equal(commandTargetsManagedWorktree(command, "/projects/repo", both), null, `primary checkout: ${command}`);
     assert.equal(commandTargetsManagedWorktree(command, "/tmp/scratch-repo", both), null, `unrelated repository: ${command}`);
     assert.equal(commandTargetsManagedWorktree(command, ownWorktree, [{ worktreePath: ownWorktree, repoPath: "/projects/repo" }]),
       null, `unpinned protection: ${command}`);
-    assert.equal(commandTargetsManagedWorktree(`git -C ${created} ${command.slice(4)}`, ownWorktree, both), null,
-      `-C to the created worktree: ${command}`);
+    if (command.startsWith("git ")) {
+      assert.equal(commandTargetsManagedWorktree(`git -C ${created} ${command.slice(4)}`, ownWorktree, both), null,
+        `-C to the created worktree: ${command}`);
+    }
   }
   // The innermost protected root decides: a worktree nested beneath the pinned one is its own.
   const nested = `${ownWorktree}/.claude/worktrees/agent`;
@@ -1052,32 +1078,75 @@ test("branch work outside a session's own worktree is unaffected (#1650)", () =>
     [...pinned, { worktreePath: nested, repoPath: "/projects/repo" }]), null);
 });
 
-test("a lone checkout operand is a file when it exists and a branch when it does not (#1650)", (t) => {
+function gitAvailable(): boolean {
+  try {
+    execFileSync("git", ["--version"], { stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+test("a lone checkout operand is a file only when Git would read it as one (#1650)", { skip: !gitAvailable() }, (t) => {
   const base = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-branch-pin-")));
   t.after(() => rmSync(base, { recursive: true, force: true }));
+  const repo = join(base, "repo");
+  mkdirSync(repo);
+  initRepo(repo);
+  const git = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, stdio: "ignore" });
+  mkdirSync(join(repo, "docs"));
+  writeFileSync(join(repo, "docs", "guide.md"), "guide");
+  writeFileSync(join(repo, "README"), "readme");
+  writeFileSync(join(repo, "feature"), "a file that shares its name with a branch");
+  writeFileSync(join(repo, "cafe"), "a file whose name could abbreviate an object id");
+  git(repo, "add", "-A");
+  git(repo, "commit", "-qm", "init");
+  git(repo, "branch", "feature");
   const worktree = join(base, "own");
-  mkdirSync(join(worktree, "docs"), { recursive: true });
-  writeFileSync(join(worktree, "README"), "readme");
-  const protections = [{ worktreePath: worktree, repoPath: join(base, "repo"), pinnedBranch: ownBranch }];
-  assert.equal(commandTargetsManagedWorktree("git checkout README", worktree, protections), null);
-  assert.equal(commandTargetsManagedWorktree("git checkout docs", worktree, protections), null);
-  assert.equal(commandTargetsManagedWorktree("git checkout feature-branch", worktree, protections),
+  git(repo, "worktree", "add", "-q", "-b", ownBranch, worktree);
+  const protections = [{ worktreePath: worktree, repoPath: repo, pinnedBranch: ownBranch }];
+  const verdict = (command: string, cwd = worktree) => commandTargetsManagedWorktree(command, cwd, protections);
+
+  // Git tries a commit before a path: a file that is not also a ref is restored...
+  assert.equal(verdict("git checkout README"), null);
+  assert.equal(verdict("git checkout docs"), null);
+  assert.equal(verdict("git checkout docs/guide.md"), null);
+  // ...while a name that is both switches to the branch, as does one that exists only as a branch.
+  assert.equal(verdict("git checkout feature"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  assert.equal(verdict("git checkout no-such-branch"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  assert.equal(verdict("git checkout cafe"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL,
+    "a name that could abbreviate an object id is treated as a commit");
+  assert.equal(verdict("git checkout -- feature"), null, "the explicit restore form stays available");
+  // Packed refs are refs too.
+  git(repo, "pack-refs", "--all");
+  assert.equal(verdict("git checkout feature"), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  assert.equal(verdict("git checkout README"), null);
+
+  // A `--git-dir` naming the worktree's administrative directory is the worktree. Spelled
+  // absolutely it names the worktree registry, which the registry veto already refuses outright;
+  // a relative spelling reaches the branch pin.
+  const adminDir = execFileSync("git", ["rev-parse", "--absolute-git-dir"], { cwd: worktree, encoding: "utf8" }).trim();
+  assert.equal(verdict(`git --git-dir=${adminDir} --work-tree=. switch -c fix/x`), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(verdict("git --git-dir ../repo/.git/worktrees/own --work-tree=. switch -c fix/x"),
     MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  assert.equal(verdict("git --git-dir=../repo/.git/worktrees/own switch -c fix/x"),
+    MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  assert.equal(verdict(`git --git-dir=${join(repo, ".git")} switch -c fix/x`, base), null,
+    "the repository's own Git directory is the primary checkout, which is not pinned");
 
   // Git takes its repository from the nearest `.git`, so a repository nested beneath the worktree
   // (a fixture, a clone) is that repository, and switching its branch is not the worktree's.
   const fixture = join(worktree, "fixtures", "repo");
   mkdirSync(join(fixture, ".git"), { recursive: true });
   mkdirSync(join(fixture, "src"));
-  assert.equal(commandTargetsManagedWorktree("git checkout -b fixture-branch", fixture, protections), null);
-  assert.equal(commandTargetsManagedWorktree("git switch main", join(fixture, "src"), protections), null);
-  assert.equal(commandTargetsManagedWorktree(`git -C ${fixture} switch main`, worktree, protections), null);
-  assert.equal(commandTargetsManagedWorktree("git switch main", join(worktree, "fixtures"), protections),
-    MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL, "a directory above the nested repository is still the worktree");
+  assert.equal(verdict("git checkout -b fixture-branch", fixture), null);
+  assert.equal(verdict("git switch main", join(fixture, "src")), null);
+  assert.equal(verdict(`git -C ${fixture} switch main`), null);
+  assert.equal(verdict("git switch main", join(worktree, "fixtures")), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL,
+    "a directory above the nested repository is still the worktree");
 
   // A worktree reached through a symlinked prefix is the same worktree.
   const alias = join(base, "alias");
   symlinkSync(worktree, alias);
-  assert.equal(commandTargetsManagedWorktree("git switch -c fix/x", alias, protections),
-    MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
+  assert.equal(verdict("git switch -c fix/x", alias), MANAGED_WORKTREE_BRANCH_SWITCH_REFUSAL);
 });

@@ -1,4 +1,4 @@
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, dirname, isAbsolute, join, matchesGlob, normalize, parse as parsePath, resolve, sep } from "node:path";
 import { parse, type ParseEntry } from "shell-quote";
@@ -846,27 +846,114 @@ function pinnedWorktreeAt(
 }
 
 /**
- * A spelling `git check-ref-format --branch` rejects: a component starting with `.`, `..`, a space
- * or control character, one of `~^:?*[\`, a leading, trailing, or doubled `/`, a trailing `.` or
- * `.lock`, `@{`, or a leading `-`. Such an operand can only be a path or pathspec.
+ * Revision syntax: a commit reached from another (`~`, `^`, `@{…}`, `A...B`) or found by its
+ * message (`:/text`). A lone `checkout` operand spelled this way switches or detaches.
  */
-const NOT_A_BRANCH_NAME =
-  /(?:^|\/)\.|\.\.|[\u0000- \u007f~^:?*[\\]|^\/|\/$|\/\/|\.$|\.lock(?:\/|$)|@\{|^-/u;
+const REVISION_SYNTAX = /[~^]|@\{|\.\.\.|^:\//u;
 
 /**
- * Whether a lone `checkout` operand reads as a file to restore rather than a branch to switch to.
- * The classifier reads no Git state, so it cannot ask which one Git would pick: something no
- * branch can be called, or something that exists on disk, is a file, and anything else is a
- * branch. A deleted file named alone therefore reads as a branch, which is why the refusal says
- * how to restore one.
+ * A spelling no ref can have (`git check-ref-format`): a component starting with `.`, `..`, a space
+ * or control character, one of `:?*[\`, a leading, trailing, or doubled `/`, or a trailing `.` or
+ * `.lock`. Once revision syntax is ruled out, such an operand can only be a path or pathspec.
  */
-function checkoutOperandNamesPath(value: string, cwd: string): boolean {
-  if (NOT_A_BRANCH_NAME.test(value)) return true;
+const PATH_ONLY_SPELLING =
+  /(?:^|\/)\.|\.\.|[\u0000-\u0020\u007f:?*[\\]|^\/|\/$|\/\/|\.$|\.lock(?:\/|$)/u;
+
+/** A packed-refs file larger than this is not read; the operand is then treated as a commit. */
+const MAX_PACKED_REFS_BYTES = 8 * 1024 * 1024;
+/** Git's own pointer files are a line or two; a larger one is not what it claims to be. */
+const MAX_GIT_POINTER_BYTES = 64 * 1024;
+
+function isFile(path: string): boolean {
   try {
-    return existsSync(isAbsolute(value) ? value : resolve(cwd, value));
+    return statSync(path).isFile();
   } catch {
     return false;
   }
+}
+
+/** One of Git's small pointer files (`.git`, `commondir`, `gitdir`), or null. */
+function readGitPointer(path: string): string | null {
+  if (!isFile(path) || statSync(path).size > MAX_GIT_POINTER_BYTES) return null;
+  return readFileSync(path, "utf8").trim() || null;
+}
+
+/**
+ * The shared Git directory a linked worktree's refs live in: its `.git` file names its
+ * administrative directory, whose `commondir` names the repository's `.git`.
+ */
+function commonGitDirectory(worktreePath: string): string | null {
+  const dotGit = join(worktreePath, ".git");
+  const pointer = readGitPointer(dotGit);
+  let gitDir = dotGit;
+  if (pointer !== null) {
+    const target = /^gitdir: (.+)$/u.exec(pointer)?.[1];
+    if (target === undefined) return null;
+    gitDir = resolve(worktreePath, target);
+  }
+  const common = readGitPointer(join(gitDir, "commondir"));
+  return common === null ? gitDir : resolve(gitDir, common);
+}
+
+/**
+ * Whether a lone `checkout` operand that exists on disk may still name a commit, which Git prefers
+ * over the path. This is the one place the classifier reads Git state, and only the shared ref
+ * store's plain files: loose refs and packed-refs. Whatever it cannot read — a reftable store, an
+ * oversized packed-refs, an I/O error — and a name that could abbreviate an object id count as a
+ * commit, so the command is refused with advice to name the path after `--` instead.
+ */
+function mayNameCommit(name: string, worktreePath: string): boolean {
+  if (/^[0-9a-f]{4,64}$/iu.test(name)) return true;
+  try {
+    const common = commonGitDirectory(worktreePath);
+    if (common === null || existsSync(join(common, "reftable"))) return true;
+    // Git's own order for a short name, the remote-tracking HEAD included.
+    const candidates = ["", "tags/", "heads/", "remotes/"].map((prefix) => `refs/${prefix}${name}`)
+      .concat(`refs/remotes/${name}/HEAD`);
+    if (candidates.some((ref) => isFile(join(common, ref)))) return true;
+    const packed = join(common, "packed-refs");
+    if (!isFile(packed)) return false;
+    if (statSync(packed).size > MAX_PACKED_REFS_BYTES) return true;
+    const refs = new Set(readFileSync(packed, "utf8").split("\n").flatMap((line) =>
+      /^[0-9a-f]{40,64} (refs\/\S+)$/u.exec(line)?.slice(1) ?? []));
+    return candidates.some((ref) => refs.has(ref));
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether a lone `checkout` operand is a file to restore rather than a commit to switch to. Git
+ * decides by trying a commit first, then a path (`parse_branchname_arg`), and this follows it:
+ * revision syntax is a commit; a spelling no ref can have is a path; any other name is a path only
+ * if it exists on disk and no ref of that name exists. A deleted file named alone therefore reads
+ * as a commit, which is why the refusal says how to restore one.
+ */
+function checkoutOperandIsPath(value: string, cwd: string, worktreePath: string): boolean {
+  if (value === "-" || REVISION_SYNTAX.test(value)) return false;
+  if (PATH_ONLY_SPELLING.test(value)) return true;
+  let onDisk: boolean;
+  try {
+    onDisk = existsSync(isAbsolute(value) ? value : resolve(cwd, value));
+  } catch {
+    onDisk = false;
+  }
+  return onDisk && !mayNameCommit(value, worktreePath);
+}
+
+/**
+ * The worktree a `--git-dir` names: its own `.git`, or its administrative directory beneath the
+ * repository's `.git/worktrees`, whose `gitdir` file records the worktree's `.git`.
+ */
+function worktreeForGitDirectory(gitDir: string): string {
+  if (basename(gitDir) === ".git") return dirname(gitDir);
+  try {
+    const recorded = readGitPointer(join(gitDir, "gitdir"));
+    if (recorded) return dirname(resolve(gitDir, recorded));
+  } catch {
+    /* Unreadable: a repository this code does not place. */
+  }
+  return UNKNOWN_CWD;
 }
 
 /** The new branch an option such as `-b`/`--orphan` names: attached, or the following word. */
@@ -883,7 +970,7 @@ function checkoutMovesBranch(
   words: readonly ShellToken[],
   cwd: string,
   environment: ReadonlyMap<string, string>,
-  pinnedBranch: string,
+  pinned: Required<ManagedWorktreeProtection>,
 ): boolean {
   const operands: Array<string | null> = [];
   let pathspecs = false;
@@ -915,28 +1002,31 @@ function checkoutMovesBranch(
       continue;
     }
     if (value.startsWith("-") && value !== "-") {
-      // A short-option cluster. `-b` and `-B` take the new branch's name, attached or as the next word.
+      // A short-option cluster: `-d` detaches, `-p` patches paths, and `-b`/`-B` take the new
+      // branch's name, attached or as the next word.
       const letters = value.slice(1);
       const create = [...letters].findIndex((letter) => letter === "b" || letter === "B");
+      const flags = create >= 0 ? letters.slice(0, create) : letters;
+      if (flags.includes("d")) detach = true;
+      if (flags.includes("p")) pathspecs = true;
       if (create >= 0) {
         const attached = letters.slice(create + 1);
         created = createdBranch(attached || null, words[index + 1], cwd, environment);
         if (!attached) index += 1;
-      } else if (letters.includes("p")) {
-        pathspecs = true;
       }
       continue;
     }
     operands.push(value);
   }
   if (pathspecs) return false;
-  if (created !== undefined) return created !== pinnedBranch;
+  if (created !== undefined) return created !== pinned.pinnedBranch;
   if (detach) return true;
   // No operand switches nothing, and several are `<tree-ish> <path>…`, which restores files.
   if (operands.length !== 1) return false;
   const target = operands[0];
-  if (target == null || target === pinnedBranch || target === "HEAD" || target === "@") return false;
-  return target === "-" || !checkoutOperandNamesPath(target, cwd);
+  // `HEAD` alone stays on the current branch; `@`, its synonym elsewhere, detaches here.
+  if (target == null || target === pinned.pinnedBranch || target === "HEAD") return false;
+  return !checkoutOperandIsPath(target, cwd, pinned.worktreePath);
 }
 
 function switchMovesBranch(
@@ -1005,11 +1095,13 @@ function branchRenamesPinned(
 
 /**
  * Whether a Git command moves a pinned worktree off its branch (#1650): `checkout` or `switch` to
- * another branch, a new branch, or a detached HEAD; `branch -m` renaming the branch; and
- * `stash branch`. Restoring files and switching back to the pinned branch are ordinary work, and a
- * repository that is not a pinned worktree is not this classifier's concern at all. Where the
+ * another branch, a new branch, a revision, or a detached HEAD; `branch -m` renaming the branch;
+ * and `stash branch`. Restoring files and switching back to the pinned branch are ordinary work, and
+ * a repository that is not a pinned worktree is not this classifier's concern at all. Where the
  * command cannot be placed (an unresolved `-C`, an unresolved branch name) it is left alone: a
  * branch switch is recoverable, and refusing what cannot be read would refuse ordinary Git work.
+ * Plumbing that rewrites `HEAD` directly (`symbolic-ref`, `update-ref`), `rebase <upstream>
+ * <branch>`, and `bisect` are not recognised; they are not how an agent starts work on a branch.
  */
 function gitBranchVerdict(
   words: readonly ShellToken[],
@@ -1028,12 +1120,11 @@ function gitBranchVerdict(
       continue;
     }
     if (value === "--git-dir" || value?.startsWith("--git-dir=")) {
-      // Git takes its repository from here instead of from the working directory. A worktree's own
-      // `.git` names that worktree; any other directory is a repository this code does not place.
+      // Git takes its repository from here instead of from the working directory.
       const gitDir = value === "--git-dir"
         ? resolvedOperand(words[index + 1], cwd, environment)
         : resolvedPath(value.slice("--git-dir=".length), cwd);
-      cwd = gitDir && basename(gitDir) === ".git" ? dirname(gitDir) : UNKNOWN_CWD;
+      cwd = gitDir ? worktreeForGitDirectory(gitDir) : UNKNOWN_CWD;
       if (value === "--git-dir") index += 1;
       continue;
     }
@@ -1049,11 +1140,31 @@ function gitBranchVerdict(
   const pinned = pinnedWorktreeAt(cwd, protections);
   if (!pinned?.pinnedBranch) return null;
   const rest = words.slice(index + 1);
-  const moves = subcommand === "checkout" ? checkoutMovesBranch(rest, cwd, environment, pinned.pinnedBranch)
+  const moves = subcommand === "checkout"
+    ? checkoutMovesBranch(rest, cwd, environment, { ...pinned, pinnedBranch: pinned.pinnedBranch })
     : subcommand === "switch" ? switchMovesBranch(rest, cwd, environment, pinned.pinnedBranch)
     : subcommand === "branch" ? branchRenamesPinned(rest, cwd, environment, pinned.pinnedBranch)
     : word(rest[0], cwd, environment) === "branch";
   return moves ? "branch" : null;
+}
+
+/**
+ * A forge CLI's change-request checkout (`gh pr checkout`, `glab mr checkout`) switches the
+ * repository in the current directory to that change's branch, so inside a pinned worktree it is
+ * the same move as `git switch` (#1650).
+ */
+function forgeCheckoutVerdict(
+  executable: string,
+  words: readonly ShellToken[],
+  cwd: string,
+  environment: ReadonlyMap<string, string>,
+  protections: readonly ManagedWorktreeProtection[],
+): Verdict {
+  const group = word(words[0], cwd, environment);
+  const action = word(words[1], cwd, environment);
+  const checkout = executable === "gh" ? group === "pr" && action === "checkout"
+    : executable === "glab" && group === "mr" && action === "checkout";
+  return checkout && pinnedWorktreeAt(cwd, protections)?.pinnedBranch ? "branch" : null;
 }
 
 /**
@@ -1173,6 +1284,9 @@ function commandVerdict(
       gitWorktreeVerdict(words, cwd, environment, protections),
       gitBranchVerdict(words, cwd, environment, protections),
     ]);
+  }
+  if (executable === "gh" || executable === "glab") {
+    return forgeCheckoutVerdict(executable, words, cwd, environment, protections);
   }
   if (["rm", "rmdir", "unlink", "trash", "trash-put", "remove-item", "del", "rd"].includes(executable)) {
     return strongest(removerVerdicts(words, cwd, environment, protections));
@@ -1300,7 +1414,9 @@ function commandVerdict(
  * detaches, or renames that branch (`gitBranchVerdict`) is refused with a pointer to
  * `wollipog worktree create`, instead of silently parking the session in worktree recovery. Only a
  * protection carrying `pinnedBranch` is judged this way; a worktree the session created for
- * another branch is not.
+ * another branch is not. Git prefers a commit to a path for a lone `checkout` operand, so for one
+ * that also exists on disk that judgement reads the worktree's ref store (`mayNameCommit`): the
+ * only Git state this module reads, and only as plain files.
  *
  * What an operand RESOLVES to is the other half (#1324). A command is judged in the environment the
  * provider's shell starts from — the one the runner passed it, which is where
