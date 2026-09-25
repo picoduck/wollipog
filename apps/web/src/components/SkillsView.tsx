@@ -362,7 +362,7 @@ export function SkillsView() {
     await refreshMachines();
   };
 
-  /** A v183 runner may keep copies aside without reporting them, so its update notice stays reachable. */
+  /** A v183 or v184 runner may keep copies aside without reporting them, so its update notice stays reachable. */
   const keptAsideUnreported = useMemo(() => runners.some((runner) => runnerSupportsProtocol(runner.protocolVersion, "skillDrift") &&
     !runnerSupportsProtocol(runner.protocolVersion, "skillKeptAsideCopies")), [runners]);
   const orphanCount = useMemo(() => runners.reduce((count, runner) =>

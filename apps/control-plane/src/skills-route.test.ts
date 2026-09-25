@@ -542,7 +542,7 @@ test("POST /api/runners/:id/skills/sync gates offline and capability, persists t
   assert.equal((await app.inject({ method: "GET", url: "/api/runners/runner-drift/skills" })).json().driftReporting,
     "supported");
   assert.equal(compatibleEmpty.json().keptAsideReporting, "unsupported",
-    "an empty kept-aside list from a pre-v184 runner is never presented as verified");
+    "an empty kept-aside list from a pre-v185 runner is never presented as verified");
   assert.deepEqual(compatibleEmpty.json().orphaned, []);
   db.registerRunner(runnerMeta("runner-kept-aside"), 30, RUNNER_CAPABILITY_MIN_PROTOCOL.skillKeptAsideCopies);
   const keptAsideId = "0f0e0d0c-0b0a-4908-8706-050403020100";

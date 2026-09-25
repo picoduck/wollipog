@@ -3542,7 +3542,7 @@ export interface RunnerSkillStateRecord {
   removalsUpdatedAt?: number;
   /** Authoritative drifted store copies from a v183 runner; empty for older runners. */
   drift: SkillDriftState[];
-  /** Authoritative kept-aside store copies from a v184 runner; empty for older runners. */
+  /** Authoritative kept-aside store copies from a v185 runner; empty for older runners. */
   keptAside: SkillKeptAsideCopy[];
   /** Kept-aside copies the runner or this record's bound left out of `keptAside`. */
   keptAsideOmitted?: number;

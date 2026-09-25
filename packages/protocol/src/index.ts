@@ -835,7 +835,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v183 runners report hand-edited store copies in `skills_state.drift`, hold them, and accept
    * correlated `skill_drift` read and restore commands. */
   skillDrift: 183,
-  /** v184 runners report edited copies kept aside in the store in `skills_state.keptAside` and
+  /** v185 runners report edited copies kept aside in the store in `skills_state.keptAside` and
    * accept correlated `skill_kept_aside` read and discard commands. */
   skillKeptAsideCopies: 185,
   sessionAgentNaming: 93,
@@ -1464,20 +1464,20 @@ export interface SkillDriftResultMessage {
   error?: string;
 }
 
-/** An edited store copy the runner moved aside instead of deleting (protocol v184): a restore
+/** An edited store copy the runner moved aside instead of deleting (protocol v185): a restore
  * replaced a copy that could not be read, a writer changed the replaced copy after the swap, or the
  * swap could not be completed. It stays at `<dataDir>/skills/store/.drift-<id>`, served by no link,
  * until an owner or admin imports or discards it. */
 export interface SkillKeptAsideCopy {
   /** Lowercase UUID of the store entry `.drift-<id>`. */
   id: string;
-  /** Skill the copy belonged to. A copy kept aside before v184 has no record, so its name is read
+  /** Skill the copy belonged to. A copy kept aside before v185 has no record, so its name is read
    * from its SKILL.md frontmatter when the copy is readable, and is otherwise absent. */
   name?: string;
-  /** Version digest and variant the copy was published as; absent for a copy kept aside before v184. */
+  /** Version digest and variant the copy was published as; absent for a copy kept aside before v185. */
   digest?: string;
   variant?: SkillInvocationPolicy;
-  /** Epoch milliseconds when the runner kept the copy aside; absent before v184. */
+  /** Epoch milliseconds when the runner kept the copy aside; absent before v185. */
   keptAsideAt?: number;
   /** Canonical manifest digest of the copy as it is now. Absent when it is not readable skill content. */
   observedDigest?: string;
@@ -1489,7 +1489,7 @@ export interface SkillKeptAsideCopy {
   detail?: string;
 }
 
-/** Correlated command for one kept-aside copy (protocol v184). `read` returns its bounded files;
+/** Correlated command for one kept-aside copy (protocol v185). `read` returns its bounded files;
  * `discard` requires explicit confirmation and names the reviewed observation, and the runner
  * deletes the copy only while it still matches. */
 export interface SkillKeptAsideMessage {
@@ -8148,10 +8148,10 @@ export interface SkillsStateMessage {
   /** v183 authoritative full replacement: every drifted store copy on this machine. Older runners
    * omit it and older control planes ignore it. */
   drift?: SkillDriftState[];
-  /** v184 authoritative full replacement: every edited copy kept aside in the store, oldest first, up
+  /** v185 authoritative full replacement: every edited copy kept aside in the store, oldest first, up
    * to a bound. Older runners omit it and older control planes ignore it. */
   keptAside?: SkillKeptAsideCopy[];
-  /** v184: kept-aside copies beyond that bound, so an omitted copy is still accounted for. */
+  /** v185: kept-aside copies beyond that bound, so an omitted copy is still accounted for. */
   keptAsideOmitted?: number;
   error?: string;
 }

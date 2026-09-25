@@ -744,7 +744,7 @@ export function registerSkillRoutes(app: FastifyInstance, deps: SkillsRouteDeps)
       ) ? "supported" : "unsupported",
       // An older runner never reports drift, so an empty list from it proves nothing.
       driftReporting: runnerSupportsProtocol(runner.protocolVersion, "skillDrift") ? "supported" : "unsupported",
-      // Likewise for copies a restore kept aside, which only a v184 runner reports.
+      // Likewise for copies a restore kept aside, which only a v185 runner reports.
       keptAsideReporting: runnerSupportsProtocol(runner.protocolVersion, "skillKeptAsideCopies") ? "supported" : "unsupported",
       orphaned: principal ? listOrphanedSkillCopies(db, principal, id) : [],
     };

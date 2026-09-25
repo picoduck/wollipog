@@ -1,6 +1,6 @@
 /**
  * Correlated read and confirmed restore of one drifted skill store copy (protocol v183), and read and
- * confirmed discard of one copy a restore kept aside (protocol v184).
+ * confirmed discard of one copy a restore kept aside (protocol v185).
  *
  * Callers serialize these with reconciliation and store GC. Only runner-owned store content is read,
  * replaced, or deleted; no harness link is touched here. A successful restore or discard is followed

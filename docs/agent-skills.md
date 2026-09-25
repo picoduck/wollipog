@@ -94,16 +94,18 @@ the Skills view lists the copy under Orphaned Copies.
 ### Orphaned Copies
 
 Two kinds of edited copy have no library skill page to appear on. While any machine reports one,
-the skill list starts with an **Orphaned Copies** entry that lists them per machine:
+or runs a version that keeps copies aside without reporting them, the skill list starts with an
+**Orphaned Copies** entry that lists them per machine:
 
 - **Kept-aside copies.** When a restore replaces a copy that was reported as unreadable, when a
   writer that still had a file open changes the replaced copy after the swap, or when a failed swap
   cannot put a copy back, the runner moves the copy to `<dataDir>/skills/store/.drift-<id>` instead
-  of deleting it. Before the move, a protocol 184 runner records which skill, version, and variant
+  of deleting it. Before the move, a protocol 185 runner records which skill, version, and variant
   the copy came from, and when, in `.drift-<id>.json` beside it. It reports every kept-aside copy in
   the additive `skills_state.keptAside` field on each reconciliation. A copy kept aside by a
-  protocol 183 runner has no record. Its skill name is read from its `SKILL.md` frontmatter when it
-  is readable, and its version and time show as unknown. Store GC never removes either entry.
+  protocol 183 or 184 runner has no record. Its skill name is read from its `SKILL.md` frontmatter
+  when it is readable, and its version and time show as unknown. Store GC never removes either
+  entry.
 - **Edited copies of deleted skills.** A drifted copy whose skill no longer exists in the library.
   The runner keeps its links while they serve it. It moves back to a skill's Deployment section
   when a skill with the same name exists again.
@@ -138,8 +140,8 @@ a skill the viewer cannot access is not listed. Owners and admins have two actio
   is unreadable, it is kept aside instead and then listed as a kept-aside copy.
 
 Older runners report no kept-aside copies, and the per-machine API labels their state
-`keptAsideReporting: "unsupported"` so an empty list is not presented as verified. A protocol 183
-runner's edited copies of deleted skills are still listed and can be resolved. Older control planes
+`keptAsideReporting: "unsupported"` so an empty list is not presented as verified. A protocol 183 or
+184 runner's edited copies of deleted skills are still listed and can be resolved. Older control planes
 ignore the new field. Limitations: a fingerprint relies on file change times, so a same-size rewrite
 within the same filesystem timestamp tick as the reported observation could go unnoticed; kernels
 with fine-grained change times close that window. As with any deletion, a write through an already
@@ -695,7 +697,7 @@ on every registration, which makes durability trivial (no receipt outbox needed)
 - Manifest cache checks and reconciliation share the same native-harness/manual-variant policy, so
   discovery changes fail closed instead of letting the two phases disagree about required content.
 - **Runner→CP `skills_state`** — deployed digests, link health, conflicts, unmanaged skills, the
-  pass's bounded managed-link removals, (protocol 183) drifted store copies, and (protocol 184)
+  pass's bounded managed-link removals, (protocol 183) drifted store copies, and (protocol 185)
   kept-aside copies. Deployed state, unmanaged inventory, drift, kept-aside copies, and the pass
   error are authoritative full replacements modeled on
   `SubscriptionUsageInventoryMessage`. Removals

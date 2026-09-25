@@ -1,6 +1,6 @@
 /**
  * Orphaned edited skill copies: edited copies a machine keeps that no library skill page shows.
- * A copy is orphaned when a restore kept it aside in the runner's store (protocol v184
+ * A copy is orphaned when a restore kept it aside in the runner's store (protocol v185
  * `keptAside`), or when it is a drifted copy (v183 `drift`) whose skill no longer exists in the
  * library.
  *

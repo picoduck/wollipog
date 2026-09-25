@@ -1,5 +1,5 @@
 /**
- * Edited skill store copies that a restore kept aside instead of deleting (protocol v184).
+ * Edited skill store copies that a restore kept aside instead of deleting (protocol v185).
  *
  * A restore that cannot fence a copy on its content (it was reported unreadable), finds the replaced
  * copy changed after the swap, or cannot finish the swap moves the copy to `<store>/.drift-<id>`.

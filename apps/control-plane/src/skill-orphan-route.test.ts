@@ -362,7 +362,7 @@ test("orphan resolution requires a capable, online runner and reauthorizes after
   older.db.setRunnerSkillState("runner-1", { deployed: [], unmanaged: [], drift: [
     { name: "gone", digest: "a".repeat(64), variant: "agent", observedDigest: "b".repeat(64), held: false },
   ] });
-  // A v183 runner still resolves a deleted skill's drift; it cannot report kept-aside copies.
+  // An older runner with drift still resolves a deleted skill's drift; it cannot report kept-aside copies.
   assert.equal(listOrphanedSkillCopies(older.db, owner, "runner-1").length, 1);
   const kept = await discard(older.app, { kind: "kept_aside", id, observedDigest: "b".repeat(64), confirmation: "explicit" });
   assert.equal(kept.statusCode, 409, "an older runner never reports kept-aside copies");
