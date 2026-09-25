@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import {
   closeSync,
   existsSync,
+  futimesSync,
   lstatSync,
   mkdirSync,
   openSync,
@@ -13,6 +14,7 @@ import {
   renameSync,
   rmSync,
   symlinkSync,
+  utimesSync,
   writeFileSync,
   writeSync,
 } from "node:fs";
@@ -515,18 +517,22 @@ test("a kept-aside copy changed after its fence check, or during removal, is kep
       "the replacement is put back under the entry's name, never unlinked");
     assert.deepEqual(leftovers(), []);
 
-    // A write through a handle opened before the discard lands just before the unlink: kept.
+    // A write through a handle opened before the discard lands just before the unlink: kept. The write
+    // keeps the size, and may land in the same timestamp tick, so only the reviewed content reveals it.
     reset();
+    utimesSync(join(dir, "SKILL.md"), 1_000, 1_000);
     const handle = openSync(join(dir, "SKILL.md"), "r+");
     try {
       const held = run({ removal: { beforeUnlink: (relative) => {
-        if (relative === "SKILL.md") writeSync(handle, "written through an open handle, longer than before\n", 0);
+        if (relative !== "SKILL.md") return;
+        writeSync(handle, "+++", 0);
+        futimesSync(handle, 1_000, 1_000);
       } } });
       assert.equal(held.status, "rejected");
     } finally {
       closeSync(handle);
     }
-    assert.match(readFileSync(join(dir, "SKILL.md"), "utf8"), /^written through an open handle, longer than before\n/);
+    assert.match(readFileSync(join(dir, "SKILL.md"), "utf8"), /^\+\+\+\nname: beta\n/);
     assert.deepEqual(leftovers(), []);
   } finally {
     rmSync(roots.root, { recursive: true, force: true });

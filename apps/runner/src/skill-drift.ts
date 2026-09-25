@@ -33,6 +33,7 @@ import {
   keptAsideStamps,
   observeKeptAsideCopy,
   removeKeptAsideRecord,
+  reviewedContents,
   removeKeptAsideTree,
   sameKeptAsideStamps,
   writeKeptAsideRecord,
@@ -229,7 +230,10 @@ export function handleSkillDrift(options: {
     } else {
       // Every entry is checked against the verified state immediately before it is removed, so a write
       // that lands during the removal is kept aside with whatever was not yet removed.
-      removeKeptAsideTree(quarantine, settled, options.hooks?.removal ?? {});
+      removeKeptAsideTree(quarantine, settled, {
+        ...options.hooks?.removal,
+        ...(discarded.readable ? { contents: reviewedContents(discarded.files) } : {}),
+      });
       removeKeptAsideRecord(storeRoot, quarantineId);
     }
   } catch (error) {
@@ -293,7 +297,10 @@ export function handleSkillKeptAside(options: {
   }
   options.hooks?.beforeRemove?.(dir);
   try {
-    removeKeptAsideTree(dir, settled, options.hooks?.removal ?? {});
+    removeKeptAsideTree(dir, settled, {
+      ...options.hooks?.removal,
+      ...(copy.readable ? { contents: reviewedContents(copy.files) } : {}),
+    });
   } catch (error) {
     options.log?.(`skill store: could not remove the kept-aside copy .drift-${id}: ${errorText(error)}`);
     return reject(`The kept-aside copy could not be removed completely: ${errorText(error)}. Refresh the machine state to see what remains.`);

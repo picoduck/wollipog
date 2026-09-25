@@ -28,7 +28,7 @@ import {
   type BigIntStats,
 } from "node:fs";
 import { join } from "node:path";
-import { validSkillName, type SkillInvocationPolicy, type SkillKeptAsideCopy } from "@wollipog/protocol";
+import { SKILL_MAX_FILE_BYTES, validSkillName, type SkillFile, type SkillInvocationPolicy, type SkillKeptAsideCopy } from "@wollipog/protocol";
 import { readStoreSkillCopy } from "./skill-store-copy.js";
 
 export const KEPT_ASIDE_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
@@ -258,8 +258,29 @@ function preserveFromHandle(fd: number, paths: readonly string[], mode: bigint):
   }
 }
 
-/** Removal seams for tests. */
+/** SHA-256 of each reviewed skill file's bytes, keyed by path, for a removal to check what it unlinked. */
+export function reviewedContents(files: readonly SkillFile[]): Map<string, string> {
+  return new Map(files.map((file) => [file.path, createHash("sha256").update(Buffer.from(file.content, file.encoding)).digest("hex")]));
+}
+
+/** SHA-256 of everything a handle's file holds, or undefined when it exceeds a skill file's size. */
+function handleContentDigest(fd: number, size: bigint): string | undefined {
+  if (size > BigInt(SKILL_MAX_FILE_BYTES)) return undefined;
+  const buffer = Buffer.alloc(Number(size) + 1);
+  let length = 0;
+  while (length < buffer.length) {
+    const read = readSync(fd, buffer, length, buffer.length - length, length);
+    if (!read) break;
+    length += read;
+  }
+  return length === Number(size) ? createHash("sha256").update(buffer.subarray(0, length)).digest("hex") : undefined;
+}
+
+/** Removal options: the reviewed content of readable files, and seams for tests. */
 export interface KeptAsideRemovalHooks {
+  /** Reviewed bytes by path (see reviewedContents). Each such file's content is checked through its
+   * handle after it is unlinked, so a write that timestamps cannot reveal is still caught. */
+  contents?: ReadonlyMap<string, string>;
   anchored?: boolean;
   /** After an entry is verified under its name. */
   afterVerify?: (relative: string) => void;
@@ -273,7 +294,8 @@ export interface KeptAsideRemovalHooks {
  * verified. Each entry is checked under its name, then moved to a private name in the same directory,
  * so a replacement saved over its name (an editor's atomic save) is never touched, and checked again
  * there. A file is unlinked while a handle to it is held; if its size or modification time moved since
- * the check, a write landed first, and those bytes are written back. Any change, addition, or
+ * the check, or a reviewed file's content no longer matches the review, a write landed first, and those
+ * bytes are written back. Any change, addition, or
  * replacement stops the removal and keeps the entry and everything not yet removed. Links are unlinked,
  * never traversed. Before a directory is listed and before every rename, unlink, or rmdir, each
  * directory from the copy down to the current one must still be the same real directory in its place,
@@ -346,7 +368,9 @@ export function removeKeptAsideTree(
       }
       unlinkSync(aside);
       const after = fstatSync(fd, { bigint: true });
-      if (after.size !== stat.size || after.mtimeNs !== stat.mtimeNs) {
+      const reviewed = options.contents?.get(relative);
+      if (after.size !== stat.size || after.mtimeNs !== stat.mtimeNs ||
+          (reviewed !== undefined && handleContentDigest(fd, after.size) !== reviewed)) {
         // Written through a handle opened before the discard: keep those bytes.
         preserveFromHandle(fd, [original, aside], stat.mode);
         throw new CopyChanged();
