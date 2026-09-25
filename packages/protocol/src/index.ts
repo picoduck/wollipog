@@ -2111,10 +2111,14 @@ export interface OrchestratorCampaignProjection {
     total: number;
     active: number;
     waitingHuman: number;
+    /** Unverified children that failed, stopped, or are held (#1650); none of them is progressing. */
     blocked: number;
     verified: number;
     cleanupPending: number;
   };
+  /** Unverified children held from starting their next turn, with how to clear each (#1650).
+   * Bounded; `children.blocked` stays the full count. Omitted when there are none. */
+  heldChildren?: Array<{ sessionId: string; holds: SessionHoldView[] }>;
   pendingDecisions: { human: number; orchestrator: number };
   /** All unresolved descendant requests, including provider questions/approvals and typed gates. */
   pendingRequests?: {
@@ -4053,6 +4057,24 @@ export interface DescendantRequestView {
   request: PendingApproval;
 }
 
+/** A descendant that cannot start its next turn until a condition clears (#1650). Listed beside
+ * requests because it has nothing to answer: its holds name what is wrong and how to clear it. */
+export interface DescendantBlockedChildView {
+  sessionId: string;
+  sessionTitle: string;
+  runnerId: string;
+  runnerOnline: boolean;
+  eventEpoch: number;
+  status: SessionStatus;
+  holds: SessionHoldView[];
+}
+
+/** `GET /api/sessions/:id/descendant-requests`. `blockedChildren` is omitted by older servers. */
+export interface DescendantRequestsView {
+  requests: DescendantRequestView[];
+  blockedChildren?: DescendantBlockedChildView[];
+}
+
 export type DescendantRequestResolution =
   | { action: "answer"; answers: Record<string, string | string[]> }
   | { action: "dismiss" }
@@ -5577,6 +5599,67 @@ export interface WorktreeRecoveryView {
   detail: string;
 }
 
+/** The step that clears a worktree-recovery hold, naming the exact tools. Shared by the 409 that
+ * refuses a prompt, the hold a parent sees, and anything else that must tell someone how to
+ * unblock the session (#1650). */
+export function worktreeRecoveryAction(recovery: Pick<WorktreeRecoveryView, "selectedPath" | "expectedBranch">): string {
+  // The example is meant to be pasted, so a path with spaces or shell syntax is quoted.
+  const shellWord = (value: string) =>
+    /^[\w@%+=:,./-]+$/u.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
+  return `Restore branch ${recovery.expectedBranch} in ${recovery.selectedPath} ` +
+    `(for example \`git -C ${shellWord(recovery.selectedPath)} switch ${shellWord(recovery.expectedBranch)}\`) and select that ` +
+    "worktree again with select_worktree, or select or create another worktree for this session with " +
+    "select_worktree or create_worktree.";
+}
+
+/**
+ * Why a session cannot start its next turn although nothing is asking a question (#1650). A hold
+ * is not a request: there is nothing to answer, only a condition to clear, so it is reported
+ * beside requests rather than as one. Every surface that shows a blocked session — the session
+ * itself, its parent's descendant view, and the campaign projection — reads this one shape, and a
+ * later runner-side hold adds a kind here rather than a surface of its own.
+ */
+export type SessionHoldKind = "worktree_recovery";
+
+/** A resume the control plane owes the session and will deliver once the hold clears. */
+export interface HeldSessionResumeView {
+  kind: "workflow_decision_resolution";
+  /** The resolved workflow decision whose outcome is waiting to be delivered. */
+  occurrenceId: string;
+  since: number;
+}
+
+export interface SessionHoldView {
+  kind: SessionHoldKind;
+  /** Stable for one incident; a later incident of the same kind has a new identity. */
+  holdId: string;
+  since: number;
+  /** What is held, in one bounded sentence. */
+  reason: string;
+  /** What clears it, naming the exact tools. */
+  recoveryAction: string;
+  /** Resumes retained until the hold clears; each is delivered exactly once afterward. */
+  heldResumes?: HeldSessionResumeView[];
+}
+
+/** The holds a session's own state implies. Pure, so every surface derives them identically. */
+export function sessionHolds(
+  session: { worktreeRecovery?: WorktreeRecoveryView | null },
+  heldResumes: HeldSessionResumeView[] = [],
+): SessionHoldView[] {
+  const recovery = session.worktreeRecovery;
+  if (!recovery) return [];
+  return [{
+    kind: "worktree_recovery",
+    holdId: recovery.recoveryId,
+    since: recovery.detectedAt,
+    // The runner's own bounded account of what failed: a switched branch, a missing path, and so on.
+    reason: recovery.detail,
+    recoveryAction: worktreeRecoveryAction(recovery),
+    ...(heldResumes.length ? { heldResumes } : {}),
+  }];
+}
+
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
   id: string;
@@ -5626,6 +5709,9 @@ export interface SessionView {
   historyQuarantine?: ProviderHistoryQuarantineView;
   /** The provider is parked until this session selects or creates a verified replacement tree. */
   worktreeRecovery?: WorktreeRecoveryView;
+  /** Conditions that keep the next turn from starting, with the step that clears each (#1650).
+   * Omitted when there are none, and by control planes that predate it. */
+  holds?: SessionHoldView[];
   /** Durable runner-observed Claude background-work lifecycle; absent when not applicable. */
   backgroundWorkState?: BackgroundWorkState;
   /** Explicit provider capability boundary. Omitted by pre-v83 control planes. */

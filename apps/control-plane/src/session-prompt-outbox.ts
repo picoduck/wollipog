@@ -8,7 +8,7 @@ import {
   type DurableSessionCommandUpdateMessage,
 } from "@wollipog/protocol";
 import { automationCommandDigest, canonicalAutomationCommandJson } from "./automation-command-outbox.js";
-import type { ControlPlaneDb, SessionPromptCommandRecord } from "./db.js";
+import type { ControlPlaneDb, SessionPromptCommandRecord, WorkflowDecisionResumeState } from "./db.js";
 import type { Hub } from "./hub.js";
 
 type Receipt = DurableSessionCommandResultMessage | DurableSessionCommandUpdateMessage;
@@ -54,6 +54,32 @@ export class SessionPromptOutbox {
       payloadSha256: automationCommandDigest(command),
       expiresAt: now + RECEIPT_HORIZON_MS,
       now,
+    });
+  }
+
+  /** Stage the command that resumes a child after its workflow decision resolves, bound to that
+   * decision in the same transaction (#1650). Throws, staging nothing, when the resume is no
+   * longer in the `from` state the caller observed. */
+  stageWorkflowDecisionResume(
+    occurrenceId: string,
+    from: WorkflowDecisionResumeState | null,
+    sessionId: string,
+    runnerId: string,
+    command: DurableSessionCommand,
+    now = Date.now(),
+  ): SessionPromptCommandRecord {
+    return this.db.stageWorkflowDecisionResume({
+      occurrenceId,
+      from,
+      command: {
+        commandId: `prompt_${randomUUID()}`,
+        sessionId,
+        runnerId,
+        payloadJson: canonicalAutomationCommandJson(command),
+        payloadSha256: automationCommandDigest(command),
+        expiresAt: now + RECEIPT_HORIZON_MS,
+        now,
+      },
     });
   }
 

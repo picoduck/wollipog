@@ -82,6 +82,7 @@ import {
   runnerSupportsProtocol,
   validatePromptImageInputs,
   validateQuestionAnswers,
+  worktreeRecoveryAction,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
@@ -900,6 +901,13 @@ function sessionCommandAuthorizationError(
 
 function configsEqual(left: SessionConfig | undefined, right: SessionConfig | undefined): boolean {
   return JSON.stringify(normalizedConfig(left)) === JSON.stringify(normalizedConfig(right));
+}
+
+/** A linked worktree now on another branch, refused with the step that recovers it (#1650): the
+ * bare message used to leave a caller, often an Orchestrator, to work the recovery out by hand. */
+function worktreeBranchChanged(summary: string, path: string, expected: string, actual: string): Error {
+  return new Error(`${summary}: ${path} is on ${actual}, not ${expected}. ` +
+    worktreeRecoveryAction({ selectedPath: path, expectedBranch: expected }));
 }
 
 export class SessionManager {
@@ -2426,7 +2434,9 @@ export class SessionManager {
         ownerHash: this.runnerOwnerHash,
         allowedProjectPaths: [worktree.path],
       });
-      if (verified.branch !== worktree.branch) throw new Error("worktree branch changed before setup retry");
+      if (verified.branch !== worktree.branch) {
+        throw worktreeBranchChanged("worktree branch changed before setup retry", worktree.path, worktree.branch, verified.branch);
+      }
       const setup = await this.prepareWorktreeSetup(meta, worktree);
       if (setup === "cancelled") throw new Error("worktree setup was cancelled");
       if (setup === "invalid") throw new Error(worktree.setupConfig?.status === "invalid"
@@ -2496,7 +2506,9 @@ export class SessionManager {
       const existing = this.attributedWorktrees(meta)
         .find((item) => sameWorktreePath(meta.context, item.path, attached.path));
       if (existing && existing.branch !== attached.branch) {
-        throw new Error("worktree branch changed since it was linked to this session");
+        throw worktreeBranchChanged(
+          "worktree branch changed since it was linked to this session", existing.path, existing.branch, attached.branch,
+        );
       }
       // Only the execution context matters here; the read touches no worktree root or project path.
       const attachedDefaultBranch = await readRepositoryDefaultBranch(meta.repoPath, { context: meta.context });
@@ -2585,7 +2597,9 @@ export class SessionManager {
         allowedProjectPaths: [worktree.path],
       });
       if (verified.branch !== worktree.branch) {
-        throw new Error("worktree branch changed since it was linked to this session");
+        throw worktreeBranchChanged(
+          "worktree branch changed since it was linked to this session", worktree.path, worktree.branch, verified.branch,
+        );
       }
       const selected = { ...worktree, path: verified.path };
       if (selected.setup?.status === "failed") {

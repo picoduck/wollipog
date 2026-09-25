@@ -1887,3 +1887,44 @@ test("attach_session_artifact refuses before reading or uploading when the reque
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("a held child reports its hold and recovery action through get_session and list_descendant_requests (#1650)", async () => {
+  const recovery = {
+    recoveryId: "worktree-recovery:switched",
+    detectedAt: 5,
+    selectedPath: "/repos/x/.agent-worktrees/s_child",
+    expectedBranch: "agent/s_child",
+    detail: "the selected worktree could not be verified before a live turn: it is now on branch fix/x instead of agent/s_child",
+  };
+  const hold = {
+    kind: "worktree_recovery",
+    holdId: recovery.recoveryId,
+    since: 5,
+    reason: recovery.detail,
+    recoveryAction: "Restore branch agent/s_child in /repos/x/.agent-worktrees/s_child and select that worktree again with select_worktree.",
+    heldResumes: [{ kind: "workflow_decision_resolution", occurrenceId: "wd_1", since: 6 }],
+  };
+  const blockedChild = {
+    sessionId: "s_child", sessionTitle: "Held child", runnerId: "r1", runnerOnline: true, eventEpoch: 0,
+    status: "input_required", holds: [hold],
+  };
+  const { deps } = makeDeps((call) => call.url.endsWith("/descendant-requests")
+    ? { status: 200, body: { requests: [], blockedChildren: [blockedChild] } }
+    : { status: 200, body: { session: {
+      id: "s_child", title: "Held child", status: "input_required", pendingApproval: null,
+      worktreeRecovery: recovery, holds: [hold],
+    } } });
+  deps.orchestrator = true;
+  const session = resultJson(await callTool(deps, "get_session", { sessionId: "s_child" })).session;
+  assert.deepEqual(session.holds, [hold], "the hold and its recovery action survive the field map");
+  assert.deepEqual(session.worktreeRecovery, recovery);
+  assert.deepEqual(resultJson(await callTool(deps, "list_descendant_requests")), {
+    requests: [], truncated: false, limit: 128, blockedChildren: [blockedChild],
+  });
+
+  // A session with nothing holding it carries no hold field at all.
+  const idle = makeDeps(() => ({ status: 200, body: { session: { id: "s_idle", title: "Idle", status: "idle" } } }));
+  const plain = resultJson(await callTool(idle.deps, "get_session", { sessionId: "s_idle" })).session;
+  assert.equal(Object.hasOwn(plain, "holds"), false);
+  assert.equal(plain.worktreeRecovery, null);
+});

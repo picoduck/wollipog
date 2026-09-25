@@ -36,6 +36,7 @@ import {
   pendingRequests,
   removePendingRequest,
   parentControlRequestEligible,
+  sessionHolds,
   normalizeAgentHarnessIdentity,
   agentContextKey,
   runnerSupportsProtocol,
@@ -78,6 +79,8 @@ import {
   type ProviderAccountSwitchFailureView,
   type ProviderHistoryQuarantineView,
   type WorktreeRecoveryView,
+  type HeldSessionResumeView,
+  type SessionHoldView,
   type ChildSessionAttentionOwner,
   type ManagedBackgroundJobSnapshot,
   type ManagedBackgroundJobView,
@@ -726,6 +729,12 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   action_provider_thread_id TEXT,
   action_runner_history_epoch INTEGER,
   child_message         TEXT,
+  -- How the prompt that resumes the child after resolution is progressing (#1650). NULL for a
+  -- decision resolved before this was recorded, or resumed over a runner that cannot report an
+  -- exact not-delivered receipt; see WorkflowDecisionResumeState.
+  resume_state          TEXT,
+  resume_command_id     TEXT,
+  resume_updated_at     INTEGER,
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE,
   FOREIGN KEY (controlling_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
@@ -812,7 +821,8 @@ CREATE TABLE IF NOT EXISTS orchestrator_campaign_events (
   event_id            TEXT NOT NULL UNIQUE,
   campaign_session_id TEXT NOT NULL,
   kind                TEXT NOT NULL CHECK (kind IN
-                       ('request_actionable','request_resolved','child_ready','human_blockers_cleared')),
+                       ('request_actionable','request_resolved','child_ready','human_blockers_cleared',
+                        'child_blocked')),
   subject_session_id  TEXT,
   occurrence_id       TEXT,
   subject_status      TEXT,
@@ -2777,7 +2787,20 @@ export type CampaignContinuationEventKind =
   | "request_actionable"
   | "request_resolved"
   | "child_ready"
-  | "human_blockers_cleared";
+  | "human_blockers_cleared"
+  /** A child became held from starting its next turn (#1650); `occurrenceId` is the hold's id. */
+  | "child_blocked";
+
+/**
+ * How the prompt that resumes a child after its workflow decision resolves is progressing (#1650).
+ * `delivering`: a durable prompt command carries it. `held`: it is not sent, because the child's
+ * worktree needs recovery; the first boundary that sees the recovery cleared claims and delivers
+ * it. `delivered`: the runner started the turn. `uncertain`: the transport cannot say, so it is
+ * never re-sent. `failed`: admission refused it for another reason, as before #1650. `abandoned`:
+ * the decision or the child ended before it could be delivered.
+ */
+export type WorkflowDecisionResumeState =
+  | "delivering" | "held" | "delivered" | "uncertain" | "failed" | "abandoned";
 
 export interface CampaignContinuationEventRecord {
   seq: number;
@@ -4227,6 +4250,66 @@ function settleLegacyChildCharges(db: DatabaseSync): void {
   }
 }
 
+/** The campaign projection names at most this many held children; `children.blocked` counts all. */
+const CAMPAIGN_HELD_CHILDREN_LIMIT = 32;
+
+/**
+ * Admit the `child_blocked` campaign event (#1650). SQLite cannot alter a CHECK constraint, so an
+ * older table is rebuilt under the new one. Event sequence numbers are campaign cursors
+ * (`orchestrator_campaign_cursors.consumed_through_seq`), so every row keeps its `seq` and the
+ * AUTOINCREMENT high-water mark is carried over too: a pruned tail must never let a new event reuse
+ * a number a cursor has already passed.
+ */
+function admitChildBlockedCampaignEvents(db: DatabaseSync): void {
+  const schema = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='orchestrator_campaign_events'",
+  ).get() as { sql?: string } | undefined;
+  if (!schema?.sql || schema.sql.includes("'child_blocked'")) return;
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    db.exec("BEGIN;");
+    const highWater = (db.prepare(
+      "SELECT seq FROM sqlite_sequence WHERE name='orchestrator_campaign_events'",
+    ).get() as { seq: number } | undefined)?.seq ?? 0;
+    db.exec(`
+      CREATE TABLE orchestrator_campaign_events_v2 (
+        seq                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id            TEXT NOT NULL UNIQUE,
+        campaign_session_id TEXT NOT NULL,
+        kind                TEXT NOT NULL CHECK (kind IN
+                             ('request_actionable','request_resolved','child_ready','human_blockers_cleared',
+                              'child_blocked')),
+        subject_session_id  TEXT,
+        occurrence_id       TEXT,
+        subject_status      TEXT,
+        created_at          INTEGER NOT NULL,
+        FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (subject_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      INSERT INTO orchestrator_campaign_events_v2
+        (seq,event_id,campaign_session_id,kind,subject_session_id,occurrence_id,subject_status,created_at)
+        SELECT seq,event_id,campaign_session_id,kind,subject_session_id,occurrence_id,subject_status,created_at
+        FROM orchestrator_campaign_events;
+      DROP TABLE orchestrator_campaign_events;
+      ALTER TABLE orchestrator_campaign_events_v2 RENAME TO orchestrator_campaign_events;
+      CREATE INDEX IF NOT EXISTS idx_orchestrator_campaign_events_pending
+        ON orchestrator_campaign_events(campaign_session_id, seq);
+    `);
+    const carried = db.prepare(
+      "UPDATE sqlite_sequence SET seq=MAX(seq, ?) WHERE name='orchestrator_campaign_events'",
+    ).run(highWater);
+    if (Number(carried.changes) === 0 && highWater > 0) {
+      db.prepare("INSERT INTO sqlite_sequence (name, seq) VALUES ('orchestrator_campaign_events', ?)").run(highWater);
+    }
+    db.exec("COMMIT;");
+  } catch (error) {
+    try { db.exec("ROLLBACK;"); } catch { /* no active transaction */ }
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 export class ControlPlaneDb {
   private constructor(
     private readonly db: DatabaseSync,
@@ -4975,9 +5058,17 @@ export class ControlPlaneDb {
       "action_runner_history_epoch INTEGER",
       "child_message TEXT",
       "human_fallback TEXT",
+      "resume_state TEXT",
+      "resume_command_id TEXT",
+      "resume_updated_at INTEGER",
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_held_resume
+      ON workflow_decisions(session_id, resolved_at) WHERE resume_state='held'`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resume_command
+      ON workflow_decisions(resume_command_id) WHERE resume_state='delivering'`);
+    admitChildBlockedCampaignEvents(db);
     // An early v147 iteration used one-admission-per-turn uniqueness. Event-order correlation is
     // narrower and permits multiple distinct invocations in one provider turn.
     db.exec("DROP INDEX IF EXISTS idx_workflow_decisions_provider_turn_action");
@@ -14470,11 +14561,11 @@ export class ControlPlaneDb {
     const resolvedCampaignId = campaign.id;
     const childIds = this.campaignDescendantIds(resolvedCampaignId);
     const rows = childIds.length ? (this.stmt(
-      `SELECT id, runner_id, status, archived, worktree_path, worktrees, pending_approval
+      `SELECT id, runner_id, status, archived, worktree_path, worktrees, pending_approval, worktree_recovery
        FROM sessions WHERE id IN (${childIds.map(() => "?").join(",")})`,
     ).all(...childIds) as unknown as Array<{
       id: string; runner_id: string; status: SessionStatus; archived: number; worktree_path: string | null;
-      worktrees: string | null; pending_approval: string | null;
+      worktrees: string | null; pending_approval: string | null; worktree_recovery: string | null;
     }>) : [];
     const verified = this.validCampaignChildReportIds(resolvedCampaignId);
     const pending = this.stmt(
@@ -14499,6 +14590,7 @@ export class ControlPlaneDb {
     let blocked = 0;
     let fullyVerified = 0;
     let cleanupPending = 0;
+    const heldChildren: NonNullable<OrchestratorCampaignProjection["heldChildren"]> = [];
     for (const child of rows) {
       const childPending = pending.filter((decision) => decision.session_id === child.id);
       const approval = parseJson<PendingApproval>(child.pending_approval);
@@ -14526,8 +14618,15 @@ export class ControlPlaneDb {
       const cleanlyRetired = child.archived === 1 && child.worktree_path === null && worktrees.length === 0;
       if (reportVerified && (policy.behavior.completion === "retain" || cleanlyRetired)) fullyVerified += 1;
       else if (reportVerified && policy.behavior.completion === "stop_and_archive") cleanupPending += 1;
+      // A held child asks nothing, so it used to count as active while no turn could start (#1650).
+      const holds = !reportVerified && !isTerminal(child.status)
+        ? this.sessionHoldsFor(child.id, child.worktree_recovery)
+        : [];
       if (!reportVerified && (child.status === "failed" || child.status === "stopped")) blocked += 1;
-      else if (!reportVerified && !childHasHumanRequest) active += 1;
+      else if (holds.length) {
+        blocked += 1;
+        if (heldChildren.length < CAMPAIGN_HELD_CHILDREN_LIMIT) heldChildren.push({ sessionId: child.id, holds });
+      } else if (!reportVerified && !childHasHumanRequest) active += 1;
     }
     const followUps = this.stmt(
       `SELECT SUM(CASE WHEN duplicate_of IS NULL THEN 1 ELSE 0 END) AS unique_count,
@@ -14578,6 +14677,7 @@ export class ControlPlaneDb {
           // The human owns the gate by choice; nothing is unavailable.
           : { status: "available", effectiveOwner: "human" },
       children: { total, active, waitingHuman, blocked, verified: fullyVerified, cleanupPending },
+      ...(heldChildren.length ? { heldChildren } : {}),
       pendingDecisions: { human: pendingHuman.length, orchestrator: pendingOrchestrator.length },
       ...(resolvedCampaignId === campaignSessionId ? { pendingRequests: {
         human: pendingHuman.length + pendingGenericHuman,
@@ -14682,6 +14782,9 @@ export class ControlPlaneDb {
         `UPDATE workflow_decisions SET status='superseded', resolved_at=?
          WHERE session_id=? AND category=? AND resource_key=? AND status IN ('pending','approved')`,
       ).run(input.createdAt, input.sessionId, input.category, input.resourceKey);
+      for (const { occurrence_id: occurrenceId } of superseded) {
+        this.retireWorkflowDecisionResume(occurrenceId, input.createdAt);
+      }
       this.stmt(
         `INSERT INTO workflow_decisions
          (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
@@ -14774,12 +14877,197 @@ export class ControlPlaneDb {
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 
-  markWorkflowDecisionRevoked(occurrenceId: string, now: number): WorkflowDecisionView | null {
+  setWorkflowDecisionResume(
+    occurrenceId: string,
+    state: WorkflowDecisionResumeState,
+    commandId: string | null,
+    now: number,
+  ): void {
     this.stmt(
-      `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
-       WHERE occurrence_id=? AND status IN ('pending','approved')`,
+      `UPDATE workflow_decisions SET resume_state=?, resume_command_id=?, resume_updated_at=?
+       WHERE occurrence_id=?`,
+    ).run(state, commandId, now, occurrenceId);
+  }
+
+  /**
+   * Stage the durable command that carries a decision's resume and bind it to the decision in one
+   * transaction (#1650). A crash then leaves the resume either still owed (`from`, which the next
+   * boundary delivers) or in flight with its command (which the outbox delivers) — never both, and
+   * never neither. The resume state the caller observed must still hold, so a delivery can never be
+   * staged twice for one owed resume.
+   */
+  stageWorkflowDecisionResume(input: {
+    occurrenceId: string;
+    from: WorkflowDecisionResumeState | null;
+    command: Parameters<ControlPlaneDb["stageSessionPromptCommand"]>[0];
+  }): SessionPromptCommandRecord {
+    this.db.exec("BEGIN");
+    try {
+      const current = this.stmt("SELECT resume_state FROM workflow_decisions WHERE occurrence_id=?")
+        .get(input.occurrenceId) as { resume_state: WorkflowDecisionResumeState | null } | undefined;
+      if (!current || current.resume_state !== input.from) {
+        throw new Error("workflow decision resume changed before it could be staged");
+      }
+      const staged = this.stageSessionPromptCommand(input.command);
+      this.stmt(
+        `UPDATE workflow_decisions SET resume_state='delivering', resume_command_id=?, resume_updated_at=?
+         WHERE occurrence_id=?`,
+      ).run(staged.commandId, input.command.now, input.occurrenceId);
+      this.db.exec("COMMIT");
+      return staged;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /**
+   * The runner reported the resume's command not sent because the child's worktree needs recovery:
+   * owe the resume again and retire the not-sent row in one transaction, so it can neither be lost
+   * nor also retried by hand (#1650). False when the resume is no longer carried by that command.
+   */
+  holdWorkflowDecisionResume(occurrenceId: string, sessionId: string, commandId: string, now: number): boolean {
+    this.db.exec("BEGIN");
+    try {
+      const held = Number(this.stmt(
+        `UPDATE workflow_decisions SET resume_state='held', resume_command_id=NULL, resume_updated_at=?
+         WHERE occurrence_id=? AND resume_state='delivering' AND resume_command_id=?`,
+      ).run(now, occurrenceId, commandId).changes) === 1;
+      if (held) this.dismissTerminalSessionPromptCommand(sessionId, commandId, now);
+      this.db.exec("COMMIT");
+      return held;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  workflowDecisionResumeForCommand(commandId: string): {
+    occurrenceId: string;
+    sessionId: string;
+    state: WorkflowDecisionResumeState;
+  } | null {
+    const row = this.stmt(
+      `SELECT occurrence_id, session_id, resume_state FROM workflow_decisions
+       WHERE resume_command_id=? AND resume_state='delivering'`,
+    ).get(commandId) as { occurrence_id: string; session_id: string; resume_state: WorkflowDecisionResumeState } | undefined;
+    return row ? { occurrenceId: row.occurrence_id, sessionId: row.session_id, state: row.resume_state } : null;
+  }
+
+  /** Commands carrying an in-flight resume whose outcome is already recorded but was never applied
+   * to the decision — a receipt processed just before a restart, for example. */
+  settledWorkflowDecisionResumeCommands(runnerId?: string, limit = 100): string[] {
+    return (this.stmt(
+      `SELECT d.resume_command_id AS id FROM workflow_decisions d
+       JOIN session_prompt_commands c ON c.command_id=d.resume_command_id
+       WHERE d.resume_state='delivering' AND c.state IN ('started','completed','failed','uncertain')
+         ${runnerId ? "AND c.runner_id=?" : ""}
+       LIMIT ?`,
+    ).all(...(runnerId ? [runnerId, limit] : [limit])) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /** Resumes waiting for this session's hold to clear, oldest resolution first. */
+  heldWorkflowDecisionResumes(sessionId: string): HeldSessionResumeView[] {
+    return (this.stmt(
+      `SELECT occurrence_id, resume_updated_at FROM workflow_decisions
+       WHERE session_id=? AND resume_state='held' ORDER BY resolved_at, occurrence_id`,
+    ).all(sessionId) as unknown as Array<{ occurrence_id: string; resume_updated_at: number | null }>)
+      .map((row) => ({
+        kind: "workflow_decision_resolution" as const,
+        occurrenceId: row.occurrence_id,
+        since: row.resume_updated_at ?? 0,
+      }));
+  }
+
+  sessionsWithHeldWorkflowDecisionResumes(runnerId?: string): string[] {
+    return (this.stmt(
+      `SELECT DISTINCT d.session_id AS id FROM workflow_decisions d JOIN sessions s ON s.id=d.session_id
+       WHERE d.resume_state='held' ${runnerId ? "AND s.runner_id=?" : ""}`,
+    ).all(...(runnerId ? [runnerId] : [])) as Array<{ id: string }>).map((row) => row.id);
+  }
+
+  /** Descendants held from starting their next turn (#1650), without hydrating full views. Only a
+   * live session is held: a terminal one has nothing left to start. */
+  listSessionDescendantHolds(ancestorId: string): Array<{
+    id: string;
+    title: string;
+    runnerId: string;
+    eventEpoch: number;
+    status: SessionStatus;
+    holds: SessionHoldView[];
+  }> {
+    const rows = this.stmt(`
+      WITH RECURSIVE descendants(id) AS (
+        SELECT id FROM sessions WHERE parent_session_id=?
+        UNION
+        SELECT s.id FROM sessions s JOIN descendants d ON s.parent_session_id=d.id
+      ) SELECT s.id, s.title, s.runner_id, s.event_epoch, s.status, s.worktree_recovery
+        FROM descendants d JOIN sessions s ON s.id=d.id
+        WHERE s.id<>? AND s.worktree_recovery IS NOT NULL AND s.worktree_recovery<>''
+          AND s.status NOT IN ('completed','failed','stopped')
+        ORDER BY s.created_at DESC, s.id ASC
+    `).all(ancestorId, ancestorId) as unknown as Array<{
+      id: string; title: string; runner_id: string; event_epoch: number | null; status: SessionStatus;
+      worktree_recovery: string | null;
+    }>;
+    return rows.flatMap((row) => {
+      const holds = this.sessionHoldsFor(row.id, row.worktree_recovery);
+      return holds.length ? [{
+        id: row.id,
+        title: row.title,
+        runnerId: row.runner_id,
+        eventEpoch: row.event_epoch ?? 0,
+        status: row.status,
+        holds,
+      }] : [];
+    });
+  }
+
+  /** The holds one stored row implies; resumes are read only while a hold exists. */
+  private sessionHoldsFor(sessionId: string, worktreeRecoveryJson: string | null): SessionHoldView[] {
+    const worktreeRecovery = parseWorktreeRecovery(worktreeRecoveryJson);
+    return worktreeRecovery ? sessionHolds({ worktreeRecovery }, this.heldWorkflowDecisionResumes(sessionId)) : [];
+  }
+
+  /**
+   * A revoked or superseded decision is not announced afterward (#1650). An owed resume is
+   * abandoned. A resume still waiting in the outbox is withdrawn and its row retired. A command
+   * already handed to the runner cannot be recalled: at-least-once transport leaves that to the
+   * resume's own text, which defers to the decision record, and the record now says revoked.
+   */
+  private retireWorkflowDecisionResume(occurrenceId: string, now: number): void {
+    const row = this.stmt(
+      "SELECT session_id, resume_state, resume_command_id FROM workflow_decisions WHERE occurrence_id=?",
+    ).get(occurrenceId) as {
+      session_id: string; resume_state: WorkflowDecisionResumeState | null; resume_command_id: string | null;
+    } | undefined;
+    if (!row) return;
+    const withdrawn = row.resume_state === "delivering" && row.resume_command_id !== null &&
+      this.cancelPendingSessionPromptCommand(row.session_id, row.resume_command_id, now) === "cancelled";
+    if (withdrawn) this.dismissTerminalSessionPromptCommand(row.session_id, row.resume_command_id!, now);
+    if (row.resume_state !== "held" && !withdrawn) return;
+    this.stmt(
+      `UPDATE workflow_decisions SET resume_state='abandoned', resume_command_id=NULL, resume_updated_at=?
+       WHERE occurrence_id=?`,
     ).run(now, occurrenceId);
-    this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
+  }
+
+  markWorkflowDecisionRevoked(occurrenceId: string, now: number): WorkflowDecisionView | null {
+    // One transaction, so a restart can never leave a revoked decision with its resume still
+    // waiting to be sent.
+    this.db.exec("BEGIN");
+    try {
+      const revoked = Number(this.stmt(
+        `UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?)
+         WHERE occurrence_id=? AND status IN ('pending','approved')`,
+      ).run(now, occurrenceId).changes) === 1;
+      if (revoked) this.retireWorkflowDecisionResume(occurrenceId, now);
+      this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     return this.workflowDecisionByOccurrence(occurrenceId);
   }
 
@@ -18355,7 +18643,9 @@ export class ControlPlaneDb {
       })(),
       ...(() => {
         const worktreeRecovery = parseWorktreeRecovery(row.worktree_recovery);
-        return worktreeRecovery ? { worktreeRecovery } : {};
+        return worktreeRecovery
+          ? { worktreeRecovery, holds: this.sessionHoldsFor(row.id, row.worktree_recovery) }
+          : {};
       })(),
       ...(() => {
         const backgroundDeliveries = this.listBackgroundDeliveries(row.id, status);

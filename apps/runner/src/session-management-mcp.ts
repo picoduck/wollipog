@@ -468,6 +468,9 @@ function mapSession(s: Json): Json {
     toolCallCount: s?.toolCallCount,
     // Title only — the options/requestId belong to the human's card, not the calling session.
     pendingApproval: s?.pendingApproval?.title ?? null,
+    // What keeps the next turn from starting and the step that clears it (#1650). A held session
+    // asks nothing, so a parent otherwise saw only `input_required` with no request behind it.
+    ...(Array.isArray(s?.holds) && s.holds.length ? { holds: capArray(s.holds, 8) } : {}),
     updatedAt: s?.updatedAt,
     archived: s?.archived ?? false,
     archiveStatus: s?.archiveStatus,
@@ -890,7 +893,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "get_session",
-    description: "Get one session's full metadata by id.",
+    description: "Get one session's full metadata by id, including any hold that keeps its next turn from starting and the recovery action that clears it.",
     inputSchema: {
       type: "object",
       properties: { sessionId: { type: "string" } },
@@ -920,6 +923,7 @@ export const TOOLS: McpTool[] = [
                 permissionMode: s.permissionMode ?? null,
                 useWorktree: s.useWorktree ?? false,
                 worktreePath: s.worktreePath ?? null,
+                worktreeRecovery: s.worktreeRecovery ?? null,
                 createdAt: s.createdAt,
                 lastEventAt: s.lastEventAt ?? null,
                 messageCount: s.messageCount,
@@ -1004,7 +1008,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "list_descendant_requests",
-    description: "List exact unresolved descendant questions and approvals currently assigned to this Orchestrator. Human-owned requests remain visible only in the parent campaign UI.",
+    description: "List exact unresolved descendant questions and approvals currently assigned to this Orchestrator, and, as blockedChildren, descendants that cannot start their next turn, each with the recovery action that clears its hold. Human-owned requests remain visible only in the parent campaign UI.",
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
     handler: async (_args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
@@ -1015,11 +1019,15 @@ export const TOOLS: McpTool[] = [
       );
       if (!r.ok) return errorResult(r.message);
       const requests = Array.isArray(r.data?.requests) ? r.data.requests : [];
+      // Held descendants have nothing to answer; they are listed apart so no caller mistakes a
+      // hold for a request it could resolve (#1650). Older control planes omit the list.
+      const blockedChildren = Array.isArray(r.data?.blockedChildren) ? r.data.blockedChildren : [];
       const limit = 128;
       return textResult({
         requests: requests.slice(0, limit),
-        truncated: requests.length > limit,
+        truncated: requests.length > limit || blockedChildren.length > limit,
         limit,
+        ...(blockedChildren.length ? { blockedChildren: blockedChildren.slice(0, limit) } : {}),
       });
     },
   },

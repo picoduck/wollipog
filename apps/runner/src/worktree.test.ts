@@ -3345,6 +3345,17 @@ test("concurrent requests retain every created branch and deletion leaves attach
     execFileSync("git", ["-C", first.worktree.path, "switch", "-c", "fix/reattach-drift"]);
     await assert.rejects(manager.attachWorktree("s_multi", first.worktree.path),
       /branch changed since it was linked/);
+    // Both refusals name the step that recovers the tree (#1650).
+    for (const refused of [manager.attachWorktree("s_multi", first.worktree.path),
+      manager.selectWorktree("s_multi", first.worktree.path)]) {
+      await assert.rejects(refused, (error: Error) => {
+        assert.ok(error.message.includes(`is on fix/reattach-drift, not ${first.worktree.branch}`), error.message);
+        assert.ok(error.message.includes(`git -C ${first.worktree.path} switch ${first.worktree.branch}`), error.message);
+        assert.match(error.message, /select_worktree/u);
+        assert.match(error.message, /create_worktree/u);
+        return true;
+      });
+    }
     execFileSync("git", ["-C", first.worktree.path, "switch", first.worktree.branch]);
     await manager.attachWorktree("s_multi", attachedPath);
     assert.equal(store.readMeta("s_multi")?.worktrees?.length, 3);
