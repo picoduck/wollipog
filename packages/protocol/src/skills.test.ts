@@ -7,6 +7,7 @@ import {
   SKILL_MAX_TOTAL_BYTES,
   isSkillScriptFile,
   isSkillScriptPath,
+  shortenAtWordBoundary,
   validSkillFilePath,
   validSkillName,
   type SkillFile,
@@ -168,4 +169,16 @@ test("the Manual Only transform reverses only its exact injected line", () => {
     { path: "SKILL.md", content: "---\ndisable-model-invocation: true\nname: alpha\n---\n", encoding: "utf8" },
     files[1],
   ]);
+});
+
+test("shortenAtWordBoundary keeps text that fits and otherwise cuts between words with an ellipsis", () => {
+  assert.equal(shortenAtWordBoundary("Short enough.", 13), "Short enough.");
+  assert.equal(shortenAtWordBoundary("A request to claim, implement, or fix", 22), "A request to claim…");
+  // The bound counts the ellipsis, and a cut that lands on a space keeps the whole last word.
+  assert.equal(shortenAtWordBoundary("one two three", 8), "one two…");
+  assert.equal([...shortenAtWordBoundary("word ".repeat(400), 1024)].length <= 1024, true);
+  // A single word longer than the bound has no boundary, so it is cut inside, still marked.
+  assert.equal(shortenAtWordBoundary("x".repeat(10), 5), "xxxx…");
+  // Code points, not UTF-16 units, so an astral character is never split.
+  assert.equal(shortenAtWordBoundary("😀😀😀 😀😀", 4), "😀😀😀…");
 });

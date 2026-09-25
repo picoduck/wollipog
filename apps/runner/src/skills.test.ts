@@ -163,6 +163,13 @@ test("skill frontmatter reader is line-based, bounded, and truncating", () => {
   const meta = parseSkillFrontmatter(`---\nname: local-skill\ndescription: ${long}\n---\n\nBody`);
   assert.equal(meta.name, "local-skill");
   assert.equal(meta.description?.length, SKILL_SCAN_LIMITS.maxValueCharacters);
+  assert.ok(meta.description?.endsWith("…"));
+  // A long description of words is cut between two words, never inside one.
+  const words = "Coordinate the work. ".repeat(30).trim();
+  const cut = parseSkillFrontmatter(`---\nname: local-skill\ndescription: ${words}\n---\n`).description!;
+  assert.ok([...cut].length <= SKILL_SCAN_LIMITS.maxValueCharacters);
+  assert.ok(cut.endsWith("…") && words.startsWith(cut.slice(0, -1)));
+  assert.match(words.slice(cut.length - 1), /^[\s.]/);
 
   // An unterminated frontmatter block is body text, not partially trusted metadata.
   assert.deepEqual(parseSkillFrontmatter("---\nname: dangling\n\nBody"), {});

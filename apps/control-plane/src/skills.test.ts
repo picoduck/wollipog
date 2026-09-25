@@ -35,8 +35,15 @@ test("readSkillFrontmatter reads only name and description from a closed block",
 });
 
 test("readSkillFrontmatter bounds values and tolerates a BOM", () => {
+  // Descriptions up to the Agent Skills limit are kept whole; earlier releases cut them at 280.
   const long = readSkillFrontmatter(`﻿---\ndescription: ${"x".repeat(600)}\n---\n`);
-  assert.equal(long.description?.length, 280);
+  assert.equal(long.description, "x".repeat(600));
+  const words = "Coordinate the work carefully. ".repeat(40).trim();
+  const bounded = readSkillFrontmatter(`---\ndescription: ${words}\n---\n`).description!;
+  assert.ok(bounded.length <= 1024);
+  assert.ok(bounded.endsWith("…"));
+  assert.ok(words.startsWith(bounded.slice(0, -1)));
+  assert.match(words.slice(bounded.length - 1), /^[\s.,]/);
 });
 
 /* ------------------------------- Validation ------------------------------ */

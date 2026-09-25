@@ -5,10 +5,12 @@
 
 import { createHash } from "node:crypto";
 import {
+  SKILL_DESCRIPTION_MAX_CHARS,
   SKILL_MAX_FILE_BYTES,
   SKILL_MAX_FILES,
   SKILL_MAX_TOTAL_BYTES,
   runnerSupportsProtocol,
+  shortenAtWordBoundary,
   validSkillFilePath,
   validSkillName,
   type AgentDefinition,
@@ -28,10 +30,12 @@ import type { ControlPlaneDb, SkillAgentSelector, SkillAssignmentView } from "./
 // YAML parser would accept beyond that is treated as opaque body text.
 const FRONTMATTER_MAX_BYTES = 16 * 1024;
 const FRONTMATTER_MAX_LINES = 128;
-const FRONTMATTER_VALUE_MAX_CHARS = 280;
+// Earlier releases stored name and description cut hard at this many UTF-16 units; the startup
+// repair below recognises exactly that cut.
+const LEGACY_FRONTMATTER_VALUE_MAX_CHARS = 280;
 
-/** Read `name:` / `description:` from a SKILL.md frontmatter block, bounded and best-effort. */
-export function readSkillFrontmatter(content: string): { name?: string; description?: string } {
+/** The unbounded `name:` / `description:` values of a closed SKILL.md frontmatter block. */
+function readRawSkillFrontmatter(content: string): { name?: string; description?: string } {
   const bounded = Buffer.from(content, "utf8")
     .subarray(0, FRONTMATTER_MAX_BYTES)
     .toString("utf8")
@@ -49,10 +53,42 @@ export function readSkillFrontmatter(content: string): { name?: string; descript
         (value.startsWith("'") && value.endsWith("'")))) {
       value = value.slice(1, -1).trim();
     }
-    if (value) values[match[1] as "name" | "description"] = value.slice(0, FRONTMATTER_VALUE_MAX_CHARS);
+    if (value) values[match[1] as "name" | "description"] = value;
   }
   // An unterminated frontmatter block is ordinary body text, not partially trusted metadata.
   return {};
+}
+
+/** Read `name:` / `description:` from a SKILL.md frontmatter block, bounded and best-effort. A
+ * description over the Agent Skills limit is shortened at a word boundary with an ellipsis. */
+export function readSkillFrontmatter(content: string): { name?: string; description?: string } {
+  const raw = readRawSkillFrontmatter(content);
+  return {
+    ...(raw.name ? { name: raw.name.slice(0, SKILL_DESCRIPTION_MAX_CHARS) } : {}),
+    ...(raw.description ? { description: shortenAtWordBoundary(raw.description, SKILL_DESCRIPTION_MAX_CHARS) } : {}),
+  };
+}
+
+/**
+ * Replace descriptions an earlier release cut mid-word at 280 characters. An entry is repaired only
+ * when its stored description is exactly that cut of the description in its latest version's
+ * SKILL.md, so an edited or explicit description is never touched. Descriptions are library
+ * metadata only: no version, digest, or synced file changes. Returns the repaired skill names.
+ */
+export function repairLegacySkillDescriptions(db: ControlPlaneDb, now = Date.now()): string[] {
+  const repaired: string[] = [];
+  for (const skill of db.listSkills()) {
+    if (skill.description?.length !== LEGACY_FRONTMATTER_VALUE_MAX_CHARS || !skill.latestVersion) continue;
+    const skillMd = db.getSkillVersion(skill.latestVersion.id)?.files.find((file) => file.path === "SKILL.md");
+    const bytes = skillMd ? decodedBytes(skillMd) : null;
+    if (!bytes) continue;
+    const full = readRawSkillFrontmatter(bytes.toString("utf8")).description;
+    if (!full || full.length <= LEGACY_FRONTMATTER_VALUE_MAX_CHARS ||
+        full.slice(0, LEGACY_FRONTMATTER_VALUE_MAX_CHARS) !== skill.description) continue;
+    db.updateSkill(skill.id, { description: shortenAtWordBoundary(full, SKILL_DESCRIPTION_MAX_CHARS) }, now);
+    repaired.push(skill.name);
+  }
+  return repaired;
 }
 
 /* ------------------------------- Validation ------------------------------ */
@@ -96,8 +132,8 @@ export function validateSkillPayload(input: {
     return { ok: false, error: "description must be a string" };
   }
   const explicitDescription = typeof input.description === "string" ? input.description.trim() : "";
-  if (explicitDescription.length > 1024) {
-    return { ok: false, error: "description must be 1024 characters or fewer" };
+  if (explicitDescription.length > SKILL_DESCRIPTION_MAX_CHARS) {
+    return { ok: false, error: `description must be ${SKILL_DESCRIPTION_MAX_CHARS} characters or fewer` };
   }
   if (!Array.isArray(input.files) || input.files.length === 0) {
     return { ok: false, error: "files must be a non-empty array" };

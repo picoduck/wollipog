@@ -245,6 +245,7 @@ import { registerWorkflowArtifactExportRoute } from "./artifact-export-route.js"
 import { registerRunnerCredentialRoutes } from "./runner-credential-route.js";
 import { makeSkillsSyncPusher, registerSkillRoutes } from "./skills-route.js";
 import { builtInSkills, seedBuiltInSkills } from "./built-in-skills.js";
+import { repairLegacySkillDescriptions } from "./skills.js";
 import { SKILL_GIT_AUTO_UPDATE_SWEEP_MS, SkillGitAutoUpdater, skillGitAutoUpdateIntervalMs } from "./skill-git-auto-update.js";
 import { registerPromptImageRoutes } from "./prompt-image-route.js";
 import {
@@ -2280,6 +2281,12 @@ try {
   }
 } catch (error) {
   app.log.error({ err: error }, "built-in skills could not be reconciled; the library is unchanged");
+}
+try {
+  const repaired = repairLegacySkillDescriptions(db);
+  if (repaired.length) app.log.info({ skills: repaired }, "restored skill descriptions an earlier release cut at 280 characters");
+} catch (error) {
+  app.log.error({ err: error }, "skill descriptions could not be repaired; the library is unchanged");
 }
 registerSkillRoutes(app, {
   db, hub, requestHuman, requestPrincipal, pushSkillsSync, builtInSkills: releaseBuiltInSkills,

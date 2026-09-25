@@ -67,6 +67,7 @@ import {
   SKILL_MAX_FILES,
   SKILL_MAX_FILE_BYTES,
   SKILL_MAX_TOTAL_BYTES,
+  shortenAtWordBoundary,
   validSkillFilePath,
   validSkillName,
   type AgentDefinition,
@@ -334,6 +335,12 @@ function boundedValue(value: string): string | undefined {
     : characters.slice(0, SKILL_SCAN_LIMITS.maxValueCharacters).join("");
 }
 
+/** A scanned description keeps the scan bound but never ends mid-word without an ellipsis. */
+function boundedDescription(value: string): string | undefined {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized ? shortenAtWordBoundary(normalized, SKILL_SCAN_LIMITS.maxValueCharacters) : undefined;
+}
+
 function unquoteScalar(value: string): string {
   const trimmed = value.trim();
   if (trimmed.length >= 2 && trimmed.startsWith('"') && trimmed.endsWith('"')) {
@@ -379,7 +386,8 @@ export function parseSkillFrontmatter(content: string): { name?: string; descrip
     for (const line of frontmatter) {
       const match = /^([A-Za-z][A-Za-z0-9_-]*)\s*:\s*(.*)$/.exec(line);
       if (!match || match[1]!.toLowerCase() !== key) continue;
-      return boundedValue(unquoteScalar(match[2]!));
+      const scalar = unquoteScalar(match[2]!);
+      return key === "description" ? boundedDescription(scalar) : boundedValue(scalar);
     }
     return undefined;
   };

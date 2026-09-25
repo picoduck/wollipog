@@ -4,7 +4,7 @@ import type { AgentDefinition, RunnerMetadata, SkillFile } from "@wollipog/proto
 import { ControlPlaneDb } from "./db.js";
 import { PERSONAL_ORGANIZATION_ID } from "./identity.js";
 import { builtInSkills, seedBuiltInSkills, type BuiltInSkill } from "./built-in-skills.js";
-import { resolveDesiredSkillSnapshot, validateSkillPayload } from "./skills.js";
+import { repairLegacySkillDescriptions, resolveDesiredSkillSnapshot, validateSkillPayload } from "./skills.js";
 
 const AGENTS: AgentDefinition[] = [
   { id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code" },
@@ -291,6 +291,82 @@ test("recommendation dismissal is per user", () => {
     assert.deepEqual(db.skillRecommendationDismissals("usr_b"), new Set());
     db.setSkillRecommendationDismissed("usr_a", skill.id, false, 120);
     assert.deepEqual(db.skillRecommendationDismissals("usr_a"), new Set());
+  } finally {
+    db.close();
+  }
+});
+
+const SCOPE = { organizationId: PERSONAL_ORGANIZATION_ID, owner: { kind: "organization" as const, organizationId: PERSONAL_ORGANIZATION_ID } };
+
+function describedFiles(name: string, description: string): SkillFile[] {
+  return [{ path: "SKILL.md", encoding: "utf8", content: `---\nname: ${name}\ndescription: ${description}\n---\nBody.\n` }];
+}
+
+test("the built-in orchestrate-issues description is kept whole, not cut at 280 characters", () => {
+  const skill = builtInSkills().find((entry) => entry.name === "orchestrate-issues")!;
+  const frontmatter = /^description: (.*)$/m.exec(skill.files.find((file) => file.path === "SKILL.md")!.content)![1]!;
+  assert.ok(frontmatter.length > 280);
+  assert.equal(skill.description, frontmatter);
+});
+
+test("startup restores descriptions an earlier release cut at 280 characters and nothing else", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(runnerMeta("laptop"), 10, 90);
+    // An installation seeded by the earlier release stored the hard 280-character cut.
+    seedBuiltInSkills(db, builtInSkills(), 100);
+    const builtIn = db.getSkillByName("orchestrate-issues")!;
+    const fullBuiltIn = builtIn.description!;
+    db.updateSkill(builtIn.id, { description: fullBuiltIn.slice(0, 280) }, 110);
+
+    const gitText = "Imported from Git with a long description. ".repeat(12).trim();
+    const git = validateSkillPayload({ name: "git-skill", files: describedFiles("git-skill", gitText) });
+    assert.ok(git.ok);
+    const gitSkill = db.importGitSkill({ ...git, scope: SCOPE, expectedVersionId: null,
+      source: { url: "https://example.test/skills.git", ref: "main", subdirectory: "", path: "", commit: "b".repeat(40) } });
+    db.updateSkill(gitSkill.id, { description: gitText.slice(0, 280) }, 120);
+
+    // Longer than the new limit: restored as a word-boundary cut with an ellipsis.
+    const hugeText = "Every word here is ordinary and short. ".repeat(40).trim();
+    const huge = validateSkillPayload({ name: "huge-skill", files: describedFiles("huge-skill", hugeText) });
+    assert.ok(huge.ok);
+    const hugeSkill = db.createSkill({ ...huge, description: hugeText.slice(0, 280), now: 130 });
+
+    // A user edit, even one exactly 280 characters long, is never replaced.
+    const editedText = "Edited by a person. ".repeat(20).trim();
+    const edited = validateSkillPayload({ name: "edited-skill", files: describedFiles("edited-skill", editedText) });
+    assert.ok(edited.ok);
+    const editedSkill = db.createSkill({ ...edited, description: "My own summary.", now: 140 });
+    const edited280 = validateSkillPayload({ name: "edited-280", files: describedFiles("edited-280", editedText) });
+    assert.ok(edited280.ok);
+    const edited280Skill = db.createSkill({ ...edited280, description: "y".repeat(280), now: 150 });
+
+    // A frontmatter description of exactly 280 characters was never cut.
+    const exactText = "z".repeat(280);
+    const exact = validateSkillPayload({ name: "exact-skill", files: describedFiles("exact-skill", exactText) });
+    assert.ok(exact.ok);
+    const exactSkill = db.createSkill({ ...exact, description: exact.description, now: 160 });
+
+    const versionsBefore = db.listSkills().map((skill) => [skill.name, skill.latestVersion!.id, skill.latestVersion!.digest]);
+
+    assert.deepEqual(repairLegacySkillDescriptions(db, 200), ["git-skill", "huge-skill", "orchestrate-issues"]);
+    assert.equal(db.getSkill(builtIn.id)!.description, fullBuiltIn);
+    assert.equal(db.getSkill(gitSkill.id)!.description, gitText);
+    const hugeDescription = db.getSkill(hugeSkill.id)!.description!;
+    assert.ok(hugeDescription.length <= 1024 && hugeDescription.endsWith("…"));
+    assert.ok(hugeText.startsWith(hugeDescription.slice(0, -1)));
+    assert.equal(db.getSkill(editedSkill.id)!.description, "My own summary.");
+    assert.equal(db.getSkill(edited280Skill.id)!.description, "y".repeat(280));
+    assert.equal(db.getSkill(exactSkill.id)!.description, exactText);
+
+    // Descriptions are library metadata: no version, digest, or deployed state changes.
+    assert.deepEqual(db.listSkills().map((skill) => [skill.name, skill.latestVersion!.id, skill.latestVersion!.digest]), versionsBefore);
+    for (const skill of db.listSkills()) assert.equal(versionCount(db, skill.id), 1);
+    assert.deepEqual(resolveDesiredSkillSnapshot(db, "laptop"), []);
+
+    // Idempotent: a second start finds nothing to repair.
+    assert.deepEqual(repairLegacySkillDescriptions(db, 300), []);
+    assert.deepEqual(seedBuiltInSkills(db, builtInSkills(), 400), { "orchestrate-issues": "unchanged", "using-wollipog": "unchanged" });
   } finally {
     db.close();
   }

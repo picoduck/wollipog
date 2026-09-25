@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { runnerSupportsProtocol, type RunnerView, type SkillDriftState, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
+import { SKILL_DESCRIPTION_MAX_CHARS, runnerSupportsProtocol, type RunnerView, type SkillDriftState, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
@@ -128,7 +128,7 @@ function NewSkillDialog({ onClose, onCreate, busy }: {
           <span>Description</span>
           <input
             value={description}
-            maxLength={280}
+            maxLength={SKILL_DESCRIPTION_MAX_CHARS}
             placeholder="What this skill helps an agent do"
             onChange={(event) => {
               const next = event.target.value;
