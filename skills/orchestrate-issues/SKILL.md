@@ -71,7 +71,7 @@ For publication, retain the exact sanitized payload and approval, the child/conv
 
 ## Dispatch and Supervise
 
-Use [the child assignment](references/child-assignment.md) when releasing each verified child. Reuse a suitable idle child for related follow-ups when possible; give it a fresh issue worktree based on the current default branch. Create another verified child if the old selected worktree has been retired or the session cannot resume safely. Count all campaign children for eventual archival.
+Use [the child assignment](references/child-assignment.md) when releasing each verified child. Reuse a suitable idle child for related follow-ups when possible; give it a fresh issue worktree based on the current default branch. Create another verified child if the old selected worktree has been retired or the session cannot resume safely. Count all campaign children for final verification and, under Stop and Archive, archival.
 
 Never assign a child to update or restart the Wollipog installation (control plane, runner, or development stack) that hosts the campaign, and never
 approve or prompt such an action as post-merge cleanup. A detached helper is not an exception: it
@@ -80,7 +80,7 @@ report the merge commit and the currently deployed commit; making them match is 
 to a human terminal or another operator proven to be outside the target stack. If the Orchestrator
 itself is hosted by that stack, it must make the same handoff rather than executing the restart.
 
-Idle children may still consume live capacity. If one cannot be safely reused, persist and adjudicate its report, verify it has no outstanding work or decisions, and stop it to release its slot before launching a replacement or the next queued issue. Verify the stop completed. Keep its history and include it in final archival; do not wait for whole-campaign convergence to free an otherwise exhausted pool.
+Idle children may still consume live capacity. If one cannot be safely reused, persist and adjudicate its report, verify it has no outstanding work or decisions, and stop it to release its slot before launching a replacement or the next queued issue. Verify the stop completed. Keep its history and include it in final verification, and in archival under Stop and Archive; do not wait for whole-campaign convergence to free an otherwise exhausted pool.
 
 After dispatch, actively supervise the whole campaign. Repeatedly check `list_descendant_requests`, consume each child's incremental events from its recorded cursor, and inspect current status for every live campaign child. Resolve only currently Orchestrator-owned exact typed decisions with `resolve_descendant_workflow_decision` under the latest `get_campaign` policy. Use bounded `wait_session` or CLI waits, including `idle` where supported, and rotate fairly among children so one silent, CI-waiting, or blocked child cannot starve the others. Read complete result messages, not just truncated previews, record updated cursors and decisions promptly, and keep the user updated during long waits.
 
@@ -116,4 +116,4 @@ Verify each finished child with `verify_campaign_child`, using its exact complet
 
 Retire runner-owned worktrees only through Wollipog discard/reconciliation. Active worktree retention before provider exit is an expected deferral. After children stop, verify reconciliation or use authorized descendant discard; inspect any remaining local branches and remove only verified merged campaign branches through supported cleanup. Preserve dirty or unpushed work and report it. Serialize shared-checkout refreshes and enforce the hosting-stack restriction above; neither the hosted parent nor any child may perform the deployment restart.
 
-Finish with the initial and follow-up issue/PR links, delivered results, rejected/duplicate follow-up reasons, verified archived session count, and cleanup results. Clearly distinguish convergence from an interrupted or blocked campaign. Do not claim complete cleanup if resources remain unexpectedly retained.
+Finish with the initial and follow-up issue/PR links, delivered results, rejected/duplicate follow-up reasons, verified archived or retained session counts, and cleanup results. Clearly distinguish convergence from an interrupted or blocked campaign. Do not claim complete cleanup if resources remain unexpectedly retained.
