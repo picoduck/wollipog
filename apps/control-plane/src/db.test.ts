@@ -2887,6 +2887,68 @@ test("policy hook heartbeat migration gives legacy open approvals a fresh livene
   }
 });
 
+test("a child-creation approval outlives the hook fence only while its parent's turn is live", () => {
+  const db = withRunner();
+  try {
+    const polledAt = 10_000_000;
+    const cutoff = polledAt;
+    const spawnCutoff = polledAt - 1;
+    const ask = (sessionId: string, requestId: string) => {
+      db.createSession(newSession({ id: sessionId }));
+      db.updateSessionStatus(sessionId, "running", polledAt);
+      assert.equal(db.beginPolicyHookApproval({
+        sessionId,
+        requestId,
+        requestFingerprint: "f".repeat(64),
+        governancePolicyId: "ask-child",
+        approval: { requestId, title: "Create Child?", kind: "policy_hook", options: [] },
+        now: polledAt,
+      }).kind, "created");
+    };
+    const abandoned = (spawn = spawnCutoff) => db.listAbandonedPolicyHookApprovals(cutoff, undefined, spawn)
+      .map((approval) => approval.requestId).sort();
+
+    ask("hook-parent", "hook_tool");
+    ask("live-parent", "spawn_live");
+    ask("settled-parent", "spawn_settled");
+    db.notePolicyResumeStatus("settled-parent", "idle");
+    ask("archived-parent", "spawn_archived");
+    db.setSessionArchived("archived-parent", true, polledAt);
+    ask("ended-parent", "spawn_ended");
+    db.updateSessionStatus("ended-parent", "completed", polledAt);
+    ask("stopped-parent", "spawn_stopped");
+    db.updateSessionStatus("stopped-parent", "stopped", polledAt);
+    ask("hook-settled-parent", "hook_settled");
+    assert.equal(db.noteSpawnApprovalsSettled("hook-settled-parent"), 0, "a passed-through settle never marks a hook row");
+    ask("passed-parent", "spawn_passed");
+    assert.equal(db.noteSpawnApprovalsSettled("passed-parent"), 1);
+
+    assert.deepEqual(abandoned(), [
+      "hook_settled", "hook_tool", "spawn_archived", "spawn_ended", "spawn_passed", "spawn_settled", "spawn_stopped",
+    ], "tool-call hooks and uncollectable spawn approvals keep the hook fence");
+    assert.deepEqual(db.listAbandonedPolicyHookApprovals(cutoff - 1, undefined, spawnCutoff), [],
+      "nothing is abandoned before the hook fence");
+    assert.deepEqual(abandoned(polledAt), [
+      "hook_settled", "hook_tool", "spawn_archived", "spawn_ended", "spawn_live", "spawn_passed",
+      "spawn_settled", "spawn_stopped",
+    ], "a live parent's spawn approval is abandoned at the spawn fence");
+    assert.equal(db.getPolicyHookApproval("hook-settled-parent", "hook_settled")?.resumeStatus, undefined);
+    assert.deepEqual(db.listAbandonedPolicyHookApprovals(cutoff, "live-parent"), [
+      db.getPolicyHookApproval("live-parent", "spawn_live"),
+    ], "omitting the spawn cutoff keeps the single hook fence");
+    assert.deepEqual(db.listAbandonedPolicyHookApprovals(cutoff, "live-parent", spawnCutoff), [],
+      "the session-scoped sweep applies the same classification");
+
+    db.settleStartupState(polledAt + 100);
+    const polled = (sessionId: string, requestId: string) => db.getPolicyHookApproval(sessionId, requestId)?.lastPolledAt;
+    assert.equal(polled("live-parent", "spawn_live"), polledAt + 100, "startup restarts a mid-flight spawn fence");
+    assert.equal(polled("hook-parent", "hook_tool"), polledAt, "startup leaves tool-call hook liveness alone");
+    assert.equal(polled("stopped-parent", "spawn_stopped"), polledAt, "an already-ended parent gets no grace");
+  } finally {
+    db.close();
+  }
+});
+
 test("policy hook approval slot, queue, and terminal decisions survive a database restart", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-policy-hook-restart-"));
   const path = join(root, "control-plane.db");

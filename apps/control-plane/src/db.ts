@@ -229,6 +229,8 @@ import {
   mergeSessionCapabilities,
   type UiEvidenceReviewReceipt,
   AGENT_SPAWN_OBSERVATION_CAP,
+  SPAWN_APPROVAL_REQUEST_ID_PREFIX,
+  TERMINAL_STATUSES,
 } from "@wollipog/protocol";
 
 function harnessInstallationFamily(driver: AgentDriverKind | undefined): HarnessInstallationSelection["family"] | null {
@@ -5637,6 +5639,18 @@ export class ControlPlaneDb {
         `SELECT id FROM sessions
          WHERE status IN ('queued','starting','running','input_required','idle')`,
       ).all() as Array<{ id: string }>;
+      // A child-creation approval is refreshed only by its agent's next create call, which could
+      // not reach this process while it was down. The provisional stop below gives it only the
+      // ordinary fence, so start that fence now: a runner that reconnects within it restores the
+      // live parent and the longer spawn fence; one that stays away lets the approval lapse.
+      this.stmt(
+        `UPDATE policy_hook_approvals SET last_polled_at=MAX(last_polled_at, ?)
+         WHERE status IN ('queued','pending')
+           AND substr(request_id, 1, ${SPAWN_APPROVAL_REQUEST_ID_PREFIX.length})=?
+           AND session_id IN (
+             SELECT id FROM sessions WHERE status IN ('queued','starting','running','input_required','idle')
+           )`,
+      ).run(now, SPAWN_APPROVAL_REQUEST_ID_PREFIX);
       this.stmt(
         `UPDATE sessions SET status = 'stopped', updated_at = ?
          WHERE status IN ('queued','starting','running','input_required','idle')`,
@@ -15457,6 +15471,18 @@ export class ControlPlaneDb {
     });
   }
 
+  /** A settle that passed through because a non-policy card held the visible slot still ends the
+   * turn that would repeat an open child-creation request, queued or displaced. Mark only those
+   * rows: a hook row's provider is blocked inside the hook, and a spawn row resolved later should
+   * restore the settled idle rather than running. A later live frame clears the marker. */
+  noteSpawnApprovalsSettled(sessionId: string): number {
+    return Number(this.stmt(
+      `UPDATE policy_hook_approvals SET resume_status='idle'
+       WHERE session_id=? AND status IN ('queued','pending') AND resume_status IS NULL
+         AND substr(request_id, 1, ${SPAWN_APPROVAL_REQUEST_ID_PREFIX.length})=?`,
+    ).run(sessionId, SPAWN_APPROVAL_REQUEST_ID_PREFIX).changes);
+  }
+
   /** A later live execution frame invalidates every previously swallowed settle marker. */
   clearPolicyResumeStatus(sessionId: string): number {
     const dirty = this.stmt(
@@ -15512,18 +15538,37 @@ export class ControlPlaneDb {
     });
   }
 
-  listAbandonedPolicyHookApprovals(cutoff: number, sessionId?: string): PolicyHookApprovalRecord[] {
+  /** Open asks whose poller fell silent at or before `cutoff`. A child-creation approval is refreshed
+   * only by its agent repeating the create call, so while its parent's turn is live (no recorded
+   * settle, not terminal, not archived) it is abandoned only at or before `spawnCutoff`. Startup
+   * settlement provisionally stops a mid-flight parent, so it restarts these rows' ordinary fence
+   * for its runner to reconnect. The spawn prefix is control-plane-derived; no hook can claim it.
+   * Rows open across an upgrade are classified by that immutable id and measured from their
+   * recorded last poll. */
+  listAbandonedPolicyHookApprovals(
+    cutoff: number,
+    sessionId?: string,
+    spawnCutoff = cutoff,
+  ): PolicyHookApprovalRecord[] {
+    const liveSpawnParent = `substr(p.request_id, 1, ${SPAWN_APPROVAL_REQUEST_ID_PREFIX.length})=?
+      AND p.resume_status IS NULL AND s.archived=0
+      AND s.status NOT IN (${TERMINAL_STATUSES.map(() => "?").join(", ")})`;
+    const abandoned = `p.status IN ('queued','pending') AND p.last_polled_at<=?
+      AND (p.last_polled_at<=? OR NOT COALESCE((${liveSpawnParent}), 0))`;
+    const bindings = [cutoff, Math.min(cutoff, spawnCutoff), SPAWN_APPROVAL_REQUEST_ID_PREFIX, ...TERMINAL_STATUSES];
     const rows = (sessionId
       ? this.stmt(
-          `SELECT request_id, session_id FROM policy_hook_approvals
-           WHERE session_id=? AND status IN ('queued','pending') AND last_polled_at<=?
-           ORDER BY last_polled_at, created_at, request_id`,
-        ).all(sessionId, cutoff)
+          `SELECT p.request_id, p.session_id FROM policy_hook_approvals p
+           LEFT JOIN sessions s ON s.id=p.session_id
+           WHERE p.session_id=? AND ${abandoned}
+           ORDER BY p.last_polled_at, p.created_at, p.request_id`,
+        ).all(sessionId, ...bindings)
       : this.stmt(
-          `SELECT request_id, session_id FROM policy_hook_approvals
-           WHERE status IN ('queued','pending') AND last_polled_at<=?
-           ORDER BY last_polled_at, created_at, request_id`,
-        ).all(cutoff)) as unknown as Array<{ request_id: string; session_id: string }>;
+          `SELECT p.request_id, p.session_id FROM policy_hook_approvals p
+           LEFT JOIN sessions s ON s.id=p.session_id
+           WHERE ${abandoned}
+           ORDER BY p.last_polled_at, p.created_at, p.request_id`,
+        ).all(...bindings)) as unknown as Array<{ request_id: string; session_id: string }>;
     return rows.flatMap((row) => {
       const approval = this.getPolicyHookApproval(row.session_id, row.request_id);
       return approval ? [approval] : [];

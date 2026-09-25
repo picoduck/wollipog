@@ -343,24 +343,46 @@ async function workflowDecisionReconciliationCompatibilityError(deps: McpDeps): 
       );
 }
 
+/** Bounds the fence probe so it cannot push a create call toward the harness's tool timeout. */
+const SPAWN_APPROVAL_FENCE_PROBE_TIMEOUT_MS = 5_000;
+
+/** The silence a pending child approval survives between identical create calls, as the connected
+ * control plane enforces it. A control plane that does not publish it (or cannot be asked) applies
+ * the ordinary POLICY_HOOK_ABANDONMENT_MS fence to spawn approvals, so null means "quote that". */
+async function publishedSpawnApprovalAbandonmentMs(deps: McpDeps): Promise<number | null> {
+  const result = await cpFetch(deps, "GET", "/api/compatibility", undefined,
+    Math.min(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, SPAWN_APPROVAL_FENCE_PROBE_TIMEOUT_MS));
+  const value = result.ok ? result.data?.spawnApprovalAbandonmentMs : undefined;
+  return Number.isSafeInteger(value) && value >= 1_000 ? value : null;
+}
+
 /** Keep the exact invocation alive while its CP-owned child approval is pending, including
- * run fan-out. Each identical retry refreshes the durable approval's abandonment fence: the control
- * plane rejects an approval nobody has retried for POLICY_HOOK_ABANDONMENT_MS. Polling stops after
- * SPAWN_APPROVAL_POLL_WINDOW_MS so the call returns before the harness times it out; the result tells
- * the agent to repeat the request at once, which keeps the fence alive across calls. `retry` names
+ * run fan-out. Each identical retry refreshes the durable approval's abandonment fence. Polling
+ * stops after SPAWN_APPROVAL_POLL_WINDOW_MS so the call returns before the harness times it out; the
+ * result tells the agent to repeat the request and quotes the fence the control plane publishes,
+ * falling back to POLICY_HOOK_ABANDONMENT_MS for a control plane that predates the longer spawn
+ * fence. The probe starts with the first 428 so it completes inside the poll window. `retry` names
  * that request as the caller can issue it. */
 async function createWithSpawnApproval(deps: McpDeps, retry: string, path: string, body: unknown) {
   const now = deps.now ?? Date.now;
   const deadline = now() + SPAWN_APPROVAL_POLL_WINDOW_MS;
   let result = await cpFetch(deps, "POST", path, body);
+  let fence: Promise<number | null> | undefined;
   while (!result.ok && result.status === 428) {
+    fence ??= publishedSpawnApprovalAbandonmentMs(deps);
     if (now() + SPAWN_APPROVAL_POLL_INTERVAL_MS > deadline) {
+      const fenceMs = await fence;
+      const withdrawal = fenceMs === null
+        ? `Do not wait for the approval first: if no identical request arrives within ` +
+          `${POLICY_HOOK_ABANDONMENT_MS / 1000} s, the approval is withdrawn as abandoned.`
+        : `Do not wait for the approval first or end your turn: the approval is withdrawn as abandoned if no ` +
+          `identical request arrives within ${Math.floor(fenceMs / 1000)} s, and shortly after this session's ` +
+          `turn ends.`;
       return {
         ...result,
         message: `${result.message} Still pending after ${SPAWN_APPROVAL_POLL_WINDOW_MS / 1000} s. As your next ` +
           `action, repeat ${retry} with identical arguments to keep waiting; once approved, that identical request ` +
-          `succeeds. Do not wait for the approval first: if no identical request arrives within ` +
-          `${POLICY_HOOK_ABANDONMENT_MS / 1000} s, the approval is withdrawn as abandoned.`,
+          `succeeds. ${withdrawal}`,
       };
     }
     if (!await cancellableSleep(deps, SPAWN_APPROVAL_POLL_INTERVAL_MS)) {
@@ -1577,7 +1599,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "create_workflow_run",
-    description: "Create a role-bound workflow run whose workers wait for exact node dispatch. A pending human approval returns after about 45 seconds; repeat the identical call immediately to keep it alive. Subject to session permissions and governance policies.",
+    description: "Create a role-bound workflow run whose workers wait for exact node dispatch. A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1910,7 +1932,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_session",
     description:
-      "Start a child session with an optional model and reasoning effort applied before its initial task. Unsupported model/effort pairs fail before launch; omitting effort preserves saved/default resolution. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports the effective model, effort, and each guardrail as a value or null (none). A pending human approval returns after about 45 seconds; repeat the identical call immediately to keep it alive. Subject to session permissions and governance policies.",
+      "Start a child session with an optional model and reasoning effort applied before its initial task. Unsupported model/effort pairs fail before launch; omitting effort preserves saved/default resolution. It gets its own worktree unless you pass useWorktree: false, so its branch, diff, checkpoints, review, and PR state are visible. Omitted cost and tool-call limits remain unlimited unless Project defaults, a finite parent ceiling, or governance policy supplies them; explicit 0 opts out when the parent is unbounded. The result reports the effective model, effort, and each guardrail as a value or null (none). A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2096,7 +2118,7 @@ export const TOOLS: McpTool[] = [
   {
     name: "create_run",
     description:
-      "Start a multi-agent run: the same task fanned out to several agents in isolated worktrees. A pending human approval returns after about 45 seconds; repeat the identical call immediately to keep it alive. Subject to session permissions and governance policies.",
+      "Start a multi-agent run: the same task fanned out to several agents in isolated worktrees. A pending human approval returns after about 45 seconds, stating how long the control plane keeps it pending between calls; repeat the identical call promptly, without ending your turn, to keep waiting. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {
