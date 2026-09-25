@@ -6,7 +6,9 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { WorkflowArtifactView } from "@wollipog/protocol";
 import { api } from "../api.js";
+import { DEVICE_TOKEN_CHANGED_EVENT } from "../device-token.js";
 import { ArtifactPreview } from "./ArtifactPreview.js";
+import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -106,6 +108,106 @@ test("verified video artifacts render a private inline player and release their 
     await act(async () => root.unmount());
     assert.deepEqual(revoked, ["blob:private-video"]);
   } finally {
+    api.artifactExport = priorExport;
+    URL.createObjectURL = priorCreate;
+    URL.revokeObjectURL = priorRevoke;
+    container.remove();
+  }
+});
+
+test("transcript screenshot remount reuses verified bytes until credentials or session change", async () => {
+  const bytes = new Uint8Array([1, 2, 3]);
+  const first = artifact("shared-id", bytes);
+  const second = { ...first, sessionId: "session_2" };
+  const priorExport = api.artifactExport;
+  const priorCreate = URL.createObjectURL;
+  const priorRevoke = URL.revokeObjectURL;
+  let exports = 0;
+  let created = 0;
+  const revoked: string[] = [];
+  api.artifactExport = async () => {
+    exports++;
+    return new Blob([bytes], { type: "image/png" });
+  };
+  URL.createObjectURL = () => `blob:transcript-${++created}`;
+  URL.revokeObjectURL = (value) => { revoked.push(value); };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = async (session: string, item: WorkflowArtifactView | null) => {
+    await act(async () => root.render(
+      <TranscriptImageCacheProvider key={session}>
+        {item && <ArtifactPreview artifact={item} />}
+      </TranscriptImageCacheProvider>,
+    ));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  };
+  try {
+    await render("session_1", first);
+    const firstUrl = container.querySelector("img")?.getAttribute("src");
+    assert.ok(firstUrl);
+    await render("session_1", null);
+    assert.deepEqual(revoked, [firstUrl]);
+    await render("session_1", first);
+    const secondUrl = container.querySelector("img")?.getAttribute("src");
+    assert.ok(secondUrl);
+    assert.notEqual(secondUrl, firstUrl);
+    assert.equal(exports, 1, "the same session reuses verified image bytes");
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.Event(DEVICE_TOKEN_CHANGED_EVENT));
+    });
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.equal(exports, 2, "a credential change invalidates retained bytes");
+    const afterCredentialChange = container.querySelector("img")?.getAttribute("src");
+    assert.ok(afterCredentialChange);
+    assert.ok(revoked.includes(secondUrl));
+    await render("session_2", second);
+    assert.equal(exports, 3, "a different session cannot reuse the first session's image");
+    assert.ok(revoked.includes(afterCredentialChange));
+    await act(async () => root.unmount());
+    assert.equal(revoked.length, 4, "every visible object URL is released");
+  } finally {
+    api.artifactExport = priorExport;
+    URL.createObjectURL = priorCreate;
+    URL.revokeObjectURL = priorRevoke;
+    container.remove();
+  }
+});
+
+test("a mismatched transcript image is never cached and can load on a later mount", async () => {
+  const bytes = new Uint8Array([7, 8, 9]);
+  const item = artifact("retry-image", bytes);
+  const priorExport = api.artifactExport;
+  const priorCreate = URL.createObjectURL;
+  const priorRevoke = URL.revokeObjectURL;
+  let exports = 0;
+  let created = 0;
+  api.artifactExport = async () => {
+    exports++;
+    return new Blob([exports === 1 ? new Uint8Array([9, 8, 7]) : bytes], { type: "image/png" });
+  };
+  URL.createObjectURL = () => { created++; return "blob:retry-image"; };
+  URL.revokeObjectURL = () => {};
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const render = async (show: boolean) => {
+    await act(async () => root.render(
+      <TranscriptImageCacheProvider>{show && <ArtifactPreview artifact={item} />}</TranscriptImageCacheProvider>,
+    ));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  };
+  try {
+    await render(true);
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /digest does not match/);
+    assert.equal(container.querySelector("img"), null);
+    assert.equal(created, 0);
+    await render(false);
+    await render(true);
+    assert.equal(exports, 2);
+    assert.equal(container.querySelector("img")?.getAttribute("src"), "blob:retry-image");
+  } finally {
+    await act(async () => root.unmount());
     api.artifactExport = priorExport;
     URL.createObjectURL = priorCreate;
     URL.revokeObjectURL = priorRevoke;

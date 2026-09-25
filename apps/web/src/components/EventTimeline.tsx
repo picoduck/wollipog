@@ -27,6 +27,7 @@ import { EditIcon, FolderUpIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { PromptImageView } from "./PromptImageView.js";
 import { ArtifactPreview } from "./ArtifactPreview.js";
+import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { SessionTimelineQuestionRegion } from "./SessionApproval.js";
@@ -318,6 +319,7 @@ export const EventTimeline = memo(function EventTimeline({
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
   return (
     <HandoffContext.Provider value={handoff}>
+    <TranscriptImageCacheProvider key={effectiveHistoryKey} enabled={historyKey !== undefined}>
     <EventTimelineBody
       key={effectiveHistoryKey}
       items={items}
@@ -344,6 +346,7 @@ export const EventTimeline = memo(function EventTimeline({
       questionContext={questionContext}
       approvalContext={approvalContext}
     />
+    </TranscriptImageCacheProvider>
     </HandoffContext.Provider>
   );
 });

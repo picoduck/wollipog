@@ -179,6 +179,22 @@ test("a large review loads images as they approach the viewport, not all at once
   expect(new Set(all).size).toBe(all.length);
 });
 
+test("a virtualized transcript screenshot loads once when its row is revisited", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/request-surfaces-e2e.html?scenario=artifact-timeline&items=1&artifacts=ready");
+  const scroller = page.getByRole("region", { name: "Session Activity" });
+  const image = page.getByRole("img", { name: "Session Screenshot.png" });
+  await scroller.evaluate((element) => { element.scrollTop = 1850; });
+  await expect(image).toBeVisible();
+  expect(await artifactRequests(page)).toEqual(["art_1"]);
+  await scroller.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+  await expect(page.locator(".tl-artifact")).toHaveCount(0);
+  await scroller.evaluate((element) => { element.scrollTop = 1850; });
+  await expect(image).toBeVisible();
+  expect(await artifactRequests(page)).toEqual(["art_1"]);
+  await page.screenshot({ path: testInfo.outputPath("transcript-screenshot-revisited.png") });
+});
+
 for (const viewport of [
   { name: "desktop", width: 1280, height: 800 },
   { name: "mobile", width: 390, height: 844 },
