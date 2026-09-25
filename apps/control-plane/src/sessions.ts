@@ -26,6 +26,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   validatePromptImageInputs,
   validatePromptImages,
   validateQuestionAnswers,
+  worktreeRecoveryAction,
   HUMAN_ONLY_PARENT_CONTROL_POLICY,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
@@ -36,8 +37,10 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type AgentCapabilities,
   type ApprovalQueueItem,
   type ApprovalQueueRejectResult,
+  type DescendantBlockedChildView,
   type DescendantRequestResolution,
   type DescendantRequestView,
+  type DescendantRequestsView,
   type AddPodMemberRequest,
   type AppendPodContextRequest,
   type CreatePodRequest,
@@ -162,6 +165,7 @@ import {
   type AgentLaunch,
   type CampaignContinuationRecord,
   type ControlPlaneDb,
+  type SessionPromptCommandRecord,
   type SessionAutomationOrigin,
 } from "./db.js";
 import { questionPolicyAnswers } from "./question-policy.js";
@@ -4297,7 +4301,10 @@ export class SessionsService {
     if (isTerminal(session.status)) return fail(`session is ${session.status}`, 409);
     if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
     if (session.worktreeRecovery) {
-      return fail("worktree recovery is required before sending another prompt", 409);
+      return fail(
+        `worktree recovery is required before sending another prompt: ${worktreeRecoveryAction(session.worktreeRecovery)}`,
+        409,
+      );
     }
     // A guardrail pause must be resolved (Continue / Stop) via approve(), not bypassed by sending a
     // new prompt — otherwise the next turn runs without the user acknowledging the breach.
@@ -4546,6 +4553,9 @@ export class SessionsService {
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.maintainCampaignContinuations(now, runnerId);
+    for (const sessionId of this.db.sessionsWithHeldWorkflowDecisionResumes(runnerId)) {
+      this.deliverHeldWorkflowDecisionResumes(sessionId, now);
+    }
     return this.promptOutbox.flush(now, runnerId);
   }
 
@@ -4558,7 +4568,10 @@ export class SessionsService {
     message: DurableSessionCommandResultMessage | DurableSessionCommandUpdateMessage,
   ): boolean {
     const handled = this.promptOutbox.receipt(runnerId, message);
-    if (handled) this.reconcileCampaignContinuationCommand(message.commandId, Date.now());
+    if (handled) {
+      this.reconcileCampaignContinuationCommand(message.commandId, Date.now());
+      this.reconcileWorkflowDecisionResumeCommand(message.commandId, Date.now());
+    }
     return handled;
   }
 
@@ -4613,7 +4626,7 @@ export class SessionsService {
         `[Wollipog Campaign Continuation — ${continuationId}]`,
         `Campaign ${campaignSessionId}; durable event range ${eventFromSeq}-${eventThroughSeq}.`,
         `Canonical event metadata: ${JSON.stringify(eventSummary)}`,
-        "Query authoritative campaign and descendant state with get_campaign and list_descendant_requests. Drain every currently actionable Orchestrator-owned request, verify terminal child reports and required cleanup, and then continue the campaign or return idle. Human-owned questions and approvals remain blocked on the human and must not be answered or bypassed. Treat repeated metadata as idempotent; do not infer request contents from this summary.",
+        "Query authoritative campaign and descendant state with get_campaign and list_descendant_requests. Drain every currently actionable Orchestrator-owned request, clear each blocked child with the recovery action its hold names, verify terminal child reports and required cleanup, and then continue the campaign or return idle. Human-owned questions and approvals remain blocked on the human and must not be answered or bypassed. Treat repeated metadata as idempotent; do not infer request contents from this summary.",
         "[End Wollipog Campaign Continuation]",
       ].join("\n");
       this.promptOutbox.stageCampaignContinuation({
@@ -4725,7 +4738,10 @@ export class SessionsService {
       return fail("only recovery-blocked messages with known non-delivery can be retried", 409);
     }
     if (session.worktreeRecovery) {
-      return fail("recover this session's selected worktree before retrying the message", 409);
+      return fail(
+        `recover this session's selected worktree before retrying the message: ${worktreeRecoveryAction(session.worktreeRecovery)}`,
+        409,
+      );
     }
 
     // A Retry is a fresh turn admission with an old, exact payload. Reapply every mutable
@@ -6391,7 +6407,7 @@ export class SessionsService {
   private publishCampaignAttentionTransition(before: SessionView | null): void {
     if (!before) return;
     const now = Date.now();
-    const humanRequests = this.descendantRequests(before.id, () => true, "human");
+    const humanRequests = this.descendantRequests(before.id, () => true, "human", false);
     if (humanRequests.ok && humanRequests.data) {
       for (const item of humanRequests.data.requests) {
         this.db.recordOutboundCampaignInputRequired({
@@ -6403,7 +6419,7 @@ export class SessionsService {
         });
       }
     }
-    const orchestratorRequests = this.descendantRequests(before.id, () => true);
+    const orchestratorRequests = this.descendantRequests(before.id, () => true, "orchestrator", false);
     if (orchestratorRequests.ok && orchestratorRequests.data) {
       for (const item of orchestratorRequests.data.requests) {
         this.db.recordCampaignContinuationEvent({
@@ -6412,6 +6428,21 @@ export class SessionsService {
           kind: "request_actionable",
           subjectSessionId: item.sessionId,
           occurrenceId: item.occurrenceId,
+          now,
+        });
+      }
+    }
+    // A held child asks nothing, so no request event covers it; each hold incident wakes the
+    // campaign once, keyed by its stable id (#1650).
+    for (const child of this.blockedDescendants(before.id, () => true)) {
+      for (const hold of child.holds) {
+        this.db.recordCampaignContinuationEvent({
+          eventId: `child-blocked:${before.id}:${child.sessionId}:${hold.holdId}`,
+          campaignSessionId: before.id,
+          kind: "child_blocked",
+          subjectSessionId: child.sessionId,
+          occurrenceId: hold.holdId,
+          subjectStatus: hold.kind,
           now,
         });
       }
@@ -6649,16 +6680,11 @@ export class SessionsService {
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
     this.db.consumeUiEvidenceReviewReceipts(occurrenceId, now);
     const child = this.db.getSession(childSessionId);
-    // Every resolution resumes the child: ordinary prompt delivery wakes an idle child and queues
-    // behind a turn still in progress. A refusal (runner offline, a guardrail pause) leaves the
-    // outcome, and any message, on the decision record.
-    const deliverResolution = () => {
-      const delivered = this.prompt(childSessionId, workflowDecisionResolutionPrompt(resolved));
-      if (!delivered.ok) {
-        this.log.warn(`workflow decision ${occurrenceId} resolution not delivered to ${childSessionId}: ${delivered.error}`);
-      }
-      return delivered.ok;
-    };
+    // Every resolution resumes the child: prompt delivery wakes an idle child and queues behind a
+    // turn still in progress, and a child whose worktree needs recovery keeps the resume until it
+    // recovers (#1650). Any other refusal (runner offline, a guardrail pause) leaves the outcome,
+    // and any message, on the decision record.
+    const deliverResolution = () => this.deliverWorkflowDecisionResume(resolved, now);
     if (child) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now, deliverResolution);
     this.recordWorkflowDecisionAudit(
       resolved,
@@ -7372,7 +7398,10 @@ export class SessionsService {
     const current = this.db.getSession(sessionId);
     if (!current) return;
     const remaining = removePendingRequest(current.pendingApproval, occurrenceId);
-    const restoreIdle = !remaining && current.status === "input_required" &&
+    // A child parked for worktree recovery is input_required because the runner said so, not because
+    // of this card, so settling the card neither idles nor runs it; a resume waits for recovery.
+    const recovering = current.worktreeRecovery != null;
+    const restoreIdle = !recovering && !remaining && current.status === "input_required" &&
       this.db.policyResumeStatus(sessionId) === "idle";
     this.db.setPendingApproval(sessionId, remaining);
     if (restoreIdle && resume && !this.pendingPolicyAsk(this.db.getSession(sessionId)!) &&
@@ -7390,7 +7419,7 @@ export class SessionsService {
       this.replayRestoredPolicyIdle(current, sessionId, now);
       return;
     }
-    if (!remaining && current.status === "input_required") {
+    if (!remaining && current.status === "input_required" && !recovering) {
       this.db.updateSessionStatus(
         sessionId,
         restoreIdle ? "idle" : "running",
@@ -7407,6 +7436,106 @@ export class SessionsService {
       if (!remaining) this.gateOnPolicy(sessionId, now);
       this.clearSettledPolicyResumeStatus(sessionId);
       resume?.();
+    }
+  }
+
+  /**
+   * Deliver the prompt that resumes a child after its decision resolves, and record how it went on
+   * the decision (#1650).
+   *
+   * The resume used to be an ordinary prompt, so a child whose worktree needed recovery lost it:
+   * the control plane refused it outright when it already knew, and otherwise the runner refused
+   * the turn before submission with nothing left to replay. On a runner that reports that refusal
+   * exactly, the resume now travels the durable prompt lane instead. A recovery already known here
+   * holds it unsent, a `WORKTREE_RECOVERY_REQUIRED` receipt holds it the same way, and whichever
+   * boundary first sees the recovery cleared claims it and delivers it once. Returns whether the
+   * child will be resumed.
+   */
+  private deliverWorkflowDecisionResume(decision: WorkflowDecisionView, now: number): boolean {
+    const child = this.db.getSession(decision.sessionId);
+    if (!child) return false;
+    const text = workflowDecisionResolutionPrompt(decision);
+    if (!runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "worktreeRecovery")) {
+      const delivered = this.prompt(child.id, text);
+      if (!delivered.ok) {
+        this.log.warn(`workflow decision ${decision.occurrenceId} resolution not delivered to ${child.id}: ${delivered.error}`);
+      }
+      return delivered.ok;
+    }
+    if (child.worktreeRecovery) {
+      this.db.setWorkflowDecisionResume(decision.occurrenceId, "held", null, now);
+      this.hub.sessionChangedById(child.id);
+      return true;
+    }
+    let staged: SessionPromptCommandRecord | null = null;
+    const delivered = this.prompt(child.id, text, [], undefined, undefined, {
+      // Staging is the success boundary: once the payload is durable, a failed flush is retried by
+      // the outbox rather than reported, exactly as for a human's durable prompt.
+      stage: (plan) => {
+        staged = this.promptOutbox.stage(child.id, plan.runnerId, plan.commands[0]!, now);
+        this.db.setWorkflowDecisionResume(decision.occurrenceId, "delivering", staged.commandId, now);
+      },
+      activate: (plan) => {
+        try {
+          this.promptOutbox.flush(now, plan.runnerId);
+        } catch (error) {
+          this.log.warn(`workflow decision resume flush deferred for ${child.id}: ${(error as Error).message}`);
+        }
+      },
+    });
+    if (!delivered.ok) {
+      if (!staged) this.db.setWorkflowDecisionResume(decision.occurrenceId, "failed", null, now);
+      this.log.warn(`workflow decision ${decision.occurrenceId} resolution not delivered to ${child.id}: ${delivered.error}`);
+    }
+    return delivered.ok;
+  }
+
+  /** Follow the durable command that carries a decision's resume. Known non-delivery for worktree
+   * recovery holds the resume, and retires the failed row so no one can also Retry it by hand. */
+  private reconcileWorkflowDecisionResumeCommand(commandId: string, now: number): void {
+    const resume = this.db.workflowDecisionResumeForCommand(commandId);
+    if (!resume || resume.state !== "delivering") return;
+    const command = this.db.getSessionPromptCommand(commandId);
+    if (!command) return;
+    if (command.state === "failed" && command.errorCode === "WORKTREE_RECOVERY_REQUIRED" &&
+        command.userEventSeq === undefined) {
+      this.promptOutbox.dismissTerminal(command.sessionId, commandId, now);
+      this.db.setWorkflowDecisionResume(resume.occurrenceId, "held", null, now);
+      this.hub.sessionChangedById(command.sessionId);
+      // The recovery may already be over by the time this receipt arrives.
+      this.deliverHeldWorkflowDecisionResumes(command.sessionId, now);
+      return;
+    }
+    const state = command.state === "started" || command.state === "completed" ? "delivered" as const
+      : command.state === "uncertain" ? "uncertain" as const
+      : command.state === "failed" ? "failed" as const
+      : null;
+    if (!state) return;
+    this.db.setWorkflowDecisionResume(resume.occurrenceId, state, commandId, now);
+    if (state === "failed") {
+      this.log.warn(`workflow decision ${resume.occurrenceId} resume failed for ${command.sessionId}: ${command.error ?? "unknown error"}`);
+    }
+  }
+
+  /** Deliver each resume held for this session once nothing holds it any more (#1650). Every
+   * boundary that can see the hold clear calls this; the claim lets exactly one of them deliver. */
+  private deliverHeldWorkflowDecisionResumes(sessionId: string, now = Date.now()): void {
+    const held = this.db.heldWorkflowDecisionResumes(sessionId);
+    if (!held.length) return;
+    const session = this.db.getSession(sessionId);
+    if (session?.worktreeRecovery) return;
+    for (const resume of held) {
+      const decision = this.db.workflowDecisionByOccurrence(resume.occurrenceId);
+      // A stopped child, or a decision revoked or superseded meanwhile, has nothing to resume.
+      if (!session || isTerminal(session.status) || !decision ||
+          !["approved", "denied", "consumed"].includes(decision.status)) {
+        this.db.setWorkflowDecisionResume(resume.occurrenceId, "abandoned", null, now);
+        continue;
+      }
+      // Keep it held while the runner is away; its reconnect is another boundary that retries.
+      if (!this.hub.isRunnerOnline(session.runnerId)) return;
+      if (!this.db.claimHeldWorkflowDecisionResume(resume.occurrenceId, now)) continue;
+      this.deliverWorkflowDecisionResume(decision, now);
     }
   }
 
@@ -7636,11 +7765,33 @@ export class SessionsService {
     });
   }
 
+  /** Descendants held from starting their next turn (#1650), with how to clear each hold. Not gated
+   * on Parent Control: there is nothing to answer, and the campaign wakes its Orchestrator for them
+   * whether or not it may answer questions. */
+  blockedDescendants(
+    parentSessionId: string,
+    canAccess: (sessionId: string) => boolean,
+  ): DescendantBlockedChildView[] {
+    return this.db.listSessionDescendantHolds(parentSessionId).flatMap((session) => canAccess(session.id)
+      ? [{
+          sessionId: session.id,
+          sessionTitle: session.title,
+          runnerId: session.runnerId,
+          runnerOnline: this.hub.isRunnerOnline(session.runnerId),
+          eventEpoch: session.eventEpoch,
+          status: session.status,
+          holds: session.holds,
+        }]
+      : []);
+  }
+
   descendantRequests(
     parentSessionId: string,
     canAccess: (sessionId: string) => boolean,
     viewer: WorkflowDecisionAuthority = "orchestrator",
-  ): ServiceResult<{ requests: DescendantRequestView[] }> {
+    // Attention bookkeeping reads only the requests, and scans held children once on its own.
+    includeBlockedChildren = true,
+  ): ServiceResult<DescendantRequestsView> {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
     const rootCampaign = this.orchestratorCampaignController(parent);
@@ -7705,7 +7856,11 @@ export class SessionsService {
         }];
       });
     });
-    return ok({ requests: [...durableTyped, ...generic] });
+    const blockedChildren = includeBlockedChildren ? this.blockedDescendants(parentSessionId, canAccess) : [];
+    return ok({
+      requests: [...durableTyped, ...generic],
+      ...(blockedChildren.length ? { blockedChildren } : {}),
+    });
   }
 
   resolveDescendantRequest(
@@ -11310,6 +11465,7 @@ export class SessionsService {
       // gateOnPolicy is idempotent and no-ops when a runner card holds the slot or nothing is tripped.
       this.gateOnPolicy(snap.id, now);
       this.restorePendingWorkflowDecisionCards(snap.id);
+      this.deliverHeldWorkflowDecisionResumes(snap.id, now);
       this.hub.sessionChangedById(snap.id);
       this.publishCampaignAttentionTransition(campaignBefore);
     }
@@ -11419,6 +11575,7 @@ export class SessionsService {
       this.notifyTransition(existing, snapshot.id);
     }
     this.restorePendingWorkflowDecisionCards(snapshot.id);
+    this.deliverHeldWorkflowDecisionResumes(snapshot.id, now);
     this.hub.sessionChangedById(snapshot.id);
     this.publishCampaignAttentionTransition(campaignBefore);
   }

@@ -762,6 +762,43 @@ through the same ordinary prompt path. A child still polling inside its turn rec
 after the turn ends; the prompt tells it the decision record is authoritative and to continue if it
 has already acted. Revocation and supersession do not send a prompt.
 
+### Held Children
+
+A child can be unable to start its next turn while nothing is asking a question. The case that
+motivated this (#1650) is worktree recovery: the runner re-proves the selected worktree before
+every turn, and a child that switched its worktree to another branch is parked `input_required`
+with no pending request. Before, its decision resume was dropped and nothing told its parent.
+
+- **The resume is kept.** On a runner at protocol v161 or later, the resolution prompt travels the
+  durable prompt lane and its progress is recorded on the decision. If the control plane already
+  knows the child is in recovery, the resume is held unsent. If the runner reports it not sent
+  with `WORKTREE_RECOVERY_REQUIRED`, it is held the same way, and the not-sent row is retired so a
+  manual Retry cannot deliver it a second time. The first boundary that sees the recovery cleared —
+  a runtime update, a reconnect, or the prompt-maintenance sweep — claims it atomically and
+  delivers it once, as a fresh durable command with the same text. A resume held for a child that
+  stops, or for a decision later revoked or superseded, is abandoned. Settling the card leaves a
+  recovering child's status as the runner reported it, instead of marking it running or idle.
+  Older runners keep the ordinary prompt path.
+- **The parent sees the hold.** A session's `holds` list what keeps its next turn from starting,
+  with a stable `holdId`, a reason, the `recoveryAction` that clears it, and any `heldResumes`.
+  MCP `get_session` returns them together with `worktreeRecovery`. `list_descendant_requests` lists
+  held descendants as `blockedChildren`, beside `requests` and never as a request, since there is
+  nothing to answer. This is not gated on Parent Control. The campaign projection counts a held
+  child as `blocked` rather than `active` and names it, with its holds, in `heldChildren`.
+- **The parent is woken.** Each new hold records one `child_blocked` campaign event, keyed by the
+  hold's id, so an idle Orchestrator gets a continuation turn. The continuation tells it to clear
+  each blocked child with the recovery action its hold names.
+- **Refusals name the recovery step.** Prompting a held session, retrying its not-sent message, and
+  attaching or selecting a worktree now on another branch all return a 409. The message says to
+  restore the expected branch (`git -C <path> switch <branch>`) and select that worktree again with
+  `select_worktree`, or to select or create another worktree.
+
+The mechanism is not specific to worktrees. A hold is one `SessionHoldView` kind, derived in one
+place (`sessionHolds` in the protocol package, fed by the control plane's session row). The
+session view, the descendant view, the campaign projection, and the `child_blocked` wake event all
+read that shape. A later runner-side hold, such as a prompt queued behind a handoff barrier, adds a
+kind and its derivation, and every surface picks it up.
+
 The control plane owns this lifecycle. A generic question answer or provider permission response
 cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,
 secret access, and persistent permission grants are not typed categories and remain human-only.

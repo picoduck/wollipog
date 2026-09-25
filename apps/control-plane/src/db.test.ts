@@ -7393,3 +7393,63 @@ test("existing campaigns migrate to the Integration Isolation their current laun
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("the campaign event table admits child_blocked without reusing a sequence a cursor has passed (#1650)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-campaign-events-"));
+  const path = join(dir, "control-plane.db");
+  try {
+    ControlPlaneDb.open(path).close();
+    // The table as it was before `child_blocked`, with a pruned tail: its AUTOINCREMENT high-water
+    // mark (3) is above every surviving row.
+    const legacy = new DatabaseSync(path);
+    // The fixture names a campaign without creating one; only the event table is under test.
+    legacy.exec("PRAGMA foreign_keys=OFF");
+    legacy.exec(`
+      DROP TABLE orchestrator_campaign_events;
+      CREATE TABLE orchestrator_campaign_events (
+        seq                 INTEGER PRIMARY KEY AUTOINCREMENT,
+        event_id            TEXT NOT NULL UNIQUE,
+        campaign_session_id TEXT NOT NULL,
+        kind                TEXT NOT NULL CHECK (kind IN
+                             ('request_actionable','request_resolved','child_ready','human_blockers_cleared')),
+        subject_session_id  TEXT,
+        occurrence_id       TEXT,
+        subject_status      TEXT,
+        created_at          INTEGER NOT NULL,
+        FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+        FOREIGN KEY (subject_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+      );
+      CREATE INDEX idx_orchestrator_campaign_events_pending ON orchestrator_campaign_events(campaign_session_id, seq);
+    `);
+    const insert = (database: DatabaseSync, eventId: string, kind: string) => database.prepare(
+      "INSERT INTO orchestrator_campaign_events (event_id,campaign_session_id,kind,created_at) VALUES (?,?,?,1)",
+    ).run(eventId, "s_campaign", kind);
+    insert(legacy, "child-ready:a", "child_ready");
+    insert(legacy, "request-actionable:b", "request_actionable");
+    insert(legacy, "child-ready:c", "child_ready");
+    legacy.exec("DELETE FROM orchestrator_campaign_events WHERE seq=3");
+    assert.throws(() => insert(legacy, "child-blocked:early", "child_blocked"), /CHECK constraint/u);
+    legacy.close();
+
+    ControlPlaneDb.open(path).close();
+    const migrated = new DatabaseSync(path);
+    migrated.exec("PRAGMA foreign_keys=OFF");
+    assert.deepEqual(migrated.prepare("SELECT seq, event_id FROM orchestrator_campaign_events ORDER BY seq").all()
+      .map((row) => ({ ...row })), [
+      { seq: 1, event_id: "child-ready:a" },
+      { seq: 2, event_id: "request-actionable:b" },
+    ], "every surviving event keeps the sequence number a cursor may already name");
+    insert(migrated, "child-blocked:x", "child_blocked");
+    assert.deepEqual({ ...migrated.prepare(
+      "SELECT seq FROM orchestrator_campaign_events WHERE event_id='child-blocked:x'",
+    ).get() }, { seq: 4 }, "a new event never reuses a number the pruned tail consumed");
+    migrated.close();
+    // A second open finds the new constraint and leaves the table alone.
+    ControlPlaneDb.open(path).close();
+    const reopened = new DatabaseSync(path);
+    assert.equal((reopened.prepare("SELECT COUNT(*) AS count FROM orchestrator_campaign_events").get() as { count: number }).count, 3);
+    reopened.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

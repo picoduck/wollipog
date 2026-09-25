@@ -420,6 +420,19 @@ function sentPromptCommands(hub: FakeHub) {
   });
 }
 
+/** Every prompt a session was sent, ordinary or durable, once per durable identity: an outbox
+ * retransmission of one command is the same prompt, not a second one. */
+function promptsSentTo(hub: FakeHub, sessionId: string) {
+  const seen = new Set<string>();
+  return hub.sentToRunner.flatMap(({ msg }) => {
+    if (msg.type === "prompt_session") return msg.sessionId === sessionId ? [msg] : [];
+    if (msg.type !== "durable_session_command" || msg.command.type !== "prompt_session" ||
+        msg.command.sessionId !== sessionId || seen.has(msg.commandId)) return [];
+    seen.add(msg.commandId);
+    return [msg.command];
+  });
+}
+
 const NOOP_LOG = { info() {}, warn() {}, error() {} };
 
 function runnerMeta(): RunnerMetadata {
@@ -3967,7 +3980,7 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
     assert.equal(db.getSession(child.id)?.status, "running",
       "resolving a restored card resumes the provider that had settled idle behind it");
-    assert.ok(hub.sentOfType("prompt_session").some((message) => message.sessionId === child.id &&
+    assert.ok(promptsSentTo(hub, child.id).some((message) =>
       message.text.includes(`[Wollipog Workflow Decision — ${reconnect.data!.occurrenceId}]`)));
     const terminal = svc.createWorkflowDecision(child.id, {
       requestId: "merge-terminal", resourceKey: "picoduck/wollipog#129",
@@ -4036,7 +4049,7 @@ test("a resolver's child-facing message reaches the child's decision view and re
       assert.ok(decision.ok && decision.data, decision.error);
       return decision.data;
     };
-    const promptsToChild = () => hub.sentOfType("prompt_session").filter((message) => message.sessionId === child.id);
+    const promptsToChild = () => promptsSentTo(hub, child.id);
     const idleWrites: string[] = [];
     const runningWrites: string[] = [];
     const updateSessionStatus = db.updateSessionStatus.bind(db);
@@ -4217,7 +4230,7 @@ test("resolving any Orchestrator-owned typed decision resumes the idle child wit
         labels: ["enhancement"],
       },
     };
-    const promptsToChild = () => hub.sentOfType("prompt_session").filter((message) => message.sessionId === child.id);
+    const promptsToChild = () => promptsSentTo(hub, child.id);
     let sequence = 0;
     for (const [category, snapshot] of Object.entries(snapshots)) {
       for (const outcome of ["approve", "deny"] as const) {
@@ -20389,6 +20402,234 @@ test("file-based screenshot attach fixes the session, kind, and encoding and bou
     // A human's upload is neither counted nor bounded.
     assert.ok(svc.attachSessionScreenshot(session.data.id, body("human"), { kind: "human", id: "owner" }, { count: 0, bytes: 0 }).ok);
     assert.equal(db.sessionAgentScreenshotUsage(session.data.id).count, 4);
+  } finally {
+    db.close();
+  }
+});
+
+/** A campaign root with one child whose typed PR merges its Orchestrator owns (#1650 fixtures). */
+function worktreeRecoveryCampaign(protocolVersion = PROTOCOL_VERSION) {
+  const harness = makeHarness();
+  const { db, svc } = harness;
+  const meta = runnerMeta();
+  const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+  orchestrator.capabilities = {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+    permissionModes: ["default", "orchestrator"],
+  };
+  db.registerRunner(meta, Date.now(), protocolVersion);
+  const root = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+    config: { permissionMode: "orchestrator" }, parentControl: "off",
+  }).data!;
+  db.updateSessionStatus(root.id, "running", Date.now());
+  const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "Recovering Child" };
+  let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: root.id });
+  if (created.status === 428) {
+    const spawnApproval = db.getSession(root.id)!.pendingApproval!;
+    assert.ok(svc.approve(root.id, spawnApproval.requestId, "allow").ok);
+    created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: root.id });
+  }
+  assert.ok(created.ok && created.data, created.error);
+  const child = created.data;
+  db.updateSessionStatus(child.id, "running", Date.now());
+  assert.ok(svc.setParentControlPolicy(root.id, {
+    implementation_question: "orchestrator",
+    pr_merge: "orchestrator",
+    merged_branch_deletion: "orchestrator",
+    follow_up_issue_publication: "orchestrator",
+    ui_evidence_approval: "human",
+  }, 0).ok);
+  const worktreePath = `/repos/demo/.agent-worktrees/${child.id}`;
+  const recovery = {
+    recoveryId: "worktree-recovery:switched",
+    detectedAt: 1_000,
+    selectedPath: worktreePath,
+    expectedBranch: `agent/${child.id}`,
+    detail: `the selected worktree could not be verified before a live turn: it is now on branch fix/issue-1650-x instead of agent/${child.id} — restore ${worktreePath} or select another worktree for this session`,
+  };
+  const requestMerge = (pullRequest: number) => {
+    const decision = svc.createWorkflowDecision(child.id, {
+      requestId: `merge-${pullRequest}`, resourceKey: `picoduck/wollipog#${pullRequest}`,
+      resourceSnapshot: {
+        category: "pr_merge", repository: "picoduck/wollipog", pullRequest,
+        headSha: "c".repeat(40), reviewResult: "merge",
+        requiredChecks: {
+          headSha: "c".repeat(40), status: "passed", checkedAt: 10,
+          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }],
+        },
+      },
+    });
+    assert.ok(decision.ok && decision.data, decision.error);
+    return decision.data;
+  };
+  const approve = (occurrenceId: string) => {
+    const resolved = svc.resolveDescendantRequest(root.id, child.id, occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.ok(resolved.ok, resolved.error);
+  };
+  /** The runner's report of the child: parked for recovery, or recovered and idle. */
+  const runnerReports = (worktreeRecovery: typeof recovery | null, status: SessionStatus) =>
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+      id: child.id, title: child.title, status, worktreePath, worktreeRecovery,
+    }));
+  const resolutionPrompts = (occurrenceId: string) => harness.hub.sentOfType("durable_session_command").filter(
+    (message) => message.command.type === "prompt_session" && message.command.sessionId === child.id &&
+      message.command.text.includes(`[Wollipog Workflow Decision — ${occurrenceId}]`));
+  const receipt = (commandId: string, state: "accepted" | "started" | "completed" | "failed", revision: number,
+    code?: "WORKTREE_RECOVERY_REQUIRED") => svc.onDurablePromptReceipt(RUNNER_ID, {
+    type: "durable_session_command_update", commandId, sessionId: child.id, state, revision,
+    ...(code ? { code, error: `${recovery.detail}; this message was not sent` } : {}),
+  });
+  const resumeState = (occurrenceId: string) => (db.raw().prepare(
+    "SELECT resume_state FROM workflow_decisions WHERE occurrence_id=?",
+  ).get(occurrenceId) as { resume_state: string | null }).resume_state;
+  return { ...harness, root, child, recovery, worktreePath, requestMerge, approve, runnerReports, resolutionPrompts,
+    receipt, resumeState };
+}
+
+test("an approved decision for a child whose worktree branch was switched is delivered exactly once after recovery (#1650)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child, recovery } = f;
+  try {
+    // The child asked for a merge and ended its turn behind the card.
+    const merge = f.requestMerge(1650);
+    svc.onSessionStatus(child.id, "idle");
+    assert.equal(db.getSession(child.id)?.status, "input_required");
+
+    // Approval resumes it through the durable lane, so a refusal before submission is known.
+    f.approve(merge.occurrenceId);
+    const [first] = f.resolutionPrompts(merge.occurrenceId);
+    assert.ok(first, "the resolution is sent as a durable prompt");
+    assert.equal(f.resumeState(merge.occurrenceId), "delivering");
+
+    // The runner finds the worktree on another branch before the turn starts: it parks the child
+    // and reports the prompt as not sent.
+    f.runnerReports(recovery, "input_required");
+    assert.equal(f.receipt(first.commandId, "failed", 1, "WORKTREE_RECOVERY_REQUIRED"), true);
+    assert.equal(f.resumeState(merge.occurrenceId), "held", "the resume is kept, not dropped");
+    assert.equal(db.getSession(child.id)?.pendingPrompts?.some((prompt) => prompt.commandId === first.commandId) ?? false,
+      false, "the not-sent row is retired so a manual Retry cannot deliver it a second time");
+
+    // The child's own view, the parent's descendant view, and the campaign all show the hold.
+    const holds = db.getSession(child.id)?.holds;
+    assert.equal(holds?.length, 1);
+    assert.equal(holds?.[0]?.kind, "worktree_recovery");
+    assert.equal(holds?.[0]?.holdId, recovery.recoveryId);
+    assert.match(holds?.[0]?.recoveryAction ?? "", new RegExp(`git -C ${f.worktreePath} switch agent/${child.id}`, "u"));
+    assert.match(holds?.[0]?.recoveryAction ?? "", /select_worktree/u);
+    assert.deepEqual(holds?.[0]?.heldResumes?.map((resume) => resume.occurrenceId), [merge.occurrenceId]);
+    const descendants = svc.descendantRequests(root.id, () => true);
+    assert.ok(descendants.ok && descendants.data);
+    assert.deepEqual(descendants.data.requests, [], "a hold is not a request: there is nothing to answer");
+    assert.deepEqual(descendants.data.blockedChildren?.map((item) => [item.sessionId, item.status, item.holds[0]?.holdId]),
+      [[child.id, "input_required", recovery.recoveryId]]);
+    const campaign = db.campaignProjection(root.id)!;
+    assert.equal(campaign.children.blocked, 1);
+    assert.equal(campaign.children.active, 0, "a held child is not counted as progressing");
+    assert.deepEqual(campaign.heldChildren?.map((item) => item.sessionId), [child.id]);
+    const wake = db.campaignContinuationEvents(root.id).filter((event) => event.kind === "child_blocked");
+    assert.deepEqual(wake.map((event) => [event.subjectSessionId, event.occurrenceId, event.subjectStatus]),
+      [[child.id, recovery.recoveryId, "worktree_recovery"]], "the parent is woken once for the hold");
+
+    // Prompting the child while it is held names the recovery step.
+    const refused = svc.prompt(child.id, "are you there?");
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", /worktree recovery is required before sending another prompt/u);
+    assert.match(refused.error ?? "", new RegExp(`switch agent/${child.id}`, "u"));
+    assert.match(refused.error ?? "", /select_worktree/u);
+
+    // Nothing is re-sent while the hold lasts, however often the runner reports it.
+    f.runnerReports(recovery, "input_required");
+    svc.retryDuePrompts(Date.now() + 60_000);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 1);
+    assert.equal(db.campaignContinuationEvents(root.id).filter((event) => event.kind === "child_blocked").length, 1);
+
+    // Recovery (select_worktree on the restored tree) clears the hold, and the resume goes out once.
+    f.runnerReports(null, "idle");
+    const afterRecovery = f.resolutionPrompts(merge.occurrenceId);
+    assert.equal(afterRecovery.length, 2);
+    const second = afterRecovery[1]!;
+    assert.notEqual(second.commandId, first.commandId, "the held resume is a fresh delivery, not a replay");
+    assert.equal(second.command.type === "prompt_session" ? second.command.text : "",
+      first.command.type === "prompt_session" ? first.command.text : "", "the same resolution text is delivered");
+    assert.equal(db.getSession(child.id)?.status, "running");
+    assert.equal(db.getSession(child.id)?.holds, undefined);
+    assert.equal(svc.descendantRequests(root.id, () => true).data?.blockedChildren, undefined);
+    assert.equal(db.campaignProjection(root.id)?.heldChildren, undefined);
+
+    // Every later boundary that could have delivered it finds nothing held.
+    f.runnerReports(null, "idle");
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    }), snapshot({ id: root.id, title: root.title, status: "running", useWorktree: false, worktreePath: null })]);
+    svc.retryDuePrompts(Date.now() + 120_000);
+    assert.equal(new Set(f.resolutionPrompts(merge.occurrenceId).map((message) => message.commandId)).size, 2);
+    assert.equal(f.receipt(second.commandId, "started", 1), true);
+    assert.equal(f.receipt(second.commandId, "completed", 2), true);
+    assert.equal(f.resumeState(merge.occurrenceId), "delivered");
+    const startedResumes = f.resolutionPrompts(merge.occurrenceId).filter((message) =>
+      ["started", "completed"].includes(db.getSessionPromptCommand(message.commandId)?.state ?? ""));
+    assert.equal(new Set(startedResumes.map((message) => message.commandId)).size, 1,
+      "the child receives the resolution exactly once");
+  } finally {
+    db.close();
+  }
+});
+
+test("a decision resolved while its child is already held waits unsent, and a stopped child's resume is abandoned (#1650)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child, recovery } = f;
+  try {
+    const merge = f.requestMerge(1651);
+    svc.onSessionStatus(child.id, "idle");
+    // The runner parked the child before anyone resolved its card.
+    f.runnerReports(recovery, "input_required");
+    assert.equal(db.getSession(child.id)?.status, "input_required");
+    f.approve(merge.occurrenceId);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0, "nothing is sent into a known hold");
+    assert.equal(f.resumeState(merge.occurrenceId), "held");
+    assert.equal(db.getSession(child.id)?.status, "input_required",
+      "settling the card leaves the runner's recovery status alone");
+    assert.deepEqual(db.getSession(child.id)?.holds?.[0]?.heldResumes?.map((resume) => resume.occurrenceId),
+      [merge.occurrenceId]);
+
+    // A runner that is away keeps it held; its return is one more boundary that delivers it.
+    f.hub.online = false;
+    f.runnerReports(null, "idle");
+    assert.equal(f.resumeState(merge.occurrenceId), "held");
+    f.hub.online = true;
+    svc.retryDuePrompts(Date.now() + 5_000);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 1);
+    assert.equal(f.resumeState(merge.occurrenceId), "delivering");
+
+    // A resume held for a child that is then stopped is never delivered.
+    const second = f.requestMerge(1652);
+    f.runnerReports(recovery, "input_required");
+    f.approve(second.occurrenceId);
+    assert.equal(f.resumeState(second.occurrenceId), "held");
+    assert.ok(svc.stop(child.id).ok);
+    assert.equal(f.resumeState(second.occurrenceId), "abandoned");
+    f.runnerReports(null, "idle");
+    svc.retryDuePrompts(Date.now() + 10_000);
+    assert.equal(f.resolutionPrompts(second.occurrenceId).length, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test("a runner that cannot report a not-sent receipt keeps the ordinary resume prompt (#1650)", () => {
+  const f = worktreeRecoveryCampaign(RUNNER_CAPABILITY_MIN_PROTOCOL.worktreeRecovery - 1);
+  const { db, svc, child } = f;
+  try {
+    const merge = f.requestMerge(1653);
+    svc.onSessionStatus(child.id, "idle");
+    f.approve(merge.occurrenceId);
+    const ordinary = f.hub.sentOfType("prompt_session").filter((message) => message.sessionId === child.id &&
+      message.text.includes(`[Wollipog Workflow Decision — ${merge.occurrenceId}]`));
+    assert.equal(ordinary.length, 1, "the resume is the same ordinary prompt as before");
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0, "nothing travels the durable lane");
+    assert.equal(f.resumeState(merge.occurrenceId), null);
   } finally {
     db.close();
   }
