@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
 import {
+  closeSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   readdirSync,
   readlinkSync,
@@ -52,6 +54,13 @@ function makeRoots(): { root: string; home: string; dataDir: string } {
   mkdirSync(home, { recursive: true });
   mkdirSync(dataDir, { recursive: true });
   return { root, home, dataDir };
+}
+
+/** Plant a file symlink to a path outside the store, as a harness or a user might. */
+function plantSymlink(roots: { root: string }, path: string): void {
+  const target = join(roots.root, "outside.txt");
+  writeFileSync(target, "outside the store\n");
+  symlinkSync(target, path, "file");
 }
 
 function skillFiles(name: string, body = "Do the thing.\n"): SkillFile[] {
@@ -269,7 +278,7 @@ test("a copy that is no longer valid skill content is reported without content a
     const alpha = entry("alpha", [agentTarget]);
     await reconcile(roots, [alpha]);
     const copy = storeCopy(roots, "alpha", alpha.versionDigest);
-    symlinkSync("/etc/hostname", join(copy, "planted"));
+    plantSymlink(roots, join(copy, "planted"));
     const result = await reconcile(roots, [entry("alpha", [agentTarget], skillFiles("alpha", "Update.\n"))],
       { previousVersionGraceMs: 0, now: 5 });
     assert.equal(result.drift?.length, 1);
@@ -298,7 +307,7 @@ test("the drift command reads an edited copy and refuses clean or unreadable cop
     assert.deepEqual(read.files, editedFiles("alpha", "Edit.\n"));
     assert.equal(read.observedDigest, skillVersionDigest(editedFiles("alpha", "Edit.\n")));
 
-    symlinkSync("/etc/hostname", join(copy, "planted"));
+    plantSymlink(roots, join(copy, "planted"));
     const unreadable = handleSkillDrift({ message: command, runnerId: "runner-1", dataDir: roots.dataDir });
     assert.equal(unreadable.status, "rejected");
     assert.match(unreadable.error ?? "", /cannot be read as skill content/);
@@ -343,6 +352,9 @@ test("a confirmed restore replaces exactly the reviewed edit and the next pass c
     assert.equal(restored.status, "restored");
     assert.equal(readFileSync(join(copy, "SKILL.md"), "utf8"), alpha.files[0]!.content);
     assert.equal(linkTarget(canonical), copy);
+
+    assert.deepEqual(readdirSync(realpathSync(skillsStoreRoot(roots.dataDir))).filter((name) => name.startsWith(".drift-")), [],
+      "the replaced copy's quarantine is deleted");
 
     const converged = await reconcile(roots, [update]);
     assert.deepEqual(converged.drift, []);
@@ -389,6 +401,45 @@ test("a restore never discards bytes written after its observation fence", async
   }
 });
 
+test("a restore while a file in the edited copy is open never loses the edit", async () => {
+  const roots = makeRoots();
+  try {
+    const alpha = entry("alpha", [agentTarget]);
+    await reconcile(roots, [alpha]);
+    const copy = storeCopy(roots, "alpha", alpha.versionDigest);
+    writeFileSync(join(copy, "SKILL.md"), "edited\n");
+    const observedDigest = (await reconcile(roots, [alpha])).drift?.[0]?.observedDigest;
+    assert.ok(observedDigest);
+    const restore = () => handleSkillDrift({ runnerId: "runner-1", dataDir: roots.dataDir, message: {
+      type: "skill_drift", runnerId: "runner-1", requestId: "restore-open", operation: "restore", name: "alpha",
+      digest: alpha.versionDigest, variant: "agent", observedDigest, files: alpha.files, confirmation: "explicit",
+    } });
+    const quarantines = () => readdirSync(realpathSync(skillsStoreRoot(roots.dataDir))).filter((name) => name.startsWith(".drift-"));
+    const handle = openSync(join(copy, "SKILL.md"), "r");
+    try {
+      const held = restore();
+      if (process.platform === "win32") {
+        // Windows refuses to rename a directory while a file inside it is open: nothing moves.
+        assert.equal(held.status, "rejected");
+        assert.match(held.error ?? "", /Restoring the library version failed/);
+        assert.equal(readFileSync(join(copy, "SKILL.md"), "utf8"), "edited\n");
+      } else {
+        // Elsewhere the copy moves, and an open reader does not stop its quarantine being deleted.
+        assert.equal(held.status, "restored");
+        assert.equal(readFileSync(join(copy, "SKILL.md"), "utf8"), alpha.files[0]!.content);
+      }
+      assert.deepEqual(quarantines(), []);
+    } finally {
+      closeSync(handle);
+    }
+    if (process.platform === "win32") assert.equal(restore().status, "restored", "once the file is closed the restore succeeds");
+    assert.equal(readFileSync(join(copy, "SKILL.md"), "utf8"), alpha.files[0]!.content);
+    assert.deepEqual(quarantines(), []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
 test("restoring an unreadable copy keeps it aside because a later change cannot be fenced", async () => {
   const roots = makeRoots();
   try {
@@ -425,7 +476,7 @@ test("restoring without library files discards an unreadable copy and removes it
     await reconcile(roots, [alpha]);
     const claudeLink = join(roots.home, ".claude", "skills", "alpha");
     const copy = storeCopy(roots, "alpha", alpha.versionDigest);
-    symlinkSync("/etc/hostname", join(copy, "planted"));
+    plantSymlink(roots, join(copy, "planted"));
     assert.equal((await reconcile(roots, [])).drift?.[0]?.held, true);
 
     const restored = handleSkillDrift({

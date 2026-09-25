@@ -22,6 +22,7 @@ import {
   readlinkSync,
   renameSync,
   rmdirSync,
+  symlinkSync,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -224,10 +225,16 @@ function stampWithoutChangeTime(stamp: string | undefined): string | undefined {
 }
 
 /** Put an entry back under its name without ever replacing whatever took that name meanwhile. If the
- * name is taken, the entry stays under its private name inside the copy, where it is still reported. */
+ * name is taken, the entry stays under its private name inside the copy, where it is still reported, as
+ * does a Windows directory symlink or junction, which cannot be hard-linked. macOS link() follows a
+ * symlink, so there a symlink is recreated from its own target text instead of linked. */
 function putBack(aside: string, original: string): void {
   try {
-    linkSync(aside, original);
+    if (process.platform === "darwin" && lstatSync(aside).isSymbolicLink()) {
+      symlinkSync(readlinkSync(aside, { encoding: "buffer" }), original);
+    } else {
+      linkSync(aside, original);
+    }
     unlinkSync(aside);
   } catch {
     // Kept under its private name.
@@ -385,7 +392,8 @@ export function removeKeptAsideTree(
   const empty = (base: string, prefix: string, chain: readonly Level[]): void => {
     options.beforeList?.(prefix);
     inPlace(chain);
-    for (const name of readdirSync(base)) {
+    // Sorted, like the stamp walk, so the order is the same on every filesystem.
+    for (const name of readdirSync(base).sort()) {
       const child = childPath(base, name);
       const stat = verified(child, prefix + name);
       if (!stat.isDirectory()) {

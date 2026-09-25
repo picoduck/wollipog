@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
+  chmodSync,
   closeSync,
   existsSync,
   futimesSync,
@@ -48,6 +49,10 @@ const claudeAgent: AgentDefinition = {
 const agents = [claudeAgent];
 const agentTarget: SkillSyncTarget = { agentId: claudeAgent.id, invocation: "agent" };
 const manualTarget: SkillSyncTarget = { agentId: claudeAgent.id, invocation: "manual" };
+/** Descriptor-anchored traversal needs `/proc/self/fd`; every platform has the path-addressed one. */
+const TRAVERSALS = process.platform === "linux" ? [true, false] : [false];
+/** Links a copy may contain: on Windows a junction is one too. */
+const LINK_KINDS: ("file" | "dir" | "junction")[] = process.platform === "win32" ? ["file", "dir", "junction"] : ["file", "dir"];
 
 function makeRoots(): { root: string; home: string; dataDir: string } {
   const root = mkdtempSync(join(tmpdir(), "runner-skill-kept-aside-"));
@@ -56,6 +61,13 @@ function makeRoots(): { root: string; home: string; dataDir: string } {
   mkdirSync(home, { recursive: true });
   mkdirSync(dataDir, { recursive: true });
   return { root, home, dataDir };
+}
+
+/** Plant a file symlink to a path outside the store, as a harness or a user might. */
+function plantSymlink(roots: { root: string }, path: string): void {
+  const target = join(roots.root, "outside.txt");
+  writeFileSync(target, "outside the store\n");
+  symlinkSync(target, path, "file");
 }
 
 function skillFiles(name: string, body = "Do the thing.\n"): SkillFile[] {
@@ -195,7 +207,7 @@ test("a copy kept aside before records existed is reported with the name its SKI
     for (const file of skillFiles("beta")) writeFileSync(join(dir, file.path), file.content);
     const unnamed = randomUUID();
     mkdirSync(join(store(roots), `.drift-${unnamed}`));
-    symlinkSync("/etc/hostname", join(store(roots), `.drift-${unnamed}`, "planted"));
+    plantSymlink(roots, join(store(roots), `.drift-${unnamed}`, "planted"));
     // Look-alike entries are never reported.
     mkdirSync(join(store(roots), ".drift-not-a-uuid"));
     writeFileSync(join(store(roots), `.drift-${randomUUID()}`), "a file, not a copy");
@@ -247,7 +259,7 @@ test("the kept-aside command reads a readable copy and refuses anything else", a
     assert.equal(handleSkillKeptAside({ message: { ...read, id: "../alpha" }, runnerId: "runner-1", dataDir: roots.dataDir }).status,
       "rejected");
     assert.equal(handleSkillKeptAside({ message: read, runnerId: "other", dataDir: roots.dataDir }).status, "rejected");
-    symlinkSync("/etc/hostname", join(dir, "planted"));
+    plantSymlink(roots, join(dir, "planted"));
     const unreadable = handleSkillKeptAside({ message: read, runnerId: "runner-1", dataDir: roots.dataDir });
     assert.equal(unreadable.status, "rejected");
     assert.match(unreadable.error ?? "", /cannot be read as skill content: it contains a symlink/);
@@ -323,8 +335,7 @@ test("an unreadable kept-aside copy is discarded against its fingerprint without
     const outside = join(roots.root, "outside");
     mkdirSync(join(outside, "nested"), { recursive: true });
     writeFileSync(join(outside, "nested", "keep.txt"), "outside the store\n");
-    symlinkSync(outside, join(dir, "linked-directory"));
-    symlinkSync(join(outside, "nested", "keep.txt"), join(dir, "linked-file"));
+    for (const kind of LINK_KINDS) symlinkSync(kind === "file" ? join(outside, "nested", "keep.txt") : outside, join(dir, `linked-${kind}`), kind);
     const [reported] = (await reconcile(roots, [])).keptAside ?? [];
     assert.ok(reported?.observedFingerprint);
     const run = (message: SkillKeptAsideMessage) => handleSkillKeptAside({ message, runnerId: "runner-1", dataDir: roots.dataDir });
@@ -342,7 +353,55 @@ test("an unreadable kept-aside copy is discarded against its fingerprint without
     assert.equal(run(discard(id, { observedFingerprint: current })).status, "discarded");
     assert.equal(existsSync(dir), false);
     assert.equal(readFileSync(join(outside, "nested", "keep.txt"), "utf8"), "outside the store\n", "link targets are never touched");
+    assert.deepEqual(readdirSync(outside), ["nested"]);
     assert.deepEqual((await reconcile(roots, [])).keptAside, []);
+  } finally {
+    rmSync(roots.root, { recursive: true, force: true });
+  }
+});
+
+test("read-only files never make a verified discard or restore fail", async () => {
+  const roots = makeRoots();
+  try {
+    await reconcile(roots, []);
+    const readable = randomUUID();
+    const unreadable = randomUUID();
+    for (const id of [readable, unreadable]) {
+      const dir = join(store(roots), `.drift-${id}`);
+      mkdirSync(join(dir, "reference"), { recursive: true });
+      for (const file of skillFiles("beta")) {
+        writeFileSync(join(dir, file.path), file.content);
+        chmodSync(join(dir, file.path), 0o444);
+      }
+    }
+    plantSymlink(roots, join(store(roots), `.drift-${unreadable}`, "planted"));
+    const reported = (await reconcile(roots, [])).keptAside ?? [];
+    for (const id of [readable, unreadable]) {
+      const copy = reported.find((entry) => entry.id === id);
+      assert.ok(copy?.observedFingerprint);
+      assert.equal(copy.observedDigest === undefined, id === unreadable);
+      const result = handleSkillKeptAside({ runnerId: "runner-1", dataDir: roots.dataDir, message: discard(id, {
+        observedFingerprint: copy.observedFingerprint, ...(copy.observedDigest ? { observedDigest: copy.observedDigest } : {}),
+      }) });
+      assert.equal(result.status, "discarded", result.error ?? "");
+      assert.equal(existsSync(join(store(roots), `.drift-${id}`)), false);
+    }
+    assert.equal(readFileSync(join(roots.root, "outside.txt"), "utf8"), "outside the store\n");
+
+    // A restore deletes a replaced copy whose edit left a file read-only.
+    const alpha = entry("alpha", [agentTarget]);
+    await reconcile(roots, [alpha]);
+    const copy = join(store(roots), "alpha", alpha.versionDigest);
+    writeFileSync(join(copy, "SKILL.md"), "edited\n");
+    chmodSync(join(copy, "SKILL.md"), 0o444);
+    const observedDigest = (await reconcile(roots, [alpha])).drift?.[0]?.observedDigest;
+    assert.ok(observedDigest);
+    assert.equal(handleSkillDrift({ runnerId: "runner-1", dataDir: roots.dataDir, message: {
+      type: "skill_drift", runnerId: "runner-1", requestId: "restore", operation: "restore", name: "alpha",
+      digest: alpha.versionDigest, variant: "agent", observedDigest, files: alpha.files, confirmation: "explicit",
+    } }).status, "restored");
+    assert.equal(readFileSync(join(copy, "SKILL.md"), "utf8"), alpha.files[0]!.content);
+    assert.deepEqual(readdirSync(store(roots)).filter((name) => name.startsWith(".drift-")), [], "the quarantine is deleted");
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
@@ -354,7 +413,7 @@ test("removal unlinks symlinks, removes only verified entries, and never lists t
     const outside = join(root, "outside");
     mkdirSync(outside);
     writeFileSync(join(outside, "keep.txt"), "keep\n");
-    for (const anchored of [true, false]) {
+    for (const anchored of TRAVERSALS) {
       const dir = join(root, `copy-${anchored}`);
       mkdirSync(join(dir, "a", "b"), { recursive: true });
       writeFileSync(join(dir, "a", "b", "file.txt"), "x");
@@ -391,18 +450,31 @@ test("removal unlinks symlinks, removes only verified entries, and never lists t
       } }));
       assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep\n", "nothing outside the copy is removed");
 
-      // A link entry whose directory is moved out of the copy just before the unlink stays linked.
-      const linked = join(root, `linked-${anchored}`);
-      const linkedAway = join(root, `linked-away-${anchored}`);
-      mkdirSync(join(linked, "sub"), { recursive: true });
-      symlinkSync(outside, join(linked, "sub", "link"));
-      const linkStamps = keptAsideStamps(linked, { anchored })!;
-      assert.throws(() => removeKeptAsideTree(linked, linkStamps, { anchored, beforeUnlink: (relative) => {
-        if (relative !== "sub/link") return;
-        renameSync(join(linked, "sub"), linkedAway);
-        symlinkSync(linkedAway, join(linked, "sub"));
-      } }), /changed while it was discarded/);
-      assert.equal(lstatSync(join(linkedAway, "link")).isSymbolicLink(), true, "the relocated link is put back, not removed");
+      // A link entry whose directory is moved out of the copy just before the unlink stays a link to the
+      // same target, never a hard link to that target (which macOS link() would make of it). It is put
+      // back under its name, except that Windows cannot hard-link a directory link or junction, which
+      // stays under its private name.
+      for (const kind of LINK_KINDS) {
+        const linked = join(root, `linked-${anchored}-${kind}`);
+        const linkedAway = join(root, `linked-away-${anchored}-${kind}`);
+        const target = kind === "file" ? join(outside, "keep.txt") : outside;
+        mkdirSync(join(linked, "sub"), { recursive: true });
+        symlinkSync(target, join(linked, "sub", "link"), kind);
+        const linkStamps = keptAsideStamps(linked, { anchored })!;
+        assert.throws(() => removeKeptAsideTree(linked, linkStamps, { anchored, beforeUnlink: (relative) => {
+          if (relative !== "sub/link") return;
+          renameSync(join(linked, "sub"), linkedAway);
+          symlinkSync(linkedAway, join(linked, "sub"), "dir");
+        } }), /changed while it was discarded/);
+        const [kept, ...rest] = readdirSync(linkedAway);
+        assert.deepEqual(rest, [], `${kind}: only the link is there`);
+        const privateName = process.platform === "win32" && kind !== "file";
+        assert.ok(privateName ? kept?.startsWith(".wollipog-discard-") : kept === "link", `${kind}: the relocated link is kept, not removed`);
+        assert.equal(lstatSync(join(linkedAway, kept!)).isSymbolicLink(), true, `${kind}: it is still a link`);
+        assert.equal(realpathSync(join(linkedAway, kept!)), realpathSync(target), `${kind}: to the same target`);
+        assert.equal(lstatSync(join(outside, "keep.txt")).nlink, 1, `${kind}: the target is never hard-linked into the copy`);
+        assert.equal(readFileSync(join(outside, "keep.txt"), "utf8"), "keep\n");
+      }
 
       // A verified directory moved out of the copy, with a link to it left in its place, is not
       // followed: its files are not removed from their new location.
@@ -432,7 +504,7 @@ test("a stamp walk never follows a directory swapped for a symlink", () => {
     const outside = join(root, "outside");
     mkdirSync(outside);
     writeFileSync(join(outside, "secret-name.txt"), "outside\n");
-    for (const anchored of [true, false]) {
+    for (const anchored of TRAVERSALS) {
       const dir = join(root, `copy-${anchored}`);
       mkdirSync(join(dir, "sub"), { recursive: true });
       writeFileSync(join(dir, "sub", "file.txt"), "x");
