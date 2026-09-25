@@ -119,6 +119,7 @@ import {
   type RoutedSessionLookup,
 } from "../detail-placeholder.js";
 import { transcriptPresentation, transcriptRendersRequestRow } from "../transcript-presentation.js";
+import { DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE } from "../ui-evidence-disclosure.js";
 import {
   acquireSessionFork,
   canStopActiveTurn,
@@ -6828,6 +6829,7 @@ export function ComposerPlusMenu({
                           { value: "orchestrator", label: "Orchestrator", description: "Let the controlling Orchestrator review this typed gate." },
                         ]}
                       />
+                      {category === "ui_evidence_approval" && <span className="muted parent-control-help">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</span>}
                     </div>
                   ))}
                   <span className="muted parent-control-help">Only an authenticated human can change these assignments. Existing unconsumed approvals are revoked when the policy changes. Secrets, authentication, persistent grants, governance, budgets, and tool guardrails remain human-only.</span>

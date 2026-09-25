@@ -337,6 +337,9 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
       "Implementation Questions", "PR Merge Approval", "Merged Branch Deletion",
       "Follow-Up Issue Publication", "UI Evidence Approval",
     ]) assert.ok(container.querySelector(`[aria-label^="${label}:"]`), `${label} is explicitly labelled`);
+    assert.match(container.textContent ?? "", /provider may retain them in provider-local transcripts or media logs/,
+      "the session override discloses provider-local retention before delegation");
+    assert.match(container.textContent ?? "", /provider-local retention is outside those audit guarantees/);
     assert.match(container.textContent ?? "", /Only an authenticated human can change/);
     assert.match(container.textContent ?? "", /unconsumed approvals are revoked/);
   } finally {

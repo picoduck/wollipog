@@ -21,8 +21,10 @@ test("desktop: Parent Control exposes five independent typed workflow authoritie
   await expect(page.getByRole("button", { name: "Merged Branch Deletion: Human" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Follow-Up Issue Publication: Orchestrator" })).toBeVisible();
   await expect(page.getByRole("button", { name: "UI Evidence Approval: Human" })).toBeVisible();
+  await expect(page.getByText(/provider may retain them in provider-local transcripts or media logs/)).toBeVisible();
   await expect(page.getByText(/Existing unconsumed approvals are revoked/)).toBeVisible();
-  await page.getByRole("button", { name: "UI Evidence Approval: Human" }).scrollIntoViewIfNeeded();
+  await page.getByText(/provider may retain them in provider-local transcripts or media logs/).scrollIntoViewIfNeeded();
+  await page.locator(".composer-plus-pop").evaluate((menu) => { menu.scrollTop = menu.scrollHeight; });
   await page.locator(".composer-plus-pop").screenshot({ path: `${SHOT}/desktop-typed-parent-control.png` });
 });
 
