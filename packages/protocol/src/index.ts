@@ -5673,7 +5673,7 @@ function backgroundLaunchTypeNoun(launchType: ManagedBackgroundJobSnapshot["laun
 /** One bounded sentence saying why the queued prompt has not started. */
 export function queueHoldReason(hold: SessionQueueHoldView): string {
   const messages = hold.queuedPrompts === 1 ? "The queued message" : `The ${hold.queuedPrompts} queued messages`;
-  const cannot = hold.queuedPrompts === 1 ? "cannot start" : "cannot start";
+  const cannot = "cannot start";
   const move = hold.kind === "worktree_rebind"
     ? `move to worktree ${hold.target}`
     : `switch to provider account ${hold.target}`;
@@ -5689,16 +5689,18 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
 }
 
 /** What clears a queue hold. Waiting is the ordinary way; a restart is the bounded way out of a
- * job that never ends, and its cost to an approved decision is stated so nobody is surprised. */
+ * job that never ends, and its costs are stated so nobody is surprised: the runner's restart path
+ * rejects every prompt still in the queue ("session restart discarded the queued command"), and a
+ * restart revokes approved decisions the session has not consumed. */
 export function queueHoldRecoveryAction(hold: SessionQueueHoldView): string {
   const one = hold.unfinishedBackgroundJobs === 1;
   const jobs = one ? "job" : "jobs";
   const messages = hold.queuedPrompts === 1 ? "message" : "messages";
   return `Wait for the unfinished background ${jobs} to end; the handoff and the queued ${messages} then proceed on their own. ` +
     `If ${one ? "it never ends" : "they never end"} (a monitor whose condition never fires ends only with its provider process), ` +
-    "restart the session with restart_session: that retires the provider, recovers the " +
-    `${jobs} as orphaned work, keeps the queued ${messages}, and revokes any approved workflow decision ` +
-    "the session has not yet consumed, which must then be requested again.";
+    "restart the session with restart_session: that retires the provider and recovers the " +
+    `${jobs} as orphaned work, but it discards the queued ${messages}, which must be sent again, and revokes ` +
+    "any approved workflow decision the session has not yet consumed, which must be requested again.";
 }
 
 /**

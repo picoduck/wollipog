@@ -844,9 +844,10 @@ queued behind a turn that had never started.
   session reads `running` but its runner reports no active turn it says the message waits for a
   turn that has not started, not behind one already running.
 - **The way out is stated.** The hold's recovery action says to wait for the job, or, if it never
-  ends, to restart the session: the provider is retired, its unfinished jobs are recovered as
-  orphaned work, queued messages are kept, and approved decisions the session has not yet consumed
-  are revoked and must be requested again.
+  ends, to restart the session: the provider is retired and its unfinished jobs are recovered as
+  orphaned work, but the runner's restart discards the prompts still in its queue (they must be sent
+  again), and approved decisions the session has not yet consumed are revoked and must be requested
+  again.
 - **The job is reported, too.** A listed job with no terminal status for more than an hour carries
   `stalledSince` in the session's job inventory and reads **Stalled** in the Background Work panel.
   That is a report, not proof it ended. A finished job whose result cannot be returned because a
