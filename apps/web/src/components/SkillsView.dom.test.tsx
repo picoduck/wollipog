@@ -747,11 +747,15 @@ test("SkillsView offers a same-name skill the built-in version and adopts it aft
 
 test("SkillsView follows the route's selected skill, including back to no selection", async () => {
   const skill = { id: "skill-1", name: "code-review", latestVersion: { id: "v1", digest: "d1" } };
+  let hold: Promise<void> | null = null;
   const client = {
     ...api,
     listSkills: async () => ({ skills: [skill] }),
     listSkillGroups: async () => ({ groups: [] }),
-    getSkill: async () => ({ skill, latestVersion: { id: "v1", digest: "d1", files: [] } }),
+    getSkill: async () => {
+      await hold;
+      return { skill, latestVersion: { id: "v1", digest: "d1", files: [] } };
+    },
     listSkillAssignments: async () => ({ assignments: [] }),
     runnerSkills: async () => ({ desired: [], reported: null }),
   } as unknown as ApiClient;
@@ -789,6 +793,15 @@ test("SkillsView follows the route's selected skill, including back to no select
   await act(settle);
   assert.equal(container.querySelector(".skills-detail-head"), null, "the bare Skills route clears the selection");
   assert.match(container.querySelector(".skills-empty")?.textContent ?? "", /Select a skill/);
+
+  // A detail load still pending when the route clears never repopulates the pane.
+  let release!: () => void;
+  hold = new Promise((resolve) => { release = resolve; });
+  await act(async () => { route("skill-1"); });
+  await act(async () => { route(undefined); });
+  await act(async () => { release(); await hold; });
+  await act(settle);
+  assert.equal(container.querySelector(".skills-detail-head"), null, "a stale detail load is discarded");
   await act(async () => root.unmount());
   container.remove();
 });

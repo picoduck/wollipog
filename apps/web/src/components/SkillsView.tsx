@@ -269,6 +269,8 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
 
   useEffect(() => {
     if (!selectedId) {
+      // A detail load still in flight must not repopulate the pane after the selection clears.
+      detailGeneration.current += 1;
       setDetail(null);
       setAssignments([]);
       return;
