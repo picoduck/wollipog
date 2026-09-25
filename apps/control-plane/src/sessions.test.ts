@@ -20634,3 +20634,55 @@ test("a runner that cannot report a not-sent receipt keeps the ordinary resume p
     db.close();
   }
 });
+
+test("a held resume survives a restart at either delivery boundary and is still delivered once (#1650)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child, recovery } = f;
+  try {
+    const merge = f.requestMerge(1654);
+    svc.onSessionStatus(child.id, "idle");
+    f.approve(merge.occurrenceId);
+    const [first] = f.resolutionPrompts(merge.occurrenceId);
+    assert.ok(first);
+    f.runnerReports(recovery, "input_required");
+    // The not-sent receipt is recorded, but the control plane stops before applying it to the
+    // decision: the transport row is terminal while the resume still reads as in flight.
+    db.recordSessionPromptCommandReceipt({
+      commandId: first.commandId, runnerId: RUNNER_ID, sessionId: child.id, state: "failed", revision: 1,
+      error: `${recovery.detail}; this message was not sent`, code: "WORKTREE_RECOVERY_REQUIRED", now: Date.now(),
+    });
+    assert.equal(f.resumeState(merge.occurrenceId), "delivering");
+    // The next maintenance pass applies it: the resume is owed again and the row retired.
+    svc.retryDuePrompts(Date.now() + 1_000);
+    assert.equal(f.resumeState(merge.occurrenceId), "held");
+    assert.equal(db.getSessionPromptCommand(first.commandId)?.dismissedAt !== undefined, true);
+
+    // Staging the delivery fails once (a crash between reading the hold and writing the command):
+    // nothing is staged, the resume stays owed, and the next boundary delivers it.
+    const stage = db.stageSessionPromptCommand.bind(db);
+    let failures = 1;
+    db.stageSessionPromptCommand = (input) => {
+      if (failures-- > 0) throw new Error("simulated crash while staging");
+      return stage(input);
+    };
+    f.runnerReports(null, "idle");
+    assert.equal(f.resumeState(merge.occurrenceId), "held", "an unstaged delivery leaves the resume owed");
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 1);
+    svc.retryDuePrompts(Date.now() + 2_000);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 2);
+    assert.equal(f.resumeState(merge.occurrenceId), "delivering");
+    // Once staged, a second observer of the same state stages nothing: the state it read is gone.
+    assert.throws(() => db.stageWorkflowDecisionResume({
+      occurrenceId: merge.occurrenceId, from: "held",
+      command: {
+        commandId: "prompt_duplicate", sessionId: child.id, runnerId: RUNNER_ID, payloadJson: "{}",
+        payloadSha256: "0".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now(),
+      },
+    }), /changed before it could be staged/u);
+    assert.equal(db.getSessionPromptCommand("prompt_duplicate"), null, "the refused staging rolled back");
+    svc.retryDuePrompts(Date.now() + 3_000);
+    assert.equal(new Set(f.resolutionPrompts(merge.occurrenceId).map((message) => message.commandId)).size, 2);
+  } finally {
+    db.close();
+  }
+});

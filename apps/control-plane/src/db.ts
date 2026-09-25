@@ -5060,7 +5060,7 @@ export class ControlPlaneDb {
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_held_resume
       ON workflow_decisions(session_id, resolved_at) WHERE resume_state='held'`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resume_command
-      ON workflow_decisions(resume_command_id) WHERE resume_command_id IS NOT NULL`);
+      ON workflow_decisions(resume_command_id) WHERE resume_state='delivering'`);
     admitChildBlockedCampaignEvents(db);
     // An early v147 iteration used one-admission-per-turn uniqueness. Event-order correlation is
     // narrower and permits multiple distinct invocations in one provider turn.
@@ -14851,13 +14851,57 @@ export class ControlPlaneDb {
     ).run(state, commandId, now, occurrenceId);
   }
 
-  /** Claim one held resume for delivery. Exactly one caller wins, whichever boundary saw the hold
-   * clear first, so a held resume is staged once. */
-  claimHeldWorkflowDecisionResume(occurrenceId: string, now: number): boolean {
-    return Number(this.stmt(
-      `UPDATE workflow_decisions SET resume_state='delivering', resume_command_id=NULL, resume_updated_at=?
-       WHERE occurrence_id=? AND resume_state='held'`,
-    ).run(now, occurrenceId).changes) === 1;
+  /**
+   * Stage the durable command that carries a decision's resume and bind it to the decision in one
+   * transaction (#1650). A crash then leaves the resume either still owed (`from`, which the next
+   * boundary delivers) or in flight with its command (which the outbox delivers) — never both, and
+   * never neither. The resume state the caller observed must still hold, so a delivery can never be
+   * staged twice for one owed resume.
+   */
+  stageWorkflowDecisionResume(input: {
+    occurrenceId: string;
+    from: WorkflowDecisionResumeState | null;
+    command: Parameters<ControlPlaneDb["stageSessionPromptCommand"]>[0];
+  }): SessionPromptCommandRecord {
+    this.db.exec("BEGIN");
+    try {
+      const current = this.stmt("SELECT resume_state FROM workflow_decisions WHERE occurrence_id=?")
+        .get(input.occurrenceId) as { resume_state: WorkflowDecisionResumeState | null } | undefined;
+      if (!current || current.resume_state !== input.from) {
+        throw new Error("workflow decision resume changed before it could be staged");
+      }
+      const staged = this.stageSessionPromptCommand(input.command);
+      this.stmt(
+        `UPDATE workflow_decisions SET resume_state='delivering', resume_command_id=?, resume_updated_at=?
+         WHERE occurrence_id=?`,
+      ).run(staged.commandId, input.command.now, input.occurrenceId);
+      this.db.exec("COMMIT");
+      return staged;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /**
+   * The runner reported the resume's command not sent because the child's worktree needs recovery:
+   * owe the resume again and retire the not-sent row in one transaction, so it can neither be lost
+   * nor also retried by hand (#1650). False when the resume is no longer carried by that command.
+   */
+  holdWorkflowDecisionResume(occurrenceId: string, sessionId: string, commandId: string, now: number): boolean {
+    this.db.exec("BEGIN");
+    try {
+      const held = Number(this.stmt(
+        `UPDATE workflow_decisions SET resume_state='held', resume_command_id=NULL, resume_updated_at=?
+         WHERE occurrence_id=? AND resume_state='delivering' AND resume_command_id=?`,
+      ).run(now, occurrenceId, commandId).changes) === 1;
+      if (held) this.dismissTerminalSessionPromptCommand(sessionId, commandId, now);
+      this.db.exec("COMMIT");
+      return held;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   workflowDecisionResumeForCommand(commandId: string): {
@@ -14866,9 +14910,22 @@ export class ControlPlaneDb {
     state: WorkflowDecisionResumeState;
   } | null {
     const row = this.stmt(
-      `SELECT occurrence_id, session_id, resume_state FROM workflow_decisions WHERE resume_command_id=?`,
+      `SELECT occurrence_id, session_id, resume_state FROM workflow_decisions
+       WHERE resume_command_id=? AND resume_state='delivering'`,
     ).get(commandId) as { occurrence_id: string; session_id: string; resume_state: WorkflowDecisionResumeState } | undefined;
     return row ? { occurrenceId: row.occurrence_id, sessionId: row.session_id, state: row.resume_state } : null;
+  }
+
+  /** Commands carrying an in-flight resume whose outcome is already recorded but was never applied
+   * to the decision — a receipt processed just before a restart, for example. */
+  settledWorkflowDecisionResumeCommands(runnerId?: string, limit = 100): string[] {
+    return (this.stmt(
+      `SELECT d.resume_command_id AS id FROM workflow_decisions d
+       JOIN session_prompt_commands c ON c.command_id=d.resume_command_id
+       WHERE d.resume_state='delivering' AND c.state IN ('started','completed','failed','uncertain')
+         ${runnerId ? "AND c.runner_id=?" : ""}
+       LIMIT ?`,
+    ).all(...(runnerId ? [runnerId, limit] : [limit])) as Array<{ id: string }>).map((row) => row.id);
   }
 
   /** Resumes waiting for this session's hold to clear, oldest resolution first. */

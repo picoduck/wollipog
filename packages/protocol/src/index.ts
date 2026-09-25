@@ -5588,8 +5588,11 @@ export interface WorktreeRecoveryView {
  * refuses a prompt, the hold a parent sees, and anything else that must tell someone how to
  * unblock the session (#1650). */
 export function worktreeRecoveryAction(recovery: Pick<WorktreeRecoveryView, "selectedPath" | "expectedBranch">): string {
+  // The example is meant to be pasted, so a path with spaces or shell syntax is quoted.
+  const shellWord = (value: string) =>
+    /^[\w@%+=:,./-]+$/u.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
   return `Restore branch ${recovery.expectedBranch} in ${recovery.selectedPath} ` +
-    `(for example \`git -C ${recovery.selectedPath} switch ${recovery.expectedBranch}\`) and select that ` +
+    `(for example \`git -C ${shellWord(recovery.selectedPath)} switch ${shellWord(recovery.expectedBranch)}\`) and select that ` +
     "worktree again with select_worktree, or select or create another worktree for this session with " +
     "select_worktree or create_worktree.";
 }

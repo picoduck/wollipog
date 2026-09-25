@@ -774,11 +774,14 @@ with no pending request. Before, its decision resume was dropped and nothing tol
   knows the child is in recovery, the resume is held unsent. If the runner reports it not sent
   with `WORKTREE_RECOVERY_REQUIRED`, it is held the same way, and the not-sent row is retired so a
   manual Retry cannot deliver it a second time. The first boundary that sees the recovery cleared —
-  a runtime update, a reconnect, or the prompt-maintenance sweep — claims it atomically and
-  delivers it once, as a fresh durable command with the same text. A resume held for a child that
-  stops, or for a decision later revoked or superseded, is abandoned. Settling the card leaves a
-  recovering child's status as the runner reported it, instead of marking it running or idle.
-  Older runners keep the ordinary prompt path.
+  a runtime update, a reconnect, or the prompt-maintenance sweep — delivers it once, as a fresh
+  durable command with the same text. Staging that command and recording it on the decision happen
+  in one transaction, conditional on the resume still being held. Holding a resume and retiring its
+  not-sent row are also one transaction, and the sweep applies any receipt a restart left
+  unapplied, so a restart can neither lose an owed resume nor send it twice. A resume held for a
+  child that stops, or for a decision later revoked or superseded, is abandoned. Settling the card
+  leaves a recovering child's status as the runner reported it, instead of marking it running or
+  idle. Older runners keep the ordinary prompt path.
 - **The parent sees the hold.** A session's `holds` list what keeps its next turn from starting,
   with a stable `holdId`, a reason, the `recoveryAction` that clears it, and any `heldResumes`.
   MCP `get_session` returns them together with `worktreeRecovery`. `list_descendant_requests` lists

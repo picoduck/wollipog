@@ -167,6 +167,7 @@ import {
   type ControlPlaneDb,
   type SessionPromptCommandRecord,
   type SessionAutomationOrigin,
+  type WorkflowDecisionResumeState,
 } from "./db.js";
 import { questionPolicyAnswers } from "./question-policy.js";
 import type { SessionEvent } from "@wollipog/protocol";
@@ -4553,6 +4554,10 @@ export class SessionsService {
 
   retryDuePrompts(now = Date.now(), runnerId?: string): number {
     this.maintainCampaignContinuations(now, runnerId);
+    // A receipt recorded just before a restart may never have reached its decision's resume.
+    for (const commandId of this.db.settledWorkflowDecisionResumeCommands(runnerId)) {
+      this.reconcileWorkflowDecisionResumeCommand(commandId, now);
+    }
     for (const sessionId of this.db.sessionsWithHeldWorkflowDecisionResumes(runnerId)) {
       this.deliverHeldWorkflowDecisionResumes(sessionId, now);
     }
@@ -7447,11 +7452,16 @@ export class SessionsService {
    * the control plane refused it outright when it already knew, and otherwise the runner refused
    * the turn before submission with nothing left to replay. On a runner that reports that refusal
    * exactly, the resume now travels the durable prompt lane instead. A recovery already known here
-   * holds it unsent, a `WORKTREE_RECOVERY_REQUIRED` receipt holds it the same way, and whichever
-   * boundary first sees the recovery cleared claims it and delivers it once. Returns whether the
-   * child will be resumed.
+   * holds it unsent, a `WORKTREE_RECOVERY_REQUIRED` receipt holds it the same way, and the first
+   * boundary that sees the recovery cleared delivers it. Staging binds the command to the decision
+   * in one transaction, conditional on the resume state observed here (`from`), so a restart can
+   * neither lose an owed resume nor send it twice. Returns whether the child will be resumed.
    */
-  private deliverWorkflowDecisionResume(decision: WorkflowDecisionView, now: number): boolean {
+  private deliverWorkflowDecisionResume(
+    decision: WorkflowDecisionView,
+    now: number,
+    from: WorkflowDecisionResumeState | null = null,
+  ): boolean {
     const child = this.db.getSession(decision.sessionId);
     if (!child) return false;
     const text = workflowDecisionResolutionPrompt(decision);
@@ -7463,26 +7473,34 @@ export class SessionsService {
       return delivered.ok;
     }
     if (child.worktreeRecovery) {
-      this.db.setWorkflowDecisionResume(decision.occurrenceId, "held", null, now);
+      if (from !== "held") this.db.setWorkflowDecisionResume(decision.occurrenceId, "held", null, now);
       this.hub.sessionChangedById(child.id);
       return true;
     }
     let staged: SessionPromptCommandRecord | null = null;
-    const delivered = this.prompt(child.id, text, [], undefined, undefined, {
-      // Staging is the success boundary: once the payload is durable, a failed flush is retried by
-      // the outbox rather than reported, exactly as for a human's durable prompt.
-      stage: (plan) => {
-        staged = this.promptOutbox.stage(child.id, plan.runnerId, plan.commands[0]!, now);
-        this.db.setWorkflowDecisionResume(decision.occurrenceId, "delivering", staged.commandId, now);
-      },
-      activate: (plan) => {
-        try {
-          this.promptOutbox.flush(now, plan.runnerId);
-        } catch (error) {
-          this.log.warn(`workflow decision resume flush deferred for ${child.id}: ${(error as Error).message}`);
-        }
-      },
-    });
+    let delivered: ReturnType<SessionsService["prompt"]>;
+    try {
+      delivered = this.prompt(child.id, text, [], undefined, undefined, {
+        // Staging is the success boundary: once the payload is durable, a failed flush is retried by
+        // the outbox rather than reported, exactly as for a human's durable prompt.
+        stage: (plan) => {
+          staged = this.promptOutbox.stageWorkflowDecisionResume(
+            decision.occurrenceId, from, child.id, plan.runnerId, plan.commands[0]!, now,
+          );
+        },
+        activate: (plan) => {
+          try {
+            this.promptOutbox.flush(now, plan.runnerId);
+          } catch (error) {
+            this.log.warn(`workflow decision resume flush deferred for ${child.id}: ${(error as Error).message}`);
+          }
+        },
+      });
+    } catch (error) {
+      // Nothing was staged: the resume keeps the state it had, and a held one is retried later.
+      this.log.warn(`workflow decision ${decision.occurrenceId} resume was not staged for ${child.id}: ${(error as Error).message}`);
+      return false;
+    }
     if (!delivered.ok) {
       if (!staged) this.db.setWorkflowDecisionResume(decision.occurrenceId, "failed", null, now);
       this.log.warn(`workflow decision ${decision.occurrenceId} resolution not delivered to ${child.id}: ${delivered.error}`);
@@ -7499,8 +7517,7 @@ export class SessionsService {
     if (!command) return;
     if (command.state === "failed" && command.errorCode === "WORKTREE_RECOVERY_REQUIRED" &&
         command.userEventSeq === undefined) {
-      this.promptOutbox.dismissTerminal(command.sessionId, commandId, now);
-      this.db.setWorkflowDecisionResume(resume.occurrenceId, "held", null, now);
+      if (!this.db.holdWorkflowDecisionResume(resume.occurrenceId, command.sessionId, commandId, now)) return;
       this.hub.sessionChangedById(command.sessionId);
       // The recovery may already be over by the time this receipt arrives.
       this.deliverHeldWorkflowDecisionResumes(command.sessionId, now);
@@ -7518,7 +7535,8 @@ export class SessionsService {
   }
 
   /** Deliver each resume held for this session once nothing holds it any more (#1650). Every
-   * boundary that can see the hold clear calls this; the claim lets exactly one of them deliver. */
+   * boundary that can see the hold clear calls this; staging is conditional on the resume still
+   * being held, so only the first of them delivers it. */
   private deliverHeldWorkflowDecisionResumes(sessionId: string, now = Date.now()): void {
     const held = this.db.heldWorkflowDecisionResumes(sessionId);
     if (!held.length) return;
@@ -7534,8 +7552,7 @@ export class SessionsService {
       }
       // Keep it held while the runner is away; its reconnect is another boundary that retries.
       if (!this.hub.isRunnerOnline(session.runnerId)) return;
-      if (!this.db.claimHeldWorkflowDecisionResume(resume.occurrenceId, now)) continue;
-      this.deliverWorkflowDecisionResume(decision, now);
+      this.deliverWorkflowDecisionResume(decision, now, "held");
     }
   }
 

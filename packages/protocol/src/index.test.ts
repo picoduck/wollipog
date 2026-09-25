@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  sessionHolds,
+  worktreeRecoveryAction,
   agentContextKey,
   CONTROL_PLANE_API_VERSION,
   CONTROL_PLANE_CAPABILITIES,
@@ -1493,4 +1495,34 @@ test("image tool results are installation truth that session snapshots never dro
     "a snapshot that states it explicitly still wins");
   const plain = caps();
   assert.equal(mergeSessionCapabilities(caps(), plain), plain, "nothing to inherit keeps the snapshot as is");
+});
+
+test("a worktree-recovery hold names its recovery step with a pasteable command (#1650)", () => {
+  const recovery = {
+    recoveryId: "worktree-recovery:x",
+    detectedAt: 7,
+    selectedPath: "/tmp/my repo/it's here",
+    expectedBranch: "agent/s_1",
+    detail: "the selected worktree could not be verified before a live turn",
+  };
+  assert.match(worktreeRecoveryAction(recovery),
+    /git -C '\/tmp\/my repo\/it'\\''s here' switch agent\/s_1/u, "a path with spaces or quotes is shell-quoted");
+  assert.match(worktreeRecoveryAction({ selectedPath: "/w/s_1", expectedBranch: "agent/s_1" }),
+    /git -C \/w\/s_1 switch agent\/s_1/u);
+  assert.match(worktreeRecoveryAction(recovery), /select_worktree/u);
+  assert.match(worktreeRecoveryAction(recovery), /create_worktree/u);
+  assert.deepEqual(sessionHolds({}), []);
+  assert.deepEqual(sessionHolds({ worktreeRecovery: null }), []);
+  const [hold] = sessionHolds({ worktreeRecovery: recovery }, [
+    { kind: "workflow_decision_resolution", occurrenceId: "wd_1", since: 8 },
+  ]);
+  assert.deepEqual(hold, {
+    kind: "worktree_recovery",
+    holdId: "worktree-recovery:x",
+    since: 7,
+    reason: recovery.detail,
+    recoveryAction: worktreeRecoveryAction(recovery),
+    heldResumes: [{ kind: "workflow_decision_resolution", occurrenceId: "wd_1", since: 8 }],
+  });
+  assert.equal(Object.hasOwn(sessionHolds({ worktreeRecovery: recovery })[0]!, "heldResumes"), false);
 });
