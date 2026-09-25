@@ -308,3 +308,50 @@ for (const viewport of [
     await expect(trigger).toBeFocused();
   });
 }
+
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "mobile portrait", width: 390, height: 844 },
+]) {
+  test(`campaign held children are listed apart from requests and leave when the hold clears at ${viewport.name}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=held");
+    const held = page.getByRole("region", { name: "Held Children" });
+    await expect(held).toBeVisible();
+    const entries = held.locator(".campaign-held-child");
+    await expect(entries).toHaveCount(2);
+    await expect(held).toContainText("The campaign counts 3 blocked children, including failed and stopped ones.");
+
+    const recovery = entries.nth(0);
+    const link = recovery.getByRole("link", { name: "Fix #1650: Keep a Decision Resume Across Worktree Recovery" });
+    await expect(link).toBeVisible();
+    await expect(recovery).toContainText("Worktree Recovery");
+    await expect(recovery).toContainText("is on branch main, not fix/issue-1650-decision-resume.");
+    await expect(recovery.locator("dd code").first())
+      .toHaveText("git -C /home/dev/worktrees/issue-1650 switch fix/issue-1650-decision-resume");
+    await expect(recovery.locator("dt")).toHaveText(["Hold", "Reason", "Recovery Action", "Held Decision Resumes"]);
+    await expect(recovery).toContainText("wd_occ_merge_1752");
+    await expect(entries.nth(1)).toContainText("Handoff Barrier");
+    await expect(entries.nth(1).locator("dt")).toHaveText(["Hold", "Reason", "Recovery Action"]);
+
+    // A hold asks nothing: no control beyond the child link, and no row in the request inbox.
+    await expect(held.getByRole("button")).toHaveCount(0);
+    await expect(held.getByRole("textbox")).toHaveCount(0);
+    await assertNoHorizontalOverflow(page, ".campaign-held-children");
+    await page.getByRole("button", { name: "Needs Your Input: 8 Requests" }).click();
+    await expect(page.locator(".request-panel-row")).toHaveCount(12);
+    await expect(page.locator(".request-panel-row", { hasText: /Fix #165[01]/u })).toHaveCount(0);
+    await page.getByRole("button", { name: "Close Panel" }).click();
+
+    await link.click();
+    await expect.poll(() => page.evaluate(() =>
+      window.__WOLLIPOG_REQUEST_SURFACES_E2E__.openedHeldChild())).toBe("held-child-1");
+
+    // The campaign projection drops a child once its hold clears; the entry and the count follow.
+    await page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.clearHold("held-child-1"));
+    await expect(entries).toHaveCount(1);
+    await expect(held).toContainText("The campaign counts 2 blocked children");
+    await page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.clearHold("held-child-2"));
+    await expect(held).toHaveCount(0);
+  });
+}

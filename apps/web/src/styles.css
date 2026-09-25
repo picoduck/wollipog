@@ -7551,6 +7551,54 @@ button.file-head.source-path-link {
   .campaign-continuation-notice .btn { min-height: 44px; }
 }
 
+/* A held child is a condition to clear, not a request: warning-edged status, no controls. */
+.campaign-held-children {
+  display: grid;
+  gap: var(--space-2);
+  margin: 8px 12px;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--bg-elev-2);
+  border: 1px solid var(--warning);
+  border-radius: var(--radius-md);
+}
+.campaign-held-children-head { display: flex; align-items: baseline; gap: var(--space-2); }
+.campaign-held-children-count { color: var(--text-dim); font-variant-numeric: tabular-nums; }
+.campaign-held-children-summary { margin: 0; color: var(--text-dim); }
+/* Up to 32 children can be held; the transcript below keeps its room and the list scrolls. */
+.campaign-held-children-list {
+  display: grid;
+  gap: var(--space-2);
+  max-height: min(40dvh, 28rem);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  list-style: none;
+}
+.campaign-held-child {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--border);
+}
+.campaign-held-child-link { font-weight: 600; overflow-wrap: anywhere; }
+.campaign-held-child-hold { display: grid; gap: var(--space-1); margin: 0; }
+.campaign-held-child-hold > div {
+  display: grid;
+  grid-template-columns: minmax(0, 10rem) minmax(0, 1fr);
+  gap: var(--space-2);
+}
+.campaign-held-child-hold dt { color: var(--text-dim); }
+.campaign-held-child-hold dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
+.campaign-held-child-hold small { color: var(--text-faint); }
+.campaign-held-child-resumes { margin: 0; padding: 0; list-style: none; }
+
+@media (max-width: 600px) {
+  .campaign-held-child-hold > div { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}
+
 .skills-unavailable-notice {
   display: grid;
   gap: 2px;

@@ -800,6 +800,11 @@ with no pending request. Before, its decision resume was dropped and nothing tol
   held descendants as `blockedChildren`, beside `requests` and never as a request, since there is
   nothing to answer. This is not gated on Parent Control. The campaign projection counts a held
   child as `blocked` rather than `active` and names it, with its holds, in `heldChildren`.
+- **A human sees it too.** The campaign parent's session detail lists `heldChildren` under
+  **Held Children** (#1760): each child's title and link, and for each hold its kind, reason,
+  recovery action, and held decision resumes. The list reads the same projection as the `Blocked`
+  count, so an entry leaves when its hold clears. It sits apart from the request inbox and offers no
+  answer or approve control. Hold kinds render from their own fields, so a new kind needs no UI change.
 - **The parent is woken.** Each new hold records one `child_blocked` campaign event, keyed by the
   hold's id, so an idle Orchestrator gets a continuation turn. The continuation tells it to clear
   each blocked child with the recovery action its hold names.

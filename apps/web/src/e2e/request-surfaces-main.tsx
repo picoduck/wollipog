@@ -4,6 +4,7 @@ import type { DescendantRequestView, SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { CampaignContinuationNotice } from "../components/SessionDetail.js";
+import { CampaignHeldChildren } from "../components/CampaignHeldChildren.js";
 import { RightPanel, type RightPanelState } from "../components/RightPanel.js";
 import { SessionApprovalRegion } from "../components/SessionApproval.js";
 import { EventTimeline } from "../components/EventTimeline.js";
@@ -23,13 +24,15 @@ declare global {
       submissions(): unknown[];
       workerReviewOpened(): boolean;
       artifactRequests(): string[];
+      openedHeldChild(): string | null;
+      clearHold(sessionId: string): void;
     };
   }
 }
 
 const scenario = new URLSearchParams(window.location.search).get("scenario") ?? "evidence";
 const evidenceCount = Number(new URLSearchParams(window.location.search).get("items")) || 8;
-const includeDescendants = scenario === "descendants" ||
+const includeDescendants = scenario === "descendants" || scenario === "held" ||
   new URLSearchParams(window.location.search).get("children") === "1";
 const requestedPollStatus = new URLSearchParams(window.location.search).get("pollStatus");
 const descendantRequestStatus: DescendantRequestStatus = requestedPollStatus === "loading" ||
@@ -83,6 +86,8 @@ async function prepareArtifacts(): Promise<void> {
 }
 
 let openedChild: DescendantRequestView | null = null;
+let openedHeldChild: string | null = null;
+let clearHold: (sessionId: string) => void = () => {};
 const submissions: unknown[] = [];
 let workerReviewOpened = false;
 
@@ -310,9 +315,66 @@ function continuationSession(): SessionView {
   } as SessionView;
 }
 
+const HELD_CHILD_TITLES: Record<string, string> = {
+  "held-child-1": "Fix #1650: Keep a Decision Resume Across Worktree Recovery",
+  "held-child-2": "Fix #1651: Queue Prompts Behind a Handoff Barrier",
+};
+
+/** A campaign whose projection holds two children: one in worktree recovery with a held decision
+ * resume, and one with a hold kind this client predates. A third blocked child failed (#1760). */
+function heldCampaignSession(): SessionView {
+  const base = continuationSession();
+  return {
+    ...base,
+    title: "Issue Campaign With Held Children",
+    status: "running",
+    orchestratorCampaign: {
+      ...base.orchestratorCampaign!,
+      status: "blocked",
+      continuation: undefined,
+      children: { total: 5, active: 1, waitingHuman: 1, blocked: 3, verified: 0, cleanupPending: 0 },
+      pendingRequests: { human: 8, orchestrator: 4 },
+      heldChildren: [
+        {
+          sessionId: "held-child-1",
+          holds: [{
+            kind: "worktree_recovery",
+            holdId: "recovery-held-child-1",
+            since: Date.now() - 7 * 60_000,
+            reason: "The selected worktree /home/dev/worktrees/issue-1650 is on branch main, not " +
+              "fix/issue-1650-decision-resume.",
+            recoveryAction: "Restore branch fix/issue-1650-decision-resume in /home/dev/worktrees/issue-1650 " +
+              "(for example `git -C /home/dev/worktrees/issue-1650 switch fix/issue-1650-decision-resume`) and " +
+              "select that worktree again with select_worktree, or select or create another worktree for this " +
+              "session with select_worktree or create_worktree.",
+            heldResumes: [{
+              kind: "workflow_decision_resolution",
+              occurrenceId: "wd_occ_merge_1752",
+              since: Date.now() - 3 * 60_000,
+            }],
+          }],
+        },
+        {
+          sessionId: "held-child-2",
+          holds: [{
+            // A runner-side hold kind this client predates renders from its own fields.
+            kind: "handoff_barrier" as never,
+            holdId: "barrier-held-child-2",
+            since: Date.now() - 90_000,
+            reason: "A prompt is queued behind a conversation handoff that has not finished.",
+            recoveryAction: "Finish or cancel the handoff; the queued prompt is delivered once it clears.",
+          }],
+        },
+      ],
+    },
+  } as SessionView;
+}
+
 function Fixture() {
   const [session, setSession] = useState(() => scenario === "continuation"
     ? continuationSession()
+    : scenario === "held"
+    ? heldCampaignSession()
     : scenario === "descendants" || scenario === "polling" ? {
         ...evidenceSession(),
         status: "running",
@@ -335,7 +397,19 @@ function Fixture() {
   const [open, setOpen] = useState(false);
   const [mode, setMode] = useState<RightPanelMode>("requests");
   const [width, setWidth] = useState(420);
-  const [selectedKey, setSelectedKey] = useState<string | null>(() => scenario === "descendants"
+  clearHold = (sessionId: string) => setSession((current) => {
+    const campaign = current.orchestratorCampaign!;
+    const heldChildren = (campaign.heldChildren ?? []).filter((child) => child.sessionId !== sessionId);
+    return {
+      ...current,
+      orchestratorCampaign: {
+        ...campaign,
+        children: { ...campaign.children, active: campaign.children.active + 1, blocked: campaign.children.blocked - 1 },
+        ...(heldChildren.length ? { heldChildren } : { heldChildren: undefined }),
+      },
+    } as SessionView;
+  });
+  const [selectedKey, setSelectedKey] = useState<string | null>(() => scenario === "descendants" || scenario === "held"
     ? sessionRequestPanelKey(descendants[0]!.sessionId, descendants[0]!.occurrenceId)
     : session.pendingApproval?.occurrenceId
       ? sessionRequestPanelKey(session.id, session.pendingApproval.occurrenceId)
@@ -427,7 +501,7 @@ function Fixture() {
         <section className="session-detail expanded" style={{ height: "100%" }}>
           <header className="detail-head" style={{ justifyContent: "space-between" }}>
             <h1 className="detail-title">{session.title}</h1>
-            {scenario === "descendants" || scenario === "polling" ? (
+            {scenario === "descendants" || scenario === "polling" || scenario === "held" ? (
               <SessionStatusIndicators
                 session={session}
                 onOpenAttention={() => setOpen(true)}
@@ -440,6 +514,14 @@ function Fixture() {
               continuation={session.orchestratorCampaign.continuation}
               onAcknowledge={(commandId) => void client.resolvePendingPrompt(session.id, commandId, "dismiss")}
               onRetry={(commandId) => void client.resolvePendingPrompt(session.id, commandId, "retry")}
+            />
+          )}
+          {scenario === "held" && session.orchestratorCampaign && (
+            <CampaignHeldChildren
+              heldChildren={session.orchestratorCampaign.heldChildren ?? []}
+              blocked={session.orchestratorCampaign.children.blocked}
+              childTitle={(id) => HELD_CHILD_TITLES[id]}
+              onOpenChild={(id) => { openedHeldChild = id; }}
             />
           )}
           <div className="detail-columns">
@@ -545,6 +627,8 @@ window.__WOLLIPOG_REQUEST_SURFACES_E2E__ = {
   submissions: () => submissions,
   workerReviewOpened: () => workerReviewOpened,
   artifactRequests: () => [...artifactRequests],
+  openedHeldChild: () => openedHeldChild,
+  clearHold: (sessionId) => clearHold(sessionId),
 };
 
 void prepareArtifacts().then(() => createRoot(document.getElementById("root")!).render(<Fixture />));

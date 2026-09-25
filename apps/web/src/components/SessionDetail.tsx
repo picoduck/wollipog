@@ -31,6 +31,7 @@ import {
   type CreateWorkspaceReferenceRequest,
   type QueuedPromptView,
   type SessionConfig,
+  type DescendantBlockedChildView,
   type DescendantRequestView,
   type ParentControlMode,
   type WorkflowDecisionAuthority,
@@ -140,6 +141,7 @@ import {
   sessionRequestPanelKey,
   type DescendantRequestStatus,
 } from "./SessionRequestPanel.js";
+import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import { SessionHeader } from "./SessionHeader.js";
@@ -606,6 +608,8 @@ export function SessionDetail(props: SessionDetailProps) {
 const DESCENDANT_REQUEST_POLL_INTERVAL_MS = 2_000;
 export const DESCENDANT_REQUEST_POLL_TIMEOUT_MS = 10_000;
 const EMPTY_DESCENDANT_REQUESTS: readonly DescendantRequestView[] = Object.freeze([]);
+const EMPTY_BLOCKED_CHILDREN: readonly DescendantBlockedChildView[] = Object.freeze([]);
+const EMPTY_HELD_CHILDREN: readonly CampaignHeldChild[] = Object.freeze([]);
 
 type ActiveDescendantRequestPoll = {
   controller: AbortController;
@@ -616,6 +620,8 @@ type DescendantRequestSnapshot = {
   contextKey: string;
   status: DescendantRequestStatus;
   requests: readonly DescendantRequestView[];
+  /** Held descendants; never requests, since there is nothing to answer (#1760). */
+  blockedChildren: readonly DescendantBlockedChildView[];
 };
 
 function transitionToEmptyDescendantRequestSnapshot(
@@ -623,9 +629,10 @@ function transitionToEmptyDescendantRequestSnapshot(
   contextKey: string,
   status: "idle" | "unavailable",
 ): DescendantRequestSnapshot {
-  return current.contextKey === contextKey && current.status === status && current.requests.length === 0
+  return current.contextKey === contextKey && current.status === status && current.requests.length === 0 &&
+    current.blockedChildren.length === 0
     ? current
-    : { contextKey, status, requests: EMPTY_DESCENDANT_REQUESTS };
+    : { contextKey, status, requests: EMPTY_DESCENDANT_REQUESTS, blockedChildren: EMPTY_BLOCKED_CHILDREN };
 }
 
 export function useDescendantRequestPolling({
@@ -638,6 +645,7 @@ export function useDescendantRequestPolling({
   available: boolean;
 }): {
   requests: readonly DescendantRequestView[];
+  blockedChildren: readonly DescendantBlockedChildView[];
   status: DescendantRequestStatus;
   refreshAfterResolution: () => void;
 } {
@@ -645,11 +653,11 @@ export function useDescendantRequestPolling({
   const contextKey = JSON.stringify([sessionId, enabled, available]);
   const fallbackStatus: DescendantRequestStatus = !enabled ? "idle" : available ? "loading" : "unavailable";
   const [snapshot, setSnapshot] = useState<DescendantRequestSnapshot>(
-    () => ({ contextKey, status: fallbackStatus, requests: EMPTY_DESCENDANT_REQUESTS }),
+    () => ({ contextKey, status: fallbackStatus, requests: EMPTY_DESCENDANT_REQUESTS, blockedChildren: EMPTY_BLOCKED_CHILDREN }),
   );
   const currentSnapshot = snapshot.contextKey === contextKey
     ? snapshot
-    : { contextKey, status: fallbackStatus, requests: EMPTY_DESCENDANT_REQUESTS };
+    : { contextKey, status: fallbackStatus, requests: EMPTY_DESCENDANT_REQUESTS, blockedChildren: EMPTY_BLOCKED_CHILDREN };
   const generationRef = useRef(0);
   const inFlightRef = useRef<ActiveDescendantRequestPoll | null>(null);
   const enabledRef = useRef(enabled);
@@ -693,7 +701,8 @@ export function useDescendantRequestPolling({
     const requestContextKey = contextKeyRef.current;
     setSnapshot((current) => current.contextKey === requestContextKey
       ? current
-      : { contextKey: requestContextKey, status: "loading", requests: EMPTY_DESCENDANT_REQUESTS });
+      : { contextKey: requestContextKey, status: "loading", requests: EMPTY_DESCENDANT_REQUESTS,
+        blockedChildren: EMPTY_BLOCKED_CHILDREN });
     const timeout = window.setTimeout(() => {
       if (inFlightRef.current?.controller !== controller) return;
       inFlightRef.current = null;
@@ -706,7 +715,7 @@ export function useDescendantRequestPolling({
     }, DESCENDANT_REQUEST_POLL_TIMEOUT_MS);
     inFlightRef.current = { controller, timeout };
     void api.descendantRequests(sessionIdRef.current, controller.signal).then(
-      ({ requests: next }) => {
+      ({ requests: next, blockedChildren: nextBlocked }) => {
         if (controller.signal.aborted || generation !== generationRef.current) return;
         // A newer web client can briefly talk to an older control plane during a rolling update.
         // Rows without exact routing/ownership metadata are not safe to render or answer.
@@ -721,10 +730,13 @@ export function useDescendantRequestPolling({
           ));
           return;
         }
+        // Older control planes omit held descendants; they only supply titles for the campaign's list.
+        const blockedChildren = Array.isArray(nextBlocked) ? nextBlocked : EMPTY_BLOCKED_CHILDREN;
         setSnapshot((current) => current.contextKey === requestContextKey && current.status === "ready" &&
-          JSON.stringify(current.requests) === JSON.stringify(compatible)
+          JSON.stringify(current.requests) === JSON.stringify(compatible) &&
+          JSON.stringify(current.blockedChildren) === JSON.stringify(blockedChildren)
           ? current
-          : { contextKey: requestContextKey, status: "ready", requests: compatible });
+          : { contextKey: requestContextKey, status: "ready", requests: compatible, blockedChildren });
       },
       () => {
         if (controller.signal.aborted || generation !== generationRef.current) return;
@@ -751,6 +763,7 @@ export function useDescendantRequestPolling({
   }, [abortInFlight, available, enabled, refresh, sessionId]);
   return {
     requests: currentSnapshot.requests,
+    blockedChildren: currentSnapshot.blockedChildren,
     status: currentSnapshot.status,
     refreshAfterResolution,
   };
@@ -867,6 +880,7 @@ function SessionDetailLoaded({
   );
   const {
     requests: descendantRequests,
+    blockedChildren: blockedDescendants,
     status: descendantRequestStatus,
     refreshAfterResolution: refreshDescendantRequestsAfterResolution,
   } = useDescendantRequestPolling({
@@ -874,6 +888,17 @@ function SessionDetailLoaded({
     enabled: descendantRequestPollingEnabled,
     available: conn === "online",
   });
+  // Held children come from the campaign projection, the same snapshot as its Blocked count, so the
+  // list and the count move together. Titles prefer the live session store and fall back to the
+  // held descendants the request poll reports, then to the id (#1760).
+  const heldChildren = session.orchestratorCampaign?.heldChildren ?? EMPTY_HELD_CHILDREN;
+  const heldChildStoreTitles = useStoreSelector((s) =>
+    heldChildren.map((child) => s.sessions.get(child.sessionId)?.title ?? "").join("\u0000"));
+  const heldChildTitle = useCallback((childSessionId: string) => {
+    const index = heldChildren.findIndex((child) => child.sessionId === childSessionId);
+    const stored = index >= 0 ? heldChildStoreTitles.split("\u0000")[index] : undefined;
+    return stored || blockedDescendants.find((child) => child.sessionId === childSessionId)?.sessionTitle;
+  }, [blockedDescendants, heldChildStoreTitles, heldChildren]);
   const ownStandaloneApproval = standaloneApprovalForReview(session.pendingApproval);
   const ownWorkerApproval = session.pendingApproval?.ownerToolUseId
     ? session.pendingApproval : null;
@@ -4650,6 +4675,14 @@ function SessionDetailLoaded({
             acknowledgementPending={pendingPromptAction?.commandId === session.orchestratorCampaign.continuation.commandId}
             onAcknowledge={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
             onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
+          />
+        )}
+        {session.orchestratorCampaign && (
+          <CampaignHeldChildren
+            heldChildren={heldChildren}
+            blocked={session.orchestratorCampaign.children.blocked}
+            childTitle={heldChildTitle}
+            onOpenChild={(childSessionId) => navigate({ name: "session", id: childSessionId })}
           />
         )}
         <SessionSkillsUnavailableNotice
