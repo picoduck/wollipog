@@ -18,6 +18,8 @@ const windowsAdoption = new URLSearchParams(location.search).has("windowsAdoptio
 const wslAdoption = new URLSearchParams(location.search).has("wslAdoption");
 // Drift resolution runs against the real API client so the spec can route and assert each request.
 const drift = new URLSearchParams(location.search).has("drift");
+// Orphaned-copy resolution does too, on a current runner beside an older one.
+const orphans = new URLSearchParams(location.search).has("orphans");
 // #1714: Build Machine offers container and cloud targets; Other Machine stays host-only.
 const targets = new URLSearchParams(location.search).has("targets");
 const hostTarget = (runnerId: string): ExecutionTargetDefinition => ({
@@ -69,7 +71,9 @@ const runner: RunnerView = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: drift
+  protocolVersion: orphans
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.skillKeptAsideCopies
+    : drift
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift
     : accountScopes
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.accountScopedAgentSkills
@@ -102,7 +106,9 @@ const snapshot: ControlPlaneToUi = {
   },
   runners: [runner, ...(new URLSearchParams(location.search).has("matrix") ? [{ ...runner, runnerId: "runner-2", displayName: "Other Machine",
     ...(targets ? { executionTargets: [hostTarget("runner-2")] } : {}),
-    status: new URLSearchParams(location.search).has("onlineMatrix") ? "online" as const : "offline" as const }] : [])],
+    status: new URLSearchParams(location.search).has("onlineMatrix") ? "online" as const : "offline" as const }] : []),
+    ...(orphans ? [{ ...runner, runnerId: "runner-2", hostname: "older-host", displayName: "Older Machine",
+      protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift }] : [])],
   boxes: [],
   sessions: [],
   runs: [],
@@ -224,7 +230,7 @@ const client = {
   ...(new URLSearchParams(location.search).has("matrix") ? {
     runnerSkills: api.runnerSkills, getMachineSkillVersionPolicy: api.getMachineSkillVersionPolicy,
   } : {}),
-  ...(drift ? { runnerSkills: api.runnerSkills, syncRunnerSkills: api.syncRunnerSkills } : {}),
+  ...(drift || orphans ? { runnerSkills: api.runnerSkills, syncRunnerSkills: api.syncRunnerSkills } : {}),
 } as unknown as ApiClient;
 
 function SkillsWhenReady() {
@@ -240,6 +246,6 @@ const view = (
 
 createRoot(document.getElementById("root")!).render(
   <ApiProvider client={client}>
-    {drift ? <FeedbackProvider>{view}</FeedbackProvider> : view}
+    {drift || orphans ? <FeedbackProvider>{view}</FeedbackProvider> : view}
   </ApiProvider>,
 );

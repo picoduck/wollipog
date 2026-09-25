@@ -7,6 +7,28 @@ import { Checkbox } from "./ui/ChoiceControls.js";
 
 const contents = (file?: SkillFile) => !file ? "(File absent)" : file.encoding === "utf8" ? file.content : `Binary content (base64):\n${file.content}`;
 
+/** Every file of a reviewed copy, each expandable. With library files to compare against, each shows
+ * both sides and its change; without them, every file is new. */
+export function SkillCopyFileReview({ previousFiles, files, copyLabel }: {
+  previousFiles: SkillFile[];
+  files: SkillFile[];
+  copyLabel: string;
+}) {
+  const compare = previousFiles.length > 0;
+  return <>
+    {[...new Set([...previousFiles, ...files].map((file) => file.path))].sort().map((path) => {
+      const before = previousFiles.find((file) => file.path === path);
+      const after = files.find((file) => file.path === path);
+      const change = !before ? "Added" : !after ? "Removed" : contents(before) === contents(after) ? "Unchanged" : "Changed";
+      return <details key={path}><summary>{path} · {change}</summary>
+        {compare && <><h4>Current</h4><pre className="skill-import-content">{contents(before)}</pre></>}
+        {compare && <h4>{copyLabel}</h4>}
+        <pre className="skill-import-content">{contents(after)}</pre>
+      </details>;
+    })}
+  </>;
+}
+
 /** Review one drifted deployed copy as a library update, then commit exactly the reviewed bytes. */
 export function SkillDriftImportDialog({ runnerId, machineLabel, copy, onClose, onImported }: {
   runnerId: string;
@@ -68,15 +90,7 @@ export function SkillDriftImportDialog({ runnerId, machineLabel, copy, onClose, 
         {preview.importBlocker && <p className="form-error" role="alert">{preview.importBlocker}</p>}
         {preview.disposition === "identical" && <p>The edited files already match the latest library version. Importing only resolves the machine's hold.</p>}
         <p>Review every file, including scripts. Reading and importing never run skill contents.</p>
-        {[...new Set([...preview.previousFiles, ...preview.files].map((file) => file.path))].sort().map((path) => {
-          const before = preview.previousFiles.find((file) => file.path === path);
-          const after = preview.files.find((file) => file.path === path);
-          const change = !before ? "Added" : !after ? "Removed" : contents(before) === contents(after) ? "Unchanged" : "Changed";
-          return <details key={path}><summary>{path} · {change}</summary>
-            <h4>Current</h4><pre className="skill-import-content">{contents(before)}</pre>
-            <h4>Edited</h4><pre className="skill-import-content">{contents(after)}</pre>
-          </details>;
-        })}
+        <SkillCopyFileReview previousFiles={preview.previousFiles} files={preview.files} copyLabel="Edited" />
         {preview.importable && needsAcceptance && <label className="field"><span>
           <Checkbox label="Accept Version Diff and Update Existing Assignments" checked={accepted} disabled={busy} onChange={setAccepted} />
           {" "}Accept Version Diff and Update Existing Assignments

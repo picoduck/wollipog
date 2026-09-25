@@ -482,6 +482,21 @@ test("skill routes are member-scoped and agents_updated refreshes the skills_syn
   assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, "/api/skill-machine/nonexistent", { method: "DELETE" })).status, 204,
     "non-personal admins reach their own scoped discovery routes, not the global-resource gate");
   assert.equal((await api(httpBase, MEMBER_TOKEN, `/api/runners/${RUNNER_ID}/skill-snapshots`, { method: "POST" })).status, 403);
+
+  // Edited-copy resolution (drift and orphaned copies) is member-scoped like every other skill route:
+  // a non-personal organization's admin reaches the handlers and is scoped out per resource (404),
+  // never rejected as a caller of a personal-organization-global resource (403).
+  for (const path of ["skill-drift/preview", "skill-drift/restore", "orphaned-skill-copies/preview", "orphaned-skill-copies/discard"]) {
+    const response = await api(httpBase, FOREIGN_ADMIN_TOKEN, `/api/runners/${RUNNER_ID}/${path}`, { method: "POST", body: "{}" });
+    assert.equal(response.status, 404, `${path} scopes out a foreign machine`);
+  }
+  for (const path of ["/api/skill-drift/nonexistent", "/api/orphaned-skill-copies/nonexistent"]) {
+    assert.equal((await api(httpBase, FOREIGN_ADMIN_TOKEN, path, { method: "DELETE" })).status, 204, `${path} reaches its handler`);
+  }
+  const memberOrphans = await api(httpBase, MEMBER_TOKEN, `/api/runners/${RUNNER_ID}/orphaned-skill-copies/preview`, { method: "POST", body: "{}" });
+  assert.equal(memberOrphans.status, 403);
+  assert.match((await memberOrphans.json() as { error: string }).error, /owner or administrator must resolve an orphaned skill copy/,
+    "a member reaches the handler, which requires an owner or administrator");
   const listingRequest = api(httpBase, ownerToken, `/api/runners/${RUNNER_ID}/skill-snapshots`, { method: "POST" });
   const listingFrame = await runnerInbox.take((message) => message.type === "skill_snapshot");
   assert.equal(listingFrame.operation, "list");

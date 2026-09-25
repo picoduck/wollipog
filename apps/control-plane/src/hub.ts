@@ -44,6 +44,7 @@ import type {
   SkillAdoptionResultMessage,
   SkillAdoptionRecoveryResultMessage,
   SkillDriftResultMessage,
+  SkillKeptAsideResultMessage,
   PodContextEntry,
   RunView,
   PodView,
@@ -208,6 +209,7 @@ export type RunnerRequestResult =
   | SkillAdoptionResultMessage
   | SkillAdoptionRecoveryResultMessage
   | SkillDriftResultMessage
+  | SkillKeptAsideResultMessage
   | (SkillsStateMessage & { requestId: string })
   | GitActionResultMessage
   | AdoptSessionResultMessage

@@ -52,6 +52,7 @@ import {
   type SkillAdoptionMessage,
   type SkillAdoptionRecoveryMessage,
   type SkillDriftMessage,
+  type SkillKeptAsideMessage,
   type StartSessionMessage,
   isOrchestratorLaunch,
 } from "@wollipog/protocol";
@@ -225,7 +226,7 @@ import {
   storedSkillVersionAvailable,
   type ReconcileSkillEntry,
 } from "./skills.js";
-import { handleSkillDrift } from "./skill-drift.js";
+import { handleSkillDrift, handleSkillKeptAside } from "./skill-drift.js";
 import { mergeWslSkillsResult, reconcileWslSkills } from "./wsl-skills.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
 import { handleSkillAdoption } from "./skill-adoption-command.js";
@@ -1590,6 +1591,15 @@ function queueSkillDrift(msg: SkillDriftMessage): void {
   skillsReconcileQueue = skillsReconcileQueue.then(run, run);
 }
 
+function queueSkillKeptAside(msg: SkillKeptAsideMessage): void {
+  const run = async () => {
+    const result = handleSkillKeptAside({ message: msg, runnerId: config.runnerId, dataDir: config.dataDir, log });
+    sendUp(result);
+    if (result.status === "discarded") queueSkillsReconcile();
+  };
+  skillsReconcileQueue = skillsReconcileQueue.then(run, run);
+}
+
 let discovering = false;
 let rediscoverPending = false;
 let rediscoverRefreshModels = false;
@@ -2794,6 +2804,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "skill_drift":
       if (runnerSupportsProtocol(controlPlaneProtocolVersion, "skillDrift")) queueSkillDrift(msg);
+      break;
+    case "skill_kept_aside":
+      if (runnerSupportsProtocol(controlPlaneProtocolVersion, "skillKeptAsideCopies")) queueSkillKeptAside(msg);
       break;
     case "skills_sync_manifest":
       beginChunkedSkillsSync(msg);

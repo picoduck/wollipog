@@ -1881,6 +1881,7 @@ test("removals of runner-created links are logged and returned in the reconcile 
         unmanaged: result.unmanaged,
         removals: result.removedLinks,
         drift: [],
+        keptAside: [],
       },
       "the outbound skills_state carries this pass's exact removal records",
     );

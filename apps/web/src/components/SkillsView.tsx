@@ -15,6 +15,8 @@ import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
 import { SkillVersionHistoryDialog } from "./SkillVersionHistoryDialog.js";
 import { SkillMachineVersionDialog } from "./SkillMachineVersionDialog.js";
 import { SkillDriftImportDialog } from "./SkillDriftImportDialog.js";
+import { SkillOrphanImportDialog } from "./SkillOrphanImportDialog.js";
+import { SkillOrphanedCopies } from "./SkillOrphanedCopies.js";
 import { AddAssignmentDialog } from "./SkillAssignmentDialog.js";
 import { SkillGroupsDialog } from "./SkillGroupsDialog.js";
 import { SkillInheritedAssignments } from "./SkillInheritedAssignments.js";
@@ -26,6 +28,10 @@ import {
   groupSkillList,
   invocationLabel,
   normalizeRemovalReporting,
+  omittedKeptAsideCopies,
+  orphanedCopyKey,
+  orphanedCopyRef,
+  reportedOrphanedCopies,
   reportedSkillDrift,
   reportedSkillLinkRemovals,
   reportedUnmanagedSkills,
@@ -41,6 +47,8 @@ import {
   type RunnerSkillsResponse,
   type SkillAgentSelector,
   type SkillAssignmentView,
+  type OrphanedSkillCopy,
+  type OrphanedSkillCopyResolution,
   type SkillDriftCopy,
   type SkillDriftResolution,
   type SkillGroupView,
@@ -187,6 +195,8 @@ export function SkillsView() {
   const [syncingRunnerId, setSyncingRunnerId] = useState<string | null>(null);
   const [versionRunnerId, setVersionRunnerId] = useState<string | undefined>();
   const [driftImport, setDriftImport] = useState<{ runnerId: string; copy: SkillDriftCopy } | null>(null);
+  const [showOrphans, setShowOrphans] = useState(false);
+  const [orphanImport, setOrphanImport] = useState<{ runnerId: string; copy: OrphanedSkillCopy } | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"groups" | "new-skill" | "add-assignment" | "git-import" | "git-update" | "machine-import" | "version-history" | "machine-versions" | null>(null);
 
@@ -221,6 +231,7 @@ export function SkillsView() {
           ...response,
           removalReporting: normalizeRemovalReporting(response.removalReporting),
           driftReporting: normalizeRemovalReporting(response.driftReporting),
+          keptAsideReporting: normalizeRemovalReporting(response.keptAsideReporting),
         } satisfies RunnerSkillsResponse] as const;
       } catch {
         // A machine that predates the skills routes reads as never reported rather than an error
@@ -247,6 +258,8 @@ export function SkillsView() {
       setAssignments([]);
       return;
     }
+    // Selecting a skill from anywhere (including creating one) leaves the orphaned-copy list.
+    setShowOrphans(false);
     refreshDetail(selectedId).catch((cause) => setError((cause as Error).message));
   }, [selectedId, refreshDetail]);
 
@@ -324,6 +337,9 @@ export function SkillsView() {
           desired: current[runnerId]?.desired ?? [],
           reported,
           removalReporting: current[runnerId]?.removalReporting ?? "unknown",
+          // Kept until the refresh below replaces them, so resolved copies do not flicker out and back.
+          ...(current[runnerId]?.orphaned ? { orphaned: current[runnerId]!.orphaned } : {}),
+          ...(current[runnerId]?.keptAsideReporting ? { keptAsideReporting: current[runnerId]!.keptAsideReporting } : {}),
           ...(current[runnerId]?.loadError || !current[runnerId] ? { loadError: current[runnerId]?.loadError ?? "Desired skill assignments have not loaded." } : {}),
         },
       }));
@@ -344,6 +360,50 @@ export function SkillsView() {
     await refreshList();
     if (selectedId) await refreshDetail(selectedId);
     await refreshMachines();
+  };
+
+  /** A v183 or v184 runner may keep copies aside without reporting them, so its update notice stays reachable. */
+  const keptAsideUnreported = useMemo(() => runners.some((runner) => runnerSupportsProtocol(runner.protocolVersion, "skillDrift") &&
+    !runnerSupportsProtocol(runner.protocolVersion, "skillKeptAsideCopies")), [runners]);
+  const orphanCount = useMemo(() => runners.reduce((count, runner) =>
+    count + reportedOrphanedCopies(machineSkills[runner.runnerId]).length + omittedKeptAsideCopies(machineSkills[runner.runnerId]),
+  0), [machineSkills, runners]);
+
+  const orphanResolved = async (result: OrphanedSkillCopyResolution) => {
+    if (result.warning) showToast(result.warning, { tone: "error" });
+    await refreshList();
+    if (selectedId) await refreshDetail(selectedId);
+    await refreshMachines();
+  };
+
+  const discardOrphan = async (runner: RunnerView, copy: OrphanedSkillCopy) => {
+    const machine = machineLabels.get(runner.runnerId) ?? runner.runnerId;
+    const fenced = "It is deleted only if it still matches what this page shows. If it changed, nothing is deleted.";
+    const confirmed = await confirm({
+      title: copy.name
+        ? `Discard the ${copy.kind === "kept_aside" ? "kept-aside" : "edited"} copy of “${copy.name}”?`
+        : "Discard this unidentified kept-aside copy?",
+      message: copy.kind === "kept_aside"
+        ? `The copy on ${machine} is discarded from the skill store. ${fenced}` +
+          (copy.observedDigest ? "" : " It cannot be previewed because it is not valid skill content.") +
+          " The edit cannot be recovered."
+        : copy.observedDigest
+          ? `The copy on ${machine} is discarded, and its links are removed like those of any skill that is no longer assigned. ` +
+            `${fenced} The edit cannot be recovered.`
+          : `The copy on ${machine} cannot be read, so there is nothing to check it against. The machine moves it aside ` +
+            "instead of deleting it and removes its links. It then appears here as a kept-aside copy, which you can discard.",
+      confirmLabel: "Discard Copy",
+      tone: "danger",
+    });
+    if (!confirmed) return;
+    await mutate(async () => {
+      // Exactly what the machine reported: a kept-aside copy's fingerprint of every entry, plus its content
+      // digest when readable; a deleted skill's copy by its digest, or null when it was unreadable.
+      const result = await api.discardOrphanedSkillCopy(runner.runnerId, orphanedCopyRef(copy), copy.kind === "kept_aside"
+        ? { observedFingerprint: copy.observedFingerprint!, ...(copy.observedDigest ? { observedDigest: copy.observedDigest } : {}) }
+        : { observedDigest: copy.observedDigest ?? null });
+      await orphanResolved(result);
+    });
   };
 
   const restoreDrift = async (runner: RunnerView, entry: SkillDriftState) => {
@@ -387,6 +447,20 @@ export function SkillsView() {
 
       <div className="skills-layout">
         <aside className="skills-list" aria-label="Skills">
+          {(orphanCount > 0 || showOrphans || keptAsideUnreported) && (
+            <button
+              type="button"
+              className={`skills-item${showOrphans ? " active" : ""}`}
+              aria-current={showOrphans ? "true" : undefined}
+              onClick={() => { setSelectedId(null); setShowOrphans(true); }}
+            >
+              <span className="skills-item-name">
+                Orphaned Copies
+                {orphanCount > 0 && <span className="status-badge st-input skills-item-drift">{orphanCount}</span>}
+              </span>
+              <span className="skills-item-description">Edited copies on machines that no library skill shows</span>
+            </button>
+          )}
           {skills === null && <Skeleton rows={4} announce="Loading skills" />}
           {skills !== null && skills.length === 0 && (
             <Empty
@@ -410,7 +484,7 @@ export function SkillsView() {
                   type="button"
                   className={`skills-item${selectedId === skill.id ? " active" : ""}`}
                   aria-current={selectedId === skill.id ? "true" : undefined}
-                  onClick={() => setSelectedId(skill.id)}
+                  onClick={() => { setShowOrphans(false); setSelectedId(skill.id); }}
                 >
                   <span className="skills-item-name">
                     {skill.name}
@@ -424,14 +498,26 @@ export function SkillsView() {
         </aside>
 
         <div className="skills-detail">
-          {!detail && (
+          {showOrphans && (
+            <SkillOrphanedCopies
+              runners={runners}
+              machineLabels={machineLabels}
+              machineSkills={machineSkills}
+              busy={busy}
+              syncingRunnerId={syncingRunnerId}
+              onSync={(runnerId) => void syncMachine(runnerId)}
+              onReview={(runner, copy) => setOrphanImport({ runnerId: runner.runnerId, copy })}
+              onDiscard={(runner, copy) => void discardOrphan(runner, copy)}
+            />
+          )}
+          {!showOrphans && !detail && (
             /* Not an empty-state card: nothing is missing here — the pane is simply waiting for a
                list selection, like the Projects manager's own unselected detail column. */
             <div className="skills-empty">
               Select a skill to see its content, assignments, and per-machine deployment.
             </div>
           )}
-          {detail && (
+          {!showOrphans && detail && (
             <>
               <div className="skills-detail-head">
                 <div>
@@ -748,6 +834,19 @@ export function SkillsView() {
           onImported={async (result) => {
             setDriftImport(null);
             await driftResolved(result);
+          }}
+        />
+      )}
+      {orphanImport && (
+        <SkillOrphanImportDialog
+          key={`${orphanImport.runnerId}:${orphanedCopyKey(orphanImport.copy)}`}
+          runnerId={orphanImport.runnerId}
+          machineLabel={machineLabels.get(orphanImport.runnerId) ?? orphanImport.runnerId}
+          copy={orphanImport.copy}
+          onClose={() => setOrphanImport(null)}
+          onImported={async (result) => {
+            setOrphanImport(null);
+            await orphanResolved(result);
           }}
         />
       )}

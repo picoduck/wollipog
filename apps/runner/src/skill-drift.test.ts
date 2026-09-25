@@ -409,9 +409,10 @@ test("restoring an unreadable copy keeps it aside because a later change cannot 
     assert.equal(restored.status, "restored");
     assert.equal(readFileSync(join(copy, "SKILL.md"), "utf8"), alpha.files[0]!.content);
     const store = realpathSync(skillsStoreRoot(roots.dataDir));
-    const aside = readdirSync(store).filter((entry) => entry.startsWith(".drift-"));
+    const aside = readdirSync(store).filter((entry) => entry.startsWith(".drift-") && !entry.endsWith(".json"));
     assert.equal(aside.length, 1);
     assert.equal(readFileSync(join(store, aside[0]!, "big.bin")).length, 700 * 1024, "the late change is kept");
+    assert.ok(existsSync(join(store, `${aside[0]}.json`)), "the kept-aside copy is identified by its record");
   } finally {
     rmSync(roots.root, { recursive: true, force: true });
   }
@@ -439,7 +440,7 @@ test("restoring without library files discards an unreadable copy and removes it
     assert.equal(restored.status, "restored");
     assert.equal(existsSync(copy), false);
     const store = realpathSync(skillsStoreRoot(roots.dataDir));
-    const aside = readdirSync(store).filter((entry) => entry.startsWith(".drift-"));
+    const aside = readdirSync(store).filter((entry) => entry.startsWith(".drift-") && !entry.endsWith(".json"));
     assert.equal(aside.length, 1, "an unreadable copy has no content fence, so it is moved aside, never deleted");
     assert.equal(lstatSync(join(store, aside[0]!, "planted")).isSymbolicLink(), true);
     const converged = await reconcile(roots, []);

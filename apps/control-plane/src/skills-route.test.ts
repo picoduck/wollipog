@@ -541,6 +541,22 @@ test("POST /api/runners/:id/skills/sync gates offline and capability, persists t
   db.registerRunner(runnerMeta("runner-drift"), 30, RUNNER_CAPABILITY_MIN_PROTOCOL.skillDrift);
   assert.equal((await app.inject({ method: "GET", url: "/api/runners/runner-drift/skills" })).json().driftReporting,
     "supported");
+  assert.equal(compatibleEmpty.json().keptAsideReporting, "unsupported",
+    "an empty kept-aside list from a pre-v185 runner is never presented as verified");
+  assert.deepEqual(compatibleEmpty.json().orphaned, []);
+  db.registerRunner(runnerMeta("runner-kept-aside"), 30, RUNNER_CAPABILITY_MIN_PROTOCOL.skillKeptAsideCopies);
+  const keptAsideId = "0f0e0d0c-0b0a-4908-8706-050403020100";
+  db.setRunnerSkillState("runner-kept-aside", { deployed: [], unmanaged: [],
+    keptAside: [{ id: keptAsideId, name: "retired", observedDigest: "b".repeat(64) }],
+    drift: [{ name: "deleted", digest: "a".repeat(64), variant: "agent", held: false }] }, 40);
+  const keptAside = (await app.inject({ method: "GET", url: "/api/runners/runner-kept-aside/skills" })).json();
+  assert.equal(keptAside.keptAsideReporting, "supported");
+  assert.deepEqual(keptAside.orphaned, [
+    { kind: "kept_aside", id: keptAsideId, name: "retired", observedDigest: "b".repeat(64) },
+    { kind: "deleted_skill", name: "deleted", digest: "a".repeat(64), variant: "agent", held: false },
+  ], "orphaned copies are listed per machine, independent of any library skill");
+  assert.equal(keptAside.reported.keptAside, undefined,
+    "raw kept-aside copies never bypass the skill-access filter of the orphaned list");
 
   stubRequest(async () => { throw new RunnerRequestTimeoutError(); });
   const timedOut = await app.inject({ method: "POST", url: "/api/runners/runner-1/skills/sync" });

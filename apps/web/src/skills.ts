@@ -151,6 +151,8 @@ export interface ReportedSkillsState {
   removals?: SkillLinkRemoval[];
   removalsUpdatedAt?: number;
   drift?: SkillDriftState[];
+  /** Kept-aside copies beyond the runner's report bound; they are not listed individually. */
+  keptAsideOmitted?: number;
   error?: string;
   updatedAt?: number;
 }
@@ -164,6 +166,10 @@ export interface RunnerSkillsResponse {
   removalReporting?: "supported" | "unsupported" | "unknown";
   /** Whether this runner verifies deployed copies; an older runner's empty drift list proves nothing. */
   driftReporting?: "supported" | "unsupported" | "unknown";
+  /** Whether this runner reports copies a restore kept aside; an older runner's empty list proves nothing. */
+  keptAsideReporting?: "supported" | "unsupported" | "unknown";
+  /** Edited copies on this machine that no library skill shows, as this user may see them. */
+  orphaned?: OrphanedSkillCopy[];
 }
 
 export function normalizeRemovalReporting(value: unknown): NonNullable<RunnerSkillsResponse["removalReporting"]> {
@@ -207,6 +213,76 @@ export function reportedSkillDrift(reported: ReportedSkillsState | null | undefi
 
 export function driftVariantLabel(variant: SkillInvocationPolicy): string {
   return variant === "manual" ? "Manual Only Copy" : "Agent Invocable Copy";
+}
+
+/** How the resolution routes address one orphaned copy. */
+export type OrphanedSkillCopyRef =
+  | { kind: "kept_aside"; id: string }
+  | { kind: "deleted_skill"; name: string; digest: string; variant: SkillInvocationPolicy };
+
+/** An edited copy a machine keeps that no library skill page shows: a copy a restore kept aside, or
+ * an edited copy of a skill deleted from the library. */
+export interface OrphanedSkillCopy {
+  kind: OrphanedSkillCopyRef["kind"];
+  id?: string;
+  name?: string;
+  digest?: string;
+  variant?: SkillInvocationPolicy;
+  keptAsideAt?: number;
+  observedDigest?: string;
+  observedFingerprint?: string;
+  held?: boolean;
+  detail?: string;
+  /** The accessible library skill with this name, which an import adds a version to. */
+  skillId?: string;
+}
+
+export interface OrphanedSkillCopyPreview {
+  previewId: string;
+  copy: OrphanedSkillCopyRef & { observedDigest: string };
+  /** The skill the import creates or updates; null when the copy does not name one. */
+  name: string | null;
+  /** Library files the import would create (a Manual Only copy's injected line removed). */
+  files: SkillFile[];
+  /** The latest version's files when a skill with this name exists. */
+  previousFiles: SkillFile[];
+  digest: string | null;
+  importable: boolean;
+  importBlocker?: string;
+  disposition: "new" | "update" | "identical";
+  assignmentCount: number;
+}
+
+export interface OrphanedSkillCopyResolution {
+  status?: "discarded" | "kept_aside" | "not_needed" | "gone";
+  released?: boolean;
+  warning?: string;
+  state?: ReportedSkillsState | null;
+}
+
+/** Well-formed orphaned copies from a runner skills response; anything malformed is ignored. */
+export function reportedOrphanedCopies(response: RunnerSkillsResponse | undefined): OrphanedSkillCopy[] {
+  if (!Array.isArray(response?.orphaned)) return [];
+  return response.orphaned.filter((copy) => copy && (copy.kind === "kept_aside"
+    ? typeof copy.id === "string"
+    : copy.kind === "deleted_skill" && typeof copy.name === "string" && typeof copy.digest === "string" &&
+      (copy.variant === "agent" || copy.variant === "manual")));
+}
+
+/** Kept-aside copies a machine could not list individually. */
+export function omittedKeptAsideCopies(response: RunnerSkillsResponse | undefined): number {
+  const count = response?.reported?.keptAsideOmitted;
+  return typeof count === "number" && Number.isSafeInteger(count) && count > 0 ? count : 0;
+}
+
+export function orphanedCopyRef(copy: OrphanedSkillCopy): OrphanedSkillCopyRef {
+  return copy.kind === "kept_aside"
+    ? { kind: "kept_aside", id: copy.id! }
+    : { kind: "deleted_skill", name: copy.name!, digest: copy.digest!, variant: copy.variant! };
+}
+
+export function orphanedCopyKey(copy: OrphanedSkillCopy): string {
+  return copy.kind === "kept_aside" ? `kept:${copy.id}` : `deleted:${copy.name}:${copy.variant}:${copy.digest}`;
 }
 
 /* Wrapped-or-bare payload aliases for the list routes, so the API client stays honest about the
