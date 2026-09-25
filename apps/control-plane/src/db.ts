@@ -15454,6 +15454,18 @@ export class ControlPlaneDb {
     });
   }
 
+  /** A settle that passed through because a non-policy card held the visible slot still ends the
+   * turn that would repeat an open child-creation request, queued or displaced. Mark only those
+   * rows: a hook row's provider is blocked inside the hook, and a spawn row resolved later should
+   * restore the settled idle rather than running. A later live frame clears the marker. */
+  noteSpawnApprovalsSettled(sessionId: string): number {
+    return Number(this.stmt(
+      `UPDATE policy_hook_approvals SET resume_status='idle'
+       WHERE session_id=? AND status IN ('queued','pending') AND resume_status IS NULL
+         AND substr(request_id, 1, ${SPAWN_APPROVAL_REQUEST_ID_PREFIX.length})=?`,
+    ).run(sessionId, SPAWN_APPROVAL_REQUEST_ID_PREFIX).changes);
+  }
+
   /** A later live execution frame invalidates every previously swallowed settle marker. */
   clearPolicyResumeStatus(sessionId: string): number {
     const dirty = this.stmt(
@@ -15510,21 +15522,25 @@ export class ControlPlaneDb {
   }
 
   /** Open asks whose poller fell silent at or before `cutoff`. A child-creation approval is refreshed
-   * only by its agent repeating the create call, so while its parent's turn is live (no swallowed
-   * settle, not terminal, not archived) it is abandoned only at or before `spawnCutoff`. The spawn
-   * prefix is control-plane-derived; no hook can claim it. Rows open across an upgrade are
-   * classified by that immutable id and measured from their recorded last poll. */
+   * only by its agent repeating the create call, so while its parent's turn is live (no recorded
+   * settle, not archived, not ended by the provider) it is abandoned only at or before
+   * `spawnCutoff`. `stopped` is deliberately not a signal: startup settlement marks every
+   * mid-flight session stopped until its runner reconnects, while every real stop, restart, and
+   * runner loss already aborts the parent's approvals directly. The spawn prefix is
+   * control-plane-derived; no hook can claim it. Rows open across an upgrade are classified by that
+   * immutable id and measured from their recorded last poll. */
   listAbandonedPolicyHookApprovals(
     cutoff: number,
     sessionId?: string,
     spawnCutoff = cutoff,
   ): PolicyHookApprovalRecord[] {
+    const endedStatuses = TERMINAL_STATUSES.filter((status) => status !== "stopped");
     const liveSpawnParent = `substr(p.request_id, 1, ${SPAWN_APPROVAL_REQUEST_ID_PREFIX.length})=?
       AND p.resume_status IS NULL AND s.archived=0
-      AND s.status NOT IN (${TERMINAL_STATUSES.map(() => "?").join(", ")})`;
+      AND s.status NOT IN (${endedStatuses.map(() => "?").join(", ")})`;
     const abandoned = `p.status IN ('queued','pending') AND p.last_polled_at<=?
       AND (p.last_polled_at<=? OR NOT COALESCE((${liveSpawnParent}), 0))`;
-    const bindings = [cutoff, Math.min(cutoff, spawnCutoff), SPAWN_APPROVAL_REQUEST_ID_PREFIX, ...TERMINAL_STATUSES];
+    const bindings = [cutoff, Math.min(cutoff, spawnCutoff), SPAWN_APPROVAL_REQUEST_ID_PREFIX, ...endedStatuses];
     const rows = (sessionId
       ? this.stmt(
           `SELECT p.request_id, p.session_id FROM policy_hook_approvals p

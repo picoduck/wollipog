@@ -10223,6 +10223,7 @@ export class SessionsService {
     if (status !== "idle" && !isTerminal(status)) {
       this.db.clearPolicyResumeStatus(sessionId);
     }
+    if (status === "idle") this.db.noteSpawnApprovalsSettled(sessionId);
     const childAttention = !isTerminal(status) && pendingRequests(session.pendingApproval).some(
       (request) => request.ownerToolUseId || request.kind === "workflow_decision",
     );

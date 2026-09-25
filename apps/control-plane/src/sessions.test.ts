@@ -2354,6 +2354,44 @@ test("a spawn approval falls back to the hook fence once its parent's turn settl
   } finally { db.close(); }
 });
 
+test("a settle that passes a displaced spawn approval still ends its longer fence", () => {
+  const { db, svc, parent, requestId, approval } = pendingSpawnFixture("session");
+  try {
+    // A non-policy card holds the visible slot, so the idle is not swallowed as a policy resume.
+    assert.ok(db.requeuePolicyHookApproval(parent.id, requestId));
+    db.setPendingApproval(parent.id, { requestId: "permission", title: "Run Command", kind: "permission", options: [] });
+    svc.onSessionStatus(parent.id, "idle");
+    assert.equal(approval().status, "queued");
+    assert.equal(approval().resumeStatus, "idle", "the settled turn is recorded on the open spawn row");
+    const returnedAt = approval().lastPolledAt;
+    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + POLICY_HOOK_ABANDONMENT_MS), 1,
+      "no agent turn is left to repeat the call, so the 30 s fence applies");
+    assert.equal(approval().status, "denied");
+  } finally { db.close(); }
+});
+
+test("a control-plane restart keeps a live parent's spawn approval until its runner reports the turn", () => {
+  const { db, svc, parent, create, requestId, approval } = pendingSpawnFixture("session");
+  try {
+    const returnedAt = approval().lastPolledAt;
+    // Startup settlement provisionally stops every mid-flight session until its runner reconnects.
+    db.settleStartupState(returnedAt + 1_000);
+    assert.equal(db.getSession(parent.id)!.status, "stopped");
+    assert.equal(svc.reconcilePolicyHookTimeouts(returnedAt + 60_000), 0,
+      "a restart during the agent's turn-around does not withdraw the approval");
+    assert.equal(approval().status, "pending");
+
+    db.registerRunner(runnerMeta(), returnedAt + 61_000, PROTOCOL_VERSION);
+    db.updateSessionStatus(parent.id, "input_required", returnedAt + 61_000);
+    const retried = create();
+    assert.equal(retried.status, 428, retried.error ?? "the reconnected parent's identical call still finds it pending");
+    assert.equal(db.getSession(parent.id)!.pendingApproval?.requestId, requestId);
+    assert.ok(svc.approve(parent.id, requestId, "allow").ok);
+    assert.ok(create().ok);
+    assert.equal(db.childSessionAllocations(parent.id).count, 1);
+  } finally { db.close(); }
+});
+
 for (const [ending, actorId] of [
   ["stopped", "session-stopped"],
   ["archived", "session-stopped"],

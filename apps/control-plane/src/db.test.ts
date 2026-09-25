@@ -2914,15 +2914,27 @@ test("a child-creation approval outlives the hook fence only while its parent's 
     db.notePolicyResumeStatus("settled-parent", "idle");
     ask("archived-parent", "spawn_archived");
     db.setSessionArchived("archived-parent", true, polledAt);
-    ask("stopped-parent", "spawn_stopped");
-    db.updateSessionStatus("stopped-parent", "stopped", polledAt);
+    ask("ended-parent", "spawn_ended");
+    db.updateSessionStatus("ended-parent", "completed", polledAt);
+    // Startup settlement marks mid-flight sessions stopped until their runner reconnects; every
+    // real stop aborts the approval directly, so `stopped` alone does not end the longer fence.
+    ask("restarted-parent", "spawn_restarted");
+    db.updateSessionStatus("restarted-parent", "stopped", polledAt);
+    ask("hook-settled-parent", "hook_settled");
+    assert.equal(db.noteSpawnApprovalsSettled("hook-settled-parent"), 0, "a passed-through settle never marks a hook row");
+    ask("passed-parent", "spawn_passed");
+    assert.equal(db.noteSpawnApprovalsSettled("passed-parent"), 1);
 
-    assert.deepEqual(abandoned(), ["hook_tool", "spawn_archived", "spawn_settled", "spawn_stopped"],
-      "tool-call hooks and uncollectable spawn approvals keep the hook fence");
+    assert.deepEqual(abandoned(), [
+      "hook_settled", "hook_tool", "spawn_archived", "spawn_ended", "spawn_passed", "spawn_settled",
+    ], "tool-call hooks and uncollectable spawn approvals keep the hook fence");
     assert.deepEqual(db.listAbandonedPolicyHookApprovals(cutoff - 1, undefined, spawnCutoff), [],
       "nothing is abandoned before the hook fence");
-    assert.deepEqual(abandoned(polledAt), ["hook_tool", "spawn_archived", "spawn_live", "spawn_settled", "spawn_stopped"],
-      "a live parent's spawn approval is abandoned at the spawn fence");
+    assert.deepEqual(abandoned(polledAt), [
+      "hook_settled", "hook_tool", "spawn_archived", "spawn_ended", "spawn_live", "spawn_passed",
+      "spawn_restarted", "spawn_settled",
+    ], "a live parent's spawn approval is abandoned at the spawn fence");
+    assert.equal(db.getPolicyHookApproval("hook-settled-parent", "hook_settled")?.resumeStatus, undefined);
     assert.deepEqual(db.listAbandonedPolicyHookApprovals(cutoff, "live-parent"), [
       db.getPolicyHookApproval("live-parent", "spawn_live"),
     ], "omitting the spawn cutoff keeps the single hook fence");
