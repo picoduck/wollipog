@@ -15756,7 +15756,7 @@ test("a live session runtime snapshot updates only its owner and preserves sessi
   assert.equal(db.getSession("runtime-two")!.status, "idle", "single-snapshot update is not full reconciliation");
 });
 
-test("replayed child snapshots and stopped campaigns do not recompute campaign attention", () => {
+test("replayed child snapshots skip campaign scans while changed snapshots survive provisional stops", () => {
   const { db, svc } = makeHarness();
   try {
     const meta = runnerMeta();
@@ -15793,13 +15793,31 @@ test("replayed child snapshots and stopped campaigns do not recompute campaign a
     svc.applySessionRuntimeUpdate(RUNNER_ID, runtime);
     assert.equal(descendantScans, 0, "a repeated runtime snapshot carries no new campaign attention");
 
+    // The CP can have a higher settled cost than the runner's snapshot. The stored fingerprint
+    // hashes that clamped runtime snapshot, so its replay must compare the same value.
+    db.raw().prepare("UPDATE sessions SET cost_usd=1 WHERE id=?").run(child.data.id);
+    svc.applySessionRuntimeUpdate(RUNNER_ID, runtime);
+    descendantScans = 0;
+    svc.applySessionRuntimeUpdate(RUNNER_ID, runtime);
+    assert.equal(descendantScans, 0, "cost clamping does not turn a replay into new attention");
+
     db.updateSessionStatus(root.id, "stopped", Date.now());
-    svc.applySessionRuntimeUpdate(RUNNER_ID, { ...runtime, seq: 2 });
-    assert.equal(descendantScans, 0, "a stopped campaign cannot receive a continuation from child snapshots");
+    db.appendEvent(child.data.id, { kind: "agent_message", text: "Completed child report", final: true }, Date.now());
+    svc.applySessionRuntimeUpdate(RUNNER_ID, { ...runtime, status: "idle", seq: 2 });
+    assert.ok(descendantScans > 0, "a changed child must still publish while its root is provisionally stopped");
+    assert.ok(db.campaignContinuationEvents(root.id).some((event) =>
+      event.kind === "child_ready" && event.subjectSessionId === child.data!.id));
 
     db.updateSessionStatus(root.id, "running", Date.now());
-    svc.applySessionRuntimeUpdate(RUNNER_ID, { ...runtime, seq: 3 });
-    assert.ok(descendantScans > 0, "a changed snapshot still updates an active campaign");
+    assert.ok(db.campaignContinuationEvents(root.id).some((event) => event.kind === "child_ready"),
+      "the durable event remains available after root recovery");
+
+    const scansBeforePolicy = descendantScans;
+    db.updateSessionCostBudget(child.data.id, 0.2, Date.now());
+    svc.applySessionRuntimeUpdate(RUNNER_ID, { ...runtime, status: "idle", seq: 2 });
+    assert.equal(db.getSession(child.data.id)?.pendingApproval?.kind, "cost_budget");
+    assert.ok(descendantScans > scansBeforePolicy,
+      "a repeated runner snapshot can still create a new CP-owned policy card");
   } finally {
     db.close();
   }

@@ -12696,35 +12696,6 @@ export class ControlPlaneDb {
     return row?.runner_snapshot_fingerprint === ControlPlaneDb.sessionSnapshotFingerprint(snapshot);
   }
 
-  /** Resolve campaign ancestry without constructing each full SessionView. A stopped or archived
-   * root cannot receive continuation events from later child snapshots. */
-  activeCampaignControllerId(parentSessionId: string): string | null {
-    const seen = new Set<string>();
-    let currentId: string | null = parentSessionId;
-    let controller: { id: string; status: SessionStatus; archived: number } | null = null;
-    for (let depth = 0; currentId && depth < 64; depth += 1) {
-      if (seen.has(currentId)) return null;
-      seen.add(currentId);
-      const row: {
-        id: string; parent_session_id: string | null; status: SessionStatus; archived: number;
-        session_role: string | null; permission_mode: string | null; has_policy: number;
-      } | undefined = this.stmt(
-        `SELECT id,parent_session_id,status,archived,session_role,permission_mode,
-                orchestrator_policy IS NOT NULL AS has_policy FROM sessions WHERE id=?`,
-      ).get(currentId) as {
-        id: string; parent_session_id: string | null; status: SessionStatus; archived: number;
-        session_role: string | null; permission_mode: string | null; has_policy: number;
-      } | undefined;
-      if (!row) return null;
-      if ((row.session_role === "orchestrator" || row.permission_mode === "orchestrator") && row.has_policy) {
-        controller = row;
-      }
-      currentId = row.parent_session_id;
-    }
-    if (currentId || !controller || controller.archived === 1 || isTerminal(controller.status)) return null;
-    return controller.id;
-  }
-
   /** Monotonic mirror of projection-safe runner facts. Absence means a pre-v82 runner and leaves
    * prior evidence intact; a present array is authoritative, so missing jobs become inactive
    * tombstones while their audit and delivery evidence remains durable. */
