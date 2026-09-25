@@ -619,3 +619,43 @@ test("adoption and recovery are gated per platform so older and unsupported runn
   assert.deepEqual(requests, ["snapshot:read", "snapshot:read", "snapshot:read", "skill_adoption",
     "skill_adoption_recovery"], "preview, preflight, and adoption each reread the source");
 });
+
+test("WSL recovery operations name their distro only from a runner that adopts inside WSL", async (t) => {
+  const db = ControlPlaneDb.open(":memory:");
+  const app = Fastify();
+  t.after(async () => { await app.close(); db.close(); });
+  const owner: HumanPrincipal = { kind: "human", actorId: LOCAL_OWNER_USER_ID, userId: LOCAL_OWNER_USER_ID,
+    userName: "Owner", organizationId: PERSONAL_ORGANIZATION_ID, organizationName: "Personal",
+    role: "owner", deviceId: null, localBootstrap: true };
+  const operation = {
+    operationId: "123e4567-e89b-42d3-a456-426614174000",
+    backupDirectory: ".codex/skills/.wollipog-adoption-123e4567-e89b-42d3-a456-426614174000",
+    sourceDirectory: ".codex/skills", name: "alpha", digest: "a".repeat(64), state: "managed_linked" as const,
+    detail: "The managed link is active and the original is preserved.",
+    context: { kind: "wsl" as const, distro: "Ubuntu", private: "dropped" },
+  };
+  let reported: unknown = operation;
+  const register = (protocol: number) => db.registerRunner({ runnerId: "runner-1", hostname: "host", os: "windows",
+    version: "1", agents: [], workspaces: [],
+    providerAccounts: [{ id: "work", label: "Work", provider: "codex", authStatus: "authenticated" }] },
+  protocol, protocol);
+  registerMachineSkillRoutes(app, { db, requestHuman: () => owner, requestPrincipal: () => owner,
+    pushSkillsSync: (() => {}) as SkillsSyncPusher,
+    hub: { isRunnerOnline: () => true, sendToRunner: () => true,
+      requestFromRunner: async (runnerId, requestId) => ({ type: "skill_adoption_recovery_result" as const, runnerId,
+        requestId, status: "listed" as const, operations: [reported] as never, truncated: false }) },
+  });
+  const inspect = () => app.inject({ method: "POST", url: "/api/runners/runner-1/skill-adoption-recovery" });
+  register(RUNNER_CAPABILITY_MIN_PROTOCOL.wslMachineSkillAdoption - 1);
+  assert.equal((await inspect()).statusCode, 502, "an older runner cannot report a WSL journal");
+  register(RUNNER_CAPABILITY_MIN_PROTOCOL.wslMachineSkillAdoption);
+  const listed = await inspect();
+  assert.equal(listed.statusCode, 200, listed.body);
+  assert.deepEqual(listed.json().operations[0].context, { kind: "wsl", distro: "Ubuntu" });
+  for (const context of [{ kind: "wsl", distro: "../escape" }, { kind: "native" }, { kind: "wsl", distro: "" }]) {
+    reported = { ...operation, context };
+    assert.equal((await inspect()).statusCode, 502, JSON.stringify(context));
+  }
+  reported = { ...operation, providerAccountId: "work" };
+  assert.equal((await inspect()).statusCode, 502, "WSL journals never belong to a host account home");
+});

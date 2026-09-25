@@ -45,7 +45,8 @@ try:
 finally: os.close(fd)
 `;
 
-type Run = typeof runContextCommand;
+export type WslRun = typeof runContextCommand;
+type Run = WslRun;
 interface HelperOutput {
   deployed?: unknown;
   unmanaged?: unknown;
@@ -90,7 +91,8 @@ function wslBindings(agents: AgentDefinition[], distro: string) {
   });
 }
 
-async function bootstrap(distro: string, ownerHash: string, run: Run): Promise<string> {
+/** Install the fixed helper under the runner's private in-distro directory and return its path. */
+export async function bootstrapWslSkillsHelper(distro: string, ownerHash: string, run: Run): Promise<string> {
   const context = { kind: "wsl" as const, distro };
   const result = await run(context, "python3", ["-c", BOOTSTRAP, ownerHash], {
     cwd: "/", stdin: WSL_SKILLS_HELPER, timeoutMs: 30_000, maxBuffer: 64 * 1024,
@@ -100,7 +102,8 @@ async function bootstrap(distro: string, ownerHash: string, run: Run): Promise<s
   return path;
 }
 
-async function translatedStoreRoot(dataDir: string, distro: string, run: Run): Promise<string> {
+/** The canonical native store as the distro sees it; managed links inside WSL name this path. */
+export async function translatedWslStoreRoot(dataDir: string, distro: string, run: Run): Promise<string> {
   const native = realpathSync(skillsStoreRoot(dataDir));
   const result = await run({ kind: "wsl", distro }, "wslpath", ["-a", native], {
     cwd: "/", timeoutMs: 5_000, maxBuffer: 16 * 1024,
@@ -216,8 +219,8 @@ export async function reconcileWslSkills(options: ReconcileWslSkillsOptions): Pr
     if (!options.allowRemovals && !hasDesiredTarget) continue;
     try {
       const [helper, storeRoot] = await Promise.all([
-        bootstrap(distro, options.ownerHash, run),
-        options.storeRoot ? options.storeRoot(distro) : translatedStoreRoot(options.dataDir, distro, run),
+        bootstrapWslSkillsHelper(distro, options.ownerHash, run),
+        options.storeRoot ? options.storeRoot(distro) : translatedWslStoreRoot(options.dataDir, distro, run),
       ]);
       const rejected: DeployedSkillState[] = [];
       const held = options.heldSkillNames ?? new Set<string>();

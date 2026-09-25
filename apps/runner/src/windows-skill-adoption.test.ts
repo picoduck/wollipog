@@ -9,11 +9,11 @@ import type { AgentDefinition, MachineSkillCandidate } from "@wollipog/protocol"
 import { skillVersionDigest } from "@wollipog/protocol/skills-digest";
 import type { RunnerProviderAccount } from "./config.js";
 import { adoptMachineSkill, type SkillAdoptionOptions } from "./skill-adoption.js";
+import { parseRecoveryInspection } from "./skill-adoption-platform.js";
 import { listSkillAdoptionRecovery, restoreSkillAdoptionRecovery } from "./skill-adoption-recovery.js";
 import { MachineSkillSnapshots } from "./skill-snapshots.js";
 import { cacheSkillSyncEntry, reconcileSkills } from "./skills.js";
 import {
-  parseWindowsRecoveryInspection,
   WINDOWS_SKILL_ADOPTION_HELPER,
   windowsAdoptionInvocation,
   windowsAdoptionOutcome,
@@ -42,11 +42,11 @@ test("the Windows adoption helper pins handles, renames relative to the journal,
     /Directory\.Delete|File\.Delete|DeleteFileW|RemoveDirectoryW|Remove-Item|MOVEFILE_REPLACE_EXISTING/u);
 });
 
-test("Windows recovery inspection output is strictly projected", () => {
+test("helper recovery inspection output is strictly projected", () => {
   const journal = (overrides: Record<string, unknown> = {}) => ({ OperationId: operationId, Intent: "{}", Name: "alpha",
     Digest: "d".repeat(64), OriginalIdentity: "1:3", Kind: 2, SourceIdentity: "", Role: 1, Extra: "discarded",
     ...overrides });
-  assert.deepEqual(parseWindowsRecoveryInspection({ parentIdentity: "1:2", truncated: true,
+  assert.deepEqual(parseRecoveryInspection({ parentIdentity: "1:2", truncated: true,
     journals: [journal(), journal({ Kind: 1, Role: 0, SourceIdentity: "1:3" })] }), {
     parentIdentity: "1:2", truncated: true, journals: [
       { operationId, intent: "{}", name: "alpha", digest: "d".repeat(64), originalIdentity: "1:3",
@@ -55,7 +55,7 @@ test("Windows recovery inspection output is strictly projected", () => {
         source: { kind: "directory", identity: "1:3" } },
     ],
   });
-  assert.deepEqual(parseWindowsRecoveryInspection({ parentIdentity: "", journals: [], truncated: false }),
+  assert.deepEqual(parseRecoveryInspection({ parentIdentity: "", journals: [], truncated: false }),
     { parentIdentity: null, journals: [], truncated: false });
   for (const invalid of [
     null,
@@ -68,7 +68,7 @@ test("Windows recovery inspection output is strictly projected", () => {
     { parentIdentity: "", journals: [journal()], truncated: false },
     { parentIdentity: "C:\\Users", journals: [], truncated: false },
     { parentIdentity: "1:2", journals: [], truncated: "no" },
-  ]) assert.throws(() => parseWindowsRecoveryInspection(invalid));
+  ]) assert.throws(() => parseRecoveryInspection(invalid));
 });
 
 test("Windows adoption progress distinguishes a clean refusal from recovery evidence", () => {

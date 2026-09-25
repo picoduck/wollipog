@@ -32,17 +32,17 @@ function fixture(t: TestContext) {
   return { home, dataDir, snapshots, desired, message, advance: () => { now += 600_001; } };
 }
 
-test("runner command revalidates desired state and adopts an exact live candidate", linux, (t) => {
+test("runner command revalidates desired state and adopts an exact live candidate", linux, async (t) => {
   const f = fixture(t);
   let lease = 0;
-  const result = handleSkillAdoption({ ...f, runnerId: "runner", agents, desired: [f.desired],
+  const result = await handleSkillAdoption({ ...f, runnerId: "runner", agents, desired: [f.desired],
     acquireProviderHomeLease: () => { lease++; } });
   assert.equal(result.status, "adopted", JSON.stringify(result));
   assert.equal(lease, 1);
   assert.ok(fs.lstatSync(join(f.home, ".codex/skills/alpha")).isSymbolicLink());
 });
 
-test("runner command rejects stale, retargeted, manual and unconfirmed commands before mutation", linux, (t) => {
+test("runner command rejects stale, retargeted, manual and unconfirmed commands before mutation", linux, async (t) => {
   for (const problem of ["expired", "digest", "unassigned", "manual", "runner", "confirmation"] as const) {
     const f = fixture(t);
     let message = f.message;
@@ -53,23 +53,24 @@ test("runner command rejects stale, retargeted, manual and unconfirmed commands 
     if (problem === "manual") desired = [{ ...f.desired, targets: [{ agentId: "codex", invocation: "manual" }] }];
     if (problem === "runner") message = { ...message, runnerId: "other" };
     if (problem === "confirmation") message = { ...message, confirmation: "missing" as "explicit" };
-    const result = handleSkillAdoption({ ...f, message, runnerId: "runner", agents, desired,
+    const result = await handleSkillAdoption({ ...f, message, runnerId: "runner", agents, desired,
       acquireProviderHomeLease: () => assert.fail("must not lease") });
     assert.equal(result.status, "rejected", problem);
     assert.ok(fs.lstatSync(join(f.home, ".codex/skills/alpha")).isDirectory(), problem);
   }
 });
 
-test("shared directory readers require explicit impact consent", linux, (t) => {
+test("shared directory readers require explicit impact consent", linux, async (t) => {
   const f = fixture(t);
   const sharedAgents = [...agents, { id: "codex-two", name: "Codex Two", command: "codex", args: [], env: {}, driver: "codex" as const }];
   const base = { ...f, runnerId: "runner", agents: sharedAgents, desired: [f.desired],
     acquireProviderHomeLease: () => undefined };
-  assert.equal(handleSkillAdoption(base).status, "rejected");
-  assert.equal(handleSkillAdoption({ ...base, message: { ...f.message, acceptSharedImpact: true } }).status, "adopted");
+  assert.equal((await handleSkillAdoption(base)).status, "rejected");
+  assert.equal((await handleSkillAdoption({ ...base, message: { ...f.message, acceptSharedImpact: true } })).status,
+    "adopted");
 });
 
-test("account-scoped adoption and recovery use and retain the selected credential home", linux, (t) => {
+test("account-scoped adoption and recovery use and retain the selected credential home", linux, async (t) => {
   const root = fs.mkdtempSync(join(tmpdir(), "skill-adoption-account-"));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const home = join(root, "home"), dataDir = join(root, "data"), accountHome = join(root, "work");
@@ -88,7 +89,7 @@ test("account-scoped adoption and recovery use and retain the selected credentia
     targets: [{ agentId: "codex", invocation: "agent" }] };
   cacheSkillSyncEntry(dataDir, agents, desired);
   const leased: string[] = [];
-  const result = handleSkillAdoption({
+  const result = await handleSkillAdoption({
     message: { type: "skill_adoption", runnerId: "runner", requestId: "adopt", candidate,
       digest: snapshot.digest, confirmation: "explicit", acceptSharedImpact: false },
     runnerId: "runner", home, dataDir, agents, snapshots, desired: [desired],

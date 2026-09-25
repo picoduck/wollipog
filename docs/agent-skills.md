@@ -1,7 +1,7 @@
 # Agent Skills Management and Deployment
 
 Status: managed Linux/macOS/Windows and mixed-context WSL deployment, Git import,
-Linux/macOS/Windows/WSL machine snapshots, guarded Linux, macOS, and Windows adoption/recovery, version history with
+Linux/macOS/Windows/WSL machine snapshots, guarded Linux, macOS, Windows, and WSL adoption/recovery, version history with
 library rollback, machine-wide version pins, assignable groups, opt-in automatic Git updates, and
 drift detection for hand-edited deployed copies implemented. Project/workspace scope remains
 deferred.
@@ -194,7 +194,7 @@ importing it and creating an explicit assignment. This owner/admin-only endpoint
 it does not adopt a directory, create assignments, change pins, or send a deployment command.
 It uses the same online snapshot gate and bounded opaque-candidate read as import. Linux runners keep
 the read-only report from protocol 111; macOS runners need protocol 181 and Windows runners protocol
-182, and WSL locations are refused before any command is sent.
+182 (184 for Windows-hosted WSL locations), and anything else is refused before a command is sent.
 
 The source is read again and must match the preview's full content digest and discovery identity.
 After that read, current ownership, effective direct/group assignments, disabled overrides, and
@@ -210,8 +210,8 @@ not current filesystem links or observed reads, especially for an unmanaged cano
 It does not certify which running harnesses have loaded those files.
 
 `status: "prerequisites_met"` is an observation, not an adoption authorization. On a protocol-115
-Linux runner, a protocol-181 macOS runner, or a protocol-182 Windows runner it also mints a one-use,
-preview-bound adoption token. Closing, importing, replacing,
+Linux runner, a protocol-181 macOS runner, or a protocol-182 Windows runner (184 for a WSL location)
+it also mints a one-use, preview-bound adoption token. Closing, importing, replacing,
 or expiring the preview invalidates it. The owner/admin must separately confirm the operation and
 any named shared-directory readers. Manual invocation variants remain blocked because their
 deployed frontmatter can differ from the approved source bytes.
@@ -220,7 +220,8 @@ deployed frontmatter can differ from the approved source bytes.
 
 The runner's `adoptMachineSkill` module implements the Linux filesystem transaction in-process.
 Protocol 115 exposes it through a serialized runner command, owner/admin API, and the machine-import
-dialog. Protocols 181 and 182 add the same transaction on native macOS and Windows (see below).
+dialog. Protocols 181, 182, and 184 add the same transaction on native macOS, native Windows, and
+Windows-hosted WSL (see below).
 Its trusted caller must resolve the opaque candidate and expiry, verify the durable
 library version and current explicit assignment/invocation/shared-directory consent, and serialize
 the whole operation with reconciliation and store GC. A read-only preflight report is not that grant.
@@ -256,10 +257,10 @@ the substituted tree, which is detected as an identity mismatch rather than dele
 with reconciliation/GC, rechecks the latest desired digest and targets, and runs a solicited sync
 first so the target is materialized. Lost or uncorrelated results instruct the operator to inspect
 for a journal before retrying. Backups are intentionally retained without automatic cleanup.
-Adoption is available on Linux (protocol 115), native macOS (protocol 181), and native Windows
-(protocol 182). Windows-hosted WSL locations support snapshot import but not yet source replacement;
-standalone WSL runners report Linux and use the Linux adoption path. Each platform has its own capability, so an
-older runner keeps the previous refusal and never receives an adoption or recovery command.
+Adoption is available on Linux (protocol 115), native macOS (protocol 181), native Windows
+(protocol 182), and Windows-hosted WSL locations (protocol 184); standalone WSL runners report Linux
+and use the Linux adoption path. Each platform has its own capability, so an older runner keeps the
+previous refusal and never receives an adoption or recovery command.
 
 ### Native macOS adoption
 
@@ -317,10 +318,39 @@ while another process holds a file inside it open, which stops adoption before t
 intent-only journal. Recovery inspection, restore, the `journal` progress line, and the test-only
 checkpoint (whose variables the runner strips from every helper environment) follow the macOS design.
 
+### Windows-hosted WSL adoption
+
+A WSL location lives in its distro's Linux home, so a Windows runner adopts it inside the distro with
+the same fixed Python helper that already reconciles managed WSL skills. The runner rereads the
+source through its no-follow Windows reader immediately before the transaction; a changed discovery
+generation or digest refuses adoption without touching anything. The helper then takes the distro
+HOME's provider-home lease, exactly as WSL reconciliation does, and repeats the Linux transaction
+with descriptor-relative calls from the pinned HOME. It walks the harness directory under
+reconciliation's ownership rule (owned by the user, not group- or world-writable) and checks source
+and store content twice against the approved digest, which it computes with the same canonical
+manifest. It refuses executable files, hard links, and links, and creates the private journal. The
+original moves with `renameat2(RENAME_NOREPLACE)`. A libc, kernel, or filesystem without it stops the
+transaction instead of falling back to a plain rename. The managed link is published with an exclusive
+`symlink` to the store path as the distro sees it, so reconciliation later routes a harness link
+through the canonical link as usual. The journal, parent, and original paths are verified before each
+move and before and after publication. Because the helper runs after asynchronous preparation, the
+runner rechecks the live agent list before the transaction, so a same-distro reader discovered in the
+meantime still needs shared-impact confirmation. The helper's test-only checkpoint is read only from
+the stdin specification the runner writes, never from the environment, so a forwarded `WSLENV` cannot
+enable it. Recovery operations from a distro carry a `context` naming it, which the control plane
+accepts only from a protocol-184 runner and displays next to the location. Like native harness
+directories, recovery inspects only distros that currently have a configured agent. If the last agent
+in a distro is removed, its journals stay on disk untouched and are listed again once an agent in that
+distro is configured. A distro that cannot be inspected, including one whose harness directory or
+journal has become unreadable (only a missing directory counts as empty), marks the recovery list as incomplete and
+blocks every restore until it can be, because operation IDs must resolve uniquely across all
+scopes. Account-scoped WSL locations remain import-only, because WSL deployment manages
+only the distro's own HOME.
+
 ### Adoption recovery inspection and restore
 
-Protocol 116 adds a bounded recovery command (protocol 181 on macOS and 182 on Windows). **Inspect
-Recovery** asks an online Linux, macOS, or Windows runner to
+Protocol 116 adds a bounded recovery command (protocol 181 on macOS, 182 on Windows, and 184 for
+Windows-hosted WSL distros). **Inspect Recovery** asks an online Linux, macOS, or Windows runner to
 scan at most 4,096 raw entries in each known native harness directory and return at most 64 validated
 journals. The control plane accepts only fixed harness-relative journal paths and projected operation
 fields; arbitrary client paths and malformed runner results are rejected. Inspection and restore are
@@ -735,7 +765,7 @@ desired-state reads stay unknown through manual sync until an authoritative refr
    enable/disable; symlink deployment for native Claude Code and Codex; Skills view and
    per-machine section.
 2. **Phase 2 (implemented)** — git upstream sync, groups as assignable units, invocation-mode
-   transforms, drift detection and guarded Linux/macOS/Windows adoption/recovery, versions/pin/rollback, and
+   transforms, drift detection and guarded Linux/macOS/Windows/WSL adoption/recovery, versions/pin/rollback, and
    Windows-junction plus mixed-context WSL support.
 3. **Phase 3** — project-scoped skills, usage analytics, sharing/export, edit-in-session,
    container mounts.

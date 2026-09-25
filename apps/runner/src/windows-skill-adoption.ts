@@ -1,21 +1,15 @@
 import { spawnSync } from "node:child_process";
 import { realpathSync } from "node:fs";
 import { win32 } from "node:path";
-import { validSkillName } from "@wollipog/protocol";
-import type {
-  PlatformAdoptionRequest,
-  PlatformRestoreRequest,
-  RecoveryDirectoryFacts,
-  RecoveryJournalFacts,
-  RecoverySourceFacts,
-  SkillAdoptionPlatformHelper,
+import {
+  parseRecoveryInspection,
+  type PlatformAdoptionRequest,
+  type PlatformRestoreRequest,
+  type SkillAdoptionPlatformHelper,
 } from "./skill-adoption-platform.js";
 import { WINDOWS_JUNCTION_REPARSE_TYPES } from "./windows-skill-junction.js";
 import { WINDOWS_SKILL_SNAPSHOT_TYPES } from "./windows-skill-snapshots.js";
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u;
-const DIGEST = /^[0-9a-f]{64}$/u;
-const IDENTITY = /^\d+:\d+$/u;
 /** Test-only checkpoint variables. The runner removes them from every helper environment. */
 export const WINDOWS_ADOPTION_CHECKPOINT_VARIABLES = [
   "WOLLIPOG_SKILL_ADOPTION_TEST_CHECKPOINT",
@@ -726,40 +720,6 @@ function optional(value: () => string): string {
   try { return value(); } catch { return ""; }
 }
 
-export function parseWindowsRecoveryInspection(value: unknown): RecoveryDirectoryFacts {
-  if (!value || typeof value !== "object") throw new Error("invalid helper result");
-  const output = value as { parentIdentity?: unknown; journals?: unknown; truncated?: unknown };
-  const parentIdentity = output.parentIdentity;
-  if (typeof parentIdentity !== "string" || (parentIdentity !== "" && !IDENTITY.test(parentIdentity)) ||
-      !Array.isArray(output.journals) || output.journals.length > 64 || typeof output.truncated !== "boolean" ||
-      (parentIdentity === "" && output.journals.length !== 0)) throw new Error("invalid helper result");
-  const text = (entry: unknown, pattern: RegExp) => {
-    if (typeof entry !== "string" || (entry !== "" && !pattern.test(entry))) throw new Error("invalid helper result");
-    return entry;
-  };
-  const journals = output.journals.map((item): RecoveryJournalFacts => {
-    const journal = item as Record<string, unknown>;
-    const operationId = text(journal.OperationId, UUID);
-    const name = journal.Name;
-    const kind = journal.Kind;
-    const role = journal.Role;
-    const sourceIdentity = text(journal.SourceIdentity, IDENTITY);
-    if (!operationId || typeof journal.Intent !== "string" || journal.Intent.length > 8192 ||
-        typeof name !== "string" || (name !== "" && !validSkillName(name)) ||
-        !Number.isInteger(kind) || !Number.isInteger(role) || (kind as number) < 0 || (kind as number) > 3 ||
-        (role as number) < 0 || (role as number) > 3 || (kind === 2) !== (role !== 0) ||
-        (kind !== 1 && sourceIdentity !== "")) throw new Error("invalid helper result");
-    const originalIdentity = text(journal.OriginalIdentity, IDENTITY);
-    const source: RecoverySourceFacts = kind === 0 ? { kind: "absent" }
-      : kind === 1 ? { kind: "directory", identity: sourceIdentity || null }
-        : kind === 2 ? { kind: "link", role: role === 1 ? "managed" : role === 2 ? "recovery" : "foreign" }
-          : { kind: "other" };
-    return { operationId, intent: journal.Intent, name, digest: text(journal.Digest, DIGEST),
-      originalIdentity: originalIdentity || null, source };
-  });
-  return { parentIdentity: parentIdentity || null, journals, truncated: output.truncated };
-}
-
 export function windowsAdoptionSpecification(request: PlatformAdoptionRequest): Record<string, unknown> {
   return { operation: "adopt", home: request.home, localSourceDirectory: request.localSourceDirectory,
     sourceDirectory: request.sourceDirectory, name: request.name, generation: request.generation,
@@ -797,7 +757,7 @@ export function windowsSkillAdoptionHelper(): SkillAdoptionPlatformHelper {
         localSourceDirectory: request.localSourceDirectory, homeLink: optional(() => realpathSync(request.home)),
         storeLink: optional(() => storeLink(request.dataDir)), operationId: request.operationId ?? "" });
       if (!result.succeeded) throw new Error("Windows adoption helper failed");
-      return parseWindowsRecoveryInspection(JSON.parse(result.stdout));
+      return parseRecoveryInspection(JSON.parse(result.stdout));
     },
     restore: (request) => {
       const result = run(windowsRestoreSpecification(request));

@@ -32,13 +32,13 @@ export function skillAdoptionPreflight(db: ControlPlaneDb, runnerId: string, can
       (!runnerSupportsProtocol(runner?.protocolVersion, "accountScopedAgentSkills") || !account)) {
     blockers.push("provider_account_scope_unavailable");
   }
+  // WSL deployment manages only the distro's own HOME, so an account home there has no managed link.
+  if (candidate.providerAccountId && candidate.context?.kind === "wsl") blockers.push("wsl_account_adoption_unsupported");
   const sameContext = (agent: typeof agents[number]) => candidate.context?.kind === "wsl"
     ? agent.context?.kind === "wsl" && agent.context.distro === candidate.context.distro
     : (agent.context?.kind ?? "native") === "native";
-  const readers = agents.filter((agent) =>
-    (candidate.providerAccountId
-      ? provider(agent.driver) === account?.provider && sameContext(agent)
-      : (agent.context?.kind ?? "native") === "native") &&
+  const readers = agents.filter((agent) => sameContext(agent) &&
+    (!candidate.providerAccountId || provider(agent.driver) === account?.provider) &&
     (agent.driver !== "pi" || piEnabled) && directory(agent.driver) &&
     (candidate.sourceDirectory === ".agents/skills" || directory(agent.driver) === candidate.sourceDirectory));
   const targets = (desired?.targets ?? []).map((target) => ({ ...target,
