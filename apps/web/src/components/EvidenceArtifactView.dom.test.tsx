@@ -188,7 +188,7 @@ test("artifact-only evidence can be reviewed without creating an external link",
   }
 });
 
-test("artifact-backed video plays inline only after digest and browser metadata checks", async () => {
+test("artifact-backed video is reviewable only after a picture frame loads", async () => {
   domWindow.localStorage.clear();
   const item = { evidenceId: "clip", artifactId: "art_clip", mediaType: "video/webm", sha256: WEBM_SHA };
   const view = await mount(sessionWith([item]), async () => new Blob([WEBM], { type: "video/webm" }));
@@ -198,7 +198,11 @@ test("artifact-backed video plays inline only after digest and browser metadata 
     assert.ok(video);
     assert.equal(video.hidden, true);
     assert.equal(view.checkbox("clip").disabled, true);
+    Object.defineProperties(video, { videoWidth: { value: 320 }, videoHeight: { value: 180 } });
     await act(async () => video.dispatchEvent(new domWindow.Event("loadedmetadata") as unknown as Event));
+    assert.equal(video.hidden, true, "metadata alone does not prove a frame was shown");
+    assert.equal(view.checkbox("clip").disabled, true);
+    await act(async () => video.dispatchEvent(new domWindow.Event("loadeddata") as unknown as Event));
     assert.equal(video.hidden, false);
     assert.equal(video.hasAttribute("controls"), true);
     assert.equal(video.hasAttribute("playsinline"), true);
@@ -206,6 +210,23 @@ test("artifact-backed video plays inline only after digest and browser metadata 
     assert.equal(view.container.querySelector(".evidence-review-item a"), null);
     await act(async () => view.checkbox("clip").click());
     assert.equal(view.button("Approve").disabled, false);
+  } finally { await view.unmount(); }
+});
+
+test("a video without a picture track cannot be marked reviewed", async () => {
+  domWindow.localStorage.clear();
+  const item = { evidenceId: "clip", artifactId: "art_clip", mediaType: "video/webm", sha256: WEBM_SHA };
+  const view = await mount(sessionWith([item]), async () => new Blob([WEBM], { type: "video/webm" }));
+  try {
+    const video = view.container.querySelector<HTMLVideoElement>(".evidence-artifact-video");
+    assert.ok(video);
+    Object.defineProperties(video, { videoWidth: { value: 0 }, videoHeight: { value: 0 } });
+    assert.equal(video.videoWidth, 0);
+    await act(async () => video.dispatchEvent(new domWindow.Event("loadedmetadata") as unknown as Event));
+    assert.match(view.container.querySelector('.evidence-artifact [role="alert"]')?.textContent ?? "",
+      /could not be displayed\.$/u);
+    assert.equal(view.checkbox("clip").disabled, true);
+    assert.equal(view.button("Approve").disabled, true);
   } finally { await view.unmount(); }
 });
 

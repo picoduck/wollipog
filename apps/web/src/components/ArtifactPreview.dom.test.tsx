@@ -100,6 +100,9 @@ test("verified video artifacts render a private inline player and release their 
     assert.equal(video?.getAttribute("src"), "blob:private-video");
     assert.equal(video?.hasAttribute("controls"), true);
     assert.equal(video?.hasAttribute("playsinline"), true);
+    await act(async () => video?.dispatchEvent(new domWindow.Event("error") as unknown as Event));
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "",
+      /This video could not be played in this browser\./u);
     await act(async () => root.unmount());
     assert.deepEqual(revoked, ["blob:private-video"]);
   } finally {

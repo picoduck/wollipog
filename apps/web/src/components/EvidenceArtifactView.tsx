@@ -174,9 +174,16 @@ export function EvidenceArtifactView({
         <p className="evidence-artifact-state muted" role="status">Loading evidence…</p>
       )}
       {imageUrl && (isVideo ? (
-        <video className="evidence-artifact-video" src={imageUrl} controls playsInline preload="metadata"
+        <video className="evidence-artifact-video" src={imageUrl} controls playsInline preload="auto"
           aria-label={`Play Evidence: ${item.evidenceId}`} hidden={state.status !== "ready"}
-          onLoadedMetadata={onImageLoad} onError={onImageError} />
+          onLoadedMetadata={(event) => {
+            if (!(event.currentTarget.videoWidth > 0 && event.currentTarget.videoHeight > 0)) onImageError();
+          }}
+          onLoadedData={(event) => {
+            if (event.currentTarget.videoWidth > 0 && event.currentTarget.videoHeight > 0) onImageLoad();
+            else onImageError();
+          }}
+          onError={onImageError} />
       ) : (
         <>
           {/* Mounted while decoding so the browser attempts the draw, but hidden and inert until it

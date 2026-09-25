@@ -96,7 +96,8 @@ export function ArtifactPreview({ artifact }: { artifact: WorkflowArtifactView }
       {loaded?.kind === "image" && <img className="artifact-preview-image" src={loaded.objectUrl} alt={artifact.name} />}
       {loaded?.kind === "video" && (
         <video className="artifact-preview-video" src={loaded.objectUrl} controls playsInline preload="metadata"
-          aria-label={`Play ${artifact.name}`} />
+          aria-label={`Play ${artifact.name}`}
+          onError={() => setError("This video could not be played in this browser.")} />
       )}
       {loaded?.kind === "html" && (
         <iframe
