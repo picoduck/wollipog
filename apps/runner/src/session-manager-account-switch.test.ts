@@ -242,6 +242,43 @@ test("a failed account resume parks the session with the selected account and a 
   }
 });
 
+for (const stop of ["end_turn", "refusal"] as const) {
+  test(`a later ${stop} turn ${stop === "end_turn" ? "clears" : "keeps"} a stale account switch failure`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-later-turn-"));
+    const messages: RunnerToControlPlane[] = [];
+    let manager: SessionManager | undefined;
+    try {
+      const made = makeManager(root, () => ({
+        pid: 1,
+        initialize: async () => {},
+        newSession: async () => {},
+        prompt: async () => stop,
+        cancel: () => {},
+        dispose: () => {},
+        setConfig: async () => {},
+        resolvePermission: () => false,
+        agentSessionId: () => "claude-session",
+      }), messages);
+      manager = made.manager;
+      const spec = launchSpec(root, "claude-code", "claude-work");
+      assert.equal(await manager.start(spec), true);
+      (manager as unknown as {
+        parkProviderAccountSwitchFailure: (sessionId: string, target: typeof accounts.claudePersonal,
+          reason: string) => void;
+      }).parkProviderAccountSwitchFailure(spec.sessionId, accounts.claudePersonal, "the provider conversation cannot be resumed under another account");
+      assert.equal(made.store.readMeta(spec.sessionId)?.status, "input_required");
+      assert.equal(manager.prompt(spec.sessionId, "Continue the campaign"), true);
+      await waitFor(() => made.store.readMeta(spec.sessionId)?.status === "idle", "later turn did not settle");
+      assert.equal(Boolean(made.store.readMeta(spec.sessionId)?.providerAccountSwitchFailure), stop === "refusal");
+      assert.equal(messages.some((message) => message.type === "session_runtime_updated" &&
+        message.snapshot.providerAccountSwitchFailure === null), stop === "end_turn");
+    } finally {
+      manager?.shutdownAll();
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("Stop remains terminal while an account-switch replacement is preparing", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-account-switch-stop-"));
   const messages: RunnerToControlPlane[] = [];

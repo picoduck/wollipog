@@ -365,6 +365,14 @@ if (params.get("quarantine") === "1") {
     recovery: "handoff",
   };
 }
+if (params.get("account-switch-failure") === "1") {
+  session.providerAccountSwitchFailure = {
+    providerAccountId: "alternate-account",
+    providerAccountLabel: "Alternate Account",
+    reason: "the provider conversation cannot be resumed under another account",
+    detectedAt: 5,
+  };
+}
 if (params.get("approval") === "checkpoint") {
   session.status = "input_required";
   session.costCheckpointsUsd = [1, 2.5];

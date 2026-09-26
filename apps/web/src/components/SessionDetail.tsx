@@ -2706,7 +2706,11 @@ function SessionDetailLoaded({
   // composer must not invite retries that cannot succeed.
   const historyQuarantine = session.historyQuarantine;
   const worktreeRecovery = session.worktreeRecovery;
-  const accountSwitchFailure = session.providerAccountSwitchFailure;
+  const accountSwitchFailureKey = session.providerAccountSwitchFailure
+    ? `${session.id}:${session.providerAccountSwitchFailure.detectedAt}` : null;
+  const [dismissedAccountSwitchFailureKey, setDismissedAccountSwitchFailureKey] = useState<string | null>(null);
+  const accountSwitchFailure = accountSwitchFailureKey !== dismissedAccountSwitchFailureKey
+    ? session.providerAccountSwitchFailure : undefined;
   const canPrompt = runnerOnline && !terminal && !policyPaused && !historyQuarantine &&
     !worktreeRecovery && !accountSwitchFailure;
   const composerPlaceholder = terminal ? `Session is ${session.status}.`
@@ -5168,8 +5172,18 @@ function SessionDetailLoaded({
                   </p>
                   <p>
                     The session is parked. Use <strong>Switch Account…</strong> in More Actions to
-                    retry this account or choose another account with usage headroom.
+                    choose an account with usage headroom. You can also dismiss this notice to send
+                    a new message with the session&rsquo;s configured account.
                   </p>
+                </div>
+                <div className="quarantine-actions">
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    onClick={() => setDismissedAccountSwitchFailureKey(accountSwitchFailureKey)}
+                  >
+                    Dismiss Notice
+                  </button>
                 </div>
               </div>
             )}
