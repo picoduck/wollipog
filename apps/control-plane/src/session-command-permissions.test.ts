@@ -12,6 +12,7 @@ const VIEWER = "Your Viewer role is read-only.";
 const STOP_JOB_OWNER = "Only the session owner or its controlling Orchestrator can stop its background jobs.";
 const AGENT_UNARCHIVE = "Session credentials may archive descendants, but cannot unarchive them.";
 const AGENT_DELETE = "Session credentials cannot delete sessions.";
+const AGENT_ROUTE = "Session credentials cannot use this command.";
 const ALL_ALLOWED: SessionCommandPermissions = {
   stop: { allowed: true },
   restart: { allowed: true },
@@ -20,7 +21,14 @@ const ALL_ALLOWED: SessionCommandPermissions = {
   unarchive: { allowed: true },
   prompt: { allowed: true },
   delete: { allowed: true },
+  cancelTurn: { allowed: true },
+  manageQueue: { allowed: true },
+  rename: { allowed: true },
+  configure: { allowed: true },
+  respond: { allowed: true },
 };
+/** The commands #1857 added, none of which an agent credential's allowlist names except configure. */
+const LATER_COMMANDS = ["cancelTurn", "manageQueue", "rename", "configure", "respond"] as const;
 const NON_OWNER: SessionCommandPermissions = {
   ...ALL_ALLOWED,
   stopBackgroundJob: { allowed: false, reason: STOP_JOB_OWNER },
@@ -49,6 +57,7 @@ test("a person's command permissions follow the role gate and Stop Job's owner r
     assert.deepEqual(sessionCommandPermissions(human("viewer"), child, facts), {
       stop: readOnly, restart: readOnly, stopBackgroundJob: readOnly,
       archive: readOnly, unarchive: readOnly, prompt: readOnly, delete: readOnly,
+      cancelTurn: readOnly, manageQueue: readOnly, rename: readOnly, configure: readOnly, respond: readOnly,
     }, "a Viewer is read-only even for a session its scope names");
   }
 });
@@ -65,7 +74,11 @@ test("an agent credential's command permissions follow descendant confinement an
     ...ALL_ALLOWED,
     unarchive: { allowed: false, reason: AGENT_UNARCHIVE },
     delete: { allowed: false, reason: AGENT_DELETE },
-  }, "the controlling Orchestrator may stop, restart, stop one job of, archive and prompt its child, but never unarchive or delete it");
+    cancelTurn: { allowed: false, reason: AGENT_ROUTE },
+    manageQueue: { allowed: false, reason: AGENT_ROUTE },
+    rename: { allowed: false, reason: AGENT_ROUTE },
+    respond: { allowed: false, reason: AGENT_ROUTE },
+  }, "the controlling Orchestrator may stop, restart, stop one job of, archive, prompt and configure its child, but never unarchive or delete it or use a route outside its allowlist");
 
   const grandchild = sessionCommandPermissions(orchestrator, { id: "s_grandchild", parentSessionId: "s_child" }, descendant);
   assert.deepEqual(grandchild.stop, { allowed: true });
@@ -89,6 +102,42 @@ test("an agent credential's command permissions follow descendant confinement an
   }
   assert.deepEqual(self.unarchive, { allowed: false, reason: AGENT_UNARCHIVE });
   assert.deepEqual(self.delete, { allowed: false, reason: AGENT_DELETE });
+});
+
+test("the commands #1857 added follow the role gate, the agent route allowlist and descendant confinement", () => {
+  const child = { id: "s_child", parentSessionId: "s_parent" };
+  const sees = { ownsSession: false, isDescendant: false };
+  for (const role of ["owner", "admin", "operator"] as const) {
+    const permissions = sessionCommandPermissions(human(role), child, sees);
+    for (const command of LATER_COMMANDS) {
+      assert.deepEqual(permissions[command], { allowed: true }, `a non-owning ${role} may ${command}`);
+    }
+  }
+  const viewer = sessionCommandPermissions(human("viewer"), child, { ownsSession: true, isDescendant: false });
+  for (const command of LATER_COMMANDS) {
+    assert.deepEqual(viewer[command], { allowed: false, reason: VIEWER }, `a Viewer may not ${command}`);
+  }
+
+  const scope = { organizationId: "org_1", owner: { kind: "user" as const, userId: "usr_1" } };
+  const worker: AgentPrincipal = {
+    kind: "agent", actorId: "s_parent", credentialSessionId: "s_parent",
+    organizationId: "org_1", delegatedScope: scope,
+  };
+  const descendant = sessionCommandPermissions(worker, child, { ownsSession: false, isDescendant: true });
+  assert.deepEqual(descendant.configure, { allowed: true }, "a worker credential may configure its descendant");
+  for (const command of ["cancelTurn", "manageQueue", "rename", "respond"] as const) {
+    assert.deepEqual(descendant[command], { allowed: false, reason: AGENT_ROUTE },
+      `no agent credential's allowlist reaches ${command}`);
+  }
+  const unrelated = sessionCommandPermissions(worker, { id: "s_other", parentSessionId: null },
+    { ownsSession: false, isDescendant: false });
+  assert.deepEqual(unrelated.configure, {
+    allowed: false, reason: "The session credential may manage only its descendants.",
+  }, "configure keeps descendant confinement");
+  const own = sessionCommandPermissions(worker, { id: "s_parent", parentSessionId: null },
+    { ownsSession: false, isDescendant: false });
+  assert.deepEqual(own.configure, { allowed: true },
+    "the config route admits a credential's own session; its service then limits what may change");
 });
 
 test("reads carry the requester's command permissions; a trusted local read is unchanged (#1843)", async (t) => {
@@ -144,7 +193,7 @@ test("reads carry the requester's command permissions; a trusted local read is u
   assert.deepEqual(await read("admin", "s_shared"), ALL_ALLOWED, "an organization-scoped session is the admin's own");
   assert.deepEqual((await read("viewer", "s_shared"))?.restart, { allowed: false, reason: VIEWER });
   const viewerRead = await read("viewer", "s_shared");
-  for (const command of ["archive", "unarchive", "prompt", "delete"] as const) {
+  for (const command of ["archive", "unarchive", "prompt", "delete", ...LATER_COMMANDS] as const) {
     assert.deepEqual(viewerRead?.[command], { allowed: false, reason: VIEWER }, `a Viewer's read refuses ${command}`);
     assert.deepEqual((await read("admin", "s_owned"))?.[command], { allowed: true },
       `a non-owning admin's read still allows ${command}`);

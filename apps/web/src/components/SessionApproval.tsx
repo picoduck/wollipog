@@ -8,6 +8,7 @@ import {
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useOptionalStoreSelector } from "../store.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
 import {
   clearQuestionDrafts,
   claimQuestionResponseOperation,
@@ -91,6 +92,15 @@ export function ApprovalSelectorContext({ context }: { context?: ApprovalContext
       ))}
     </dl>
   );
+}
+
+/** Why the signed-in person may not answer or decide this session's requests (#1857), from the
+ * session's view in the store; null without a store or a view, so the server still decides. */
+export function useSessionResponseRefusal(sessionId: string): string | null {
+  return useOptionalStoreSelector((state) => {
+    const session = state.sessions.get(sessionId);
+    return session ? sessionCommandRefusal(session, "respond") : null;
+  }) ?? null;
 }
 
 /** Stable focus/live boundary across coalesced approval replacement and final resolution. */
@@ -389,6 +399,10 @@ export function SessionApprovalBanner({
   const instanceScope = useInstanceScope();
   const approval = session.pendingApproval!;
   const runner = useOptionalStoreSelector((state) => state.runners.get(session.runnerId));
+  // A person the server refuses a decision (a Viewer) reads the request with every option disabled
+  // and the reason beside them (#1857).
+  const responseRefusal = sessionCommandRefusal(session, "respond");
+  const responseRefusalId = useId();
   const providerLogin = runner?.providerLogins?.find(
     (login) => login.sessionId === session.id && login.status !== "succeeded" && login.status !== "cancelled",
   );
@@ -466,6 +480,7 @@ export function SessionApprovalBanner({
   };
 
   const decide = async (optionId: string | null) => {
+    if (responseRefusal !== null) return;
     setBusy(true);
     setError(null);
     try {
@@ -504,11 +519,17 @@ export function SessionApprovalBanner({
         recoveryReason={approval.recoveryReason}
         recoveryAction={approval.recoveryAction}
         runnerOnline={runnerOnline}
+        responseRefusal={responseRefusal}
         onSessionUpdate={onSessionUpdate}
         showKeyHints={showKeyHints}
       />
     );
   }
+
+  const refusalNote = responseRefusal !== null && (
+    <p className="muted approval-refusal" id={responseRefusalId}>{responseRefusal}</p>
+  );
+  const refusalDescription = responseRefusal !== null ? responseRefusalId : undefined;
 
   if (presentation === "review" && evidenceDecision) {
     return (
@@ -574,6 +595,7 @@ export function SessionApprovalBanner({
           </details>
         </div>
         {error && <div className="form-error" role="alert">Approval failed: {error}</div>}
+        {refusalNote}
         <div className="evidence-review-actions">
           {approval.options.map((option) => {
             const blocksApproval = option.optionId === "approve" && !evidenceComplete;
@@ -583,7 +605,8 @@ export function SessionApprovalBanner({
                 key={option.optionId}
                 type="button"
                 className={`btn ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
-                disabled={busy || blocksApproval || blocksProviderLogin}
+                disabled={busy || blocksApproval || blocksProviderLogin || responseRefusal !== null}
+                aria-describedby={refusalDescription}
                 onClick={() => void decide(option.optionId)}
               >
                 {busy ? "Submitting…" : option.name}
@@ -618,6 +641,7 @@ export function SessionApprovalBanner({
           )}
         </div>
         {error && <div className="form-error" role="alert">Approval failed: {error}</div>}
+        {refusalNote}
         <div className="approval-review-actions">
           {approval.options.map((option) => (
             <button
@@ -628,7 +652,8 @@ export function SessionApprovalBanner({
                 : option.description}
               className={`btn ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
               disabled={busy || (decisionNeedsRunner && !runnerOnline) ||
-                (option.optionId === "auth:login" && runner?.canManage === false)}
+                (option.optionId === "auth:login" && runner?.canManage === false) || responseRefusal !== null}
+              aria-describedby={refusalDescription}
               onClick={() => void decide(option.optionId)}
             >
               {busy ? "Submitting…" : option.name}
@@ -682,7 +707,8 @@ export function SessionApprovalBanner({
                   : option.description}
                 className={`btn sm ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
                 disabled={busy || evidenceBlocksApproval || providerLoginBlocked ||
-                  (decisionNeedsRunner && !runnerOnline)}
+                  (decisionNeedsRunner && !runnerOnline) || responseRefusal !== null}
+                aria-describedby={refusalDescription}
                 onClick={() => void decide(option.optionId)}
               >
                 {option.name}
@@ -692,6 +718,7 @@ export function SessionApprovalBanner({
           })}
         </div>
       </div>
+      {refusalNote}
       {approval.kind === "authentication" && providerLogin && (
         <ProviderLoginCard runnerId={session.runnerId} login={providerLogin} />
       )}
@@ -751,6 +778,7 @@ export function SessionQuestionBanner({
   recoveryReason,
   recoveryAction,
   runnerOnline,
+  responseRefusal: responseRefusalOverride,
   onSessionUpdate,
   showKeyHints = true,
 }: {
@@ -762,10 +790,17 @@ export function SessionQuestionBanner({
   recoveryReason?: "provider_restart";
   recoveryAction?: "resume_answer";
   runnerOnline: boolean;
+  /** Why the signed-in person may not answer (#1857); read from the session's view by default. */
+  responseRefusal?: string | null;
   onSessionUpdate?: (session: SessionView) => void;
   showKeyHints?: boolean;
 }) {
   const api = useApi();
+  const storedRefusal = useSessionResponseRefusal(sessionId);
+  const responseRefusal = responseRefusalOverride === undefined ? storedRefusal : responseRefusalOverride;
+  // A refused person reads the question like one whose runner is offline: every response control
+  // is unavailable and the availability line says why. Runner Offline itself stays the runner's.
+  const responsesAvailable = runnerOnline && responseRefusal === null;
   const responseStyle = useQuestionResponseStyle();
   const answerKey = isAsync && occurrenceId ? `${requestId}:${occurrenceId}` : requestId;
   const [busy, setBusy] = useState<"submit" | "dismiss" | null>(null);
@@ -821,7 +856,7 @@ export function SessionQuestionBanner({
   const draftValue = (questionId: string) => Object.hasOwn(draftValues, questionId) ? draftValues[questionId] : undefined;
   const resolved = questionDraftAnswers(questions, draftValues);
   const unsupportedQuestionFormat = questions.some((question) => !isAnswerableAgentQuestion(question));
-  const controlsDisabled = busy !== null || !runnerOnline || unsupportedQuestionFormat || recoveryRequiresDismiss;
+  const controlsDisabled = busy !== null || !responsesAvailable || unsupportedQuestionFormat || recoveryRequiresDismiss;
   const fixedChoicesNativelyDisabled = busy !== null || unsupportedQuestionFormat || recoveryRequiresDismiss;
 
   const updateDraft = (question: AgentQuestion, value: QuestionResponseDraft) => {
@@ -853,7 +888,7 @@ export function SessionQuestionBanner({
   const complete = !unsupportedQuestionFormat && Object.keys(resolved.errors).length === 0;
 
   const submit = async () => {
-    if (operationPendingRef.current || busy !== null || !runnerOnline || unsupportedQuestionFormat || recoveryRequiresDismiss) return;
+    if (operationPendingRef.current || busy !== null || !responsesAvailable || unsupportedQuestionFormat || recoveryRequiresDismiss) return;
     if (Object.keys(resolved.errors).length > 0) {
       setValidationAttempted(true);
       const validatingRequest = liveRequestRef.current;
@@ -893,7 +928,7 @@ export function SessionQuestionBanner({
   };
 
   const dismiss = async () => {
-    if (operationPendingRef.current || busy !== null || !runnerOnline) return;
+    if (operationPendingRef.current || busy !== null || !responsesAvailable) return;
     const releaseOperation = claimQuestionResponseOperation(sessionId, answerKey);
     if (!releaseOperation) {
       setError("Another response is already being submitted for this question.");
@@ -944,8 +979,8 @@ export function SessionQuestionBanner({
             className="btn ghost sm"
             type="button"
             data-session-request-control="dismiss"
-            aria-describedby={!runnerOnline ? availabilityId : undefined}
-            disabled={busy !== null || !runnerOnline}
+            aria-describedby={!responsesAvailable ? availabilityId : undefined}
+            disabled={busy !== null || !responsesAvailable}
             onClick={() => void dismiss()}
           >
             {busy === "dismiss" ? "Dismissing…" : recoveryRequired ? "Dismiss and Continue" : "Dismiss"} {showKeyHints && busy === null && <kbd className="inbox-key-hint">D</kbd>}
@@ -955,8 +990,8 @@ export function SessionQuestionBanner({
               className="btn sm primary"
               type="button"
               data-session-request-control="submit"
-              aria-describedby={!runnerOnline ? availabilityId : undefined}
-              disabled={busy !== null || !runnerOnline || !complete}
+              aria-describedby={!responsesAvailable ? availabilityId : undefined}
+              disabled={busy !== null || !responsesAvailable || !complete}
               onClick={() => void submit()}
             >
               {busy === "submit" ? "Submitting…" : "Submit"}
@@ -965,7 +1000,7 @@ export function SessionQuestionBanner({
         </div>
       </div>
       <div id={availabilityId} className="question-availability" role="status" aria-atomic="true">
-        {runnerOnline ? "" : "Responses are unavailable until the runner reconnects."}
+        {responseRefusal ?? (runnerOnline ? "" : "Responses are unavailable until the runner reconnects.")}
       </div>
       {recoveryRequired && (
         <div className="question-recovery" id={recoveryId} role="status">
@@ -979,7 +1014,7 @@ export function SessionQuestionBanner({
           Respond through Answer Mode in the Session composer. Press R or use <code>/respond</code>.
         </div>
       )}
-      {responseStyle === "interactive" && runnerOnline && busy === null && questions.length > 0 && !complete && !recoveryRequiresDismiss && (
+      {responseStyle === "interactive" && responsesAvailable && busy === null && questions.length > 0 && !complete && !recoveryRequiresDismiss && (
         <div className="question-submit-hint">
           {unsupportedQuestionFormat
             ? "This question format is unsupported. Dismiss the question to continue."
@@ -1005,7 +1040,7 @@ export function SessionQuestionBanner({
             question.context ? contextId : null,
             requirementId,
             recoveryRequired ? recoveryId : null,
-            !runnerOnline ? availabilityId : null,
+            !responsesAvailable ? availabilityId : null,
           ]
             .filter((value): value is string => value !== null);
           const inputDescriptionIds = [...controlDescriptionIds, showResponseError ? responseErrorId : null]
@@ -1040,7 +1075,7 @@ export function SessionQuestionBanner({
                   onKeyDown={question.multiSelect ? undefined : (event) => handleRovingChoiceKeyDown(
                     event,
                     "radio",
-                    { includeAriaDisabled: !runnerOnline, activate: runnerOnline },
+                    { includeAriaDisabled: !responsesAvailable, activate: responsesAvailable },
                   )}
                 >
                   {question.options.map((option, optionIndex) => {

@@ -1389,6 +1389,115 @@ test("row and card context menus share one surface, act on their target, and nev
 
 });
 
+test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing (#1857)", async () => {
+  mobileViewport = false;
+  setWindowFocused(true);
+  setVisibility("visible");
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "viewer-inbox-actions",
+    runtimeKey: "viewer-inbox-actions:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const calls: string[] = [];
+  const client = {
+    ...api,
+    setArchived: async (id: string) => { calls.push(`archive:${id}`); return session(id, 30); },
+    retryStop: async (id: string) => { calls.push(`retryStop:${id}`); return session(id, 30); },
+    approve: async (id: string) => { calls.push(`approve:${id}`); return session(id, 30); },
+    answerQuestion: async (id: string) => { calls.push(`answer:${id}`); return session(id, 30); },
+    renameSession: async (id: string) => { calls.push(`rename:${id}`); return session(id, 30); },
+  } as unknown as ApiClient;
+  const navigation: ViewNavigation = { current: () => ({ name: "inbox" }), push: () => undefined, listen: () => () => {} };
+  const reason = "Your Viewer role is read-only.";
+  const refused = { allowed: false as const, reason };
+  const viewerSession = session("A", 30, {
+    status: "running",
+    pendingApproval: {
+      requestId: "approval-1",
+      title: "Allow Command?",
+      options: [
+        { optionId: "approve", name: "Approve", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+    } as SessionView["pendingApproval"],
+    commandPermissions: {
+      stop: refused, restart: refused, stopBackgroundJob: refused, archive: refused, unarchive: refused,
+      prompt: refused, delete: refused, cancelTurn: refused, manageQueue: refused, rename: refused,
+      configure: refused, respond: refused,
+    },
+  });
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView viewMode="list" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => { socket.push(snapshot([viewerSession])); });
+  const row = [...container.querySelectorAll<HTMLElement>(".inbox-row")]
+    .find((candidate) => candidate.textContent?.includes("Session A"))!;
+  await act(async () => { row.click(); });
+  for (const key of ["e", "a", "d"]) {
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true }));
+    });
+    await act(async () => { await Promise.resolve(); });
+  }
+  const rail = container.querySelector<HTMLElement>('[aria-label="Shortcuts for Session A"]');
+  assert.ok(rail, "the rail shows the selected session");
+  for (const selector of ['[aria-label="Approve"]', '[aria-label="Deny"]', '[aria-label^="Archive"]']) {
+    assert.equal(rail!.querySelector<HTMLButtonElement>(selector)?.disabled, true, `${selector} is disabled`);
+  }
+
+  const shell = [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
+    .find((candidate) => candidate.textContent?.includes("Session A"))!;
+  await act(async () => {
+    shell.dispatchEvent(new domWindow.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 50, clientY: 60 }) as never);
+  });
+  const menu = domWindow.document.querySelector('[role="menu"]') as unknown as HTMLElement;
+  assert.ok(menu, "the row menu still opens");
+  const item = (label: string) => [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    .find((candidate) => candidate.textContent === label)!;
+  assert.equal(item("Rename Session…").disabled, true);
+  assert.equal(item("Archive").disabled, true);
+  assert.equal(item("Pin Session").disabled, false, "Pin is per person and stays available");
+  await act(async () => {
+    item("Rename Session…").click();
+    item("Archive").click();
+  });
+  await act(async () => { await Promise.resolve(); });
+  assert.equal(domWindow.document.querySelector('[role="dialog"]'), null, "no rename dialog or confirmation opens");
+  assert.deepEqual(calls, [], "no archive, decision or rename request is sent");
+
+  // Board mode: the card's inline approval options are refused the same way.
+  await act(async () => {
+    (domWindow.document.querySelector(".menu-backdrop") as unknown as HTMLElement | null)?.click();
+  });
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView viewMode="board" rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  const options = [...container.querySelectorAll<HTMLButtonElement>(".card-approval .approval-actions button")];
+  assert.deepEqual(options.map((option) => option.textContent), ["Approve", "Deny"]);
+  for (const option of options) {
+    assert.equal(option.disabled, true, `the card's ${option.textContent} is disabled`);
+    const described = option.getAttribute("aria-describedby");
+    assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason);
+  }
+  await act(async () => { for (const option of options) option.click(); });
+  assert.deepEqual(calls, [], "no decision is sent from the board");
+});
+
 test("row and card context menus pin their exact target, reorder immediately, persist, and restore keyboard focus", async () => {
   mobileViewport = false;
   setWindowFocused(true);

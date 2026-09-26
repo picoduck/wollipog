@@ -11,6 +11,8 @@ import { ApiProvider } from "../api-context.js";
 import { viewPath } from "../navigation.js";
 import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChildren.js";
 import { useDescendantRequestPolling } from "./SessionDetail.js";
+import { holdRecoveryActionFor } from "../session-command-permissions.js";
+import { sessionHolds, type SessionQueueHoldView } from "@wollipog/protocol";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -211,5 +213,45 @@ test("descendant polling reports held descendants apart from requests and tolera
   } finally {
     await view.dispose();
     Object.defineProperty(domWindow, "setInterval", { configurable: true, value: originalSetInterval });
+  }
+});
+
+test("a held child's recovery action is the advice written for the reader when one is supplied (#1857)", async () => {
+  const queueHold: SessionQueueHoldView = {
+    kind: "worktree_rebind", holdId: "worktree-rebind:9", since: Date.now() - 60_000,
+    target: "/repo/.agent-worktrees/fix", queuedPrompts: 1, unfinishedBackgroundJobs: 1, canStopJobs: true,
+  };
+  const held: CampaignHeldChild[] = [{ sessionId: "child-1", holds: sessionHolds({ queueHold }) }];
+  const reason = "Your Viewer role is read-only.";
+  const child = {
+    queueHold,
+    commandPermissions: {
+      stop: { allowed: false as const, reason },
+      restart: { allowed: false as const, reason },
+      stopBackgroundJob: { allowed: false as const, reason },
+    },
+  };
+  const recoveryText = (container: HTMLElement) => [...container.querySelectorAll("dt")]
+    .find((term) => term.textContent === "Recovery Action")?.nextElementSibling?.textContent ?? "";
+  const view = await mount(
+    <CampaignHeldChildren
+      heldChildren={held}
+      blocked={1}
+      childTitle={() => "Held Child"}
+      recoveryAction={(_sessionId, hold) => holdRecoveryActionFor(hold, child)}
+      onOpenChild={() => undefined}
+    />,
+  );
+  try {
+    const advice = recoveryText(view.container);
+    assert.match(advice, /^Wait for the unfinished background job to end/u);
+    assert.doesNotMatch(advice, /Stop Job|stop_background_job|restart/iu, "a Viewer is not told to stop a job or restart");
+    await view.render(
+      <CampaignHeldChildren heldChildren={held} blocked={1} childTitle={() => "Held Child"} onOpenChild={() => undefined} />,
+    );
+    assert.equal(recoveryText(view.container), held[0]!.holds[0]!.recoveryAction.replaceAll("`", ""),
+      "without a reader the server's advice is shown as written");
+  } finally {
+    await view.dispose();
   }
 });

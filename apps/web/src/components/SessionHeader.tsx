@@ -215,6 +215,7 @@ export function SessionHeader({
   const stopRefusal = sessionCommandRefusal(session, "stop");
   const restartRefusal = sessionCommandRefusal(session, "restart");
   const archiveRefusal = sessionArchiveActionRefusal(session);
+  const renameRefusal = sessionCommandRefusal(session, "rename");
   const runtimeCaution = [...new Set([
     showRetryStop || !terminal ? stopRefusal : null,
     showRestart ? restartRefusal : null,
@@ -797,11 +798,20 @@ export function SessionHeader({
                     </>
                   )}
                   <div className="menu-label" role="presentation">Session</div>
+                  {renameRefusal && (
+                    <div className="menu-caution" id="session-rename-caution" role="presentation">
+                      {renameRefusal}
+                    </div>
+                  )}
                   <button
                     className="menu-item"
                     type="button"
                     role="menuitem"
+                    disabled={renameRefusal !== null}
+                    aria-describedby={renameRefusal ? "session-rename-caution" : undefined}
+                    title={renameRefusal ?? undefined}
                     onClick={() => {
+                      if (renameRefusal !== null) return;
                       closeMenu(false);
                       setRenameDialogOpen(true);
                     }}

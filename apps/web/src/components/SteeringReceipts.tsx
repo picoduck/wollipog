@@ -16,6 +16,9 @@ export interface SteeringReceiptsProps {
   /** The transcript is a bounded window, so an accepted steer's message may be in an unloaded turn. */
   historyPartial?: boolean;
   pendingActions?: ReadonlyMap<string, SteeringResolutionAction>;
+  /** Why the signed-in person may not resolve a steering attempt (#1857); its actions are then
+   * disabled with this reason. */
+  actionRefusal?: string | null;
   onQueueAgain: (submissionId: string) => void;
   onDismiss: (submissionId: string) => void | Promise<void>;
 }
@@ -119,6 +122,9 @@ function humanReason(reason: SteeringAttemptView["reason"]): string | undefined 
 interface SteeringReceiptCardProps {
   receipt: SteeringReceiptPresentation;
   pendingActions?: ReadonlyMap<string, SteeringResolutionAction>;
+  /** Why the signed-in person may not resolve a steering attempt (#1857); its actions are then
+   * disabled with this reason. */
+  actionRefusal?: string | null;
   onQueueAgain: (submissionId: string) => void;
   onDismiss: (submissionId: string) => void | Promise<void>;
 }
@@ -126,6 +132,7 @@ interface SteeringReceiptCardProps {
 function SteeringReceiptCard({
   receipt: { attempt, status, label, detail },
   pendingActions,
+  actionRefusal = null,
   onQueueAgain,
   onDismiss,
 }: SteeringReceiptCardProps) {
@@ -158,8 +165,8 @@ function SteeringReceiptCard({
           className="icon-btn steering-receipt-dismiss"
           type="button"
           aria-label="Dismiss"
-          title="Dismiss"
-          disabled={actionPending}
+          title={actionRefusal ?? "Dismiss"}
+          disabled={actionPending || actionRefusal !== null}
           onClick={() => onDismiss(attempt.submissionId)}
         >
           <CloseIcon />
@@ -188,7 +195,8 @@ function SteeringReceiptCard({
           <button
             className="btn ghost sm steering-receipt-action"
             type="button"
-            disabled={actionPending}
+            disabled={actionPending || actionRefusal !== null}
+            title={actionRefusal ?? undefined}
             onClick={() => onQueueAgain(attempt.submissionId)}
           >
             Queue Again
@@ -205,6 +213,7 @@ export function SteeringReceipts({
   activeTurnId,
   historyPartial = false,
   pendingActions,
+  actionRefusal = null,
   onQueueAgain,
   onDismiss,
 }: SteeringReceiptsProps) {
@@ -234,6 +243,7 @@ export function SteeringReceipts({
           key={receipt.attempt.submissionId}
           receipt={receipt}
           pendingActions={pendingActions}
+          actionRefusal={actionRefusal}
           onQueueAgain={onQueueAgain}
           onDismiss={onDismiss}
         />
@@ -254,7 +264,8 @@ export function SteeringReceipts({
             <button
               className="btn ghost sm steering-receipt-action"
               type="button"
-              disabled={clearingRejected || clearableRejected.length === 0}
+              disabled={clearingRejected || clearableRejected.length === 0 || actionRefusal !== null}
+              title={actionRefusal ?? undefined}
               onClick={async () => {
                 setClearingRejected(true);
                 try {
@@ -276,6 +287,7 @@ export function SteeringReceipts({
                   key={receipt.attempt.submissionId}
                   receipt={receipt}
                   pendingActions={pendingActions}
+                  actionRefusal={actionRefusal}
                   onQueueAgain={onQueueAgain}
                   onDismiss={onDismiss}
                 />
@@ -300,7 +312,8 @@ export function SteeringReceipts({
             <button
               className="btn ghost sm steering-receipt-action"
               type="button"
-              disabled={clearingQueuedAgain || clearableQueuedAgain.length === 0}
+              disabled={clearingQueuedAgain || clearableQueuedAgain.length === 0 || actionRefusal !== null}
+              title={actionRefusal ?? undefined}
               onClick={async () => {
                 setClearingQueuedAgain(true);
                 try {
@@ -322,6 +335,7 @@ export function SteeringReceipts({
                   key={receipt.attempt.submissionId}
                   receipt={receipt}
                   pendingActions={pendingActions}
+                  actionRefusal={actionRefusal}
                   onQueueAgain={onQueueAgain}
                   onDismiss={onDismiss}
                 />

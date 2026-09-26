@@ -53,6 +53,7 @@ export function PendingPromptBubbles({
   canCancelLive,
   pendingAction,
   worktreeRecoveryPending = false,
+  actionRefusal = null,
   onCancelPending,
   onCancelLive,
   onDismiss,
@@ -64,6 +65,8 @@ export function PendingPromptBubbles({
   canCancelLive: boolean;
   pendingAction?: string;
   worktreeRecoveryPending?: boolean;
+  /** Why the signed-in person may not act on a delivery (#1857); every action is then disabled. */
+  actionRefusal?: string | null;
   onCancelPending: (commandId: string) => void;
   onCancelLive: (commandId: string) => void;
   onDismiss: (commandId: string) => void;
@@ -88,7 +91,12 @@ export function PendingPromptBubbles({
     // A disabled control's tooltip is announced by nothing, so the blocking reason is carried as a
     // programmatic description alongside the retained message itself.
     const recoveryReasonId = `pending-prompt-recovery-${prompt.commandId}`;
-    const retryDescribedBy = recoveryBlocksRetry ? `${detailsId} ${recoveryReasonId}` : detailsId;
+    const refusalId = `pending-prompt-refusal-${prompt.commandId}`;
+    const refused = actionRefusal !== null;
+    const describedBy = refused ? `${detailsId} ${refusalId}` : detailsId;
+    const retryDescribedBy = refused
+      ? describedBy
+      : recoveryBlocksRetry ? `${detailsId} ${recoveryReasonId}` : detailsId;
     return (
       <div
         className="tl-row user"
@@ -109,8 +117,11 @@ export function PendingPromptBubbles({
             {prompt.text && <div className="bubble-text">{prompt.text}</div>}
             {prompt.error && <div className="pending-prompt-error">{prompt.error}</div>}
           </div>
-          {prompt.canRetry && recoveryBlocksRetry && (
+          {prompt.canRetry && recoveryBlocksRetry && !refused && (
             <p className="sr-only" id={recoveryReasonId}>{RECOVERY_BLOCKS_RETRY_REASON}</p>
+          )}
+          {refused && (cancelPending || cancelLive || prompt.canDismiss || prompt.canRetry) && (
+            <p className="sr-only" id={refusalId}>{actionRefusal}</p>
           )}
           {(cancelPending || cancelLive || prompt.canDismiss || prompt.canRetry) && (
             <div className="pending-prompt-actions" aria-busy={busy || undefined}>
@@ -118,9 +129,10 @@ export function PendingPromptBubbles({
                 <button
                   type="button"
                   className="btn ghost sm"
-                  disabled={actionPending}
+                  disabled={actionPending || refused}
+                  title={actionRefusal ?? undefined}
                   aria-label={busy ? "Cancelling Pending Message" : "Cancel Pending Message"}
-                  aria-describedby={detailsId}
+                  aria-describedby={describedBy}
                   onClick={() => cancelPending
                     ? onCancelPending(prompt.commandId)
                     : onCancelLive(prompt.commandId)}
@@ -132,9 +144,10 @@ export function PendingPromptBubbles({
                 <button
                   type="button"
                   className="btn ghost sm"
-                  disabled={actionPending}
+                  disabled={actionPending || refused}
+                  title={actionRefusal ?? undefined}
                   aria-label={busy && !prompt.canRetry ? "Dismissing Pending Message" : "Dismiss Pending Message"}
-                  aria-describedby={detailsId}
+                  aria-describedby={describedBy}
                   onClick={() => onDismiss(prompt.commandId)}
                 >
                   {busy && !prompt.canRetry ? "Dismissing…" : "Dismiss"}
@@ -144,8 +157,8 @@ export function PendingPromptBubbles({
                 <button
                   type="button"
                   className="btn ghost sm"
-                  disabled={actionPending || recoveryBlocksRetry}
-                  title={recoveryBlocksRetry ? RECOVERY_BLOCKS_RETRY_REASON : undefined}
+                  disabled={actionPending || recoveryBlocksRetry || refused}
+                  title={actionRefusal ?? (recoveryBlocksRetry ? RECOVERY_BLOCKS_RETRY_REASON : undefined)}
                   aria-label={busy && !prompt.canDismiss ? "Retrying Message" : "Retry Message"}
                   aria-describedby={retryDescribedBy}
                   onClick={() => onRetry(prompt.commandId)}

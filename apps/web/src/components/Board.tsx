@@ -8,6 +8,7 @@ import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import { SessionStatusIndicators, Empty, SessionPinIndicator, ThreadDot } from "./common.js";
 import { inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
 import { useLongPress } from "./interactions.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useExperiments } from "../use-experiments.js";
@@ -371,9 +372,11 @@ function SessionCard({
   const openMenu = (anchor: { x: number; y: number }) => onSessionMenu(session.id, anchor, restoreTarget);
   const longPress = useLongPress(openMenu);
 
+  // A person the server refuses a decision (a Viewer) sees the options disabled with the reason (#1857).
+  const respondRefusal = sessionCommandRefusal(session, "respond");
   const approve = async (e: MouseEvent, optionId: string | null) => {
     e.stopPropagation();
-    if (!session.pendingApproval) return;
+    if (!session.pendingApproval || respondRefusal !== null) return;
     setBusy(true);
     try {
       await api.approve(session.id, { requestId: session.pendingApproval.requestId, optionId });
@@ -437,12 +440,16 @@ function SessionCard({
       ) : session.pendingApproval ? (
         <div className="card-approval" onClick={(e) => e.stopPropagation()}>
           <div className="approval-title">{session.pendingApproval.title}</div>
+          {respondRefusal !== null && (
+            <div className="muted approval-refusal" id={`card-approval-refusal-${session.id}`}>{respondRefusal}</div>
+          )}
           <div className="approval-actions">
             {session.pendingApproval.options.map((o) => (
               <button
                 key={o.optionId}
                 className={`btn sm ${o.kind?.startsWith("allow") ? "primary" : "danger"}`}
-                disabled={busy || !runnerOnline}
+                disabled={busy || !runnerOnline || respondRefusal !== null}
+                aria-describedby={respondRefusal !== null ? `card-approval-refusal-${session.id}` : undefined}
                 onClick={(e) => approve(e, o.optionId)}
               >
                 {o.name}

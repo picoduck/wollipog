@@ -309,3 +309,38 @@ test("the Context Window group offers provider-stated variants and switches only
     container.remove();
   }
 });
+
+test("a refused person's composer setting is disabled with the reason and never opens (#1857)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  let selectionCount = 0;
+  await act(async () => {
+    root.render(
+      <BarMenu label="Current Model" ariaLabel="Model Settings: Current Model" title="Choose a model" disabledReason={reason}>
+        {() => (
+          <button type="button" role="menuitemradio" aria-checked="true" onClick={() => { selectionCount += 1; }}>
+            Current Model
+          </button>
+        )}
+      </BarMenu>,
+    );
+  });
+  try {
+    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Model Settings: Current Model"]')!;
+    assert.equal(trigger.disabled, true);
+    assert.equal(trigger.title, reason, "the trigger says why instead of its usual hint");
+    const described = trigger.getAttribute("aria-describedby");
+    assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason);
+    await act(async () => {
+      trigger.click();
+      trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
+    });
+    assert.equal(container.querySelector('[role="menu"]'), null, "the menu never opens");
+    assert.equal(selectionCount, 0);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});

@@ -9,7 +9,7 @@ import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { claimQuestionResponseOperation, clearQuestionDrafts, storedQuestionDrafts } from "../question-response.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
-import { SessionQuestionBanner } from "./SessionApproval.js";
+import { SessionApprovalBanner, SessionQuestionBanner } from "./SessionApproval.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -724,5 +724,127 @@ test("Composer Response never renders secret entry controls in the transcript ca
     await act(async () => { setQuestionResponseStyle("interactive", domWindow as never); });
     await act(async () => { root.unmount(); });
     container.remove();
+  }
+});
+
+test("a Viewer can read a question but not answer or dismiss it, and the card says why (#1857)", async () => {
+  setQuestionResponseStyle("interactive");
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const reason = "Your Viewer role is read-only.";
+  const answered: string[] = [];
+  const client = {
+    ...api,
+    answerQuestion: async (_sessionId: string, body: { action?: string }) => {
+      answered.push(body.action ?? "submit");
+      return {} as SessionView;
+    },
+  } as unknown as ApiClient;
+  const questions: AgentQuestion[] = [{
+    id: "target",
+    question: "Choose a target",
+    options: [{ label: "Staging" }, { label: "Production" }],
+    allowOther: true,
+  }];
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client}>
+          <SessionQuestionBanner
+            sessionId="session-viewer"
+            requestId="question-viewer"
+            questions={questions}
+            runnerOnline
+            responseRefusal={reason}
+          />
+        </ApiProvider>,
+      );
+    });
+    assert.equal(container.textContent?.includes("Choose a target"), true, "the question stays readable");
+    assert.equal(container.textContent?.includes("Runner Offline"), false, "the runner is not blamed");
+    const availability = container.querySelector<HTMLElement>(".question-availability")!;
+    assert.equal(availability.textContent, reason, "the card says why");
+    assert.ok(container.querySelector<HTMLInputElement>(".question-input")?.disabled);
+    const choices = [...container.querySelectorAll<HTMLButtonElement>(".question-option")];
+    assert.ok(choices.every((choice) => choice.getAttribute("aria-disabled") === "true"));
+    const actions = [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")];
+    assert.ok(actions.length > 0);
+    assert.ok(actions.every((control) => control.disabled && control.getAttribute("aria-describedby") === availability.id));
+    await act(async () => {
+      choices[0]!.click();
+      for (const control of actions) control.click();
+      container.querySelector("section")!.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+        key: "Enter", ctrlKey: true, bubbles: true,
+      }) as never);
+      await tick();
+    });
+    assert.equal(choices[0]!.getAttribute("aria-checked"), "false");
+    assert.deepEqual(answered, [], "nothing is sent");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("a Viewer sees a permission request's options disabled with the reason, and no decision is sent (#1857)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  for (const respond of [{ allowed: false as const, reason }, { allowed: true as const }, undefined]) {
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(container as never);
+    const root = createRoot(container);
+    const decisions: Array<string | null> = [];
+    const pending = {
+      id: "session-approval", runnerId: "runner-1", title: "Approval", status: "running", archived: false,
+      pendingApproval: {
+        kind: "permission",
+        requestId: "approval-1",
+        title: "Allow Command?",
+        options: [
+          { optionId: "approve", name: "Approve", kind: "allow_once" },
+          { optionId: "deny", name: "Deny", kind: "reject_once" },
+        ],
+      },
+      ...(respond ? { commandPermissions: {
+        stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true }, respond,
+      } } : {}),
+    } as unknown as SessionView;
+    const client = {
+      ...api,
+      approve: async (_sessionId: string, body: { optionId: string | null }) => {
+        decisions.push(body.optionId);
+        return pending;
+      },
+    } as unknown as ApiClient;
+    try {
+      for (const presentation of ["banner", "review"] as const) {
+        decisions.length = 0;
+        await act(async () => {
+          root.render(
+            <ApiProvider client={client}>
+              <SessionApprovalBanner session={pending} runnerOnline presentation={presentation} />
+            </ApiProvider>,
+          );
+        });
+        const approve = [...container.querySelectorAll<HTMLButtonElement>("button")]
+          .find((button) => button.textContent?.startsWith("Approve"))!;
+        assert.ok(approve, `${presentation}: Approve is shown`);
+        if (respond?.allowed === false) {
+          assert.equal(approve.disabled, true, `${presentation}: Approve is disabled`);
+          const described = approve.getAttribute("aria-describedby");
+          assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason,
+            `${presentation}: the visible reason describes the option`);
+        } else {
+          assert.equal(approve.disabled, false, `${presentation}: Approve is offered as before`);
+          assert.equal(container.querySelector(".approval-refusal"), null);
+        }
+        await act(async () => { approve.click(); await tick(); });
+        assert.deepEqual(decisions, respond?.allowed === false ? [] : ["approve"],
+          `${presentation}: a decision is sent only when allowed`);
+      }
+    } finally {
+      await act(async () => { root.unmount(); });
+      container.remove();
+    }
   }
 });

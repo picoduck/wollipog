@@ -111,6 +111,7 @@ export function BarMenu({
   modelSettings = false,
   showCaret = true,
   menuTitle,
+  disabledReason = null,
   children,
 }: {
   align?: "left" | "right";
@@ -121,27 +122,35 @@ export function BarMenu({
   modelSettings?: boolean;
   showCaret?: boolean;
   menuTitle?: string;
+  /** Why the signed-in person may not change this setting (#1857). The trigger is then disabled,
+   * says why, and never opens its menu. */
+  disabledReason?: string | null;
   children: (close: () => void) => ReactNode;
 }) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "composer-control-menu");
+  const disabledReasonId = `${menu.menuId}-disabled-reason`;
+  const disabled = disabledReason !== null;
   return (
     <div className={`cbar-menu ${align}${permissionMode ? " permission-mode-menu" : ""}${modelSettings ? " model-settings-menu" : ""}`}>
       <button
         ref={menu.triggerRef}
         type="button"
         className="cbar-trigger"
-        title={title}
+        title={disabledReason ?? title}
         aria-label={ariaLabel}
         aria-haspopup="menu"
-        aria-expanded={open}
+        aria-expanded={open && !disabled}
         aria-controls={menu.menuId}
+        aria-describedby={disabled ? disabledReasonId : undefined}
+        disabled={disabled}
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
       >
         {label} {showCaret && <span className="caret">▾</span>}
       </button>
-      {open && (
+      {disabled && <span className="sr-only" id={disabledReasonId}>{disabledReason}</span>}
+      {open && !disabled && (
         <>
           <div className={`plus-backdrop${modelSettings ? " model-settings-backdrop" : ""}`} onClick={() => menu.close(true)} />
           <div className={`cbar-pop${permissionMode ? " permission-mode-pop" : ""}${modelSettings ? " model-settings-pop" : ""}`} role="menu" id={menu.menuId} ref={menu.menuRef} onKeyDown={menu.onMenuKeyDown}>
@@ -320,9 +329,12 @@ export function ModelEffortControl(
     pendingModel,
     pendingEffort,
     pendingServiceTier,
+    disabledReason = null,
   }: {
     session: SessionView;
     apply: Apply;
+    /** Why the signed-in person may not change the model or effort (#1857). */
+    disabledReason?: string | null;
     pendingModel?: () => string | undefined;
     pendingEffort?: () => string | undefined;
     pendingServiceTier?: () => string | undefined;
@@ -360,6 +372,7 @@ export function ModelEffortControl(
       label={label}
       title={modelSource === "cached" ? `${tooltip} Model metadata is cached; Rediscover to refresh.` : tooltip}
       ariaLabel={`Model Settings: ${modelLabel}${effortSuffix ? `, ${effortSuffix}` : ""}`}
+      disabledReason={disabledReason}
     >
       {(close) => <ModelEffortMenuChoices
         models={models}
@@ -701,7 +714,12 @@ export function ApprovalsMenuChoices({
   );
 }
 
-export function ApprovalsControl({ session, apply }: { session: SessionView; apply: Apply }) {
+export function ApprovalsControl({ session, apply, disabledReason = null }: {
+  session: SessionView;
+  apply: Apply;
+  /** Why the signed-in person may not change approvals mode (#1857). */
+  disabledReason?: string | null;
+}) {
   const [details, setDetails] = useState<PermissionModeDetails | null>(null);
   const detailsReturnFocusRef = useRef<HTMLElement | null>(null);
   const { caps, permModes, permVal, showDefaultPermissionMode } = useSessionConfig(session);
@@ -740,6 +758,7 @@ export function ApprovalsControl({ session, apply }: { session: SessionView; app
         }
         ariaLabel={accessibleLabel}
         title={approvalOptionTitle(`${accessibleLabel}. Applies to the next turn.`, currentOutcome)}
+        disabledReason={disabledReason}
       >
         {(close) => (
           <ApprovalsMenuChoices

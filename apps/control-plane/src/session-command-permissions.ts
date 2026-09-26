@@ -1,4 +1,5 @@
 import type { SessionCommandPermission, SessionCommandPermissions, SessionView } from "@wollipog/protocol";
+import { isAgentControlApiRouteAllowed } from "./auth.js";
 import {
   AGENT_UNARCHIVE_ERROR,
   agentCredentialSessionTargetError,
@@ -23,11 +24,25 @@ const ARCHIVE_ROUTE = "/api/sessions/:id/archive";
 const UNARCHIVE_AND_RESTART_ROUTE = "/api/sessions/:id/unarchive-and-restart";
 const PROMPT_ROUTE = "/api/sessions/:id/prompt";
 const DELETE_ROUTE = "/api/sessions/:id";
+const CANCEL_TURN_ROUTE = "/api/sessions/:id/cancel";
+/** Steer, Cancel, Edit, and resolving a delivery or steering attempt apply the same gates (#1857). */
+const QUEUE_ROUTES = [
+  "/api/sessions/:id/steer",
+  "/api/sessions/:id/cancel-queued",
+  "/api/sessions/:id/queued/:promptId/edit",
+  "/api/sessions/:id/pending-prompts/:commandId/resolve",
+  "/api/sessions/:id/steering/:submissionId/resolve",
+] as const;
+const RENAME_ROUTES = ["/api/sessions/:id/title", "/api/sessions/:id/retitle"] as const;
+const CONFIG_ROUTE = "/api/sessions/:id/config";
+const RESPOND_ROUTES = ["/api/sessions/:id/answer", "/api/sessions/:id/approve"] as const;
 
 const VIEWER_REASON = "Your Viewer role is read-only.";
 const STOP_JOB_OWNER_REASON = "Only the session owner or its controlling Orchestrator can stop its background jobs.";
 /** No agent credential's route allowlist includes deleting a session. */
 const AGENT_DELETE_REASON = "Session credentials cannot delete sessions.";
+/** An agent credential authenticates only on the exact routes its allowlist names (#1857). */
+const AGENT_ROUTE_REASON = "Session credentials cannot use this command.";
 
 function sentence(error: string): string {
   const text = error.charAt(0).toUpperCase() + error.slice(1);
@@ -48,6 +63,26 @@ function routeRefusal(
   if (principal.kind !== "agent") return null;
   const targetError = agentCredentialSessionTargetError(routePath, principal, target.id, facts.isDescendant);
   return targetError ? sentence(targetError) : null;
+}
+
+/** `routeRefusal` for the commands #1857 added, which also apply the agent credential's route
+ * allowlist: a credential outside it is never authenticated for the route. Commands served by
+ * several routes take the first refusal, since a surface offers the command only if all admit it. */
+function allowlistedRouteRefusal(
+  routePaths: readonly string[],
+  principal: AuthPrincipal,
+  target: { id: string },
+  facts: SessionCommandPermissionFacts,
+): string | null {
+  for (const routePath of routePaths) {
+    if (principal.kind === "agent" &&
+        !isAgentControlApiRouteAllowed("POST", routePath, principal.orchestrator ? "orchestrator" : null)) {
+      return AGENT_ROUTE_REASON;
+    }
+    const refusal = routeRefusal(routePath, principal, target, facts);
+    if (refusal) return refusal;
+  }
+  return null;
 }
 
 function permission(reason: string | null): SessionCommandPermission {
@@ -83,6 +118,11 @@ export function sessionCommandPermissions(
     delete: permission(principal.kind === "agent"
       ? AGENT_DELETE_REASON
       : routeRefusal(DELETE_ROUTE, principal, target, facts, "DELETE")),
+    cancelTurn: permission(allowlistedRouteRefusal([CANCEL_TURN_ROUTE], principal, target, facts)),
+    manageQueue: permission(allowlistedRouteRefusal(QUEUE_ROUTES, principal, target, facts)),
+    rename: permission(allowlistedRouteRefusal(RENAME_ROUTES, principal, target, facts)),
+    configure: permission(allowlistedRouteRefusal([CONFIG_ROUTE], principal, target, facts)),
+    respond: permission(allowlistedRouteRefusal(RESPOND_ROUTES, principal, target, facts)),
   };
 }
 

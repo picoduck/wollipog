@@ -39,6 +39,8 @@ export function SessionContextMenu({
   onSnooze,
   onDismissReminder,
   onArchive,
+  renameRefusal = null,
+  archiveRefusal = null,
 }: {
   state: SessionContextMenuState;
   sessionTitle: string;
@@ -51,6 +53,10 @@ export function SessionContextMenu({
   onSnooze: (sessionId: string) => void;
   onDismissReminder?: (sessionId: string) => void;
   onArchive: (sessionId: string) => void;
+  /** Why the signed-in person may not rename or archive the session (#1857). The item then stays
+   * listed, disabled and described by the reason. */
+  renameRefusal?: string | null;
+  archiveRefusal?: string | null;
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
@@ -76,7 +82,7 @@ export function SessionContextMenu({
   // The menu owns focus while open; the virtualized collections never focus their rows, so
   // initial focus goes straight to the first action.
   useEffect(() => {
-    menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    menuRef.current?.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
   }, [state.sessionId]);
 
   const close = (restoreFocus: boolean) => {
@@ -114,7 +120,20 @@ export function SessionContextMenu({
         onKeyDown={(event) => handleMenuKeyDown(event, close)}
         onContextMenu={(event) => event.preventDefault()}
       >
-        <button type="button" className="menu-item" role="menuitem" onClick={act(onRename, false)}>
+        {renameRefusal !== null && (
+          <div className="menu-caution" id={`session-menu-rename-caution-${state.sessionId}`} role="presentation">
+            {renameRefusal}
+          </div>
+        )}
+        <button
+          type="button"
+          className="menu-item"
+          role="menuitem"
+          disabled={renameRefusal !== null}
+          aria-describedby={renameRefusal !== null ? `session-menu-rename-caution-${state.sessionId}` : undefined}
+          title={renameRefusal ?? undefined}
+          onClick={act(onRename, false)}
+        >
           Rename Session…
         </button>
         <button type="button" className="menu-item" role="menuitem" onClick={act(onTogglePin, true)}>
@@ -130,7 +149,22 @@ export function SessionContextMenu({
             Dismiss Reminder
           </button>
         )}
-        <button type="button" className="menu-item menu-danger" role="menuitem" onClick={act(onArchive, true)}>
+        {archiveRefusal !== null && archiveRefusal !== renameRefusal && (
+          <div className="menu-caution" id={`session-menu-archive-caution-${state.sessionId}`} role="presentation">
+            {archiveRefusal}
+          </div>
+        )}
+        <button
+          type="button"
+          className="menu-item menu-danger"
+          role="menuitem"
+          disabled={archiveRefusal !== null}
+          aria-describedby={archiveRefusal === null ? undefined : archiveRefusal === renameRefusal
+            ? `session-menu-rename-caution-${state.sessionId}`
+            : `session-menu-archive-caution-${state.sessionId}`}
+          title={archiveRefusal ?? undefined}
+          onClick={act(onArchive, true)}
+        >
           Archive
         </button>
       </div>

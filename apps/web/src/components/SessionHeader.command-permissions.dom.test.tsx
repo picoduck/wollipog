@@ -36,6 +36,7 @@ const readOnly: SessionCommandPermissions = {
   unarchive: { allowed: false, reason: VIEWER },
   prompt: { allowed: false, reason: VIEWER },
   delete: { allowed: false, reason: VIEWER },
+  rename: { allowed: false, reason: VIEWER },
 };
 
 function menuItem(container: HTMLElement, label: string): HTMLButtonElement {
@@ -246,6 +247,32 @@ test("a person who may archive and unarchive keeps the archive item as before", 
       assert.deepEqual(calls, ["unarchive-and-restart:session-archived"]);
     } finally {
       await archived.unmount();
+    }
+  }
+});
+
+test("a Viewer sees Rename Session disabled with the reason, and the rename dialog does not open (#1857)", async () => {
+  for (const commandPermissions of [readOnly, { ...readOnly, rename: { allowed: true } }, undefined] satisfies Array<SessionCommandPermissions | undefined>) {
+    const refused = commandPermissions?.rename?.allowed === false;
+    const header = await renderHeader({
+      id: "session-rename", runnerId: "runner-1", title: "Rename Me", status: "idle", archived: false,
+      ...(commandPermissions ? { commandPermissions } : {}),
+    } as SessionView, []);
+    try {
+      const rename = menuItem(header.container, "Rename Session…");
+      assert.equal(rename.disabled, refused, refused ? "refused rename is disabled" : "rename is offered as before");
+      if (refused) {
+        assert.equal(rename.title, VIEWER);
+        assert.equal(description(rename), VIEWER);
+        assert.equal(header.container.querySelector("#session-rename-caution")?.textContent, VIEWER);
+      } else {
+        assert.equal(header.container.querySelector("#session-rename-caution"), null);
+      }
+      await act(async () => { rename.click(); await tick(); });
+      const dialog = domWindow.document.querySelector('[role="dialog"]');
+      assert.equal(dialog !== null, !refused, refused ? "no rename dialog opens" : "the rename dialog opens");
+    } finally {
+      await header.unmount();
     }
   }
 });

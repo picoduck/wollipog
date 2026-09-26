@@ -1,6 +1,7 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { prioritizedPendingRequests, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
+import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import {
   INBOX_COLLAPSED_THREADS_KEY,
   INBOX_REORDER_SETTLE_MS,
@@ -1033,6 +1034,13 @@ export function InboxView({
   const archive = useCallback(async (sessionId: string) => {
     const session = sessions.get(sessionId);
     if (!session) return;
+    // The `E` shortcut, the rail and the row menu all land here; a refused person is told why and
+    // nothing is confirmed or sent (#1857).
+    const refusal = sessionArchiveActionRefusal(session);
+    if (refusal !== null) {
+      showToast(refusal, { tone: "error" });
+      return;
+    }
     if (!beginBusy(sessionId)) return;
     const selectionAtRequest = selectedSessionIdRef.current;
     try {
@@ -1107,6 +1115,14 @@ export function InboxView({
     const targetSession = sessions.get(sessionId);
     const approval = targetSession ? prioritizedPendingRequests(targetSession.pendingApproval)[0] : undefined;
     if (!targetSession || !approval) return;
+    // Opening a question to read it stays available; answering and deciding do not (#1857).
+    const refusal = approval.kind === "question" && intent === "approve"
+      ? null
+      : sessionCommandRefusal(targetSession, "respond");
+    if (refusal !== null) {
+      showToast(refusal, { tone: "error" });
+      return;
+    }
     if (!beginBusy(targetSession.id)) return;
     try {
       if (approval.kind === "question") {
@@ -1618,6 +1634,8 @@ export function InboxView({
               .catch((cause: unknown) => showToast((cause as Error).message, { tone: "error" }));
           }}
           onArchive={(sessionId) => { void archive(sessionId); }}
+          renameRefusal={sessionCommandRefusal(sessions.get(sessionMenu.sessionId)!, "rename")}
+          archiveRefusal={sessionArchiveActionRefusal(sessions.get(sessionMenu.sessionId)!)}
         />
       )}
       {renameSession && sessions.has(renameSession.sessionId) && (

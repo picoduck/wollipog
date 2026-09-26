@@ -1,4 +1,9 @@
-import type { SessionCommandPermissions, SessionView } from "@wollipog/protocol";
+import {
+  queueHoldRecoveryAction,
+  type SessionCommandPermissions,
+  type SessionHoldView,
+  type SessionView,
+} from "@wollipog/protocol";
 
 /** Why the signed-in principal may not run `command` on this session (#1843), or null when it
  * may. A control plane that sends no permissions refuses nothing here, and the server still
@@ -21,4 +26,24 @@ export function sessionArchiveActionRefusal(
     session,
     session.archived ? "unarchive" : session.archiveStatus === "stop_failed" ? "stop" : "archive",
   );
+}
+
+/** A hold's recovery advice written for the signed-in person (#1857). The server writes one copy
+ * for every reader, naming Stop Job and restarting; when this client holds the session's queue hold
+ * and the person's permissions, it rewrites the advice to name only what they may do. Otherwise
+ * (a worktree hold, an unknown session, or a control plane that sends no permissions) the server's
+ * copy is shown as written. */
+export function holdRecoveryActionFor(
+  hold: SessionHoldView,
+  session: Pick<SessionView, "queueHold" | "commandPermissions"> | undefined,
+): string {
+  const queueHold = session?.queueHold;
+  const permissions = session?.commandPermissions;
+  if (!queueHold || !permissions || queueHold.holdId !== hold.holdId || hold.kind === "worktree_recovery") {
+    return hold.recoveryAction;
+  }
+  return queueHoldRecoveryAction(queueHold, {
+    canStopJobs: permissions.stopBackgroundJob.allowed,
+    canRestart: permissions.restart.allowed,
+  });
 }

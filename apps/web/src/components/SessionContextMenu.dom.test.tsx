@@ -31,7 +31,13 @@ interface Log {
   archived: string[];
 }
 
-async function mount(overrides: { pinned?: boolean; snoozeAvailable?: boolean; reminder?: SessionReminderView } = {}): Promise<{ root: Root; log: Log; menu: HTMLElement }> {
+async function mount(overrides: {
+  pinned?: boolean;
+  snoozeAvailable?: boolean;
+  reminder?: SessionReminderView;
+  renameRefusal?: string | null;
+  archiveRefusal?: string | null;
+} = {}): Promise<{ root: Root; log: Log; menu: HTMLElement }> {
   const log: Log = { closed: 0, restored: 0, renamed: [], toggledPin: [], snoozed: [], dismissed: [], archived: [] };
   const restoreHost = domWindow.document.createElement("button") as unknown as HTMLElement;
   domWindow.document.body.append(restoreHost as never);
@@ -58,6 +64,8 @@ async function mount(overrides: { pinned?: boolean; snoozeAvailable?: boolean; r
         onSnooze={(id) => log.snoozed.push(id)}
         onDismissReminder={(id) => log.dismissed.push(id)}
         onArchive={(id) => log.archived.push(id)}
+        renameRefusal={overrides.renameRefusal ?? null}
+        archiveRefusal={overrides.archiveRefusal ?? null}
       />,
     );
   });
@@ -174,6 +182,36 @@ test("Escape and arrow roving come from the collection-owned keyboard handler", 
     });
     assert.equal(log.closed, 1);
     assert.equal(log.restored, 1);
+  } finally {
+    await unmount(root);
+  }
+});
+
+test("a Viewer's Rename and Archive stay listed, disabled and described by the reason; Pin and Snooze keep working (#1857)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const { root, log, menu } = await mount({ renameRefusal: reason, archiveRefusal: reason });
+  try {
+    const item = (label: string) => [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+      .find((candidate) => candidate.textContent === label)!;
+    for (const label of ["Rename Session…", "Archive"]) {
+      const button = item(label);
+      assert.equal(button.disabled, true, `${label} is disabled`);
+      assert.equal(button.title, reason);
+      const described = button.getAttribute("aria-describedby");
+      assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason,
+        `${label} is described by the visible reason`);
+    }
+    assert.equal(menu.querySelectorAll(".menu-caution").length, 1, "one shared reason is shown once");
+    assert.equal(domWindow.document.activeElement?.textContent, "Pin Session",
+      "initial focus skips the disabled Rename item");
+    await act(async () => {
+      item("Rename Session…").click();
+      item("Archive").click();
+    });
+    assert.deepEqual(log.renamed, []);
+    assert.deepEqual(log.archived, []);
+    await act(async () => { item("Pin Session").click(); });
+    assert.deepEqual(log.toggledPin, ["s-1"], "per-person Pin still works");
   } finally {
     await unmount(root);
   }

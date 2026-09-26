@@ -30,12 +30,15 @@ export function CampaignHeldChildren({
   heldChildren,
   blocked,
   childTitle,
+  recoveryAction = (_sessionId, hold) => hold.recoveryAction,
   onOpenChild,
 }: {
   heldChildren: readonly CampaignHeldChild[];
   /** `children.blocked` from the same projection; it also counts failed and stopped children. */
   blocked: number;
   childTitle: (sessionId: string) => string | undefined;
+  /** The hold's advice as written for the signed-in person (#1857); the server's copy by default. */
+  recoveryAction?: (sessionId: string, hold: SessionHoldView) => string;
   onOpenChild: (sessionId: string) => void;
 }) {
   const headingId = `campaign-held-children-${useId().replace(/:/gu, "")}`;
@@ -85,7 +88,7 @@ export function CampaignHeldChildren({
                   </div>
                   <div>
                     <dt>Recovery Action</dt>
-                    <dd><RecoveryText text={hold.recoveryAction} /></dd>
+                    <dd><RecoveryText text={recoveryAction(child.sessionId, hold)} /></dd>
                   </div>
                   {hold.heldResumes && hold.heldResumes.length > 0 && (
                     <div>

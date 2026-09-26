@@ -504,3 +504,37 @@ test("palette clicks preserve exact numeric provider labels instead of reparsing
     container.remove();
   }
 });
+
+test("a Viewer's waiting question says why and does not offer Respond (#1857)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  let entered = 0;
+  try {
+    for (const responseRefusal of [reason, null]) {
+      await act(async () => root.render(<ApiProvider client={api}>
+        <ComposerQuestionResponse sessionId="session-1" requestId="ask-waiting"
+          questions={[{ id: "0", question: "Which path?", options: [], allowOther: true }]}
+          runnerOnline active={false} showWaiting responseRefusal={responseRefusal}
+          inputRef={{ current: null }} onEnter={() => { entered += 1; }} onExit={() => {}} />
+      </ApiProvider>));
+      const respond = [...container.querySelectorAll<HTMLButtonElement>("button")]
+        .find((button) => button.textContent === "Respond")!;
+      assert.ok(respond, "Respond stays in place");
+      assert.equal(respond.disabled, responseRefusal !== null);
+      if (responseRefusal !== null) {
+        const described = respond.getAttribute("aria-describedby");
+        assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason,
+          "the waiting card's text is the refusal and describes Respond");
+      } else {
+        assert.match(container.textContent ?? "", /Press R to respond/u);
+      }
+      await act(async () => { respond.click(); });
+    }
+    assert.equal(entered, 1, "Answer Mode opens only for a person allowed to answer");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

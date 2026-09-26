@@ -36,6 +36,7 @@ import {
   type ParentControlMode,
   type WorkflowDecisionAuthority,
   type WorkflowDecisionCategory,
+  type SessionHoldView,
   type SessionReminderView,
   sessionRole,
   type SessionView,
@@ -245,7 +246,7 @@ import {
   type QueuedPromptEditState,
 } from "../queued-edit-recovery.js";
 import { materializePromptImages } from "../prompt-image-materialization.js";
-import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
+import { holdRecoveryActionFor, sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
@@ -907,6 +908,24 @@ function SessionDetailLoaded({
     const stored = index >= 0 ? heldChildStoreTitles[index] : undefined;
     return stored || blockedDescendants.find((child) => child.sessionId === childSessionId)?.sessionTitle;
   }, [blockedDescendants, heldChildStoreTitles, heldChildren]);
+  // Each hold's advice as written for this person, from the child's own view (#1857).
+  const heldChildStoreRecoveryActions = useStoreSelector(
+    (s) => heldChildren.flatMap((child) => child.holds.map((hold) =>
+      holdRecoveryActionFor(hold, s.sessions.get(child.sessionId)))),
+    sameStrings,
+  );
+  const heldChildRecoveryAction = useCallback((childSessionId: string, hold: SessionHoldView) => {
+    let index = 0;
+    for (const child of heldChildren) {
+      for (const candidate of child.holds) {
+        if (child.sessionId === childSessionId && candidate.holdId === hold.holdId) {
+          return heldChildStoreRecoveryActions[index] ?? hold.recoveryAction;
+        }
+        index += 1;
+      }
+    }
+    return hold.recoveryAction;
+  }, [heldChildStoreRecoveryActions, heldChildren]);
   const ownStandaloneApproval = standaloneApprovalForReview(session.pendingApproval);
   const ownWorkerApproval = session.pendingApproval?.ownerToolUseId
     ? session.pendingApproval : null;
@@ -2672,11 +2691,15 @@ function SessionDetailLoaded({
     prompt.liveQueueObserved ? [prompt.id] : []
   )), [session.queued]);
   const queuedPromptControls = queuedPromptsWithControls(session.queued);
+  // A person the server refuses queue management (a Viewer) sees queued messages, delivery
+  // receipts and steering attempts with their actions disabled and the reason (#1857).
+  const queueRefusal = sessionCommandRefusal(session, "manageQueue");
+  const queueRefusalId = `queued-refusal-${session.id}`;
   const resolvePendingPrompt = useCallback(async (
     commandId: string,
     action: "cancel" | "dismiss" | "retry",
   ) => {
-    if (pendingPromptAction) return;
+    if (pendingPromptAction || queueRefusal !== null) return;
     setPendingPromptAction({ commandId, action });
     setError(null);
     try {
@@ -2686,9 +2709,9 @@ function SessionDetailLoaded({
     } finally {
       setPendingPromptAction(undefined);
     }
-  }, [api, pendingPromptAction, session.id]);
+  }, [api, pendingPromptAction, queueRefusal, session.id]);
   const cancelLivePendingPrompt = useCallback(async (commandId: string) => {
-    if (pendingPromptAction) return;
+    if (pendingPromptAction || queueRefusal !== null) return;
     setPendingPromptAction({ commandId, action: "cancel" });
     setError(null);
     try {
@@ -2698,7 +2721,7 @@ function SessionDetailLoaded({
     } finally {
       setPendingPromptAction(undefined);
     }
-  }, [api, pendingPromptAction, session.id]);
+  }, [api, pendingPromptAction, queueRefusal, session.id]);
   const terminal = isTerminal(session.status);
   // A guardrail pause (cost budget / tool-call limit) must be resolved via the Continue/Stop card,
   // not bypassed by sending a prompt.
@@ -2736,7 +2759,11 @@ function SessionDetailLoaded({
     }
     return approvalQuestions;
   })();
+  // A person the server refuses a response (a Viewer) never enters Answer Mode; the question card
+  // says why (#1857).
+  const responseRefusal = sessionCommandRefusal(session, "respond");
   const canAnswerPendingQuestion = pendingQuestion !== null && composerQuestions.length > 0 &&
+    responseRefusal === null &&
     (pendingQuestion.recoveryReason !== "provider_restart" || pendingQuestion.recoveryAction === "resume_answer");
   const questionResponseStyle = useQuestionResponseStyle();
   const steeringAvailabilityInput = {
@@ -2758,6 +2785,9 @@ function SessionDetailLoaded({
     policyPaused,
     activeTurnId: session.activeTurnId,
   });
+  // A person the server refuses Stop Turn (a Viewer) keeps the button, disabled with the reason,
+  // and its shortcut does nothing (#1857).
+  const cancelTurnRefusal = sessionCommandRefusal(session, "cancelTurn");
   const [activePane, setActivePane] = useState<"reader" | "composer">("reader");
   const [answerModeRequestId, setAnswerModeRequestId] = useState<string | null>(null);
   const answerModeExplicitRequestRef = useRef<string | null>(null);
@@ -2936,6 +2966,7 @@ function SessionDetailLoaded({
   }, [canStopTurn, clearStopTurnAttempt, mutationKey, sessionId]);
 
   const stopTurn = useCallback(async (): Promise<boolean> => {
+    if (cancelTurnRefusal !== null) return false;
     if (!canStopTurn) {
       setError("There is no active turn to stop.");
       return false;
@@ -2972,10 +3003,10 @@ function SessionDetailLoaded({
       setError((cause as Error).message);
       return false;
     }
-  }, [api, canStopTurn, clearStopTurnAttempt, mutationKey, sessionId]);
+  }, [api, canStopTurn, cancelTurnRefusal, clearStopTurnAttempt, mutationKey, sessionId]);
 
   useEffect(() => {
-    if (mode !== "expanded" || !canStopTurn) return;
+    if (mode !== "expanded" || !canStopTurn || cancelTurnRefusal !== null) return;
     const onStopTurnShortcut = (event: globalThis.KeyboardEvent) => {
       if (event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
       const target = event.target instanceof Element ? event.target : null;
@@ -2986,7 +3017,7 @@ function SessionDetailLoaded({
     };
     window.addEventListener("keydown", onStopTurnShortcut);
     return () => window.removeEventListener("keydown", onStopTurnShortcut);
-  }, [canStopTurn, mode, stopTurn]);
+  }, [canStopTurn, cancelTurnRefusal, mode, stopTurn]);
 
   // Follow state belongs to the stable session surface, so compact/expanded mode changes preserve
   // the reader's position while a session change resets to live output.
@@ -3159,8 +3190,14 @@ function SessionDetailLoaded({
   const readingActions = useMemo<SessionReadingKeyActions>(() => ({
     nextSession: () => onNextSession?.(),
     previousSession: () => onPreviousSession?.(),
-    approve: () => onApprove?.(),
-    deny: () => onDeny?.(),
+    approve: () => {
+      if (responseRefusal === null) onApprove?.();
+      else setError(responseRefusal);
+    },
+    deny: () => {
+      if (responseRefusal === null) onDeny?.();
+      else setError(responseRefusal);
+    },
     archive: () => {
       if (archiveRefusal === null) onArchive?.();
       else setError(archiveRefusal);
@@ -3169,7 +3206,7 @@ function SessionDetailLoaded({
     reply: canAnswerPendingQuestion ? enterAnswerMode : focusComposerAtDraftEnd,
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
-  }), [archiveRefusal, canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze]);
+  }), [archiveRefusal, canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze, responseRefusal]);
   useSessionReadingKeys({
     enabled: mode === "expanded" && !isMobile,
     sessionId,
@@ -3798,13 +3835,18 @@ function SessionDetailLoaded({
   // Pending composer config: remember what the user selected so a change made just before Send is
   // included atomically in the prompt (not lost to an in-flight setConfig round trip).
   const pendingConfig = useRef<SessionConfig>({});
+  // A person the server refuses configuration (a Viewer) sees the controls disabled with the
+  // reason, and nothing is applied (#1857).
+  const configRefusal = sessionCommandRefusal(session, "configure");
+  const configRefusalId = `config-refusal-${session.id}`;
   const applyConfig = useCallback(
     (patch: Partial<SessionConfig>) => {
+      if (configRefusal !== null) return;
       pendingConfig.current = { ...pendingConfig.current, ...patch };
       if (patch.model !== undefined) setOptimisticModel(patch.model || undefined);
       void api.setConfig(sessionId, patch); // optimistic between-turns apply (updates the UI + snapshot)
     },
-    [api, sessionId],
+    [api, configRefusal, sessionId],
   );
 
   const planActive = session.permissionMode === "plan";
@@ -3821,10 +3863,11 @@ function SessionDetailLoaded({
     void saveComposerDraft(sessionId, "", images, instanceScope);
   };
 
+  const renameRefusal = sessionCommandRefusal(session, "rename");
   const requestSessionRetitle = async (
     composerFocus?: ReturnType<typeof captureComposerFocus>,
   ) => {
-    if (retitleInFlightRef.current) return;
+    if (retitleInFlightRef.current || renameRefusal !== null) return;
     const generation = viewGenerationRef.current;
     retitleInFlightRef.current = true;
     setRetitleFeedback({ state: "running" });
@@ -4150,7 +4193,7 @@ function SessionDetailLoaded({
   };
 
   const promoteQueuedPrompt = async (prompt: QueuedPromptView) => {
-    if (queueSteeringInFlightRef.current.has(prompt.id) ||
+    if (queueRefusal !== null || queueSteeringInFlightRef.current.has(prompt.id) ||
         composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current) return;
     const availability = queuedPromptSteeringAvailability(steeringAvailabilityInput, prompt);
     if (!availability.available) {
@@ -4185,7 +4228,7 @@ function SessionDetailLoaded({
   };
 
   const beginQueuedPromptEdit = async (prompt: QueuedPromptView) => {
-    if (queuedEdit || composerRequestBusy) return;
+    if (queuedEdit || composerRequestBusy || queueRefusal !== null) return;
     const availability = queuedPromptEditingAvailability({
       runnerProtocolVersion: runner?.protocolVersion,
       runnerOnline,
@@ -4412,7 +4455,7 @@ function SessionDetailLoaded({
     submissionId: string,
     action: "queue_again" | "dismiss",
   ) => {
-    if (steeringResolutionInFlightRef.current.has(submissionId)) return;
+    if (queueRefusal !== null || steeringResolutionInFlightRef.current.has(submissionId)) return;
     const generation = viewGenerationRef.current;
     steeringResolutionInFlightRef.current.add(submissionId);
     setSteeringResolutionPending((current) => new Map(current).set(submissionId, action));
@@ -4458,7 +4501,7 @@ function SessionDetailLoaded({
     // navigation, dismissal, or history. Arrow and Escape are part of candidate selection too.
     const composing = e.nativeEvent.isComposing || e.keyCode === 229;
     if (composing) return;
-    if (canStopTurn && !shortcutLayerActive(document) && matchesShortcut(e, "stop-turn")) {
+    if (canStopTurn && cancelTurnRefusal === null && !shortcutLayerActive(document) && matchesShortcut(e, "stop-turn")) {
       e.preventDefault();
       void stopTurn();
       return;
@@ -4694,6 +4737,7 @@ function SessionDetailLoaded({
           <CampaignContinuationNotice
             continuation={session.orchestratorCampaign.continuation}
             acknowledgementPending={pendingPromptAction?.commandId === session.orchestratorCampaign.continuation.commandId}
+            actionRefusal={queueRefusal}
             onAcknowledge={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
             onRetry={(commandId) => void resolvePendingPrompt(commandId, "retry")}
           />
@@ -4703,6 +4747,7 @@ function SessionDetailLoaded({
             heldChildren={heldChildren}
             blocked={session.orchestratorCampaign?.children?.blocked ?? heldChildren.length}
             childTitle={heldChildTitle}
+            recoveryAction={heldChildRecoveryAction}
             onOpenChild={(childSessionId) => navigate({ name: "session", id: childSessionId })}
           />
         )}
@@ -4978,6 +5023,7 @@ function SessionDetailLoaded({
                     canCancelLive={runnerOnline && canCancelQueued}
                     pendingAction={pendingPromptAction?.commandId}
                     worktreeRecoveryPending={worktreeRecovery !== undefined}
+                    actionRefusal={queueRefusal}
                     onCancelPending={(commandId) => void resolvePendingPrompt(commandId, "cancel")}
                     onCancelLive={(commandId) => void cancelLivePendingPrompt(commandId)}
                     onDismiss={(commandId) => void resolvePendingPrompt(commandId, "dismiss")}
@@ -5218,6 +5264,8 @@ function SessionDetailLoaded({
                     <button
                       type="button"
                       className="btn ghost sm retitle-receipt-retry"
+                      disabled={renameRefusal !== null}
+                      title={renameRefusal ?? undefined}
                       onPointerDown={() => {
                         retitleRetryPointerActivationRef.current = true;
                       }}
@@ -5259,11 +5307,15 @@ function SessionDetailLoaded({
               activeTurnId={session.activeTurnId}
               historyPartial={isPartialHistory(eventWindow)}
               pendingActions={steeringResolutionPending}
+              actionRefusal={queueRefusal}
               onQueueAgain={(submissionId) => void resolveSteeringAttempt(submissionId, "queue_again")}
               onDismiss={(submissionId) => resolveSteeringAttempt(submissionId, "dismiss")}
             />
             {queuedPromptControls.length > 0 && (
               <div className="queued-list" aria-label="Queued Messages">
+                {/* A disabled control's tooltip is announced by nothing, so the refusal is also a
+                    programmatic description of each action it disables. */}
+                {queueRefusal !== null && <p className="sr-only" id={queueRefusalId}>{queueRefusal}</p>}
                 {queuedPromptControls.map((q) => {
                   const availability = queuedPromptSteeringAvailability(steeringAvailabilityInput, q);
                   const editAvailability = queuedPromptEditingAvailability({
@@ -5305,7 +5357,11 @@ function SessionDetailLoaded({
                           ? "Wait for the current message request to finish."
                         : "Promote this queued message into the active turn.";
                   const heldBadge = session.queueHeld === true && !terminalDurable;
-                  const canCancelThis = canCancelQueued && !durable && !reserved && !locallyPromoting;
+                  const canCancelThis = canCancelQueued && !durable && !reserved && !locallyPromoting &&
+                    queueRefusal === null;
+                  const steerTitle = queueRefusal ?? queueTitle;
+                  const steerDisabled = queueRefusal !== null || !availability.available || locallyPromoting ||
+                    composerRequestBusy;
                   const dismissBusy = pendingPromptAction?.commandId === q.id &&
                     pendingPromptAction.action === "dismiss";
                   return (
@@ -5334,31 +5390,33 @@ function SessionDetailLoaded({
                         <button
                           type="button"
                           className="btn ghost sm queued-steer"
-                          disabled={!availability.available || locallyPromoting || composerRequestBusy}
-                          title={queueTitle}
+                          disabled={steerDisabled}
+                          title={steerTitle}
+                          aria-describedby={queueRefusal !== null ? queueRefusalId : undefined}
                           aria-label="Steer Queued Message"
                           onClick={() => void promoteQueuedPrompt(q)}
                         >
                           {locallyPromoting || q.steeringState === "promoting" ? "Steering…" : "Steer"}
                         </button>
-                        {(!availability.available || locallyPromoting || composerRequestBusy) && (
+                        {steerDisabled && (
                           <details className="queued-steer-info">
                             <summary aria-label="Why Steering Is Unavailable">ⓘ</summary>
-                            <span role="status">{queueTitle}</span>
+                            <span role="status">{steerTitle}</span>
                           </details>
                         )}
                         <button
                           type="button"
                           className="btn ghost sm queued-edit"
-                          disabled={!editAvailability.available || queuedEdit !== null}
-                          title={terminalDurable
+                          disabled={queueRefusal !== null || !editAvailability.available || queuedEdit !== null}
+                          title={queueRefusal ?? (terminalDurable
                             ? TERMINAL_RECEIPT_REASON
                             : queuedEdit?.promptId === q.id
                               ? "This queued message is already being edited."
                               : editAvailability.available
                                 ? "Edit this queued message."
-                                : editAvailability.reason}
+                                : editAvailability.reason)}
                           aria-label="Edit Queued Message"
+                          aria-describedby={queueRefusal !== null ? queueRefusalId : undefined}
                           onClick={() => void beginQueuedPromptEdit(q)}
                         >
                           <EditIcon size={14} />
@@ -5367,12 +5425,13 @@ function SessionDetailLoaded({
                           <button
                             type="button"
                             className="btn ghost sm queued-dismiss"
-                            disabled={pendingPromptAction !== undefined}
+                            disabled={pendingPromptAction !== undefined || queueRefusal !== null}
                             aria-busy={dismissBusy || undefined}
-                            title="Remove this delivery receipt. The message already recorded in the transcript is kept, and no provider work is cancelled, resent, or restarted."
+                            title={queueRefusal ?? "Remove this delivery receipt. The message already recorded in the transcript is kept, and no provider work is cancelled, resent, or restarted."}
                             aria-label={q.durableDeliveryState === "failed"
                               ? "Dismiss Failed Message"
                               : "Dismiss Uncertain Message"}
+                            aria-describedby={queueRefusal !== null ? queueRefusalId : undefined}
                             onClick={() => void resolvePendingPrompt(q.id, "dismiss")}
                           >
                             {dismissBusy ? "Dismissing…" : "Dismiss"}
@@ -5382,7 +5441,7 @@ function SessionDetailLoaded({
                             type="button"
                             className="queued-cancel"
                             disabled={!canCancelThis}
-                            title={
+                            title={queueRefusal ?? (
                               !canCancelQueued
                                 ? runnerCapabilityRequirement(
                                     runner?.protocolVersion,
@@ -5394,8 +5453,9 @@ function SessionDetailLoaded({
                                   : durable
                                     ? "Durable delivery entries cannot be cancelled before runner admission."
                                   : "Cancel this queued message."
-                            }
+                            )}
                             aria-label={canCancelThis ? "Cancel Queued Message" : "Queued Message Cancellation Unavailable"}
+                            aria-describedby={queueRefusal !== null ? queueRefusalId : undefined}
                             onClick={() => void api.cancelQueuedPrompt(session.id, q.id)}
                           >
                             ✕
@@ -5480,6 +5540,7 @@ function SessionDetailLoaded({
                   runnerOnline={runnerOnline}
                   active={composerAnswerActive}
                   showWaiting={questionResponseStyle === "composer"}
+                  responseRefusal={responseRefusal}
                   inputRef={answerInputRef}
                   onEnter={enterAnswerMode}
                   onExit={exitAnswerMode}
@@ -5621,13 +5682,17 @@ function SessionDetailLoaded({
                   >
                     {composerIdlePreview}
                   </button>
-                  <ApprovalsControl session={session} apply={applyConfig} />
+                  <ApprovalsControl session={session} apply={applyConfig} disabledReason={configRefusal} />
                   {planActive && (
                     <button
                       type="button"
                       className="mode-pill"
+                      disabled={configRefusal !== null}
                       onClick={() => togglePlan(false)}
-                      title="Plan mode is on — the agent researches + proposes, no edits. Click to turn off."
+                      aria-describedby={configRefusal !== null ? configRefusalId : undefined}
+                      title={configRefusal !== null
+                        ? `Plan mode is on. ${configRefusal}`
+                        : "Plan mode is on — the agent researches + proposes, no edits. Click to turn off."}
                     >
                       ◒ Plan
                     </button>
@@ -5638,9 +5703,16 @@ function SessionDetailLoaded({
                     pendingModel={() => pendingConfig.current.model}
                     pendingEffort={() => pendingConfig.current.effort}
                     pendingServiceTier={() => pendingConfig.current.serviceTier}
+                    disabledReason={configRefusal}
                   />
+                  {configRefusal !== null && planActive && (
+                    <span className="sr-only" id={configRefusalId}>{configRefusal}</span>
+                  )}
                 </div>
                 <div className="cbar-right">
+                  {cancelTurnRefusal !== null && (
+                    <span className="sr-only" id={`stop-turn-refusal-${session.id}`}>{cancelTurnRefusal}</span>
+                  )}
                   {dictation.supported && (
                     <button
                       type="button"
@@ -5707,11 +5779,12 @@ function SessionDetailLoaded({
                       /* Same tap-vs-reflow race as the Send button it replaces in this slot. */
                       onPointerDown={(e) => e.preventDefault()}
                       onClick={() => void stopTurn()}
-                      disabled={primaryComposerAction === "stopping"}
+                      disabled={primaryComposerAction === "stopping" || cancelTurnRefusal !== null}
                       title={primaryComposerAction === "stopping"
                         ? "Stopping Turn"
-                        : `Stop Turn (${shortcutDisplay("stop-turn")})`}
+                        : cancelTurnRefusal ?? `Stop Turn (${shortcutDisplay("stop-turn")})`}
                       aria-label={primaryComposerAction === "stopping" ? "Stopping Turn" : "Stop Turn"}
+                      aria-describedby={cancelTurnRefusal !== null ? `stop-turn-refusal-${session.id}` : undefined}
                     >
                       {primaryComposerAction === "stopping" ? <Spinner /> : <StopTurnIcon size={14} />}
                     </button>
@@ -6562,11 +6635,14 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
 export function CampaignContinuationNotice({
   continuation,
   acknowledgementPending = false,
+  actionRefusal = null,
   onAcknowledge,
   onRetry,
 }: {
   continuation: NonNullable<NonNullable<SessionView["orchestratorCampaign"]>["continuation"]>;
   acknowledgementPending?: boolean;
+  /** Why the signed-in person may not resolve the continuation (#1857). */
+  actionRefusal?: string | null;
   onAcknowledge?: (commandId: string) => void;
   onRetry?: (commandId: string) => void;
 }) {
@@ -6607,7 +6683,8 @@ export function CampaignContinuationNotice({
         <button
           type="button"
           className="btn sm"
-          disabled={acknowledgementPending}
+          disabled={acknowledgementPending || actionRefusal !== null}
+          title={actionRefusal ?? undefined}
           onClick={() => onAcknowledge(continuation.commandId!)}
         >
           {acknowledgementPending ? "Acknowledging…" : "Acknowledge Missing Result"}
@@ -6617,7 +6694,8 @@ export function CampaignContinuationNotice({
         <button
           type="button"
           className="btn sm"
-          disabled={acknowledgementPending}
+          disabled={acknowledgementPending || actionRefusal !== null}
+          title={actionRefusal ?? undefined}
           onClick={() => onRetry(continuation.commandId!)}
         >
           {acknowledgementPending ? "Retrying…" : "Retry Campaign Continuation"}

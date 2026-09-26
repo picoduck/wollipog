@@ -5823,31 +5823,49 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
  *   restart, records unfinished work as killed, reports a finished result still owed to the new
  *   conversation, and the control plane tells the restarted session which decisions it revoked;
  * - an older runner rejects every prompt still in the queue ("session restart discarded the queued
- *   command") and returns no undelivered result. */
-export function queueHoldRecoveryAction(hold: SessionQueueHoldView): string {
+ *   command") and returns no undelivered result.
+ *
+ * `reader` is what the person reading the advice may do to the held session (#1857). Advice written
+ * for them names Stop Job only if they may stop its background jobs, and restarting only if they
+ * may restart it; otherwise it tells them to wait or to ask someone who can act. Without a reader
+ * (the server's own copy, which agents read through their tools) every action is named. */
+export function queueHoldRecoveryAction(hold: SessionQueueHoldView, reader?: QueueHoldReader): string {
+  const canStopJobs = reader?.canStopJobs ?? true;
+  const canRestart = reader?.canRestart ?? true;
   const one = hold.unfinishedBackgroundJobs === 1;
   const jobs = one ? "job" : "jobs";
   const messages = hold.queuedPrompts === 1 ? "message" : "messages";
-  const avoidRestart = (preferred: string) => hold.restartKeepsQueue
-    ? `Prefer ${preferred} to restarting the session: a restart keeps the queued ${messages} but ends every ` +
+  const wait = `Wait for the unfinished background ${jobs} to end; the handoff and the queued ${messages} then proceed on their own. `;
+  const avoidRestart = (preferred: string) => !canRestart ? ""
+    : hold.restartKeepsQueue
+    ? ` Prefer ${preferred} to restarting the session: a restart keeps the queued ${messages} but ends every ` +
       "background job and starts a new conversation."
-    : `Do not restart the session to get past this hold: a restart discards the queued ${messages}.`;
-  if (hold.canStopJobs) {
-    return `Wait for the unfinished background ${jobs} to end; the handoff and the queued ${messages} then proceed on their own. ` +
+    : ` Do not restart the session to get past this hold: a restart discards the queued ${messages}.`;
+  const deadline = hold.endsAt === undefined ? undefined : new Date(hold.endsAt).toISOString().slice(0, 16);
+  if (hold.canStopJobs && canStopJobs) {
+    return wait +
       `To end ${one ? "it" : "one"} now, stop it by its job id with stop_background_job (get_session lists the unfinished jobs) ` +
       "or with Stop Job in the Background Work panel: only that job ends, it is recorded as killed, and the conversation " +
       `keeps running. Once no unfinished job remains, the handoff and the queued ${messages} run in order` +
-      (hold.endsAt !== undefined
-        ? `; Wollipog also ends any job still running at ${new Date(hold.endsAt).toISOString().slice(0, 16)}Z. `
-        : ". ") +
+      (deadline !== undefined ? `; Wollipog also ends any job still running at ${deadline}Z.` : ".") +
       avoidRestart("stopping the job");
   }
-  if (hold.endsAt !== undefined) {
-    return `Wait for the unfinished background ${jobs} to end; the handoff and the queued ${messages} then proceed on their own. ` +
-      `If ${one ? "it is" : "they are"} still running at ${new Date(hold.endsAt).toISOString().slice(0, 16)}Z, ` +
-      `Wollipog ends ${one ? "it" : "them"}, records ${one ? "it" : "each"} as killed, and then runs the handoff and ` +
-      `the queued ${messages} in order; a finished job's result from the same turn is still delivered. ` +
+  if (hold.canStopJobs) {
+    return wait +
+      `Only the session owner or its controlling Orchestrator can end ${one ? "it" : "one"} sooner; ask them if it must end now.` +
+      (deadline !== undefined ? ` Wollipog also ends any job still running at ${deadline}Z.` : "") +
       avoidRestart("waiting");
+  }
+  if (deadline !== undefined) {
+    return wait +
+      `If ${one ? "it is" : "they are"} still running at ${deadline}Z, ` +
+      `Wollipog ends ${one ? "it" : "them"}, records ${one ? "it" : "each"} as killed, and then runs the handoff and ` +
+      `the queued ${messages} in order; a finished job's result from the same turn is still delivered.` +
+      avoidRestart("waiting");
+  }
+  const never = `If ${one ? "it never ends" : "they never end"} (a monitor whose condition never fires ends only with its provider process), `;
+  if (!canRestart) {
+    return wait + `${never}the hold clears only when someone who can act on this session steps in; ask its owner.`;
   }
   const restartCost = hold.restartKeepsQueue
     ? `the provider and its background ${jobs} end, with unfinished work recorded as killed and unrecoverable and ` +
@@ -5858,9 +5876,14 @@ export function queueHoldRecoveryAction(hold: SessionQueueHoldView): string {
     : `the provider and its background ${jobs} end and no undelivered result is recovered, the queued ${messages} ` +
       `${hold.queuedPrompts === 1 ? "is" : "are"} discarded and must be sent again, and any approved workflow decision ` +
       "the session has not yet consumed is revoked and must be requested again.";
-  return `Wait for the unfinished background ${jobs} to end; the handoff and the queued ${messages} then proceed on their own. ` +
-    `If ${one ? "it never ends" : "they never end"} (a monitor whose condition never fires ends only with its provider process), ` +
-    `restart the session with restart_session, knowing what that costs: ${restartCost}`;
+  return wait + `${never}restart the session with restart_session, knowing what that costs: ${restartCost}`;
+}
+
+/** What the person reading queue-hold advice may do to the held session (#1857), from its
+ * `stopBackgroundJob` and `restart` command permissions. */
+export interface QueueHoldReader {
+  canStopJobs: boolean;
+  canRestart: boolean;
 }
 
 /**
@@ -5949,6 +5972,17 @@ export interface SessionCommandPermissions {
   prompt?: SessionCommandPermission;
   /** Delete an archived session. */
   delete?: SessionCommandPermission;
+  /** Stop Turn (#1857). */
+  cancelTurn?: SessionCommandPermission;
+  /** Steer, edit or cancel a queued message, and resolve a failed or uncertain delivery or a
+   * steering attempt (#1857). */
+  manageQueue?: SessionCommandPermission;
+  /** Rename the session, including regenerating its title (#1857). */
+  rename?: SessionCommandPermission;
+  /** Change the session's configuration: approvals mode, Plan, model and effort (#1857). */
+  configure?: SessionCommandPermission;
+  /** Answer a pending question, or approve or deny a pending permission request (#1857). */
+  respond?: SessionCommandPermission;
 }
 
 /** Denormalised session record for the UI (board cards + lists). */

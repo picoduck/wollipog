@@ -391,3 +391,43 @@ test("retained-prompt Retry and Dismiss are described by the message and the rec
     container.remove();
   }
 });
+
+test("a Viewer sees every delivery action disabled and described by the reason, and nothing is sent (#1857)", async () => {
+  const container = domWindow.document.createElement("div");
+  domWindow.document.body.append(container);
+  const root = createRoot(container as unknown as HTMLDivElement);
+  const actions: string[] = [];
+  const reason = "Your Viewer role is read-only.";
+  try {
+    await act(async () => {
+      root.render(<PendingPromptBubbles
+        prompts={[
+          pending({ commandId: "prompt-1", canCancel: true }),
+          pending({ commandId: "prompt-2", state: "failed", canDismiss: true, canRetry: true }),
+        ]}
+        deliveredCommandIds={new Set()}
+        liveQueueIds={new Set()}
+        canCancelLive
+        actionRefusal={reason}
+        onCancelPending={() => actions.push("pending")}
+        onCancelLive={() => actions.push("live")}
+        onDismiss={() => actions.push("dismiss")}
+        onRetry={() => actions.push("retry")}
+      />);
+    });
+    const buttons = [...container.querySelectorAll("button")];
+    assert.deepEqual(buttons.map((button) => button.textContent), ["Cancel", "Dismiss", "Retry"]);
+    for (const button of buttons) {
+      assert.equal(button.disabled, true, `${button.textContent} is disabled`);
+      assert.equal(button.title, reason);
+      const descriptions = (button.getAttribute("aria-describedby") ?? "").split(" ")
+        .map((id) => domWindow.document.getElementById(id)?.textContent ?? "");
+      assert.ok(descriptions.includes(reason), `${button.textContent} is described by the reason`);
+    }
+    await act(async () => { for (const button of buttons) button.click(); });
+    assert.deepEqual(actions, []);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});

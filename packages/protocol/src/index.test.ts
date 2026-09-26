@@ -1670,3 +1670,52 @@ test("a hold whose runner keeps the queue across a restart states what a restart
   assert.match(queueHoldRecoveryAction({ ...queueHold, restartKeepsQueue: undefined }),
     /the queued messages are discarded and must be sent again/u, "an older runner's restart still discards the queue");
 });
+
+test("queue-hold advice written for a reader names only the actions that reader may take (#1857)", () => {
+  const base = {
+    kind: "worktree_rebind" as const,
+    holdId: "worktree-rebind:5000",
+    since: 5_000,
+    target: "/repos/x/.agent-worktrees/fix-1857",
+    queuedPrompts: 1,
+    unfinishedBackgroundJobs: 1,
+  };
+  const holds = [
+    base,
+    { ...base, restartKeepsQueue: true as const },
+    { ...base, endsAt: Date.UTC(2026, 8, 25, 1, 48, 43) },
+    { ...base, canStopJobs: true as const },
+    { ...base, canStopJobs: true as const, restartKeepsQueue: true as const, endsAt: Date.UTC(2026, 8, 25, 1, 48, 43) },
+  ];
+  for (const hold of holds) {
+    assert.equal(queueHoldRecoveryAction(hold, { canStopJobs: true, canRestart: true }), queueHoldRecoveryAction(hold),
+      "a reader allowed both reads the server's advice");
+    for (const reader of [
+      { canStopJobs: false, canRestart: true },
+      { canStopJobs: true, canRestart: false },
+      { canStopJobs: false, canRestart: false },
+    ]) {
+      const advice = queueHoldRecoveryAction(hold, reader);
+      assert.match(advice, /^Wait for the unfinished background job to end; the handoff and the queued message then proceed on their own\./u);
+      if (!reader.canStopJobs) assert.doesNotMatch(advice, /Stop Job|stop_background_job/u, "a reader who cannot stop jobs is not told to");
+      if (!reader.canRestart) assert.doesNotMatch(advice, /restart/iu, "a reader who cannot restart is not told about restarting");
+    }
+  }
+
+  assert.equal(queueHoldRecoveryAction({ ...base, canStopJobs: true }, { canStopJobs: false, canRestart: true }),
+    "Wait for the unfinished background job to end; the handoff and the queued message then proceed on their own. " +
+    "Only the session owner or its controlling Orchestrator can end it sooner; ask them if it must end now. " +
+    "Do not restart the session to get past this hold: a restart discards the queued message.",
+    "a non-owning admin may restart, so the warning against restarting stays");
+  assert.equal(queueHoldRecoveryAction({ ...base, canStopJobs: true, unfinishedBackgroundJobs: 2, endsAt: Date.UTC(2026, 8, 25, 1, 48, 43) },
+    { canStopJobs: false, canRestart: false }),
+  "Wait for the unfinished background jobs to end; the handoff and the queued message then proceed on their own. " +
+    "Only the session owner or its controlling Orchestrator can end one sooner; ask them if it must end now. " +
+    "Wollipog also ends any job still running at 2026-09-25T01:48Z.");
+  assert.equal(queueHoldRecoveryAction(base, { canStopJobs: false, canRestart: false }),
+    "Wait for the unfinished background job to end; the handoff and the queued message then proceed on their own. " +
+    "If it never ends (a monitor whose condition never fires ends only with its provider process), the hold clears " +
+    "only when someone who can act on this session steps in; ask its owner.");
+  assert.equal(queueHoldRecoveryAction(base, { canStopJobs: false, canRestart: true }), queueHoldRecoveryAction(base),
+    "a hold its runner cannot stop names restarting to anyone allowed to restart");
+});

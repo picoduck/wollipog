@@ -115,3 +115,54 @@ test("the Inbox footer rail keeps standard shortcuts global and approval shortcu
   await act(async () => { root.unmount(); });
   container.remove();
 });
+
+test("a Viewer's Archive, Approve and Deny shortcuts are disabled with the reason; per-person shortcuts keep working (#1857)", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const invoked: string[] = [];
+  const reason = "Your Viewer role is read-only.";
+  const refused = { allowed: false as const, reason };
+  const viewer = {
+    ...session({ requestId: "approval-1", title: "Allow Command?", options: [] }),
+    commandPermissions: {
+      stop: refused, restart: refused, stopBackgroundJob: refused, archive: refused,
+      unarchive: refused, prompt: refused, delete: refused, respond: refused,
+    },
+  } as SessionView;
+  await act(async () => {
+    root.render(<InboxShortcutRail
+      session={viewer}
+      pinned={false}
+      busy={false}
+      stopBeforeArchiveSupported
+      forkAvailability={{ available: true, forkTurn: 3 }}
+      onApprove={() => invoked.push("approve")}
+      onDeny={() => invoked.push("deny")}
+      onReply={() => invoked.push("reply")}
+      onExpand={() => invoked.push("expand")}
+      onFork={() => invoked.push("fork")}
+      onTogglePin={() => invoked.push("pin")}
+      onMarkUnread={() => invoked.push("unread")}
+      onArchive={() => invoked.push("archive")}
+      onSnooze={() => invoked.push("snooze")}
+    />);
+  });
+  for (const label of ["Approve", "Deny", "Archive and Stop"]) {
+    const button = container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!;
+    assert.equal(button.disabled, true, `${label} is disabled`);
+    assert.equal(button.title, reason, `${label} says why`);
+    const described = button.getAttribute("aria-describedby");
+    assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason,
+      `${label} carries the reason as its description`);
+  }
+  await act(async () => {
+    for (const label of ["Approve", "Deny", "Archive and Stop", "Pin", "Unread", "Snooze"]) {
+      container.querySelector<HTMLButtonElement>(`[aria-label="${label}"]`)!.click();
+    }
+  });
+  assert.deepEqual(invoked, ["pin", "unread", "snooze"], "only the per-person shortcuts act");
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+});

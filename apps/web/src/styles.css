@@ -3609,9 +3609,13 @@ textarea {
   padding: 3px 5px;
   border-radius: 5px;
 }
-.queued-cancel:hover {
+.queued-cancel:hover:not(:disabled) {
   background: var(--bg-elev-2);
   color: var(--text);
+}
+.queued-cancel:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .queued-edit-banner {
   display: flex;
@@ -4193,9 +4197,14 @@ textarea {
   max-width: 100%;
   white-space: nowrap;
 }
-.cbar-trigger:hover {
+.cbar-trigger:hover:not(:disabled) {
   background: var(--bg-elev-2);
   color: var(--text);
+}
+/* A setting the person may not change (#1857) stays readable but plainly unavailable. */
+.cbar-trigger:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .cbar-trigger .caret {
   font-size: 9px;
@@ -4482,6 +4491,11 @@ textarea {
   background: color-mix(in srgb, var(--red) 22%, transparent);
   border-color: color-mix(in srgb, var(--red) 58%, transparent);
   color: var(--red-on-strong-tint);
+}
+/* Refused rather than busy (#1857): the red Stop Turn must not look actionable. */
+.send-btn.stop-turn-btn:disabled:not(.is-stopping) {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 .send-btn.stop-turn-btn.is-stopping:disabled {
   background: color-mix(in srgb, var(--red) 30%, transparent);
@@ -4822,6 +4836,10 @@ textarea,
   background: color-mix(in srgb, var(--accent) 14%, transparent);
   color: var(--accent-on-tint);
   cursor: pointer;
+}
+.mode-pill:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* --- Slash-command palette --- */
@@ -12080,6 +12098,17 @@ body.shell-dock-dragging * {
   align-items: center;
   gap: 10px;
   width: 100%;
+}
+/* Why a refused person cannot decide this request (#1857): a full-width line under the options. */
+.approval-refusal {
+  width: 100%;
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-sm);
+  line-height: 1.4;
+}
+.card-approval .approval-refusal {
+  margin-bottom: 7px;
 }
 .approval-context {
   margin: 8px 0 0;

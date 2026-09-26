@@ -28,6 +28,9 @@ export interface ComposerQuestionResponseProps {
   runnerOnline: boolean;
   active: boolean;
   showWaiting: boolean;
+  /** Why the signed-in person may not answer (#1857). Answer Mode then never opens, and the
+   * waiting card says why instead of offering Respond. */
+  responseRefusal?: string | null;
   inputRef: RefObject<HTMLInputElement | null>;
   onEnter: () => void;
   onExit: () => void;
@@ -83,6 +86,7 @@ export function ComposerQuestionResponse({
   runnerOnline,
   active,
   showWaiting,
+  responseRefusal = null,
   inputRef,
   onEnter,
   onExit,
@@ -148,9 +152,19 @@ export function ComposerQuestionResponse({
       <div className="composer-question-waiting" role="status">
         <div>
           <strong>Question Waiting</strong>
-          <span>Your message draft is preserved. Press R to respond through the composer.</span>
+          <span id={`${ids}-composer-waiting`}>
+            {responseRefusal ?? "Your message draft is preserved. Press R to respond through the composer."}
+          </span>
         </div>
-        <button className="btn primary sm" type="button" onClick={onEnter}>Respond</button>
+        <button
+          className="btn primary sm"
+          type="button"
+          disabled={responseRefusal !== null}
+          aria-describedby={responseRefusal !== null ? `${ids}-composer-waiting` : undefined}
+          onClick={onEnter}
+        >
+          Respond
+        </button>
       </div>
     ) : null;
   }

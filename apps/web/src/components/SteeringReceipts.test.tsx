@@ -424,3 +424,42 @@ test("a bounded window is not evidence that an accepted steer never landed", () 
   assert.deepEqual(deriveSteeringReceipts([accepted], [], undefined, true), []);
   assert.equal(deriveSteeringReceipts([accepted], [], undefined, false).length, 1);
 });
+
+test("a Viewer's Queue Again, Dismiss and Clear All are disabled with the reason and send nothing (#1857)", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const actions: string[] = [];
+  const reason = "Your Viewer role is read-only.";
+  try {
+    await act(async () => {
+      root.render(<SteeringReceipts
+        attempts={[
+          attempt("uncertain", "uncertain", { reason: "transport_uncertain" }),
+          attempt("rejected-1", "rejected", { reason: "provider_rejected" }),
+          attempt("rejected-2", "rejected", { reason: "provider_rejected" }),
+        ]}
+        timelineItems={[]}
+        activeTurnId="turn-1"
+        actionRefusal={reason}
+        onQueueAgain={(id) => { actions.push(`queue:${id}`); }}
+        onDismiss={(id) => { actions.push(`dismiss:${id}`); }}
+      />);
+    });
+    const buttons = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .filter((button) => ["Queue Again", "Clear All"].includes(button.textContent ?? "") ||
+        button.getAttribute("aria-label") === "Dismiss");
+    assert.ok(buttons.some((button) => button.textContent === "Queue Again"));
+    assert.ok(buttons.some((button) => button.textContent === "Clear All"));
+    assert.ok(buttons.some((button) => button.getAttribute("aria-label") === "Dismiss"));
+    for (const button of buttons) {
+      assert.equal(button.disabled, true, `${button.textContent || button.getAttribute("aria-label")} is disabled`);
+      assert.equal(button.title, reason);
+    }
+    await act(async () => { for (const button of buttons) button.click(); });
+    assert.deepEqual(actions, []);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
