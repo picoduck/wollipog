@@ -36,7 +36,7 @@ Session status is multidimensional. A workflow column is organization only; it n
 | Background Work | `backgroundWorkState=continuation_pending` | **Continuation Pending** | A continuation is durably pending. |
 | Background Work | `backgroundWorkState=orphaned` | **Background Work: Orphaned** | Managed work needs recovery or authoritative re-observation. |
 | Background Work | `backgroundDeliveries[].watchdogState=continuation_blocked` | **Result Blocked** | A finished job's result cannot be returned while a sibling job from the same turn has no terminal status; it asks for a step, unlike the self-progressing **Result Pending**. |
-| Background Work | Listed job with `stalledSince` (no terminal status for over an hour) | **Stalled** job row | A report that the job may never end, not proof that it ended. |
+| Background Work | Listed job with `stalledSince` (no terminal status for over an hour) | **Stalled** job row | A report that the job may never end, not proof that it ended. When a queued handoff waits on the job past its bound (`queueHold.endsAt`), the runner ends it and it becomes a killed job row. |
 | Background Work | Settled delivery or legacy `backgroundWorkState=resumed` | No current-status badge | Completion remains in the timestamped Background Work inventory instead of resembling live work. |
 
 ## Projection Rules

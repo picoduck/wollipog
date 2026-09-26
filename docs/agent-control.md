@@ -859,11 +859,26 @@ queued behind a turn that had never started.
   unless the runner itself queued it. `prompt_session` names a hold when one exists, and when the
   session reads `running` but its runner reports no active turn it says the message waits for a
   turn that has not started, not behind one already running.
-- **The way out is stated.** The hold's recovery action says to wait for the job, or, if it never
-  ends, to restart the session, and what that costs: an explicit restart builds fresh session
-  metadata, so the provider's background jobs end with it and no undelivered result is recovered;
-  the runner discards the prompts still in its queue (they must be sent again); and approved
-  decisions the session has not yet consumed are revoked and must be requested again.
+- **The wait is bounded (#1778).** When the provider can end its background work — Claude Code,
+  by retiring the process that owns it — the runner bounds the hold. The hold carries `endsAt`,
+  one bound after it began (`WOLLIPOG_CLAUDE_HANDOFF_WAIT_MAX_MS`, default one hour; see
+  [DRIVERS.md](DRIVERS.md)). If the work is still unfinished then, and no turn is running, the
+  runner ends it: each job is recorded as `killed` with who ended it and why, and the timeline gets
+  a notice naming the jobs and the handoff that waited. The ended jobs are not handed to orphan
+  recovery, whose one recovery turn could relaunch them. A finished sibling from the same turn is
+  then unblocked, and its result is delivered once through its managed continuation, which names
+  the killed job. The handoff follows, and then every queued prompt, decision resumes included, in
+  its original order. Nothing is discarded. A job that ends on its own first is left alone, and
+  the bound is counted from when a prompt began to wait, so work nobody waits on is never ended by
+  it. Orphaned work is not bounded: its one recovery turn already crosses the barrier.
+- **The way out is stated.** For a bounded hold, the recovery action says to wait, gives the
+  time Wollipog ends the work, and warns that restarting discards the queued prompts. Otherwise —
+  an older runner, a disabled bound, or a provider that cannot end its work — it says to wait for
+  the job, or, if it never ends, to restart the session, and what that costs: an explicit restart
+  builds fresh session metadata, so the provider's background jobs end with it and no undelivered
+  result is recovered; the runner discards the prompts still in its queue (they must be sent
+  again); and approved decisions the session has not yet consumed are revoked and must be
+  requested again.
 - **The job is reported, too.** A listed job with no terminal status for more than an hour carries
   `stalledSince` in the session's job inventory and reads **Stalled** in the Background Work panel.
   That is a report, not proof it ended. A finished job whose result cannot be returned because a

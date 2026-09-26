@@ -1,6 +1,6 @@
 import { useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
-import type { DescendantRequestView, SessionView } from "@wollipog/protocol";
+import { sessionHolds, type DescendantRequestView, type SessionView } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { CampaignContinuationNotice } from "../components/SessionDetail.js";
@@ -32,6 +32,10 @@ declare global {
 
 const scenario = new URLSearchParams(window.location.search).get("scenario") ?? "evidence";
 const evidenceCount = Number(new URLSearchParams(window.location.search).get("items")) || 8;
+// `bounded=1` replaces the held children with one whose handoff the runner bounds (#1778);
+// `bounded=legacy` shows the same hold as a runner without the bound reports it.
+const boundedParam = new URLSearchParams(window.location.search).get("bounded");
+const boundedHold = boundedParam === "1" || boundedParam === "legacy";
 const includeDescendants = scenario === "descendants" || scenario === "held" ||
   new URLSearchParams(window.location.search).get("children") === "1";
 const requestedPollStatus = new URLSearchParams(window.location.search).get("pollStatus");
@@ -318,7 +322,27 @@ function continuationSession(): SessionView {
 const HELD_CHILD_TITLES: Record<string, string> = {
   "held-child-1": "Fix #1650: Keep a Decision Resume Across Worktree Recovery",
   "held-child-2": "Fix #1651: Queue Prompts Behind a Handoff Barrier",
+  "held-child-3": "Fix #1778: Bound a Handoff Held by a Never-Ending Job",
 };
+
+/** A child whose worktree handoff waits on a monitor that never fires, with the runner's bound
+ * (#1778). The reason and recovery action come from the protocol, as the control plane derives them. */
+function boundedHandoffHeldChild() {
+  const since = Date.now() - 41 * 60_000;
+  const [hold] = sessionHolds({
+    queueHold: {
+      kind: "worktree_rebind",
+      holdId: `worktree-rebind:${since}`,
+      since,
+      target: "/home/dev/worktrees/issue-1778",
+      queuedPrompts: 2,
+      unfinishedBackgroundJobs: 1,
+      oldestUnfinishedJob: { launchType: "monitor", startedAt: since - 36 * 60_000 },
+      ...(boundedParam === "1" ? { endsAt: since + 60 * 60_000 } : {}),
+    },
+  }, [{ kind: "workflow_decision_resolution", occurrenceId: "wd_occ_merge_1778", since: since + 60_000 }]);
+  return { sessionId: "held-child-3", holds: [hold!] };
+}
 
 /** A campaign whose projection holds two children: one in worktree recovery with a held decision
  * resume, and one with a hold kind this client predates. A third blocked child failed (#1760). */
@@ -332,9 +356,9 @@ function heldCampaignSession(): SessionView {
       ...base.orchestratorCampaign!,
       status: "blocked",
       continuation: undefined,
-      children: { total: 5, active: 1, waitingHuman: 1, blocked: 3, verified: 0, cleanupPending: 0 },
+      children: { total: 5, active: 1, waitingHuman: 1, blocked: boundedHold ? 1 : 3, verified: 0, cleanupPending: 0 },
       pendingRequests: { human: 8, orchestrator: 4 },
-      heldChildren: [
+      heldChildren: boundedHold ? [boundedHandoffHeldChild()] : [
         {
           sessionId: "held-child-1",
           holds: [{

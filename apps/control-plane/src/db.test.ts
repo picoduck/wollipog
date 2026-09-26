@@ -2284,6 +2284,28 @@ test("snapshot fractional cost becomes the baseline for later sub-micro events",
   assert.equal(db.getSession("fractional-snapshot")!.costUsd, 0.000002);
 });
 
+test("a queue hold keeps the runner's bound on the wait, and its way out is waiting, not restart (#1778)", () => {
+  const db = withRunner();
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:5000", since: 5_000, target: "/w/next",
+    queuedPrompts: 2, unfinishedBackgroundJobs: 1,
+    oldestUnfinishedJob: { launchType: "monitor" as const, startedAt: 4_000 },
+    endsAt: 5_000 + 3_600_000,
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "bounded-hold", status: "queued", queueHold }), "runner-1", 6_000);
+  const held = db.getSession("bounded-hold")!;
+  assert.deepEqual(held.queueHold, queueHold);
+  assert.match(held.holds?.[0]?.recoveryAction ?? "", /If it is still running at 1970-01-01T01:00Z, Wollipog ends it, records it as killed/u);
+  assert.match(held.holds?.[0]?.recoveryAction ?? "", /Do not restart the session to get past this hold/u);
+  assert.doesNotMatch(held.holds?.[0]?.recoveryAction ?? "", /restart_session/u);
+
+  // An end before the hold began is not a bound; the hold is unreadable rather than misreported.
+  db.createSessionFromSnapshot(snapshot({
+    id: "backwards-hold", status: "queued", queueHold: { ...queueHold, endsAt: 4_999 },
+  }), "runner-1", 6_000);
+  assert.equal(db.getSession("backwards-hold")!.queueHold, undefined);
+});
+
 test("snapshot residuals and indexed source coverage prevent cold-history and replay double counting", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(snapshot({

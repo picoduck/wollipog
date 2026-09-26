@@ -115,7 +115,7 @@ test("pending reminders make Active and Snoozed mutually exclusive across every 
 test("snoozed attention uses the shared delivery-watchdog presentation", () => {
   const cases = [
     ["terminal_without_continuation", "Result Pending", "pending", /returning the result automatically.*No action is needed/s],
-    ["continuation_blocked", "Result Blocked", "blocked", /cannot end that job itself.*stop the unfinished job/s],
+    ["continuation_blocked", "Result Blocked", "blocked", /ends that job itself only when a queued handoff has waited on it past its bound.*stop the unfinished job/s],
     ["accepted_without_result", "Result Missing", "missing", /will not repeat.*Acknowledge the missing result/s],
     ["result_not_projected", "Transcript Delayed", "pending", /updating the transcript automatically.*No action is needed/s],
     ["dashboard_observation_pending", "Notification Pending", "pending", /waiting for the dashboard confirmation.*No action is needed/s],

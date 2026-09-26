@@ -40,6 +40,7 @@ import type {
   DriverBackgroundJob,
   DriverBackgroundLaunchType,
   DriverBackgroundTerminalJob,
+  DriverBackgroundWorkEndResult,
   DriverCallbacks,
   DriverCommandInput,
   DriverOptions,
@@ -58,12 +59,18 @@ type Json = any;
 export const CLAUDE_PERSISTENT_FLAG = "WOLLIPOG_CLAUDE_PERSISTENT";
 export const CLAUDE_PERSISTENT_IDLE_MS = "WOLLIPOG_CLAUDE_PERSISTENT_IDLE_MS";
 export const CLAUDE_PENDING_MAX_MS = "WOLLIPOG_CLAUDE_PENDING_MAX_MS";
+export const CLAUDE_HANDOFF_WAIT_MAX_MS = "WOLLIPOG_CLAUDE_HANDOFF_WAIT_MAX_MS";
 export const LEGACY_CLAUDE_PERSISTENT_FLAG = "MAM_CLAUDE_PERSISTENT";
 export const LEGACY_CLAUDE_PERSISTENT_IDLE_MS = "MAM_CLAUDE_PERSISTENT_IDLE_MS";
 export const LEGACY_CLAUDE_PENDING_MAX_MS = "MAM_CLAUDE_PENDING_MAX_MS";
 const DEFAULT_PERSISTENT_IDLE_MS = 60 * 60_000;
 const MIN_PERSISTENT_IDLE_MS = 30_000;
 const DEFAULT_PENDING_MAX_MS = 7 * 24 * 60 * 60_000;
+/** How long a queued handoff waits on unfinished background work before the runner ends it
+ * (#1778). An hour matches the control plane's Stalled mark (`BACKGROUND_JOB_STALL_MS`), is far
+ * longer than a CI watch or a subagent normally runs, and is counted from when a prompt began to
+ * wait, not from when the job started, so work nobody is waiting on is never ended by it. */
+const DEFAULT_HANDOFF_WAIT_MAX_MS = 60 * 60_000;
 const MAX_TIMER_MS = 0x7fffffff;
 const GRACEFUL_STOP_MS = 5_000;
 /** After killTree has had time to deliver its bounded native/WSL escalation, stop waiting for an
@@ -126,14 +133,27 @@ export interface ClaudePersistentSettings {
   enabled: boolean;
   idleMs: number;
   pendingMaxMs: number;
+  handoffWaitMaxMs: number;
   warnings: string[];
 }
 
+/** A setting introduced after the MAM rename has no legacy name. */
 type CompatibleEnvironmentReader = (
   currentName: string,
-  legacyName: string,
+  legacyName: string | undefined,
   warn: (warning: string) => void,
 ) => string | undefined;
+
+function readSettingEnv(
+  env: Environment,
+  currentName: string,
+  legacyName: string | undefined,
+  warn: (warning: string) => void,
+): string | undefined {
+  if (legacyName) return readCompatibleEnv(env, currentName, legacyName, warn);
+  const value = env[currentName];
+  return typeof value === "string" ? value : undefined;
+}
 
 function parseLifetimeMs(
   rawValue: string | undefined,
@@ -175,13 +195,20 @@ function persistentSettings(readEnvironment: CompatibleEnvironmentReader): Claud
       1,
       warnings,
     ),
+    handoffWaitMaxMs: parseLifetimeMs(
+      readEnvironment(CLAUDE_HANDOFF_WAIT_MAX_MS, undefined, warn),
+      CLAUDE_HANDOFF_WAIT_MAX_MS,
+      DEFAULT_HANDOFF_WAIT_MAX_MS,
+      1,
+      warnings,
+    ),
     warnings,
   };
 }
 
 export function claudePersistentSettings(env: Environment): ClaudePersistentSettings {
   return persistentSettings((currentName, legacyName, warn) =>
-    readCompatibleEnv(env, currentName, legacyName, warn));
+    readSettingEnv(env, currentName, legacyName, warn));
 }
 
 /** Surface daemon-level legacy lifetime aliases before any session transcript exists. Values are
@@ -205,11 +232,11 @@ export function claudePersistentSettingsForAgent(
   daemonEnv: Environment = process.env,
 ): ClaudePersistentSettings {
   return persistentSettings((currentName, legacyName, warn) => {
-    if (agentEnv[currentName] !== undefined || agentEnv[legacyName] !== undefined) {
-      return readCompatibleEnv(agentEnv, currentName, legacyName, warn);
+    if (agentEnv[currentName] !== undefined || (legacyName && agentEnv[legacyName] !== undefined)) {
+      return readSettingEnv(agentEnv, currentName, legacyName, warn);
     }
     // Keep the raw process.env proxy: its name lookup is case-insensitive on Windows.
-    return readCompatibleEnv(daemonEnv, currentName, legacyName, warn);
+    return readSettingEnv(daemonEnv, currentName, legacyName, warn);
   });
 }
 
@@ -494,6 +521,7 @@ export class ClaudeCodeDriver implements Driver {
   private readonly persistentRequested: boolean;
   private readonly persistentIdleMs: number;
   private readonly pendingMaxMs: number;
+  readonly handoffWaitMaxMs: number;
   private persistentCircuitOpen = false;
   /** Lifetime budget by design: after one recovered acknowledged failure, a second failure in
    * this logical session falls back conservatively even if healthy turns occurred in between. */
@@ -627,6 +655,7 @@ export class ClaudeCodeDriver implements Driver {
     this.persistentRequested = persistent.enabled;
     this.persistentIdleMs = persistent.idleMs;
     this.pendingMaxMs = persistent.pendingMaxMs;
+    this.handoffWaitMaxMs = persistent.handoffWaitMaxMs;
     for (const id of opts.initialBackgroundTaskIds ?? []) {
       if (id) {
         this.pendingBackgroundTasks.set(id, { id, startedAt: this.deps.now(), launchType: "unknown" });
@@ -1934,6 +1963,45 @@ export class ClaudeCodeDriver implements Driver {
     this.stopPersistentTransport(false, "ceiling");
   }
 
+  /** Claude offers no way to end one detached task from outside, so the runner ends them by
+   * retiring the process that owns them — the same boundary the pending ceiling uses. Unlike the
+   * ceiling, nothing is left orphaned: the work was ended on purpose, so a recovery turn that
+   * could relaunch it would undo the decision. Each job is reported as killed instead. */
+  async endBackgroundWork(): Promise<DriverBackgroundWorkEndResult> {
+    const turnActive = () => this.activePersistentTurn != null || this.activeOneShotTurnId != null;
+    if (turnActive()) return { status: "refused", reason: "turn_active" };
+    if (this.pendingBackgroundTasks.size === 0) return { status: "none" };
+    if (this.disposed || !this.persistentTransport || !this.child) {
+      return { status: "refused", reason: "no_live_process" };
+    }
+    // A job that finished without its lifecycle event reaching us is completed, not killed.
+    if (this.opts.context.kind === "wsl") await this.reconcilePendingTaskFilesInContext(true);
+    else this.reconcilePendingTaskFiles(true);
+    if (turnActive()) return { status: "refused", reason: "turn_active" };
+    if (this.pendingBackgroundTasks.size === 0) return { status: "none" };
+    // The process exited while receipts were read: its exit already handed the work to orphan
+    // recovery, which owns it now.
+    if (this.disposed || !this.persistentTransport || !this.child) {
+      return { status: "refused", reason: "no_live_process" };
+    }
+    const tasks = [...this.pendingBackgroundTasks.values()];
+    // Emptying the pending set first is what keeps retirement from writing an orphan marker.
+    this.pendingBackgroundTasks.clear();
+    this.unverifiedBackgroundTaskIds.clear();
+    await this.stopPersistentTransport(false);
+    const terminalAt = this.deps.now();
+    const jobs = tasks.map((task): DriverBackgroundTerminalJob => ({
+      ...driverBackgroundJob(task),
+      status: "killed",
+      terminalAt,
+      // The killed job has no result to deliver; a finished sibling still gets its continuation.
+      continuationRequired: false,
+      endedByRunner: true,
+    }));
+    this.pendingWorkChanged(jobs);
+    return { status: "ended", jobs };
+  }
+
   private handlePersistentFailure(message: string, turn: PersistentTurn): void {
     if (turn.settled || this.activePersistentTurn !== turn) return;
     if (turn.origin === "provider") {
@@ -2093,6 +2161,7 @@ export class ClaudeCodeDriver implements Driver {
     delete env[CLAUDE_PERSISTENT_FLAG];
     delete env[CLAUDE_PERSISTENT_IDLE_MS];
     delete env[CLAUDE_PENDING_MAX_MS];
+    delete env[CLAUDE_HANDOFF_WAIT_MAX_MS];
     delete env[LEGACY_CLAUDE_PERSISTENT_FLAG];
     delete env[LEGACY_CLAUDE_PERSISTENT_IDLE_MS];
     delete env[LEGACY_CLAUDE_PENDING_MAX_MS];

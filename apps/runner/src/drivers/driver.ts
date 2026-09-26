@@ -99,7 +99,15 @@ export interface DriverBackgroundTerminalJob extends DriverBackgroundJob {
   terminalAt: number;
   /** True only when the terminal observation arrived outside a provider turn. */
   continuationRequired: boolean;
+  /** Set only on a job the runner ended through `endBackgroundWork`, never on a provider report. */
+  endedByRunner?: true;
 }
+
+/** What `endBackgroundWork` did. `none` means nothing was unfinished once receipts were read. */
+export type DriverBackgroundWorkEndResult =
+  | { status: "ended"; jobs: DriverBackgroundTerminalJob[] }
+  | { status: "none" }
+  | { status: "refused"; reason: "turn_active" | "no_live_process" };
 
 export interface DriverBackgroundWorkUpdate {
   state: "running" | "orphaned" | null;
@@ -272,6 +280,16 @@ export interface Driver {
 
   /** Interrupt the in-flight turn (best-effort). */
   cancel(): void;
+
+  /** How long a queued worktree or account handoff may wait on this provider's unfinished
+   * background work before the runner ends that work (#1778). `0` disables the bound. Drivers that
+   * cannot end background work omit it together with `endBackgroundWork`. */
+  readonly handoffWaitMaxMs?: number;
+
+  /** End every unfinished background job the live provider process owns, between turns. A job
+   * whose receipt shows it already finished is reported as such; every other one is reported as
+   * `killed` with `endedByRunner`, and none of them is left for orphan recovery. */
+  endBackgroundWork?(): Promise<DriverBackgroundWorkEndResult>;
 
   /** Answer a pending permission/approval request surfaced via onEvent. Returns true iff a
    * live ask was answered (the response reached the agent); false = nothing was waiting

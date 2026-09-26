@@ -205,6 +205,7 @@ function scrubInheritedEnv(driver: SessionMeta["driver"]): string[] {
         "WOLLIPOG_CLAUDE_PERSISTENT",
         "WOLLIPOG_CLAUDE_PERSISTENT_IDLE_MS",
         "WOLLIPOG_CLAUDE_PENDING_MAX_MS",
+        "WOLLIPOG_CLAUDE_HANDOFF_WAIT_MAX_MS",
         "MAM_CLAUDE_PERSISTENT",
         "MAM_CLAUDE_PERSISTENT_IDLE_MS",
         "MAM_CLAUDE_PENDING_MAX_MS",
