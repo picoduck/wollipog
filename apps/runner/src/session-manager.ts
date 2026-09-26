@@ -820,8 +820,8 @@ function managedBackgroundWorkState(
 }
 const MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS = 4_096;
 const BACKGROUND_CONTINUATION_DELIVERED_PREFIX = "Managed background continuation delivered: ";
-/** One continuation reports at most this many finished jobs; a larger barrier is delivered over
- * several turns under the same continuation id, so none is marked delivered without being named. */
+/** One continuation reports at most this many finished jobs. A larger barrier is split into several
+ * continuations before submission, so none is marked delivered without being named. */
 const MAX_CONTINUATION_JOBS = 128;
 const RESTART_CONTINUATION_PROMPT =
   "This session was restarted. The conversation that started the background jobs listed below ended with the restart, so their task notifications cannot reach this conversation; Wollipog recorded their results instead. A finished job's output, when listed, is in the named file: read it if the work in front of you needs it. A job the restart ended left no result that can be recovered. Report these results without waiting for another user message.";
@@ -15801,8 +15801,7 @@ export class SessionManager {
       .sort((left, right) => left.continuationQueuedAt! - right.continuationQueuedAt!);
     const continuationId = queued[0]?.continuationId;
     if (!continuationId) return [];
-    return queued.filter((job) => job.continuationId === continuationId).map((job) => job.id)
-      .slice(0, MAX_CONTINUATION_JOBS);
+    return queued.filter((job) => job.continuationId === continuationId).map((job) => job.id);
   }
 
   /** Lifecycle rejection (Stop/delete) must also drop any pending continuation timer: a stale
@@ -15827,7 +15826,7 @@ export class SessionManager {
   private async runBackgroundContinuation(sessionId: string): Promise<void> {
     if (this.shuttingDown || this.backgroundContinuationLaunching.has(sessionId)) return;
     const meta = this.store.readMeta(sessionId);
-    const jobIds = this.queuedBackgroundJobIds(meta);
+    let jobIds = this.queuedBackgroundJobIds(meta);
     if (!meta || meta.status === "stopped" || !automaticClaudeRecoveryAllowed(meta) || jobIds.length === 0) return;
     const entry = this.active.get(sessionId);
     if (this.backgroundRecoveryHeld(meta)) {
@@ -15839,6 +15838,20 @@ export class SessionManager {
         entry?.queue.some((prompt) => prompt.backgroundJobIds?.some((id) => jobIds.includes(id))) ||
         this.preLaunchQueues.get(sessionId)?.some((prompt) =>
           prompt.backgroundJobIds?.some((id) => jobIds.includes(id)))) return;
+    if (jobIds.length > MAX_CONTINUATION_JOBS) {
+      // Move the overflow to its own continuation id before anything is submitted. Delivery proof is
+      // keyed by continuation id (reconcileDeliveredBackgroundContinuations), so jobs sharing an id
+      // with a delivered continuation they were never named in would be counted as delivered.
+      const overflow = new Set(jobIds.slice(MAX_CONTINUATION_JOBS));
+      const overflowId = `bgcont_${randomUUID()}`;
+      const current = this.store.readMeta(sessionId) ?? meta;
+      this.store.patchMeta(sessionId, {
+        backgroundJobs: (current.backgroundJobs ?? []).map((job) => overflow.has(job.id)
+          ? { ...job, continuationId: overflowId }
+          : job),
+      });
+      jobIds = jobIds.slice(0, MAX_CONTINUATION_JOBS);
+    }
     this.backgroundContinuationLaunching.add(sessionId);
     try {
       const selected = (meta.backgroundJobs ?? []).filter((job) => jobIds.includes(job.id));
