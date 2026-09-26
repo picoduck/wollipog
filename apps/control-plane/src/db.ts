@@ -773,6 +773,12 @@ CREATE TABLE IF NOT EXISTS ui_evidence_review_receipts (
   artifact_id         TEXT NOT NULL,
   sha256              TEXT NOT NULL,
   delivered_at        INTEGER NOT NULL,
+  delivery_order      INTEGER,
+  video_source_artifact_id TEXT,
+  video_source_sha256 TEXT,
+  video_manifest_sha256 TEXT,
+  video_frame_index INTEGER,
+  video_frame_pts_ms INTEGER,
   expires_at          INTEGER NOT NULL,
   -- Set only when the reviewer's runner confirms it verified and handed over the bytes. A row
   -- without it records an attempted delivery and supports no approval.
@@ -4430,6 +4436,17 @@ export class ControlPlaneDb {
     // with REPLACE has one.
     db.exec("PRAGMA recursive_triggers = ON;");
     db.exec(SCHEMA);
+    const videoReceiptColumns = new Set((db.prepare("PRAGMA table_info(ui_evidence_review_receipts)")
+      .all() as unknown as Array<{ name: string }>).map((column) => column.name));
+    for (const [name, type] of [
+      ["delivery_order", "INTEGER"], ["video_source_artifact_id", "TEXT"],
+      ["video_source_sha256", "TEXT"], ["video_manifest_sha256", "TEXT"],
+      ["video_frame_index", "INTEGER"], ["video_frame_pts_ms", "INTEGER"],
+    ] as const) {
+      if (!videoReceiptColumns.has(name)) {
+        db.exec(`ALTER TABLE ui_evidence_review_receipts ADD COLUMN ${name} ${type}`);
+      }
+    }
     const reminderColumns = db.prepare("PRAGMA table_info(session_reminders)")
       .all() as unknown as Array<{ name: string }>;
     if (!reminderColumns.some((column) => column.name === "schedule_kind")) {
@@ -15363,22 +15380,36 @@ export class ControlPlaneDb {
     receipt: UiEvidenceReviewReceipt,
     expiresAt: number,
   ): UiEvidenceReviewReceipt {
+    const deliveryOrder = ((this.stmt(
+      "SELECT MAX(delivery_order) AS n FROM ui_evidence_review_receipts WHERE occurrence_id=?",
+    ).get(receipt.occurrenceId) as unknown as { n: number | null }).n ?? 0) + 1;
+    const video = receipt.videoFrame;
     this.stmt(
       `INSERT INTO ui_evidence_review_receipts
        (receipt_id, occurrence_id, reviewer_session_id, child_session_id, policy_revision, evidence_id,
-        artifact_id, sha256, delivered_at, expires_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        artifact_id, sha256, delivered_at, delivery_order, video_source_artifact_id,
+        video_source_sha256, video_manifest_sha256, video_frame_index, video_frame_pts_ms, expires_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(occurrence_id, reviewer_session_id, evidence_id) DO UPDATE SET
          receipt_id=excluded.receipt_id, child_session_id=excluded.child_session_id,
          policy_revision=excluded.policy_revision, artifact_id=excluded.artifact_id,
-         sha256=excluded.sha256, delivered_at=excluded.delivered_at, expires_at=excluded.expires_at,
+         sha256=excluded.sha256, delivered_at=excluded.delivered_at,
+         delivery_order=excluded.delivery_order,
+         video_source_artifact_id=excluded.video_source_artifact_id,
+         video_source_sha256=excluded.video_source_sha256,
+         video_manifest_sha256=excluded.video_manifest_sha256,
+         video_frame_index=excluded.video_frame_index,
+         video_frame_pts_ms=excluded.video_frame_pts_ms,
+         expires_at=excluded.expires_at,
          acknowledged_at=NULL, consumed_at=NULL, revoked_at=NULL`,
     ).run(
       receipt.receiptId, receipt.occurrenceId, receipt.reviewerSessionId, receipt.childSessionId,
       receipt.policyRevision, receipt.evidenceId, receipt.artifactId, receipt.sha256,
-      receipt.deliveredAt, expiresAt,
+      receipt.deliveredAt, video ? deliveryOrder : null, video?.sourceArtifactId ?? null,
+      video?.sourceSha256 ?? null, video?.manifestSha256 ?? null,
+      video?.index ?? null, video?.ptsMs ?? null, expiresAt,
     );
-    return receipt;
+    return video ? { ...receipt, deliveryOrder } : receipt;
   }
 
   /** The runner confirms one exact delivery. Only the current receipt id of a live row matches, so
@@ -15409,6 +15440,9 @@ export class ControlPlaneDb {
     ).all(occurrenceId, reviewerSessionId, now) as unknown as Array<{
       receipt_id: string; occurrence_id: string; reviewer_session_id: string; child_session_id: string;
       policy_revision: number; evidence_id: string; artifact_id: string; sha256: string; delivered_at: number;
+      delivery_order: number | null; video_source_artifact_id: string | null;
+      video_source_sha256: string | null; video_manifest_sha256: string | null;
+      video_frame_index: number | null; video_frame_pts_ms: number | null;
     }>).map((row) => ({
       receiptId: row.receipt_id,
       occurrenceId: row.occurrence_id,
@@ -15419,6 +15453,15 @@ export class ControlPlaneDb {
       artifactId: row.artifact_id,
       sha256: row.sha256,
       deliveredAt: row.delivered_at,
+      ...(row.delivery_order == null ? {} : { deliveryOrder: row.delivery_order }),
+      ...(row.video_source_artifact_id && row.video_source_sha256 && row.video_manifest_sha256 &&
+          row.video_frame_index != null && row.video_frame_pts_ms != null ? { videoFrame: {
+            sourceArtifactId: row.video_source_artifact_id,
+            sourceSha256: row.video_source_sha256,
+            manifestSha256: row.video_manifest_sha256,
+            index: row.video_frame_index,
+            ptsMs: row.video_frame_pts_ms,
+          } } : {}),
     }));
   }
 

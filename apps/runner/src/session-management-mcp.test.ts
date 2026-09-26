@@ -245,6 +245,38 @@ test("review_descendant_ui_evidence returns the verified image and refuses bytes
   assert.equal(calls.length, before + 1, "refused bytes are never acknowledged");
 });
 
+test("ordered video-frame deliveries retain one image and exact source-manifest metadata per call", async () => {
+  const sourceSha256 = "a".repeat(64);
+  const manifestSha256 = "b".repeat(64);
+  const frames = [Buffer.from("frame zero"), Buffer.from("frame one")];
+  const { deps, calls } = makeDeps((call) => {
+    if (call.url.endsWith("/acknowledge")) return { status: 200, body: { acknowledged: true } };
+    const index = call.body && typeof call.body === "object" &&
+      (call.body as { evidenceId?: string }).evidenceId === "frame-1" ? 1 : 0;
+    const bytes = frames[index]!;
+    return { status: 200, body: { receipt: {
+      receiptId: `uireceipt_${index}`, occurrenceId: "workflow_video", reviewerSessionId: SELF_ID,
+      childSessionId: "child", policyRevision: 4, evidenceId: `frame-${index}`,
+      artifactId: `art_frame_${index}`, sha256: createHash("sha256").update(bytes).digest("hex"),
+      deliveredAt: 10 + index, deliveryOrder: index + 1,
+      videoFrame: { sourceArtifactId: "art_source", sourceSha256, manifestSha256,
+        index, ptsMs: index * 250 },
+    }, mimeType: "image/png", sizeBytes: bytes.length, data: bytes.toString("base64") } };
+  });
+  deps.orchestrator = true;
+  for (let index = 0; index < frames.length; index++) {
+    const result = await callTool(deps, "review_descendant_ui_evidence",
+      { sessionId: "child", occurrenceId: "workflow_video", evidenceId: `frame-${index}` });
+    assert.equal(result.isError, undefined);
+    assert.equal(result.content.length, 2, "each call delivers exactly one text block and one image");
+    assert.equal(result.content[1].data, frames[index]!.toString("base64"));
+    assert.equal(resultJson(result).receipt.deliveryOrder, index + 1);
+    assert.deepEqual(resultJson(result).receipt.videoFrame,
+      { sourceArtifactId: "art_source", sourceSha256, manifestSha256, index, ptsMs: index * 250 });
+  }
+  assert.equal(calls.length, 4, "each image is independently fetched and acknowledged");
+});
+
 test("PR merge action admission fails closed against mixed-version control planes", async () => {
   const { deps, calls } = makeDeps();
   deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission - 1;

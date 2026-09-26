@@ -3669,7 +3669,7 @@ app.post("/api/sessions/:id/workflow-decisions", async (req, reply) => {
     return reply.code(403).send({ error: "a matching session credential is required" });
   }
   if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
-  return respond(reply, svc.createWorkflowDecision(
+  return respond(reply, await svc.createWorkflowDecisionWithVideo(
     id,
     req.body as CreateWorkflowDecisionRequest,
     (sessionId) => db.canAccessSession(principal, sessionId),
