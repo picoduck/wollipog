@@ -47,7 +47,7 @@ human-principal requests and do not send an agent-session claim header.
 ```text
 wollipog session list [--archived] --json
 wollipog session get ID --json
-wollipog session events ID [--after SEQ] [--limit COUNT] --json
+wollipog session events ID [--after SEQ [--event-epoch EPOCH]] [--limit COUNT] --json
 wollipog session create --runner ID --agent ID (--workspace ID | --path PATH) [--prompt TEXT] [--model MODEL] [--effort EFFORT] [--cost-budget USD] [--max-tool-calls N] [--max-child-sessions N] --json
 wollipog session prompt ID TEXT --json
 wollipog session wait ID [--for STATE,...] [--timeout MS] [--interval MS] --json
@@ -79,6 +79,9 @@ whose seq is greater than `SEQ`, oldest first. Pass the returned `lastSeq` as th
 falls back to the full read only while the control plane's event cache is still hydrating. If the
 cache still cannot hold the whole log (for example, the runner is offline), the result carries
 `historyIncomplete: true` and a forward page keeps `hasMore` true, so retry later instead of stopping.
+Every result carries `eventEpoch`; pass it back with `--event-epoch` (MCP `eventEpoch`) alongside
+`--after`, and the call fails if the session's history was replaced instead of applying the old
+cursor to the new log.
 
 `wollipog admin` is host administration for an SSH operator on the control-plane machine. It
 authenticates with the control plane's protected local credential over loopback instead of a

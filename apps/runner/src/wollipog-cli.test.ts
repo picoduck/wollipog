@@ -613,6 +613,7 @@ test("CLI session events pages forward with --after and reads the newest events 
   const events = Array.from({ length: 12 }, (_, i) => ({ seq: i + 1, ts: i, payload: { kind: "agent_message", text: `m${i + 1}` } }));
   for (const [argv, pagePath, seqs, lastSeq] of [
     [["--after", "4", "--limit", "2"], "/api/sessions/s_child/events?after=4&limit=2&eventEpoch=3", [5, 6], 6],
+    [["--after", "6", "--event-epoch", "3", "--limit", "2"], "/api/sessions/s_child/events?after=6&limit=2&eventEpoch=3", [7, 8], 8],
     [["--limit", "2"], "/api/sessions/s_child/events?direction=backward&limit=2&eventEpoch=3", [11, 12], 12],
   ] as const) {
     const requests: string[] = [];
@@ -641,8 +642,10 @@ test("CLI session events pages forward with --after and reads the newest events 
       { stdout: (text) => { output += text; }, stderr: () => {} },
       fetch,
     ), 0);
-    assert.equal(requests[2], `http://cp${pagePath}`);
+    assert.equal(requests.at(-1), `http://cp${pagePath}`);
+    assert.equal(requests.includes("http://cp/api/sessions/s_child"), !argv.includes("--event-epoch" as never));
     const data = JSON.parse(output);
+    assert.equal(data.eventEpoch, 3);
     assert.deepEqual(data.lines.map((line: string) => Number(/^\((\d+)\)/.exec(line)![1])), seqs);
     assert.equal(data.lastSeq, lastSeq);
   }

@@ -270,7 +270,15 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       return words[2] ? { tool: "get_session", input: { sessionId: words[2] } } : { error: "session get requires an id" };
     case "events":
       return words[2]
-        ? { tool: "get_session_events", input: { sessionId: words[2], after: numeric(option(args, "--after")), limit: numeric(option(args, "--limit")) } }
+        ? {
+          tool: "get_session_events",
+          input: {
+            sessionId: words[2],
+            after: numeric(option(args, "--after")),
+            limit: numeric(option(args, "--limit")),
+            eventEpoch: numeric(option(args, "--event-epoch")),
+          },
+        }
         : { error: "session events requires an id" };
     case "capabilities": {
       const runnerId = option(args, "--runner");
