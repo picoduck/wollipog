@@ -818,6 +818,32 @@ function managedBackgroundWorkState(
   }
   return jobs.some((job) => !job.terminalStatus) ? "running" : undefined;
 }
+/** Queue a continuation for every parent turn whose jobs have all ended and that still owes one
+ * finished result. Jobs of one barrier share a continuation id. Returns the ids now queued. */
+function queueReadyBackgroundBarriers(byId: ReadonlyMap<string, DurableBackgroundJob>): string[] {
+  const terminalCandidates = [...byId.values()].filter((job) => job.terminalObservedAt &&
+    job.continuationRequired && !job.continuationSubmittedAt && !job.assistantResultPersistedAt);
+  const readyParents = new Set(terminalCandidates.map((job) => job.parentTurnId).filter((parentTurnId) =>
+    ![...byId.values()].some((job) => job.parentTurnId === parentTurnId &&
+      !job.terminalObservedAt && !job.assistantResultPersistedAt)));
+  const queuedJobIds = terminalCandidates
+    .filter((job) => readyParents.has(job.parentTurnId))
+    .map((job) => job.id);
+  if (queuedJobIds.length > 0) {
+    const queuedAt = Date.now();
+    for (const parentTurnId of readyParents) {
+      const barrierJobs = queuedJobIds.map((id) => byId.get(id)!)
+        .filter((job) => job.parentTurnId === parentTurnId);
+      const continuationId = barrierJobs.find((job) => job.continuationId)?.continuationId ??
+        `bgcont_${randomUUID()}`;
+      for (const job of barrierJobs) {
+        job.continuationId = continuationId;
+        job.continuationQueuedAt ??= queuedAt;
+      }
+    }
+  }
+  return queuedJobIds;
+}
 const MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS = 4_096;
 const BACKGROUND_CONTINUATION_DELIVERED_PREFIX = "Managed background continuation delivered: ";
 /** One continuation reports at most this many finished jobs. A larger barrier is split into several
@@ -1296,6 +1322,9 @@ export class SessionManager {
    * provider carries it out later, the job is still that actor's stop. Bounded like the driver's
    * own record, and dropped once the job reports a terminal status. */
   private readonly unconfirmedJobStops = new Map<string, Map<string, BackgroundJobStopActor>>();
+  /** Jobs the model stopped itself during the session's current runner turn (#1855). That turn's
+   * outcome decides whether they are settled or get their continuation back. */
+  private readonly modelStoppedJobs = new Map<string, { turnId: string; jobIds: Set<string> }>();
   private readonly activeTurnAdmitted = new Set<string>();
   private activeTurnRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Parking retirements remain serialized while an exact exit is pending. Once an attempt settles
@@ -12206,6 +12235,7 @@ export class SessionManager {
       if (stop !== "cancelled" && stop !== "refusal") {
         this.finishParentTurnBackgroundJobs(sessionId, queued.id);
       }
+      this.settleModelStoppedJobs(sessionId, queued.id, stop !== "cancelled" && stop !== "refusal");
       if (!this.active.has(sessionId)) {
         durable?.uncertain("session stopped while provider execution was in progress");
         return;
@@ -15532,10 +15562,18 @@ export class SessionManager {
     });
     for (const job of update.terminalJobs ?? []) unconfirmedStops?.delete(job.id);
     if (unconfirmedStops?.size === 0) this.unconfirmedJobStops.delete(sessionId);
+    const activeTurnId = this.active.get(sessionId)?.activeTurnId;
+    const stoppedByModel = (update.terminalJobs ?? []).filter((job) => job.stoppedByModel).map((job) => job.id);
+    if (activeTurnId !== undefined && stoppedByModel.length > 0) {
+      const tracked = this.modelStoppedJobs.get(sessionId);
+      const jobIds = tracked?.turnId === activeTurnId ? tracked.jobIds : new Set<string>();
+      for (const id of stoppedByModel) jobIds.add(id);
+      this.modelStoppedJobs.set(sessionId, { turnId: activeTurnId, jobIds });
+    }
     const { jobs: backgroundJobs, queuedJobIds } = this.mergeDurableBackgroundJobs(
       current,
       update,
-      this.active.get(sessionId)?.activeTurnId,
+      activeTurnId,
       ending ? { actor: ending.actor, reason: ending.reason, endedAt: ending.endedAt } : undefined,
       new Map(confirmedLate.map(({ job, end }) => [job.id, end])),
     );
@@ -15702,32 +15740,15 @@ export class SessionManager {
       durable.continuationRequired = terminal.continuationRequired;
       if (terminal.endedByRunner && end) durable.endedBy = end;
       else if (lateStops.has(terminal.id)) durable.endedBy = lateStops.get(terminal.id);
-      // The model stopped the job itself, so the result is already in its conversation. The job is
-      // settled now: its launching turn may have ended long ago and will not settle it (#1855).
-      if (terminal.stoppedByModel) durable.assistantResultPersistedAt ??= terminal.terminalAt;
-    }
-
-    const terminalCandidates = [...byId.values()].filter((job) => job.terminalObservedAt &&
-      job.continuationRequired && !job.continuationSubmittedAt && !job.assistantResultPersistedAt);
-    const readyParents = new Set(terminalCandidates.map((job) => job.parentTurnId).filter((parentTurnId) =>
-      ![...byId.values()].some((job) => job.parentTurnId === parentTurnId &&
-        !job.terminalObservedAt && !job.assistantResultPersistedAt)));
-    const queuedJobIds = terminalCandidates
-      .filter((job) => readyParents.has(job.parentTurnId))
-      .map((job) => job.id);
-    if (queuedJobIds.length > 0) {
-      const queuedAt = Date.now();
-      for (const parentTurnId of readyParents) {
-        const barrierJobs = queuedJobIds.map((id) => byId.get(id)!)
-          .filter((job) => job.parentTurnId === parentTurnId);
-        const continuationId = barrierJobs.find((job) => job.continuationId)?.continuationId ??
-          `bgcont_${randomUUID()}`;
-        for (const job of barrierJobs) {
-          job.continuationId = continuationId;
-          job.continuationQueuedAt ??= queuedAt;
-        }
+      // The model stopped the job itself, so the result is already in its conversation (#1855). Its
+      // launching turn may have ended long ago and will not settle it. The runner turn it was stopped
+      // in settles it when that turn completes (settleModelStoppedJobs); with none, it settles now.
+      if (terminal.stoppedByModel && activeTurnId === undefined) {
+        durable.assistantResultPersistedAt ??= terminal.terminalAt;
       }
     }
+
+    const queuedJobIds = queueReadyBackgroundBarriers(byId);
     const all = [...byId.values()].sort((left, right) => left.registeredAt - right.registeredAt);
     // A job Wollipog ended has nothing left to deliver and never gets a delivery receipt, so it is
     // retained like a delivered one rather than growing the unresolved set without bound (#1778).
@@ -16202,6 +16223,36 @@ export class SessionManager {
       return { ...job, assistantResultPersistedAt: persistedAt };
     });
     if (changed) this.store.patchMeta(sessionId, { backgroundJobs });
+  }
+
+  /** A job the model stopped itself during a runner turn needs no continuation once that turn
+   * completes: it is settled like a job the turn launched (#1855). If the turn was cancelled or
+   * failed, the model may never have seen its stop succeed, so the job gets back the continuation
+   * it would otherwise have had, with its launching turn's barrier. */
+  private settleModelStoppedJobs(sessionId: string, turnId: string, completed: boolean): void {
+    const tracked = this.modelStoppedJobs.get(sessionId);
+    if (tracked?.turnId !== turnId) return;
+    this.modelStoppedJobs.delete(sessionId);
+    const current = this.store.readMeta(sessionId);
+    if (!current?.backgroundJobs) return;
+    const persistedAt = Date.now();
+    const byId = new Map(current.backgroundJobs.map((job) => [job.id, { ...job }]));
+    let changed = false;
+    for (const job of byId.values()) {
+      if (!tracked.jobIds.has(job.id) || job.continuationRequired || job.assistantResultPersistedAt !== undefined) continue;
+      if (completed) job.assistantResultPersistedAt = persistedAt;
+      else job.continuationRequired = true;
+      changed = true;
+    }
+    if (!changed) return;
+    const queuedJobIds = completed ? [] : queueReadyBackgroundBarriers(byId);
+    const backgroundJobs = [...byId.values()];
+    const updated = this.store.patchMeta(sessionId, {
+      backgroundJobs,
+      ...(completed ? {} : { backgroundWorkState: managedBackgroundWorkState(backgroundJobs) }),
+    });
+    if (updated && !completed) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    if (queuedJobIds.length > 0) this.scheduleBackgroundContinuation(sessionId);
   }
 
   /** Automatic background work must not turn a restart into new spending authority. */

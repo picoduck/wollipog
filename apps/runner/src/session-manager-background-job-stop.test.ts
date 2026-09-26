@@ -59,7 +59,11 @@ interface ProviderProcess {
  * the named job, reports it killed and runner-ended with the rest still running, and keeps the
  * process. `endBackgroundWork` is present but must never be called by a stop.
  */
-function fakeProvider(options: { canStop?: boolean; onPrompt?: (provider: ProviderProcess, text: string) => void } = {}) {
+function fakeProvider(options: {
+  canStop?: boolean;
+  onPrompt?: (provider: ProviderProcess, text: string) => void;
+  stopReason?: (text: string) => "end_turn" | "cancelled" | "refusal";
+} = {}) {
   const providers: ProviderProcess[] = [];
   const prompts: Array<{ cwd: string; text: string }> = [];
   const live = new Map<string, DriverBackgroundJob>();
@@ -110,6 +114,8 @@ function fakeProvider(options: { canStop?: boolean; onPrompt?: (provider: Provid
         prompts.push({ cwd: launch.cwd, text });
         cb.onPromptAccepted?.();
         options.onPrompt?.(provider, text);
+        const reason = options.stopReason?.(text) ?? "end_turn";
+        if (reason !== "end_turn") return reason;
         cb.onEvent({ kind: "agent_message", text: `answer to: ${text.slice(0, 40)}`, final: true });
         return "end_turn" as const;
       },
@@ -535,6 +541,53 @@ test("a lone job the model stops in a later turn starts no continuation turn and
       "the job is settled rather than left among unresolved jobs");
     assert.equal(store.readEvents(spec.sessionId)
       .some((event) => event.payload.kind === "background_continuation_delivered"), false);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a model stop whose turn is cancelled keeps the job's continuation (#1855)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-job-model-stop-cancelled-"));
+  let manager: SessionManager | undefined;
+  try {
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    let onPrompt: (provider: ProviderProcess, text: string) => void = () => {};
+    const fake = fakeProvider({
+      onPrompt: (provider, text) => onPrompt(provider, text),
+      stopReason: (text) => text === "stop the monitor" ? "cancelled" : "end_turn",
+    });
+    onPrompt = (provider, text) => {
+      if (text === "watch CI") {
+        fake.live.set("monitor-1", { id: "monitor-1", launchType: "monitor", startedAt: Date.now() });
+        fake.report(provider);
+      } else if (text === "stop the monitor") {
+        const monitor = fake.live.get("monitor-1")!;
+        fake.live.delete("monitor-1");
+        fake.report(provider, [{
+          ...monitor, status: "killed", terminalAt: Date.now(), continuationRequired: false, stoppedByModel: true,
+        }]);
+      }
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_job_model_stop_cancelled", root);
+    await manager.start(spec);
+
+    manager.prompt(spec.sessionId, "watch CI");
+    await waitFor(() => fake.prompts.length === 1 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the launching turn did not finish");
+    // The stopping turn ends without completing, so the model may never have seen its stop succeed.
+    manager.prompt(spec.sessionId, "stop the monitor");
+    const monitor = () => store.readMeta(spec.sessionId)?.backgroundJobs?.find((job) => job.id === "monitor-1");
+    await waitFor(() => monitor()?.continuationQueuedAt !== undefined,
+      "the stopped job's continuation was not restored");
+    // It is queued with its launching turn's barrier, exactly as before #1855, and is not settled.
+    assert.equal(monitor()?.terminalStatus, "killed");
+    assert.equal(monitor()?.continuationRequired, true);
+    assert.ok(monitor()?.continuationId);
+    assert.equal(monitor()?.assistantResultPersistedAt, undefined);
+    assert.equal(store.readMeta(spec.sessionId)?.backgroundWorkState, "continuation_pending");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
