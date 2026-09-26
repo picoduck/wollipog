@@ -99,6 +99,25 @@ for (const viewport of [
   });
 }
 
+test("the inline approval card shows a blocked item's reviewed checkbox as disabled", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await page.goto("/request-surfaces-e2e.html?scenario=legacy&items=3&artifacts=unavailable");
+  const card = page.locator(".approval-evidence");
+  const blocked = card.getByRole("checkbox", { name: "Mark viewport-2 as Reviewed" });
+  const open = card.getByRole("checkbox", { name: "Mark viewport-1 as Reviewed" });
+  await expect(card.getByRole("img", { name: "Evidence: viewport-1" })).toBeVisible();
+  await expect(blocked).toBeDisabled();
+  const styles = (checkbox: Locator) => checkbox.evaluate((input) => {
+    const label = getComputedStyle(input.closest("label")!);
+    return { label: label.cursor, opacity: label.opacity, checkbox: getComputedStyle(input).cursor };
+  });
+  expect(await styles(blocked)).toEqual({ label: "not-allowed", opacity: "0.6", checkbox: "not-allowed" });
+  // An enabled item is untouched: no disabled cursor or dimming leaks onto it.
+  expect(await styles(open)).toEqual({ label: "default", opacity: "1", checkbox: "default" });
+  await open.check();
+  await expect(open).toBeChecked();
+});
+
 test("an artifact that matches its digest but cannot be drawn is never shown and cannot be marked reviewed", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openReview(page, "items=3&artifacts=undecodable");
