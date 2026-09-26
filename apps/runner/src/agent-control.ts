@@ -127,22 +127,27 @@ const agentControlMemory = new Map<string, AgentControlMemoryState>();
  * for the rest of the provider's life (#1841), so the runner re-sends these until answered. */
 const unacknowledgedRegistrations = new Map<string, { tokenHash: string; sentAt: number }>();
 
-/** Registration frames of each session's current hash that the control plane has not answered on
- * the current socket. It answers every frame, in order, on the socket that carried it, so when a
- * relaunch re-arms the fence with the same hash, the next `stale` answers belong to frames sent
- * before it. Re-sending makes such duplicate answers routine; counting them keeps a late answer
- * to an earlier frame from opening the new fence. */
+/** Registration frames of each session's current hash, keyed from provisioning, that the control
+ * plane has not answered on the current socket. It answers every frame, in order, on the socket
+ * that carried it, so when a relaunch re-arms the fence with the same hash, the next `stale`
+ * answers belong to frames sent before it. Re-sending makes such duplicate answers routine;
+ * counting them keeps a late answer to an earlier frame from opening the new fence. */
 const registrationAnswers = new Map<string, { tokenHash: string; unanswered: number; stale: number }>();
 
-function noteRegistrationSent(sessionId: string, tokenHash: string): void {
+/** Count one registration frame written to the current control-plane socket. Only the socket
+ * write counts: a frame still buffered for a later socket is counted when that socket carries it. */
+export function noteAgentControlRegistrationSent(sessionId: string, tokenHash: string): void {
   const answers = registrationAnswers.get(sessionId);
+  // A superseded hash's answer is discarded by hash alone, so its frames need no count.
   if (answers?.tokenHash === tokenHash) answers.unanswered++;
-  else registrationAnswers.set(sessionId, { tokenHash, unanswered: 1, stale: 0 });
 }
 
 /** The control-plane socket closed: no answer to a frame it carried can arrive any more. */
 export function forgetAgentControlRegistrationAnswers(): void {
-  registrationAnswers.clear();
+  for (const answers of registrationAnswers.values()) {
+    answers.unanswered = 0;
+    answers.stale = 0;
+  }
 }
 
 /** Current unacknowledged registrations last sent at least `minAgeMs` ago, each marked as sent
@@ -155,7 +160,6 @@ export function agentControlRegistrationsToResend(
   for (const [sessionId, registration] of unacknowledgedRegistrations) {
     if (now - registration.sentAt < minAgeMs) continue;
     registration.sentAt = now;
-    noteRegistrationSent(sessionId, registration.tokenHash);
     due.push({ sessionId, tokenHash: registration.tokenHash });
   }
   return due;
@@ -614,10 +618,7 @@ export function provisionAgentControl(
   unacknowledgedRegistrations.set(spec.sessionId, { tokenHash, sentAt: Date.now() });
   const answers = registrationAnswers.get(spec.sessionId);
   if (answers?.tokenHash === tokenHash) answers.stale = answers.unanswered;
-  else registrationAnswers.delete(spec.sessionId);
-  if (config.registerCredential || (wslOrchestrator && config.registerCredentialAndWait)) {
-    noteRegistrationSent(spec.sessionId, tokenHash);
-  }
+  else registrationAnswers.set(spec.sessionId, { tokenHash, unanswered: 0, stale: 0 });
   const credentialRegistration = wslOrchestrator && config.registerCredentialAndWait
     ? config.registerCredentialAndWait(spec.sessionId, tokenHash)
     : (config.registerCredential?.(spec.sessionId, tokenHash), undefined);

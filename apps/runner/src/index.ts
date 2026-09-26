@@ -111,6 +111,7 @@ import {
   defaultAgentControlHost,
   forgetAgentControlRegistrationAnswers,
   isStaleAgentControlAnswer,
+  noteAgentControlRegistrationSent,
   markAgentControlCredentialReady,
   markAgentControlCredentialRejected,
   provisionAgentControl,
@@ -1220,6 +1221,7 @@ function sendUp(msg: RunnerToControlPlane): void {
     if (!projected) return;
     try {
       ws.send(JSON.stringify(projected));
+      noteSentRegistration(projected);
     } catch (error) {
       if (ephemeral) return;
       outbox.enqueue(msg);
@@ -1231,13 +1233,24 @@ function sendUp(msg: RunnerToControlPlane): void {
   outbox.enqueue(msg);
 }
 
+/** Agent Control answers are matched to registration frames by order on the socket that carried
+ * them (#1841), so a frame counts once it is written, never while it waits in the outbox. */
+function noteSentRegistration(message: RunnerToControlPlane): void {
+  if (message.type === "agent_control_credential") {
+    noteAgentControlRegistrationSent(message.sessionId, message.tokenHash);
+  }
+}
+
 function flushOutbox(): void {
   if (!ws || ws.readyState !== WebSocket.OPEN || !registered) return;
   const socket = ws;
   flushProjectedOutbox(
     outbox,
     projectMessageForCurrentProtocol,
-    (message) => socket.send(JSON.stringify(message)),
+    (message) => {
+      socket.send(JSON.stringify(message));
+      noteSentRegistration(message);
+    },
     (error, message) => log(`dropping ${message.type}: wire projection failed (${errText(error)})`),
     (error, message) => log(`retaining ${message.type}: socket send failed (${errText(error)})`),
   );
