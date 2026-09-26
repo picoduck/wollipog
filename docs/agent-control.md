@@ -796,13 +796,19 @@ with no pending request. Before, its decision resume was dropped and nothing tol
   superseded, is abandoned. Revocation or supersession also withdraws a resume still waiting in the
   outbox. One already handed to the runner cannot be recalled, but its text defers to the decision
   record, which now says revoked. Settling the card leaves a recovering child's status as the
-  runner reported it, instead of marking it running or idle; a child whose runner is offline is
-  restored to idle with the resume still owed, and an offline runner is not shown as a hold, since
-  the runner's own status already says so. A resume refused behind a cost-budget or policy-hook
-  card is recorded `failed` and not retried: the outcome, and any message, stay on the decision
-  record for the child to read once the human resolves the card. Older runners keep the ordinary
-  prompt path. A resume held before its runner downgraded is settled on that path rather than held
-  on a recovery record the older runner never clears.
+  runner reported it, instead of marking it running or idle. A runner disconnect provisionally
+  stops every session it hosted, and reconnect hydration restores them; a child that reads
+  `stopped` while its decision is still pending was stopped that way, so resolving the decision is
+  accepted and its resume waits, still owed, for hydration to restore the child. The registration
+  sweep that precedes hydration leaves it alone. An offline runner is not shown as a hold, since the
+  runner's own status already says so. Every authoritative end of a child — a runner-reported
+  terminal status, a session the runner no longer holds at reconnect, an explicit Stop or restart,
+  a guardrail Stop — revokes its unconsumed decisions and abandons every resume it still owed, so
+  an ended child is never resumed. A resume refused behind a cost-budget or policy-hook card is
+  recorded `failed` and not retried: the outcome, and any message, stay on the decision record for
+  the child to read once the human resolves the card. Older runners keep the ordinary prompt path.
+  A resume held before its runner downgraded is settled on that path rather than held on a recovery
+  record the older runner never clears.
 - **The parent sees the hold.** A session's `holds` list what keeps its next turn from starting,
   with a stable `holdId`, a reason, the `recoveryAction` that clears it, and any `heldResumes`.
   MCP `get_session` returns them together with `worktreeRecovery`. `list_descendant_requests` lists

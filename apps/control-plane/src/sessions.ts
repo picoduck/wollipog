@@ -6704,7 +6704,8 @@ export class SessionsService {
     const currentChild = this.db.getSession(childSessionId);
     const currentParent = this.db.getSession(parentSessionId);
     const currentPolicy = currentParent?.parentControlPolicy;
-    if (!currentChild || !currentParent || isTerminal(currentChild.status) || isTerminal(currentParent.status) ||
+    if (!currentChild || !currentParent || this.workflowDecisionChildEnded(currentChild) ||
+        isTerminal(currentParent.status) ||
         !currentPolicy || currentPolicy.revision !== decision.policyRevision ||
         !this.workflowDecisionAuthorityCurrent(currentParent, currentPolicy, decision)) {
       this.revokeWorkflowDecision(decision, actor);
@@ -7506,6 +7507,18 @@ export class SessionsService {
     }
   }
 
+  /**
+   * Whether a decision's child has ended for good. A runner disconnect provisionally stops every
+   * session it hosted (`failRunnerSessions`), and reconnect hydration restores them; every
+   * authoritative end instead revokes the child's unconsumed decisions, so a child that reads
+   * `stopped` while its decision is still pending was stopped provisionally. Resolving such a
+   * decision owes the resume for the runner's return rather than refusing the resolution (#1759).
+   */
+  private workflowDecisionChildEnded(child: SessionView): boolean {
+    return isTerminal(child.status) &&
+      !(child.status === "stopped" && !this.db.hasSessionStopIntent(child.id));
+  }
+
   /** Whether a resolution's resume is recorded as owed by the resolving write itself (#1759).
    * Only a runner that reports exact not-sent receipts carries the resume on the durable lane;
    * an older runner keeps the ordinary prompt, which has no state to record. */
@@ -7586,12 +7599,14 @@ export class SessionsService {
       this.hub.sessionChangedById(child.id);
       return true;
     }
-    // A runner that is away cannot take the prompt, and nothing retries a refused one. Keep the
-    // resume owed instead: the runner's return — its registration sweep, its hydration, or the
-    // next maintenance pass — is the boundary that delivers it once (#1759).
-    if (!this.hub.isRunnerOnline(child.runnerId)) {
+    // A runner that is away cannot take the prompt, and nothing retries a refused one; a child its
+    // disconnect provisionally stopped is the same case with the status already written. Keep the
+    // resume owed instead: the runner's return — its hydration restoring the child, or the next
+    // maintenance pass — is the boundary that delivers it once (#1759).
+    if (!this.hub.isRunnerOnline(child.runnerId) || isTerminal(child.status)) {
       if (from !== "held") this.db.setWorkflowDecisionResume(decision.occurrenceId, "held", null, now);
-      this.log.info(`workflow decision ${decision.occurrenceId} resume held for ${child.id}: runner ${child.runnerId} is offline`);
+      this.log.info(`workflow decision ${decision.occurrenceId} resume held for ${child.id}: ${
+        this.hub.isRunnerOnline(child.runnerId) ? `child is ${child.status}` : `runner ${child.runnerId} is offline`}`);
       return false;
     }
     let staged: SessionPromptCommandRecord | null = null;
@@ -7679,14 +7694,17 @@ export class SessionsService {
       const decision = this.db.workflowDecisionByOccurrence(resume.occurrenceId);
       // Each delivery can move the child, so the next resume reads it again.
       const child = this.db.getSession(sessionId);
-      // A stopped child, or a decision revoked or superseded meanwhile, has nothing to resume.
-      if (!child || isTerminal(child.status) || !decision ||
-          !["approved", "denied", "consumed"].includes(decision.status)) {
+      // A decision revoked or superseded meanwhile has nothing to announce.
+      if (!child || !decision || !["approved", "denied", "consumed"].includes(decision.status)) {
         this.db.setWorkflowDecisionResume(resume.occurrenceId, "abandoned", null, now);
         continue;
       }
-      // Keep it held while the runner is away; its reconnect is another boundary that retries.
-      if (!this.hub.isRunnerOnline(child.runnerId)) return;
+      // A child that reads terminal while it still owes a resolved decision's resume was stopped
+      // provisionally by a runner disconnect: every authoritative end abandons the resumes a child
+      // owed (revokeUnconsumedWorkflowDecisionsForSession), so none is left here. Reconnect
+      // hydration restores the child and is the boundary that delivers; the registration sweep
+      // that precedes it, and a runner that is away, leave the resume waiting (#1759).
+      if (isTerminal(child.status) || !this.hub.isRunnerOnline(child.runnerId)) return;
       // A resolution recorded just before a stop still has its card on the child (#1759): settle
       // the card now, exactly as the resolving call would have, and the resume goes out through it.
       if (pendingRequests(child.pendingApproval).some((request) => request.requestId === resume.occurrenceId)) {
@@ -7723,6 +7741,9 @@ export class SessionsService {
     this.db.updateSessionStatus(sessionId, "input_required", Date.now());
   }
 
+  /** Every authoritative end of a child calls this: revocation retires the resumes of its pending
+   * and approved decisions, and any resume still owed for a denied or consumed one is abandoned
+   * with them, so only a provisional disconnect stop leaves a resume held (#1759). */
   private revokeUnconsumedWorkflowDecisionsForSession(sessionId: string, actorId: string): void {
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
@@ -7730,6 +7751,7 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { kind: "system", id: actorId });
       if (settle) void this.settleArmedMergeFromForge(child!, decision);
     }
+    this.db.abandonHeldWorkflowDecisionResumes(sessionId, Date.now());
   }
 
   /** A Claude Code child's armed enqueue never produces a permission receipt in auto or Full Access
@@ -11590,6 +11612,7 @@ export class SessionsService {
       const existing = this.db.getSession(snap.id);
       if (!existing || existing.runnerId !== runnerId || !isTerminal(existing.status) ||
           this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
+          this.db.heldWorkflowDecisionResumes(snap.id).length > 0 ||
           this.db.listOpenPolicyHookApprovals(snap.id).length > 0 ||
           this.db.policyResumeStatus(snap.id) !== null) return [];
       return [{ snap, snapshotIndex, campaignBefore: this.campaignAttentionController(existing) }];
@@ -11676,6 +11699,14 @@ export class SessionsService {
       this.deliverHeldWorkflowDecisionResumes(snap.id, now);
       this.hub.sessionChangedById(snap.id);
       this.publishCampaignAttentionTransition(campaignBefore);
+    }
+    // A session a disconnect stopped provisionally, and that the runner no longer holds, has ended
+    // for good: nothing will restore it, so its decisions are revoked and it owes no resume (#1759).
+    for (const sessionId of this.db.sessionsWithHeldWorkflowDecisionResumes(runnerId)) {
+      const status = this.db.getSession(sessionId)?.status;
+      if (!byId.has(sessionId) && status && isTerminal(status)) {
+        this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "provider-session-absent");
+      }
     }
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !byId.has(s.id)) {

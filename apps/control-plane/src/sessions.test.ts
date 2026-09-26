@@ -20814,8 +20814,14 @@ function worktreeRecoveryCampaign(protocolVersion = PROTOCOL_VERSION) {
   const resumeState = (occurrenceId: string) => (db.raw().prepare(
     "SELECT resume_state FROM workflow_decisions WHERE occurrence_id=?",
   ).get(occurrenceId) as { resume_state: string | null }).resume_state;
+  /** Host the Orchestrator on another runner, so a disconnect of the child's runner stops only
+   * the child, as in a campaign whose parent and children run on different machines. */
+  const parentOnOtherRunner = () => {
+    db.registerRunner({ ...runnerMeta(), runnerId: "other-runner" }, Date.now(), PROTOCOL_VERSION);
+    db.raw().prepare("UPDATE sessions SET runner_id='other-runner' WHERE id=?").run(root.id);
+  };
   return { ...harness, root, child, recovery, worktreePath, requestMerge, approve, runnerReports, resolutionPrompts,
-    receipt, resumeState };
+    receipt, resumeState, parentOnOtherRunner };
 }
 
 test("an approved decision for a child whose worktree branch was switched is delivered exactly once after recovery (#1650)", () => {
@@ -21353,18 +21359,26 @@ test("a resume the runner refuses returns the child to idle rather than leaving 
 
 test("a decision resolved while the child's runner is offline is delivered exactly once after the runner reconnects (#1759)", () => {
   const f = worktreeRecoveryCampaign();
-  const { db, svc, root, child } = f;
+  const { db, svc, child } = f;
   try {
     // The child asked for a merge and ended its turn behind the card; then its runner went away.
+    // A disconnect detaches the runner and provisionally stops every session it hosted, in one
+    // step, so an offline child always reads stopped. The Orchestrator lives elsewhere.
+    f.parentOnOtherRunner();
     const merge = f.requestMerge(1759);
     svc.onSessionStatus(child.id, "idle");
     assert.equal(db.getSession(child.id)?.status, "input_required");
     f.hub.online = false;
+    svc.failRunnerSessions(RUNNER_ID);
+    assert.equal(db.getSession(child.id)?.status, "stopped", "provisionally stopped by the disconnect");
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "pending", "a provisional stop revokes nothing");
+
+    // Resolving is accepted: the child has not ended, it is unreachable.
     f.approve(merge.occurrenceId);
     assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "approved");
     assert.equal(f.resumeState(merge.occurrenceId), "held", "the resume is owed, not failed");
     assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0, "nothing can reach an offline runner");
-    assert.equal(db.getSession(child.id)?.status, "idle", "the child is as idle as it was behind the card");
+    assert.equal(db.getSession(child.id)?.status, "stopped", "settling the card leaves the disconnect's status alone");
     assert.equal(db.getSession(child.id)?.pendingApproval ?? null, null, "the resolved card is settled");
     assert.equal(db.getSession(child.id)?.holds, undefined, "an offline runner is not a hold on the child");
 
@@ -21375,18 +21389,26 @@ test("a decision resolved while the child's runner is offline is delivered exact
     assert.equal(f.resumeState(merge.occurrenceId), "held");
 
     // The runner registers again. Registration runs the prompt sweep for that runner before it
-    // hydrates the runner's snapshots; the sweep is the first boundary that can deliver, and does.
+    // hydrates the runner's snapshots, while the child still reads stopped: the sweep must keep
+    // the resume, not abandon it.
     f.hub.online = true;
     svc.retryDuePrompts(Date.now() + 15_000, RUNNER_ID);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0, "nothing is sent into a provisionally stopped child");
+    assert.equal(f.resumeState(merge.occurrenceId), "held", "the registration sweep keeps the resume for hydration");
+
+    // Hydration restores the child from the runner's snapshot and delivers the resume once.
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    })]);
     const [resume] = f.resolutionPrompts(merge.occurrenceId);
     assert.ok(resume, "the resolution goes out once the runner is back");
     assert.equal(f.resumeState(merge.occurrenceId), "delivering");
     assert.equal(db.getSession(child.id)?.status, "queued", "admitted, not yet started (#1651)");
 
-    // Hydration and every later sweep find nothing owed.
-    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+    // Every later boundary finds nothing owed.
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
       id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
-    }), snapshot({ id: root.id, title: root.title, status: "running", useWorktree: false, worktreePath: null })]);
+    }));
     svc.retryDuePrompts(Date.now() + 20_000);
     svc.retryDuePrompts(Date.now() + 25_000, RUNNER_ID);
     assert.equal(new Set(f.resolutionPrompts(merge.occurrenceId).map((message) => message.commandId)).size, 1,
@@ -21397,6 +21419,84 @@ test("a decision resolved while the child's runner is offline is delivered exact
     assert.equal(f.resumeState(merge.occurrenceId), "delivered");
     svc.retryDuePrompts(Date.now() + 30_000);
     assert.equal(new Set(f.resolutionPrompts(merge.occurrenceId).map((message) => message.commandId)).size, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("a runner disconnect after a resolution keeps the owed resume until reconnect hydration, and an ended child owes nothing (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child, recovery } = f;
+  const disconnect = () => { f.hub.online = false; svc.failRunnerSessions(RUNNER_ID); };
+  const register = (offset: number) => { f.hub.online = true; svc.retryDuePrompts(Date.now() + offset, RUNNER_ID); };
+  const hydrate = (status: SessionStatus, worktreeRecovery: typeof recovery | null = null) =>
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status, worktreePath: f.worktreePath, worktreeRecovery,
+    })]);
+  try {
+    f.parentOnOtherRunner();
+    // Held for worktree recovery when the runner drops: the registration sweep runs against a
+    // provisionally stopped child and must not abandon the resume; hydration clears the recovery
+    // and delivers it once.
+    const recovering = f.requestMerge(1766);
+    svc.onSessionStatus(child.id, "idle");
+    f.runnerReports(recovery, "input_required");
+    f.approve(recovering.occurrenceId);
+    assert.equal(f.resumeState(recovering.occurrenceId), "held");
+    disconnect();
+    assert.equal(db.getSession(child.id)?.status, "stopped");
+    register(1_000);
+    assert.equal(f.resumeState(recovering.occurrenceId), "held", "a provisional stop is not an end");
+    assert.equal(f.resolutionPrompts(recovering.occurrenceId).length, 0);
+    hydrate("idle");
+    assert.equal(f.resolutionPrompts(recovering.occurrenceId).length, 1, "hydration restores the child and delivers once");
+    assert.equal(f.resumeState(recovering.occurrenceId), "delivering");
+    register(2_000);
+    assert.equal(new Set(f.resolutionPrompts(recovering.occurrenceId).map((message) => message.commandId)).size, 1);
+
+    // The runner comes back without the child: it has ended for good, so the decision is revoked
+    // and nothing is owed.
+    const absent = f.requestMerge(1767);
+    svc.onSessionStatus(child.id, "idle");
+    disconnect();
+    f.approve(absent.occurrenceId);
+    assert.equal(f.resumeState(absent.occurrenceId), "held");
+    f.hub.online = true;
+    svc.hydrateRunnerSessions(RUNNER_ID, []);
+    assert.equal(db.getSession(child.id)?.status, "stopped");
+    assert.equal(db.workflowDecisionByOccurrence(absent.occurrenceId)?.status, "revoked");
+    assert.equal(f.resumeState(absent.occurrenceId), "abandoned");
+    svc.retryDuePrompts(Date.now() + 3_000, RUNNER_ID);
+    assert.equal(f.resolutionPrompts(absent.occurrenceId).length, 0, "an ended child is never resumed");
+  } finally {
+    db.close();
+  }
+});
+
+test("a runner that reports the child ended abandons the resume owed for a denied decision (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  try {
+    f.parentOnOtherRunner();
+    // Denied while the runner is away; revocation never touches a denied decision, so the
+    // authoritative end must retire its resume itself.
+    const denied = f.requestMerge(1768);
+    svc.onSessionStatus(child.id, "idle");
+    f.hub.online = false;
+    svc.failRunnerSessions(RUNNER_ID);
+    assert.ok(svc.resolveDescendantRequest(root.id, child.id, denied.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", childMessage: "Not this head." }, () => true).ok);
+    assert.equal(f.resumeState(denied.occurrenceId), "held");
+    f.hub.online = true;
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "completed", worktreePath: f.worktreePath, worktreeRecovery: null,
+    })]);
+    assert.equal(db.getSession(child.id)?.status, "completed");
+    assert.equal(db.workflowDecisionByOccurrence(denied.occurrenceId)?.status, "denied", "the record keeps the outcome");
+    assert.equal(f.resumeState(denied.occurrenceId), "abandoned");
+    svc.retryDuePrompts(Date.now() + 5_000, RUNNER_ID);
+    assert.equal(f.resolutionPrompts(denied.occurrenceId).length, 0);
+    assert.deepEqual(db.sessionsWithHeldWorkflowDecisionResumes(RUNNER_ID), [], "nothing stays owed to an ended child");
   } finally {
     db.close();
   }

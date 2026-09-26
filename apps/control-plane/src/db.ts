@@ -15215,6 +15215,16 @@ export class ControlPlaneDb {
       }));
   }
 
+  /** Abandon every resume still owed to a session that has ended for good (#1759). Revocation
+   * retires the resumes of its pending and approved decisions; this covers a denied or consumed
+   * one, and is a no-op for the common case. */
+  abandonHeldWorkflowDecisionResumes(sessionId: string, now: number): number {
+    return Number(this.stmt(
+      `UPDATE workflow_decisions SET resume_state='abandoned', resume_command_id=NULL, resume_updated_at=?
+       WHERE session_id=? AND resume_state='held'`,
+    ).run(now, sessionId).changes);
+  }
+
   sessionsWithHeldWorkflowDecisionResumes(runnerId?: string): string[] {
     return (this.stmt(
       `SELECT DISTINCT d.session_id AS id FROM workflow_decisions d JOIN sessions s ON s.id=d.session_id
