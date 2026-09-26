@@ -476,8 +476,9 @@ The lifetime policy is quiescence-aware and fail-safe:
   when an earlier turn launched it (#1855). It is settled when that runner turn completes, or at
   once in a provider-initiated turn. It is not named in its siblings' continuation, and it never
   starts an automatic turn of its own. If the runner turn is cancelled or fails, the model may never
-  have seen its stop succeed, so the job gets its continuation back with its launching turn's
-  barrier. A call that a cancelled or failed turn left without a result still ends the job, but it
+  have seen its stop succeed, so the job gets its continuation back. It still waits for any
+  unfinished sibling from its launching turn, and it gets a continuation id of its own, because a
+  sibling's continuation may already be queued without it. A call that a cancelled or failed turn left without a result still ends the job, but it
   keeps the ordinary continuation rule.
 - Eviction and runner-shutdown stops send EOF first and allow five seconds for a clean exit before
   `killTree` reaps the remaining native or WSL process group; explicit Stop and cancellation kill
