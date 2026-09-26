@@ -5,6 +5,22 @@ import { expect, test } from "@playwright/test";
 const imagePath = fileURLToPath(new URL("../public/icons/icon-512.png", import.meta.url));
 const videoPath = fileURLToPath(new URL("./fixtures/inline-media.webm", import.meta.url));
 
+test("runner history replay returns a retained attachment to its conversation position", async ({ page }) => {
+  const imageBody = await readFile(fileURLToPath(new URL("../public/icons/icon-192.png", import.meta.url)));
+  await page.route("**/api/artifacts/replay-proof/export", (route) =>
+    route.fulfill({ status: 200, contentType: "image/png", body: imageBody }));
+  await page.goto("/inline-media-e2e.html?attachmentReplay=1");
+  await expect(page.locator("[data-virtual-key='item:artifact_attached:1']")).toBeVisible();
+  await page.getByRole("button", { name: "Replay Runner History" }).click();
+  await expect(page.locator("[data-virtual-key='item:user_message:3']")).toBeVisible();
+  const rows = await page.locator("[data-virtual-key^='item:']").evaluateAll((elements) =>
+    elements.map((element) => element.getAttribute("data-virtual-key")));
+  expect(rows).toEqual([
+    "item:user_message:2", "item:artifact_attached:1", "item:user_message:3",
+  ]);
+  await expect(page.getByText("proof.png")).toHaveCount(1);
+});
+
 test("HTTPS transcript media embeds resize virtual rows and failed media leaves its link", async ({ page }) => {
   let releaseImage!: () => void;
   let imageRequests = 0;

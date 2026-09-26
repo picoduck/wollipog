@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import fc from "fast-check";
 import { AGENT_SPAWN_OBSERVATION_CAP } from "@wollipog/protocol";
 import type { EventPayloadReference, SessionEvent, SessionEventPayload } from "@wollipog/protocol";
 import {
@@ -10,6 +11,7 @@ import {
   MAX_OPEN_PROVIDER_TEXT_ITEMS,
   MAX_TRACKED_TOOL_CALL_STATEMENTS,
   nestSubagents,
+  orderTranscriptAttachments,
   SubagentTreeProjector,
   TimelineBuilder,
   timelineItemIsStreaming,
@@ -85,6 +87,51 @@ test("a durable attachment remains a standalone transcript row with its exact ar
   const groups = groupTimeline(items);
   assert.equal(groups.at(-1)?.kind, "item");
   assert.deepEqual(items.at(-1), { kind: "artifact_attached", id: seq, artifact, createdAt: seq });
+});
+
+test("a retained attachment returns to its timestamped context as runner history replays", () => {
+  const artifact = {
+    artifactId: "art_replayed", sessionId: "s", kind: "screenshot" as const, name: "proof.png",
+    mimeType: "image/png", encoding: "base64" as const, sizeBytes: 20,
+    sha256: "a".repeat(64), createdBy: { kind: "agent" as const, id: "s" }, createdAt: 20,
+  };
+  const retained = { id: 501, sessionId: "s", seq: 1, ts: 20,
+    payload: { kind: "artifact_attached" as const, artifact } };
+  const before = { id: 502, sessionId: "s", seq: 2, ts: 10,
+    payload: { kind: "user_message" as const, text: "before" } };
+  const after = { id: 503, sessionId: "s", seq: 3, ts: 30,
+    payload: { kind: "user_message" as const, text: "after" } };
+
+  const items = deriveTimeline([retained, before, after]);
+  assert.deepEqual(items.map((item) => item.kind), ["user_message", "artifact_attached", "user_message"]);
+  assert.deepEqual(items.map((item) => item.id), [2, 1, 3]);
+  assert.equal(items[1]?.kind === "artifact_attached" ? items[1].createdAt : null, 20);
+});
+
+test("attachment placement keeps every event and runner order across timestamped replays", () => {
+  fc.assert(fc.property(fc.array(fc.record({
+    attached: fc.boolean(), ts: fc.integer({ min: 0, max: 40 }),
+  }), { maxLength: 30 }), (entries) => {
+    const attachments = entries.filter((entry) => entry.attached);
+    const runner = entries.filter((entry) => !entry.attached).sort((a, b) => a.ts - b.ts);
+    const events: SessionEvent[] = [...attachments, ...runner].map((entry, index) => ({
+      id: index + 1, sessionId: "s", seq: index + 1, ts: entry.ts,
+      payload: entry.attached
+        ? { kind: "artifact_attached", artifact: {
+            artifactId: `art_${index}`, sessionId: "s", kind: "screenshot", name: "proof.png",
+            mimeType: "image/png", encoding: "base64", sizeBytes: 1,
+            sha256: "a".repeat(64), createdBy: { kind: "agent", id: "s" }, createdAt: entry.ts,
+          } }
+        : { kind: "user_message", text: `message ${index}` },
+    }));
+    const ordered = orderTranscriptAttachments(events);
+    assert.deepEqual(ordered.map((event) => event.id).sort((a, b) => a - b), events.map((event) => event.id));
+    assert.deepEqual(ordered.filter((event) => event.payload.kind !== "artifact_attached").map((event) => event.id),
+      events.filter((event) => event.payload.kind !== "artifact_attached").map((event) => event.id));
+    assert.ok(ordered.every((event, index) => index === 0 || ordered[index - 1]!.ts <= event.ts));
+    assert.deepEqual(events.map((event) => event.seq), events.map((_, index) => index + 1),
+      "ordering must not mutate durable sequence numbers");
+  }), { numRuns: 200 });
 });
 
 test("timeline row identity follows runner sequence across REST database-id replacement", () => {

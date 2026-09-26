@@ -1245,6 +1245,29 @@ function mergeSubagentRollup(current: SubagentRollup | undefined, addition: Suba
  * incrementally — see useTimeline(). */
 export function deriveTimeline(events: SessionEvent[]): TimelineItem[] {
   const b = new TimelineBuilder();
-  for (const ev of events) b.push(ev);
+  for (const ev of orderTranscriptAttachments(events)) b.push(ev);
   return b.snapshot();
+}
+
+/** A reset keeps control-plane attachment events before it replays runner history. Their CP
+ * sequence is still the durable cursor, but their timestamps place them among the replayed
+ * events in the transcript. Preserve the order of every non-attachment event and stable ties. */
+export function orderTranscriptAttachments(events: SessionEvent[]): SessionEvent[] {
+  const attachments = events.filter((event) => event.payload.kind === "artifact_attached");
+  if (attachments.length === 0) return events;
+  attachments.sort((a, b) => a.ts - b.ts || a.seq - b.seq);
+  const ordered: SessionEvent[] = [];
+  let nextAttachment = 0;
+  for (const event of events) {
+    if (event.payload.kind === "artifact_attached") continue;
+    while (nextAttachment < attachments.length && (
+      attachments[nextAttachment]!.ts < event.ts ||
+      (attachments[nextAttachment]!.ts === event.ts && attachments[nextAttachment]!.seq < event.seq)
+    )) {
+      ordered.push(attachments[nextAttachment++]!);
+    }
+    ordered.push(event);
+  }
+  while (nextAttachment < attachments.length) ordered.push(attachments[nextAttachment++]!);
+  return ordered.every((event, index) => event === events[index]) ? events : ordered;
 }

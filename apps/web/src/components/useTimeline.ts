@@ -1,6 +1,6 @@
 import { useRef } from "react";
 import type { SessionEvent } from "@wollipog/protocol";
-import { TimelineBuilder, type TimelineItem } from "../timeline.js";
+import { orderTranscriptAttachments, TimelineBuilder, type TimelineItem } from "../timeline.js";
 import { isRebuiltEventsArray } from "../store.js";
 
 interface BuilderState {
@@ -13,6 +13,8 @@ interface BuilderState {
   /** The exact array last folded — a REBUILT (merged/reset) array may replace prefix elements
    * while preserving length + tail identity, so tail checks alone can't vouch for it. */
   lastArr: SessionEvent[] | null;
+  /** Only replayed events older than a retained attachment can change its display position. */
+  latestAttachmentAt: number | null;
 }
 
 /**
@@ -37,11 +39,23 @@ export function useTimeline(sessionId: string, events: SessionEvent[] | undefine
     st.sessionId === sessionId &&
     evs.length >= st.count &&
     (st.count === 0 || evs[st.count - 1] === st.lastEv);
-  if (!st || !extendsPrior) {
-    st = { sessionId, builder: new TimelineBuilder(), count: 0, lastEv: null, lastArr: null };
+  const appended = extendsPrior && st ? evs.slice(st.count) : evs;
+  const attachmentPositionChanged = appended.some((event) =>
+    event.payload.kind === "artifact_attached" ||
+    (st?.latestAttachmentAt != null && event.ts < st.latestAttachmentAt));
+  if (!st || !extendsPrior || attachmentPositionChanged) {
+    st = { sessionId, builder: new TimelineBuilder(), count: 0, lastEv: null, lastArr: null,
+      latestAttachmentAt: null };
     ref.current = st;
+    for (const event of orderTranscriptAttachments(evs)) st.builder.push(event);
+    for (const event of evs) {
+      if (event.payload.kind === "artifact_attached") {
+        st.latestAttachmentAt = Math.max(st.latestAttachmentAt ?? event.ts, event.ts);
+      }
+    }
+  } else {
+    for (const event of appended) st.builder.push(event);
   }
-  for (let i = st.count; i < evs.length; i++) st.builder.push(evs[i]!);
   st.count = evs.length;
   st.lastEv = evs[evs.length - 1] ?? null;
   st.lastArr = evs;
