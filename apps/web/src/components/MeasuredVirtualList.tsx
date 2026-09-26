@@ -113,14 +113,23 @@ export function shouldRelinquishAnchorCorrection(state: {
 
 export function shouldAdjustVirtualScrollForResize({
   itemStart,
+  itemEnd,
   scrollOffset,
   anchorPending,
+  mountRestorePending,
 }: {
   itemStart: number;
+  itemEnd: number;
   scrollOffset: number;
   anchorPending: boolean;
+  mountRestorePending: boolean;
 }): boolean {
-  return !anchorPending && itemStart < scrollOffset;
+  // On session return, a fully preceding row must compensate immediately even while the mount
+  // anchor is pending. Its measurement can land in the frame that releases the bounded window;
+  // without compensation the next render adopts the wrong visible row. Width and structural
+  // anchors own their entire reflow, so compensating those rows here would scroll twice.
+  return itemStart < scrollOffset &&
+    (!anchorPending || (mountRestorePending && itemEnd <= scrollOffset));
 }
 
 interface VirtualMeasurementReseeder {
@@ -517,16 +526,17 @@ function VirtualList<T>({
   // Every external scrollRef host carries `measured-virtual-scroll`, disabling native anchoring.
   // Logical-key corrections and TanStack's measured-row adjustments must be the only scroll
   // owners; native anchoring sees transformed rows as ordinary flow and applies a third correction.
-  // Our logical-key anchor correction owns structural/width changes while pending. Otherwise,
-  // retain TanStack's positional rule: only measurements above the viewport may compensate the
-  // scroll offset. Returning true for a late below-viewport resize moves paused readers. The
-  // public tracked offset already includes every accepted adjustment because TanStack folds each
-  // one into that value before measuring the next row.
+  // The logical-key anchor corrects structural/width changes while pending. During a session
+  // return, a fully preceding row still needs TanStack's immediate adjustment when its measured
+  // growth lands at the end of that window. Below-viewport rows must not move paused readers.
+  // The public tracked offset includes each adjustment before the next row is measured.
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
     shouldAdjustVirtualScrollForResize({
       itemStart: item.start,
+      itemEnd: item.end,
       scrollOffset: instance.scrollOffset ?? 0,
       anchorPending: pendingAnchorRef.current != null,
+      mountRestorePending: anchorCorrectionRequiresIntentRef.current,
     });
 
   useEffect(() => {
