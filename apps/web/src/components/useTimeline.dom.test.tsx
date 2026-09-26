@@ -4,12 +4,15 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionEvent } from "@wollipog/protocol";
+import { ApiProvider } from "../api-context.js";
+import type { ApiClient } from "../api.js";
+import type { TimelineItem } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 const globals: Record<string, unknown> = {
   window: domWindow, document: domWindow.document, navigator: domWindow.navigator,
-  IS_REACT_ACT_ENVIRONMENT: true,
+  IS_REACT_ACT_ENVIRONMENT: true, React,
 };
 const prior = Object.fromEntries(Object.keys(globals).map(
   (name) => [name, (globalThis as Record<string, unknown>)[name]],
@@ -41,8 +44,11 @@ const afterEvent: SessionEvent = {
   id: 503, sessionId: "s", seq: 3, ts: 30, payload: { kind: "user_message", text: "after" },
 };
 
-function Timeline({ events }: { events: SessionEvent[] }) {
-  const items = useTimeline("s", events);
+function Timeline({ events, eventEpoch = 1, onItems }: {
+  events: SessionEvent[]; eventEpoch?: number; onItems?: (items: TimelineItem[]) => void;
+}) {
+  const items = useTimeline("s", events, eventEpoch);
+  onItems?.(items);
   return <div>{items.map((item) => <span key={item.id}>{item.kind}:{item.id};</span>)}</div>;
 }
 
@@ -65,6 +71,57 @@ test("an open transcript moves a retained attachment into replayed context witho
       payload: { kind: "user_message", text: "live" } };
     await act(async () => root.render(<Timeline events={[retained, beforeMessage, afterEvent, live]} />));
     assert.equal(container.textContent, "user_message:2;artifact_attached:1;user_message:3;user_message:4;");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("replay appends preserve existing runner row objects while the attachment moves", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  let latest: TimelineItem[] = [];
+  const replay: SessionEvent[] = Array.from({ length: 20 }, (_, offset) => ({
+    id: 600 + offset, sessionId: "s", seq: 3 + offset, ts: 11 + offset,
+    payload: { kind: "user_message", text: `replayed ${offset}` },
+  }));
+  try {
+    await act(async () => root.render(<Timeline events={[retained, beforeMessage]} onItems={(items) => { latest = items; }} />));
+    const firstRunnerRow = latest.find((item) => item.id === 2);
+    assert.ok(firstRunnerRow);
+    for (let index = 0; index < 20; index++) {
+      await act(async () => root.render(<Timeline events={[retained, beforeMessage, ...replay.slice(0, index + 1)]}
+        onItems={(items) => { latest = items; }} />));
+      assert.equal(latest.find((item) => item.id === 2), firstRunnerRow);
+    }
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a bounded fresh tail includes a retained attachment outside the ordinary event window", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const client = {
+    getRetainedAttachmentEventPage: async (_id: string, _after: number, eventEpoch: number) => ({
+      events: [retained], eventEpoch, nextAfter: 1, hasMore: false,
+    }),
+  } as unknown as ApiClient;
+  try {
+    await act(async () => root.render(<ApiProvider client={client}>
+      <Timeline events={[beforeMessage, afterEvent]} />
+    </ApiProvider>));
+    assert.equal(container.textContent, "user_message:2;artifact_attached:1;user_message:3;");
+    await act(async () => root.render(<ApiProvider client={client}>
+      <Timeline events={[retained, beforeMessage, afterEvent]} />
+    </ApiProvider>));
+    assert.equal(container.textContent, "user_message:2;artifact_attached:1;user_message:3;",
+      "later paging in the original event must not duplicate its supplemental row");
   } finally {
     await act(async () => root.unmount());
     container.remove();

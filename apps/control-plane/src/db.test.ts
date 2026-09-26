@@ -5318,9 +5318,21 @@ test("runner history resets preserve attachment rows, timestamps, and retry iden
       );
       assert.equal(hydrated.applied, true);
       assert.deepEqual(db.listEvents(id).map((event) => event.seq), [1, 2, 3]);
+      const firstAttachmentPage = db.listRetainedAttachmentEventPage(id, 0, 1);
+      assert.deepEqual(firstAttachmentPage.events.map((event) => event.id), [imageEvent.id]);
+      assert.equal(firstAttachmentPage.hasMore, true);
+      const secondAttachmentPage = db.listRetainedAttachmentEventPage(id, firstAttachmentPage.nextAfterSeq, 1);
+      assert.deepEqual(secondAttachmentPage.events.map((event) => event.id), [videoEvent.id]);
+      assert.deepEqual(secondAttachmentPage.events.map((event) => event.ts), [200]);
+      assert.equal(secondAttachmentPage.hasMore, false);
       assert.equal(db.appendHydratedPage(id, { afterSeq: 0, historyEpoch: epoch, eventEpoch }, []).applied,
         false, "replaying hydration cannot duplicate attachment rows");
     }
+    const laterImage = createScreenshotArtifact(db, { sessionId: id }, "later-image",
+      { purpose: "session_attachment" });
+    db.appendEvent(id, { kind: "artifact_attached", artifact: laterImage }, 500);
+    assert.deepEqual(db.listRetainedAttachmentEventPage(id, 0, 200).events.map((event) => event.id), originalIds,
+      "a live attachment after runner history is not part of the retained reset prefix");
   } finally {
     db.close();
   }

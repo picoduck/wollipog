@@ -1243,31 +1243,41 @@ function mergeSubagentRollup(current: SubagentRollup | undefined, addition: Suba
 
 /** One-shot fold (tests, small lists). Hot paths should hold a TimelineBuilder and push
  * incrementally — see useTimeline(). */
-export function deriveTimeline(events: SessionEvent[]): TimelineItem[] {
+export function deriveTimeline(events: SessionEvent[], retainedAttachmentSeqs: ReadonlySet<number> = new Set()): TimelineItem[] {
   const b = new TimelineBuilder();
-  for (const ev of orderTranscriptAttachments(events)) b.push(ev);
-  return b.snapshot();
+  const timestamps = new Map<number, number>();
+  for (const ev of events) {
+    b.push(ev);
+    timestamps.set(ev.seq, ev.ts);
+  }
+  return placeRetainedAttachmentItems(b.snapshot(), timestamps, retainedAttachmentSeqs);
 }
 
-/** A reset keeps control-plane attachment events before it replays runner history. Their CP
- * sequence is still the durable cursor, but their timestamps place them among the replayed
- * events in the transcript. Preserve the order of every non-attachment event and stable ties. */
-export function orderTranscriptAttachments(events: SessionEvent[]): SessionEvent[] {
-  const attachments = events.filter((event) => event.payload.kind === "artifact_attached");
-  if (attachments.length === 0) return events;
-  attachments.sort((a, b) => a.ts - b.ts || a.seq - b.seq);
-  const ordered: SessionEvent[] = [];
+/** Retained reset attachments have old CP cursors at the start of the new epoch. Move only those
+ * visible rows by timestamp; other items keep their source order and object identity. */
+export function placeRetainedAttachmentItems(
+  items: TimelineItem[],
+  timestampsBySeq: ReadonlyMap<number, number>,
+  retainedAttachmentSeqs: ReadonlySet<number>,
+): TimelineItem[] {
+  if (retainedAttachmentSeqs.size === 0) return items;
+  const attachments = items.filter((item): item is Extract<TimelineItem, { kind: "artifact_attached" }> =>
+    item.kind === "artifact_attached" && retainedAttachmentSeqs.has(item.id));
+  if (attachments.length === 0) return items;
+  attachments.sort((a, b) => a.createdAt - b.createdAt || a.id - b.id);
+  const ordered: TimelineItem[] = [];
   let nextAttachment = 0;
-  for (const event of events) {
-    if (event.payload.kind === "artifact_attached") continue;
+  for (const item of items) {
+    if (item.kind === "artifact_attached" && retainedAttachmentSeqs.has(item.id)) continue;
+    const timestamp = timestampsBySeq.get(item.id);
     while (nextAttachment < attachments.length && (
-      attachments[nextAttachment]!.ts < event.ts ||
-      (attachments[nextAttachment]!.ts === event.ts && attachments[nextAttachment]!.seq < event.seq)
+      timestamp !== undefined && (attachments[nextAttachment]!.createdAt < timestamp ||
+        (attachments[nextAttachment]!.createdAt === timestamp && attachments[nextAttachment]!.id < item.id))
     )) {
       ordered.push(attachments[nextAttachment++]!);
     }
-    ordered.push(event);
+    ordered.push(item);
   }
   while (nextAttachment < attachments.length) ordered.push(attachments[nextAttachment++]!);
-  return ordered.every((event, index) => event === events[index]) ? events : ordered;
+  return ordered.every((item, index) => item === items[index]) ? items : ordered;
 }

@@ -3852,6 +3852,28 @@ app.post("/api/sessions/:id/side-chat", async (req, reply) => {
   return respond(reply, svc.createSideChat((req.params as { id: string }).id, body.replaceEnded === true));
 });
 
+app.get("/api/sessions/:id/retained-attachment-events", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const query = req.query as { after?: string; limit?: string; eventEpoch?: string };
+  const after = Number(query.after ?? 0);
+  const limit = Number(query.limit);
+  const eventEpoch = Number(query.eventEpoch);
+  if (!Number.isSafeInteger(after) || after < 0 || !Number.isSafeInteger(limit) || limit < 1 || limit > 200 ||
+      !Number.isSafeInteger(eventEpoch) || eventEpoch < 0) {
+    return reply.code(400).send({ error: "after, limit, and eventEpoch must be bounded non-negative integers" });
+  }
+  const state = db.getRunnerHistoryState(id);
+  if (!state) return reply.code(404).send({ error: "session not found" });
+  if (state.eventEpoch !== eventEpoch) {
+    return reply.code(409).send({ error: "session event history was replaced", code: "stale_event_epoch",
+      eventEpoch: state.eventEpoch });
+  }
+  const page = eventEpoch > 0
+    ? db.listRetainedAttachmentEventPage(id, after, limit)
+    : { events: [], nextAfterSeq: after, hasMore: false };
+  return { events: page.events, eventEpoch, nextAfter: page.nextAfterSeq, hasMore: page.hasMore };
+});
+
 app.get("/api/sessions/:id/events", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const query = req.query as {

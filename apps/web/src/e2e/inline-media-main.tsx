@@ -36,11 +36,13 @@ function Fixture() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const streamingScenario = new URLSearchParams(window.location.search).has("streaming");
   const replayScenario = new URLSearchParams(window.location.search).has("attachmentReplay");
+  const freshTailScenario = new URLSearchParams(window.location.search).has("freshTail");
   const legacyReplayOrder = new URLSearchParams(window.location.search).has("legacyOrder");
   const [streamStep, setStreamStep] = useState(0);
   const [replayed, setReplayed] = useState(false);
   const replayItems = useTimeline("attachment-replay-e2e",
-    replayed ? [replayAttachment, replayBefore, replayAfter] : [replayAttachment]);
+    freshTailScenario ? [replayBefore, replayAfter]
+      : replayed ? [replayAttachment, replayBefore, replayAfter] : [replayAttachment], 1);
   const legacyReplayItems = useMemo(() => {
     const builder = new TimelineBuilder();
     for (const event of replayed

@@ -19487,6 +19487,34 @@ export class ControlPlaneDb {
     }));
   }
 
+  /** The control-plane-owned prefix retained across a runner-history reset. Read it separately
+   * from the normal event window so a recent tail page does not lose an attachment whose durable
+   * sequence was compacted to the start of the new epoch. This cursor never advances the normal
+   * transcript cursor, and the caller bounds each page. */
+  listRetainedAttachmentEventPage(sessionId: string, afterSeq: number, limit: number): CachedEventPage {
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      throw new RangeError("retained attachment cursor and limit must be bounded");
+    }
+    const firstRunner = this.stmt(
+      `SELECT seq FROM session_events WHERE session_id=? AND kind!='artifact_attached'
+         ORDER BY seq LIMIT 1`,
+    ).get(sessionId) as { seq: number } | undefined;
+    const rows = this.stmt(
+      `SELECT id, session_id, seq, ts, payload FROM session_events
+         WHERE session_id=? AND kind='artifact_attached' AND seq>?
+           AND (? IS NULL OR seq<?)
+         ORDER BY seq LIMIT ?`,
+    ).all(sessionId, afterSeq, firstRunner?.seq ?? null, firstRunner?.seq ?? null, limit + 1) as unknown as Array<{
+      id: number; session_id: string; seq: number; ts: number; payload: string;
+    }>;
+    const events = rows.slice(0, limit).map((row) => ({
+      id: row.id, sessionId: row.session_id, seq: row.seq, ts: row.ts,
+      payload: JSON.parse(row.payload) as SessionEventPayload,
+    }));
+    return { events, nextAfterSeq: events.at(-1)?.seq ?? afterSeq, hasMore: rows.length > limit };
+  }
+
   /** A bounded, SQL-filtered page for child projections. Unrelated root messages and tools remain
    * inside SQLite and are never synchronously parsed on the request path. */
   listChildSessionProjectionPage(

@@ -214,7 +214,7 @@ export function SideChatPanel({
     };
   }, [api, childId, session.id]);
 
-  const items = useTimeline(childId ?? "side-chat", events);
+  const items = useTimeline(childId ?? "side-chat", events, sideChat?.session.eventEpoch ?? 0);
   const latestResponse = useMemo(() => {
     for (let index = items.length - 1; index >= 0; index -= 1) {
       const item = items[index];
