@@ -39,6 +39,7 @@ import type {
   CreateWorkflowRunResult,
   DeviceView,
   DescendantRequestView,
+  DescendantRequestsView,
   DirectoryEntry,
   ExternalSessionDescriptor,
   GitActionData,
@@ -1048,7 +1049,7 @@ export function createApiClient(transport: ApiTransport) {
       body: JSON.stringify({ decisions, expectedRevision }),
     }),
   descendantRequests: (id: string, signal?: AbortSignal) =>
-    req<{ requests: DescendantRequestView[] }>(
+    req<DescendantRequestsView>(
       `/api/sessions/${encodeURIComponent(id)}/descendant-requests`,
       { signal },
     ),
