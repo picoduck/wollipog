@@ -929,13 +929,29 @@ mismatch, a missing artifact, and an artifact the reviewer may not access each s
 display no image, and cannot be marked reviewed, so approval stays blocked while rejection stays
 possible; a reviewed mark saved on an earlier visit does not survive the artifact turning out wrong.
 Images load as they approach the viewport, a few at a time, and are held only as short-lived object
-URLs that are released when the card closes.
+URLs that are released when the card closes. Each shown item says who checked it: "Checked by this
+browser against the request's digest." Nothing else on the card claims a check.
 
-When supplied, the `uri` remains the reviewer's route for an item with no artifact, for video or
-any non-raster media type, and in a browser context without SubtleCrypto (plain HTTP on a
-non-localhost origin), where unverifiable bytes are not shown as the evidence the request names.
-Those links are labelled as external. An artifact-only item with no SubtleCrypto cannot be marked
-reviewed or approved from that browser; the reviewer must use HTTPS or localhost.
+When supplied, the `uri` remains the reviewer's route for an item with no artifact and for a media
+type the card cannot show in place. Those links are labelled as external. An artifact-backed item
+never falls back to its `uri`, even when it has one: the reviewer approves the checked artifact or
+nothing.
+
+**Reviewing artifact evidence requires HTTPS or localhost.** Browsers provide SubtleCrypto, which
+the digest check needs, only in a secure context: an HTTPS page, or `localhost` on the machine that
+runs Wollipog. On any other page, such as `http://<LAN or Tailscale IP>:4317` opened from a phone,
+the card does not fetch artifact evidence, shows no image, and cannot mark it reviewed, so Approve
+stays unavailable while Deny still works. A notice on the card names the page's origin and the way
+out: reopen Wollipog over HTTPS, for example with `tailscale serve` (see
+[Headless Deployment](headless-deployment.md#exposure-tailscale-or-https)), or on localhost.
+
+This is deliberate. Over plain HTTP an on-path attacker can change the artifact bytes, the digest in
+the decision snapshot, and any server-reported result together, and the session's own credentials
+cross the same connection, so no browser-side or server-side check could restore what the missing
+transport integrity takes away. A pure-JavaScript SHA-256 fallback was considered and not adopted:
+it would still catch a swapped stored artifact, but it would make plain-HTTP review a supported flow
+on a connection Wollipog already treats as unprotected.
+
 An artifact-only human approval also carries the exact decision digest from the updated review
 card. A tab kept open from an older web build lacks that field and is refused with a reload prompt
 instead of approving evidence it may not have shown.

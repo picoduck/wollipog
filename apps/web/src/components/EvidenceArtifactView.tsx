@@ -10,11 +10,17 @@ export type EvidenceItem = Extract<
   { category: "ui_evidence_approval" }
 >["evidence"][number];
 
-/** `blocked` statuses mean the reviewer was not shown the evidence, so it cannot count as reviewed. */
+/** Every status but `ready` means the reviewer was not shown the evidence, so it cannot count as reviewed. */
 export type EvidenceArtifactStatus = "pending" | "loading" | "ready" | "mismatch" | "unavailable" | "unverifiable";
 
 export function evidenceStatusBlocksReview(status: EvidenceArtifactStatus): boolean {
-  return status === "pending" || status === "loading" || status === "mismatch" || status === "unavailable";
+  return status !== "ready";
+}
+
+/** Browsers expose SubtleCrypto only in a secure context: an HTTPS page or localhost. Plain HTTP at a
+ * network address has none, and there the card cannot check any artifact against its digest. */
+export function evidenceIntegrityCheckAvailable(): boolean {
+  return Boolean(globalThis.crypto?.subtle);
 }
 
 /** Only an artifact-backed image or browser-playable video is shown in place. Other evidence needs an external link
@@ -87,6 +93,13 @@ export function EvidenceArtifactView({
 
   useEffect(() => {
     if (!visible) return;
+    // Unchecked bytes are never shown as the evidence the request names, and there is no external
+    // link to fall back on for an artifact-backed item, so bytes that cannot be checked are not
+    // fetched at all: over plain HTTP they would only cross the network for nothing.
+    if (!evidenceIntegrityCheckAvailable()) {
+      setState({ status: "unverifiable" });
+      return;
+    }
     let active = true;
     let objectUrl: string | null = null;
     setState({ status: "loading" });
@@ -110,9 +123,6 @@ export function EvidenceArtifactView({
       if (blob.size > (isVideo ? MAX_SESSION_VIDEO_BYTES : MAX_PROMPT_IMAGE_BYTES)) {
         return { status: "unavailable", reason: "This artifact is too large to show here.", retryable: false };
       }
-      // Without SubtleCrypto (plain HTTP on a non-localhost origin) the bytes cannot be checked, and
-      // unchecked bytes are not shown as the evidence the request names.
-      if (!globalThis.crypto?.subtle) return { status: "unverifiable" };
       try {
         const bytes = await blob.arrayBuffer();
         if ((await sha256Hex(bytes)) !== item.sha256.toLowerCase()) return { status: "mismatch" };
@@ -211,9 +221,12 @@ export function EvidenceArtifactView({
           )}
         </>
       ))}
+      {state.status === "ready" && (
+        <p className="evidence-artifact-check muted">Checked by this browser against the request's digest.</p>
+      )}
       {state.status === "mismatch" && (
         <p className="evidence-artifact-state form-error" role="alert">
-          This artifact does not match the digest recorded in the request, so it is not shown.
+          This browser found that this artifact does not match the digest recorded in the request, so it is not shown.
         </p>
       )}
       {state.status === "unavailable" && (
@@ -222,15 +235,32 @@ export function EvidenceArtifactView({
           {state.retryable && <button type="button" className="btn ghost sm" onClick={retry}>Retry</button>}
         </div>
       )}
+      {/* No external link here, even when the item has a `uri`: an artifact-backed item is reviewed
+          as the checked artifact or not at all, so the reviewer never approves bytes nobody checked. */}
       {state.status === "unverifiable" && (
-        <div className="evidence-artifact-state muted" role="status">
-          <p>Evidence integrity checks require HTTPS or localhost, so the artifact is not shown here.</p>
-          {item.uri && <a className="btn ghost sm" href={item.uri} target="_blank" rel="noreferrer"
-            aria-label={`View External Evidence: ${item.evidenceId}`}>
-            View External Evidence
-          </a>}
-        </div>
+        <p className="evidence-artifact-state muted" role="status">
+          Not shown: this browser can check the artifact against the request's digest only over HTTPS or on localhost.
+        </p>
       )}
+    </div>
+  );
+}
+
+/** Says, once per card, why artifact evidence is not shown on this page and how to finish the review. */
+export function EvidenceSecureContextNotice({ evidence }: { evidence: readonly EvidenceItem[] }) {
+  if (evidenceIntegrityCheckAvailable() || !evidence.some(isRenderableEvidence)) return null;
+  return (
+    <div className="evidence-secure-context-notice" role="note" aria-label="HTTPS or Localhost Required">
+      <strong>HTTPS or Localhost Required</strong>
+      <p>
+        This page is open at <code>{window.location.origin}</code>. Browsers can check evidence against the
+        request's digest only on HTTPS or localhost pages, so artifact evidence is not shown here and cannot be
+        marked reviewed. You can still deny the request from this page.
+      </p>
+      <p>
+        To finish the review, reopen Wollipog over HTTPS, for example through <code>tailscale serve</code>, or on
+        localhost on the machine that runs it.
+      </p>
     </div>
   );
 }

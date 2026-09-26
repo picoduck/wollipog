@@ -67,21 +67,28 @@ async function drawCapture(index: number): Promise<ArrayBuffer> {
   return blob.arrayBuffer();
 }
 
+// A page opened over plain HTTP at a network address has no SubtleCrypto. The card refuses such
+// evidence before hashing it, so the recorded digest is never compared there; a placeholder keeps
+// the fixture loadable, and a card that did show the bytes would read them as a mismatch.
+async function fixtureDigest(bytes: ArrayBuffer): Promise<string> {
+  if (!globalThis.crypto?.subtle) return "e".repeat(64);
+  const digest = await crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
 async function prepareArtifacts(): Promise<void> {
   if (!artifactMode) return;
   if (artifactMode === "video" || artifactMode === "mixed") {
     const bytes = await fetch(new URL("../../e2e/fixtures/session-artifact-review.webm", import.meta.url)).then((response) => response.arrayBuffer());
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
     artifactBytes.set("art_clip", bytes);
-    artifactDigests.set("art_clip", [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join(""));
+    artifactDigests.set("art_clip", await fixtureDigest(bytes));
   }
   for (let index = 0; index < evidenceCount; index += 1) {
     const bytes = artifactMode === "undecodable" && index === 1
       ? new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, ...new TextEncoder().encode("not an image")]).buffer
       : await drawCapture(index);
-    const digest = await crypto.subtle.digest("SHA-256", bytes);
     artifactBytes.set(`art_${index + 1}`, bytes);
-    artifactDigests.set(`art_${index + 1}`, [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join(""));
+    artifactDigests.set(`art_${index + 1}`, await fixtureDigest(bytes));
   }
 }
 

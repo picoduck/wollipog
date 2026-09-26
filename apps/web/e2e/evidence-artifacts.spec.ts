@@ -130,6 +130,8 @@ for (const viewport of [
     const item = page.locator(".evidence-review-item");
     await expect(item.getByRole("img", { name: "Evidence: viewport-1" })).toBeVisible();
     await expect(item.getByRole("link")).toHaveCount(0);
+    await expect(item.getByText("Checked by this browser against the request's digest.")).toBeVisible();
+    await expect(page.getByRole("note", { name: "HTTPS or Localhost Required" })).toHaveCount(0);
     for (const theme of ["dark", "light"]) {
       await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
       await page.screenshot({ path: testInfo.outputPath(`artifact-only-${theme}.png`) });
@@ -140,6 +142,63 @@ for (const viewport of [
       .toEqual([{ requestId: "evidence-occurrence", optionId: "approve", evidenceReviewed: ["viewport-1"],
         evidenceReviewDigest: "a".repeat(64) }]);
   });
+}
+
+// A plain-HTTP page at a network address, as a phone on the LAN would open it. The hostname is
+// answered by the test server through the route, so the browser treats the page as a real
+// non-secure context: no SubtleCrypto, exactly as in the field.
+const NETWORK_ORIGIN = "http://reviewer-lan.test:4174";
+
+async function openReviewFromNetworkAddress(page: Page, query: string): Promise<void> {
+  const served = new URL(test.info().project.use.baseURL!);
+  await page.route(`${NETWORK_ORIGIN}/**`, async (route) => {
+    const url = new URL(route.request().url());
+    url.host = served.host;
+    await route.fulfill({ response: await route.fetch({ url: url.href }) });
+  });
+  await page.goto(`${NETWORK_ORIGIN}/request-surfaces-e2e.html?scenario=evidence&${query}`);
+  expect(await page.evaluate(() => [window.isSecureContext, Boolean(globalThis.crypto?.subtle)])).toEqual([false, false]);
+  await page.getByRole("button", { name: "Review Evidence" }).click();
+  await expect(page.getByRole("complementary", { name: "Requests" })).toBeVisible();
+}
+
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "mobile", width: 390, height: 844 },
+]) {
+  for (const evidence of [
+    { name: "artifact-only", artifacts: "artifact-only" },
+    { name: "artifact-plus-uri", artifacts: "ready" },
+  ]) {
+    test(`${viewport.name}: over plain HTTP at a network address, ${evidence.name} evidence says how to finish and cannot be approved unseen`, async ({ page }, testInfo) => {
+      await page.setViewportSize(viewport);
+      await openReviewFromNetworkAddress(page, `items=2&artifacts=${evidence.artifacts}`);
+
+      const notice = page.getByRole("note", { name: "HTTPS or Localhost Required" });
+      await expect(notice).toBeVisible();
+      await expect(notice).toContainText(`This page is open at ${NETWORK_ORIGIN}.`);
+      await expect(notice).toContainText("reopen Wollipog over HTTPS, for example through tailscale serve, or on localhost");
+      const box = await notice.boundingBox();
+      expect(box!.x + box!.width).toBeLessThanOrEqual(viewport.width);
+
+      for (const id of ["viewport-1", "viewport-2"]) {
+        const item = page.locator(".evidence-review-item", { hasText: id });
+        await item.scrollIntoViewIfNeeded();
+        await expect(item.getByRole("status")).toHaveText(
+          "Not shown: this browser can check the artifact against the request's digest only over HTTPS or on localhost.");
+        await expect(item.getByRole("img")).toHaveCount(0);
+        await expect(item.getByRole("link")).toHaveCount(0);
+        await expect(item.getByRole("checkbox", { name: `Mark ${id} as Reviewed` })).toBeDisabled();
+      }
+      await expect(page.locator('a[href^="https://evidence.example"]')).toHaveCount(0);
+      await expect(page.getByText("0 of 2 Reviewed")).toBeVisible();
+      await expect(page.getByRole("button", { name: "Approve" })).toBeDisabled();
+      await expect(page.getByRole("button", { name: "Deny" })).toBeEnabled();
+      expect(await artifactRequests(page), "bytes nobody can check are not fetched").toEqual([]);
+      await notice.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: testInfo.outputPath(`plain-http-${evidence.name}.png`) });
+    });
+  }
 }
 
 test("mixed decisions show artifacts in place and keep a labelled external link for everything else", async ({ page }) => {
