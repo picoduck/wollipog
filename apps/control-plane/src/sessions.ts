@@ -1378,6 +1378,10 @@ function workflowArtifactPage(rows: WorkflowArtifactView[], limit: number): Work
 export class SessionsService {
   /** Bound stored-video reads and derivation across all service instances in this process. */
   private static readonly videoReviewRequests = new Set<string>();
+  private static readonly inFlightVideoDecisions = new Map<string, {
+    requestDigest: string;
+    result: Promise<ServiceResult<WorkflowDecisionView>>;
+  }>();
   private readonly automaticQuestions = new Map<string, Set<string>>();
   /** Sessions with an in-flight lazy history fetch, so a burst of gapped live events fans into one. */
   private readonly hydrating = new Map<string, Promise<void>>();
@@ -6639,6 +6643,34 @@ export class SessionsService {
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean = () => true,
   ): Promise<ServiceResult<WorkflowDecisionView>> {
+    const snapshot = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
+    if (!this.videoFrameReviewValidated || !boundedDecisionString(request?.requestId, 256) ||
+        !snapshot.ok || snapshot.data?.category !== "ui_evidence_approval" ||
+        !snapshot.data.evidence.some((item) => item.mediaType?.startsWith("video/"))) {
+      return this.createWorkflowDecisionWithVideoInner(sessionId, request, canAccess);
+    }
+    // Coalescing must not return another HTTP request's result before checking this caller's
+    // audience. The inner method performs the same check before any decode or persistence.
+    const child = this.db.getSession(sessionId);
+    const controller = child && this.workflowDecisionController(child);
+    if (!child || !controller || !canAccess(child.id) || !canAccess(controller.session.id)) {
+      return this.createWorkflowDecisionWithVideoInner(sessionId, request, canAccess);
+    }
+    const key = `${sessionId}:${request.requestId}`;
+    const requestDigest = auditDigest({ resourceKey: request.resourceKey, snapshot: snapshot.data })!;
+    const existing = SessionsService.inFlightVideoDecisions.get(key);
+    if (existing) return existing.requestDigest === requestDigest
+      ? existing.result : fail("requestId was already used for different workflow decision content", 409);
+    const result = this.createWorkflowDecisionWithVideoInner(sessionId, request, canAccess);
+    SessionsService.inFlightVideoDecisions.set(key, { requestDigest, result });
+    try { return await result; } finally { SessionsService.inFlightVideoDecisions.delete(key); }
+  }
+
+  private async createWorkflowDecisionWithVideoInner(
+    sessionId: string,
+    request: CreateWorkflowDecisionRequest,
+    canAccess: (sessionId: string) => boolean,
+  ): Promise<ServiceResult<WorkflowDecisionView>> {
     const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
     if (!normalized.ok || normalized.data?.category !== "ui_evidence_approval") {
       return this.createWorkflowDecision(sessionId, request, canAccess);
@@ -6661,6 +6693,22 @@ export class SessionsService {
     if (controller && isTerminal(controller.session.status)) {
       return fail("a terminal Orchestrator cannot control a new workflow decision", 409);
     }
+    if (child && controller && canAccess(child.id) && canAccess(controller.session.id)) {
+      const previous = this.db.workflowDecisionByRequestId(sessionId, request.requestId);
+      if (previous) {
+        const priorVideo = previous.resourceSnapshot.category === "ui_evidence_approval"
+          ? previous.resourceSnapshot.videoReview : undefined;
+        if (previous.resourceKey !== request.resourceKey ||
+            previous.controllingSessionId !== controller.session.id ||
+            previous.policyRevision !== controller.policy.revision ||
+            (priorVideo?.originalRequestSha256 !== auditDigest(normalized.data) &&
+              previous.resourceDigest !== auditDigest(normalized.data))) {
+          return fail("requestId was already used for different workflow decision content", 409);
+        }
+        if (previous.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
+        return ok(previous);
+      }
+    }
     if (!child || !controller || !canAccess(child.id) || !canAccess(controller.session.id) ||
         controller.policy.decisions.ui_evidence_approval !== "orchestrator" ||
         evaluateUiEvidenceReviewClient(this.db.uiEvidenceReviewClient(
@@ -6671,20 +6719,6 @@ export class SessionsService {
     const fallback = (reason: string) => this.createWorkflowDecision(sessionId, request, canAccess, {
       videoFallbackReason: reason,
     });
-    const previous = this.db.workflowDecisionByRequestId(sessionId, request.requestId);
-    if (previous) {
-      const priorVideo = previous.resourceSnapshot.category === "ui_evidence_approval"
-        ? previous.resourceSnapshot.videoReview : undefined;
-      if (previous.resourceKey !== request.resourceKey ||
-          previous.controllingSessionId !== controller.session.id ||
-          previous.policyRevision !== controller.policy.revision ||
-          (priorVideo?.originalRequestSha256 !== auditDigest(normalized.data) &&
-            previous.resourceDigest !== auditDigest(normalized.data))) {
-        return fail("requestId was already used for different workflow decision content", 409);
-      }
-      if (previous.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
-      return ok(previous);
-    }
     if (![child, controller.session].every((owner) => runnerSupportsProtocol(
       this.db.getRunner(owner.runnerId)?.protocolVersion, "orchestratorVideoFrameReview",
     ))) {
@@ -6699,6 +6733,12 @@ export class SessionsService {
     }
     if (item.mediaType !== "video/webm" || !item.artifactId) {
       return fallback("Only a child-owned WebM Session artifact can receive delegated video review.");
+    }
+    const otherEvidence = normalized.data.evidence.filter((candidate) => candidate !== item);
+    if (otherEvidence.length && evaluateUiEvidenceItems(controller.session.driver, sessionId,
+      otherEvidence, (artifactId) => this.db.workflowArtifactExportPreflight(artifactId)?.artifact ?? null,
+    ).effectiveOwner === "human") {
+      return this.createWorkflowDecision(sessionId, request, canAccess);
     }
     if (SessionsService.videoReviewRequests.has(sessionId) ||
         SessionsService.videoReviewRequests.size >= 2) {
@@ -6718,6 +6758,11 @@ export class SessionsService {
       }
       const decoded = await decodeShortSilentWebm(sourceBytes);
       if (!decoded.ok) return fallback(decoded.reason);
+      const retainedSource = this.db.workflowArtifactExportPreflight(source.artifactId)?.artifact;
+      if (!retainedSource || retainedSource.sessionId !== sessionId ||
+          retainedSource.sha256 !== source.sha256 || retainedSource.kind !== "video") {
+        return fallback("The source video was removed while its frames were being derived.");
+      }
       if (normalized.data.evidence.length - 1 + decoded.frames.length > 32) {
         return fallback("This video has too many complete frames for one UI evidence decision.");
       }

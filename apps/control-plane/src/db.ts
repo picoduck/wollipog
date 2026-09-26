@@ -22016,16 +22016,23 @@ export class ControlPlaneDb {
   pruneExpiredSessionAttachments(cutoff: number, limit = 1_000): number {
     const bounded = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 10_000)) : 1_000;
     const ids = this.stmt(
-      `SELECT id FROM artifacts WHERE session_id IS NOT NULL AND run_id IS NULL
+      `SELECT id,kind FROM artifacts WHERE session_id IS NOT NULL AND run_id IS NULL
          AND kind IN ('screenshot','video') AND created_at < ?
          AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_attachment'
          AND NOT EXISTS (SELECT 1 FROM workflow_attempt_artifacts WHERE artifact_id=artifacts.id)
        ORDER BY created_at,id LIMIT ?`,
-    ).all(cutoff, bounded) as Array<{ id: string }>;
+    ).all(cutoff, bounded) as Array<{ id: string; kind: string }>;
     if (!ids.length) return 0;
     this.db.exec("BEGIN IMMEDIATE");
     try {
-      for (const row of ids) this.stmt("DELETE FROM artifacts WHERE id=?").run(row.id);
+      for (const row of ids) {
+        if (row.kind === "video") {
+          this.stmt(`DELETE FROM artifacts WHERE kind='screenshot' AND json_valid(metadata)
+            AND json_extract(metadata, '$.purpose')='video_review_frame'
+            AND json_extract(metadata, '$.sourceArtifactId')=?`).run(row.id);
+        }
+        this.stmt("DELETE FROM artifacts WHERE id=?").run(row.id);
+      }
       this.db.exec("COMMIT");
     } catch (error) {
       this.db.exec("ROLLBACK");

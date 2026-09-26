@@ -20102,7 +20102,10 @@ test("video review stays human-owned by default and older peers keep a specific 
 });
 
 test("validated local video path binds all source frames, ordered receipts, source digest, and exact occurrence", async (t) => {
-  if (!await shortVideoDecoderAvailable()) return t.skip("no isolated video decoder on this host");
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
   const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, undefined, true);
   try {
     const child = h.createChild("Video Child");
@@ -20124,8 +20127,18 @@ test("validated local video path binds all source frames, ordered receipts, sour
       requestId: id, resourceKey: "video-ui",
       resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
     });
-    const pending = await request("video-first");
+    const [pending, concurrentReplay, deniedReplay] = await Promise.all([
+      request("video-first"), request("video-first"),
+      h.svc.createWorkflowDecisionWithVideo(child.id, {
+        requestId: "video-first", resourceKey: "video-ui",
+        resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
+      }, () => false),
+    ]);
     assert.ok(pending.ok && pending.data, pending.error);
+    assert.equal(deniedReplay.status, 404,
+      "an out-of-audience caller cannot join an authorized in-flight review");
+    assert.equal(concurrentReplay.data?.occurrenceId, pending.data.occurrenceId,
+      "same-key in-flight retries join one derivation and one occurrence");
     assert.equal((await request("video-first")).data?.occurrenceId, pending.data.occurrenceId,
       "a retry replays the exact prior decision without a second decode");
     assert.equal(pending.data.authority, "orchestrator");
@@ -20206,11 +20219,17 @@ test("validated local video path binds all source frames, ordered receipts, sour
       replacement.data.occurrenceId, frameId, () => true).status, 409,
       "source-video removal invalidates derived frames");
     assert.equal(h.db.workflowDecisionByOccurrence(replacement.data.occurrenceId)?.status, "revoked");
+    h.db.updateSessionConfig(h.parent.id, { model: "text-only", permissionMode: "orchestrator" }, Date.now());
+    assert.equal((await request("video-first")).data?.occurrenceId, pending.data.occurrenceId,
+      "a changed client capability does not turn exact request replay into a digest conflict");
   } finally { h.db.close(); }
 });
 
 test("video frame tampering and policy revocation invalidate a pending review", async (t) => {
-  if (!await shortVideoDecoderAvailable()) return t.skip("no isolated video decoder on this host");
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
   const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, undefined, true);
   try {
     const child = h.createChild("Video Child");
@@ -20243,6 +20262,51 @@ test("video frame tampering and policy revocation invalidate a pending review", 
     assert.equal(h.db.workflowDecisionByOccurrence(policy.data.occurrenceId)?.status, "revoked");
     assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id,
       policy.data.occurrenceId, first.evidenceId, () => true).status, 409);
+  } finally { h.db.close(); }
+});
+
+test("retention pruning removes video-derived frames and unsupported mixed evidence stays original", async (t) => {
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
+  const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, undefined, true);
+  try {
+    const child = h.createChild("Video Retention Child");
+    const attached = h.svc.attachSessionVideo(child.id, {
+      name: "motion.webm", mimeType: "video/webm", data: transientVideoBytes().toString("base64"),
+    }, { kind: "agent", id: child.id });
+    assert.ok(attached.ok && attached.data, attached.error);
+    const item = { evidenceId: "motion", artifactId: attached.data.artifactId,
+      sha256: attached.data.sha256, mediaType: "video/webm" };
+    const mixed = await h.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: "mixed-video", resourceKey: "mixed-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [
+        { evidenceId: "external", uri: "https://evidence.example/remote.png", sha256: "a".repeat(64) }, item,
+      ] },
+    });
+    assert.equal(mixed.data?.authority, "human");
+    assert.equal(mixed.data?.resourceSnapshot.category, "ui_evidence_approval");
+    if (mixed.data?.resourceSnapshot.category === "ui_evidence_approval") {
+      assert.deepEqual(mixed.data.resourceSnapshot.evidence[1], item,
+        "a human card retains the original video rather than derived frames");
+      assert.equal(mixed.data.resourceSnapshot.videoReview, undefined);
+    }
+    const derived = await h.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: "retained-video", resourceKey: "retained-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
+    });
+    assert.ok(derived.ok && derived.data, derived.error);
+    const snapshot = derived.data.resourceSnapshot;
+    assert.equal(snapshot.category, "ui_evidence_approval");
+    if (snapshot.category !== "ui_evidence_approval") return;
+    const frameId = snapshot.videoReview?.frames[0]?.artifactId;
+    assert.ok(frameId);
+    assert.ok(h.db.workflowArtifactExportPreflight(frameId));
+    assert.ok(h.db.pruneExpiredSessionAttachments(Date.now() + 1000) >= 1);
+    assert.equal(h.db.workflowArtifactExportPreflight(item.artifactId), null);
+    assert.equal(h.db.workflowArtifactExportPreflight(frameId), null,
+      "retention pruning of the source also removes every server-derived frame");
   } finally { h.db.close(); }
 });
 

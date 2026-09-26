@@ -6,8 +6,15 @@ import { decodeShortSilentWebm, shortVideoDecoderAvailable, SHORT_VIDEO_PROFILE 
 
 const fixture = (name: string) => readFileSync(new URL(`../test-fixtures/${name}`, import.meta.url));
 
+async function requireDecoder(t: { skip: (reason: string) => void }): Promise<boolean> {
+  if (await shortVideoDecoderAvailable()) return true;
+  assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+  t.skip("no isolated video decoder on this host");
+  return false;
+}
+
 test("the isolated decoder preserves every frame and a one-frame transient", async (t) => {
-  if (!await shortVideoDecoderAvailable()) return t.skip("no isolated video decoder on this host");
+  if (!await requireDecoder(t)) return;
   const source = fixture("video-review-one-frame-transient.webm");
   const decoded = await decodeShortSilentWebm(source);
   assert.ok(decoded.ok, decoded.ok ? "expected a complete decode" : decoded.reason);
@@ -26,7 +33,7 @@ test("the isolated decoder preserves every frame and a one-frame transient", asy
 });
 
 test("the strict profile rejects audio, excess duration, excess source frames, and malformed media", async (t) => {
-  if (!await shortVideoDecoderAvailable()) return t.skip("no isolated video decoder on this host");
+  if (!await requireDecoder(t)) return;
   for (const name of ["video-review-has-audio.webm", "video-review-too-long.webm",
     "video-review-too-many-frames.webm"] as const) {
     const decoded = await decodeShortSilentWebm(fixture(name));
@@ -37,7 +44,7 @@ test("the strict profile rejects audio, excess duration, excess source frames, a
 });
 
 test("the full 16-frame, 640×360 profile is complete and remains inside derived-byte limits", async (t) => {
-  if (!await shortVideoDecoderAvailable()) return t.skip("no isolated video decoder on this host");
+  if (!await requireDecoder(t)) return;
   const decoded = await decodeShortSilentWebm(fixture("video-review-max-profile.webm"));
   assert.ok(decoded.ok, decoded.ok ? "expected a complete decode" : decoded.reason);
   assert.equal(decoded.frames.length, SHORT_VIDEO_PROFILE.frames);
@@ -55,7 +62,7 @@ test("the source-byte limit fails before a decoder or artifact write", async () 
 });
 
 test("a third simultaneous decode fails closed at the process resource bound", async (t) => {
-  if (!await shortVideoDecoderAvailable()) return t.skip("no isolated video decoder on this host");
+  if (!await requireDecoder(t)) return;
   const source = fixture("video-review-one-frame-transient.webm");
   const results = await Promise.all(Array.from({ length: 3 }, () => decodeShortSilentWebm(source)));
   assert.equal(results.filter((result) => result.ok).length, 2);
