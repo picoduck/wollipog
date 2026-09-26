@@ -73,11 +73,13 @@ export function evaluateUiEvidenceReviewClient(client: UiEvidenceReviewClient): 
   // The default model stands in only when no model was selected. A selected model the catalog does
   // not know has advertised nothing, so it must not inherit the installation's attestation. The one
   // exception is the one launch validation makes: a Claude stable alias the catalog stopped listing
-  // is judged by the catalog entry of its family. Dated pins and unknown ids still fail closed.
+  // is judged by the catalog entry of its family. Dated pins and unknown ids still fail closed, and
+  // so does a family the installation does not offer: the runner backfills hidden bare aliases into
+  // every live Claude catalog, and those placeholders are not offers.
   const model = client.modelId
     ? capabilities.models.find((candidate) => candidate.id === client.modelId)
       ?? (client.driver === "claude-code"
-        ? claudeStableAliasCatalogModel(client.modelId, capabilities.models)
+        ? claudeStableAliasCatalogModel(client.modelId, capabilities.models.filter((candidate) => !candidate.hidden))
         : undefined)
     : capabilities.models.find((candidate) => candidate.default && !candidate.hidden);
   if (!model) {

@@ -146,6 +146,15 @@ test("a saved Claude alias the catalog stopped listing is judged by its family's
       { effectiveOwner: "orchestrator" }, modelId);
   }
 
+  // The runner backfills hidden bare aliases for families the installation does not offer; those
+  // placeholders must not stand in for a missing alias.
+  assert.ok(withoutOneMillion.models.some((model) => model.id === "sonnet" && model.hidden), "the premise: a hidden backfill");
+  for (const modelId of ["sonnet[1m]", "haiku[1m]"]) {
+    assert.equal(fallbackCode({ capabilities: withoutOneMillion, modelId })?.reason,
+      `The Orchestrator model ${JSON.stringify(modelId)} is no longer offered by its installation, so whether it accepts images is unknown. Reselect the Orchestrator's model to restore Orchestrator review.`,
+      modelId);
+  }
+
   // The family entry must still pass every existing check.
   const unattested = fallbackCode({ capabilities: { ...withoutOneMillion, imageToolResults: false }, modelId: "opus[1m]" });
   assert.equal(unattested?.code, "harness_unsupported");
