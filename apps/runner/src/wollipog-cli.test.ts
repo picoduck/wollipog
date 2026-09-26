@@ -391,6 +391,21 @@ test("CLI capability discovery rejects malformed numbers and conflicting exact l
   }
 });
 
+test("CLI session events rejects a malformed --event-epoch instead of reading unpinned", async () => {
+  for (const suffix of [
+    ["--event-epoch", "NaN"],
+    ["--event-epoch", "-1"],
+    ["--event-epoch", "1.5"],
+    ["--event-epoch="],
+    ["--event-epoch", "--json"],
+  ]) {
+    const result = await captureCli(["session", "events", "s_child", "--after", "6", ...suffix, "--json"]);
+    assert.equal(result.code, 2, suffix.join(" "));
+    assert.equal(result.stderr, "", suffix.join(" "));
+    assert.match(JSON.parse(result.stdout).error, /--event-epoch requires a non-negative integer/u, suffix.join(" "));
+  }
+});
+
 test("CLI JSON create and prompt commands reuse the manager routes and reject incompatible control planes", async () => {
   const requests: Array<{ url: string; method?: string; body?: string; headers?: Record<string, string> }> = [];
   const fetch: McpFetch = async (url, init) => {
@@ -574,7 +589,7 @@ test("CLI emits JSON for get, events, prompt, wait, and stop core commands", asy
   const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
   const cases = [
     { argv: ["session", "get", "s_child"], method: "GET", path: "/api/sessions/s_child" },
-    { argv: ["session", "events", "s_child", "--after", "4", "--limit", "2"], method: "GET", path: "/api/sessions/s_child/events?after=4" },
+    { argv: ["session", "events", "s_child", "--after", "4", "--limit", "2"], method: "GET", path: "/api/sessions/s_child" },
     { argv: ["session", "prompt", "s_child", "Keep", "going"], method: "POST", path: "/api/sessions/s_child/prompt" },
     { argv: ["session", "wait", "s_child", "--for", "completed", "--timeout", "50"], method: "GET", path: "/api/sessions/s_child" },
     { argv: ["session", "stop", "s_child"], method: "POST", path: "/api/sessions/s_child/stop" },
@@ -605,6 +620,52 @@ test("CLI emits JSON for get, events, prompt, wait, and stop core commands", asy
     assert.doesNotThrow(() => JSON.parse(output), testCase.argv.join(" "));
     assert.equal(requests[1]!.method, testCase.method);
     assert.equal(requests[1]!.url, `http://cp${testCase.path}`);
+  }
+});
+
+test("CLI session events pages forward with --after and reads the newest events without it", async () => {
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" };
+  const events = Array.from({ length: 12 }, (_, i) => ({ seq: i + 1, ts: i, payload: { kind: "agent_message", text: `m${i + 1}` } }));
+  for (const [argv, pagePath, seqs, lastSeq] of [
+    [["--after", "4", "--limit", "2"], "/api/sessions/s_child/events?after=4&limit=2&eventEpoch=3", [5, 6], 6],
+    [["--after", "6", "--event-epoch", "3", "--limit", "2"], "/api/sessions/s_child/events?after=6&limit=2&eventEpoch=3", [7, 8], 8],
+    [["--event-epoch", "3", "--after", "8", "--limit", "2"], "/api/sessions/s_child/events?after=8&limit=2&eventEpoch=3", [9, 10], 10],
+    [["--limit", "2"], "/api/sessions/s_child/events?direction=backward&limit=2&eventEpoch=3", [11, 12], 12],
+  ] as const) {
+    const requests: string[] = [];
+    const fetch: McpFetch = async (url) => {
+      requests.push(url);
+      const query = new URL(url).searchParams;
+      const limit = Number(query.get("limit"));
+      const body = url.endsWith("/api/compatibility")
+        ? { protocolVersion: PROTOCOL_VERSION }
+        : url.endsWith("/api/sessions/s_child")
+          ? { session: { id: "s_child", eventEpoch: 3 } }
+          : query.get("direction") === "backward"
+            ? { events: events.slice(-limit), eventEpoch: 3, hasMoreOlder: true, cacheComplete: true }
+            : {
+              events: events.filter((e) => e.seq > Number(query.get("after"))).slice(0, limit),
+              eventEpoch: 3,
+              hasMoreCached: true,
+              cacheComplete: true,
+            };
+      return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+    };
+    let output = "";
+    assert.equal(await runWollipogCli(
+      // The option-first case puts every option before the session id, which must still parse as the id.
+      ["node", "cli.js", "--wollipog-cli", "session", "events",
+        ...(argv[0] === "--event-epoch" ? [...argv, "s_child"] : ["s_child", ...argv]), "--json"],
+      env,
+      { stdout: (text) => { output += text; }, stderr: () => {} },
+      fetch,
+    ), 0);
+    assert.equal(requests.at(-1), `http://cp${pagePath}`);
+    assert.equal(requests.includes("http://cp/api/sessions/s_child"), !argv.includes("--event-epoch" as never));
+    const data = JSON.parse(output);
+    assert.equal(data.eventEpoch, 3);
+    assert.deepEqual(data.lines.map((line: string) => Number(/^\((\d+)\)/.exec(line)![1])), seqs);
+    assert.equal(data.lastSeq, lastSeq);
   }
 });
 

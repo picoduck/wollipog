@@ -65,7 +65,7 @@ export function sessionHelp(): string {
     "Usage: wollipog session <command> [options]",
     "  session list [--archived] [--json]",
     "  session get <session-id> [--json]",
-    "  session events <session-id> [--after <seq>] [--limit <count>] [--json]",
+    "  session events <session-id> [--after <seq> [--event-epoch <epoch>]] [--limit <count>] [--json]",
     "  session capabilities --runner <runner-id> --agent <agent-id> [--offset <count>] [--limit <count>] [--include-hidden] [--json]",
     "  session capabilities --runner <runner-id> --agent <agent-id> --model <exact-model-id> [--json]",
     "  session create --runner <runner-id> --agent <agent-id> [--workspace <workspace-id> | --path <path>]",
@@ -79,6 +79,7 @@ export function sessionHelp(): string {
     "  session guardrails <session-id> [--cost-budget <usd>] [--max-tool-calls <count>]",
     "                     [--max-child-sessions <count>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
+    "session events without --after returns the newest events. With --after it pages forward from that seq; pass the returned lastSeq as the next --after, and eventEpoch as --event-epoch, while hasMore is true.",
   ].join("\n");
 }
 
