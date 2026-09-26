@@ -184,6 +184,11 @@ import {
   evaluateUiEvidenceReviewClient,
   type UiEvidenceReviewEvaluation,
 } from "./ui-evidence-review.js";
+import {
+  claudeCatalogFamily,
+  claudeStableAliasCatalogModel,
+  claudeStableAliasFamily,
+} from "./claude-model-aliases.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { childRestartAllowanceError, childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
@@ -988,22 +993,8 @@ export function claudeModelConfigForValidation(
   ) {
     return config;
   }
-  const family = claudeStableAliasFamily(config.model);
-  if (!family) return config;
-  const replacement = capabilities.models.find((candidate) => claudeCatalogFamily(candidate.id) === family);
+  const replacement = claudeStableAliasCatalogModel(config.model, capabilities.models);
   return replacement ? { ...config, model: replacement.id } : config;
-}
-
-function claudeStableAliasFamily(value: string): string | null {
-  const normalized = value.trim().toLowerCase();
-  return /^(opus|fable|sonnet|haiku)(?:\[1m\])?$/.exec(normalized)?.[1] ?? null;
-}
-
-function claudeCatalogFamily(value: string): string | null {
-  const normalized = value.trim().toLowerCase();
-  return claudeStableAliasFamily(normalized)
-    ?? /^claude-(opus|fable|sonnet|haiku)-\d+(?:-\d+)?(?:-\d{8})?(?:\[1m\])?$/.exec(normalized)?.[1]
-    ?? null;
 }
 
 const EFFORT_FALLBACK_ORDER = ["high", "medium", "low", "xhigh", "max", "minimal"] as const;

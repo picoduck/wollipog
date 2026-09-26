@@ -20354,6 +20354,52 @@ test("a Claude Code Orchestrator owns UI evidence review on its runner's attesta
   }
 });
 
+test("a Claude Orchestrator whose saved alias left the catalog keeps UI evidence review through its family entry (#1776)", () => {
+  // The observed catalog: `opus[1m]` is gone while `opus` is still offered, and no Sonnet is.
+  const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, {
+    models: [
+      { id: "default", displayName: "Default (Opus 5.5)", default: true },
+      { id: "opus", displayName: "Opus 5.5" },
+    ],
+    modelSource: "live",
+    effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, imageToolResults: true,
+    permissionModes: ["default", "orchestrator"],
+  });
+  try {
+    const child = h.createChild("UI Child");
+    // An alias with no family entry still falls back, and says how to recover.
+    h.db.updateSessionConfig(h.parent.id, { model: "sonnet[1m]", permissionMode: "orchestrator" }, Date.now());
+    const unavailable = h.db.campaignProjection(h.parent.id)!.uiEvidenceReview;
+    assert.equal(unavailable.status, "unavailable");
+    assert.equal(unavailable.reasonCode, "model_unsupported");
+    assert.match(unavailable.reason ?? "", /"sonnet\[1m\]" is no longer offered by its installation.* Reselect the Orchestrator's model/);
+    const duringFallback = h.request(child.id, "ui-during-fallback", [h.screenshot(child.id, "before").item]);
+    assert.ok(duringFallback.ok && duringFallback.data, duringFallback.error);
+    assert.equal(duringFallback.data.authority, "human");
+    assert.equal(duringFallback.data.humanFallback?.code, "model_unsupported");
+
+    h.db.updateSessionConfig(h.parent.id, { model: "opus[1m]", permissionMode: "orchestrator" }, Date.now());
+    const projection = h.db.campaignProjection(h.parent.id)!;
+    assert.deepEqual(projection.uiEvidenceReview, { status: "available", effectiveOwner: "orchestrator" });
+    assert.equal(projection.decisionOwners.ui_evidence_approval, "orchestrator");
+    const shot = h.screenshot(child.id, "after");
+    const decision = h.request(child.id, "ui-alias", [shot.item]);
+    assert.ok(decision.ok && decision.data, decision.error);
+    assert.equal(decision.data.authority, "orchestrator");
+    assert.equal(decision.data.humanFallback, undefined);
+    const delivered = h.review(child.id, decision.data.occurrenceId, "after");
+    assert.ok(delivered.ok && delivered.data, delivered.error);
+
+    // The card created while the fallback applied keeps its human routing.
+    assert.equal(h.review(child.id, duringFallback.data.occurrenceId, "before").status, 403);
+    const kept = h.db.workflowDecisionByOccurrence(duringFallback.data.occurrenceId);
+    assert.equal(kept?.status, "pending");
+    assert.equal(kept?.authority, "human");
+  } finally {
+    h.db.close();
+  }
+});
+
 // --- Issue #1406: a message sent to a session that is mid-turn -----------------------------------
 // A parent Orchestrator reaching a descendant has neither the dashboard's visible queue nor its
 // explicit Steer control, so "accepted" has to mean something it can act on. These pin the three
