@@ -67,14 +67,21 @@ test("late row measurements retain TanStack positional scroll semantics", () => 
   const base = {
     scrollOffset: 500,
     anchorPending: false,
+    mountRestorePending: false,
   };
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400 }), true,
+  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 450 }), true,
     "a changed row above the viewport compensates its size delta");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 700 }), false,
+  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 700, itemEnd: 750 }), false,
     "a late overscanned row below the viewport must not move the reader");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, anchorPending: true }), false,
-    "the explicit logical anchor owns corrections while it is pending");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 500 }), false,
+  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 450, anchorPending: true }), false,
+    "a width or structural anchor owns its entire reflow");
+  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 450,
+    anchorPending: true, mountRestorePending: true }), true,
+    "a fully preceding row compensates before a mount anchor can expire");
+  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 550,
+    anchorPending: true, mountRestorePending: true }), false,
+    "the mount anchor owns a growing row that spans the viewport");
+  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 500, itemEnd: 550 }), false,
     "a row beginning at the viewport boundary does not need compensation");
 });
 
@@ -100,8 +107,10 @@ test("sequential TanStack measurements fold each adjustment into the public offs
     predicateInputs.push({ itemStart: item.start, scrollOffset });
     return shouldAdjustVirtualScrollForResize({
       itemStart: item.start,
+      itemEnd: item.end,
       scrollOffset,
       anchorPending: false,
+      mountRestorePending: false,
     });
   };
 
