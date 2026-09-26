@@ -36,6 +36,14 @@ function artifact(id: string, bytes: Uint8Array): WorkflowArtifactView {
   };
 }
 
+async function waitForPreview(predicate: () => boolean, description: string): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!predicate()) {
+    assert.ok(Date.now() < deadline, `timed out waiting for ${description}`);
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); });
+  }
+}
+
 test("artifact preview fences stale loads and revokes its selected image URL on unmount", async () => {
   const firstBytes = new Uint8Array([1, 2, 3]);
   const secondBytes = new Uint8Array([4, 5, 6]);
@@ -142,15 +150,19 @@ test("transcript screenshot remount reuses verified bytes until credentials or s
         </TranscriptImageCacheProvider>
       </React.StrictMode>,
     ));
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   };
   try {
     await render("session_1", first);
+    await waitForPreview(() => !!container.querySelector("img")?.getAttribute("src"), "the first verified image");
     const firstUrl = container.querySelector("img")?.getAttribute("src");
     assert.ok(firstUrl);
     await render("session_1", null);
     assert.deepEqual(revoked, [firstUrl]);
     await render("session_1", first);
+    await waitForPreview(
+      () => !!container.querySelector("img")?.getAttribute("src"),
+      "the remounted verified image",
+    );
     const secondUrl = container.querySelector("img")?.getAttribute("src");
     assert.ok(secondUrl);
     assert.notEqual(secondUrl, firstUrl);
@@ -158,22 +170,31 @@ test("transcript screenshot remount reuses verified bytes until credentials or s
     await act(async () => {
       domWindow.dispatchEvent(new domWindow.Event(DEVICE_TOKEN_CHANGED_EVENT));
     });
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await waitForPreview(
+      () => exports === 2 && !!container.querySelector("img")?.getAttribute("src") &&
+        container.querySelector("img")?.getAttribute("src") !== secondUrl,
+      "the image after credentials change",
+    );
     assert.equal(exports, 2, "a credential change invalidates retained bytes");
     const afterCredentialChange = container.querySelector("img")?.getAttribute("src");
     assert.ok(afterCredentialChange);
     assert.ok(revoked.includes(secondUrl));
     await render("session_2", second);
+    await waitForPreview(
+      () => exports === 3 && !!container.querySelector("img")?.getAttribute("src") &&
+        container.querySelector("img")?.getAttribute("src") !== afterCredentialChange,
+      "the image in the second session",
+    );
     assert.equal(exports, 3, "a different session cannot reuse the first session's image");
     assert.ok(revoked.includes(afterCredentialChange));
-    await act(async () => root.unmount());
-    assert.equal(revoked.length, 4, "every visible object URL is released");
   } finally {
+    await act(async () => root.unmount());
     api.artifactExport = priorExport;
     URL.createObjectURL = priorCreate;
     URL.revokeObjectURL = priorRevoke;
     container.remove();
   }
+  assert.equal(revoked.length, 4, "every visible object URL is released");
 });
 
 test("a mismatched transcript image is never cached and can load on a later mount", async () => {
@@ -197,15 +218,16 @@ test("a mismatched transcript image is never cached and can load on a later moun
     await act(async () => root.render(
       <TranscriptImageCacheProvider>{show && <ArtifactPreview artifact={item} />}</TranscriptImageCacheProvider>,
     ));
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   };
   try {
     await render(true);
+    await waitForPreview(() => !!container.querySelector('[role="alert"]'), "the digest mismatch error");
     assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /digest does not match/);
     assert.equal(container.querySelector("img"), null);
     assert.equal(created, 0);
     await render(false);
     await render(true);
+    await waitForPreview(() => !!container.querySelector("img")?.getAttribute("src"), "the verified retry image");
     assert.equal(exports, 2);
     assert.equal(container.querySelector("img")?.getAttribute("src"), "blob:retry-image");
   } finally {
