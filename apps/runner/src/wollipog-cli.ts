@@ -409,7 +409,9 @@ async function compatible(
     let response = await fetchImpl(`${cpUrl}/api/compatibility`, {
       method: "GET",
       headers,
-      signal: AbortSignal.timeout(10_000),
+      // Longer than the runner relay's 10-second credential-acknowledgement wait, so its named
+      // failure reaches the caller instead of this timeout's bare abort (#1841).
+      signal: AbortSignal.timeout(15_000),
     });
     // Protocol v100-v102 dogfood control planes predate the authenticated route but still expose
     // the version on their public health response. Released pre-v100 peers never receive this CLI.
@@ -419,7 +421,14 @@ async function compatible(
         signal: AbortSignal.timeout(10_000),
       });
     }
-    if (!response.ok) return { error: `control plane compatibility check failed: HTTP ${response.status}` };
+    if (!response.ok) {
+      let detail = "";
+      try {
+        const body = JSON.parse(await response.text()) as { error?: unknown };
+        if (typeof body.error === "string") detail = `: ${body.error}`;
+      } catch { /* Keep the status alone when the body is not a JSON error. */ }
+      return { error: `control plane compatibility check failed: HTTP ${response.status}${detail}` };
+    }
     const body = JSON.parse(await response.text()) as { protocolVersion?: unknown };
     if (typeof body.protocolVersion !== "number" || body.protocolVersion < requiredProtocol) {
       return {

@@ -120,6 +120,42 @@ interface AgentControlMemoryState {
  * alive but is not a credential the control plane accepts. */
 const agentControlMemory = new Map<string, AgentControlMemoryState>();
 
+/** Registrations the control plane has not acknowledged yet, one per session: only the current
+ * credential is ever tracked, so a superseded hash is never sent again, and an acknowledgement,
+ * rejection, or teardown removes it. A registration frame lost on its way to the control plane
+ * would otherwise leave every Agent Control call waiting on an acknowledgement that never comes
+ * for the rest of the provider's life (#1841), so the runner re-sends these until answered. */
+const unacknowledgedRegistrations = new Map<string, { tokenHash: string; sentAt: number }>();
+
+/** Current unacknowledged registrations last sent at least `minAgeMs` ago, each marked as sent
+ * now: the caller re-sends every entry it receives. */
+export function agentControlRegistrationsToResend(
+  minAgeMs: number,
+  now = Date.now(),
+): Array<{ sessionId: string; tokenHash: string }> {
+  const due: Array<{ sessionId: string; tokenHash: string }> = [];
+  for (const [sessionId, registration] of unacknowledgedRegistrations) {
+    if (now - registration.sentAt < minAgeMs) continue;
+    registration.sentAt = now;
+    due.push({ sessionId, tokenHash: registration.tokenHash });
+  }
+  return due;
+}
+
+/** Whether `tokenHash` names the session's current credential. An acknowledgement for any other
+ * hash answers a superseded registration and must not change the current one. */
+export function isCurrentAgentControlCredential(configDir: string, sessionId: string, tokenHash: string): boolean {
+  const memory = agentControlMemory.get(sessionId);
+  if (memory) return memory.tokenHash === tokenHash;
+  try {
+    const file = agentControlTokenPath(configDir, sessionId);
+    if (lstatSync(file).isSymbolicLink()) return false;
+    return createHash("sha256").update(readFileSync(file, "utf8").trim()).digest("hex") === tokenHash;
+  } catch {
+    return false;
+  }
+}
+
 function ensureAgentControlMemory(sessionId: string, cpUrl: string): AgentControlMemoryState {
   let state = agentControlMemory.get(sessionId);
   if (!state) {
@@ -543,6 +579,7 @@ export function provisionAgentControl(
   } else {
     rmSync(readyFile, { force: true });
   }
+  unacknowledgedRegistrations.set(spec.sessionId, { tokenHash, sentAt: Date.now() });
   const credentialRegistration = wslOrchestrator && config.registerCredentialAndWait
     ? config.registerCredentialAndWait(spec.sessionId, tokenHash)
     : (config.registerCredential?.(spec.sessionId, tokenHash), undefined);
@@ -713,6 +750,7 @@ export function provisionAgentControl(
 export function removeAgentControlFiles(sessionId: string, configDir: string): void {
   wslLaunches.delete(sessionId);
   agentControlMemory.delete(sessionId);
+  unacknowledgedRegistrations.delete(sessionId);
   for (const file of [
     agentControlTokenPath(configDir, sessionId),
     agentControlMcpConfigPath(configDir, sessionId),
@@ -748,6 +786,7 @@ export function markAgentControlCredentialReady(configDir: string, sessionId: st
       throw new Error("agent-control acknowledgement does not match the active token");
     }
     memory.ready = true;
+    unacknowledgedRegistrations.delete(sessionId);
     removeAgentControlCredentialFiles(configDir, sessionId);
     return;
   }
@@ -756,6 +795,7 @@ export function markAgentControlCredentialReady(configDir: string, sessionId: st
     throw new Error("agent-control acknowledgement does not match the active token");
   }
   protectedWrite(agentControlReadyPath(configDir, sessionId), tokenHash);
+  unacknowledgedRegistrations.delete(sessionId);
 }
 
 /** A rejected binding cannot remain callable or be accidentally reused on resume. */

@@ -108,6 +108,45 @@ test("closing a session relay refuses subsequent connections to its former endpo
   }
 });
 
+test("a runner-side relay failure reaches the adapter as a named error, not an empty response (#1841)", async () => {
+  const sockets = new AgentControlRelaySockets(async () => {
+    throw new Error("Agent Control credential was not acknowledged within 10 seconds");
+  });
+  try {
+    const endpoint = await sockets.ensure("s_relay_failure");
+    const response = await agentControlRelayFetch(endpoint, "k".repeat(32))("http://unused/api/compatibility");
+    assert.equal(response.ok, false);
+    assert.equal(response.status, 503);
+    assert.deepEqual(JSON.parse(await response.text()), {
+      error: "Agent Control credential was not acknowledged within 10 seconds",
+    });
+  } finally {
+    await sockets.closeAll();
+  }
+});
+
+test("the injected CLI names an unacknowledged relay credential instead of aborting (#1841)", async () => {
+  const sockets = new AgentControlRelaySockets(async () => {
+    throw new Error("Agent Control credential was not acknowledged within 10 seconds");
+  });
+  try {
+    const endpoint = await sockets.ensure("s_relay_cli_failure");
+    const stdout: string[] = [];
+    const code = await runWollipogCli(["node", "cli.js", "--wollipog-cli", "session", "list", "--json"], {
+      WOLLIPOG_CONTROL_PLANE_URL: "http://127.0.0.1:4317",
+      WOLLIPOG_SESSION_ID: "s_relay_cli_failure",
+      [AGENT_CONTROL_RELAY_ENDPOINT_ENV]: endpoint,
+      [AGENT_CONTROL_RELAY_KEY_ENV]: "k".repeat(32),
+    }, { stdout: (text) => stdout.push(text), stderr: () => {} });
+    assert.equal(code, 1);
+    assert.deepEqual(JSON.parse(stdout.join("")), {
+      error: "control plane compatibility check failed: HTTP 503: Agent Control credential was not acknowledged within 10 seconds",
+    });
+  } finally {
+    await sockets.closeAll();
+  }
+});
+
 test("the injected CLI works through the relay without any token file or token environment", async () => {
   const sockets = new AgentControlRelaySockets(async (_sessionId, request) => request.path === "/api/compatibility"
     ? { status: 200, body: JSON.stringify({ protocolVersion: PROTOCOL_VERSION }) }

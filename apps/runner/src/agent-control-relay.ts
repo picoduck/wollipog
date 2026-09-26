@@ -186,7 +186,16 @@ function serveConnection(socket: Socket, sessionId: string, handler: AgentContro
         if (Buffer.byteLength(frame, "utf8") > MAX_RESPONSE_FRAME_BYTES) socket.destroy();
         else if (!socket.destroyed) socket.end(frame);
       },
-      () => socket.destroy(),
+      // Name the runner-side cause (#1841): a bare close reached the agent only as an empty-body
+      // JSON parse error. The runner's own failure messages carry no credential material.
+      (error: unknown) => {
+        if (socket.destroyed) return;
+        const response: AgentControlRelayResponse = {
+          status: 503,
+          body: JSON.stringify({ error: error instanceof Error ? error.message : String(error) }),
+        };
+        socket.end(JSON.stringify(response));
+      },
     );
   });
 }
