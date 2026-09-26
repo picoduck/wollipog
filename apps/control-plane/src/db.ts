@@ -674,6 +674,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   orchestrator_policy TEXT,
   session_role TEXT CHECK (session_role IS NULL OR session_role IN ('normal','orchestrator')),
   policy_resume_status TEXT,
+  stop_cause     TEXT,
+  stop_confirmation TEXT,
+  stop_confirmed_at INTEGER,
   driver         TEXT NOT NULL DEFAULT 'acp',
   model          TEXT,
   resolved_model TEXT,
@@ -2713,6 +2716,64 @@ interface SessionStopIntentRow {
   failure_code: string | null;
   failure_message: string | null;
 }
+
+/** The path that wrote a session's current `stopped` status (#1466). Kept when the stop is later
+ * confirmed, so a caller can still tell a restorable disconnect stop from a deliberate one. */
+export type SessionStopCause =
+  /** The runner reported the session terminal. */
+  | "runner_reported"
+  /** A reconnecting runner's inventory no longer held the session. */
+  | "runner_absent"
+  /** A user, agent, or archive Stop, backed by a durable stop intent. */
+  | "requested"
+  /** A declined cost or tool-call guardrail stopped the turn. */
+  | "guardrail"
+  /** The runner's socket closed; reconnect may restore the session. */
+  | "runner_disconnect"
+  /** The control plane restarted with the session mid-flight; reconnect may restore it. */
+  | "startup_settlement"
+  /** The launch frame could not be written to the runner. */
+  | "launch_undelivered"
+  /** The runner refused the launch command. */
+  | "launch_rejected"
+  /** The control plane never sent the launch at all. */
+  | "not_launched"
+  /** Stopped before stop provenance was recorded. */
+  | "unrecorded";
+
+/** What proved no provider process remains for a stopped session. */
+export type SessionStopConfirmation =
+  | "runner_terminal"
+  | "runner_absent"
+  | "launch_rejected"
+  | "not_launched";
+
+/** Provenance for a write of `stopped`. Without `confirmation`, the stop is provisional. */
+export interface SessionStopWrite {
+  cause: SessionStopCause;
+  confirmation?: SessionStopConfirmation;
+}
+
+export interface SessionStopProvenance {
+  cause: SessionStopCause;
+  /** Null while the stop is provisional. */
+  confirmation: SessionStopConfirmation | null;
+  confirmedAt: number | null;
+}
+
+/** A disconnect or startup settlement stops a session only until its runner reports back, and
+ * reconnect may restore that exact run. Every other cause ends it, confirmed or not. */
+export function sessionStopRestorable(provenance: SessionStopProvenance): boolean {
+  return provenance.confirmation === null &&
+    (provenance.cause === "runner_disconnect" || provenance.cause === "startup_settlement");
+}
+
+/** A runner-reported terminal status or snapshot: the canonical confirmed stop. */
+export const RUNNER_REPORTED_STOP: SessionStopWrite = { cause: "runner_reported", confirmation: "runner_terminal" };
+
+/** For a write that restores a status the caller read, which is never `stopped` on a live path.
+ * A row already stopped keeps its provenance; one that is not records an unconfirmed stop. */
+export const UNCHANGED_STOP: SessionStopWrite = { cause: "unrecorded" };
 
 export interface SessionStopIntentRecord {
   sessionId: string;
@@ -5770,6 +5831,33 @@ export class ControlPlaneDb {
     db.exec(
       "CREATE INDEX IF NOT EXISTS idx_session_stop_intents_runner ON session_stop_intents(runner_id, created_at, session_id)",
     );
+    // Stop provenance (#1466). A row stopped before this column existed has no evidence that its
+    // runner confirmed the stop, so it starts provisional; the runner's next terminal snapshot or
+    // absent inventory confirms it, exactly as it would a fresh disconnect stop. One transaction,
+    // so an interrupted upgrade cannot leave some columns added and the backfill skipped.
+    const stopProvenanceColumns = new Set((db.prepare("PRAGMA table_info(sessions)")
+      .all() as unknown as Array<{ name: string }>).map((column) => column.name));
+    const missingStopProvenance = [
+      "stop_cause TEXT",
+      "stop_confirmation TEXT",
+      "stop_confirmed_at INTEGER",
+    ].filter((column) => !stopProvenanceColumns.has(column.split(" ")[0]!));
+    if (missingStopProvenance.length > 0) {
+      db.exec("BEGIN");
+      try {
+        for (const column of missingStopProvenance) db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`);
+        db.exec(
+          `UPDATE sessions SET stop_cause=CASE
+             WHEN EXISTS (SELECT 1 FROM session_stop_intents i WHERE i.session_id=sessions.id) THEN 'requested'
+             ELSE 'unrecorded' END
+           WHERE status='stopped' AND stop_cause IS NULL`,
+        );
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
+    }
     const controlPlane = new ControlPlaneDb(db, artifactBlobs, instanceId);
     try {
       controlPlane.recoverPendingArtifactBlobs();
@@ -5824,7 +5912,8 @@ export class ControlPlaneDb {
            )`,
       ).run(now, SPAWN_APPROVAL_REQUEST_ID_PREFIX);
       this.stmt(
-        `UPDATE sessions SET status = 'stopped', updated_at = ?
+        `UPDATE sessions SET status = 'stopped', updated_at = ?,
+           stop_cause = 'startup_settlement', stop_confirmation = NULL, stop_confirmed_at = NULL
          WHERE status IN ('queued','starting','running','input_required','idle')`,
       ).run(now);
       // Terminality is the retry fence on every path: a runner disconnect already fences these
@@ -12629,6 +12718,7 @@ export class ControlPlaneDb {
         ControlPlaneDb.sessionSnapshotFingerprint(snap),
         snap.adopted ? 1 : 0,
       );
+      this.writeSessionStopProvenance(snap.id, undefined, snap.status, RUNNER_REPORTED_STOP, now);
       if (snap.providerAccountId) {
         this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=?, provider_account_automatically_selected=? WHERE id=?")
           .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId,
@@ -12732,6 +12822,9 @@ export class ControlPlaneDb {
   ): RunnerHistoryReconciliation | null {
     const snapshotFingerprint = ControlPlaneDb.sessionSnapshotFingerprint(snap);
     if (isTerminal(snap.status)) {
+      // A terminal snapshot is runner evidence that no provider process remains, even when it
+      // matches the last one applied and nothing else below changes (#1466).
+      this.confirmSessionStopInTransaction(id, "runner_terminal", now);
       const stored = this.stmt(
         `SELECT status, runner_snapshot_fingerprint, runner_registration_snapshot_fingerprint,
                 runner_history_epoch, runner_history_tail_seq, hydrated_seq, event_epoch,
@@ -12936,6 +13029,7 @@ export class ControlPlaneDb {
       now,
       id,
     );
+    this.writeSessionStopProvenance(id, existing?.status, status, RUNNER_REPORTED_STOP, now);
     if (snap.providerAccountId) {
       this.stmt("UPDATE sessions SET provider_account_id=?, provider_account_label=?, provider_account_automatically_selected=? WHERE id=?")
         .run(snap.providerAccountId, snap.providerAccountLabel ?? snap.providerAccountId,
@@ -13721,11 +13815,27 @@ export class ControlPlaneDb {
     }
   }
 
+  /** Every write that can land on `stopped` must say which path wrote it and whether the runner
+   * has confirmed it (#1466); the provenance is ignored for any other status. */
+  updateSessionStatus(
+    id: string,
+    status: Exclude<SessionStatus, "stopped">,
+    now: number,
+    stop?: SessionStopWrite,
+    invalidateCampaignReports?: boolean,
+  ): void;
   updateSessionStatus(
     id: string,
     status: SessionStatus,
     now: number,
-    provisionalStop = false,
+    stop: SessionStopWrite,
+    invalidateCampaignReports?: boolean,
+  ): void;
+  updateSessionStatus(
+    id: string,
+    status: SessionStatus,
+    now: number,
+    stop?: SessionStopWrite,
     invalidateCampaignReports = true,
   ): void {
     // Terminality couples the status write to its fences below; commit them together so a crash
@@ -13742,6 +13852,15 @@ export class ControlPlaneDb {
     const effectiveStatus: SessionStatus = keepWorkflowPause ? "input_required" : status;
     this.stmt("UPDATE sessions SET status=?, capacity_wait=NULL, updated_at=? WHERE id=?")
       .run(effectiveStatus, now, id);
+    // The overloads require provenance for `stopped`; an untyped caller still records a stop that
+    // nothing has confirmed rather than one that claims runner evidence it never had.
+    const stopWrite = stop ?? { cause: "unrecorded" };
+    this.writeSessionStopProvenance(id, current?.status, effectiveStatus, stopWrite, now);
+    const restorableStop = effectiveStatus === "stopped" && sessionStopRestorable({
+      cause: stopWrite.cause,
+      confirmation: stopWrite.confirmation ?? null,
+      confirmedAt: null,
+    });
     if (invalidateCampaignReports && (status === "queued" || status === "starting" || status === "running")) {
       // A verification attests to one finished assignment, not the lifetime of a retained
       // session. Delete it as soon as any new execution is admitted so a later Stop/Idle without
@@ -13755,10 +13874,10 @@ export class ControlPlaneDb {
       this.cancelSessionPromptCommands(id, `session became ${status} before durable prompt delivery completed`, now);
       // An authoritative terminal transition orphans any armed-but-unsettled delivery marker: the
       // trailing idle it awaited will never belong to this run, and leaving it pending would
-      // suppress the Ready of an unrelated later run. Provisional stops (runner disconnect,
+      // suppress the Ready of an unrelated later run. Restorable stops (runner disconnect,
       // startup settlement) deliberately do NOT clear it — the delivery's idle still arrives
       // after reconnect, and that restart survival is the feature's core case.
-      if (!provisionalStop) {
+      if (!restorableStop) {
         this.stmt(
           `UPDATE managed_background_deliveries
               SET status_settlement_pending_at=NULL, updated_at=MAX(updated_at, ?)
@@ -13801,6 +13920,68 @@ export class ControlPlaneDb {
       now,
     });
     });
+  }
+
+  /** Record stop provenance for a status write, inside the caller's transaction. Leaving `stopped`
+   * clears it. Entering `stopped` records the writer's path. A write while already `stopped`
+   * keeps the episode's original cause and may only upgrade it to confirmed: once the runner has
+   * proved nothing is running, a later redundant Stop cannot make that less true. */
+  private writeSessionStopProvenance(
+    id: string,
+    previousStatus: SessionStatus | undefined,
+    status: SessionStatus,
+    stop: SessionStopWrite,
+    now: number,
+  ): void {
+    if (status !== "stopped") {
+      this.stmt(
+        `UPDATE sessions SET stop_cause=NULL, stop_confirmation=NULL, stop_confirmed_at=NULL
+          WHERE id=? AND stop_cause IS NOT NULL`,
+      ).run(id);
+      return;
+    }
+    if (previousStatus !== "stopped") {
+      this.stmt(
+        "UPDATE sessions SET stop_cause=?, stop_confirmation=?, stop_confirmed_at=? WHERE id=?",
+      ).run(stop.cause, stop.confirmation ?? null, stop.confirmation ? now : null, id);
+      return;
+    }
+    // A row stopped by a path that predates provenance may still lack a cause.
+    this.stmt("UPDATE sessions SET stop_cause=? WHERE id=? AND stop_cause IS NULL").run(stop.cause, id);
+    if (stop.confirmation) this.confirmSessionStopInTransaction(id, stop.confirmation, now);
+  }
+
+  private confirmSessionStopInTransaction(id: string, confirmation: SessionStopConfirmation, now: number): boolean {
+    const result = this.stmt(
+      `UPDATE sessions SET stop_cause=COALESCE(stop_cause, 'unrecorded'), stop_confirmation=?, stop_confirmed_at=?
+        WHERE id=? AND status='stopped' AND stop_confirmation IS NULL`,
+    ).run(confirmation, now, id);
+    return Number(result.changes) > 0;
+  }
+
+  /** Upgrade a provisional stop once the runner proves no provider process remains: a terminal
+   * status or snapshot, or a reconnect inventory that no longer holds the session. A no-op for a
+   * session that is not stopped or whose stop is already confirmed. */
+  confirmSessionStop(id: string, confirmation: SessionStopConfirmation, now: number): boolean {
+    return this.confirmSessionStopInTransaction(id, confirmation, now);
+  }
+
+  /** The recorded provenance of a stopped session, or null for any other status. */
+  sessionStopProvenance(id: string): SessionStopProvenance | null {
+    const row = this.stmt(
+      "SELECT status, stop_cause, stop_confirmation, stop_confirmed_at FROM sessions WHERE id=?",
+    ).get(id) as {
+      status: SessionStatus;
+      stop_cause: SessionStopCause | null;
+      stop_confirmation: SessionStopConfirmation | null;
+      stop_confirmed_at: number | null;
+    } | undefined;
+    if (row?.status !== "stopped") return null;
+    return {
+      cause: row.stop_cause ?? "unrecorded",
+      confirmation: row.stop_confirmation,
+      confirmedAt: row.stop_confirmed_at,
+    };
   }
 
   setSessionCapacityWait(id: string, wait: SessionView["capacityWait"]): boolean {
@@ -17295,13 +17476,20 @@ export class ControlPlaneDb {
 
   /** Terminal/absence evidence settles the stop fence and, in the same transaction, performs the
    * requested archive mutation. This is the only path that hides an active archive request. */
-  settleSessionStopIntent(sessionId: string, now: number): { archived: boolean } {
+  /** Terminal or absence evidence settles the intent, and is the same evidence that confirms the
+   * stop it wrote (#1466). */
+  settleSessionStopIntent(
+    sessionId: string,
+    now: number,
+    confirmation: SessionStopConfirmation,
+  ): { archived: boolean } {
     return this.atomic(() => {
       const row = this.stmt(
         "SELECT archive_after_stop FROM session_stop_intents WHERE session_id=?",
       ).get(sessionId) as { archive_after_stop: number } | undefined;
       if (!row) return { archived: false };
       this.stmt("DELETE FROM session_stop_intents WHERE session_id=?").run(sessionId);
+      this.confirmSessionStopInTransaction(sessionId, confirmation, now);
       if (row.archive_after_stop === 1) {
         this.stmt("UPDATE sessions SET archived=1, updated_at=? WHERE id=?").run(now, sessionId);
         return { archived: true };

@@ -166,12 +166,15 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
 import {
   MAX_PENDING_STEERING_RESOLUTION_REPLAYS,
   MAX_UNRESOLVED_STEERING_ATTEMPTS,
+  RUNNER_REPORTED_STOP,
   SessionArtifactQuotaError,
+  UNCHANGED_STOP,
   type AgentLaunch,
   type CampaignContinuationRecord,
   type ControlPlaneDb,
   type SessionPromptCommandRecord,
   type SessionAutomationOrigin,
+  type SessionStopConfirmation,
   type WorkflowDecisionResumeState,
 } from "./db.js";
 import { questionPolicyAnswers } from "./question-policy.js";
@@ -4211,7 +4214,7 @@ export class SessionsService {
           if (session.parentSessionId) this.hub.sessionChangedById(session.parentSessionId);
           return fail("runner disconnected while launching the session", 409);
         }
-        this.db.updateSessionStatus(id, "stopped", Date.now());
+        this.db.updateSessionStatus(id, "stopped", Date.now(), { cause: "launch_undelivered" });
         this.hub.sessionChangedById(id);
         return fail("runner disconnected while launching the session", 409);
       }
@@ -4629,7 +4632,7 @@ export class SessionsService {
       // A caller that knows the provider is idle and follows the durable receipts admits the
       // prompt as `queued`: the runner's started receipt, or its own running status, is what
       // makes it `running` (#1651).
-      this.db.updateSessionStatus(sessionId, delivery?.admitAs ?? "running", now, false, false);
+      this.db.updateSessionStatus(sessionId, delivery?.admitAs ?? "running", now, undefined, false);
     }
     if (delivery) {
       delivery.activate(plan!);
@@ -4645,7 +4648,7 @@ export class SessionsService {
       if (command.type !== "prompt_session") return fail("session prompt command is malformed", 409);
       const delivered = this.hub.sendToRunner(session.runnerId, command);
       if (!delivered) {
-        this.db.updateSessionStatus(sessionId, session.status, Date.now());
+        this.db.updateSessionStatus(sessionId, session.status, Date.now(), UNCHANGED_STOP);
         this.hub.sessionChangedById(sessionId);
         return fail("runner did not receive the prompt", 409);
       }
@@ -4927,7 +4930,7 @@ export class SessionsService {
       return fail("only recovery-blocked messages with known non-delivery can be retried", 409);
     }
     if (!pendingInputBarrier && session.status !== "queued" && session.status !== "starting") {
-      this.db.updateSessionStatus(sessionId, "running", now, false, false);
+      this.db.updateSessionStatus(sessionId, "running", now, undefined, false);
     }
     try {
       this.promptOutbox.flush(now, session.runnerId);
@@ -5909,7 +5912,7 @@ export class SessionsService {
     this.promptOutbox.stopSession(session.id, now);
     this.revokeUnconsumedWorkflowDecisionsForSession(session.id, "session-stopped");
     this.abortPolicyHookApprovals(session, now, "session-stopped");
-    this.db.updateSessionStatus(session.id, "stopped", now);
+    this.db.updateSessionStatus(session.id, "stopped", now, { cause: "requested" });
     this.sendStopCommand(session.runnerId, session.id);
     const stopped = this.db.getSession(session.id)!;
     if (refreshProject) this.hub.sessionChangedById(session.id);
@@ -5925,10 +5928,10 @@ export class SessionsService {
    * settles the intent can arrive on a path that skips revocation because the session already
    * reads terminal. Settlement therefore revokes again, idempotently, so a session whose Stop is
    * confirmed never keeps a decision its parent could still resolve (#1759). */
-  private settleStopIntent(sessionId: string, now: number): void {
+  private settleStopIntent(sessionId: string, now: number, confirmation: SessionStopConfirmation): void {
     this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-stopped");
     const projectId = this.db.getSession(sessionId)?.projectId;
-    const settled = this.db.settleSessionStopIntent(sessionId, now);
+    const settled = this.db.settleSessionStopIntent(sessionId, now, confirmation);
     this.hub.sessionChangedById(sessionId);
     if (settled.archived && projectId) this.hub.projectChangedById(projectId);
   }
@@ -5947,7 +5950,7 @@ export class SessionsService {
     const existing = this.db.sessionStopIntent(sessionId);
     if (!existing) return fail("there is no Stop operation to retry", 409);
     if (isTerminal(session.status) && session.status !== "stopped") {
-      this.settleStopIntent(sessionId, Date.now());
+      this.settleStopIntent(sessionId, Date.now(), "runner_terminal");
       return ok(this.db.getSession(sessionId)!, 200);
     }
     const rearmed = this.db.retrySessionStopIntent(sessionId, Date.now());
@@ -6409,11 +6412,18 @@ export class SessionsService {
         !canAccess(campaignSessionId) || !canAccess(child.id)) {
       return fail("campaign child not found", 404);
     }
-    // A requested stop writes `stopped` before the runner confirms it and keeps a durable intent
-    // until terminal or absence evidence settles it, so that row is not yet proof of anything.
-    // `setArchived` reads the same intent for the same reason.
-    if (child.status === "stopped" && this.db.hasSessionStopIntent(child.id)) {
-      return fail("campaign child's stop is not settled yet: its runner has not confirmed it", 409);
+    // A requested stop, a guardrail Stop, a runner disconnect, and startup settlement all write
+    // `stopped` before the runner confirms anything, so that row is not yet proof the child's last
+    // report is final. Only a recorded confirmation is (#1466): it survives the runner going
+    // offline afterwards, so verification never depends on current liveness. `setArchived` reads
+    // the open stop intent for the same reason.
+    if (child.status === "stopped" &&
+        (this.db.hasSessionStopIntent(child.id) || !this.db.sessionStopProvenance(child.id)?.confirmation)) {
+      return fail(
+        "campaign child's stop is provisional: its runner has not confirmed it yet. Wait for the runner " +
+          "to report the session terminal or reconnect without it, then verify again",
+        409,
+      );
     }
     // A settled stop is terminal: the session cannot be prompted again, so its last report is as
     // final as a completed one. Refusing it stranded a helper a child stopped on its way out,
@@ -8625,7 +8635,8 @@ export class SessionsService {
       const remaining = removePendingRequest(session.pendingApproval, requestId);
       this.db.setPendingApproval(sessionId, remaining);
       this.db.updateSessionStatus(sessionId,
-        pending.async ? session.status : hasBlockingPendingRequest(remaining) ? "input_required" : "running", now);
+        pending.async ? session.status : hasBlockingPendingRequest(remaining) ? "input_required" : "running", now,
+        UNCHANGED_STOP);
       this.recordGovernanceAudit(
         session,
         pending,
@@ -8670,6 +8681,7 @@ export class SessionsService {
         ? session.status === "input_required" ? "idle" : session.status
         : "running",
       now,
+      UNCHANGED_STOP,
     );
     this.recordGovernanceAudit(
       session,
@@ -8864,7 +8876,7 @@ export class SessionsService {
         this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "guardrail-stopped");
         this.db.setPendingApproval(sessionId, null);
         this.sendStopCommand(session.runnerId, sessionId);
-        this.db.updateSessionStatus(sessionId, "stopped", now);
+        this.db.updateSessionStatus(sessionId, "stopped", now, { cause: "guardrail" });
         this.recordGovernanceAudit(session, pending, "resolution", "denied", actor, now, { optionId });
       }
       this.hub.sessionChangedById(sessionId);
@@ -8944,7 +8956,7 @@ export class SessionsService {
         this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "guardrail-stopped");
         this.db.setPendingApproval(sessionId, null);
         this.sendStopCommand(session.runnerId, sessionId);
-        this.db.updateSessionStatus(sessionId, "stopped", now);
+        this.db.updateSessionStatus(sessionId, "stopped", now, { cause: "guardrail" });
       }
       this.recordRunnerGuardrailResolution(
         session,
@@ -9957,7 +9969,7 @@ export class SessionsService {
           this.hub.sendToRunner(req.runnerId, { type: "cancel_session", sessionId: accepted.spec.sessionId });
         }
         for (const session of sessions) {
-          this.db.updateSessionStatus(session.id, "stopped", failedAt);
+          this.db.updateSessionStatus(session.id, "stopped", failedAt, { cause: "launch_undelivered" });
           this.hub.sessionChangedById(session.id);
         }
         instance = this.db.finishWorkflowInstance({
@@ -9975,7 +9987,10 @@ export class SessionsService {
       // capacity merely to observe an instance that is already terminal.
       const settledAt = Date.now();
       for (const session of sessions) {
-        this.db.updateSessionStatus(session.id, "stopped", settledAt);
+        this.db.updateSessionStatus(session.id, "stopped", settledAt, {
+          cause: "not_launched",
+          confirmation: "not_launched",
+        });
         this.hub.sessionChangedById(session.id);
       }
     }
@@ -10997,10 +11012,10 @@ export class SessionsService {
         this.db.removeSessionStopIntent(sessionId);
         admittedReplacement = true;
       } else if (!restartLaunchId && isTerminal(status)) {
-        this.settleStopIntent(sessionId, Date.now());
+        this.settleStopIntent(sessionId, Date.now(), "runner_terminal");
       } else {
         // A late/nonterminal status is evidence that the accepted stop frame did not take.
-        this.db.updateSessionStatus(sessionId, "stopped", Date.now());
+        this.db.updateSessionStatus(sessionId, "stopped", Date.now(), { cause: "requested" });
         if (!isTerminal(status)) {
           this.sendStopCommand(session.runnerId, sessionId);
         }
@@ -11016,8 +11031,9 @@ export class SessionsService {
     }
     if (isTerminal(status) || status === "idle" || status === "running") this.automaticQuestions.delete(sessionId);
     // A control-plane terminal decision must not be resurrected by a stale or
-    // in-flight runner status event.
+    // in-flight runner status event. A terminal one still confirms a provisional stop (#1466).
     if (isTerminal(session.status) && !admittedReplacement) {
+      if (isTerminal(status)) this.db.confirmSessionStop(sessionId, "runner_terminal", Date.now());
       this.hub.sessionChangedById(sessionId);
       return;
     }
@@ -11040,7 +11056,7 @@ export class SessionsService {
       this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "provider-session-ended");
       this.abortPolicyHookApprovals(session, Date.now(), "provider-session-ended");
     }
-    this.db.updateSessionStatus(sessionId, childAttention ? "input_required" : status, Date.now());
+    this.db.updateSessionStatus(sessionId, childAttention ? "input_required" : status, Date.now(), RUNNER_REPORTED_STOP);
     if (!childAttention && status === "queued" && capacityWait) {
       this.db.setSessionCapacityWait(sessionId, capacityWait);
     }
@@ -11531,7 +11547,7 @@ export class SessionsService {
     // event recreate an approval card or move the control-plane session out of stopped.
     if (this.db.hasSessionStopIntent(sessionId)) {
       if (payload.kind === "question_request") this.hub.sessionEvent(ev, { suppressReminderWake: true });
-      this.db.updateSessionStatus(sessionId, "stopped", now);
+      this.db.updateSessionStatus(sessionId, "stopped", now, { cause: "requested" });
       this.sendStopCommand(session.runnerId, sessionId);
       this.hub.sessionChangedById(sessionId);
       return;
@@ -11949,7 +11965,7 @@ export class SessionsService {
         this.abortPolicyHookApprovals(s, now, "runner-disconnected");
         // A disconnect stop is provisional — reconnect hydration can restore this exact run, and
         // an armed delivery-settlement marker must survive to suppress its trailing Ready.
-        this.db.updateSessionStatus(s.id, "stopped", now, true);
+        this.db.updateSessionStatus(s.id, "stopped", now, { cause: "runner_disconnect" });
         const ev = this.db.appendEvent(
           s.id,
           { kind: "stderr", text: "runner disconnected — session interrupted" },
@@ -11977,7 +11993,7 @@ export class SessionsService {
         if (liveSet.has(s.id)) {
           this.sendStopCommand(runnerId, s.id);
         } else {
-          this.settleStopIntent(s.id, now);
+          this.settleStopIntent(s.id, now, "runner_absent");
         }
         continue;
       }
@@ -12004,7 +12020,11 @@ export class SessionsService {
         }
         if (!isTerminal(s.status)) {
           this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
-          this.db.updateSessionStatus(s.id, "stopped", now);
+          this.db.updateSessionStatus(s.id, "stopped", now, { cause: "runner_absent", confirmation: "runner_absent" });
+        } else {
+          // An inventory without a provisionally stopped session is the runner's confirmation
+          // that nothing of it still runs (#1466).
+          this.db.confirmSessionStop(s.id, "runner_absent", now);
         }
         if (hadOpenHookApproval || !isTerminal(s.status)) {
           this.hub.sessionChangedById(s.id);
@@ -12090,11 +12110,11 @@ export class SessionsService {
         if (restartLaunchId && snap.controlPlaneLaunchId === restartLaunchId) {
           this.db.removeSessionStopIntent(snap.id);
         } else if (!restartLaunchId && isTerminal(snap.status)) {
-          this.settleStopIntent(snap.id, now);
+          this.settleStopIntent(snap.id, now, "runner_terminal");
         } else {
           // Fence runner-authoritative hydration until the durable stop is re-applied. In
           // particular, never replace the CP's stopped status with this still-live snapshot.
-          this.db.updateSessionStatus(snap.id, "stopped", now);
+          this.db.updateSessionStatus(snap.id, "stopped", now, { cause: "requested" });
           if (!isTerminal(snap.status)) {
             this.sendStopCommand(runnerId, snap.id);
           }
@@ -12149,14 +12169,18 @@ export class SessionsService {
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !byId.has(s.id)) {
         const campaignBefore = this.campaignAttentionController(s);
-        if (stopIntentIds.has(s.id)) this.settleStopIntent(s.id, now);
+        if (stopIntentIds.has(s.id)) this.settleStopIntent(s.id, now, "runner_absent");
         const hadOpenHookApproval = this.db.listOpenPolicyHookApprovals(s.id).length > 0;
         if (hadOpenHookApproval) {
           this.abortPolicyHookApprovals(s, now, "provider-session-absent");
         }
         if (!isTerminal(s.status)) {
           this.revokeUnconsumedWorkflowDecisionsForSession(s.id, "provider-session-absent");
-          this.db.updateSessionStatus(s.id, "stopped", now);
+          this.db.updateSessionStatus(s.id, "stopped", now, { cause: "runner_absent", confirmation: "runner_absent" });
+        } else {
+          // An inventory without a provisionally stopped session is the runner's confirmation
+          // that nothing of it still runs (#1466).
+          this.db.confirmSessionStop(s.id, "runner_absent", now);
         }
         if (hadOpenHookApproval || !isTerminal(s.status)) {
           this.hub.sessionChangedById(s.id);
@@ -12216,9 +12240,9 @@ export class SessionsService {
       if (restartLaunchId && snapshot.controlPlaneLaunchId === restartLaunchId) {
         this.db.removeSessionStopIntent(snapshot.id);
       } else if (!restartLaunchId && isTerminal(snapshot.status)) {
-        this.settleStopIntent(snapshot.id, Date.now());
+        this.settleStopIntent(snapshot.id, Date.now(), "runner_terminal");
       } else {
-        this.db.updateSessionStatus(snapshot.id, "stopped", Date.now());
+        this.db.updateSessionStatus(snapshot.id, "stopped", Date.now(), { cause: "requested" });
         if (!isTerminal(snapshot.status)) {
           this.sendStopCommand(runnerId, snapshot.id);
         }
