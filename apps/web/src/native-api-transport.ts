@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ApiTransport } from "./api-transport.js";
+import { TransportRequestError, type ApiTransport } from "./api-transport.js";
 import { decodeNativeHttpResponse, encodeNativeHttpRequest } from "./native-ipc-codec.js";
 
 export interface NativeInvokeRuntime {
@@ -26,11 +26,19 @@ function abortError(message: string): DOMException {
 }
 
 function nativeRequestError(cause: unknown): Error {
-  if (cause instanceof Error) return cause;
-  if (typeof cause === "string" && cause.trim()) return new Error(cause);
-  if (cause !== null && typeof cause === "object" && "message" in cause &&
-      typeof cause.message === "string" && cause.message.trim()) return new Error(cause.message);
-  return new Error("The native request failed.");
+  if (cause instanceof DOMException && cause.name === "AbortError") return cause;
+  const message = cause instanceof Error ? cause.message
+    : typeof cause === "string" ? cause
+    : cause !== null && typeof cause === "object" && "message" in cause &&
+      typeof cause.message === "string" ? cause.message
+    : "The native request failed.";
+  // The Rust transport uses these exact messages for send and response-stream failures. Other
+  // IPC rejections include deterministic path, connection-state, and credential refusals.
+  if (message === "The remote instance request failed." ||
+      message === "The remote instance response was interrupted.") {
+    return new TransportRequestError(message, cause);
+  }
+  return cause instanceof Error ? cause : new Error(message.trim() || "The native request failed.");
 }
 
 export interface NativeApiTransportOptions {

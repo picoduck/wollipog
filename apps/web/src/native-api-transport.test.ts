@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { TransportRequestError } from "./api-transport.js";
 import { createNativeApiTransport, NATIVE_API_METHODS, type NativeInvokeRuntime } from "./native-api-transport.js";
 
 test("every explicit ApiClient method is supported by the native transport contract", () => {
@@ -28,24 +29,20 @@ test("native API transport rejects unsupported methods before invoking Rust", as
   assert.equal(calls, 0);
 });
 
-test("native API transport presents IPC string rejections as Errors", async () => {
-  const desktop: NativeInvokeRuntime = {
-    async invoke<T>(): Promise<T> { throw "native request failed"; },
-  };
-  const transport = createNativeApiTransport({
-    instanceId: "a",
-    runtimeKey: "a:1",
-    publicOrigin: "https://a.test",
-    desktop,
-  });
-  await assert.rejects(
-    () => transport.request("/api/identity"),
-    (error: unknown) => error instanceof Error && error.message === "native request failed",
-  );
+test("native API transport identifies retryable IPC failures", async () => {
+  for (const message of ["The remote instance request failed.",
+    "The remote instance response was interrupted."]) {
+    const desktop: NativeInvokeRuntime = { async invoke<T>(): Promise<T> { throw message; } };
+    const transport = createNativeApiTransport({
+      instanceId: "a", runtimeKey: "a:1", publicOrigin: "https://a.test", desktop,
+    });
+    await assert.rejects(() => transport.request("/api/identity"), (error: unknown) =>
+      error instanceof TransportRequestError && error.message === message);
+  }
 });
 
-test("native API transport preserves Error rejections", async () => {
-  const failure = new TypeError("native request failed");
+test("native API transport preserves unrelated Error rejections", async () => {
+  const failure = new TypeError("The remote API path is not allowed.");
   const desktop: NativeInvokeRuntime = {
     async invoke<T>(): Promise<T> { throw failure; },
   };
@@ -56,6 +53,19 @@ test("native API transport preserves Error rejections", async () => {
     desktop,
   });
   await assert.rejects(() => transport.request("/api/identity"), (error: unknown) => error === failure);
+});
+
+test("native API transport does not classify permanent IPC refusals as retryable", async () => {
+  for (const message of ["The remote API path is not allowed.",
+    "The remote instance returned unsafe credential data.",
+    "The remote instance connection is closed."]) {
+    const desktop: NativeInvokeRuntime = { async invoke<T>(): Promise<T> { throw message; } };
+    const transport = createNativeApiTransport({
+      instanceId: "a", runtimeKey: "a:1", publicOrigin: "https://a.test", desktop,
+    });
+    await assert.rejects(() => transport.request("/api/identity"), (error: unknown) =>
+      error instanceof Error && !(error instanceof TransportRequestError) && error.message === message);
+  }
 });
 
 function responseFrame(status: number, body: Uint8Array): Uint8Array {

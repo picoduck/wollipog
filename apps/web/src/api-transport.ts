@@ -5,6 +5,14 @@ export interface ApiTransport {
   close(): void;
 }
 
+/** The native transport reported a retryable request failure before an HTTP response. */
+export class TransportRequestError extends Error {
+  constructor(message: string, cause?: unknown) {
+    super(message, { cause });
+    this.name = "TransportRequestError";
+  }
+}
+
 export interface BrowserApiTransportOptions {
   instanceId: string;
   origin: string;
