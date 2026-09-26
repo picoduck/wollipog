@@ -391,6 +391,21 @@ test("CLI capability discovery rejects malformed numbers and conflicting exact l
   }
 });
 
+test("CLI session events rejects a malformed --event-epoch instead of reading unpinned", async () => {
+  for (const suffix of [
+    ["--event-epoch", "NaN"],
+    ["--event-epoch", "-1"],
+    ["--event-epoch", "1.5"],
+    ["--event-epoch="],
+    ["--event-epoch", "--json"],
+  ]) {
+    const result = await captureCli(["session", "events", "s_child", "--after", "6", ...suffix, "--json"]);
+    assert.equal(result.code, 2, suffix.join(" "));
+    assert.equal(result.stderr, "", suffix.join(" "));
+    assert.match(JSON.parse(result.stdout).error, /--event-epoch requires a non-negative integer/u, suffix.join(" "));
+  }
+});
+
 test("CLI JSON create and prompt commands reuse the manager routes and reject incompatible control planes", async () => {
   const requests: Array<{ url: string; method?: string; body?: string; headers?: Record<string, string> }> = [];
   const fetch: McpFetch = async (url, init) => {

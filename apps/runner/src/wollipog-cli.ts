@@ -268,18 +268,25 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       return { tool: "list_sessions", input: { archived: flag(args, "--archived") } };
     case "get":
       return words[2] ? { tool: "get_session", input: { sessionId: words[2] } } : { error: "session get requires an id" };
-    case "events":
-      return words[2]
-        ? {
-          tool: "get_session_events",
-          input: {
-            sessionId: words[2],
-            after: numeric(option(args, "--after")),
-            limit: numeric(option(args, "--limit")),
-            eventEpoch: numeric(option(args, "--event-epoch")),
-          },
-        }
-        : { error: "session events requires an id" };
+    case "events": {
+      if (!words[2]) return { error: "session events requires an id" };
+      // The epoch fences a cursor against a replaced history; dropping a malformed one would silently
+      // turn a pinned read into an unpinned one.
+      const eventEpoch = option(args, "--event-epoch");
+      if (optionPresent(args, "--event-epoch") &&
+          (eventEpoch === undefined || !/^\d+$/.test(eventEpoch) || !Number.isSafeInteger(Number(eventEpoch)))) {
+        return { error: "session events --event-epoch requires a non-negative integer" };
+      }
+      return {
+        tool: "get_session_events",
+        input: {
+          sessionId: words[2],
+          after: numeric(option(args, "--after")),
+          limit: numeric(option(args, "--limit")),
+          eventEpoch: numeric(eventEpoch),
+        },
+      };
+    }
     case "capabilities": {
       const runnerId = option(args, "--runner");
       const agentId = option(args, "--agent");
