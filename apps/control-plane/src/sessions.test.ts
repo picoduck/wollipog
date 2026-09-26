@@ -22297,6 +22297,108 @@ test("a runner that reports the child ended abandons the resume owed for a denie
   }
 });
 
+test("a runner's terminal status on a disconnect-stopped child ends it: its decision is revoked and its owed resume abandoned (#1839)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  const disconnect = () => { f.hub.online = false; svc.failRunnerSessions(RUNNER_ID); f.hub.online = true; };
+  try {
+    f.parentOnOtherRunner();
+    // Still pending when the runner confirms the stop: the confirmation revokes it, so the parent
+    // cannot resolve a decision for a child that has ended.
+    const pending = f.requestMerge(1901);
+    svc.onSessionStatus(child.id, "idle");
+    disconnect();
+    assert.equal(db.workflowDecisionByOccurrence(pending.occurrenceId)?.status, "pending", "a provisional stop revokes nothing");
+    svc.onSessionStatus(child.id, "stopped", undefined, undefined, RUNNER_ID);
+    assert.equal(db.sessionStopProvenance(child.id)?.confirmation, "runner_terminal");
+    assert.equal(db.hasSessionStopIntent(child.id), false);
+    assert.equal(db.workflowDecisionByOccurrence(pending.occurrenceId)?.status, "revoked",
+      "the runner's confirmation is an authoritative end");
+    const refused = svc.resolveDescendantRequest(root.id, child.id, pending.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.equal(refused.status, 409);
+    assert.notEqual(f.resumeState(pending.occurrenceId), "held");
+    assert.deepEqual(db.sessionsWithHeldWorkflowDecisionResumes(RUNNER_ID), []);
+
+    // Resolved while the stop was provisional, so the resume is owed; the confirmation abandons it
+    // instead of keeping it for a runner return that already happened.
+    db.updateSessionStatus(root.id, "running", Date.now());
+    db.updateSessionStatus(child.id, "idle", Date.now());
+    const owed = f.requestMerge(1902);
+    svc.onSessionStatus(child.id, "idle");
+    disconnect();
+    f.approve(owed.occurrenceId);
+    assert.equal(f.resumeState(owed.occurrenceId), "held");
+    svc.onSessionStatus(child.id, "stopped", undefined, undefined, RUNNER_ID);
+    assert.equal(db.workflowDecisionByOccurrence(owed.occurrenceId)?.status, "revoked");
+    assert.equal(f.resumeState(owed.occurrenceId), "abandoned");
+    svc.retryDuePrompts(Date.now() + 5_000, RUNNER_ID);
+    assert.equal(f.resolutionPrompts(owed.occurrenceId).length, 0, "an ended child is never resumed");
+    assert.deepEqual(db.sessionsWithHeldWorkflowDecisionResumes(RUNNER_ID), [], "nothing stays owed to an ended child");
+  } finally {
+    db.close();
+  }
+});
+
+test("whether a stopped child can still answer its decision follows its recorded stop provenance (#1839)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  let pullRequest = 1910;
+  /** A fresh pending decision on a child stopped as `stop` describes, then the parent resolves it. */
+  const resolveAfter = (stop: (now: number) => void) => {
+    db.updateSessionStatus(root.id, "running", Date.now());
+    db.updateSessionStatus(child.id, "idle", Date.now());
+    const decision = f.requestMerge(pullRequest++);
+    svc.onSessionStatus(child.id, "idle");
+    stop(Date.now());
+    assert.equal(db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "pending");
+    const resolved = svc.resolveDescendantRequest(root.id, child.id, decision.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    return { resolved, decision };
+  };
+  const owesResume = (label: string, stop: (now: number) => void) => {
+    const { resolved, decision } = resolveAfter(stop);
+    assert.ok(resolved.ok, `${label}: ${resolved.error}`);
+    assert.equal(db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "approved", label);
+    assert.equal(f.resumeState(decision.occurrenceId), "held", `${label}: the resume waits for the runner's return`);
+  };
+  const ended = (label: string, stop: (now: number) => void) => {
+    const { resolved, decision } = resolveAfter(stop);
+    assert.equal(resolved.status, 409, label);
+    assert.match(resolved.error ?? "", /revoked or superseded/u, label);
+    assert.equal(db.workflowDecisionByOccurrence(decision.occurrenceId)?.status, "revoked", label);
+    assert.notEqual(f.resumeState(decision.occurrenceId), "held", label);
+  };
+  try {
+    f.parentOnOtherRunner();
+    // Restorable: reconnect may bring this exact run back.
+    owesResume("disconnect", (now) => db.updateSessionStatus(child.id, "stopped", now, { cause: "runner_disconnect" }));
+    owesResume("startup settlement",
+      (now) => db.updateSessionStatus(child.id, "stopped", now, { cause: "startup_settlement" }));
+    // Stopped before provenance was recorded: without an intent it may be a disconnect, as before.
+    owesResume("unrecorded", (now) => db.updateSessionStatus(child.id, "stopped", now, { cause: "unrecorded" }));
+
+    // Ended, although no stop intent is open: the runner confirmed the stop, or it was never a
+    // stop that reconnect restores.
+    ended("confirmed disconnect", (now) => {
+      db.updateSessionStatus(child.id, "stopped", now, { cause: "runner_disconnect" });
+      db.confirmSessionStop(child.id, "runner_terminal", now);
+    });
+    ended("confirmed unrecorded", (now) => {
+      db.updateSessionStatus(child.id, "stopped", now, { cause: "unrecorded" });
+      db.confirmSessionStop(child.id, "runner_absent", now);
+    });
+    ended("undelivered launch", (now) => db.updateSessionStatus(child.id, "stopped", now, { cause: "launch_undelivered" }));
+    // An open stop intent ends the child even when the stop it lands on was a disconnect's.
+    ended("stop intent on a disconnect stop", (now) => {
+      db.updateSessionStatus(child.id, "stopped", now, { cause: "runner_disconnect" });
+      db.addSessionStopIntent(child.id, RUNNER_ID, now, false);
+    });
+  } finally {
+    db.close();
+  }
+});
+
 test("a resolution recorded just before the control plane stops still resumes the child exactly once (#1759)", () => {
   const f = worktreeRecoveryCampaign();
   const { db, svc, root, child } = f;

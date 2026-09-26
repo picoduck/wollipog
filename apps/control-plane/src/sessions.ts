@@ -172,6 +172,7 @@ import {
   RUNNER_REPORTED_STOP,
   SessionArtifactQuotaError,
   UNCHANGED_STOP,
+  sessionStopRestorable,
   type AgentLaunch,
   type CampaignContinuationRecord,
   type ControlPlaneDb,
@@ -7993,17 +7994,20 @@ export class SessionsService {
   }
 
   /**
-   * Whether a decision's child has ended for good. A runner disconnect provisionally stops every
-   * session it hosted (`failRunnerSessions`), and reconnect hydration restores them; every
-   * authoritative end instead revokes the child's unconsumed decisions, so a child that reads
-   * `stopped` while its decision is still pending was stopped provisionally. Resolving such a
-   * decision owes the resume for the runner's return rather than refusing the resolution (#1759).
-   * An archived child is ended either way: archiving a terminal session records no stop intent,
-   * but the runner's return stops it rather than restoring it.
+   * Whether a decision's child has ended for good. A runner disconnect or startup settlement stops
+   * a session only until its runner reports back, and reconnect hydration may restore it; its
+   * recorded stop provenance says so (#1466). Resolving a decision of such a child owes the resume
+   * for the runner's return rather than refusing the resolution (#1759). Every other stop ends the
+   * child, and so does one its runner has confirmed, an open stop intent, or archiving: archiving a
+   * terminal session records no stop intent, but the runner's return stops it rather than restoring
+   * it. A stop recorded before provenance existed keeps the older reading: without an intent, it
+   * may be a disconnect.
    */
   private workflowDecisionChildEnded(child: SessionView): boolean {
-    return isTerminal(child.status) &&
-      !(child.status === "stopped" && !child.archived && !this.db.hasSessionStopIntent(child.id));
+    if (!isTerminal(child.status)) return false;
+    if (child.status !== "stopped" || child.archived || this.db.hasSessionStopIntent(child.id)) return true;
+    const stop = this.db.sessionStopProvenance(child.id);
+    return !stop || !(sessionStopRestorable(stop) || (stop.cause === "unrecorded" && stop.confirmation === null));
   }
 
   /** Whether a resolution's resume is recorded as owed by the resolving write itself (#1759).
@@ -11098,9 +11102,14 @@ export class SessionsService {
     }
     if (isTerminal(status) || status === "idle" || status === "running") this.automaticQuestions.delete(sessionId);
     // A control-plane terminal decision must not be resurrected by a stale or
-    // in-flight runner status event. A terminal one still confirms a provisional stop (#1466).
+    // in-flight runner status event. A terminal one still confirms a provisional stop (#1466), and
+    // that confirmation ends the child like any other runner-reported end: the decisions and resume
+    // the provisional stop kept for the runner's return are revoked and abandoned.
     if (isTerminal(session.status) && !admittedReplacement) {
-      if (isTerminal(status)) this.db.confirmSessionStop(sessionId, "runner_terminal", Date.now());
+      if (isTerminal(status) && this.db.confirmSessionStop(sessionId, "runner_terminal", Date.now())) {
+        this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "provider-session-ended");
+        this.publishCampaignAttentionTransition(campaignBefore);
+      }
       this.hub.sessionChangedById(sessionId);
       return;
     }
