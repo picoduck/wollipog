@@ -22016,20 +22016,21 @@ export class ControlPlaneDb {
   pruneExpiredSessionAttachments(cutoff: number, limit = 1_000): number {
     const bounded = Number.isSafeInteger(limit) ? Math.max(1, Math.min(limit, 10_000)) : 1_000;
     const ids = this.stmt(
-      `SELECT id,kind FROM artifacts WHERE session_id IS NOT NULL AND run_id IS NULL
+      `SELECT id,kind,session_id FROM artifacts WHERE session_id IS NOT NULL AND run_id IS NULL
          AND kind IN ('screenshot','video') AND created_at < ?
          AND CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.purpose') END='session_attachment'
          AND NOT EXISTS (SELECT 1 FROM workflow_attempt_artifacts WHERE artifact_id=artifacts.id)
        ORDER BY created_at,id LIMIT ?`,
-    ).all(cutoff, bounded) as Array<{ id: string; kind: string }>;
+    ).all(cutoff, bounded) as Array<{ id: string; kind: string; session_id: string }>;
     if (!ids.length) return 0;
     this.db.exec("BEGIN IMMEDIATE");
     try {
       for (const row of ids) {
         if (row.kind === "video") {
-          this.stmt(`DELETE FROM artifacts WHERE kind='screenshot' AND json_valid(metadata)
+          this.stmt(`DELETE FROM artifacts WHERE session_id=? AND kind='screenshot'
+            AND created_by_kind='system' AND created_by_id='video-review-v1' AND json_valid(metadata)
             AND json_extract(metadata, '$.purpose')='video_review_frame'
-            AND json_extract(metadata, '$.sourceArtifactId')=?`).run(row.id);
+            AND json_extract(metadata, '$.sourceArtifactId')=?`).run(row.session_id, row.id);
         }
         this.stmt("DELETE FROM artifacts WHERE id=?").run(row.id);
       }
@@ -22076,22 +22077,24 @@ export class ControlPlaneDb {
   }
 
   deleteWorkflowArtifact(artifactId: string): boolean {
-    this.db.exec("BEGIN IMMEDIATE");
-    let deleted: boolean;
-    try {
-      deleted = Number(this.stmt("DELETE FROM artifacts WHERE id=?").run(artifactId).changes) > 0;
-      if (deleted) {
-        // Derived video frames must never outlive deletion of their source Session artifact.
-        this.stmt(`DELETE FROM artifacts WHERE kind='screenshot' AND json_valid(metadata)
+    const nested = Boolean((this.db as DatabaseSync & { isTransaction?: boolean }).isTransaction);
+    const deleted = this.atomic(() => {
+      const source = this.stmt("SELECT kind,session_id FROM artifacts WHERE id=?").get(artifactId) as
+        { kind: string; session_id: string | null } | undefined;
+      if (!source) return false;
+      // Derived frames are server-authored and belong to the same child Session as the source.
+      // Agent-provided metadata alone can never nominate another artifact for deletion.
+      if (source.kind === "video" && source.session_id) {
+        this.stmt(`DELETE FROM artifacts WHERE session_id=? AND kind='screenshot'
+          AND created_by_kind='system' AND created_by_id='video-review-v1' AND json_valid(metadata)
           AND json_extract(metadata, '$.purpose')='video_review_frame'
-          AND json_extract(metadata, '$.sourceArtifactId')=?`).run(artifactId);
+          AND json_extract(metadata, '$.sourceArtifactId')=?`).run(source.session_id, artifactId);
       }
-      this.db.exec("COMMIT");
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
-    if (deleted) this.collectWorkflowArtifactBlobs();
+      return Number(this.stmt("DELETE FROM artifacts WHERE id=?").run(artifactId).changes) > 0;
+    });
+    // An outer transaction may still roll back; collecting blobs before it commits would delete
+    // bytes that the rollback restores. Normal callers collect immediately after the atomic delete.
+    if (deleted && !nested) this.collectWorkflowArtifactBlobs();
     return deleted;
   }
 

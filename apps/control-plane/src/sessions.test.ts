@@ -20303,10 +20303,29 @@ test("retention pruning removes video-derived frames and unsupported mixed evide
     const frameId = snapshot.videoReview?.frames[0]?.artifactId;
     assert.ok(frameId);
     assert.ok(h.db.workflowArtifactExportPreflight(frameId));
+    const forgedBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("agent screenshot")]);
+    const forged = h.svc.createWorkflowArtifact({
+      sessionId: child.id, kind: "screenshot", name: "agent.png", mimeType: "image/png",
+      encoding: "base64", data: forgedBytes.toString("base64"),
+      metadata: { purpose: "video_review_frame", sourceArtifactId: item.artifactId },
+    }, { kind: "agent", id: child.id });
+    assert.ok(forged.ok && forged.data, forged.error);
+    const unrelated = h.screenshot(child.id, "rollback-safe");
+    const rawDb = (h.db as unknown as { db: { exec: (sql: string) => void } }).db;
+    rawDb.exec("BEGIN IMMEDIATE");
+    try {
+      assert.equal(h.db.deleteWorkflowArtifact(unrelated.item.artifactId), true,
+        "artifact deletion joins an existing transaction");
+    } finally { rawDb.exec("ROLLBACK"); }
+    assert.deepEqual(h.db.readWorkflowArtifactBytes(unrelated.item.artifactId), unrelated.bytes,
+      "rolling back an outer transaction does not lose its artifact blob");
     assert.ok(h.db.pruneExpiredSessionAttachments(Date.now() + 1000) >= 1);
     assert.equal(h.db.workflowArtifactExportPreflight(item.artifactId), null);
     assert.equal(h.db.workflowArtifactExportPreflight(frameId), null,
       "retention pruning of the source also removes every server-derived frame");
+    assert.ok(h.db.workflowArtifactExportPreflight(forged.data.artifactId),
+      "agent-authored metadata cannot nominate a screenshot for frame cleanup");
   } finally { h.db.close(); }
 });
 
