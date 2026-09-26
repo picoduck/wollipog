@@ -25,6 +25,7 @@ const globals: Record<string, unknown> = {
   window: domWindow,
   document: domWindow.document,
   navigator: domWindow.navigator,
+  Element: domWindow.Element,
   HTMLElement: domWindow.HTMLElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
@@ -174,6 +175,11 @@ test("opening a nested agent from the selected output transfers focus to the new
     const [selected, setSelected] = useState<string | null>("outer");
     return <SubagentsPanel session={session} items={items} runnerOnline requestedId={selected} onSelect={setSelected} />;
   }
+  // React reports an exception thrown by an event handler as a window `error` event instead of
+  // failing the test, so a missing DOM global in focus capture would otherwise go unnoticed.
+  const reportedErrors: unknown[] = [];
+  const recordError = (event: unknown) => { reportedErrors.push((event as { error: unknown }).error); };
+  domWindow.addEventListener("error", recordError);
   try {
     await act(async () => root.render(<Harness />));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
@@ -189,7 +195,9 @@ test("opening a nested agent from the selected output transfers focus to the new
     assert.equal(container.querySelector(".subagent-detail-title")?.textContent, "Agent: Inspect Parser");
     assert.equal(domWindow.document.activeElement, detail);
     assert.notEqual(domWindow.document.activeElement, domWindow.document.body);
+    assert.deepEqual(reportedErrors, [], "focus capture and transfer report no uncaught handler errors");
   } finally {
+    domWindow.removeEventListener("error", recordError);
     await act(async () => root.unmount());
     container.remove();
   }
