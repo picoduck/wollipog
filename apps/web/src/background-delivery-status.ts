@@ -1,4 +1,5 @@
 import type { BackgroundDeliveryWatchdogState } from "@wollipog/protocol";
+import type { BackgroundJobStopAvailability } from "./background-job-stop.js";
 
 /** `pending` progresses on its own; `blocked` and `missing` do not and ask for a step. */
 export type BackgroundDeliverySeverity = "pending" | "blocked" | "missing";
@@ -67,6 +68,28 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
     severity: "pending",
   },
 };
+
+/**
+ * The step a watchdog state asks for, where the surface knows whether this runner can stop one job
+ * (#1780). Result Blocked then offers Stop Job, or says why it is unavailable; every other state,
+ * and a surface that does not know, keeps the shared copy.
+ */
+export function backgroundDeliveryAction(
+  state: BackgroundDeliveryWatchdogState,
+  jobStop?: BackgroundJobStopAvailability | null,
+  stoppableJobListed = true,
+): string {
+  const status = BACKGROUND_DELIVERY_STATUS[state];
+  if (state !== "continuation_blocked" || !jobStop) return status.action;
+  if (jobStop.available) {
+    const where = stoppableJobListed
+      ? "Use Stop Job on the unfinished job below"
+      : "Use Stop Job on the unfinished job from the same turn, listed in Background Work";
+    return `${where}: only that job ends, it is recorded as killed, and this result is then returned. ` +
+      "Restarting or stopping the session also ends it, but ends every other job and discards this result.";
+  }
+  return `Stop Job is unavailable: ${jobStop.reason} ${status.action}`;
+}
 
 export function backgroundDeliveryAccessibleName(state: BackgroundDeliveryWatchdogState): string {
   const status = BACKGROUND_DELIVERY_STATUS[state];

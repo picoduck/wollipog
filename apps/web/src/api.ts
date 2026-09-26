@@ -1,5 +1,6 @@
 import type {
   AddBoxRequest,
+  BackgroundJobStopResponse,
   SessionWorktreeCreateOperationSummary,
   SessionWorktreeCreateOperationView,
   AccessScopeChangePreview,
@@ -1081,6 +1082,12 @@ export function createApiClient(transport: ApiTransport) {
   acknowledgeBackgroundMissingResult: (id: string, continuationId: string) =>
     req<SessionView>(
       `/api/sessions/${encodeURIComponent(id)}/background-deliveries/${encodeURIComponent(continuationId)}/acknowledge-missing-result`,
+      { method: "POST" },
+    ),
+
+  stopBackgroundJob: (id: string, jobId: string) =>
+    req<BackgroundJobStopResponse>(
+      `/api/sessions/${encodeURIComponent(id)}/background-jobs/${encodeURIComponent(jobId)}/stop`,
       { method: "POST" },
     ),
 

@@ -1,4 +1,4 @@
-import type { OrganizationRole } from "@wollipog/protocol";
+import type { BackgroundJobStopActor, OrganizationRole } from "@wollipog/protocol";
 import type { ResourceScope } from "@wollipog/protocol";
 import { matchWorkspaceId } from "./workspace-match.js";
 
@@ -107,6 +107,33 @@ export function agentDelegationAuthorizationError(routePath: string, principal: 
   return "the agent session is not delegated organization-wide access to this global resource";
 }
 
+/** Stopping one background job (#1780) belongs to the session owner and to the controlling
+ * Orchestrator of the session's campaign: the Orchestrator session that is its direct parent. A
+ * person must be named by the session's ownership scope (`humanOwnsSession`); an organization admin
+ * who merely can see the session does not qualify. No other agent credential qualifies either,
+ * including the session's own and a more distant ancestor's. */
+export function backgroundJobStopAuthorizationError(
+  principal: AuthPrincipal,
+  target: { id: string; parentSessionId?: string | null },
+  humanOwnsSession: boolean,
+): string | null {
+  if (principal.kind === "human") {
+    return humanOwnsSession ? null : "only the session owner or its controlling Orchestrator may stop its background jobs";
+  }
+  if (principal.orchestrator === true && principal.credentialSessionId &&
+      principal.credentialSessionId !== target.id && target.parentSessionId === principal.credentialSessionId) {
+    return null;
+  }
+  return "only the session owner or its controlling Orchestrator may stop its background jobs";
+}
+
+/** The actor a background-job stop records: the person, or the Orchestrator session. */
+export function backgroundJobStopActor(principal: AuthPrincipal, fallbackUserId: string): BackgroundJobStopActor {
+  return principal.kind === "agent" && principal.credentialSessionId
+    ? { kind: "orchestrator", sessionId: principal.credentialSessionId }
+    : { kind: "user", userId: principal.userId ?? fallbackUserId };
+}
+
 export function agentCredentialSessionTargetError(
   routePath: string,
   principal: AgentPrincipal,
@@ -121,7 +148,8 @@ export function agentCredentialSessionTargetError(
   // The caller computes ancestry from server-owned records; visibility is checked separately.
   const descendantMutation = routePath === "/api/sessions/:id/prompt" ||
     routePath === "/api/sessions/:id/stop" || routePath === "/api/sessions/:id/restart" ||
-    routePath === "/api/sessions/:id/config" || routePath === "/api/sessions/:id/archive";
+    routePath === "/api/sessions/:id/config" || routePath === "/api/sessions/:id/archive" ||
+    routePath === "/api/sessions/:id/background-jobs/:jobId/stop";
   // The config service permits a self-target only for maxChildSessions, so a live orchestrator can
   // raise its own delegation concurrency without gaining authority over its spend/tool ceilings.
   if (routePath === "/api/sessions/:id/config" &&

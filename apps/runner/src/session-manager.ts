@@ -20,6 +20,8 @@ import type {
   AgentCapabilities,
   AgentContext,
   AgentDefinition,
+  BackgroundJobStopActor,
+  StopBackgroundJobRefusal,
   AgentDriverKind,
   AgentSlashCommand,
   AcpRuntimeCapabilities,
@@ -99,6 +101,7 @@ import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } 
 import { managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
 import type {
   CompletedCommandReconciliationProof,
+  DriverBackgroundJobStopResult,
   DriverBackgroundTerminalJob,
   DriverBackgroundWorkUpdate,
   DriverSteerResult,
@@ -840,12 +843,25 @@ export type BackgroundJobEndOutcome =
       reason: "no_session" | "unsupported" | "turn_active" | "in_progress" | "unknown_job" | "no_live_process";
     };
 
+/** What `stopBackgroundJob` did (#1780); the wire result carries the same outcome. */
+export type BackgroundJobStopOutcome =
+  | { outcome: "stopped" | "already_terminal"; terminalStatus: "completed" | "failed" | "killed" }
+  | { outcome: "unknown_job" }
+  | { outcome: "refused"; reason: StopBackgroundJobRefusal };
+
 function waitedFor(ms: number): string {
   const minutes = Math.round(ms / 60_000);
   if (minutes >= 120) return `${Math.round(ms / 3_600_000)} hours`;
   if (minutes >= 1) return minutes === 1 ? "1 minute" : `${minutes} minutes`;
   const seconds = Math.max(1, Math.round(ms / 1_000));
   return seconds === 1 ? "1 second" : `${seconds} seconds`;
+}
+
+/** Names who asked for a stop in the timeline. A person is named by role, never by account. */
+function backgroundJobEndActorLabel(actor: BackgroundJobEndActor): string {
+  if (actor.kind === "orchestrator") return `its controlling Orchestrator (session ${actor.sessionId})`;
+  if (actor.kind === "user") return "the session owner";
+  return "Wollipog";
 }
 
 /** The timeline's account of a kill the runner caused (#952, #1778): which jobs, why, and what
@@ -860,6 +876,10 @@ function backgroundWorkEndedNotice(
     ? `Wollipog ended ${described[0]}`
     : `Wollipog ended ${jobs.length} background jobs: ${described.join("; ")}`;
   const recorded = jobs.length === 1 ? "It is recorded as killed." : "Each is recorded as killed.";
+  if (request.reason === "stop_request") {
+    return `Wollipog stopped ${described.join("; ")} at the request of ${backgroundJobEndActorLabel(request.actor)}. ` +
+      `${recorded} The provider process, its conversation, and the session's other background jobs keep running.`;
+  }
   const hold = request.hold;
   if (request.reason === "handoff_wait_bound" && hold) {
     // An account label may be an email-shaped alias, and the transcript names no account.
@@ -9518,8 +9538,8 @@ export class SessionManager {
     // The bound applies only to work a live provider still owns. Orphaned work already has its
     // one recovery turn coming, which crosses the barrier; a queued continuation does too.
     const bound = entry.client.endBackgroundWork ? entry.client.handoffWaitMaxMs ?? 0 : 0;
-    const bounded = bound > 0 && unfinishedBackgroundJobs > 0 && !meta.orphanedWork &&
-      meta.backgroundWorkState !== "orphaned";
+    const live = !meta.orphanedWork && meta.backgroundWorkState !== "orphaned";
+    const bounded = bound > 0 && unfinishedBackgroundJobs > 0 && live;
     return {
       kind,
       holdId: `${kind.replaceAll("_", "-")}:${since}`,
@@ -9529,6 +9549,7 @@ export class SessionManager {
       unfinishedBackgroundJobs,
       ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.registeredAt } } : {}),
       ...(bounded ? { endsAt: since + bound } : {}),
+      ...(entry.client.stopBackgroundJob && live && unfinished.length > 0 ? { canStopJobs: true as const } : {}),
     };
   }
 
@@ -9620,6 +9641,47 @@ export class SessionManager {
     } finally {
       this.endingBackgroundWork.delete(sessionId);
     }
+  }
+
+  /**
+   * Stop one managed background job by id at an authorized actor's request (#1780). The provider
+   * ends just that job and keeps its process, its conversation, and every other job; the job is
+   * recorded as `killed` with the actor, and the timeline says who asked. Everything after that is
+   * what would follow had the job ended on its own: a finished sibling's result is delivered once,
+   * and a handoff that waited only on this job proceeds with its queued prompts in order.
+   *
+   * The caller (the control plane) has already established that the actor may act on the session.
+   * Unlike `endBackgroundJobs`, a live turn is no obstacle: nothing but the one job is touched.
+   */
+  async stopBackgroundJob(
+    sessionId: string,
+    jobId: string,
+    actor: BackgroundJobStopActor,
+  ): Promise<BackgroundJobStopOutcome> {
+    const meta = this.store.readMeta(sessionId);
+    if (!meta || this.store.isDeleted(sessionId)) return { outcome: "refused", reason: "session_not_found" };
+    const known = () => this.store.readMeta(sessionId)?.backgroundJobs?.find((job) => job.id === jobId);
+    const recorded = known();
+    if (!recorded) return { outcome: "unknown_job" };
+    if (recorded.terminalStatus) return { outcome: "already_terminal", terminalStatus: recorded.terminalStatus };
+    const entry = this.active.get(sessionId);
+    if (!entry) return { outcome: "refused", reason: "no_live_process" };
+    if (!entry.client.stopBackgroundJob) return { outcome: "refused", reason: "unsupported" };
+    if (this.endingBackgroundWork.has(sessionId)) return { outcome: "refused", reason: "in_progress" };
+    this.endingBackgroundWork.set(sessionId, { actor, reason: "stop_request", jobIds: [jobId], endedAt: Date.now() });
+    let result: DriverBackgroundJobStopResult;
+    try {
+      result = await entry.client.stopBackgroundJob(jobId);
+    } finally {
+      this.endingBackgroundWork.delete(sessionId);
+    }
+    if (result.status === "stopped") return { outcome: "stopped", terminalStatus: "killed" };
+    if (result.status === "finished") return { outcome: "already_terminal", terminalStatus: result.job.status };
+    if (result.status === "refused") return { outcome: "refused", reason: result.reason };
+    // The live process holds no such job: it ended in the meantime, or it was never this process's.
+    const latest = known();
+    if (latest?.terminalStatus) return { outcome: "already_terminal", terminalStatus: latest.terminalStatus };
+    return { outcome: "refused", reason: "not_owned" };
   }
 
   /**

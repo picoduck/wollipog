@@ -273,6 +273,8 @@ import {
 import {
   agentCredentialSessionTargetError,
   agentDelegationAuthorizationError,
+  backgroundJobStopActor,
+  backgroundJobStopAuthorizationError,
   boundedTargetId,
   forkProjectAssignment,
   forkSnapshotIdentityError,
@@ -1518,6 +1520,7 @@ app.register(async (instance) => {
       case "acp_registry_approval_result":
       case "host_action_result":
       case "interrupt_turn_result":
+      case "stop_background_job_result":
       case "read_queued_prompt_result":
       case "edit_queued_prompt_result":
       case "provider_login_result":
@@ -4264,6 +4267,20 @@ app.post("/api/sessions/:id/cancel", async (req, reply) =>
 app.post("/api/sessions/:id/restart", async (req, reply) =>
   respond(reply, svc.restart((req.params as { id: string }).id)),
 );
+
+// #1780: end one managed background job without ending the session. The auth gate has already
+// confined an agent credential to its descendants; only the direct parent Orchestrator remains.
+app.post("/api/sessions/:id/background-jobs/:jobId/stop", async (req, reply) => {
+  const { id, jobId } = req.params as { id: string; jobId: string };
+  const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
+  const session = db.getSession(id);
+  if (!principal || !session) return reply.code(404).send({ error: "session not found" });
+  const refusal = backgroundJobStopAuthorizationError(principal, session,
+    principal.kind === "human" && db.isSessionOwner(principal, id));
+  if (refusal) return reply.code(403).send({ error: refusal });
+  if (!validParentControlCoordinate(jobId)) return reply.code(400).send({ error: "invalid background job id" });
+  return respond(reply, await svc.stopBackgroundJob(id, jobId, backgroundJobStopActor(principal, db.localIdentityContext().userId)));
+});
 
 app.get("/api/sessions/:id/provider-accounts", async (req, reply) => {
   const id = (req.params as { id: string }).id;

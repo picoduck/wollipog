@@ -366,6 +366,10 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         : { error: "session wait requires an id" };
     case "stop":
       return words[2] ? { tool: "stop_session", input: { sessionId: words[2] } } : { error: "session stop requires an id" };
+    case "stop-job":
+      return words[2] && words[3]
+        ? { tool: "stop_background_job", input: { sessionId: words[2], jobId: words[3] } }
+        : { error: "session stop-job requires a session id and a job id" };
     case "restart":
       return words[2] ? { tool: "restart_session", input: { sessionId: words[2] } } : { error: "session restart requires an id" };
     case "archive":

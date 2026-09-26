@@ -2307,6 +2307,22 @@ test("a queue hold keeps the runner's bound on the wait, and its way out is wait
   assert.equal(db.getSession("backwards-hold")!.queueHold, undefined);
 });
 
+test("a queue hold keeps the runner's word that one job can be stopped (#1780)", () => {
+  const db = withRunner();
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:5000", since: 5_000, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 1, canStopJobs: true as const,
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "stoppable-hold", status: "queued", queueHold }), "runner-1", 6_000);
+  const held = db.getSession("stoppable-hold")!;
+  assert.deepEqual(held.queueHold, queueHold);
+  assert.match(held.holds?.[0]?.recoveryAction ?? "", /stop_background_job/u);
+  db.createSessionFromSnapshot(snapshot({
+    id: "not-stoppable-hold", status: "queued", queueHold: { ...queueHold, canStopJobs: "yes" as never },
+  }), "runner-1", 6_000);
+  assert.equal(db.getSession("not-stoppable-hold")!.queueHold?.canStopJobs, undefined, "only an exact true is kept");
+});
+
 test("snapshot residuals and indexed source coverage prevent cold-history and replay double counting", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(snapshot({

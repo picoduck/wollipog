@@ -588,7 +588,12 @@
 //      instead of being recorded twice. Older runners do not offer removal.
 // 189: an Orchestrator may receive every frame of a strictly bounded source video through the
 //      existing one-image MCP result, in manifest order. Old runners must retain human ownership.
-export const PROTOCOL_VERSION = 189;
+// 190: the session owner or the controlling Orchestrator of a session's campaign can stop one
+//      managed background job by id with a correlated `stop_background_job` request. The runner
+//      ends only that job, records it as `killed` with the actor, and proceeds as though it had
+//      ended on its own; the provider conversation and the session's other jobs keep running.
+//      Older runners do not offer the action, and the control plane refuses it for them.
+export const PROTOCOL_VERSION = 190;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -900,6 +905,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   worktreeRecovery: 161,
   /** v187 reports a prompt held behind a handoff barrier as `queueHold`, with `queued` status. */
   queueHolds: 187,
+  /** v190 stops one managed background job by id (`stop_background_job`, #1780). */
+  backgroundJobStop: 190,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
@@ -5730,6 +5737,9 @@ export interface SessionQueueHoldView {
    * killed, then runs the handoff and the queued prompts in order. Absent when the runner cannot
    * end the work or its bound is disabled, and from runners older than the bound. */
   endsAt?: number;
+  /** The live provider can stop one of the unfinished jobs by id without ending the others or the
+   * session (#1780), through `stop_background_job`. Absent from runners older than v190. */
+  canStopJobs?: true;
 }
 
 export function backgroundLaunchTypeNoun(launchType: ManagedBackgroundJobSnapshot["launchType"]): string {
@@ -5773,6 +5783,16 @@ export function queueHoldRecoveryAction(hold: SessionQueueHoldView): string {
   const one = hold.unfinishedBackgroundJobs === 1;
   const jobs = one ? "job" : "jobs";
   const messages = hold.queuedPrompts === 1 ? "message" : "messages";
+  if (hold.canStopJobs) {
+    return `Wait for the unfinished background ${jobs} to end; the handoff and the queued ${messages} then proceed on their own. ` +
+      `To end ${one ? "it" : "one"} now, stop it by its job id with stop_background_job (get_session lists the unfinished jobs) ` +
+      "or with Stop Job in the Background Work panel: only that job ends, it is recorded as killed, and the conversation " +
+      `keeps running. Once no unfinished job remains, the handoff and the queued ${messages} run in order` +
+      (hold.endsAt !== undefined
+        ? `; Wollipog also ends any job still running at ${new Date(hold.endsAt).toISOString().slice(0, 16)}Z. `
+        : ". ") +
+      `Do not restart the session to get past this hold: a restart discards the queued ${messages}.`;
+  }
   if (hold.endsAt !== undefined) {
     return `Wait for the unfinished background ${jobs} to end; the handoff and the queued ${messages} then proceed on their own. ` +
       `If ${one ? "it is" : "they are"} still running at ${new Date(hold.endsAt).toISOString().slice(0, 16)}Z, ` +
@@ -7452,6 +7472,39 @@ export interface InterruptTurnResultMessage {
   reason: InterruptTurnResultReason;
 }
 
+/** Why a runner could not stop a background job (#1780). `session_not_found`: the runner has no
+ * such session. `unsupported`: the session's harness cannot end a single job. `in_progress`:
+ * other background work of the session is being ended right now. `no_live_process`: no live
+ * provider process owns the job (the session is not running, or its process exited). `not_owned`:
+ * the live process did not launch the job. `provider_rejected`: the provider refused the request.
+ * `unconfirmed`: the provider gave no proof in time that the job ended, so it is left running; if
+ * the provider later reports that it ended, the job is recorded as killed then. */
+export type StopBackgroundJobRefusal =
+  | "session_not_found"
+  | "unsupported"
+  | "in_progress"
+  | "no_live_process"
+  | "not_owned"
+  | "provider_rejected"
+  | "unconfirmed";
+
+/** `already_terminal` reports a job that had already ended, whether before the request or on its
+ * own while the stop was in flight; nothing was changed. */
+export type StopBackgroundJobOutcome = "stopped" | "already_terminal" | "unknown_job" | "refused";
+
+/** Correlated v190 answer to `stop_background_job`. */
+export interface StopBackgroundJobResultMessage {
+  type: "stop_background_job_result";
+  requestId: string;
+  sessionId: string;
+  jobId: string;
+  outcome: StopBackgroundJobOutcome;
+  /** Present exactly when `outcome` is `refused`. */
+  reason?: StopBackgroundJobRefusal;
+  /** The job's terminal status for `stopped` (always `killed`) and `already_terminal`. */
+  terminalStatus?: "completed" | "failed" | "killed";
+}
+
 /** Correlated runner disposition for a v73 steering request. */
 export interface SteerSessionResultMessage {
   type: "steer_session_result";
@@ -7642,6 +7695,7 @@ export type RunnerToControlPlane =
   | SubscriptionUsageRefreshResultMessage
   | SessionQueueMessage
   | InterruptTurnResultMessage
+  | StopBackgroundJobResultMessage
   | SteerSessionResultMessage
   | ResolveSteeringAttemptResultMessage
   | ReadQueuedPromptResultMessage
@@ -7956,6 +8010,31 @@ export interface InterruptTurnMessage {
   requestId?: string;
   /** Runner-assigned coordinate from the live queue overlay. Mismatches are rejected as stale. */
   turnId?: string;
+}
+
+/** Who asked to stop a background job (#1780): the session owner, or the controlling Orchestrator
+ * of the session's campaign. Recorded on the job and named in the session timeline. */
+export type BackgroundJobStopActor =
+  | { kind: "user"; userId: string }
+  | { kind: "orchestrator"; sessionId: string };
+
+/** v190: stop one managed background job by id. Unlike cancel_session and stop_session, the
+ * session, its provider conversation, and its other jobs keep running. */
+export interface StopBackgroundJobMessage {
+  type: "stop_background_job";
+  requestId: string;
+  sessionId: string;
+  jobId: string;
+  actor: BackgroundJobStopActor;
+}
+
+/** HTTP answer of `POST /api/sessions/:id/background-jobs/:jobId/stop`. A refusal is an HTTP error
+ * instead: 404 for an unknown job, 409 when the runner cannot stop it. */
+export interface BackgroundJobStopResponse {
+  sessionId: string;
+  jobId: string;
+  outcome: "stopped" | "already_terminal";
+  terminalStatus: "completed" | "failed" | "killed";
 }
 
 /** Control plane asks the runner to drop ONE not-yet-started prompt from a session's queue (the
@@ -9272,6 +9351,7 @@ export type ControlPlaneToRunner =
   | DurableSessionCommandMessage
   | CancelSessionMessage
   | InterruptTurnMessage
+  | StopBackgroundJobMessage
   | CancelQueuedPromptMessage
   | ReadQueuedPromptMessage
   | EditQueuedPromptMessage

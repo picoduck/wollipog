@@ -165,6 +165,36 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     );
     assert.equal(providerOwnWorktree.status, 409,
       "provider-mode Orchestrator self-worktrees pass immutable policy and reach runner admission");
+    // #1780: only the session owner and the controlling Orchestrator (the direct parent) may stop
+    // one background job. An admitted request reaches the runner, which is offline in this fixture.
+    const stopJob = async (target: string, token: string, agent?: string) => {
+      const response = await fetch(`http://127.0.0.1:${port}/api/sessions/${target}/background-jobs/job-1/stop`, {
+        method: "POST", signal: AbortSignal.timeout(3000),
+        headers: { authorization: `Bearer ${token}`, ...(agent ? { [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: agent } : {}) },
+      });
+      return { status: response.status, error: (await response.json() as { error?: string }).error };
+    };
+    assert.deepEqual(await stopJob("orchestrator-child", `device-${ownerId}`), { status: 409, error: "runner is offline" },
+      "the session owner is admitted");
+    assert.deepEqual(await stopJob("orchestrator-child", "token-orchestrator", "orchestrator"),
+      { status: 409, error: "runner is offline" }, "the controlling Orchestrator is admitted");
+    assert.equal((await stopJob("orchestrator-grandchild", "token-orchestrator", "orchestrator")).status, 403,
+      "a grandchild's controlling Orchestrator is its own parent, not an ancestor");
+    assert.equal((await stopJob("orchestrator", "token-orchestrator", "orchestrator")).status, 404,
+      "an Orchestrator cannot target its own session");
+    assert.equal((await stopJob("normal-child", "token-orchestrator", "orchestrator")).status, 404,
+      "an Orchestrator cannot reach another session's child");
+    assert.equal((await stopJob("orchestrator-hidden", "token-orchestrator", "orchestrator")).status, 404,
+      "an Orchestrator cannot reach a child outside its delegated scope");
+    assert.equal((await stopJob("orchestrator-grandchild", "token-orchestrator-child", "orchestrator-child")).status, 401,
+      "a worker parent never gains the route");
+    assert.equal((await stopJob("normal-child", "token-normal", "normal")).status, 401,
+      "an ordinary agent credential never gains the route");
+    assert.equal((await stopJob("orchestrator-child", "device-other-user")).status, 404,
+      "a person without access to the session is refused");
+    assert.deepEqual(await stopJob("orchestrator-child", "device-policy-admin"), {
+      status: 403, error: "only the session owner or its controlling Orchestrator may stop its background jobs",
+    }, "an organization admin who can see another user's session is not its owner");
     for (const mode of ["normal", "orchestrator"]) {
       const request = (target: string, operation: string, body: unknown, method = "POST") => fetch(
         `http://127.0.0.1:${port}/api/sessions/${target}${operation ? `/${operation}` : ""}`, {

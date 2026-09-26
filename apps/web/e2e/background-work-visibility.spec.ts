@@ -1,4 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
+import { PROTOCOL_VERSION } from "@wollipog/protocol";
 
 async function expectUnclipped(badge: Locator) {
   await expect(badge).toBeVisible();
@@ -215,5 +216,90 @@ for (const width of [320, 1280]) {
       }
       await panel.getByRole("button", { name: "Close Panel", exact: true }).click();
     }
+  });
+}
+
+for (const width of [320, 1280]) {
+  test(`Result Blocked offers Stop Job for the unfinished job and shows it unavailable on older runners at ${width}px (#1780)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/command-inbox-projects-e2e.html?scenario=git-visibility&sessionShell=1");
+    await page.getByRole("button", { name: /Alpha Session/ }).click();
+    const expand = page.getByRole("button", { name: "Expand Session" });
+    if (await expand.isVisible()) await expand.click();
+    const resultBlocked = () => page.evaluate(() => {
+      const now = Date.now();
+      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+        driver: "claude-code",
+        backgroundWorkState: "running",
+        backgroundWorkTracking: "managed",
+        backgroundJobsAvailable: true,
+        backgroundJobs: [
+          {
+            id: "monitor-never-fires", parentTurnId: "blocked-parent", launchType: "monitor",
+            registeredAt: now - 50 * 60_000, lastObservedAt: now - 60_000, sourcePresent: true,
+          },
+          {
+            id: "review-subagent", parentTurnId: "blocked-parent", launchType: "agent",
+            registeredAt: now - 50 * 60_000, lastObservedAt: now - 20 * 60_000, sourcePresent: true,
+            terminalStatus: "completed", terminalObservedAt: now - 20 * 60_000, continuationRequired: true,
+          },
+        ],
+        backgroundDeliveries: [{
+          parentTurnId: "blocked-parent", jobCount: 2, terminalCount: 1,
+          watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1,
+        }],
+      });
+    });
+    const openPanel = async () => {
+      const header = page.locator(".session-detail > .detail-head");
+      const name = /^Background Work: Result Blocked\./;
+      let badge = header.locator(":scope > .session-header-statuses").getByRole("button", { name });
+      if (!await badge.isVisible()) {
+        await header.locator(".session-status-overflow-trigger").click();
+        badge = page.getByRole("dialog", { name: "Session Statuses" }).getByRole("button", { name });
+      }
+      await expect(badge).toHaveText("Result Blocked");
+      await badge.click();
+      const panel = page.getByRole("complementary", { name: "Background Work", exact: true });
+      await expect(panel).toBeVisible();
+      return panel;
+    };
+
+    // An older runner: the action is visible but unavailable, and the guidance says why.
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(189));
+    await resultBlocked();
+    let panel = await openPanel();
+    const summary = panel.locator('[data-watchdog-state="continuation_blocked"] .background-delivery-summary');
+    await expect(summary).toContainText("Stop Job is unavailable: Runner protocol is v189; Stop Job requires protocol v190.");
+    await expect(summary).toContainText("Ask the session to stop the unfinished job");
+    const monitorRow = panel.locator(".background-work-job").filter({ hasText: "Monitor Job" });
+    const unavailable = monitorRow.getByRole("button", { name: "Stop Job", exact: true });
+    await expect(unavailable).toBeDisabled();
+    await expect(unavailable).toHaveAccessibleDescription(/^Stops Monitor Job \d\. Stop Job is unavailable: Runner protocol is v189/);
+    await panel.getByRole("button", { name: "Close Panel", exact: true }).click();
+
+    // A current runner: Stop Job is offered on the unfinished job only, behind a confirmation.
+    await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
+    await resultBlocked();
+    panel = await openPanel();
+    await expect(summary).toContainText("Use Stop Job on the unfinished job below: only that job ends");
+    await expect(panel.getByRole("button", { name: "Stop Job", exact: true })).toHaveCount(1);
+    const stop = panel.locator(".background-work-job").filter({ hasText: "Monitor Job" })
+      .getByRole("button", { name: "Stop Job", exact: true });
+    await expect(stop).toBeEnabled();
+    await expect(stop).toHaveAccessibleDescription(/^Stops Monitor Job \d\.$/);
+    await stop.click();
+    const confirm = panel.getByRole("group", { name: /^Confirm Stopping Monitor Job \d$/ });
+    await expect(confirm).toContainText("Only this job ends, and it is recorded as killed.");
+    const confirmBox = await confirm.boundingBox();
+    const panelBox = await panel.boundingBox();
+    expect(confirmBox && panelBox && confirmBox.x >= panelBox.x - 0.5 &&
+      confirmBox.x + confirmBox.width <= panelBox.x + panelBox.width + 0.5).toBe(true);
+    await confirm.getByRole("button", { name: "Confirm Stop" }).click();
+
+    await expect(panel.locator('[data-watchdog-state="continuation_blocked"]')).toHaveCount(0);
+    await expect(panel.locator(".background-work-job").filter({ hasText: "Monitor Job" })).toContainText("Killed");
+    await expect(panel.locator(".background-work-job").filter({ hasText: "Agent Job" })).toContainText("Result Delivered");
+    await expect(panel.getByRole("button", { name: "Stop Job", exact: true })).toHaveCount(0);
   });
 }

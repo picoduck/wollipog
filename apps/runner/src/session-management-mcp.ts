@@ -258,6 +258,26 @@ async function worktreeRetirementCompatibilityError(deps: McpDeps): Promise<Tool
       );
 }
 
+/** A pre-v190 control plane has no stop route, and its refusal would not say why. */
+async function backgroundJobStopCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundJobStop;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return errorResult(
+        `Stopping one background job requires control plane protocol v${required}, but compatibility could not be verified: ${result.message}`,
+      );
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : errorResult(
+        `Stopping one background job requires control plane protocol v${required}; connected control plane reports v${String(actual ?? "unknown")}. Update Wollipog first.`,
+      );
+}
+
 async function workflowDecisionActionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionAdmission;
   let actual = deps.controlPlaneProtocolVersion;
@@ -444,6 +464,22 @@ function promptDelivery(s: Json): Json {
   };
 }
 
+function unfinishedBackgroundJobs(s: Json): { unfinishedBackgroundJobs?: Json[] } {
+  const jobs = Array.isArray(s?.backgroundJobs)
+    ? s.backgroundJobs.filter((job: Json) => typeof job?.id === "string" && !job.terminalStatus)
+    : [];
+  return jobs.length
+    ? {
+        unfinishedBackgroundJobs: capArray(jobs.map((job: Json) => ({
+          id: job.id,
+          launchType: job.launchType ?? "unknown",
+          parentTurnId: job.parentTurnId ?? null,
+          registeredAt: job.registeredAt ?? null,
+        })), 16),
+      }
+    : {};
+}
+
 /** Field-map a SessionView to the compact shape every session-returning tool shares. */
 function mapSession(s: Json): Json {
   return {
@@ -471,6 +507,8 @@ function mapSession(s: Json): Json {
     // What keeps the next turn from starting and the step that clears it (#1650). A held session
     // asks nothing, so a parent otherwise saw only `input_required` with no request behind it.
     ...(Array.isArray(s?.holds) && s.holds.length ? { holds: capArray(s.holds, 8) } : {}),
+    // The ids stop_background_job takes (#1780). Finished jobs are omitted: there is nothing to stop.
+    ...unfinishedBackgroundJobs(s),
     updatedAt: s?.updatedAt,
     archived: s?.archived ?? false,
     archiveStatus: s?.archiveStatus,
@@ -807,8 +845,8 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "resolve_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "reconcile_workflow_decision",
   "wait_session", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
-  "stop_session", "restart_session", "archive_session", "set_guardrails", "create_worktree", "attach_worktree",
-  "select_worktree", "discard_worktree"]);
+  "stop_session", "stop_background_job", "restart_session", "archive_session", "set_guardrails", "create_worktree",
+  "attach_worktree", "select_worktree", "discard_worktree"]);
 const PARENT_CONTROL_TOOLS = new Set([
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child",
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
@@ -2143,6 +2181,35 @@ export const TOOLS: McpTool[] = [
       const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(args.sessionId)}/stop`);
       if (!r.ok) return errorResult(r.message);
       return textResult({ session: mapSession(r.data) });
+    },
+  },
+  {
+    name: "stop_background_job",
+    description: "Stop one unfinished managed background job of a descendant session by its job id (get_session lists them as unfinishedBackgroundJobs), for example a monitor that never fires and keeps a finished sibling's result or a queued worktree or account handoff waiting. Only that job ends: it is recorded as killed with you as the actor, the session's conversation and other jobs keep running, and whatever waited only on it proceeds. Only the session's controlling Orchestrator and its owner may use it; a job that already ended is reported without change. Subject to session permissions and governance policies.",
+    inputSchema: {
+      type: "object",
+      properties: { sessionId: { type: "string" }, jobId: { type: "string" } },
+      required: ["sessionId", "jobId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (typeof args?.sessionId !== "string" || !args.sessionId || typeof args?.jobId !== "string" || !args.jobId) {
+        return errorResult("sessionId and jobId are required");
+      }
+      if (args.sessionId === deps.selfSessionId) {
+        return errorResult("refusing: that is my own session (stop your own background task with your task-stop tool)");
+      }
+      const incompatible = await backgroundJobStopCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(args.sessionId)}/background-jobs/${encodeURIComponent(args.jobId)}/stop`);
+      if (!r.ok) return errorResult(r.message);
+      return textResult({
+        sessionId: r.data?.sessionId,
+        jobId: r.data?.jobId,
+        outcome: r.data?.outcome,
+        terminalStatus: r.data?.terminalStatus,
+      });
     },
   },
   {
