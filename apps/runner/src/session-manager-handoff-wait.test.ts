@@ -492,3 +492,84 @@ test("ending the work keeps orphan recovery at most once: a recovered monitor th
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a turn in the middle of the wait does not restart the bound (#1778)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-wait-interrupted-"));
+  let manager: SessionManager | undefined;
+  try {
+    const repo = initRepo(root);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const sent: RunnerToControlPlane[] = [];
+    const bound = 400;
+    const fake = fakeProvider({
+      handoffWaitMaxMs: bound,
+      onPrompt: (provider, text) => {
+        if (text !== "watch CI") return;
+        fake.live.set("monitor-1", { id: "monitor-1", launchType: "monitor", startedAt: Date.now() });
+        fake.report(provider);
+      },
+    });
+    manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
+      fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_handoff_wait_interrupted", repo);
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "watch CI");
+    await waitFor(() => store.readMeta(spec.sessionId)?.status === "idle", "the launching turn did not finish");
+    await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/handoff-interrupted" });
+    manager.prompt(spec.sessionId, "queued");
+    await waitFor(() => publishedHolds(sent).some((hold) => hold?.endsAt !== undefined), "the hold was not bounded");
+    const first = publishedHolds(sent).find((hold) => hold?.endsAt !== undefined)!;
+
+    // Shortly before the deadline the provider starts a turn on its own (a monitor event, say),
+    // which interrupts the published hold; it settles after the deadline has passed.
+    await waitFor(() => Date.now() >= first.endsAt! - 150, "the deadline did not approach");
+    fake.providers[0]!.cb.onProviderInitiatedTurn?.("started", "provider-turn-1");
+    await waitFor(() => Date.now() >= first.endsAt! + 100, "the deadline did not pass");
+    assert.deepEqual(fake.endCalls, [], "nothing is ended while a turn is running");
+    fake.providers[0]!.cb.onProviderInitiatedTurn?.("settled", "provider-turn-1");
+
+    await waitFor(() => fake.prompts.some((prompt) => prompt.text === "queued"), "the queued prompt did not run");
+    assert.equal(fake.endCalls.length, 1);
+    assert.ok(fake.endCalls[0]! < first.endsAt! + bound,
+      "the work is ended at the original deadline once the turn settles, not a full bound later");
+    const bounded = publishedHolds(sent).filter((hold) => hold?.endsAt !== undefined);
+    assert.ok(bounded.length >= 2, "the hold is published again after the turn");
+    assert.ok(bounded.every((hold) => hold!.holdId === first.holdId && hold!.endsAt === first.endsAt),
+      "the interrupted wait is the same incident with the same deadline");
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("jobs Wollipog ended are retained like delivered ones, so repeated kills cannot crowd out live jobs (#1778)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-wait-retention-"));
+  let manager: SessionManager | undefined;
+  try {
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const fake = fakeProvider({ handoffWaitMaxMs: 0 });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_handoff_wait_retention", root);
+    await manager.start(spec);
+    const ended = Array.from({ length: 600 }, (_, index) => ({
+      id: `ended-${index}`, parentTurnId: `turn-${index}`, runnerId: "runner", workspaceId: "repo",
+      context: { kind: "native" as const }, launchType: "monitor" as const, registeredAt: 1_000 + index,
+      terminalStatus: "killed" as const, terminalObservedAt: 2_000 + index, continuationRequired: false,
+      endedBy: { actor: { kind: "runner" as const }, reason: "handoff_wait_bound" as const, endedAt: 2_000 + index },
+    }));
+    store.patchMeta(spec.sessionId, { backgroundJobs: ended });
+    fake.live.set("fresh-1", { id: "fresh-1", launchType: "shell", startedAt: 10_000 });
+    fake.report(fake.providers[0]!);
+    const jobs = store.readMeta(spec.sessionId)!.backgroundJobs!;
+    assert.ok(jobs.length <= 128, `retained ${jobs.length} jobs`);
+    assert.equal(jobs[0]?.id, "fresh-1", "the live job leads the inventory the control plane reads");
+    assert.equal(jobs.at(-1)?.id, "ended-599", "the most recent ended jobs are kept");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

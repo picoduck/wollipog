@@ -870,7 +870,10 @@ queued behind a turn that had never started.
   the killed job. The handoff follows, and then every queued prompt, decision resumes included, in
   its original order. Nothing is discarded. A job that ends on its own first is left alone, and
   the bound is counted from when a prompt began to wait, so work nobody waits on is never ended by
-  it. Orphaned work is not bounded: its one recovery turn already crosses the barrier.
+  it. A turn in between (one the provider starts on its own, or a continuation) interrupts the
+  hold but not the wait: the hold keeps its identity and deadline, and the work is ended as soon as
+  that turn settles if the deadline has passed. Orphaned work is not bounded: its one recovery turn
+  already crosses the barrier.
 - **The way out is stated.** For a bounded hold, the recovery action says to wait, gives the
   time Wollipog ends the work, and warns that restarting discards the queued prompts. Otherwise —
   an older runner, a disabled bound, or a provider that cannot end its work — it says to wait for

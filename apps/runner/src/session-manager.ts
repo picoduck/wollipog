@@ -1132,6 +1132,10 @@ export class SessionManager {
   /** The queue hold last published for each session (#1651), kept apart from the active entry so
    * a replacement provider still clears the hold its predecessor reported. */
   private readonly publishedQueueHolds = new Map<string, SessionQueueHoldView>();
+  /** When the prompts behind a deferred handoff began to wait (#1778). A turn in between — one the
+   * provider starts on its own, or a continuation that crosses the barrier — interrupts the
+   * published hold but not the wait, so the bound keeps counting from here rather than restarting. */
+  private readonly handoffWaitStarts = new Map<string, { kind: SessionQueueHoldKind; since: number }>();
   /** One timer per published hold whose wait the driver bounds (#1778). */
   private readonly handoffWaitTimers = new Map<string, {
     holdId: string;
@@ -9504,8 +9508,11 @@ export class SessionManager {
     const oldest = unfinished.reduce<typeof unfinished[number] | undefined>(
       (min, job) => !min || job.registeredAt < min.registeredAt ? job : min, undefined);
     const published = this.publishedQueueHolds.get(sessionId);
-    // One incident keeps its identity while it lasts, however its counts change.
-    const since = published?.kind === kind ? published.since : Date.now();
+    const waitStart = this.handoffWaitStarts.get(sessionId);
+    // One incident keeps its identity while it lasts, however its counts change, and across a turn
+    // that interrupts it while the same prompts keep waiting.
+    const since = waitStart?.kind === kind ? waitStart.since
+      : published?.kind === kind ? published.since : Date.now();
     const unfinishedBackgroundJobs = Math.max(unfinished.length, meta.pendingBackgroundTaskIds?.length ?? 0);
     // The bound applies only to work a live provider still owns. Orphaned work already has its
     // one recovery turn coming, which crosses the barrier; a queued continuation does too.
@@ -9522,6 +9529,19 @@ export class SessionManager {
       ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.registeredAt } } : {}),
       ...(bounded ? { endsAt: since + bound } : {}),
     };
+  }
+
+  private syncHandoffWaitStart(sessionId: string, entry: ActiveSession | undefined): void {
+    const kind: SessionQueueHoldKind | null = entry?.pendingProviderAccountSwitch
+      ? "provider_account_switch"
+      : entry?.pendingWorktreeRebind ? "worktree_rebind" : null;
+    if (!kind || !entry!.queue.some((prompt) => !prompt.syntheticRecovery)) {
+      this.handoffWaitStarts.delete(sessionId);
+      return;
+    }
+    if (this.handoffWaitStarts.get(sessionId)?.kind !== kind) {
+      this.handoffWaitStarts.set(sessionId, { kind, since: Date.now() });
+    }
   }
 
   /** Keep exactly one timer per bounded hold, re-armed when the hold changes identity or bound. */
@@ -9607,6 +9627,7 @@ export class SessionManager {
    */
   private syncQueueHold(sessionId: string): void {
     const entry = this.active.get(sessionId);
+    this.syncHandoffWaitStart(sessionId, entry);
     const next = entry ? this.queueHoldFor(sessionId, entry) : null;
     this.syncHandoffWaitTimer(sessionId, next);
     const published = this.publishedQueueHolds.get(sessionId);
@@ -14550,6 +14571,7 @@ export class SessionManager {
     this.backgroundContinuationTimers.clear();
     for (const { timer } of this.handoffWaitTimers.values()) clearTimeout(timer);
     this.handoffWaitTimers.clear();
+    this.handoffWaitStarts.clear();
     this.approvalStarted.clear();
     if (this.admissionRetryTimer) clearTimeout(this.admissionRetryTimer);
     this.admissionRetryTimer = null;
@@ -15366,11 +15388,15 @@ export class SessionManager {
       }
     }
     const all = [...byId.values()].sort((left, right) => left.registeredAt - right.registeredAt);
-    const unresolved = all.filter((job) => !job.assistantResultPersistedAt);
+    // A job Wollipog ended has nothing left to deliver and never gets a delivery receipt, so it is
+    // retained like a delivered one rather than growing the unresolved set without bound (#1778).
+    const settled = (job: DurableBackgroundJob) => job.assistantResultPersistedAt !== undefined ||
+      (job.endedBy !== undefined && job.terminalObservedAt !== undefined && !job.continuationRequired);
+    const unresolved = all.filter((job) => !settled(job));
     const deliveredLimit = Math.max(0, MAX_RETAINED_DELIVERED_BACKGROUND_JOBS - unresolved.length);
     const delivered = deliveredLimit === 0
       ? []
-      : all.filter((job) => job.assistantResultPersistedAt).slice(-deliveredLimit);
+      : all.filter(settled).slice(-deliveredLimit);
     return { jobs: [...unresolved, ...delivered], queuedJobIds };
   }
 
