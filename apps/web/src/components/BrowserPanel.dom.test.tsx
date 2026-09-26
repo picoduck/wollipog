@@ -42,6 +42,16 @@ function artifact(id: string, text: string): WorkflowArtifactView {
   };
 }
 
+async function waitForPreviewToSettle(container: HTMLDivElement): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (container.querySelector(".artifact-preview")?.getAttribute("aria-busy") !== "false") {
+    if (Date.now() >= deadline) throw new Error(`Timed out waiting for artifact preview: ${container.innerHTML}`);
+    await act(async () => {
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+  }
+}
+
 test("browser panel paginates metadata and fetches exact bodies only after selection", async () => {
   const first = artifact("first", "first body");
   const second = artifact("second", "second body");
@@ -55,6 +65,7 @@ test("browser panel paginates metadata and fetches exact bodies only after selec
   };
   api.artifactExport = async (id: string) => {
     exported.push(id);
+    await new Promise((resolve) => setTimeout(resolve, 75));
     return new Blob([id === "first" ? "first body" : "second body"], { type: "text/plain" });
   };
 
@@ -79,7 +90,7 @@ test("browser panel paginates metadata and fetches exact bodies only after selec
     assert.equal(container.querySelectorAll(".browser-artifact-row").length, 2);
 
     await act(async () => { (container.querySelector(".browser-artifact-row") as HTMLButtonElement).click(); });
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    await waitForPreviewToSettle(container);
     assert.deepEqual(exported, ["first"]);
     assert.equal(container.querySelector("pre")?.textContent, "first body", container.innerHTML);
   } finally {
