@@ -2224,8 +2224,10 @@ textarea {
   .request-panel:not(.request-panel-single) {
     grid-template-rows: minmax(72px, 25%) minmax(0, 1fr);
   }
+  /* Only the summary's own lines give way. The HTTPS notice is the one way forward when evidence
+     cannot be shown, so it stays whole even here. */
   .request-panel:not(.request-panel-single) .request-panel-detail:has(> .evidence-review-surface) > .request-owner,
-  .request-panel:not(.request-panel-single) .evidence-review-summary p {
+  .request-panel:not(.request-panel-single) .evidence-review-summary > div > p {
     display: none;
   }
 }

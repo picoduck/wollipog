@@ -413,7 +413,8 @@ export function SessionApprovalBanner({
   const decisionNeedsRunner = approval.kind !== "policy_hook" && approval.kind !== "workflow_decision";
   // An artifact-backed item counts as reviewed only once its verified image was actually shown. A
   // saved mark from an earlier visit does not survive the artifact turning out missing, mismatched,
-  // or uncheckable in this browser. Its `uri`, if any, never stands in for the checked artifact.
+  // or uncheckable in this browser. For an artifact the card can show, its `uri`, if any, never
+  // stands in for the checked bytes.
   const [artifactStatus, setArtifactStatus] = useState<Record<string, EvidenceArtifactStatus>>({});
   const evidenceBlocked = (item: (typeof evidence)[number]) => {
     if (!isRenderableEvidence(item)) return !item.uri;

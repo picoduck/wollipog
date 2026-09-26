@@ -933,9 +933,9 @@ URLs that are released when the card closes. Each shown item says who checked it
 browser against the request's digest." Nothing else on the card claims a check.
 
 When supplied, the `uri` remains the reviewer's route for an item with no artifact and for a media
-type the card cannot show in place. Those links are labelled as external. An artifact-backed item
-never falls back to its `uri`, even when it has one: the reviewer approves the checked artifact or
-nothing.
+type the card cannot show in place. Those links are labelled as external. An artifact the card can
+show in place (a raster image or an MP4 or WebM video) never falls back to its `uri`, even when it
+has one: the reviewer approves the checked artifact or nothing.
 
 **Reviewing artifact evidence requires HTTPS or localhost.** Browsers provide SubtleCrypto, which
 the digest check needs, only in a secure context: an HTTPS page, or `localhost` on the machine that
