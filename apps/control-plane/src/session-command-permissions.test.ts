@@ -183,4 +183,19 @@ test("each live client receives its own command permissions for one session chan
   assert.deepEqual(upsertPermissions(clients.otherAdmin), snapshotPermissions(clients.admin),
     "clients sharing a verdict share one serialization and still receive it");
   assert.equal(upsertPermissions(clients.local), undefined);
+
+  // An ownership change leaves organization admins connected; each is resent the session only
+  // because its verdict changed, and nothing is resent when no verdict moves.
+  assert.equal(db.setResourceScope({
+    resource: "session", resourceId: "s_owned", now: 5,
+    scope: { organizationId: local.organizationId, owner: { kind: "organization", organizationId: local.organizationId } },
+  }), true);
+  const before = { admin: clients.admin.length, local: clients.local.length };
+  hub.closeScopedUiClients();
+  assert.deepEqual(upsertPermissions(clients.admin), ALL_ALLOWED, "the admin now owns the session through its organization");
+  assert.deepEqual(upsertPermissions(clients.otherAdmin), ALL_ALLOWED);
+  assert.equal(clients.admin.length, before.admin + 1);
+  assert.equal(clients.local.length, before.local, "a trusted local client has no verdict to refresh");
+  hub.closeScopedUiClients();
+  assert.equal(clients.admin.length, before.admin + 1, "an unchanged verdict is not resent");
 });
