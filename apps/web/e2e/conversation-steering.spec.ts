@@ -96,6 +96,9 @@ test("Ctrl+Enter steers without an optimistic echo while Enter, Shift+Enter, IME
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(0);
 
   await composer.fill("Steer this active turn");
+  // Ctrl+Enter is ignored until the ordinary send releases the composer, which follows its
+  // provider receipt by its draft bookkeeping; Send enables at exactly that point.
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.deferNextSteeringResult());
   await page.keyboard.press("Control+Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(1);
@@ -126,6 +129,8 @@ test("Ctrl+Enter steers without an optimistic echo while Enter, Shift+Enter, IME
 
   await composer.fill("/rev");
   await expect(page.getByRole("listbox")).toBeVisible();
+  // The settled steer holds the composer through the same bookkeeping.
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await page.keyboard.press("Control+Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests().length)).toBe(2);
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.steeringRequests()[1]?.text)).toBe("/rev");
