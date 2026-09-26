@@ -108,13 +108,18 @@ export function agentDelegationAuthorizationError(routePath: string, principal: 
 }
 
 /** Stopping one background job (#1780) belongs to the session owner and to the controlling
- * Orchestrator of the session's campaign: the Orchestrator session that is its direct parent. No
- * other agent credential qualifies, including the session's own and a more distant ancestor's. */
+ * Orchestrator of the session's campaign: the Orchestrator session that is its direct parent. A
+ * person must be named by the session's ownership scope (`humanOwnsSession`); an organization admin
+ * who merely can see the session does not qualify. No other agent credential qualifies either,
+ * including the session's own and a more distant ancestor's. */
 export function backgroundJobStopAuthorizationError(
   principal: AuthPrincipal,
   target: { id: string; parentSessionId?: string | null },
+  humanOwnsSession: boolean,
 ): string | null {
-  if (principal.kind === "human") return null;
+  if (principal.kind === "human") {
+    return humanOwnsSession ? null : "only the session owner or its controlling Orchestrator may stop its background jobs";
+  }
   if (principal.orchestrator === true && principal.credentialSessionId &&
       principal.credentialSessionId !== target.id && target.parentSessionId === principal.credentialSessionId) {
     return null;

@@ -296,26 +296,29 @@ test("only the session owner and its controlling Orchestrator may stop one of it
     organizationId: "org_1", delegatedScope: scope,
   };
   const child = { id: "s_child", parentSessionId: "s_parent" };
-  assert.equal(backgroundJobStopAuthorizationError(orchestrator, child), null);
+  assert.equal(backgroundJobStopAuthorizationError(orchestrator, child, false), null);
   assert.deepEqual(backgroundJobStopActor(orchestrator, "usr_local"), { kind: "orchestrator", sessionId: "s_parent" });
 
   const refused = /only the session owner or its controlling Orchestrator/;
   // A grandchild belongs to its own parent's campaign; a worker parent is not an Orchestrator.
-  assert.match(backgroundJobStopAuthorizationError(orchestrator, { id: "s_grandchild", parentSessionId: "s_child" })!, refused);
-  assert.match(backgroundJobStopAuthorizationError({ ...orchestrator, orchestrator: undefined }, child)!, refused);
+  assert.match(backgroundJobStopAuthorizationError(orchestrator, { id: "s_grandchild", parentSessionId: "s_child" }, false)!, refused);
+  assert.match(backgroundJobStopAuthorizationError({ ...orchestrator, orchestrator: undefined }, child, false)!, refused);
   // The session itself, and a sibling Orchestrator, are other callers.
   assert.match(backgroundJobStopAuthorizationError({ ...orchestrator, actorId: "s_child", credentialSessionId: "s_child" },
-    { id: "s_child", parentSessionId: "s_child" })!, refused);
-  assert.match(backgroundJobStopAuthorizationError({ ...orchestrator, actorId: "s_other", credentialSessionId: "s_other" }, child)!,
+    { id: "s_child", parentSessionId: "s_child" }, false)!, refused);
+  assert.match(backgroundJobStopAuthorizationError({ ...orchestrator, actorId: "s_other", credentialSessionId: "s_other" }, child, false)!,
     refused);
-  assert.match(backgroundJobStopAuthorizationError({ ...orchestrator, credentialSessionId: undefined }, child)!, refused);
-  assert.match(backgroundJobStopAuthorizationError(orchestrator, { id: "s_root", parentSessionId: null })!, refused);
+  assert.match(backgroundJobStopAuthorizationError({ ...orchestrator, credentialSessionId: undefined }, child, false)!, refused);
+  assert.match(backgroundJobStopAuthorizationError(orchestrator, { id: "s_root", parentSessionId: null }, false)!, refused);
+  // An agent never qualifies through the ownership flag.
+  assert.match(backgroundJobStopAuthorizationError({ ...orchestrator, orchestrator: undefined }, child, true)!, refused);
 
-  // A person passes here; session access (ownership) is enforced by the central auth gate.
+  // A person qualifies only as the session's owner, not by an organization role.
   const owner = {
     kind: "human" as const, actorId: "usr_1", userId: "usr_1", userName: "Owner", organizationId: "org_1",
     organizationName: "Org", role: "operator" as const, deviceId: null, localBootstrap: false,
   };
-  assert.equal(backgroundJobStopAuthorizationError(owner, child), null);
+  assert.equal(backgroundJobStopAuthorizationError(owner, child, true), null);
+  assert.match(backgroundJobStopAuthorizationError({ ...owner, role: "admin" as const }, child, false)!, refused);
   assert.deepEqual(backgroundJobStopActor(owner, "usr_local"), { kind: "user", userId: "usr_1" });
 });

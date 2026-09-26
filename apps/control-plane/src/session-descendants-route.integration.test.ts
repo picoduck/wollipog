@@ -192,6 +192,9 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       "an ordinary agent credential never gains the route");
     assert.equal((await stopJob("orchestrator-child", "device-other-user")).status, 404,
       "a person without access to the session is refused");
+    assert.deepEqual(await stopJob("orchestrator-child", "device-policy-admin"), {
+      status: 403, error: "only the session owner or its controlling Orchestrator may stop its background jobs",
+    }, "an organization admin who can see another user's session is not its owner");
     for (const mode of ["normal", "orchestrator"]) {
       const request = (target: string, operation: string, body: unknown, method = "POST") => fetch(
         `http://127.0.0.1:${port}/api/sessions/${target}${operation ? `/${operation}` : ""}`, {

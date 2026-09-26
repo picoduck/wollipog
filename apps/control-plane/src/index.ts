@@ -4275,7 +4275,8 @@ app.post("/api/sessions/:id/background-jobs/:jobId/stop", async (req, reply) => 
   const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
   const session = db.getSession(id);
   if (!principal || !session) return reply.code(404).send({ error: "session not found" });
-  const refusal = backgroundJobStopAuthorizationError(principal, session);
+  const refusal = backgroundJobStopAuthorizationError(principal, session,
+    principal.kind === "human" && db.isSessionOwner(principal, id));
   if (refusal) return reply.code(403).send({ error: refusal });
   if (!validParentControlCoordinate(jobId)) return reply.code(400).send({ error: "invalid background job id" });
   return respond(reply, await svc.stopBackgroundJob(id, jobId, backgroundJobStopActor(principal, db.localIdentityContext().userId)));

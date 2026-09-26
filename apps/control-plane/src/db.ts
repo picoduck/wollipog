@@ -9429,6 +9429,21 @@ export class ControlPlaneDb {
     return this.principalCanAccessScope(principal, scope);
   }
 
+  /** Whether the session's ownership scope itself names this person (#1780): the owning user, a
+   * member of the owning team, or a member of the owning organization. Unlike `canAccessSession`,
+   * an organization owner or admin role grants nothing beyond that. */
+  isSessionOwner(principal: HumanPrincipal, sessionId: string): boolean {
+    const scope = this.sessionScope(sessionId);
+    if (!scope || principal.organizationId !== scope.organizationId) return false;
+    if (scope.owner.kind === "organization") return scope.owner.organizationId === principal.organizationId;
+    if (scope.owner.kind === "user") return scope.owner.userId === principal.userId;
+    return this.stmt(
+      `SELECT 1 FROM identity_teams team
+       JOIN identity_team_members member ON member.team_id=team.team_id
+       WHERE team.team_id=? AND team.organization_id=? AND member.user_id=?`,
+    ).get(scope.owner.teamId, principal.organizationId, principal.userId) !== undefined;
+  }
+
   canAccessSession(principal: AuthPrincipal, sessionId: string): boolean {
     const scope = this.sessionScope(sessionId);
     return scope ? this.principalCanAccessScope(principal, scope) : false;
