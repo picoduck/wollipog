@@ -907,14 +907,17 @@ human-owned with a `humanFallback` code and reason shown on the request card:
 - every evidence item names an `artifactId` of a `screenshot` Session artifact owned by the requesting
   child, declares an allowed image `mediaType`, and matches that artifact's type, size, and SHA-256.
 
-Video (`media_video_unsupported`), unknown or non-raster media (`media_unsupported`), and evidence
-that lives only behind a URI (`provider_untrusted`) always go to the human. The control plane never
+Video (`media_video_unsupported`), an image type the Orchestrator's client does not accept, such as
+GIF for Codex App Server (`media_unsupported`), and evidence that lives only behind a URI
+(`provider_untrusted`) always go to the human. The control plane never
 fetches a child-supplied URL; the URI is display material for the human reviewer only. A screenshot
 Session artifact can be submitted without a URI when it names its `artifactId`, raster `mediaType`,
 and SHA-256. A first-class MP4 or WebM Session artifact can also be submitted without a URI, but
 video remains human-owned: no installed Orchestrator client is audited to deliver its motion to the
-model, so an artifact and a matching digest alone cannot create a review receipt. URI-only evidence
-still requires a safe HTTPS link. Campaign-level
+model, so an artifact and a matching digest alone cannot create a review receipt. An item that names
+an `artifactId` must declare a media type the human review card can show (a raster image, MP4, or
+WebM); any other or missing media type is refused when the decision is requested, with or without a
+URI. URI-only evidence still requires a safe HTTPS link. Campaign-level
 unavailability is reported as `uiEvidenceReview.reasonCode` and `reason` on the campaign projection.
 A human fallback is scoped to that one decision: other children and other assigned categories are
 unaffected.
@@ -932,10 +935,12 @@ Images load as they approach the viewport, a few at a time, and are held only as
 URLs that are released when the card closes. Each shown item says who checked it: "Checked by this
 browser against the request's digest." Nothing else on the card claims a check.
 
-When supplied, the `uri` remains the reviewer's route for an item with no artifact and for a media
-type the card cannot show in place. Those links are labelled as external. An artifact the card can
-show in place (a raster image or an MP4 or WebM video) never falls back to its `uri`, even when it
-has one: the reviewer approves the checked artifact or nothing.
+The `uri` is the reviewer's route only for an item with no artifact, and that link is labelled as
+external. An artifact-backed item never falls back to its `uri`, even when it has one: the reviewer
+approves the checked artifact or nothing. The control plane refuses a new request naming an artifact
+the card cannot show. A decision stored before that check can still name one, and the card shows it
+as blocked with its media type and no link, so it cannot be marked reviewed; Deny still works, and
+the control plane refuses a human approval of such a decision.
 
 **Reviewing artifact evidence requires HTTPS or localhost.** Browsers provide SubtleCrypto, which
 the digest check needs, only in a secure context: an HTTPS page, or `localhost` on the machine that

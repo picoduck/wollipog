@@ -488,6 +488,14 @@ export function validateParentControlDecisions(value: unknown): value is ParentC
     record[category] === "human" || record[category] === "orchestrator");
 }
 
+/** Media types the human review card shows in place, after checking the bytes against the digest. */
+const RENDERABLE_EVIDENCE_MEDIA_TYPES: readonly string[] = [...PROMPT_IMAGE_MIME_TYPES, "video/mp4", "video/webm"];
+
+/** An evidence item that names an artifact is reviewable only as that artifact's checked bytes. */
+function unrenderableEvidenceArtifact(item: { artifactId?: string; mediaType?: string }): boolean {
+  return item.artifactId !== undefined && !RENDERABLE_EVIDENCE_MEDIA_TYPES.includes(item.mediaType as string);
+}
+
 /** Normalize untrusted JSON into a canonical key order before hashing or persistence. */
 export function normalizeWorkflowDecisionSnapshot(
   input: unknown,
@@ -607,10 +615,11 @@ export function normalizeWorkflowDecisionSnapshot(
     if (item.artifactId !== undefined && !boundedDecisionString(item.artifactId, 256)) return [];
     if (item.mediaType !== undefined &&
         (typeof item.mediaType !== "string" || !/^[a-z0-9][a-z0-9.+-]{0,62}\/[a-z0-9][a-z0-9.+-]{0,62}$/u.test(item.mediaType))) return [];
-    // Without an external link, the human fallback must have an artifact the browser can display.
+    // An item naming an artifact must be one the human review card can show and check; its `uri`
+    // is never reviewed in the artifact's place. Evidence without an artifact needs its link.
     // The Orchestrator still applies its own stricter client and artifact checks before delivery.
-    if (item.uri === undefined && (!item.artifactId ||
-        ![...PROMPT_IMAGE_MIME_TYPES, "video/mp4", "video/webm"].includes(item.mediaType as string))) return [];
+    if (item.artifactId === undefined && item.uri === undefined) return [];
+    if (unrenderableEvidenceArtifact(item as { artifactId?: string; mediaType?: string })) return [];
     // Optional fields are emitted only when present so a pre-v167 snapshot keeps its digest.
     return [{
       evidenceId: item.evidenceId,
@@ -8238,6 +8247,13 @@ export class SessionsService {
           snapshot.evidence.some((item) => item.uri === undefined) &&
           evidenceReviewDigest !== decision.resourceDigest) {
         return fail("Reload the page to review artifact-only evidence before approving this decision", 409);
+      }
+      // A decision stored before request validation refused it can still name an artifact the card
+      // cannot show. Only its unchecked external copy was ever on offer, so it can only be denied.
+      const unshowable = !deny && snapshot.category === "ui_evidence_approval"
+        ? snapshot.evidence.find(unrenderableEvidenceArtifact) : undefined;
+      if (unshowable) {
+        return fail(`Evidence ${JSON.stringify(unshowable.evidenceId)} is an artifact the review card cannot show; deny this decision`, 409);
       }
       const resolution: ResolveWorkflowDecisionRequest = {
         outcome: deny ? "deny" : "approve",

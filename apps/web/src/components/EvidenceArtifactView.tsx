@@ -23,10 +23,15 @@ export function evidenceIntegrityCheckAvailable(): boolean {
   return Boolean(globalThis.crypto?.subtle);
 }
 
-/** Only an artifact-backed image or browser-playable video is shown in place. Other evidence needs an external link
- * to be reviewable; an item with neither a renderable artifact nor a link is blocked. */
+/** An item that names a Session artifact is reviewed as that artifact's checked bytes or not at all. */
+export function isArtifactBackedEvidence(item: EvidenceItem): item is EvidenceItem & { artifactId: string } {
+  return typeof item.artifactId === "string" && item.artifactId.length > 0;
+}
+
+/** Only an artifact-backed image or browser-playable video is shown in place. Evidence without an artifact needs an
+ * external link to be reviewable; an artifact of any other media type is blocked, even when it has a link. */
 export function isRenderableEvidence(item: EvidenceItem): item is EvidenceItem & { artifactId: string; mediaType: string } {
-  return typeof item.artifactId === "string" && item.artifactId.length > 0 &&
+  return isArtifactBackedEvidence(item) &&
     typeof item.mediaType === "string" &&
     [...PROMPT_IMAGE_MIME_TYPES, "video/mp4", "video/webm"].includes(item.mediaType.toLowerCase());
 }
@@ -242,6 +247,23 @@ export function EvidenceArtifactView({
           Not shown: this browser can check the artifact against the request's digest only over HTTPS or on localhost.
         </p>
       )}
+    </div>
+  );
+}
+
+/** An artifact the card cannot draw. Its external copy, if any, is never offered in its place: nobody could check
+ * that copy against the request's digest, so the item stays blocked and only Deny remains. */
+export function UnrenderableEvidenceArtifact({ item }: { item: EvidenceItem }) {
+  return (
+    <div className="evidence-artifact" data-status="unsupported">
+      <div className="evidence-artifact-state form-error" role="alert">
+        <p>
+          {item.mediaType
+            ? <>This artifact is <code>{item.mediaType}</code>, which the review card cannot show, so it cannot be reviewed here.</>
+            : <>This artifact declares no media type, so the review card cannot show it and it cannot be reviewed here.</>}
+          {" "}Ask for a PNG, JPEG, GIF, WebP, MP4, or WebM capture, or deny the request.
+        </p>
+      </div>
     </div>
   );
 }
