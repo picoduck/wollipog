@@ -44,6 +44,7 @@ import {
   SessionStore,
   isAdoptedSession,
   metaToSnapshot,
+  type DurableBackgroundJob,
   type SessionMeta,
 } from "./session-store.js";
 
@@ -850,6 +851,7 @@ test("v82 snapshots expose bounded background delivery facts without runner-priv
     continuationAcceptedAt: 23,
     continuationMissingResultAt: undefined,
     assistantResultPersistedAt: 24,
+    endedBy: undefined,
   }]);
   assert.equal(metaToSnapshot(meta({ backgroundJobs }), 133).backgroundJobs?.[0]?.continuationMissingResultAt,
     undefined, "older control planes never receive the additive terminal-recovery field");
@@ -859,6 +861,40 @@ test("v82 snapshots expose bounded background delivery facts without runner-priv
   assert.equal(serialized.includes("provider/artifact"), false);
   assert.equal(serialized.includes("Ubuntu"), false);
   assert.equal(serialized.includes("structuredDeliveryPublishedAt"), false);
+});
+
+test("v192 snapshots say who ended a job, naming a person by role and never by account (#1849)", () => {
+  const job = (id: string, endedBy?: DurableBackgroundJob["endedBy"]): DurableBackgroundJob => ({
+    id,
+    parentTurnId: "turn-1",
+    runnerId: "runner-1",
+    workspaceId: "repo",
+    context: { kind: "native" },
+    launchType: "monitor",
+    registeredAt: 10,
+    terminalStatus: "killed",
+    terminalObservedAt: 20,
+    continuationRequired: false,
+    ...(endedBy ? { endedBy } : {}),
+  });
+  const backgroundJobs = [
+    job("owner-stop", { actor: { kind: "user", userId: "usr_private_owner" }, reason: "stop_request", endedAt: 20 }),
+    job("orchestrator-stop", { actor: { kind: "orchestrator", sessionId: "s_parent" }, reason: "stop_request", endedAt: 21 }),
+    job("bound", { actor: { kind: "runner" }, reason: "handoff_wait_bound", endedAt: 22 }),
+    job("restart", { actor: { kind: "runner" }, reason: "session_restart", endedAt: 23 }),
+    job("on-its-own"),
+  ];
+  const endedBy = (version: number) => metaToSnapshot(meta({ backgroundJobs }), version).backgroundJobs
+    ?.map((projected) => [projected.id, projected.endedBy]);
+  assert.deepEqual(endedBy(192), [
+    ["owner-stop", { actor: { kind: "user" }, reason: "stop_request", endedAt: 20 }],
+    ["orchestrator-stop", { actor: { kind: "orchestrator", sessionId: "s_parent" }, reason: "stop_request", endedAt: 21 }],
+    ["bound", { actor: { kind: "runner" }, reason: "handoff_wait_bound", endedAt: 22 }],
+    ["restart", { actor: { kind: "runner" }, reason: "session_restart", endedAt: 23 }],
+    ["on-its-own", undefined],
+  ]);
+  assert.equal(JSON.stringify(metaToSnapshot(meta({ backgroundJobs }), 192)).includes("usr_private_owner"), false);
+  assert.ok(endedBy(191)?.every(([, end]) => end === undefined), "an older control plane receives no endedBy");
 });
 
 test("v83 snapshots explicitly classify provider background tracking", () => {

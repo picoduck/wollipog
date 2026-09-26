@@ -46,7 +46,9 @@ Each event is one summary line capped at 400 characters, so a long message is tr
 session by its id, which `session get` lists as `unfinishedBackgroundJobs`. Use it when a job that
 never ends, such as a monitor whose condition never fires, keeps a finished sibling's result or a
 queued handoff waiting. Only that job ends and is recorded as killed; the child's conversation, its
-other jobs, and its queued prompts are kept. `session stop` and `session restart` end every job
+other jobs, and its queued prompts are kept. If the provider does not confirm the stop in time, the
+job is left running; should it end later, it is still recorded as your stop, so do not repeat the
+request just to be named. `session stop` and `session restart` end every job
 instead: a stop discards the queued prompts, while a restart keeps them and runs them after it, but
 starts a new Claude Code conversation. Only the session's owner and its controlling Orchestrator may
 use `stop-job`.

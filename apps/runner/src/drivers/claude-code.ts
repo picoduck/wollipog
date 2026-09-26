@@ -1774,6 +1774,7 @@ export class ClaudeCodeDriver implements Driver {
     id: string,
     toolUseId?: string,
     status: "completed" | "failed" | "killed" = "completed",
+    provenance: Pick<DriverBackgroundTerminalJob, "stopConfirmedLate"> = {},
   ): void {
     const terminal = new Map<string, DriverBackgroundTerminalJob>();
     const activeTurnId = this.activeProviderTurnId();
@@ -1783,6 +1784,7 @@ export class ClaudeCodeDriver implements Driver {
       terminalAt: this.deps.now(),
       continuationRequired: activeTurnId == null ||
         (task.parentPersistentTurnId != null && task.parentPersistentTurnId !== activeTurnId),
+      ...provenance,
     });
     this.unverifiedBackgroundTaskIds.delete(id);
     const direct = this.pendingBackgroundTasks.get(id);
@@ -1834,11 +1836,13 @@ export class ClaudeCodeDriver implements Driver {
   /** Claude reported that a task ended through a stop the runner is not waiting on: one whose
    * request was already answered, or one the model made with its own task-stop tool. The job is
    * recorded as killed on the ordinary path (its continuation tells the provider), and tombstoned
-   * so the rest of the report cannot revive it. */
+   * so the rest of the report cannot revive it. Only the late confirmation of the runner's stop is
+   * marked as such, so it keeps its requester (#1849); while the model's own call naming the task
+   * is outstanding, that call is the evident cause and nobody is named. */
   private completeProviderStop(id: string, toolUseId?: string): void {
-    this.unconfirmedStopTaskIds.delete(id);
+    const runnerStop = this.unconfirmedStopTaskIds.delete(id) && ![...this.modelTaskStops.values()].includes(id);
     if (!this.pendingBackgroundTasks.has(id)) return;
-    this.completePendingTask(id, toolUseId, "killed");
+    this.completePendingTask(id, toolUseId, "killed", runnerStop ? { stopConfirmedLate: true } : {});
     this.endedBackgroundTaskIds.add(id);
   }
 

@@ -101,6 +101,10 @@ export interface DriverBackgroundTerminalJob extends DriverBackgroundJob {
   continuationRequired: boolean;
   /** Set only on a job the runner ended through `endBackgroundWork`, never on a provider report. */
   endedByRunner?: true;
+  /** Set only when the provider reported the job ended after `stopBackgroundJob` had already
+   * answered `unconfirmed` for it (#1849): the stop was carried out late, so it is still the
+   * requester's stop. Never set for a stop the provider made on its own. */
+  stopConfirmedLate?: true;
 }
 
 /** What `endBackgroundWork` did. `none` means nothing was unfinished once receipts were read. */

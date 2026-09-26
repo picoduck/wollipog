@@ -206,13 +206,15 @@ test("an answer without Claude's report leaves the job as it was (#1780)", async
   assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1", "shell-2"]);
 
   // A report that arrives only after the window still ends the job, on the ordinary killed path,
-  // so a slow stop cannot leave it blocking a sibling or a handoff forever. Its trailing
+  // so a slow stop cannot leave it blocking a sibling or a handoff forever. It is marked as the
+  // late confirmation of the stop, so the runner keeps who asked (#1849). Its trailing
   // notification does not revive it.
   killedReport(child, "monitor-1", "toolu_monitor");
   await nextTask();
   const late = h.background.at(-1)!;
   assert.deepEqual(late.pendingTaskIds, ["shell-2"]);
-  assert.deepEqual(late.terminalJobs?.map((job) => [job.id, job.status, job.endedByRunner]), [["monitor-1", "killed", undefined]]);
+  assert.deepEqual(late.terminalJobs?.map((job) => [job.id, job.status, job.endedByRunner, job.stopConfirmedLate]),
+    [["monitor-1", "killed", undefined, true]]);
   assert.equal(late.terminalJobs?.[0]?.continuationRequired, true, "outside a turn, the provider is told the job ended");
   frame(child, { type: "system", subtype: "task_notification", task_id: "monitor-1", status: "stopped" });
   await nextTask();
@@ -254,10 +256,16 @@ test("a refused, unanswered, or interrupted stop leaves the job running (#1780)"
   await nextTask();
   silent.timers.find((timer) => timer.delay === CLAUDE_STOP_TASK_RESPONSE_MS)!.callback();
   assert.deepEqual(await waiting, { status: "refused", reason: "unconfirmed" });
-  // An unanswered stop that Claude carries out later still ends the job.
+  // An unanswered stop that Claude carries out later still ends the job, as that stop (#1849).
   frame(silent.spawned[0], { type: "system", subtype: "task_notification", task_id: "monitor-1", status: "stopped" });
   await nextTask();
   assert.deepEqual(silent.background.at(-1)?.pendingTaskIds, ["shell-2"]);
+  assert.deepEqual(silent.background.at(-1)?.terminalJobs?.map((job) => [job.id, job.stopConfirmedLate]), [["monitor-1", true]]);
+  // A job nobody asked to stop is never marked as a late stop.
+  frame(silent.spawned[0], { type: "system", subtype: "task_notification", task_id: "shell-2", status: "killed" });
+  await nextTask();
+  assert.deepEqual(silent.background.at(-1)?.terminalJobs?.map((job) => [job.id, job.status, job.stopConfirmedLate]),
+    [["shell-2", "killed", undefined]]);
   silent.driver.dispose();
 
   const exiting = harness();
@@ -439,5 +447,30 @@ test("a subagent's result does not close the model's stop call", async () => {
   killedReport(child, "monitor-1", "toolu_monitor");
   await nextTask();
   assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["shell-2"]);
+  h.driver.dispose();
+});
+
+test("a model stop outstanding for the task outranks an earlier unconfirmed runner stop (#1849)", async () => {
+  const h = harness();
+  const child = await launchTwoTasks(h);
+  const waiting = h.driver.stopBackgroundJob("monitor-1");
+  await nextTask();
+  h.timers.find((timer) => timer.delay === CLAUDE_STOP_TASK_RESPONSE_MS)!.callback();
+  assert.deepEqual(await waiting, { status: "refused", reason: "unconfirmed" });
+
+  // The model then stops the same task with its own tool, and Claude reports it inside that call.
+  // Either stop could be the cause; the model's call is the evident one, so the job is not marked
+  // as the runner's late stop and nobody is named for it.
+  const turn = h.driver.prompt("stop the monitor");
+  await nextTask();
+  frame(child, { type: "assistant", message: { content: [
+    { type: "tool_use", id: "toolu_stop", name: "TaskStop", input: { task_id: "monitor-1" } },
+  ] } });
+  killedReport(child, "monitor-1", "toolu_monitor");
+  frame(child, { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_stop", content: "ok" }] } });
+  frame(child, { type: "result", subtype: "success" });
+  assert.equal(await turn, "end_turn");
+  const ended = h.background.flatMap((update) => update.terminalJobs ?? []);
+  assert.deepEqual(ended.map((job) => [job.id, job.status, job.stopConfirmedLate]), [["monitor-1", "killed", undefined]]);
   h.driver.dispose();
 });

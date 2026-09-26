@@ -599,7 +599,12 @@
 //      the restart, and a finished result no conversation received is reported once to the new
 //      conversation through a managed continuation. The queue hold reports `restartKeepsQueue`.
 //      Older runners discard the queue and the records on restart, as before.
-export const PROTOCOL_VERSION = 191;
+// 192: a managed background job Wollipog ended carries `endedBy` on its snapshot: who asked (the
+//      runner itself, a person by role, or the controlling Orchestrator session), why, and when.
+//      No account identifier crosses. A stop Claude confirms only after the request was answered
+//      `unconfirmed` keeps the actor who asked. Older runners send no `endedBy`, and the dashboard
+//      shows the job as killed without saying who ended it, as before.
+export const PROTOCOL_VERSION = 192;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -915,6 +920,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   backgroundJobStop: 190,
   /** v191 keeps queued prompts and accounts for background work across an explicit restart (#1779). */
   restartKeepsQueuedWork: 191,
+  /** v192 projects who ended a managed background job, and why, as `endedBy` (#1849). */
+  backgroundJobEndedBy: 192,
   /** `GET /api/admin/status` and `pairing.publicOrigin` on device creation (`wollipog admin`). */
   hostAdministration: 114,
   /** `GET /api/admin/doctor`: pass/warn/fail operational checks (`wollipog admin doctor`). */
@@ -5393,6 +5400,27 @@ export interface ManagedBackgroundJobSnapshot {
   /** The accepted provider turn ended without a complete durable top-level assistant result. */
   continuationMissingResultAt?: number;
   assistantResultPersistedAt?: number;
+  /** v192: present only when Wollipog ended the job itself (#1849). */
+  endedBy?: ManagedBackgroundJobEnd;
+}
+
+/** Who asked Wollipog to end a managed background job: the runner on its own policy, a person the
+ * session's ownership scope names (by role only; no account identifier crosses the boundary), or
+ * the controlling Orchestrator of the session's campaign. */
+export type ManagedBackgroundJobEndActor =
+  | { kind: "runner" }
+  | { kind: "user" }
+  | { kind: "orchestrator"; sessionId: string };
+
+/** Why Wollipog ended a job. `handoff_wait_bound`: a worktree or provider-account handoff waited on
+ * it past the configured bound (#1778). `stop_request`: an authorized actor stopped this one job
+ * (#1780). `session_restart`: an explicit Restart replaced the conversation that ran it (#1779). */
+export type ManagedBackgroundJobEndReason = "handoff_wait_bound" | "stop_request" | "session_restart";
+
+export interface ManagedBackgroundJobEnd {
+  actor: ManagedBackgroundJobEndActor;
+  reason: ManagedBackgroundJobEndReason;
+  endedAt: number;
 }
 
 /** Bounded, projection-safe control-plane view of one managed job. This intentionally omits raw
@@ -5415,6 +5443,9 @@ export interface ManagedBackgroundJobView {
   continuationAcceptedAt?: number;
   continuationMissingResultAt?: number;
   assistantResultPersistedAt?: number;
+  /** Who ended the job and why, when Wollipog ended it (#1849). Absent for a job that ended on its
+   * own, and for any job a pre-v192 runner reported. */
+  endedBy?: ManagedBackgroundJobEnd;
   /** Set once a job the runner still lists has gone `BACKGROUND_JOB_STALL_MS` without a terminal
    * status (#1651). It is a report, not proof that the job ended: Wollipog cannot tell a monitor
    * that never fires from one still waiting. */
@@ -7523,7 +7554,8 @@ export interface InterruptTurnResultMessage {
  * provider process owns the job (the session is not running, or its process exited). `not_owned`:
  * the live process did not launch the job. `provider_rejected`: the provider refused the request.
  * `unconfirmed`: the provider gave no proof in time that the job ended, so it is left running; if
- * the provider later reports that it ended, the job is recorded as killed then. */
+ * the provider later reports that it ended, the job is recorded then as killed at the actor's
+ * request (#1849). */
 export type StopBackgroundJobRefusal =
   | "session_not_found"
   | "unsupported"

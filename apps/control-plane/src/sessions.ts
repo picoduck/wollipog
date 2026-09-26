@@ -1416,7 +1416,7 @@ function backgroundJobStopRefusal(reason: StopBackgroundJobRefusal | undefined):
     case "not_owned": return "the session's current provider process did not start this job, so it cannot stop it";
     case "provider_rejected": return "the provider refused to stop the job";
     default: return "the provider did not confirm in time that the job ended, so it is left running; " +
-      "if the provider reports it ended later, its status updates on its own";
+      "if the provider reports it ended later, it is recorded then as stopped at your request";
   }
 }
 

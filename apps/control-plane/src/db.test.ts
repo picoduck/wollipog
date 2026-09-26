@@ -28,6 +28,7 @@ import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
+  type ManagedBackgroundJobSnapshot,
   type OrchestratorCampaignPolicy,
 } from "@wollipog/protocol";
 import { archiveSessionPage } from "./archive-session-page.js";
@@ -3791,6 +3792,65 @@ test("a finished job whose sibling never finishes is a blocked delivery, and a l
     }]);
   } finally {
     db.close();
+  }
+});
+
+test("who ended a killed job reaches the job view by role, keeps its first account, and survives a restart (#1849)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-background-ended-by-"));
+  const dbPath = join(root, "control-plane.db");
+  const killed = (id: string, endedBy?: unknown) => ({
+    id, parentTurnId: "turn-1", runnerId: "runner-1", workspaceId: null,
+    launchType: "monitor" as const, registeredAt: 1_000,
+    terminalStatus: "killed" as const, terminalObservedAt: 1_500, continuationRequired: false,
+    ...(endedBy === undefined ? {} : { endedBy: endedBy as ManagedBackgroundJobSnapshot["endedBy"] }),
+  });
+  const owner = { actor: { kind: "user" }, reason: "stop_request", endedAt: 1_500 };
+  const orchestrator = { actor: { kind: "orchestrator", sessionId: "s_parent" }, reason: "stop_request", endedAt: 1_510 };
+  const bound = { actor: { kind: "runner" }, reason: "handoff_wait_bound", endedAt: 1_520 };
+  const restart = { actor: { kind: "runner" }, reason: "session_restart", endedAt: 1_530 };
+  const jobs = [
+    killed("owner", owner),
+    killed("orchestrator", orchestrator),
+    killed("bound", bound),
+    killed("restart", restart),
+    killed("on-its-own"),
+    // Malformed accounts drop only the account: an account id, an unknown reason, a bare
+    // orchestrator, and an account on a job that did not end killed.
+    killed("with-account", { actor: { kind: "user", userId: "usr_private" }, reason: "stop_request", endedAt: 1_500 }),
+    killed("unknown-reason", { actor: { kind: "runner" }, reason: "tidy_up", endedAt: 1_500 }),
+    killed("bare-orchestrator", { actor: { kind: "orchestrator" }, reason: "stop_request", endedAt: 1_500 }),
+    { ...killed("completed", owner), terminalStatus: "completed" as const },
+  ];
+  let db = ControlPlaneDb.open(dbPath);
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    db.createSessionFromSnapshot(snapshot({ id: "ended", driver: "claude_code", backgroundJobs: jobs }), "runner-1", 2_000);
+    const expected = new Map<string, unknown>([
+      ["owner", owner], ["orchestrator", orchestrator], ["bound", bound], ["restart", restart],
+      ["on-its-own", undefined], ["with-account", undefined], ["unknown-reason", undefined],
+      ["bare-orchestrator", undefined], ["completed", undefined],
+    ]);
+    const endedBy = () => new Map(db.listManagedBackgroundJobs("ended", 3_000).map((job) => [job.id, job.endedBy]));
+    assert.deepEqual(endedBy(), expected);
+    assert.deepEqual(new Map(db.getSession("ended")?.backgroundJobs?.map((job) => [job.id, job.endedBy])), expected);
+    assert.equal(JSON.stringify(db.getSession("ended")).includes("usr_private"), false);
+
+    // A later snapshot cannot rewrite who ended a job, and one without the field (a pre-v192
+    // runner reconnecting) does not erase it.
+    db.updateSessionFromSnapshot("ended", snapshot({
+      id: "ended", driver: "claude_code",
+      backgroundJobs: [killed("owner", orchestrator), killed("orchestrator"), killed("on-its-own", bound)],
+    }), 4_000);
+    assert.deepEqual(endedBy().get("owner"), owner);
+    assert.deepEqual(endedBy().get("orchestrator"), orchestrator);
+    assert.deepEqual(endedBy().get("on-its-own"), bound, "an account arriving after the terminal status is kept");
+
+    db.close();
+    db = ControlPlaneDb.open(dbPath);
+    assert.deepEqual(endedBy().get("orchestrator"), orchestrator, "the account survives a control-plane restart");
+  } finally {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
   }
 });
 

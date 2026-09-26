@@ -308,7 +308,12 @@ for (const width of [320, 1280]) {
     await confirm.getByRole("button", { name: "Confirm Stop" }).click();
 
     await expect(panel.locator('[data-watchdog-state="continuation_blocked"]')).toHaveCount(0);
-    await expect(panel.locator(".background-work-job").filter({ hasText: "Monitor Job" })).toContainText("Killed");
+    const stopped = panel.locator(".background-work-job").filter({ hasText: "Monitor Job" });
+    await expect(stopped).toContainText("Killed");
+    // #1849: the killed row names who stopped it, by role, and why.
+    await expect(stopped.locator("dl > div").filter({ hasText: "Ended By" }).locator("dd")).toHaveText("Session Owner");
+    await expect(stopped.locator("dl > div").filter({ hasText: "Reason" }).locator("dd")).toHaveText("Stop Job Request");
+    await expect(panel.locator(".background-work-job").filter({ hasText: "Agent Job" })).not.toContainText("Ended By");
     await expect(panel.locator(".background-work-job").filter({ hasText: "Agent Job" })).toContainText("Result Delivered");
     await expect(panel.getByRole("button", { name: "Stop Job", exact: true })).toHaveCount(0);
   });

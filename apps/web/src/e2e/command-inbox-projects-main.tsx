@@ -992,7 +992,11 @@ const client = {
       return { sessionId: id, jobId, outcome: "already_terminal" as const, terminalStatus: job.terminalStatus };
     }
     const now = Date.now();
-    Object.assign(job, { terminalStatus: "killed", terminalObservedAt: now, continuationRequired: false, lastObservedAt: now });
+    Object.assign(job, {
+      terminalStatus: "killed", terminalObservedAt: now, continuationRequired: false, lastObservedAt: now,
+      // #1849: the runner reports who asked, naming the person by role only.
+      endedBy: { actor: { kind: "user" }, reason: "stop_request", endedAt: now },
+    });
     for (const sibling of value.backgroundJobs ?? []) {
       if (sibling.parentTurnId === job.parentTurnId && sibling.terminalStatus && sibling.continuationRequired) {
         sibling.assistantResultPersistedAt = now;

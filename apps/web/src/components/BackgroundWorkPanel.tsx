@@ -5,6 +5,7 @@ import {
   runnerSupportsProtocol,
   type BackgroundDeliveryView,
   type BackgroundWorkState,
+  type ManagedBackgroundJobEnd,
   type ManagedBackgroundJobView,
   type SessionView,
 } from "@wollipog/protocol";
@@ -55,6 +56,19 @@ export function backgroundJobDeliveryStage(job: ManagedBackgroundJobView): strin
   }
   if (job.terminalObservedAt != null && job.continuationRequired === false) return "No Continuation Required";
   return "Not Started";
+}
+
+/** Who ended a job Wollipog ended (#1849). A person is named by role, as the timeline names them. */
+export function backgroundJobEndedByLabel(end: ManagedBackgroundJobEnd): string {
+  if (end.actor.kind === "orchestrator") return "Controlling Orchestrator";
+  if (end.actor.kind === "user") return "Session Owner";
+  return "Wollipog";
+}
+
+export function backgroundJobEndReasonLabel(end: ManagedBackgroundJobEnd): string {
+  if (end.reason === "stop_request") return "Stop Job Request";
+  if (end.reason === "handoff_wait_bound") return "Handoff Waited Past Its Bound";
+  return "Session Restarted";
 }
 
 function recordedTime(timestamp: number | undefined, now: number) {
@@ -576,6 +590,20 @@ export function BackgroundWorkPanel({
                           <div><dt>Latest Activity</dt><dd>{recordedTime(job.lastObservedAt, now)}</dd></div>
                           {job.terminalObservedAt != null && (
                             <div><dt>Terminal Time</dt><dd>{recordedTime(job.terminalObservedAt, now)}</dd></div>
+                          )}
+                          {job.endedBy && (
+                            <>
+                              <div>
+                                <dt>Ended By</dt>
+                                <dd>
+                                  {backgroundJobEndedByLabel(job.endedBy)}
+                                  {job.endedBy.actor.kind === "orchestrator" && (
+                                    <> <code>{job.endedBy.actor.sessionId}</code></>
+                                  )}
+                                </dd>
+                              </div>
+                              <div><dt>Reason</dt><dd>{backgroundJobEndReasonLabel(job.endedBy)}</dd></div>
+                            </>
                           )}
                           <div><dt>Continuation</dt><dd>{backgroundJobDeliveryStage(job)}</dd></div>
                         </dl>

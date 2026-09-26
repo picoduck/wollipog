@@ -942,6 +942,8 @@ function restartBackgroundNotice(
 }
 /** setTimeout's ceiling; a longer bound is re-armed in chunks. */
 const MAX_TIMER_MS = 0x7fffffff;
+/** How many unconfirmed stops per session keep their requester, as the Claude driver bounds its own. */
+const MAX_UNCONFIRMED_JOB_STOPS = 64;
 
 /** A request to end a session's unfinished background work (#1778). */
 export interface BackgroundJobEndRequest {
@@ -989,6 +991,7 @@ function backgroundJobEndActorLabel(actor: BackgroundJobEndActor): string {
 function backgroundWorkEndedNotice(
   request: BackgroundJobEndRequest & { endedAt: number },
   jobs: readonly DriverBackgroundTerminalJob[],
+  confirmedLate = false,
 ): string {
   const described = jobs.map((job) => `${backgroundLaunchTypeNoun(job.launchType)} (job ${job.id}, started ` +
     `${new Date(job.startedAt).toISOString().slice(0, 16)}Z)`);
@@ -997,8 +1000,11 @@ function backgroundWorkEndedNotice(
     : `Wollipog ended ${jobs.length} background jobs: ${described.join("; ")}`;
   const recorded = jobs.length === 1 ? "It is recorded as killed." : "Each is recorded as killed.";
   if (request.reason === "stop_request") {
+    const late = confirmedLate
+      ? "The provider confirmed the stop only after the request had been reported as unconfirmed. "
+      : "";
     return `Wollipog stopped ${described.join("; ")} at the request of ${backgroundJobEndActorLabel(request.actor)}. ` +
-      `${recorded} The provider process, its conversation, and the session's other background jobs keep running.`;
+      `${late}${recorded} The provider process, its conversation, and the session's other background jobs keep running.`;
   }
   const hold = request.hold;
   if (request.reason === "handoff_wait_bound" && hold) {
@@ -1286,6 +1292,10 @@ export class SessionManager {
   /** A request to end background work, from before the driver is asked until it answers. The
    * driver's terminal report arrives inside that window and takes its actor and reason from here. */
   private readonly endingBackgroundWork = new Map<string, BackgroundJobEndRequest & { endedAt: number }>();
+  /** Who asked for each stop the provider answered without proof (#1849), by session and job. If the
+   * provider carries it out later, the job is still that actor's stop. Bounded like the driver's
+   * own record, and dropped once the job reports a terminal status. */
+  private readonly unconfirmedJobStops = new Map<string, Map<string, BackgroundJobStopActor>>();
   private readonly activeTurnAdmitted = new Set<string>();
   private activeTurnRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Parking retirements remain serialized while an exact exit is pending. Once an attempt settles
@@ -9846,11 +9856,24 @@ export class SessionManager {
     }
     if (result.status === "stopped") return { outcome: "stopped", terminalStatus: "killed" };
     if (result.status === "finished") return { outcome: "already_terminal", terminalStatus: result.job.status };
-    if (result.status === "refused") return { outcome: "refused", reason: result.reason };
+    if (result.status === "refused") {
+      if (result.reason === "unconfirmed" && !known()?.terminalStatus) {
+        this.rememberUnconfirmedJobStop(sessionId, jobId, actor);
+      }
+      return { outcome: "refused", reason: result.reason };
+    }
     // The live process holds no such job: it ended in the meantime, or it was never this process's.
     const latest = known();
     if (latest?.terminalStatus) return { outcome: "already_terminal", terminalStatus: latest.terminalStatus };
     return { outcome: "refused", reason: "not_owned" };
+  }
+
+  private rememberUnconfirmedJobStop(sessionId: string, jobId: string, actor: BackgroundJobStopActor): void {
+    const stops = this.unconfirmedJobStops.get(sessionId) ?? new Map<string, BackgroundJobStopActor>();
+    stops.delete(jobId);
+    stops.set(jobId, actor);
+    while (stops.size > MAX_UNCONFIRMED_JOB_STOPS) stops.delete(stops.keys().next().value!);
+    this.unconfirmedJobStops.set(sessionId, stops);
   }
 
   /**
@@ -15497,11 +15520,22 @@ export class SessionManager {
     if (!current || current.driver !== "claude-code") return;
     const ending = this.endingBackgroundWork.get(sessionId);
     const endedByRunner = ending ? (update.terminalJobs ?? []).filter((job) => job.endedByRunner) : [];
+    // A stop the provider carried out after its request was answered `unconfirmed` stays the
+    // requester's (#1849). It is matched by job, so a stop in flight for another job, by whoever,
+    // never takes it over.
+    const unconfirmedStops = this.unconfirmedJobStops.get(sessionId);
+    const confirmedLate = (update.terminalJobs ?? []).flatMap((job) => {
+      const actor = job.stopConfirmedLate && !job.endedByRunner ? unconfirmedStops?.get(job.id) : undefined;
+      return actor ? [{ job, end: { actor, reason: "stop_request" as const, endedAt: job.terminalAt } }] : [];
+    });
+    for (const job of update.terminalJobs ?? []) unconfirmedStops?.delete(job.id);
+    if (unconfirmedStops?.size === 0) this.unconfirmedJobStops.delete(sessionId);
     const { jobs: backgroundJobs, queuedJobIds } = this.mergeDurableBackgroundJobs(
       current,
       update,
       this.active.get(sessionId)?.activeTurnId,
       ending ? { actor: ending.actor, reason: ending.reason, endedAt: ending.endedAt } : undefined,
+      new Map(confirmedLate.map(({ job, end }) => [job.id, end])),
     );
     const observedTaskIds = update.observedTaskIds ?? [];
     // A killed job leaves a task file with no completion marker, whether Wollipog ended it (#1778)
@@ -15599,6 +15633,9 @@ export class SessionManager {
     if (ending && endedByRunner.length > 0) {
       this.emitEvent(sessionId, { kind: "stderr", text: backgroundWorkEndedNotice(ending, endedByRunner) });
     }
+    for (const { job, end } of confirmedLate) {
+      this.emitEvent(sessionId, { kind: "stderr", text: backgroundWorkEndedNotice(end, [job], true) });
+    }
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     const entry = this.active.get(sessionId);
     if (entry) this.reconcileAuthoritativeBackgroundWorkPermit(sessionId, entry, update.state === "running");
@@ -15616,6 +15653,7 @@ export class SessionManager {
     update: DriverBackgroundWorkUpdate,
     activeTurnId: string | undefined,
     end?: BackgroundJobEnd,
+    lateStops: ReadonlyMap<string, BackgroundJobEnd> = new Map(),
   ): { jobs: DurableBackgroundJob[]; queuedJobIds: string[] } {
     const byId = new Map((current.backgroundJobs ?? []).map((job) => [job.id, { ...job }]));
     const findAlias = (id: string, toolUseId?: string) => byId.get(id) ?? (toolUseId
@@ -15661,6 +15699,7 @@ export class SessionManager {
       durable.terminalObservedAt = terminal.terminalAt;
       durable.continuationRequired = terminal.continuationRequired;
       if (terminal.endedByRunner && end) durable.endedBy = end;
+      else if (lateStops.has(terminal.id)) durable.endedBy = lateStops.get(terminal.id);
     }
 
     const terminalCandidates = [...byId.values()].filter((job) => job.terminalObservedAt &&

@@ -940,6 +940,14 @@ queued behind a turn that had never started.
   conversation), rather than **Result Pending** with "No action is needed".
   Older runners leave all of this absent, and a queued prompt behind such a barrier stays invisible
   to them as before.
+- **Who ended a job is shown (#1849).** A job Wollipog ended carries `endedBy` in the session's job
+  inventory (v192): the actor (`runner`, a `user` named by role only, or the controlling
+  `orchestrator` session), the reason (`stop_request`, `handoff_wait_bound`, `session_restart`),
+  and when. The Background Work panel shows it as **Ended By** and **Reason** on the killed row. A
+  stop the provider carries out after the request was answered `unconfirmed` is still recorded as
+  that actor's stop, with a timeline notice saying it was confirmed late; a stop in flight for
+  another job at that moment does not take it over. A job that ended on its own carries no
+  `endedBy`, and a v191 or older runner sends none, so its killed row names no actor.
 
 The control plane owns this lifecycle. A generic question answer or provider permission response
 cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,

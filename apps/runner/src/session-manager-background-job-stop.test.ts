@@ -470,3 +470,70 @@ test("a job the model stops with its own tool frees its sibling's result and is 
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a stop the provider confirms late keeps the actor who asked, and no other stop takes it over (#1849)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-job-stop-late-"));
+  let manager: SessionManager | undefined;
+  try {
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    let onPrompt: (provider: ProviderProcess, text: string) => void = () => {};
+    const fake = fakeProvider({ onPrompt: (provider, text) => onPrompt(provider, text) });
+    onPrompt = launches(fake);
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_job_stop_late", root);
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "watch CI and review");
+    await waitFor(() => fake.prompts.length === 1 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the launching turn did not finish");
+    manager.prompt(spec.sessionId, "run the suite");
+    await waitFor(() => fake.prompts.length === 2 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the second turn did not finish");
+    const owner = { kind: "user" as const, userId: "usr_owner" };
+    const orchestrator = { kind: "orchestrator" as const, sessionId: "s_parent_orchestrator" };
+    const job = (id: string) => store.readMeta(spec.sessionId)?.backgroundJobs?.find((candidate) => candidate.id === id);
+
+    // The owner's stops of the monitor and the shell are answered without proof.
+    fake.stopResult = () => ({ status: "refused", reason: "unconfirmed" });
+    for (const id of ["monitor-1", "shell-3"]) {
+      assert.deepEqual(await manager.stopBackgroundJob(spec.sessionId, id, owner), { outcome: "refused", reason: "unconfirmed" });
+    }
+    assert.deepEqual(stopNotices(store, spec.sessionId), []);
+
+    // The Orchestrator stops the subagent. While that stop is in flight, the provider carries out
+    // the owner's earlier stop of the monitor, and the driver reports it as a late confirmation.
+    let lateAt = 0;
+    fake.stopResult = (jobId) => {
+      if (jobId !== "agent-1") return undefined;
+      const monitor = fake.live.get("monitor-1")!;
+      fake.live.delete("monitor-1");
+      lateAt = Date.now();
+      fake.report(fake.providers.at(-1)!, [{
+        ...monitor, status: "killed", terminalAt: lateAt, continuationRequired: true, stopConfirmedLate: true,
+      }]);
+      return undefined;
+    };
+    assert.deepEqual(await manager.stopBackgroundJob(spec.sessionId, "agent-1", orchestrator),
+      { outcome: "stopped", terminalStatus: "killed" });
+    assert.deepEqual(job("monitor-1")?.endedBy, { actor: owner, reason: "stop_request", endedAt: lateAt },
+      "the late stop is the owner's, not the Orchestrator's in-flight one");
+    const agentEnd = job("agent-1")?.endedBy;
+    assert.deepEqual(agentEnd && { actor: agentEnd.actor, reason: agentEnd.reason }, { actor: orchestrator, reason: "stop_request" });
+    const [late, direct, ...rest] = stopNotices(store, spec.sessionId);
+    assert.match(late ?? "", /^Wollipog stopped a monitor \(job monitor-1, started [^)]+\) at the request of the session owner\. The provider confirmed the stop only after the request had been reported as unconfirmed\. It is recorded as killed\./);
+    assert.match(direct ?? "", /^Wollipog stopped a subagent \(job agent-1, [^)]+\) at the request of its controlling Orchestrator \(session s_parent_orchestrator\)\. It is recorded as killed\./);
+    assert.deepEqual(rest, []);
+
+    // The shell then ends without the driver tying it to that stop, as when Claude stops it on its
+    // own: an earlier unconfirmed request does not make it the owner's stop.
+    const shell = fake.live.get("shell-3")!;
+    fake.live.delete("shell-3");
+    fake.report(fake.providers.at(-1)!, [{ ...shell, status: "killed", terminalAt: Date.now(), continuationRequired: true }]);
+    assert.equal(job("shell-3")?.terminalStatus, "killed");
+    assert.equal(job("shell-3")?.endedBy, undefined);
+    assert.equal(stopNotices(store, spec.sessionId).length, 2);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});

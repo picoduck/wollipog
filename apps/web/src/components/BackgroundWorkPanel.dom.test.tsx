@@ -415,6 +415,53 @@ test("the panel renders individual jobs, their parent barrier, durable times, an
   }
 });
 
+test("a killed job says who ended it and why, and a job that ended on its own says nothing (#1849)", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const killed = (id: string, registeredAt: number, endedBy?: ManagedBackgroundJobView["endedBy"]): ManagedBackgroundJobView => ({
+    ...baseJob, id, launchType: "monitor", registeredAt, terminalStatus: "killed", terminalObservedAt: 3_000,
+    continuationRequired: false, ...(endedBy ? { endedBy } : {}),
+  });
+  const session = {
+    id: "session",
+    runnerId: "runner",
+    backgroundWorkTracking: "managed",
+    backgroundJobs: [
+      killed("owner", 1_000, { actor: { kind: "user" }, reason: "stop_request", endedAt: 3_000 }),
+      killed("orchestrator", 1_001, { actor: { kind: "orchestrator", sessionId: "s_parent_orchestrator" }, reason: "stop_request", endedAt: 3_000 }),
+      killed("bound", 1_002, { actor: { kind: "runner" }, reason: "handoff_wait_bound", endedAt: 3_000 }),
+      killed("restart", 1_003, { actor: { kind: "runner" }, reason: "session_restart", endedAt: 3_000 }),
+      killed("on-its-own", 1_004),
+    ],
+    backgroundDeliveries: [],
+  } as unknown as SessionView;
+  try {
+    await act(async () => root.render(
+      <BackgroundWorkPanel session={session} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()} onOpenParentTurn={() => {}} />,
+    ));
+    const rows = new Map([...container.querySelectorAll<HTMLElement>(".background-work-job")].map((row) => {
+      const terms = Object.fromEntries([...row.querySelectorAll("dl > div")].map((entry) =>
+        [entry.querySelector("dt")?.textContent, entry.querySelector("dd")?.textContent]));
+      return [row.querySelector("strong")?.textContent, [terms["Ended By"], terms.Reason]];
+    }));
+    assert.deepEqual([...rows.values()], [
+      ["Session Owner", "Stop Job Request"],
+      ["Controlling Orchestrator s_parent_orchestrator", "Stop Job Request"],
+      ["Wollipog", "Handoff Waited Past Its Bound"],
+      ["Wollipog", "Session Restarted"],
+      [undefined, undefined],
+    ]);
+    assert.equal(container.querySelectorAll(".background-work-state[data-state='killed']").length, 5,
+      "every job still reads Killed");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("bounded history uses authoritative barrier totals and discloses omitted jobs", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);

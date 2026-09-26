@@ -50,6 +50,8 @@ import type {
   AgentContext,
   BackgroundJobStopActor,
   AgentDriverKind,
+  ManagedBackgroundJobEnd,
+  ManagedBackgroundJobEndReason,
   BackgroundWorkState,
   ExecutionHandoffReceipt,
   ExecutionHandoffRequest,
@@ -353,12 +355,20 @@ export type BackgroundJobEndActor = { kind: "runner" } | BackgroundJobStopActor;
  * handoff, and every prompt queued behind it, waited on the work past the configured bound.
  * `stop_request`: an authorized actor asked to stop this one job (#1780). `session_restart`: an
  * explicit Restart replaced the provider process, and the conversation, that ran the job (#1779). */
-export type BackgroundJobEndReason = "handoff_wait_bound" | "stop_request" | "session_restart";
+export type BackgroundJobEndReason = ManagedBackgroundJobEndReason;
 
 export interface BackgroundJobEnd {
   actor: BackgroundJobEndActor;
   reason: BackgroundJobEndReason;
   endedAt: number;
+}
+
+/** The dashboard learns who ended a job by role only: a person's account never leaves the runner. */
+function projectBackgroundJobEnd(end: BackgroundJobEnd): ManagedBackgroundJobEnd {
+  const actor: ManagedBackgroundJobEnd["actor"] = end.actor.kind === "orchestrator"
+    ? { kind: "orchestrator", sessionId: end.actor.sessionId }
+    : { kind: end.actor.kind };
+  return { actor, reason: end.reason, endedAt: end.endedAt };
 }
 
 export interface DurableBackgroundJob {
@@ -3017,6 +3027,9 @@ export function metaToSnapshot(
             "backgroundMissingResultRecovery",
           ) ? job.continuationMissingResultAt : undefined,
           assistantResultPersistedAt: job.assistantResultPersistedAt,
+          endedBy: job.endedBy && runnerSupportsProtocol(controlPlaneProtocolVersion, "backgroundJobEndedBy")
+            ? projectBackgroundJobEnd(job.endedBy)
+            : undefined,
         }))
       : undefined,
     tokensIn: m.tokensIn,

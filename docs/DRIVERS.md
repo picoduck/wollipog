@@ -468,7 +468,9 @@ The lifetime policy is quiescence-aware and fail-safe:
   naming the task has not yet returned. The job is recorded as `killed`, not runner-ended, and
   tombstoned like the jobs above, so the trailing `stopped` report and a restart's receipt read
   cannot revive it. A stdin-close kill, or any other unrequested report, leaves the job pending for
-  orphan recovery.
+  orphan recovery. A report that carries out a runner stop already answered `unconfirmed` is marked
+  `stopConfirmedLate`, so the job keeps the actor who asked (#1849); while a model `TaskStop` call
+  naming the task is outstanding, that call counts as the cause and no actor is recorded.
 - Eviction and runner-shutdown stops send EOF first and allow five seconds for a clean exit before
   `killTree` reaps the remaining native or WSL process group; explicit Stop and cancellation kill
   immediately. A stop with pending work writes the
