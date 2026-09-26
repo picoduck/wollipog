@@ -1671,8 +1671,6 @@ export class ClaudeCodeDriver implements Driver {
           this.completeStoppedTask(taskId);
         } else if (status === "completed" || status === "failed" || status === "killed") {
           this.completePendingTask(taskId, toolUseId, status);
-        } else if (this.endedBackgroundTaskIds.has(taskId)) {
-          // The trailing report of a task the runner already recorded as ended.
         } else {
           // `stopped` has no durable completion record and an unknown future status is ambiguous.
           this.recordPendingTask(taskId, toolUseId, undefined, true);
@@ -1719,6 +1717,10 @@ export class ClaudeCodeDriver implements Driver {
     launchType?: DriverBackgroundLaunchType,
     parentPersistentTurnId?: number,
   ): void {
+    // A task this driver ended stays ended (#1778, #1780). Claude may still report it afterwards:
+    // its trailing `stopped` notification, or an async-launch tool result that trails a stop made
+    // while the task was being launched.
+    if (this.endedBackgroundTaskIds.has(id)) return;
     const fallback = toolUseId
       ? [...this.pendingBackgroundTasks.values()].find((task) => task.toolUseId === toolUseId)
       : undefined;

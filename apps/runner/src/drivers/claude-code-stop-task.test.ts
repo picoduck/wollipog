@@ -269,6 +269,30 @@ test("a job that finishes on its own while being stopped is reported as finished
   h.driver.dispose();
 });
 
+test("a launch result that trails a stop cannot register the stopped task again (#1780)", async () => {
+  const h = harness();
+  const child = await launchTwoTasks(h);
+  const turn = h.driver.prompt("launch a monitor");
+  await nextTask();
+  // Claude reports the task started; the stop lands before its async-launch tool result.
+  taskStarted(child, "monitor-late", "toolu_late");
+  await nextTask();
+  const stopping = h.driver.stopBackgroundJob("monitor-late");
+  await nextTask();
+  killedReport(child, "monitor-late", "toolu_late");
+  controlResponse(child, stopRequest(h, "monitor-late").request_id);
+  assert.equal((await stopping).status, "stopped");
+  frame(child, { type: "user", message: { content: [{
+    type: "tool_result", tool_use_id: "toolu_late",
+    content: JSON.stringify({ status: "async_launched", taskId: "monitor-late", outputFile: "/tmp/monitor-late.output" }),
+  }] } });
+  frame(child, { type: "result", subtype: "success" });
+  assert.equal(await turn, "end_turn");
+  assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1", "shell-2"],
+    "the stopped task is not pending again, so it cannot hold a handoff it can no longer be stopped from");
+  h.driver.dispose();
+});
+
 test("only a task the live process launched can be stopped (#1780)", async () => {
   const h = harness();
   assert.deepEqual(await h.driver.stopBackgroundJob("nothing"), { status: "not_running" });

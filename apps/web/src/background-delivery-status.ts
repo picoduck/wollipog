@@ -77,12 +77,16 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
 export function backgroundDeliveryAction(
   state: BackgroundDeliveryWatchdogState,
   jobStop?: BackgroundJobStopAvailability | null,
+  stoppableJobListed = true,
 ): string {
   const status = BACKGROUND_DELIVERY_STATUS[state];
   if (state !== "continuation_blocked" || !jobStop) return status.action;
   if (jobStop.available) {
-    return "Use Stop Job on the unfinished job below: only that job ends, it is recorded as killed, and this result " +
-      "is then returned. Restarting or stopping the session also ends it, but ends every other job and discards this result.";
+    const where = stoppableJobListed
+      ? "Use Stop Job on the unfinished job below"
+      : "Use Stop Job on the unfinished job from the same turn, listed in Background Work";
+    return `${where}: only that job ends, it is recorded as killed, and this result is then returned. ` +
+      "Restarting or stopping the session also ends it, but ends every other job and discards this result.";
   }
   return `Stop Job is unavailable: ${jobStop.reason} ${status.action}`;
 }

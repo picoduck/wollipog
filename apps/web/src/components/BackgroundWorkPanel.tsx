@@ -89,6 +89,11 @@ type AcknowledgementFeedback = {
   message: string;
 };
 
+/** Only a job the runner still lists as running can be stopped; any other state has nothing to end. */
+function stoppableJobState(state: BackgroundJobCurrentState): boolean {
+  return state === "Running" || state === "Stalled";
+}
+
 type JobStopFeedback =
   | { state: "confirming" }
   | { state: "pending" }
@@ -108,16 +113,18 @@ function BackgroundJobStopControl({ sessionId, jobId, jobLabel, availability }: 
   availability: BackgroundJobStopAvailability;
 }) {
   const api = useApi();
-  const reasonId = useId();
+  const descriptionId = useId();
   const [feedback, setFeedback] = useState<JobStopFeedback | null>(null);
   if (!availability.available) {
     return (
       <div className="background-work-job-actions">
-        <button type="button" className="btn ghost sm" disabled aria-label={`Stop ${jobLabel}`}
-          aria-describedby={reasonId} title={availability.reason}>
+        <button type="button" className="btn ghost sm" disabled aria-describedby={descriptionId}
+          title={availability.reason}>
           Stop Job
         </button>
-        <span id={reasonId} className="sr-only">Stop Job is unavailable: {availability.reason}</span>
+        <span id={descriptionId} className="sr-only">
+          Stops {jobLabel}. Stop Job is unavailable: {availability.reason}
+        </span>
       </div>
     );
   }
@@ -141,12 +148,13 @@ function BackgroundJobStopControl({ sessionId, jobId, jobLabel, availability }: 
           </div>
         </div>
       ) : (
-        <button type="button" className="btn ghost sm" aria-label={`Stop ${jobLabel}`}
+        <button type="button" className="btn ghost sm" aria-describedby={descriptionId}
           disabled={feedback?.state === "pending" || feedback?.state === "stopped" || feedback?.state === "already_terminal"}
           onClick={() => setFeedback({ state: "confirming" })}>
           {feedback?.state === "pending" ? "Stopping…" : feedback?.state === "stopped" ? "Stopped" : "Stop Job"}
         </button>
       )}
+      <span id={descriptionId} className="sr-only">Stops {jobLabel}.</span>
       {feedback?.state === "stopped" && (
         <p className="hint" role="status">The job was stopped. Its status updates here shortly.</p>
       )}
@@ -375,6 +383,8 @@ export function BackgroundWorkPanel({
                   ? "Continuation In Flight"
                   : "Delivery Pending";
             const parentEventId = parentTurnEventIds.get(group.parentTurnId);
+            const stoppableJobListed = group.jobs.some((job) => stoppableJobState(backgroundJobCurrentState(
+              job, session.backgroundWorkState, runnerOnline, inventorySupported, now)));
             return (
               <section className={`background-work-group${watchdogHighlighted ? " background-work-group-watchdog" : ""}`}
                 role="listitem" key={group.key} data-watchdog-state={watchdogState}
@@ -438,7 +448,7 @@ export function BackgroundWorkPanel({
                           <div><dt>Still Pending</dt><dd>{status.outstanding}</dd></div>
                           <div><dt>Recovery</dt><dd>{status.recovery}</dd></div>
                           <div><dt>Your Action</dt><dd>{recoveryState
-                            ? backgroundDeliveryAction(recoveryState, jobStop)
+                            ? backgroundDeliveryAction(recoveryState, jobStop, stoppableJobListed)
                             : status.action}</dd></div>
                         </>}
                         {isMissing && (
@@ -568,7 +578,7 @@ export function BackgroundWorkPanel({
                           )}
                           <div><dt>Continuation</dt><dd>{backgroundJobDeliveryStage(job)}</dd></div>
                         </dl>
-                        {jobStop && (state === "Running" || state === "Stalled") && (
+                        {jobStop && stoppableJobState(state) && (
                           <BackgroundJobStopControl sessionId={session.id} jobId={job.id} jobLabel={jobLabel}
                             availability={jobStop} />
                         )}

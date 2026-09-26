@@ -272,9 +272,10 @@ for (const width of [320, 1280]) {
     const summary = panel.locator('[data-watchdog-state="continuation_blocked"] .background-delivery-summary');
     await expect(summary).toContainText("Stop Job is unavailable: Runner protocol is v189; Stop Job requires protocol v190.");
     await expect(summary).toContainText("Ask the session to stop the unfinished job");
-    const unavailable = panel.getByRole("button", { name: /^Stop Monitor Job \d$/ });
+    const monitorRow = panel.locator(".background-work-job").filter({ hasText: "Monitor Job" });
+    const unavailable = monitorRow.getByRole("button", { name: "Stop Job", exact: true });
     await expect(unavailable).toBeDisabled();
-    await expect(unavailable).toHaveAccessibleDescription(/Stop Job is unavailable: Runner protocol is v189/);
+    await expect(unavailable).toHaveAccessibleDescription(/^Stops Monitor Job \d\. Stop Job is unavailable: Runner protocol is v189/);
     await panel.getByRole("button", { name: "Close Panel", exact: true }).click();
 
     // A current runner: Stop Job is offered on the unfinished job only, behind a confirmation.
@@ -282,9 +283,11 @@ for (const width of [320, 1280]) {
     await resultBlocked();
     panel = await openPanel();
     await expect(summary).toContainText("Use Stop Job on the unfinished job below: only that job ends");
-    await expect(panel.getByRole("button", { name: /^Stop Agent Job \d$/ })).toHaveCount(0);
-    const stop = panel.getByRole("button", { name: /^Stop Monitor Job \d$/ });
+    await expect(panel.getByRole("button", { name: "Stop Job", exact: true })).toHaveCount(1);
+    const stop = panel.locator(".background-work-job").filter({ hasText: "Monitor Job" })
+      .getByRole("button", { name: "Stop Job", exact: true });
     await expect(stop).toBeEnabled();
+    await expect(stop).toHaveAccessibleDescription(/^Stops Monitor Job \d\.$/);
     await stop.click();
     const confirm = panel.getByRole("group", { name: /^Confirm Stopping Monitor Job \d$/ });
     await expect(confirm).toContainText("Only this job ends, and it is recorded as killed.");
@@ -297,6 +300,6 @@ for (const width of [320, 1280]) {
     await expect(panel.locator('[data-watchdog-state="continuation_blocked"]')).toHaveCount(0);
     await expect(panel.locator(".background-work-job").filter({ hasText: "Monitor Job" })).toContainText("Killed");
     await expect(panel.locator(".background-work-job").filter({ hasText: "Agent Job" })).toContainText("Result Delivered");
-    await expect(panel.getByRole("button", { name: /^Stop Monitor Job \d$/ })).toHaveCount(0);
+    await expect(panel.getByRole("button", { name: "Stop Job", exact: true })).toHaveCount(0);
   });
 }

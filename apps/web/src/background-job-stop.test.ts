@@ -25,6 +25,8 @@ test("only Result Blocked guidance changes with Stop Job availability (#1780)", 
   assert.equal(backgroundDeliveryAction("continuation_blocked", null), blocked);
   assert.match(backgroundDeliveryAction("continuation_blocked", { available: true }),
     /^Use Stop Job on the unfinished job below: only that job ends, it is recorded as killed, and this result is then returned\./);
+  assert.match(backgroundDeliveryAction("continuation_blocked", { available: true }, false),
+    /^Use Stop Job on the unfinished job from the same turn, listed in Background Work: only that job ends/);
   assert.equal(backgroundDeliveryAction("continuation_blocked", { available: false, reason: "The runner is offline." }),
     `Stop Job is unavailable: The runner is offline. ${blocked}`);
   assert.equal(backgroundDeliveryAction("accepted_without_result", { available: true }),
