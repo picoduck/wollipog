@@ -834,12 +834,20 @@ const RESTART_CONTINUATION_PROMPT =
  *   into the new conversation, under the ordinary managed-continuation fences and holds;
  * - a continuation already submitted to the old conversation is never repeated: it is recorded as
  *   missing its result.
- * Delivered jobs, and jobs Wollipog ended earlier, are kept unchanged as history. */
+ * Delivered jobs, and jobs Wollipog ended earlier, are kept unchanged as history. A restart onto
+ * another provider (`deliver` false) cannot hand a Claude result to it: a finished result still
+ * owed is recorded as missing instead, and the notice names it. */
 function carryBackgroundWorkAcrossRestart(
   prior: SessionMeta,
   runnerId: string,
   now: number,
-): { jobs: DurableBackgroundJob[]; killed: DurableBackgroundJob[]; delivering: DurableBackgroundJob[] } {
+  deliver: boolean,
+): {
+  jobs: DurableBackgroundJob[];
+  killed: DurableBackgroundJob[];
+  delivering: DurableBackgroundJob[];
+  undeliverable: DurableBackgroundJob[];
+} {
   const endedBy: BackgroundJobEnd = { actor: { kind: "runner" }, reason: "session_restart", endedAt: now };
   const kill = (job: DurableBackgroundJob): DurableBackgroundJob => ({
     ...job,
@@ -859,6 +867,7 @@ function carryBackgroundWorkAcrossRestart(
     if (job.continuationSubmittedAt !== undefined) {
       return job.continuationMissingResultAt !== undefined ? job : { ...job, continuationMissingResultAt: now };
     }
+    if (!deliver) return { ...job, continuationMissingResultAt: now, restartedAt: now };
     return {
       ...job,
       continuationId: job.continuationId ?? continuationId,
@@ -888,7 +897,9 @@ function carryBackgroundWorkAcrossRestart(
     jobs,
     killed: jobs.filter((job) => job.restartedAt === now && job.endedBy?.reason === "session_restart"),
     delivering: jobs.filter((job) => job.restartedAt === now && job.continuationRequired &&
-      job.continuationSubmittedAt === undefined),
+      job.continuationSubmittedAt === undefined && job.continuationMissingResultAt === undefined),
+    undeliverable: jobs.filter((job) => job.restartedAt === now && job.continuationRequired &&
+      job.continuationSubmittedAt === undefined && job.continuationMissingResultAt !== undefined),
   };
 }
 
@@ -898,6 +909,7 @@ function carryBackgroundWorkAcrossRestart(
 function restartBackgroundNotice(
   killed: readonly DurableBackgroundJob[],
   delivering: readonly DurableBackgroundJob[],
+  undeliverable: readonly DurableBackgroundJob[] = [],
 ): string {
   const describe = (job: DurableBackgroundJob) => `${backgroundLaunchTypeNoun(job.launchType)} (job ${job.id}, started ` +
     `${new Date(job.registeredAt).toISOString().slice(0, 16)}Z)`;
@@ -914,6 +926,11 @@ function restartBackgroundNotice(
   } else if (delivering.length > 1) {
     parts.push(`The results of ${delivering.length} background jobs that finished before the restart never reached ` +
       `the conversation: ${delivering.map(describe).join("; ")}. Wollipog reports them to the restarted conversation once.`);
+  }
+  if (undeliverable.length) {
+    parts.push(`The ${undeliverable.length === 1 ? "result" : "results"} of ${undeliverable.map(describe).join("; ")}, ` +
+      "which finished before the restart, never reached the conversation and cannot be reported: the restarted " +
+      "session uses a different provider.");
   }
   return parts.join(" ");
 }
@@ -5596,8 +5613,8 @@ export class SessionManager {
       }
       // The replaced Claude conversation's background work is carried, not dropped (#1779). No
       // pending task id is carried: the fresh provider must not wait on work that died with the old.
-      if (prior?.driver === "claude-code" && driver === "claude-code") {
-        restartBackground = carryBackgroundWorkAcrossRestart(prior, this.runnerId, Date.now());
+      if (prior?.driver === "claude-code") {
+        restartBackground = carryBackgroundWorkAcrossRestart(prior, this.runnerId, Date.now(), driver === "claude-code");
         if (restartBackground.jobs.length) {
           meta.backgroundJobs = restartBackground.jobs;
           meta.backgroundWorkState = managedBackgroundWorkState(restartBackground.jobs);
@@ -5607,10 +5624,13 @@ export class SessionManager {
       // supersedes us before this callback preserves the adopted Pi row and copy; after this write,
       // later launches see cleanup-pending state rather than inheriting a directory we may remove.
       this.store.create(meta);
-      if (restartBackground && (restartBackground.killed.length || restartBackground.delivering.length)) {
+      if (restartBackground && (restartBackground.killed.length || restartBackground.delivering.length ||
+          restartBackground.undeliverable.length)) {
         this.emitEvent(spec.sessionId, {
           kind: "stderr",
-          text: restartBackgroundNotice(restartBackground.killed, restartBackground.delivering),
+          text: restartBackgroundNotice(
+            restartBackground.killed, restartBackground.delivering, restartBackground.undeliverable,
+          ),
         });
       }
       if (managedPiStateToCleanup) {
@@ -6152,7 +6172,16 @@ export class SessionManager {
       return false;
     }
     if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
-    if (initialPrompt || (initialImages && initialImages.length)) {
+    const carriedQueue = this.preLaunchQueues.get(spec.sessionId);
+    if ((initialPrompt || (initialImages && initialImages.length)) && carriedQueue?.length &&
+        !this.queueCanAccept(carriedQueue, initialPrompt ?? "", initialImages ?? [])) {
+      // The prompts queued before this launch were accepted first; a full FIFO refuses the new one
+      // rather than evicting one of them (#1779).
+      if (priorResumeId) this.releaseResumeLock(spec.sessionId, launchGeneration);
+      this.emitEvent(spec.sessionId, { kind: "error", message: "prompt queue is full; this message was not sent" });
+      this.emitStatus(spec.sessionId, "idle");
+      durable?.failed("prompt queue is full", "QUEUE_FULL");
+    } else if (initialPrompt || (initialImages && initialImages.length)) {
       if (priorResumeId) this.handoffResumeLockToTurn(spec.sessionId, launchGeneration);
       if (!this.prompt(spec.sessionId, initialPrompt ?? "", initialImages ?? [], undefined, undefined, durable,
         false, undefined, false, undefined, undefined, undefined, false, true)) {
@@ -9942,14 +9971,22 @@ export class SessionManager {
    * recovery or continuation turn belonged to the replaced conversation, so it is dropped; the
    * restart reschedules whatever background delivery the new conversation still owes. */
   private carryQueuedWorkAcrossRestart(sessionId: string, existing: ActiveSession | undefined): void {
-    const replaced = [...(existing?.queue ?? []), ...(this.recoveryQueues.get(sessionId) ?? [])];
+    // A launch this Restart overtakes (a rebind, an account switch, a recovery) may still hold its
+    // own pre-admission FIFO, which the replacement generation inherits. It is carried the same way.
+    const replaced = [
+      ...(existing?.queue ?? []),
+      ...(this.recoveryQueues.get(sessionId) ?? []),
+      ...(this.preLaunchQueues.get(sessionId) ?? []),
+    ];
     if (existing) existing.queue.length = 0;
     this.recoveryQueues.delete(sessionId);
+    this.preLaunchQueues.delete(sessionId);
     if (replaced.length === 0) return;
     this.cancelQueued(replaced.filter((prompt) => prompt.syntheticRecovery), "session restart replaced the conversation");
     const carried = replaced.filter((prompt) => !prompt.syntheticRecovery);
     if (carried.length === 0) return;
-    const queue = this.preLaunchQueues.get(sessionId) ?? [];
+    // Inserting re-seeds the ordinal counter Restart cleared, so later prompts queue behind these.
+    const queue: QueuedPrompt[] = [];
     for (const prompt of carried) this.insertQueuedPrompt(sessionId, queue, prompt);
     this.preLaunchQueues.set(sessionId, queue);
   }

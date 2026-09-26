@@ -5748,9 +5748,9 @@ export interface SessionQueueHoldView {
   /** The live provider can stop one of the unfinished jobs by id without ending the others or the
    * session (#1780), through `stop_background_job`. Absent from runners older than v190. */
   canStopJobs?: true;
-  /** An explicit restart keeps the queued prompts and runs them after it, in order, and reports
-   * the ended conversation's background results to the new one (#1779). Absent from runners older
-   * than v191, whose restart discards the queue. */
+  /** An explicit restart keeps the queued prompts and runs them after it, in order, and reports a
+   * finished background result still owed to the new conversation (#1779). Absent from runners
+   * older than v191, whose restart discards the queue. */
   restartKeepsQueue?: true;
 }
 
@@ -5789,8 +5789,8 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
  * conversation, so the provider's background work ends with it, and the control plane revokes
  * approved decisions the session has not consumed. What else it costs depends on the runner:
  * - one that keeps the queue (`restartKeepsQueue`, v191, #1779) runs the queued prompts after the
- *   restart, reports each ended job's result, or that it is unrecoverable, to the new conversation,
- *   and the control plane tells the restarted session which decisions it revoked;
+ *   restart, records unfinished work as killed, reports a finished result still owed to the new
+ *   conversation, and the control plane tells the restarted session which decisions it revoked;
  * - an older runner rejects every prompt still in the queue ("session restart discarded the queued
  *   command") and returns no undelivered result. */
 export function queueHoldRecoveryAction(hold: SessionQueueHoldView): string {
@@ -5819,8 +5819,9 @@ export function queueHoldRecoveryAction(hold: SessionQueueHoldView): string {
       avoidRestart("waiting");
   }
   const restartCost = hold.restartKeepsQueue
-    ? `the provider and its background ${jobs} end, and the new conversation is told each job's result or that it ` +
-      `cannot be recovered; the queued ${messages} ${hold.queuedPrompts === 1 ? "is" : "are"} kept and ` +
+    ? `the provider and its background ${jobs} end, with unfinished work recorded as killed and unrecoverable and ` +
+      "a finished result still owed reported to the new conversation; " +
+      `the queued ${messages} ${hold.queuedPrompts === 1 ? "is" : "are"} kept and ` +
       `${hold.queuedPrompts === 1 ? "runs" : "run"} after the restart; and any approved workflow decision the session ` +
       "has not yet consumed is revoked, and the restarted session is told which ones to request again."
     : `the provider and its background ${jobs} end and no undelivered result is recovered, the queued ${messages} ` +

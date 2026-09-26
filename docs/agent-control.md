@@ -821,7 +821,9 @@ with no pending request. Before, its decision resume was dropped and nothing tol
   decisions and abandons every resume it still owed, so an ended child is never resumed. A restart
   is the one end the child continues past, so the control plane then queues one durable notice for
   it, `[Wollipog Session Restart]`, naming each occurrence the restart revoked and whether it was
-  approved or still pending; the child requests again what it still needs (#1779). A resume refused behind a cost-budget or policy-hook card is
+  approved or still pending; the child requests again what it still needs (#1779). A guardrail that
+  refuses the notice, such as a daily budget or worktree recovery, is not bypassed for it; the
+  session's timeline records the revoked occurrences instead. A resume refused behind a cost-budget or policy-hook card is
   recorded `failed` and not retried: the outcome, and any message, stay on the decision record for
   the child to read once the human resolves the card. Older runners keep the ordinary prompt path.
   A resume held before its runner downgraded is settled on that path rather than held on a recovery
@@ -910,8 +912,10 @@ queued behind a turn that had never started.
     waited for its continuation joins one managed continuation into the new conversation. That
     continuation names each job, its status, and a finished job's provider output file, under
     the ordinary at-most-once fences and governance holds. A continuation already submitted to the
-    old conversation is never repeated; it is recorded as missing its result. The timeline gets
-    a notice naming the ended and reported jobs by type and id, never a provider path. Approved
+    old conversation is never repeated; it is recorded as missing its result, as is an owed result
+    when the restart moves the session to another provider. Prompts the overtaken launch of a
+    rebind or account switch had queued are kept the same way. The timeline gets a notice naming
+    the ended and reported jobs by type and id, never a provider path. Approved
     decisions the session has not consumed are still revoked, and the restarted child is told which.
   - **An older runner discards it.** It builds fresh session metadata, so the provider's background
     jobs end with it and no undelivered result is recovered; it discards the prompts still in its

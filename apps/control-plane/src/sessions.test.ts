@@ -22389,6 +22389,30 @@ test("a restart keeps revoking unconsumed decisions and tells the restarted chil
   }
 });
 
+test("a restart whose notice a guardrail refuses records the revoked occurrences on the session instead (#1779)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, hub, svc, child, recovery } = f;
+  try {
+    const approved = f.requestMerge(1779);
+    f.approve(approved.occurrenceId);
+    // The child is parked for worktree recovery, which refuses every prompt until it is repaired.
+    f.runnerReports(recovery, "input_required");
+    assert.ok(db.getSession(child.id)?.worktreeRecovery);
+    assert.ok(svc.restart(child.id).ok);
+    assert.equal(db.workflowDecisionByOccurrence(approved.occurrenceId)?.status, "revoked");
+    assert.equal(hub.sentOfType("durable_session_command").some((message) =>
+      message.command.type === "prompt_session" && message.command.text.includes("[Wollipog Session Restart]")), false,
+    "the guardrail is not bypassed for the notice");
+    const recorded = db.listEvents(child.id).map((event) => event.payload)
+      .find((payload) => payload.kind === "error" && payload.message.startsWith("Restarting this session revoked"));
+    assert.ok(recorded, "the loss is recorded on the session");
+    assert.ok(recorded.kind === "error" && recorded.message.includes(approved.occurrenceId));
+    assert.match(recorded.kind === "error" ? recorded.message : "", /the notice naming them was not queued \(worktree recovery is required/u);
+  } finally {
+    db.close();
+  }
+});
+
 test("Stop still revokes unconsumed decisions without sending a restart notice (#1779)", () => {
   const f = worktreeRecoveryCampaign();
   const { db, hub, svc, child } = f;
