@@ -869,8 +869,9 @@ queued behind a turn that had never started.
   then unblocked, and its result is delivered once through its managed continuation, which names
   the killed job. The handoff follows, and then every queued prompt, decision resumes included, in
   its original order. Nothing is discarded. A job that ends on its own first is left alone, and
-  the bound is counted from when a prompt began to wait, so work nobody waits on is never ended by
-  it. A turn in between (one the provider starts on its own, or a continuation) interrupts the
+  the bound is counted from when the hold began — a prompt waiting between turns behind a handoff
+  that background work holds back — so work nobody waits on is never ended by it, and a job
+  launched late in a long turn gets the whole bound. A turn in between (one the provider starts on its own, or a continuation) interrupts the
   hold but not the wait: the hold keeps its identity and deadline, and the work is ended as soon as
   that turn settles if the deadline has passed. Orphaned work is not bounded: its one recovery turn
   already crosses the barrier.

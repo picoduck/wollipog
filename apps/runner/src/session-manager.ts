@@ -1132,9 +1132,10 @@ export class SessionManager {
   /** The queue hold last published for each session (#1651), kept apart from the active entry so
    * a replacement provider still clears the hold its predecessor reported. */
   private readonly publishedQueueHolds = new Map<string, SessionQueueHoldView>();
-  /** When the prompts behind a deferred handoff began to wait (#1778). A turn in between — one the
-   * provider starts on its own, or a continuation that crosses the barrier — interrupts the
-   * published hold but not the wait, so the bound keeps counting from here rather than restarting. */
+  /** When a hold began (#1778). A turn in between — one the provider starts on its own, or a
+   * continuation that crosses the barrier — interrupts the published hold but not the wait, so the
+   * bound keeps counting from here rather than restarting. It starts only once a hold exists, so a
+   * job launched late in a long turn never inherits time the prompts spent waiting for that turn. */
   private readonly handoffWaitStarts = new Map<string, { kind: SessionQueueHoldKind; since: number }>();
   /** One timer per published hold whose wait the driver bounds (#1778). */
   private readonly handoffWaitTimers = new Map<string, {
@@ -9531,17 +9532,19 @@ export class SessionManager {
     };
   }
 
-  private syncHandoffWaitStart(sessionId: string, entry: ActiveSession | undefined): void {
+  /** Forget a wait once it is over: the handoff applied, the prompts left, or the background work
+   * stopped holding it back. A hold that forms again after that is a new wait. */
+  private settleHandoffWaitStart(sessionId: string, entry: ActiveSession | undefined): void {
+    const start = this.handoffWaitStarts.get(sessionId);
+    if (!start) return;
     const kind: SessionQueueHoldKind | null = entry?.pendingProviderAccountSwitch
       ? "provider_account_switch"
       : entry?.pendingWorktreeRebind ? "worktree_rebind" : null;
-    if (!kind || !entry!.queue.some((prompt) => !prompt.syntheticRecovery)) {
-      this.handoffWaitStarts.delete(sessionId);
-      return;
-    }
-    if (this.handoffWaitStarts.get(sessionId)?.kind !== kind) {
-      this.handoffWaitStarts.set(sessionId, { kind, since: Date.now() });
-    }
+    const meta = this.store.readMeta(sessionId);
+    const stillWaiting = kind === start.kind && entry!.queue.some((prompt) => !prompt.syntheticRecovery) &&
+      (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
+      !meta?.orphanedWork?.recoveryAttemptedAt;
+    if (!stillWaiting) this.handoffWaitStarts.delete(sessionId);
   }
 
   /** Keep exactly one timer per bounded hold, re-armed when the hold changes identity or bound. */
@@ -9627,8 +9630,11 @@ export class SessionManager {
    */
   private syncQueueHold(sessionId: string): void {
     const entry = this.active.get(sessionId);
-    this.syncHandoffWaitStart(sessionId, entry);
+    this.settleHandoffWaitStart(sessionId, entry);
     const next = entry ? this.queueHoldFor(sessionId, entry) : null;
+    if (next && this.handoffWaitStarts.get(sessionId)?.kind !== next.kind) {
+      this.handoffWaitStarts.set(sessionId, { kind: next.kind, since: next.since });
+    }
     this.syncHandoffWaitTimer(sessionId, next);
     const published = this.publishedQueueHolds.get(sessionId);
     if (isDeepStrictEqual(next ?? undefined, published)) return;
@@ -15220,9 +15226,11 @@ export class SessionManager {
       ending ? { actor: ending.actor, reason: ending.reason, endedAt: ending.endedAt } : undefined,
     );
     const observedTaskIds = update.observedTaskIds ?? [];
-    const recoveredBackgroundTaskIds = withoutRecoveredBackgroundTaskIds(
-      current.recoveredBackgroundTaskIds,
-      observedTaskIds,
+    // A job Wollipog ended leaves a task file with no completion marker. Tombstone it as orphan
+    // recovery does, so no later receipt read revives it as unfinished work (#1778).
+    const recoveredBackgroundTaskIds = mergeRecoveredBackgroundTaskIds(
+      withoutRecoveredBackgroundTaskIds(current.recoveredBackgroundTaskIds, observedTaskIds),
+      endedByRunner.map((job) => job.id),
     );
     const recovered = new Set(recoveredBackgroundTaskIds);
     const eligiblePendingTaskIds = update.pendingTaskIds.filter((id) => !recovered.has(id));

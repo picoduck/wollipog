@@ -457,7 +457,9 @@ The lifetime policy is quiescence-aware and fail-safe:
   work nobody is waiting on. Past it, between turns, the driver reads task receipts (a job that
   already finished is recorded as completed), then retires the process with the same graceful stop
   and records every remaining job as `killed` and runner-ended instead of orphaned, so no recovery
-  turn relaunches it. An agent-authored `hold.json` does not extend this bound: the prompts it
+  turn relaunches it. An ended job's task file never gets a completion marker, so its id is
+  tombstoned in the driver and in the session's recovered-task ids: no later receipt read revives
+  it as unfinished work. An agent-authored `hold.json` does not extend this bound: the prompts it
   would hold are someone else's. See Queue Holds in [agent-control.md](agent-control.md).
 - Eviction and runner-shutdown stops send EOF first and allow five seconds for a clean exit before
   `killTree` reaps the remaining native or WSL process group; explicit Stop and cancellation kill

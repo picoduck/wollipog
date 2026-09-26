@@ -257,6 +257,18 @@ test("a monitor that never ends is killed after the bound, the sibling result is
 
     const holds = publishedHolds(sent);
     assert.equal(holds.at(-1), null, "the hold is cleared explicitly");
+
+    // The killed monitor's task file never gets a completion marker. A later receipt read that
+    // reports it again, without a live observation, does not revive it as unfinished work.
+    assert.ok(store.readMeta(spec.sessionId)?.recoveredBackgroundTaskIds?.includes("monitor-1"));
+    fake.providers.at(-1)!.cb.onBackgroundWork?.({
+      state: "running", pendingTaskIds: ["monitor-1"],
+      jobs: [{ id: "monitor-1", launchType: "monitor", startedAt: 0 }], observedTaskIds: [],
+    });
+    assert.equal(store.readMeta(spec.sessionId)?.backgroundWorkState, undefined);
+    assert.deepEqual(store.readMeta(spec.sessionId)?.pendingBackgroundTaskIds, []);
+    assert.equal(store.readMeta(spec.sessionId)?.backgroundJobs?.find((job) => job.id === "monitor-1")?.terminalStatus,
+      "killed");
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);
   } finally {
@@ -540,6 +552,64 @@ test("a turn in the middle of the wait does not restart the bound (#1778)", { sk
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);
   } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a job launched late in a long turn gets the whole bound, not the time prompts waited for the turn (#1778)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-wait-late-job-"));
+  let manager: SessionManager | undefined;
+  let releaseTurn = () => {};
+  try {
+    const repo = initRepo(root);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const sent: RunnerToControlPlane[] = [];
+    const bound = 300;
+    const turnGate = new Promise<void>((resolve) => { releaseTurn = resolve; });
+    let launchedAt = 0;
+    const fake = fakeProvider({ handoffWaitMaxMs: bound });
+    const factory = (driver: unknown, launch: { cwd: string; env: Record<string, string> }, cb: DriverCallbacks) => {
+      const client = fake.factory(driver, launch, cb);
+      const prompt = client.prompt;
+      return {
+        ...client,
+        prompt: async (text: string) => {
+          if (text !== "long turn") return prompt(text);
+          await turnGate;
+          // The job starts just before the turn ends.
+          launchedAt = Date.now();
+          fake.live.set("monitor-1", { id: "monitor-1", launchType: "monitor", startedAt: launchedAt });
+          fake.report(fake.providers.at(-1)!);
+          return prompt(text);
+        },
+      };
+    };
+    manager = new SessionManager((message) => { sent.push(message); }, () => {}, store, "runner", undefined,
+      factory as never, dataDir, 1);
+    const spec = claudeSpec("s_handoff_wait_late_job", repo);
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "long turn");
+    await waitFor(() => store.readMeta(spec.sessionId)?.status === "running", "the long turn did not start");
+    await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/handoff-late-job" });
+    manager.prompt(spec.sessionId, "queued");
+    // The prompt waits for the turn itself for longer than the bound; no background work yet.
+    await new Promise<void>((resolve) => setTimeout(resolve, bound + 150));
+    releaseTurn();
+
+    await waitFor(() => publishedHolds(sent).some((hold) => hold?.endsAt !== undefined), "the hold was not bounded");
+    const hold = publishedHolds(sent).find((candidate) => candidate?.endsAt !== undefined)!;
+    assert.ok(hold.since >= launchedAt, "the wait starts when the job holds the handoff, not before");
+    assert.equal(hold.endsAt, hold.since + bound);
+    await new Promise<void>((resolve) => setTimeout(resolve, bound / 3));
+    assert.deepEqual(fake.endCalls, [], "the new job is not ended on an already-expired deadline");
+    await waitFor(() => fake.prompts.some((prompt) => prompt.text === "queued"), "the queued prompt did not run");
+    assert.ok(fake.endCalls[0]! >= hold.endsAt!);
+    manager.stop(spec.sessionId);
+    await manager.delete(spec.sessionId);
+  } finally {
+    releaseTurn();
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }

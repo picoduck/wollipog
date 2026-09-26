@@ -522,6 +522,9 @@ export class ClaudeCodeDriver implements Driver {
   private readonly persistentIdleMs: number;
   private readonly pendingMaxMs: number;
   readonly handoffWaitMaxMs: number;
+  /** Tasks this driver ended (#1778). Their task files never get a completion marker, so a receipt
+   * read would otherwise report them as unfinished again. */
+  private readonly endedBackgroundTaskIds = new Set<string>();
   private persistentCircuitOpen = false;
   /** Lifetime budget by design: after one recovered acknowledged failure, a second failure in
    * this logical session falls back conservatively even if healthy turns occurred in between. */
@@ -1837,7 +1840,7 @@ export class ClaudeCodeDriver implements Driver {
     continuationRequired = false,
   ): void {
     for (const artifact of inspection.incompleteArtifacts) {
-      if (!this.pendingBackgroundTasks.has(artifact.id)) {
+      if (!this.pendingBackgroundTasks.has(artifact.id) && !this.endedBackgroundTaskIds.has(artifact.id)) {
         this.recordPendingTask(artifact.id, undefined, artifact.outputFile, true, false);
       }
     }
@@ -1984,13 +1987,23 @@ export class ClaudeCodeDriver implements Driver {
     if (this.disposed || !this.persistentTransport || !this.child) {
       return { status: "refused", reason: "no_live_process" };
     }
-    const tasks = [...this.pendingBackgroundTasks.values()];
+    const tasks = new Map<string, PendingBackgroundTask>();
+    const takePending = () => {
+      for (const task of this.pendingBackgroundTasks.values()) {
+        tasks.set(task.id, task);
+        this.endedBackgroundTaskIds.add(task.id);
+      }
+      this.pendingBackgroundTasks.clear();
+      this.unverifiedBackgroundTaskIds.clear();
+    };
     // Emptying the pending set first is what keeps retirement from writing an orphan marker.
-    this.pendingBackgroundTasks.clear();
-    this.unverifiedBackgroundTaskIds.clear();
+    takePending();
     await this.stopPersistentTransport(false);
+    // Anything recorded while the process retired (a WSL receipt read already in flight, say)
+    // belonged to that process too, and ended with it.
+    takePending();
     const terminalAt = this.deps.now();
-    const jobs = tasks.map((task): DriverBackgroundTerminalJob => ({
+    const jobs = [...tasks.values()].map((task): DriverBackgroundTerminalJob => ({
       ...driverBackgroundJob(task),
       status: "killed",
       terminalAt,

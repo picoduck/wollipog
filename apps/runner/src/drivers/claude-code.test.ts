@@ -2282,6 +2282,70 @@ test("ending background work retires the process and reports each unfinished job
   driver.dispose();
 });
 
+test("a WSL receipt read in flight while the work is ended cannot revive the ended job (#1778)", async () => {
+  const child = fakeProcess();
+  const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
+  const timers: Array<{ callback: () => void; delay: number }> = [];
+  let resolveCeilingRead!: (value: any) => void;
+  let reads = 0;
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      context: { kind: "wsl", distro: "Ubuntu" },
+      env: { [CLAUDE_PENDING_MAX_MS]: "30000" },
+      config: { permissionMode: "acceptEdits" },
+    },
+    { ...noopCb, onBackgroundWork: (update) => background.push(update) },
+    {
+      spawn: () => child,
+      kill: () => {},
+      setTimer: (callback: () => void, delay: number) => {
+        timers.push({ callback, delay });
+        return { unref() {} } as any;
+      },
+      clearTimer: () => {},
+      inspectBackgroundWork: () => {
+        reads += 1;
+        // The pending ceiling's read is slow; the one endBackgroundWork makes finds nothing new.
+        if (reads === 1) return new Promise((resolve) => { resolveCeilingRead = resolve; });
+        return Promise.resolve({ incompleteArtifacts: [], terminalTaskIds: new Set<string>() });
+      },
+    } as any,
+  );
+  const turn = driver.prompt("watch CI");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "system", subtype: "task_started", task_id: "monitor-9" }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await turn;
+  timers.find((timer) => timer.delay === 30_000)!.callback();
+  assert.equal(reads, 1, "the ceiling's receipt read is in flight");
+
+  const ending = driver.endBackgroundWork();
+  await nextTask();
+  await nextTask();
+  // The slow read returns the monitor's markerless task file while the process retires.
+  resolveCeilingRead({
+    incompleteArtifacts: [{ id: "monitor-9", outputFile: "/tmp/monitor-9.output" }],
+    terminalTaskIds: new Set<string>(),
+  });
+  await nextTask();
+  child.emit("close", 0);
+  const result = await ending;
+  assert.equal(result.status, "ended");
+  assert.equal(background.at(-1)?.state, null, "the last report leaves nothing running");
+  assert.deepEqual(background.at(-1)?.pendingTaskIds, []);
+  assert.deepEqual(background.at(-1)?.terminalJobs?.map((job) => [job.id, job.status]), [["monitor-9", "killed"]]);
+
+  // Any later receipt read still finds the markerless file; the ended job stays ended.
+  (driver as any).applyBackgroundInspection({
+    incompleteArtifacts: [{ id: "monitor-9", outputFile: "/tmp/monitor-9.output" }],
+    terminalTaskIds: new Set<string>(),
+  });
+  assert.deepEqual(await driver.endBackgroundWork(), { status: "none" });
+  assert.equal(background.at(-1)?.state, null);
+  driver.dispose();
+});
+
 test("ending background work leaves a one-shot process's work to orphan recovery (#1778)", async () => {
   const child = fakeProcess();
   const driver = new ClaudeCodeDriver(
