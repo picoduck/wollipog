@@ -2374,6 +2374,106 @@ test("a WSL receipt read in flight while the work is ended cannot revive the end
   driver.dispose();
 });
 
+test("a task first recorded while ending retires the process is reported killed, never orphaned (#1833)", async () => {
+  // Same explicit signals and fixed clock as the in-flight test above, but the late receipt names a
+  // sibling task this driver has never seen, so only the backstop after retirement can claim it.
+  let retirementStarted!: () => void;
+  const retiring = new Promise<void>((resolve) => { retirementStarted = resolve; });
+  const stdin = new PassThrough();
+  const endStdin = stdin.end.bind(stdin);
+  stdin.end = ((...args: any[]) => {
+    retirementStarted();
+    return endStdin(...args);
+  }) as typeof stdin.end;
+  const child = fakeProcess(stdin);
+  const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
+  const liveTimers = new Set<{ callback: () => void; delay: number }>();
+  let now = 1_000;
+  let resolveCeilingRead!: (value: any) => void;
+  let reads = 0;
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      context: { kind: "wsl", distro: "Ubuntu" },
+      env: { [CLAUDE_PENDING_MAX_MS]: "30000" },
+      config: { permissionMode: "acceptEdits" },
+    },
+    { ...noopCb, onBackgroundWork: (update) => background.push(update) },
+    {
+      spawn: () => child,
+      kill: () => {},
+      now: () => now,
+      setTimer: (callback: () => void, delay: number) => {
+        const timer = { callback, delay, unref() {} };
+        liveTimers.add(timer);
+        return timer as any;
+      },
+      clearTimer: (timer: any) => { liveTimers.delete(timer); },
+      inspectBackgroundWork: () => {
+        reads += 1;
+        if (reads === 1) return new Promise((resolve) => { resolveCeilingRead = resolve; });
+        return Promise.resolve({ incompleteArtifacts: [], terminalTaskIds: new Set<string>() });
+      },
+    } as any,
+  );
+  const reconciles: Promise<void>[] = [];
+  const reconcile = (driver as any).reconcilePendingTaskFilesInContext.bind(driver);
+  (driver as any).reconcilePendingTaskFilesInContext = (...args: unknown[]) => {
+    const applied = reconcile(...args);
+    reconciles.push(applied);
+    return applied;
+  };
+  const turn = driver.prompt("watch CI");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "system", subtype: "task_started", task_id: "monitor-9" }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await turn;
+  const [ceiling, ...otherTimers] = liveTimers;
+  assert.equal(otherTimers.length, 0, "only the pending ceiling is armed between turns");
+  liveTimers.delete(ceiling!);
+  ceiling!.callback();
+  assert.equal(reads, 1, "the ceiling's receipt read is in flight");
+
+  const ending = driver.endBackgroundWork();
+  await retiring;
+  assert.equal(reads, 2, "ending read its own receipts before retiring the process");
+  // The slow read lands mid-retirement with a markerless sibling the process started unseen.
+  resolveCeilingRead({
+    incompleteArtifacts: [
+      { id: "monitor-9", outputFile: "/tmp/monitor-9.output" },
+      { id: "monitor-10", outputFile: "/tmp/monitor-10.output" },
+    ],
+    terminalTaskIds: new Set<string>(),
+  });
+  await reconciles[0];
+  assert.deepEqual([...(driver as any).pendingBackgroundTasks.keys()], ["monitor-10"],
+    "the sibling is recorded while the process is still retiring");
+  child.emit("close", 0);
+  const result = await ending;
+  assert.equal(result.status, "ended");
+  const jobs = result.status === "ended" ? result.jobs : [];
+  assert.deepEqual(jobs.map((job) => ({
+    id: job.id, status: job.status, continuationRequired: job.continuationRequired, endedByRunner: job.endedByRunner,
+  })), [
+    { id: "monitor-9", status: "killed", continuationRequired: false, endedByRunner: true },
+    { id: "monitor-10", status: "killed", continuationRequired: false, endedByRunner: true },
+  ], "the sibling belonged to the retired process and ended with it");
+  assert.deepEqual(background.at(-1), { state: null, pendingTaskIds: [], terminalJobs: jobs });
+
+  // Past the pending ceiling, whatever timers remain find nothing left to hand to orphan recovery.
+  now += 60_000;
+  for (const timer of [...liveTimers]) {
+    liveTimers.delete(timer);
+    timer.callback();
+  }
+  await Promise.all(reconciles);
+  assert.equal(background.some((update) => update.state === "orphaned"), false,
+    "work ended on purpose is never handed to orphan recovery");
+  assert.equal(background.at(-1)?.state, null);
+  assert.deepEqual(await driver.endBackgroundWork(), { status: "none" });
+  driver.dispose();
+});
+
 test("ending background work leaves a one-shot process's work to orphan recovery (#1778)", async () => {
   const child = fakeProcess();
   const driver = new ClaudeCodeDriver(
