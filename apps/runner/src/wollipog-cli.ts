@@ -72,7 +72,7 @@ function positional(args: string[]): string[] {
     "--url", "--token-file", "--runner", "--agent", "--workspace", "--path", "--prompt",
     "--title", "--model", "--effort", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
-    "--max-child-sessions", "--offset",
+    "--max-child-sessions", "--offset", "--event-epoch",
   ]);
   for (let i = 0; i < args.length; i++) {
     const arg = args[i]!;

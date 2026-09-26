@@ -614,6 +614,7 @@ test("CLI session events pages forward with --after and reads the newest events 
   for (const [argv, pagePath, seqs, lastSeq] of [
     [["--after", "4", "--limit", "2"], "/api/sessions/s_child/events?after=4&limit=2&eventEpoch=3", [5, 6], 6],
     [["--after", "6", "--event-epoch", "3", "--limit", "2"], "/api/sessions/s_child/events?after=6&limit=2&eventEpoch=3", [7, 8], 8],
+    [["--event-epoch", "3", "--after", "8", "--limit", "2"], "/api/sessions/s_child/events?after=8&limit=2&eventEpoch=3", [9, 10], 10],
     [["--limit", "2"], "/api/sessions/s_child/events?direction=backward&limit=2&eventEpoch=3", [11, 12], 12],
   ] as const) {
     const requests: string[] = [];
@@ -637,7 +638,9 @@ test("CLI session events pages forward with --after and reads the newest events 
     };
     let output = "";
     assert.equal(await runWollipogCli(
-      ["node", "cli.js", "--wollipog-cli", "session", "events", "s_child", ...argv, "--json"],
+      // The option-first case puts every option before the session id, which must still parse as the id.
+      ["node", "cli.js", "--wollipog-cli", "session", "events",
+        ...(argv[0] === "--event-epoch" ? [...argv, "s_child"] : ["s_child", ...argv]), "--json"],
       env,
       { stdout: (text) => { output += text; }, stderr: () => {} },
       fetch,
