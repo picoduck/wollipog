@@ -2305,6 +2305,7 @@ textarea {
   opacity: 0.6;
 }
 /* The native checkbox does not inherit the label's cursor; the browser gives it its own. */
+.evidence-reviewed-control input:disabled,
 .approval-evidence-item label input:disabled {
   cursor: not-allowed;
 }

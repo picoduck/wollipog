@@ -118,6 +118,25 @@ test("the inline approval card shows a blocked item's reviewed checkbox as disab
   await expect(open).toBeChecked();
 });
 
+test("the review surface shows a blocked item's reviewed checkbox with the disabled cursor", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 800 });
+  await openReview(page, "items=3&artifacts=unavailable");
+  const blocked = page.locator(".evidence-review-item", { hasText: "viewport-2" }).getByRole("checkbox");
+  const open = page.locator(".evidence-review-item", { hasText: "viewport-1" }).getByRole("checkbox");
+  await expect(page.getByRole("img", { name: "Evidence: viewport-1" })).toBeVisible();
+  await expect(blocked).toBeDisabled();
+  const styles = (checkbox: Locator) => checkbox.evaluate((input) => {
+    const label = getComputedStyle(input.closest("label")!);
+    return { label: label.cursor, opacity: label.opacity, checkbox: getComputedStyle(input).cursor };
+  });
+  // The checkbox agrees with its label instead of keeping the browser's own default arrow.
+  expect(await styles(blocked)).toEqual({ label: "not-allowed", opacity: "0.6", checkbox: "not-allowed" });
+  // An enabled item is untouched: its label keeps the pointer and its checkbox the browser default.
+  expect(await styles(open)).toEqual({ label: "pointer", opacity: "1", checkbox: "default" });
+  await open.check();
+  await expect(open).toBeChecked();
+});
+
 test("an artifact that matches its digest but cannot be drawn is never shown and cannot be marked reviewed", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 800 });
   await openReview(page, "items=3&artifacts=undecodable");
