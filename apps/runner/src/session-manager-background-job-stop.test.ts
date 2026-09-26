@@ -686,6 +686,56 @@ test("a model stop in a provider-initiated turn is settled by that turn, not by 
   }
 });
 
+test("a restored model stop gets its own continuation, not one already queued for a sibling (#1855)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-job-model-stop-own-continuation-"));
+  let manager: SessionManager | undefined;
+  try {
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    let onPrompt: (provider: ProviderProcess, text: string) => void = () => {};
+    const fake = fakeProvider({
+      onPrompt: (provider, text) => onPrompt(provider, text),
+      stopReason: (text) => text === "stop the monitor" ? "throw" : "end_turn",
+    });
+    onPrompt = (provider, text) => {
+      if (text === "watch CI and run the suite") {
+        fake.live.set("monitor-1", { id: "monitor-1", launchType: "monitor", startedAt: Date.now() });
+        fake.live.set("shell-2", { id: "shell-2", launchType: "shell", startedAt: Date.now() });
+        fake.report(provider);
+      } else if (text === "stop the monitor") {
+        // The suite finishes during the stopping turn, and the model's stop then completes the
+        // barrier, so the suite's continuation is queued before the turn fails.
+        const shell = fake.live.get("shell-2")!;
+        fake.live.delete("shell-2");
+        fake.report(provider, [{ ...shell, status: "completed", terminalAt: Date.now(), continuationRequired: true }]);
+        const monitor = fake.live.get("monitor-1")!;
+        fake.live.delete("monitor-1");
+        fake.report(provider, [{
+          ...monitor, status: "killed", terminalAt: Date.now(), continuationRequired: false, stoppedByModel: true,
+        }]);
+      }
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_job_model_stop_own_continuation", root);
+    await manager.start(spec);
+
+    manager.prompt(spec.sessionId, "watch CI and run the suite");
+    await waitFor(() => fake.prompts.length === 1 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the launching turn did not finish");
+    manager.prompt(spec.sessionId, "stop the monitor");
+    const job = (id: string) => store.readMeta(spec.sessionId)?.backgroundJobs?.find((each) => each.id === id);
+    await waitFor(() => job("monitor-1")?.continuationQueuedAt !== undefined,
+      "the stopped job's continuation was not restored");
+    assert.ok(job("shell-2")?.continuationId);
+    assert.ok(job("monitor-1")?.continuationId);
+    assert.notEqual(job("monitor-1")?.continuationId, job("shell-2")?.continuationId,
+      "delivery of the suite's continuation cannot count as delivery of the stop");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("with the real Claude driver, a model stop in a later turn starts no continuation turn (#1855)", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-job-model-stop-driver-"));
   let manager: SessionManager | undefined;
