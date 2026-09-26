@@ -278,11 +278,21 @@ for (const width of [320, 1280]) {
     await expect(unavailable).toHaveAccessibleDescription(/^Stops Monitor Job \d\. Stop Job is unavailable: Runner protocol is v189/);
     await panel.getByRole("button", { name: "Close Panel", exact: true }).click();
 
-    // A current runner: Stop Job is offered on the unfinished job only, behind a confirmation.
+    // A v190 runner offers Stop Job, but its restart still discards the result (#1779).
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(190));
+    await resultBlocked();
+    panel = await openPanel();
+    await expect(summary).toContainText("Restarting or stopping the session also ends it, but ends every other job and discards this result.");
+    await panel.getByRole("button", { name: "Close Panel", exact: true }).click();
+
+    // A current runner: Stop Job is offered on the unfinished job only, behind a confirmation, and
+    // its restart reports the result to the new conversation instead of discarding it (#1779).
     await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
     await resultBlocked();
     panel = await openPanel();
     await expect(summary).toContainText("Use Stop Job on the unfinished job below: only that job ends");
+    await expect(summary).toContainText("Stopping the session also ends it but discards this result; restarting the " +
+      "session ends every job and reports this result to the new conversation instead.");
     await expect(panel.getByRole("button", { name: "Stop Job", exact: true })).toHaveCount(1);
     const stop = panel.locator(".background-work-job").filter({ hasText: "Monitor Job" })
       .getByRole("button", { name: "Stop Job", exact: true });

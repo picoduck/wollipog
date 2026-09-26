@@ -2323,6 +2323,24 @@ test("a queue hold keeps the runner's word that one job can be stopped (#1780)",
   assert.equal(db.getSession("not-stoppable-hold")!.queueHold?.canStopJobs, undefined, "only an exact true is kept");
 });
 
+test("a queue hold keeps the runner's word that a restart keeps the queue (#1779)", () => {
+  const db = withRunner();
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:5000", since: 5_000, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 1, restartKeepsQueue: true as const,
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "keeping-hold", status: "queued", queueHold }), "runner-1", 6_000);
+  const held = db.getSession("keeping-hold")!;
+  assert.deepEqual(held.queueHold, queueHold);
+  assert.match(held.holds?.[0]?.recoveryAction ?? "", /the queued message is kept and runs after the restart/u);
+  db.createSessionFromSnapshot(snapshot({
+    id: "discarding-hold", status: "queued", queueHold: { ...queueHold, restartKeepsQueue: "yes" as never },
+  }), "runner-1", 6_000);
+  const discarding = db.getSession("discarding-hold")!;
+  assert.equal(discarding.queueHold?.restartKeepsQueue, undefined, "only an exact true is kept");
+  assert.match(discarding.holds?.[0]?.recoveryAction ?? "", /the queued message is discarded and must be sent again/u);
+});
+
 test("snapshot residuals and indexed source coverage prevent cold-history and replay double counting", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(snapshot({

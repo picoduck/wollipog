@@ -46,8 +46,10 @@ Each event is one summary line capped at 400 characters, so a long message is tr
 session by its id, which `session get` lists as `unfinishedBackgroundJobs`. Use it when a job that
 never ends, such as a monitor whose condition never fires, keeps a finished sibling's result or a
 queued handoff waiting. Only that job ends and is recorded as killed; the child's conversation, its
-other jobs, and its queued prompts are kept, unlike `session stop` or `session restart`. Only the
-session's owner and its controlling Orchestrator may use it.
+other jobs, and its queued prompts are kept. `session stop` and `session restart` end every job
+instead: a stop discards the queued prompts, while a restart keeps them and runs them after it, but
+starts a new Claude Code conversation. Only the session's owner and its controlling Orchestrator may
+use `stop-job`.
 
 An Orchestrator campaign must use the management tools as the policy boundary, not infer authority
 from its prompt. Call `get_campaign` at campaign start and after a human changes policy. It returns
@@ -80,6 +82,9 @@ When those MCP tools are unavailable, use the equivalent self-scoped `wollipog d
 JSON objects. The CLI refuses `--session` for these commands and exposes no resolution operation.
 Only the current owner may resolve the exact pending occurrence. Authentication, secrets,
 persistent grants, governance, budgets, and tool guardrails remain human-only.
+A stop or restart revokes every decision the session has not consumed. After a restart the session
+receives a `[Wollipog Session Restart]` message naming each revoked occurrence: do not act on an
+earlier approval of it, and request again what you still need.
 If an exact armed PR merge command already succeeded but its approved occurrence remained
 unconsumed, use `reconcile_workflow_decision` (or `wollipog decision reconcile`) with that
 occurrence's unchanged resource snapshot.

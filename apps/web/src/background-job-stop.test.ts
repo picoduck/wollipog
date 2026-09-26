@@ -32,3 +32,13 @@ test("only Result Blocked guidance changes with Stop Job availability (#1780)", 
   assert.equal(backgroundDeliveryAction("accepted_without_result", { available: true }),
     BACKGROUND_DELIVERY_STATUS.accepted_without_result.action);
 });
+
+test("Result Blocked says a restart reports the result only where the runner's restart does (#1779)", () => {
+  assert.match(backgroundDeliveryAction("continuation_blocked", { available: true }),
+    /Restarting or stopping the session also ends it, but ends every other job and discards this result\.$/u,
+    "a v190 runner's restart still discards the result");
+  const reported = backgroundDeliveryAction("continuation_blocked", { available: true }, true, true);
+  assert.match(reported, /Stopping the session also ends it but discards this result; restarting the session ends every job and reports this result to the new conversation instead\.$/u);
+  assert.doesNotMatch(BACKGROUND_DELIVERY_STATUS.continuation_blocked.action, /discard/u,
+    "the shared copy, read without knowing the runner, claims nothing a restart may not do");
+});

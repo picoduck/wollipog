@@ -820,6 +820,103 @@ function managedBackgroundWorkState(
 }
 const MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS = 4_096;
 const BACKGROUND_CONTINUATION_DELIVERED_PREFIX = "Managed background continuation delivered: ";
+const RESTART_CONTINUATION_PROMPT =
+  "This session was restarted. The conversation that started the background jobs listed below ended with the restart, so their task notifications cannot reach this conversation; Wollipog recorded their results instead. A finished job's output, when listed, is in the named file: read it if the work in front of you needs it. A job the restart ended left no result that can be recovered. Report these results without waiting for another user message.";
+
+/** The background work of the Claude conversation an explicit Restart replaces (#1779).
+ *
+ * Restart starts a fresh conversation and ends the old provider process together with every job it
+ * still ran, so nothing of the old conversation can deliver a result any more. The records are
+ * carried rather than dropped:
+ * - a job with no terminal status, and a pending or orphaned task id without a record, ended with
+ *   the process: it is recorded as killed by the restart, and its result is unrecoverable;
+ * - a finished job whose result still waited for its continuation is queued for one continuation
+ *   into the new conversation, under the ordinary managed-continuation fences and holds;
+ * - a continuation already submitted to the old conversation is never repeated: it is recorded as
+ *   missing its result.
+ * Delivered jobs, and jobs Wollipog ended earlier, are kept unchanged as history. */
+function carryBackgroundWorkAcrossRestart(
+  prior: SessionMeta,
+  runnerId: string,
+  now: number,
+): { jobs: DurableBackgroundJob[]; killed: DurableBackgroundJob[]; delivering: DurableBackgroundJob[] } {
+  const endedBy: BackgroundJobEnd = { actor: { kind: "runner" }, reason: "session_restart", endedAt: now };
+  const kill = (job: DurableBackgroundJob): DurableBackgroundJob => ({
+    ...job,
+    terminalStatus: "killed",
+    terminalObservedAt: now,
+    continuationRequired: false,
+    endedBy,
+    restartedAt: now,
+  });
+  const continuationId = `bgcont_${randomUUID()}`;
+  const jobs = (prior.backgroundJobs ?? []).map((job): DurableBackgroundJob => {
+    if (job.assistantResultPersistedAt !== undefined) return job;
+    if (!job.terminalStatus || job.terminalObservedAt === undefined) return kill(job);
+    // A job that finished inside a provider turn reached the conversation there, and one Wollipog
+    // ended has no result: neither is owed a continuation.
+    if (!job.continuationRequired) return job;
+    if (job.continuationSubmittedAt !== undefined) {
+      return job.continuationMissingResultAt !== undefined ? job : { ...job, continuationMissingResultAt: now };
+    }
+    return {
+      ...job,
+      continuationId: job.continuationId ?? continuationId,
+      continuationQueuedAt: job.continuationQueuedAt ?? now,
+      restartedAt: now,
+    };
+  });
+  const known = new Set(jobs.flatMap((job) => job.toolUseId ? [job.id, job.toolUseId] : [job.id]));
+  const recovered = new Set(prior.recoveredBackgroundTaskIds ?? []);
+  const untracked = [...new Set([
+    ...(prior.pendingBackgroundTaskIds ?? []),
+    ...(prior.orphanedWork?.pendingTaskIds ?? []),
+  ])].filter((id) => id !== "unknown" && !known.has(id) && !recovered.has(id)).sort();
+  for (const id of untracked) {
+    jobs.push(kill({
+      id,
+      parentTurnId: "unknown",
+      runnerId,
+      workspaceId: prior.workspaceId,
+      context: prior.context,
+      ...(prior.executionTarget ? { executionTarget: prior.executionTarget } : {}),
+      launchType: "unknown",
+      registeredAt: prior.orphanedWork?.markedAt ?? now,
+    }));
+  }
+  return {
+    jobs,
+    killed: jobs.filter((job) => job.restartedAt === now && job.endedBy?.reason === "session_restart"),
+    delivering: jobs.filter((job) => job.restartedAt === now && job.continuationRequired &&
+      job.continuationSubmittedAt === undefined),
+  };
+}
+
+/** The timeline's account of what a Restart did with the replaced conversation's background work
+ * (#1779). Like the other runner notices it names jobs by type and id only: output references are
+ * runner-local provider paths and never reach the dashboard. */
+function restartBackgroundNotice(
+  killed: readonly DurableBackgroundJob[],
+  delivering: readonly DurableBackgroundJob[],
+): string {
+  const describe = (job: DurableBackgroundJob) => `${backgroundLaunchTypeNoun(job.launchType)} (job ${job.id}, started ` +
+    `${new Date(job.registeredAt).toISOString().slice(0, 16)}Z)`;
+  const parts: string[] = [];
+  if (killed.length === 1) {
+    parts.push(`The restart ended ${describe(killed[0]!)}. It is recorded as killed, and its result cannot be recovered.`);
+  } else if (killed.length > 1) {
+    parts.push(`The restart ended ${killed.length} background jobs: ${killed.map(describe).join("; ")}. ` +
+      "Each is recorded as killed, and their results cannot be recovered.");
+  }
+  if (delivering.length === 1) {
+    parts.push(`The result of ${describe(delivering[0]!)}, which finished before the restart, never reached the ` +
+      "conversation. Wollipog reports it to the restarted conversation once.");
+  } else if (delivering.length > 1) {
+    parts.push(`The results of ${delivering.length} background jobs that finished before the restart never reached ` +
+      `the conversation: ${delivering.map(describe).join("; ")}. Wollipog reports them to the restarted conversation once.`);
+  }
+  return parts.join(" ");
+}
 /** setTimeout's ceiling; a longer bound is re-armed in chunks. */
 const MAX_TIMER_MS = 0x7fffffff;
 
@@ -5277,17 +5374,16 @@ export class SessionManager {
       durable?.failed(message, "INVALID_COMMAND");
       return false;
     }
-    // Explicit Restart is authoritative and keeps its historical behavior of discarding queued
-    // work. Clear crash-recovery state before replacing/launching so it cannot intercept the
-    // restart's initial prompt or later prompts.
+    // Restart keeps the work queued for the session (#1779): prompts waiting in the live FIFO or in
+    // crash recovery move to this launch's pre-admission queue and run after it, in their original
+    // order. Crash-recovery state is cleared before replacing/launching so it cannot intercept them.
+    // Steering state goes first: clearing it resets the ordinal counter the carried prompts re-seed.
+    const existing = this.active.get(spec.sessionId);
+    if (existing) this.clearSteeringState(spec.sessionId, "session restart discarded steering state");
+    this.carryQueuedWorkAcrossRestart(spec.sessionId, existing);
     this.discardRecovery(spec.sessionId);
     // Restart: a start for a session we already run replaces the old process.
-    const existing = this.active.get(spec.sessionId);
     if (existing) {
-      this.clearSteeringState(spec.sessionId, "session restart discarded steering state");
-      this.rejectQueued(existing.queue, "session restart discarded the queued command");
-      existing.queue.length = 0;
-      this.emitQueue(spec.sessionId); // a restart discards any queued prompts
       existing.client.dispose({ forceImmediate: true });
       // Keep the durable worktree lease until the provider has been told to terminate. Releasing
       // it first would briefly let a sibling runner clean the provider's still-live cwd.
@@ -5295,6 +5391,7 @@ export class SessionManager {
       this.clearLock(spec.sessionId);
       this.log(`restarting ${spec.sessionId} — replacing existing process`);
     }
+    this.emitQueue(spec.sessionId);
 
     // Persist the session to the box store BEFORE anything else, so it is the source of truth, is
     // visible to other dashboards even if init fails, and so setup warnings below land in the log
@@ -5470,6 +5567,7 @@ export class SessionManager {
     // create() upserts meta.json (refreshing launch params) but preserves any existing event log,
     // so a restart keeps the timeline while re-spawning a fresh agent.
     let managedPiCleanupError: string | undefined;
+    let restartBackground: ReturnType<typeof carryBackgroundWorkAcrossRestart> | undefined;
     await this.runWorktreeOperation(spec.sessionId, async () => {
       if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return;
       // A worktree request may have committed after the launch captured `prior` but before this
@@ -5496,10 +5594,25 @@ export class SessionManager {
         meta.checkpointWorktreeIds = latest.checkpointWorktreeIds;
         meta.worktreePending = shouldUseWorktree;
       }
+      // The replaced Claude conversation's background work is carried, not dropped (#1779). No
+      // pending task id is carried: the fresh provider must not wait on work that died with the old.
+      if (prior?.driver === "claude-code" && driver === "claude-code") {
+        restartBackground = carryBackgroundWorkAcrossRestart(prior, this.runnerId, Date.now());
+        if (restartBackground.jobs.length) {
+          meta.backgroundJobs = restartBackground.jobs;
+          meta.backgroundWorkState = managedBackgroundWorkState(restartBackground.jobs);
+        }
+      }
       // The serialized row transition is the cleanup linearization point. A Restart that
       // supersedes us before this callback preserves the adopted Pi row and copy; after this write,
       // later launches see cleanup-pending state rather than inheriting a directory we may remove.
       this.store.create(meta);
+      if (restartBackground && (restartBackground.killed.length || restartBackground.delivering.length)) {
+        this.emitEvent(spec.sessionId, {
+          kind: "stderr",
+          text: restartBackgroundNotice(restartBackground.killed, restartBackground.delivering),
+        });
+      }
       if (managedPiStateToCleanup) {
         try {
           await cleanupPiExternalSession(
@@ -6041,7 +6154,8 @@ export class SessionManager {
     if (!this.launchIsCurrent(spec.sessionId, launchGeneration)) return false;
     if (initialPrompt || (initialImages && initialImages.length)) {
       if (priorResumeId) this.handoffResumeLockToTurn(spec.sessionId, launchGeneration);
-      if (!this.prompt(spec.sessionId, initialPrompt ?? "", initialImages ?? [], undefined, undefined, durable)) {
+      if (!this.prompt(spec.sessionId, initialPrompt ?? "", initialImages ?? [], undefined, undefined, durable,
+        false, undefined, false, undefined, undefined, undefined, false, true)) {
         return false;
       }
     } else {
@@ -6050,6 +6164,9 @@ export class SessionManager {
       durable?.completed();
     }
     this.activatePreLaunchQueue(spec.sessionId);
+    // The replaced conversation's finished results reach the new one through the ordinary managed
+    // continuation, queued behind the prompts the restart carried (#1779).
+    if (restartBackground?.delivering.length) this.scheduleBackgroundContinuation(spec.sessionId);
     return true;
   }
 
@@ -8018,6 +8135,8 @@ export class SessionManager {
     recoveredQuestion?: QueuedPrompt["recoveredQuestion"],
     queuedPromptId?: string,
     campaignContinuation = false,
+    /** The launch's own initial prompt, which precedes whatever queued up while it was admitted. */
+    launchInitialPrompt = false,
   ): boolean {
     if (durable && this.store.readEvents(sessionId).some((event) =>
       recoveredQuestion
@@ -8189,7 +8308,11 @@ export class SessionManager {
     }
     const entry = this.active.get(sessionId);
     const currentGeneration = this.launchGenerations.get(sessionId);
-    if (!entry && currentGeneration !== undefined &&
+    // A launch publishes its entry before its provider is ready. While its pre-admission FIFO (such
+    // as the prompts a Restart carried, #1779) still waits, a new prompt joins that FIFO rather than
+    // the live queue, so it cannot start ahead of the prompts queued before it.
+    if ((!entry || (!launchInitialPrompt && !!this.preLaunchQueues.get(sessionId)?.length)) &&
+        currentGeneration !== undefined &&
         this.preLaunchAdmissionGenerations.get(sessionId) === currentGeneration) {
       const queue = this.preLaunchQueues.get(sessionId) ?? [];
       if (!this.queueCanAccept(queue, text, images)) {
@@ -9439,10 +9562,13 @@ export class SessionManager {
    * every connected dashboard. The full text stays in the runner's queue for the actual turn. */
   private emitQueue(sessionId: string): void {
     const entry = this.active.get(sessionId);
-    const waitingForAdmission = !entry ? this.preLaunchQueues.get(sessionId) : undefined;
-    const visible = entry || waitingForAdmission
+    // A launch publishes its entry before provider initialization, but activates its pre-admission
+    // FIFO (a Restart's carried prompts, #1779) only once the provider is ready. Those prompts are
+    // still queued in between, so they stay visible and removable, though not yet editable.
+    const waitingForAdmission = new Set(this.preLaunchQueues.get(sessionId) ?? []);
+    const visible = entry || waitingForAdmission.size
       ? [
-          ...(entry?.queue ?? waitingForAdmission ?? []).map((prompt) => ({
+          ...[...(entry?.queue ?? []), ...waitingForAdmission].map((prompt) => ({
             prompt,
             steeringState: undefined as "promoting" | "uncertain" | undefined,
           })),
@@ -9466,12 +9592,12 @@ export class SessionManager {
                 ? "Resolve uncertain delivery before steering this queued prompt."
                 : "Steering is already in progress for this queued prompt.",
             }
-          : entry
+          : entry && !waitingForAdmission.has(q)
             ? this.steeringEligibility(entry, q)
             : { eligible: false as const, message: "Wait for an active provider turn before steering." };
         const editEligibility = steeringState
           ? { eligible: false as const, message: "Resolve steering before editing this queued message." }
-          : entry
+          : entry && !waitingForAdmission.has(q)
             ? this.queuedPromptEditEligibility(q)
             : { eligible: false as const, message: "Wait for live runner admission before editing." };
         return {
@@ -9550,6 +9676,7 @@ export class SessionManager {
       ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.registeredAt } } : {}),
       ...(bounded ? { endsAt: since + bound } : {}),
       ...(entry.client.stopBackgroundJob && live && unfinished.length > 0 ? { canStopJobs: true as const } : {}),
+      restartKeepsQueue: true,
     };
   }
 
@@ -9762,7 +9889,7 @@ export class SessionManager {
    * so it can't be cancelled this way). No-op if the id already ran or the session isn't active. */
   removeQueuedPrompt(sessionId: string, promptId: string): void {
     const entry = this.active.get(sessionId);
-    const preLaunch = !entry ? this.preLaunchQueues.get(sessionId) : undefined;
+    const preLaunch = this.preLaunchQueues.get(sessionId);
     if (!entry && !preLaunch) return;
     const reserved = entry ? this.reservedPromotions(entry).get(promptId) : undefined;
     if (reserved && entry) {
@@ -9785,16 +9912,19 @@ export class SessionManager {
       }
       return;
     }
-    const queue = entry?.queue ?? preLaunch!;
+    // A launch's pre-admission FIFO outlives the entry's publication until the provider is ready.
+    const fromPreLaunch = !!preLaunch?.some((q) => q.id === promptId) &&
+      !entry?.queue.some((q) => q.id === promptId);
+    const queue = fromPreLaunch || !entry ? preLaunch! : entry.queue;
     const before = queue.length;
     const removed = queue.filter((q) => q.id === promptId);
     const retained = queue.filter((q) => q.id !== promptId);
-    if (entry) entry.queue = retained;
+    if (entry && !fromPreLaunch) entry.queue = retained;
     else if (retained.length) this.preLaunchQueues.set(sessionId, retained);
     else this.preLaunchQueues.delete(sessionId);
     this.cancelQueued(removed, "queued command was cancelled");
     if (retained.length !== before) {
-      if (entry && retained.length === 0 && !entry.running && this.cancelActiveTurnWait(sessionId) &&
+      if (entry && !fromPreLaunch && retained.length === 0 && !entry.running && this.cancelActiveTurnWait(sessionId) &&
           this.store.readMeta(sessionId)?.status === "queued") {
         this.emitStatus(sessionId, "idle");
       }
@@ -9804,6 +9934,24 @@ export class SessionManager {
 
   private rejectQueued(queue: QueuedPrompt[], error: string): void {
     for (const prompt of queue) this.failQueuedPrompt(prompt, error, "COMMAND_CANCELLED");
+  }
+
+  /** Move the prompts a Restart replaces the provider under into the launch's pre-admission queue
+   * (#1779). Ordinals keep their original order ahead of anything sent after the Restart, and a
+   * launch that fails rejects them with its own reason rather than dropping them. A runner-owned
+   * recovery or continuation turn belonged to the replaced conversation, so it is dropped; the
+   * restart reschedules whatever background delivery the new conversation still owes. */
+  private carryQueuedWorkAcrossRestart(sessionId: string, existing: ActiveSession | undefined): void {
+    const replaced = [...(existing?.queue ?? []), ...(this.recoveryQueues.get(sessionId) ?? [])];
+    if (existing) existing.queue.length = 0;
+    this.recoveryQueues.delete(sessionId);
+    if (replaced.length === 0) return;
+    this.cancelQueued(replaced.filter((prompt) => prompt.syntheticRecovery), "session restart replaced the conversation");
+    const carried = replaced.filter((prompt) => !prompt.syntheticRecovery);
+    if (carried.length === 0) return;
+    const queue = this.preLaunchQueues.get(sessionId) ?? [];
+    for (const prompt of carried) this.insertQueuedPrompt(sessionId, queue, prompt);
+    this.preLaunchQueues.set(sessionId, queue);
   }
 
   /** Discard a FIFO the caller deliberately cancelled. Identical to rejectQueued except that the
@@ -11746,9 +11894,12 @@ export class SessionManager {
       : syntheticRecovery
       ? this.emitEvent(sessionId, {
           kind: "stderr",
-          text: backgroundJobIds?.length
-            ? "Runner continued after managed background work completed."
-            : "Runner resumed orphaned background work automatically.",
+          text: !backgroundJobIds?.length
+            ? "Runner resumed orphaned background work automatically."
+            : (this.store.readMeta(sessionId)?.backgroundJobs ?? []).some((job) =>
+                backgroundJobIds.includes(job.id) && job.restartedAt !== undefined)
+              ? "Runner reported the background work of the conversation the restart replaced."
+              : "Runner continued after managed background work completed.",
         })
       : this.emitEvent(sessionId, {
           kind: "user_message",
@@ -15650,19 +15801,28 @@ export class SessionManager {
     this.backgroundContinuationLaunching.add(sessionId);
     try {
       const selected = (meta.backgroundJobs ?? []).filter((job) => jobIds.includes(job.id));
+      // A job whose conversation a Restart replaced has no task notification left to consume
+      // (#1779). Its continuation names every job that restart ended, and each finished job's output.
+      const restarted = selected.some((job) => job.restartedAt !== undefined);
       // A sibling Wollipog ended belongs to the same barrier but has no result of its own. Name it,
       // or the provider may keep waiting for a job that no longer exists (#1778).
       const parents = new Set(selected.map((job) => job.parentTurnId));
       const endedSiblings = (meta.backgroundJobs ?? []).filter((job) => !jobIds.includes(job.id) &&
-        parents.has(job.parentTurnId) && job.endedBy && !job.assistantResultPersistedAt);
+        job.endedBy && !job.assistantResultPersistedAt && (restarted
+          ? job.endedBy.reason === "session_restart"
+          : parents.has(job.parentTurnId)));
       const resultSummary = [...selected, ...endedSiblings]
         .filter((job) => job.terminalStatus && job.terminalObservedAt).slice(0, 128).map((job) => ({
         id: job.id,
         launchType: job.launchType,
         status: job.terminalStatus!,
         terminalAt: job.terminalObservedAt!,
+        ...(restarted && job.endedBy?.reason === "session_restart" ? { endedByRestart: true, recoverable: false } : {}),
+        ...(restarted && job.endedBy === undefined && job.outputReference ? { outputFile: job.outputReference } : {}),
       }));
-      const prompt = `${BACKGROUND_CONTINUATION_PROMPT}\n\nRunner-managed terminal results:\n${JSON.stringify(resultSummary)}`;
+      const prompt = restarted
+        ? `${RESTART_CONTINUATION_PROMPT}\n\nBackground jobs from the replaced conversation:\n${JSON.stringify(resultSummary)}`
+        : `${BACKGROUND_CONTINUATION_PROMPT}\n\nRunner-managed terminal results:\n${JSON.stringify(resultSummary)}`;
       const currentGeneration = this.launchGenerations.get(sessionId);
       const admissionInFlight = !entry && currentGeneration !== undefined &&
         this.preLaunchAdmissionGenerations.get(sessionId) === currentGeneration;

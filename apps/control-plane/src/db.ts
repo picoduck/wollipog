@@ -25069,6 +25069,7 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
     ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.startedAt } } : {}),
     ...(value.endsAt !== undefined ? { endsAt: value.endsAt } : {}),
     ...(value.canStopJobs === true ? { canStopJobs: true as const } : {}),
+    ...(value.restartKeepsQueue === true ? { restartKeepsQueue: true as const } : {}),
   };
 }
 
