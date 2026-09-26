@@ -6734,6 +6734,13 @@ export class SessionsService {
         );
       }
     }
+    // Every resolution resumes the child: prompt delivery wakes an idle child and queues behind a
+    // turn still in progress. On a runner that reports exact not-sent receipts the resume is owed
+    // from this write onward (#1759): the resolving statement records it as held, so a stop before
+    // it is staged cannot lose it, and a child whose worktree needs recovery (#1650) or whose
+    // runner is offline keeps it until the first boundary that can deliver it. A guardrail card
+    // still refuses it, leaving the outcome, and any message, on the decision record.
+    const oweResume = this.workflowDecisionResumeOwed(currentChild);
     const resolved = this.db.resolveWorkflowDecision(
       occurrenceId,
       authority,
@@ -6743,17 +6750,11 @@ export class SessionsService {
       checked.data.evidenceReviewed,
       auditDigest(checked.data.rationale),
       checked.data.childMessage,
+      oweResume,
     );
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
     this.db.consumeUiEvidenceReviewReceipts(occurrenceId, now);
-    const child = this.db.getSession(childSessionId);
-    // Every resolution resumes the child: prompt delivery wakes an idle child and queues behind a
-    // turn still in progress, and a child whose worktree needs recovery keeps the resume until it
-    // recovers (#1650). Any other refusal (runner offline, a guardrail pause) leaves the outcome,
-    // and any message, on the decision record.
-    const deliverResolution = (childIdle: boolean) =>
-      this.deliverWorkflowDecisionResume(resolved, now, null, childIdle);
-    if (child) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now, deliverResolution);
+    this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
     this.recordWorkflowDecisionAudit(
       resolved,
       checked.data.outcome === "approve" ? "allowed" : "denied",
@@ -7505,6 +7506,41 @@ export class SessionsService {
     }
   }
 
+  /** Whether a resolution's resume is recorded as owed by the resolving write itself (#1759).
+   * Only a runner that reports exact not-sent receipts carries the resume on the durable lane;
+   * an older runner keeps the ordinary prompt, which has no state to record. */
+  private workflowDecisionResumeOwed(child: SessionView): boolean {
+    return runnerSupportsProtocol(this.db.getRunner(child.runnerId)?.protocolVersion, "worktreeRecovery");
+  }
+
+  /**
+   * Settle a resolved decision's card and deliver the resume it owes through that settlement, so
+   * the child leaves the pause straight into the resumed turn (#1759). `from` is the resume state
+   * the resolving write recorded: `held` on a runner that reports exact not-sent receipts, else
+   * null. The same path finishes a resolution the control plane stopped after recording: the
+   * next boundary finds the resume held and the card still on the child, and settles both.
+   *
+   * A guardrail that gates the child — a cost-budget card, or an open policy-hook approval —
+   * keeps the resume from being attempted at all. By default that resume is settled `failed`: the
+   * outcome stays on the decision record, and the human resolves the card first.
+   */
+  private settleResolvedWorkflowDecision(
+    decision: WorkflowDecisionView,
+    now: number,
+    from: "held" | null,
+  ): void {
+    let attempted = false;
+    this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now, (childIdle) => {
+      attempted = true;
+      return this.deliverWorkflowDecisionResume(decision, now, from, childIdle);
+    });
+    if (from === "held" && !attempted) {
+      this.db.setWorkflowDecisionResume(decision.occurrenceId, "failed", null, now);
+      this.log.warn(`workflow decision ${decision.occurrenceId} resolution not delivered to ${decision.sessionId}: ` +
+        "a guardrail card gates the child, so the outcome stays on the decision record");
+    }
+  }
+
   /**
    * Deliver the prompt that resumes a child after its decision resolves, and record how it went on
    * the decision (#1650).
@@ -7513,10 +7549,11 @@ export class SessionsService {
    * the control plane refused it outright when it already knew, and otherwise the runner refused
    * the turn before submission with nothing left to replay. On a runner that reports that refusal
    * exactly, the resume now travels the durable prompt lane instead. A recovery already known here
-   * holds it unsent, a `WORKTREE_RECOVERY_REQUIRED` receipt holds it the same way, and the first
-   * boundary that sees the recovery cleared delivers it. Staging binds the command to the decision
-   * in one transaction, conditional on the resume state observed here (`from`), so a restart can
-   * neither lose an owed resume nor send it twice. Returns whether the child will be resumed.
+   * holds it unsent, a `WORKTREE_RECOVERY_REQUIRED` receipt holds it the same way, and so does a
+   * runner that is offline (#1759); the first boundary that can deliver it does. Staging binds the
+   * command to the decision in one transaction, conditional on the resume state observed here
+   * (`from`), so a restart can neither lose an owed resume nor send it twice. Returns whether the
+   * child will be resumed now: a held resume answers false, and the child is as idle as it was.
    *
    * `childIdle` says the provider had settled idle, so the durable lane admits the resume as
    * `queued`: the runner's started receipt makes it `running`, and a runner that cannot start it
@@ -7548,6 +7585,14 @@ export class SessionsService {
       if (from !== "held") this.db.setWorkflowDecisionResume(decision.occurrenceId, "held", null, now);
       this.hub.sessionChangedById(child.id);
       return true;
+    }
+    // A runner that is away cannot take the prompt, and nothing retries a refused one. Keep the
+    // resume owed instead: the runner's return — its registration sweep, its hydration, or the
+    // next maintenance pass — is the boundary that delivers it once (#1759).
+    if (!this.hub.isRunnerOnline(child.runnerId)) {
+      if (from !== "held") this.db.setWorkflowDecisionResume(decision.occurrenceId, "held", null, now);
+      this.log.info(`workflow decision ${decision.occurrenceId} resume held for ${child.id}: runner ${child.runnerId} is offline`);
+      return false;
     }
     let staged: SessionPromptCommandRecord | null = null;
     let delivered: ReturnType<SessionsService["prompt"]>;
@@ -7632,15 +7677,23 @@ export class SessionsService {
         runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "worktreeRecovery")) return;
     for (const resume of held) {
       const decision = this.db.workflowDecisionByOccurrence(resume.occurrenceId);
+      // Each delivery can move the child, so the next resume reads it again.
+      const child = this.db.getSession(sessionId);
       // A stopped child, or a decision revoked or superseded meanwhile, has nothing to resume.
-      if (!session || isTerminal(session.status) || !decision ||
+      if (!child || isTerminal(child.status) || !decision ||
           !["approved", "denied", "consumed"].includes(decision.status)) {
         this.db.setWorkflowDecisionResume(resume.occurrenceId, "abandoned", null, now);
         continue;
       }
       // Keep it held while the runner is away; its reconnect is another boundary that retries.
-      if (!this.hub.isRunnerOnline(session.runnerId)) return;
-      this.deliverWorkflowDecisionResume(decision, now, "held", session.status === "idle");
+      if (!this.hub.isRunnerOnline(child.runnerId)) return;
+      // A resolution recorded just before a stop still has its card on the child (#1759): settle
+      // the card now, exactly as the resolving call would have, and the resume goes out through it.
+      if (pendingRequests(child.pendingApproval).some((request) => request.requestId === resume.occurrenceId)) {
+        this.settleResolvedWorkflowDecision(decision, now, "held");
+        continue;
+      }
+      this.deliverWorkflowDecisionResume(decision, now, "held", child.status === "idle");
     }
   }
 

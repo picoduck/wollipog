@@ -732,9 +732,10 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   action_provider_thread_id TEXT,
   action_runner_history_epoch INTEGER,
   child_message         TEXT,
-  -- How the prompt that resumes the child after resolution is progressing (#1650). NULL for a
-  -- decision resolved before this was recorded, or resumed over a runner that cannot report an
-  -- exact not-delivered receipt; see WorkflowDecisionResumeState.
+  -- How the prompt that resumes the child after resolution is progressing (#1650). The resolving
+  -- write itself records 'held' on a runner that reports exact not-delivered receipts (#1759).
+  -- NULL for a decision resolved before this was recorded, or resumed over a runner that cannot
+  -- report such a receipt; see WorkflowDecisionResumeState.
   resume_state          TEXT,
   resume_command_id     TEXT,
   resume_updated_at     INTEGER,
@@ -2826,11 +2827,14 @@ export type CampaignContinuationEventKind =
 
 /**
  * How the prompt that resumes a child after its workflow decision resolves is progressing (#1650).
- * `delivering`: a durable prompt command carries it. `held`: it is not sent, because the child's
- * worktree needs recovery; the first boundary that sees the recovery cleared claims and delivers
- * it. `delivered`: the runner started the turn. `uncertain`: the transport cannot say, so it is
- * never re-sent. `failed`: admission refused it for another reason, as before #1650. `abandoned`:
- * the decision or the child ended before it could be delivered.
+ * `held`: it is owed and no command carries it yet. On a runner that reports exact not-sent
+ * receipts it is recorded by the write that resolves the decision (#1759), and it stays held while
+ * the child's worktree needs recovery or its runner is offline; the first boundary that can
+ * deliver it claims and delivers it. `delivering`: a durable prompt command carries it.
+ * `delivered`: the runner started the turn. `uncertain`: the transport cannot say, so it is never
+ * re-sent. `failed`: admission refused it for another reason — a guardrail card, say — and the
+ * outcome stays on the decision record, as before #1650. `abandoned`: the decision or the child
+ * ended before it could be delivered.
  */
 export type WorkflowDecisionResumeState =
   | "delivering" | "held" | "delivered" | "uncertain" | "failed" | "abandoned";
@@ -15080,6 +15084,12 @@ export class ControlPlaneDb {
     );
   }
 
+  /**
+   * Resolve a pending decision. With `oweResume`, the same statement records the child's resume as
+   * owed (`held`), so the resume exists from the moment the outcome does: a control-plane stop
+   * between resolving the decision and staging its resume cannot lose it, because the next boundary
+   * finds it held and delivers it (#1759).
+   */
   resolveWorkflowDecision(
     occurrenceId: string,
     expectedAuthority: WorkflowDecisionAuthority,
@@ -15089,14 +15099,16 @@ export class ControlPlaneDb {
     evidenceReviewed?: string[],
     rationaleDigest?: string,
     childMessage?: string,
+    oweResume = false,
   ): WorkflowDecisionView | null {
+    const owed = oweResume ? ", resume_state='held', resume_command_id=NULL, resume_updated_at=?" : "";
     const result = this.stmt(
       `UPDATE workflow_decisions SET status=?, selected_option_id=?, evidence_reviewed=?,
-       rationale_digest=?, child_message=?, resolved_at=?
+       rationale_digest=?, child_message=?, resolved_at=?${owed}
        WHERE occurrence_id=? AND status='pending' AND authority=?`,
     ).run(
       outcome, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
-      rationaleDigest ?? null, childMessage ?? null, now, occurrenceId, expectedAuthority,
+      rationaleDigest ?? null, childMessage ?? null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
