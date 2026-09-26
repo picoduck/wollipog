@@ -58,6 +58,9 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type DurableSessionCommandResultMessage,
   type DurableSessionCommandUpdateMessage,
   type DispatchWorkflowNodeResult,
+  type BackgroundJobStopActor,
+  type BackgroundJobStopResponse,
+  type StopBackgroundJobRefusal,
   type ExternalSessionDescriptor,
   type GovernanceActor,
   type GovernanceAuditEntry,
@@ -1373,6 +1376,22 @@ function workflowArtifactPage(rows: WorkflowArtifactView[], limit: number): Work
       ? { nextCursor: Buffer.from(JSON.stringify({ createdAt: last.createdAt, artifactId: last.artifactId }), "utf8").toString("base64url") }
       : {}),
   };
+}
+
+/** The runner answers within its own provider bounds (10 s for the answer, 2 s for the proof). */
+const BACKGROUND_JOB_STOP_TIMEOUT_MS = 20_000;
+
+/** Why the runner could not stop a background job, in words the caller can act on (#1780). */
+function backgroundJobStopRefusal(reason: StopBackgroundJobRefusal | undefined): string {
+  switch (reason) {
+    case "session_not_found": return "the runner has no record of this session";
+    case "unsupported": return "this session's harness cannot stop a single background job";
+    case "in_progress": return "other background work of this session is being ended right now; try again shortly";
+    case "no_live_process": return "no running provider process owns this job, so it cannot be stopped by itself";
+    case "not_owned": return "the session's current provider process did not start this job, so it cannot stop it";
+    case "provider_rejected": return "the provider refused to stop the job";
+    default: return "the provider did not confirm that the job ended, so it was left as it was";
+  }
 }
 
 export class SessionsService {
@@ -6021,6 +6040,42 @@ export class SessionsService {
       return fail("runner is offline", 409);
     }
     return ok(session);
+  }
+
+  /** Stop one managed background job by id (#1780). The runner ends only that job and records the
+   * actor; the session, its provider conversation, and its other jobs keep running. The caller has
+   * already established that the actor is the session owner or its controlling Orchestrator. */
+  async stopBackgroundJob(
+    sessionId: string,
+    jobId: string,
+    actor: BackgroundJobStopActor,
+  ): Promise<ServiceResult<BackgroundJobStopResponse>> {
+    const session = this.db.getSession(sessionId);
+    if (!session) return fail("session not found", 404);
+    const unsupported = this.capabilityFailure(session.runnerId, "backgroundJobStop", "Stopping one background job");
+    if (unsupported) return unsupported;
+    const requestId = `stopjob_${randomUUID()}`;
+    try {
+      const result = await this.hub.requestFromRunner(session.runnerId, requestId, {
+        type: "stop_background_job",
+        requestId,
+        sessionId,
+        jobId,
+        actor,
+      }, BACKGROUND_JOB_STOP_TIMEOUT_MS);
+      if (result.type !== "stop_background_job_result" || result.sessionId !== sessionId || result.jobId !== jobId) {
+        return fail("runner returned an invalid background job stop response", 502);
+      }
+      if (result.outcome === "unknown_job") return fail("background job not found", 404);
+      if (result.outcome === "refused") return fail(backgroundJobStopRefusal(result.reason), 409);
+      if (!result.terminalStatus) return fail("runner returned an invalid background job stop response", 502);
+      return ok({ sessionId, jobId, outcome: result.outcome, terminalStatus: result.terminalStatus });
+    } catch (error) {
+      const message = (error as Error).message;
+      if (/offline|not sent/i.test(message)) return fail("runner is offline", 409);
+      if (/respond in time/i.test(message)) return fail("the runner did not answer the stop request in time", 504);
+      return fail(`stopping the background job failed: ${message}`, 502);
+    }
   }
 
   /** Restore an archived session to the Inbox and relaunch it as one server-owned operation. Every

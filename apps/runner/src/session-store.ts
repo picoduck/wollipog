@@ -48,6 +48,7 @@ import type {
   AgentSlashCommand,
   AcpRuntimeCapabilities,
   AgentContext,
+  BackgroundJobStopActor,
   AgentDriverKind,
   BackgroundWorkState,
   ExecutionHandoffReceipt,
@@ -343,13 +344,15 @@ export interface ProviderAuthIdentityEvidence {
   fields: Partial<Record<ProviderAuthIdentityField, string>>;
 }
 
-/** Who asked Wollipog to end background work. The runner acts on its own policy today; an explicit
- * request from outside the session is another actor kind (#1780). */
-export type BackgroundJobEndActor = { kind: "runner" };
+/** Who asked Wollipog to end background work: the runner on its own policy (#1778), or an
+ * explicit stop request from outside the session (#1780) by the session owner or by the
+ * controlling Orchestrator of its campaign. */
+export type BackgroundJobEndActor = { kind: "runner" } | BackgroundJobStopActor;
 
 /** Why Wollipog ended background work. `handoff_wait_bound`: a worktree or provider-account
- * handoff, and every prompt queued behind it, waited on the work past the configured bound. */
-export type BackgroundJobEndReason = "handoff_wait_bound";
+ * handoff, and every prompt queued behind it, waited on the work past the configured bound.
+ * `stop_request`: an authorized actor asked to stop this one job (#1780). */
+export type BackgroundJobEndReason = "handoff_wait_bound" | "stop_request";
 
 export interface BackgroundJobEnd {
   actor: BackgroundJobEndActor;

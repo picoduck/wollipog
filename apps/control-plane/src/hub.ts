@@ -22,6 +22,7 @@ import type {
   ForkResultMessage,
   HostActionResultMessage,
   InterruptTurnResultMessage,
+  StopBackgroundJobResultMessage,
   ListDirectoryResultMessage,
   ListExternalSessionsResultMessage,
   ListSessionFilesResultMessage,
@@ -233,6 +234,7 @@ export type RunnerRequestResult =
   | ShellOpenResultMessage
   | HostActionResultMessage
   | InterruptTurnResultMessage
+  | StopBackgroundJobResultMessage
   | ResolveSteeringAttemptResultMessage
   | ReadQueuedPromptResultMessage
   | EditQueuedPromptResultMessage

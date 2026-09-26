@@ -2637,6 +2637,30 @@ textarea {
   margin: 10px 0 0;
 }
 .background-work-job-meta > div { min-width: 0; }
+.background-work-job-actions {
+  display: grid;
+  gap: 6px;
+  justify-items: start;
+  margin-top: 10px;
+}
+.background-work-job-actions .hint { margin: 0; }
+.background-work-job-confirm {
+  display: grid;
+  gap: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.background-work-job-confirm p {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: var(--text-xs);
+}
+.background-work-job-confirm-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
 .background-work-job-meta dt {
   color: var(--text-faint);
   font-size: var(--text-xs);

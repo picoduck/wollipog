@@ -109,6 +109,19 @@ export type DriverBackgroundWorkEndResult =
   | { status: "none" }
   | { status: "refused"; reason: "turn_active" | "no_live_process" };
 
+/** What `stopBackgroundJob` did (#1780). `finished`: the job ended on its own before the stop
+ * landed. `not_running`: the driver holds no such unfinished job. `not_owned`: the job is not one
+ * the live process launched (a seed from before a restart, or an unconfirmed launch).
+ * `unconfirmed`: the provider answered without proof the job ended, so it is left as it was. */
+export type DriverBackgroundJobStopResult =
+  | { status: "stopped"; job: DriverBackgroundTerminalJob }
+  | { status: "finished"; job: DriverBackgroundTerminalJob }
+  | { status: "not_running" }
+  | {
+      status: "refused";
+      reason: "no_live_process" | "not_owned" | "in_progress" | "provider_rejected" | "unconfirmed";
+    };
+
 export interface DriverBackgroundWorkUpdate {
   state: "running" | "orphaned" | null;
   pendingTaskIds: string[];
@@ -290,6 +303,11 @@ export interface Driver {
    * whose receipt shows it already finished is reported as such; every other one is reported as
    * `killed` with `endedByRunner`, and none of them is left for orphan recovery. */
   endBackgroundWork?(): Promise<DriverBackgroundWorkEndResult>;
+
+  /** End one unfinished background job by id without retiring the provider process, so the
+   * conversation and every other job keep running (#1780). The ended job is reported as `killed`
+   * with `endedByRunner`. Drivers that cannot end a single job omit it. */
+  stopBackgroundJob?(jobId: string): Promise<DriverBackgroundJobStopResult>;
 
   /** Answer a pending permission/approval request surfaced via onEvent. Returns true iff a
    * live ask was answered (the response reached the agent); false = nothing was waiting

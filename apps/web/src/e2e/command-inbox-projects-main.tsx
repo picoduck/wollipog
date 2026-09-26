@@ -982,6 +982,34 @@ const client = {
     if (!value) throw new Error("session not found");
     return { session: structuredClone(value) };
   },
+  // #1780: the runner ends only this job; a Result Blocked sibling's result is then delivered.
+  stopBackgroundJob: async (id: string, jobId: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    const job = value.backgroundJobs?.find((candidate) => candidate.id === jobId);
+    if (!job) throw new Error("background job not found");
+    if (job.terminalStatus) {
+      return { sessionId: id, jobId, outcome: "already_terminal" as const, terminalStatus: job.terminalStatus };
+    }
+    const now = Date.now();
+    Object.assign(job, { terminalStatus: "killed", terminalObservedAt: now, continuationRequired: false, lastObservedAt: now });
+    for (const sibling of value.backgroundJobs ?? []) {
+      if (sibling.parentTurnId === job.parentTurnId && sibling.terminalStatus && sibling.continuationRequired) {
+        sibling.assistantResultPersistedAt = now;
+      }
+    }
+    for (const delivery of value.backgroundDeliveries ?? []) {
+      if (delivery.parentTurnId !== job.parentTurnId || delivery.watchdogState !== "continuation_blocked") continue;
+      delete delivery.watchdogState;
+      delete delivery.unfinishedSiblingJobs;
+      delivery.terminalCount = delivery.jobCount;
+      delivery.runnerResultPersistedAt = now;
+    }
+    if (!(value.backgroundJobs ?? []).some((candidate) => !candidate.terminalStatus)) value.backgroundWorkState = undefined;
+    value.updatedAt += 1;
+    pushSession(value);
+    return { sessionId: id, jobId, outcome: "stopped" as const, terminalStatus: "killed" as const };
+  },
   acknowledgeBackgroundMissingResult: async (id: string, continuationId: string) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
     if (!value) throw new Error("session not found");

@@ -2265,6 +2265,19 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       break;
     }
+    case "stop_background_job": {
+      const { requestId, sessionId, jobId } = msg;
+      void sessions.stopBackgroundJob(sessionId, jobId, msg.actor).then(
+        (result) => sendUp({ type: "stop_background_job_result", requestId, sessionId, jobId, ...result }),
+        (error) => {
+          log(`stopping background job ${jobId} of ${sessionId} failed: ${errText(error)}`);
+          sendUp({
+            type: "stop_background_job_result", requestId, sessionId, jobId, outcome: "refused", reason: "unconfirmed",
+          });
+        },
+      );
+      break;
+    }
     case "cancel_queued_prompt":
       sessions.removeQueuedPrompt(msg.sessionId, msg.promptId);
       break;

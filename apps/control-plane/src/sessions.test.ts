@@ -22296,3 +22296,79 @@ test("video attachments use private session storage, a video-specific limit, and
     assert.equal((events[0]?.payload as { artifact: { artifactId: string } }).artifact.artifactId, first.data.artifactId);
   } finally { db.close(); }
 });
+
+test("stopBackgroundJob asks the runner to stop one job by id and returns its outcome (#1780)", async () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const actor = { kind: "orchestrator" as const, sessionId: "s_parent" };
+  hub.requestHandler = (msg) => {
+    assert.equal(msg.type, "stop_background_job");
+    if (msg.type !== "stop_background_job") throw new Error("unexpected");
+    return {
+      type: "stop_background_job_result", requestId: msg.requestId, sessionId: msg.sessionId, jobId: msg.jobId,
+      outcome: "stopped", terminalStatus: "killed",
+    };
+  };
+  const result = await svc.stopBackgroundJob(id, "monitor-1", actor);
+  assert.deepEqual(result, { ok: true, status: 200, data: { sessionId: id, jobId: "monitor-1", outcome: "stopped", terminalStatus: "killed" } });
+  const sent = hub.sentOfType("stop_background_job").at(-1)!;
+  assert.deepEqual({ ...sent, requestId: undefined }, {
+    type: "stop_background_job", requestId: undefined, sessionId: id, jobId: "monitor-1", actor,
+  });
+  assert.equal(hub.sentOfType("stop_session").length + hub.sentOfType("cancel_session").length, 0,
+    "the session itself is not stopped");
+
+  hub.requestHandler = (msg) => msg.type === "stop_background_job"
+    ? { type: "stop_background_job_result", requestId: msg.requestId, sessionId: msg.sessionId, jobId: msg.jobId,
+        outcome: "already_terminal", terminalStatus: "completed" }
+    : assert.fail("unexpected request");
+  assert.deepEqual((await svc.stopBackgroundJob(id, "agent-1", actor)).data,
+    { sessionId: id, jobId: "agent-1", outcome: "already_terminal", terminalStatus: "completed" });
+});
+
+test("stopBackgroundJob maps an unknown job, refusals, and transport failures to actionable errors (#1780)", async () => {
+  const { hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  const actor = { kind: "user" as const, userId: "usr_owner" };
+  const answer = (outcome: string, reason?: string) => {
+    hub.requestHandler = (msg) => msg.type === "stop_background_job"
+      ? { type: "stop_background_job_result", requestId: msg.requestId, sessionId: msg.sessionId, jobId: msg.jobId,
+          outcome, ...(reason ? { reason } : {}) } as never
+      : assert.fail("unexpected request");
+  };
+  answer("unknown_job");
+  assert.deepEqual(await svc.stopBackgroundJob(id, "nope", actor), { ok: false, status: 404, error: "background job not found" });
+  for (const [reason, pattern] of [
+    ["no_live_process", /no running provider process/],
+    ["not_owned", /did not start this job/],
+    ["unsupported", /cannot stop a single background job/],
+    ["in_progress", /try again shortly/],
+    ["provider_rejected", /refused/],
+    ["unconfirmed", /left as it was/],
+  ] as const) {
+    answer("refused", reason);
+    const result = await svc.stopBackgroundJob(id, "monitor-1", actor);
+    assert.equal(result.status, 409, reason);
+    assert.match(result.error ?? "", pattern, reason);
+  }
+  hub.requestHandler = (msg) => msg.type === "stop_background_job"
+    ? { type: "stop_background_job_result", requestId: msg.requestId, sessionId: msg.sessionId, jobId: "other",
+        outcome: "stopped", terminalStatus: "killed" }
+    : assert.fail("unexpected request");
+  assert.equal((await svc.stopBackgroundJob(id, "monitor-1", actor)).status, 502, "a result for another job is rejected");
+  hub.requestHandler = undefined;
+  assert.equal((await svc.stopBackgroundJob(id, "monitor-1", actor)).status, 504);
+  hub.deliver = false;
+  assert.deepEqual(await svc.stopBackgroundJob(id, "monitor-1", actor), { ok: false, status: 409, error: "runner is offline" });
+  assert.equal((await svc.stopBackgroundJob("s_missing", "monitor-1", actor)).status, 404);
+});
+
+test("stopBackgroundJob is refused for a runner older than v190 without contacting it (#1780)", async () => {
+  const { db, hub, svc } = makeHarness();
+  const id = seedSession(svc, hub);
+  db.registerRunner(runnerMeta(), Date.now(), 189);
+  const result = await svc.stopBackgroundJob(id, "monitor-1", { kind: "user", userId: "usr_owner" });
+  assert.equal(result.status, 409);
+  assert.match(result.error ?? "", /Stopping one background job requires protocol v190/);
+  assert.equal(hub.sentOfType("stop_background_job").length, 0);
+});

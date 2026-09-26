@@ -3,7 +3,7 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { PROTOCOL_VERSION, type ManagedBackgroundJobView, type SessionView } from "@wollipog/protocol";
+import { PROTOCOL_VERSION, type BackgroundJobStopResponse, type ManagedBackgroundJobView, type SessionView } from "@wollipog/protocol";
 import type { ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import {
@@ -714,5 +714,173 @@ test("offline current work and older untracked providers receive truthful capabi
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+/** A Result Blocked turn: a monitor that never fires beside a finished subagent (#1780). */
+function resultBlockedSession(overrides: Partial<SessionView> = {}): SessionView {
+  return {
+    id: "session",
+    runnerId: "runner",
+    driver: "claude-code",
+    backgroundWorkTracking: "managed",
+    backgroundWorkState: "running",
+    backgroundJobs: [
+      { ...baseJob, id: "monitor-1", launchType: "monitor" },
+      {
+        ...baseJob, id: "agent-1", launchType: "agent", terminalStatus: "completed",
+        terminalObservedAt: 3_000, continuationRequired: true,
+      },
+    ],
+    backgroundDeliveries: [{
+      parentTurnId: "turn-1", jobCount: 2, terminalCount: 1,
+      watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1,
+    }],
+    ...overrides,
+  } as unknown as SessionView;
+}
+
+test("Result Blocked offers Stop Job, which stops only the unfinished job after confirmation (#1780)", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const stops: Array<[string, string]> = [];
+  let finish!: (value: BackgroundJobStopResponse) => void;
+  const client = {
+    stopBackgroundJob: (sessionId: string, jobId: string) => {
+      stops.push([sessionId, jobId]);
+      return new Promise<BackgroundJobStopResponse>((resolve) => { finish = resolve; });
+    },
+  } as unknown as ApiClient;
+  const render = (session: SessionView) => act(async () => root.render(
+    <ApiProvider client={client}>
+      <BackgroundWorkPanel session={session} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()} onOpenParentTurn={() => undefined} />
+    </ApiProvider>,
+  ));
+  try {
+    await render(resultBlockedSession());
+    const summary = container.querySelector<HTMLElement>(".background-delivery-summary");
+    assert.match(summary?.textContent ?? "", /Result Blocked/);
+    assert.match(summary?.textContent ?? "", /Use Stop Job on the unfinished job below: only that job ends/);
+    assert.doesNotMatch(summary?.textContent ?? "", /Ask the session to stop/);
+    // Only the unfinished job offers the action.
+    const stopButtons = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .filter((button) => button.textContent === "Stop Job");
+    assert.equal(stopButtons.length, 1);
+    assert.match(stopButtons[0]!.getAttribute("aria-label") ?? "", /^Stop Monitor Job \d$/);
+
+    await act(async () => stopButtons[0]!.click());
+    assert.deepEqual(stops, [], "nothing is stopped before confirmation");
+    const confirm = container.querySelector<HTMLElement>("[aria-label^='Confirm Stopping Monitor Job']");
+    assert.match(confirm?.textContent ?? "", /Only this job ends, and it is recorded as killed\. The session, its conversation, and its other jobs keep running\./);
+    const keep = [...confirm!.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Keep Running")!;
+    await act(async () => keep.click());
+    assert.equal(container.querySelector("[aria-label^='Confirm Stopping Monitor Job']"), null);
+    assert.deepEqual(stops, []);
+
+    await act(async () => container.querySelector<HTMLButtonElement>("[aria-label^='Stop Monitor Job']")!.click());
+    const confirmStop = [...container.querySelectorAll<HTMLButtonElement>("button")]
+      .find((button) => button.textContent === "Confirm Stop")!;
+    assert.ok(confirmStop.classList.contains("danger"));
+    await act(async () => confirmStop.click());
+    assert.deepEqual(stops, [["session", "monitor-1"]]);
+    const pending = container.querySelector<HTMLButtonElement>("[aria-label^='Stop Monitor Job']")!;
+    assert.equal(pending.textContent, "Stopping…");
+    assert.equal(pending.disabled, true);
+    await act(async () => {
+      finish({ sessionId: "session", jobId: "monitor-1", outcome: "stopped", terminalStatus: "killed" });
+      await Promise.resolve();
+    });
+    assert.match(container.textContent ?? "", /The job was stopped\. Its status updates here shortly\./);
+
+    // The inventory update arrives: the job is killed and the control is gone.
+    await render(resultBlockedSession({
+      backgroundJobs: [
+        { ...baseJob, id: "monitor-1", launchType: "monitor", terminalStatus: "killed", terminalObservedAt: 4_000, continuationRequired: false },
+        { ...baseJob, id: "agent-1", launchType: "agent", terminalStatus: "completed", terminalObservedAt: 3_000, continuationRequired: true },
+      ],
+      backgroundDeliveries: [],
+    }));
+    assert.equal(container.querySelector("[aria-label^='Stop Monitor Job']"), null);
+    assert.match(container.textContent ?? "", /Killed/);
+  } finally {
+    await act(async () => root.unmount());
+    happyContainer.remove();
+  }
+});
+
+test("Stop Job reports a refusal and a job that had already ended without claiming a stop (#1780)", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const answers: Array<() => Promise<BackgroundJobStopResponse>> = [
+    async () => { throw new Error("the provider did not confirm that the job ended, so it was left as it was"); },
+    async () => ({ sessionId: "session", jobId: "monitor-1", outcome: "already_terminal", terminalStatus: "completed" }),
+  ];
+  const client = { stopBackgroundJob: () => answers.shift()!() } as unknown as ApiClient;
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={client}>
+        <BackgroundWorkPanel session={resultBlockedSession()} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+          parentTurnEventIds={new Map()} onOpenParentTurn={() => undefined} />
+      </ApiProvider>,
+    ));
+    const confirmAndStop = async () => {
+      await act(async () => container.querySelector<HTMLButtonElement>("[aria-label^='Stop Monitor Job']")!.click());
+      await act(async () => {
+        [...container.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Confirm Stop")!.click();
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+    };
+    await confirmAndStop();
+    assert.equal(container.querySelector("[role='alert']")?.textContent,
+      "the provider did not confirm that the job ended, so it was left as it was");
+    const retry = container.querySelector<HTMLButtonElement>("[aria-label^='Stop Monitor Job']")!;
+    assert.equal(retry.disabled, false, "a refused stop can be tried again");
+    await confirmAndStop();
+    assert.match(container.textContent ?? "", /This job had already ended, so nothing was changed\./);
+    assert.equal(container.querySelector("[role='alert']"), null);
+  } finally {
+    await act(async () => root.unmount());
+    happyContainer.remove();
+  }
+});
+
+test("Stop Job is shown as unavailable on an older runner, and Result Blocked says why (#1780)", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  let called = false;
+  const client = { stopBackgroundJob: async () => { called = true; } } as unknown as ApiClient;
+  const render = (session: SessionView, version: number, online = true) => act(async () => root.render(
+    <ApiProvider client={client}>
+      <BackgroundWorkPanel session={session} runnerOnline={online} runnerProtocolVersion={version}
+        parentTurnEventIds={new Map()} onOpenParentTurn={() => undefined} />
+    </ApiProvider>,
+  ));
+  try {
+    await render(resultBlockedSession(), 189);
+    const button = container.querySelector<HTMLButtonElement>("[aria-label^='Stop Monitor Job']")!;
+    assert.equal(button.disabled, true);
+    assert.equal(button.textContent, "Stop Job");
+    const reason = domWindow.document.getElementById(button.getAttribute("aria-describedby")!);
+    assert.match(reason?.textContent ?? "", /Stop Job is unavailable: Runner protocol is v189; Stop Job requires protocol v190/);
+    const summary = container.querySelector<HTMLElement>(".background-delivery-summary");
+    assert.match(summary?.textContent ?? "", /Stop Job is unavailable: Runner protocol is v189; Stop Job requires protocol v190\. Update and restart the runner\. Ask the session to stop the unfinished job/);
+    await act(async () => button.click());
+    assert.equal(called, false);
+
+    // Another harness has no managed jobs to stop, so nothing is offered or promised.
+    await render(resultBlockedSession({ driver: "codex" } as Partial<SessionView>), PROTOCOL_VERSION);
+    assert.equal(container.querySelector("[aria-label^='Stop Monitor Job']"), null);
+    assert.match(container.querySelector(".background-delivery-summary")?.textContent ?? "", /Ask the session to stop the unfinished job/);
+  } finally {
+    await act(async () => root.unmount());
+    happyContainer.remove();
   }
 });

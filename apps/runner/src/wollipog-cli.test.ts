@@ -593,6 +593,7 @@ test("CLI emits JSON for get, events, prompt, wait, and stop core commands", asy
     { argv: ["session", "prompt", "s_child", "Keep", "going"], method: "POST", path: "/api/sessions/s_child/prompt" },
     { argv: ["session", "wait", "s_child", "--for", "completed", "--timeout", "50"], method: "GET", path: "/api/sessions/s_child" },
     { argv: ["session", "stop", "s_child"], method: "POST", path: "/api/sessions/s_child/stop" },
+    { argv: ["session", "stop-job", "s_child", "monitor-1"], method: "POST", path: "/api/sessions/s_child/background-jobs/monitor-1/stop" },
   ] as const;
 
   for (const testCase of cases) {

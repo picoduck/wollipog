@@ -39,6 +39,7 @@ import type {
   Driver,
   DriverBackgroundJob,
   DriverBackgroundLaunchType,
+  DriverBackgroundJobStopResult,
   DriverBackgroundTerminalJob,
   DriverBackgroundWorkEndResult,
   DriverCallbacks,
@@ -77,6 +78,12 @@ const GRACEFUL_STOP_MS = 5_000;
  * exit event from a wedged relay. This keeps the per-session retirement barrier finite. */
 const FORCE_STOP_WAIT_MS = 6_500;
 export const CLAUDE_GRACEFUL_STOP_BUDGET_MS = GRACEFUL_STOP_MS + FORCE_STOP_WAIT_MS;
+/** How long a `stop_task` control request may wait for Claude's answer (#1780). Claude answers at
+ * once; the bound only keeps a wedged process from holding the caller's request open. */
+export const CLAUDE_STOP_TASK_RESPONSE_MS = 10_000;
+/** Claude reports the ended task before it answers the control request. If its answer arrives
+ * first, the report may still be in flight for this long; after it the job is left as it was. */
+export const CLAUDE_STOP_TASK_CONFIRM_MS = 2_000;
 
 interface ClaudeDriverDeps {
   spawn: (opts: SpawnAgentOptions) => AgentProcess;
@@ -100,6 +107,13 @@ interface PendingBackgroundTask {
   parentPersistentTurnId?: number;
   /** True when launch input proves a status-less acknowledgment cannot mean completion. */
   requiresTerminalEvidence?: boolean;
+}
+
+interface PendingBackgroundTaskStop {
+  /** Set once the provider's own report proves the task ended, and how. */
+  ended?: { stopped: boolean; job: DriverBackgroundTerminalJob };
+  /** Wakes the waiting stop request when that report arrives. */
+  wake?: () => void;
 }
 
 interface PersistentTurn {
@@ -525,6 +539,11 @@ export class ClaudeCodeDriver implements Driver {
   /** Tasks this driver ended (#1778). Their task files never get a completion marker, so a receipt
    * read would otherwise report them as unfinished again. */
   private readonly endedBackgroundTaskIds = new Set<string>();
+  /** Tasks the runner asked Claude to stop (#1780), by task id. The provider's own `killed` or
+   * `stopped` report for one of them is the proof that it ended. */
+  private readonly stoppingBackgroundTasks = new Map<string, PendingBackgroundTaskStop>();
+  /** Runner-originated control requests awaiting Claude's `control_response`, by request id. */
+  private readonly pendingControlResponses = new Map<string, (response: Json | null) => void>();
   private persistentCircuitOpen = false;
   /** Lifetime budget by design: after one recovered acknowledged failure, a second failure in
    * this logical session falls back conservatively even if healthy turns occurred in between. */
@@ -1472,6 +1491,7 @@ export class ClaudeCodeDriver implements Driver {
       const trailing = this.persistentBuffer?.takeTrailing() ?? "";
       if (trailing.trim()) this.processPersistentLine(trailing, true);
       this.persistentBuffer = null;
+      this.settleControlResponses();
       this.persistentTransport = false;
       this.persistentFingerprint = null;
       if (this.disposed || this.intentionalPersistentStop) return;
@@ -1512,6 +1532,7 @@ export class ClaudeCodeDriver implements Driver {
     }
 
     if (this.acknowledgeClaudeSteer(msg)) return;
+    if (this.settleControlResponse(msg)) return;
     if (this.disposed) return;
 
     let turn = this.activePersistentTurn;
@@ -1639,10 +1660,19 @@ export class ClaudeCodeDriver implements Driver {
           undefined,
           this.activeProviderTurnId(),
         );
+      } else if (msg.subtype === "task_updated" && taskId) {
+        // Read only for a stop the runner asked for: Claude patches the task to `killed` first.
+        const patch = msg.patch as Record<string, Json> | undefined;
+        const status = typeof patch?.status === "string" ? patch.status.toLowerCase() : "";
+        if (status === "killed" && this.stoppingBackgroundTasks.has(taskId)) this.completeStoppedTask(taskId);
       } else if (msg.subtype === "task_notification" && taskId) {
         const status = typeof msg.status === "string" ? msg.status.toLowerCase() : "";
-        if (status === "completed" || status === "failed" || status === "killed") {
+        if ((status === "stopped" || status === "killed") && this.stoppingBackgroundTasks.has(taskId)) {
+          this.completeStoppedTask(taskId);
+        } else if (status === "completed" || status === "failed" || status === "killed") {
           this.completePendingTask(taskId, toolUseId, status);
+        } else if (this.endedBackgroundTaskIds.has(taskId)) {
+          // The trailing report of a task the runner already recorded as ended.
         } else {
           // `stopped` has no durable completion record and an unknown future status is ambiguous.
           this.recordPendingTask(taskId, toolUseId, undefined, true);
@@ -1743,6 +1773,38 @@ export class ClaudeCodeDriver implements Driver {
       }
     }
     if (changed) this.pendingWorkChanged([...terminal.values()]);
+    // A job that finished on its own while the runner was stopping it was not stopped.
+    for (const job of terminal.values()) {
+      const stop = this.stoppingBackgroundTasks.get(job.id);
+      if (!stop || stop.ended) continue;
+      stop.ended = { stopped: false, job };
+      stop.wake?.();
+    }
+  }
+
+  /** Claude reported that a task the runner asked it to stop has ended (#1780). It has no result to
+   * deliver, and it is tombstoned so the provider's trailing report cannot revive it. */
+  private completeStoppedTask(id: string): void {
+    const stop = this.stoppingBackgroundTasks.get(id);
+    const task = this.pendingBackgroundTasks.get(id);
+    if (!stop || stop.ended || !task) return;
+    for (const [key, pending] of this.pendingBackgroundTasks) {
+      if (key !== id && !(task.toolUseId && pending.toolUseId === task.toolUseId)) continue;
+      this.pendingBackgroundTasks.delete(key);
+      this.unverifiedBackgroundTaskIds.delete(key);
+      this.endedBackgroundTaskIds.add(key);
+    }
+    const job: DriverBackgroundTerminalJob = {
+      ...driverBackgroundJob(task),
+      status: "killed",
+      terminalAt: this.deps.now(),
+      // The stopped job has no result to deliver; a finished sibling still gets its continuation.
+      continuationRequired: false,
+      endedByRunner: true,
+    };
+    stop.ended = { stopped: true, job };
+    this.pendingWorkChanged([job]);
+    stop.wake?.();
   }
 
   private reconcileBackgroundToolResult(toolUseId: string, content: Json, isError: boolean): void {
@@ -2015,6 +2077,86 @@ export class ClaudeCodeDriver implements Driver {
     return { status: "ended", jobs };
   }
 
+  /** Claude can end one detached task without retiring its process, through the same `stop_task`
+   * control request its own task-stop tool uses (#1780). The conversation and every other job keep
+   * running. Claude answers `stop_task` with success even for a task it does not know, so the
+   * answer alone proves nothing: only Claude's own report that this task ended does. Without one
+   * the job is left exactly as it was. */
+  async stopBackgroundJob(jobId: string): Promise<DriverBackgroundJobStopResult> {
+    if (!this.pendingBackgroundTasks.has(jobId)) return { status: "not_running" };
+    const child = this.child;
+    if (this.disposed || !this.persistentTransport || !child) return { status: "refused", reason: "no_live_process" };
+    // A seed from before a restart that this process never re-observed, or a launch Claude has not
+    // confirmed as a task, is not a task this process can stop.
+    if (this.unverifiedBackgroundTaskIds.has(jobId) || jobId.startsWith("tool:")) {
+      return { status: "refused", reason: "not_owned" };
+    }
+    if (this.stoppingBackgroundTasks.has(jobId)) return { status: "refused", reason: "in_progress" };
+    const stop: PendingBackgroundTaskStop = {};
+    this.stoppingBackgroundTasks.set(jobId, stop);
+    try {
+      const response = await this.sendControlRequest(
+        child,
+        `wollipog_stop_task_${randomUUID()}`,
+        { subtype: "stop_task", task_id: jobId },
+        CLAUDE_STOP_TASK_RESPONSE_MS,
+      );
+      const succeeded = response?.response?.subtype === "success";
+      if (!stop.ended && succeeded && this.child === child) {
+        await new Promise<void>((resolve) => {
+          const timer = this.deps.setTimer(resolve, CLAUDE_STOP_TASK_CONFIRM_MS);
+          stop.wake = () => {
+            this.deps.clearTimer(timer);
+            resolve();
+          };
+        });
+      }
+      if (stop.ended) return { status: stop.ended.stopped ? "stopped" : "finished", job: stop.ended.job };
+      if (this.child !== child) return { status: "refused", reason: "no_live_process" };
+      if (response && !succeeded) return { status: "refused", reason: "provider_rejected" };
+      return { status: "refused", reason: "unconfirmed" };
+    } finally {
+      this.stoppingBackgroundTasks.delete(jobId);
+    }
+  }
+
+  /** Write one runner-originated control request and wait for Claude's answer. Resolves `null`
+   * when the write fails, the transport closes, or the bound passes without an answer. */
+  private sendControlRequest(child: AgentProcess, requestId: string, request: Json, timeoutMs: number): Promise<Json | null> {
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (response: Json | null) => {
+        if (settled) return;
+        settled = true;
+        this.deps.clearTimer(timer);
+        this.pendingControlResponses.delete(requestId);
+        resolve(response);
+      };
+      const timer = this.deps.setTimer(() => finish(null), timeoutMs);
+      this.pendingControlResponses.set(requestId, finish);
+      try {
+        child.stdin.write(JSON.stringify({ type: "control_request", request_id: requestId, request }) + "\n",
+          (error?: Error | null) => { if (error) finish(null); });
+      } catch {
+        finish(null);
+      }
+    });
+  }
+
+  /** Route Claude's answer to a runner-originated control request. Other frames are not consumed. */
+  private settleControlResponse(msg: Json): boolean {
+    if (msg?.type !== "control_response") return false;
+    const requestId = msg.response?.request_id;
+    const finish = typeof requestId === "string" ? this.pendingControlResponses.get(requestId) : undefined;
+    if (!finish) return false;
+    finish(msg);
+    return true;
+  }
+
+  private settleControlResponses(): void {
+    for (const finish of [...this.pendingControlResponses.values()]) finish(null);
+  }
+
   private handlePersistentFailure(message: string, turn: PersistentTurn): void {
     if (turn.settled || this.activePersistentTurn !== turn) return;
     if (turn.origin === "provider") {
@@ -2072,6 +2214,7 @@ export class ClaudeCodeDriver implements Driver {
     this.persistentTransport = false;
     this.persistentFingerprint = null;
     this.pendingApprovals.clear();
+    this.settleControlResponses();
     this.settleAllClaudeSteers("Claude steering transport closed before acknowledgement");
     this.unacknowledgedSteerMessages.clear();
     this.persistentGeneration += 1;

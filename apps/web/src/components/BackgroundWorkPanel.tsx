@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 import {
   BACKGROUND_JOB_STALL_MS,
   MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
@@ -10,7 +10,8 @@ import {
 } from "@wollipog/protocol";
 import { formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { useTimelineClock } from "../timeline-clock.js";
-import { BACKGROUND_DELIVERY_STATUS } from "../background-delivery-status.js";
+import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAction } from "../background-delivery-status.js";
+import { backgroundJobStopAvailability, type BackgroundJobStopAvailability } from "../background-job-stop.js";
 import { useApi } from "../api-context.js";
 
 export type BackgroundJobCurrentState =
@@ -87,6 +88,75 @@ type AcknowledgementFeedback = {
   state: "error";
   message: string;
 };
+
+type JobStopFeedback =
+  | { state: "confirming" }
+  | { state: "pending" }
+  | { state: "stopped" }
+  | { state: "already_terminal" }
+  | { state: "error"; message: string };
+
+/**
+ * Stop Job for one unfinished managed job (#1780). The runner ends only that job; the session, its
+ * conversation, and its other jobs keep running. It asks for confirmation first, because the job's
+ * own work is lost, and on a runner that cannot do it the control stays visible but unavailable.
+ */
+function BackgroundJobStopControl({ sessionId, jobId, jobLabel, availability }: {
+  sessionId: string;
+  jobId: string;
+  jobLabel: string;
+  availability: BackgroundJobStopAvailability;
+}) {
+  const api = useApi();
+  const reasonId = useId();
+  const [feedback, setFeedback] = useState<JobStopFeedback | null>(null);
+  if (!availability.available) {
+    return (
+      <div className="background-work-job-actions">
+        <button type="button" className="btn ghost sm" disabled aria-label={`Stop ${jobLabel}`}
+          aria-describedby={reasonId} title={availability.reason}>
+          Stop Job
+        </button>
+        <span id={reasonId} className="sr-only">Stop Job is unavailable: {availability.reason}</span>
+      </div>
+    );
+  }
+  const stop = () => {
+    setFeedback({ state: "pending" });
+    void api.stopBackgroundJob(sessionId, jobId)
+      .then((result) => setFeedback({ state: result.outcome === "stopped" ? "stopped" : "already_terminal" }))
+      .catch((error: unknown) => setFeedback({
+        state: "error",
+        message: error instanceof Error ? error.message : "The job could not be stopped.",
+      }));
+  };
+  return (
+    <div className="background-work-job-actions">
+      {feedback?.state === "confirming" ? (
+        <div className="background-work-job-confirm" role="group" aria-label={`Confirm Stopping ${jobLabel}`}>
+          <p>Stop this job? Only this job ends, and it is recorded as killed. The session, its conversation, and its other jobs keep running.</p>
+          <div className="background-work-job-confirm-actions">
+            <button type="button" className="btn danger sm" onClick={stop}>Confirm Stop</button>
+            <button type="button" className="btn ghost sm" onClick={() => setFeedback(null)}>Keep Running</button>
+          </div>
+        </div>
+      ) : (
+        <button type="button" className="btn ghost sm" aria-label={`Stop ${jobLabel}`}
+          disabled={feedback?.state === "pending" || feedback?.state === "stopped" || feedback?.state === "already_terminal"}
+          onClick={() => setFeedback({ state: "confirming" })}>
+          {feedback?.state === "pending" ? "Stopping…" : feedback?.state === "stopped" ? "Stopped" : "Stop Job"}
+        </button>
+      )}
+      {feedback?.state === "stopped" && (
+        <p className="hint" role="status">The job was stopped. Its status updates here shortly.</p>
+      )}
+      {feedback?.state === "already_terminal" && (
+        <p className="hint" role="status">This job had already ended, so nothing was changed.</p>
+      )}
+      {feedback?.state === "error" && <p className="hint warn" role="alert">{feedback.message}</p>}
+    </div>
+  );
+}
 
 function acknowledgementKey(sessionId: string, continuationId: string): string {
   return JSON.stringify([sessionId, continuationId]);
@@ -198,6 +268,7 @@ export function BackgroundWorkPanel({
   const [acknowledgementFeedback, setAcknowledgementFeedback] =
     useState<ReadonlyMap<string, AcknowledgementFeedback>>(() => new Map());
   const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
+  const jobStop = backgroundJobStopAvailability(session, runnerProtocolVersion, runnerOnline);
   const jobs = useMemo(() => (session.backgroundJobs ?? []).filter((job) =>
     selectedJobId === undefined || job.id === selectedJobId), [session.backgroundJobs, selectedJobId]);
   const deliveries = useMemo(() => (session.backgroundDeliveries ?? []).filter((delivery) =>
@@ -366,7 +437,9 @@ export function BackgroundWorkPanel({
                           <div><dt>Completed</dt><dd>{status.completed}</dd></div>
                           <div><dt>Still Pending</dt><dd>{status.outstanding}</dd></div>
                           <div><dt>Recovery</dt><dd>{status.recovery}</dd></div>
-                          <div><dt>Your Action</dt><dd>{status.action}</dd></div>
+                          <div><dt>Your Action</dt><dd>{recoveryState
+                            ? backgroundDeliveryAction(recoveryState, jobStop)
+                            : status.action}</dd></div>
                         </>}
                         {isMissing && (
                           <div><dt>Missing Since</dt><dd>{recordedTime(delivery.missingResultAt, now)}</dd></div>
@@ -477,10 +550,11 @@ export function BackgroundWorkPanel({
                     );
                     const end = job.terminalObservedAt ?? (state === "Running" || state === "Stalled" ? now : job.lastObservedAt);
                     const duration = formatDuration(Math.max(0, end - job.registeredAt));
+                    const jobLabel = `${titleCaseLabel(job.launchType === "unknown" ? "Background Job" : `${job.launchType} Job`)} ${jobIndex + 1}`;
                     return (
                       <li className="background-work-job" key={job.id}>
                         <div className="background-work-job-title">
-                          <strong>{titleCaseLabel(job.launchType === "unknown" ? "Background Job" : `${job.launchType} Job`)} {jobIndex + 1}</strong>
+                          <strong>{jobLabel}</strong>
                           <span className="background-work-state" data-state={state.toLowerCase().replace(/\s+/g, "-")}>
                             {state}
                           </span>
@@ -494,6 +568,10 @@ export function BackgroundWorkPanel({
                           )}
                           <div><dt>Continuation</dt><dd>{backgroundJobDeliveryStage(job)}</dd></div>
                         </dl>
+                        {jobStop && (state === "Running" || state === "Stalled") && (
+                          <BackgroundJobStopControl sessionId={session.id} jobId={job.id} jobLabel={jobLabel}
+                            availability={jobStop} />
+                        )}
                       </li>
                     );
                   })}

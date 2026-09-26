@@ -419,6 +419,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "create_session",
       "prompt_session",
       "stop_session",
+      "stop_background_job",
       "restart_session",
       "archive_session",
       "set_guardrails",
@@ -1609,6 +1610,52 @@ test("stop_session -> POST /api/sessions/:id/stop", async () => {
   await callTool(deps, "stop_session", { sessionId: "s_2" });
   assert.equal(calls[0]!.method, "POST");
   assert.equal(calls[0]!.url, `${CP_URL}/api/sessions/s_2/stop`);
+});
+
+test("stop_background_job -> POST /api/sessions/:id/background-jobs/:jobId/stop, and refuses its own session (#1780)", async () => {
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/compatibility")
+    ? { status: 200, body: { protocolVersion: 190 } }
+    : { status: 200, body: { sessionId: "s_child", jobId: "b 1/x", outcome: "stopped", terminalStatus: "killed" } });
+  deps.orchestrator = true;
+  const result = await callTool(deps, "stop_background_job", { sessionId: "s_child", jobId: "b 1/x" });
+  assert.equal(result.isError, undefined);
+  const stop = calls.find((call) => call.method === "POST")!;
+  assert.equal(stop.url, `${CP_URL}/api/sessions/s_child/background-jobs/b%201%2Fx/stop`);
+  assert.equal(stop.body, undefined);
+  assert.deepEqual(JSON.parse(resultText(result)),
+    { sessionId: "s_child", jobId: "b 1/x", outcome: "stopped", terminalStatus: "killed" });
+
+  const before = calls.length;
+  assert.equal((await callTool(deps, "stop_background_job", { sessionId: SELF_ID, jobId: "b1" })).isError, true);
+  assert.equal((await callTool(deps, "stop_background_job", { sessionId: "s_child" })).isError, true);
+  assert.equal(calls.length, before, "refused before contacting the control plane");
+
+  const old = makeDeps(() => ({ status: 200, body: { protocolVersion: 189 } }));
+  const refused = await callTool(old.deps, "stop_background_job", { sessionId: "s_child", jobId: "b1" });
+  assert.equal(refused.isError, true);
+  assert.match(resultText(refused), /requires control plane protocol v190/);
+  assert.equal(old.calls.some((call) => call.method === "POST"), false);
+
+  const denied = makeDeps((call) => call.url.endsWith("/api/compatibility")
+    ? { status: 200, body: { protocolVersion: 190 } }
+    : { status: 403, body: { error: "only the session owner or its controlling Orchestrator may stop its background jobs" } });
+  const deniedResult = await callTool(denied.deps, "stop_background_job", { sessionId: "s_grandchild", jobId: "b1" });
+  assert.equal(deniedResult.isError, true);
+  assert.match(resultText(deniedResult), /controlling Orchestrator/);
+});
+
+test("session results list unfinished background jobs by id for stop_background_job (#1780)", async () => {
+  const { deps } = makeDeps(() => ({ status: 200, body: { session: {
+    id: "s_child", status: "queued",
+    backgroundJobs: [
+      { id: "monitor-1", launchType: "monitor", parentTurnId: "turn-1", registeredAt: 10 },
+      { id: "agent-1", launchType: "agent", parentTurnId: "turn-1", registeredAt: 11, terminalStatus: "completed" },
+    ],
+  } } }));
+  const result = await callTool(deps, "get_session", { sessionId: "s_child" });
+  const session = JSON.parse(resultText(result)).session;
+  assert.deepEqual(session.unfinishedBackgroundJobs,
+    [{ id: "monitor-1", launchType: "monitor", parentTurnId: "turn-1", registeredAt: 10 }]);
 });
 
 test("archive_session sends only archived true, preserves scoped errors, and refuses self", async () => {

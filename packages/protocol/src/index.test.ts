@@ -213,8 +213,10 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 189", () => {
-  assert.equal(PROTOCOL_VERSION, 189);
+test("PROTOCOL_VERSION is 190", () => {
+  assert.equal(PROTOCOL_VERSION, 190);
+  assert.equal(runnerSupportsProtocol(189, "backgroundJobStop"), false);
+  assert.equal(runnerSupportsProtocol(190, "backgroundJobStop"), true);
   assert.equal(runnerSupportsProtocol(188, "orchestratorVideoFrameReview"), false);
   assert.equal(runnerSupportsProtocol(189, "orchestratorVideoFrameReview"), true);
   assert.equal(runnerSupportsProtocol(187, "providerAccountRemoval"), false);
@@ -1609,4 +1611,28 @@ test("a hold the runner bounds says when the work ends and does not offer a rest
   const several = queueHoldRecoveryAction({ ...queueHold, queuedPrompts: 2, unfinishedBackgroundJobs: 3 });
   assert.match(several, /If they are still running at 2026-09-25T01:48Z, Wollipog ends them, records each as killed/u);
   assert.match(several, /a restart discards the queued messages\.$/u);
+});
+
+test("a hold whose runner can stop one job names that action before the bound or a restart (#1780)", () => {
+  const queueHold = {
+    kind: "worktree_rebind" as const,
+    holdId: "worktree-rebind:5000",
+    since: 5_000,
+    target: "/repos/x/.agent-worktrees/fix-1780",
+    queuedPrompts: 1,
+    unfinishedBackgroundJobs: 1,
+    canStopJobs: true as const,
+  };
+  assert.equal(queueHoldRecoveryAction(queueHold),
+    "Wait for the unfinished background job to end; the handoff and the queued message then proceed on their own. " +
+    "To end it now, stop it by its job id with stop_background_job (get_session lists the unfinished jobs) or with " +
+    "Stop Job in the Background Work panel: only that job ends, it is recorded as killed, and the conversation keeps " +
+    "running. Once no unfinished job remains, the handoff and the queued message run in order. " +
+    "Do not restart the session to get past this hold: a restart discards the queued message.");
+  const bounded = queueHoldRecoveryAction({
+    ...queueHold, queuedPrompts: 2, unfinishedBackgroundJobs: 2, endsAt: Date.UTC(2026, 8, 25, 1, 48, 43),
+  });
+  assert.match(bounded, /To end one now, stop it by its job id with stop_background_job/u);
+  assert.match(bounded, /the queued messages run in order; Wollipog also ends any job still running at 2026-09-25T01:48Z\. /u);
+  assert.doesNotMatch(bounded, /restart_session/u);
 });

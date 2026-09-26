@@ -24865,6 +24865,7 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
     unfinishedBackgroundJobs: value.unfinishedBackgroundJobs!,
     ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.startedAt } } : {}),
     ...(value.endsAt !== undefined ? { endsAt: value.endsAt } : {}),
+    ...(value.canStopJobs === true ? { canStopJobs: true as const } : {}),
   };
 }
 
