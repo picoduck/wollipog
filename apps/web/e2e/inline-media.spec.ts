@@ -4,11 +4,28 @@ import { expect, test } from "@playwright/test";
 
 const imagePath = fileURLToPath(new URL("../public/icons/icon-512.png", import.meta.url));
 const videoPath = fileURLToPath(new URL("./fixtures/inline-media.webm", import.meta.url));
+const replayAttachmentPage = {
+  events: [{
+    id: 501, sessionId: "attachment-replay-e2e", seq: 1, ts: 2_000,
+    payload: { kind: "artifact_attached", artifact: {
+      artifactId: "replay-proof", sessionId: "attachment-replay-e2e", kind: "screenshot",
+      name: "proof.png", mimeType: "image/png", encoding: "base64", sizeBytes: 70_182,
+      sha256: "1f3a9c4feced44d27b2b68bb4027ce7fa3cd0b4594ff00d78c9d46e004bd9fb4",
+      createdBy: { kind: "agent", id: "attachment-replay-e2e" }, createdAt: 2_000,
+    } },
+  }], eventEpoch: 1, nextAfter: 1, hasMore: false,
+};
+
+function routeReplayAttachments(page: import("@playwright/test").Page) {
+  return page.route("**/api/sessions/attachment-replay-e2e/retained-attachment-events?*", (route) =>
+    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(replayAttachmentPage) }));
+}
 
 test("runner history replay returns a retained attachment to its conversation position", async ({ page }) => {
   const imageBody = await readFile(fileURLToPath(new URL("../public/icons/icon-192.png", import.meta.url)));
   await page.route("**/api/artifacts/replay-proof/export", (route) =>
     route.fulfill({ status: 200, contentType: "image/png", body: imageBody }));
+  await routeReplayAttachments(page);
   await page.goto("/inline-media-e2e.html?attachmentReplay=1");
   await expect(page.locator("[data-virtual-key='item:artifact_attached:1']")).toBeVisible();
   await page.getByRole("button", { name: "Replay Runner History" }).click();
@@ -25,18 +42,7 @@ test("fresh tail shows a retained attachment outside its ordinary event page", a
   const imageBody = await readFile(fileURLToPath(new URL("../public/icons/icon-192.png", import.meta.url)));
   await page.route("**/api/artifacts/replay-proof/export", (route) =>
     route.fulfill({ status: 200, contentType: "image/png", body: imageBody }));
-  await page.route("**/api/sessions/attachment-replay-e2e/retained-attachment-events?*", (route) =>
-    route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({
-      events: [{
-        id: 501, sessionId: "attachment-replay-e2e", seq: 1, ts: 2_000,
-        payload: { kind: "artifact_attached", artifact: {
-          artifactId: "replay-proof", sessionId: "attachment-replay-e2e", kind: "screenshot",
-          name: "proof.png", mimeType: "image/png", encoding: "base64", sizeBytes: 70_182,
-          sha256: "1f3a9c4feced44d27b2b68bb4027ce7fa3cd0b4594ff00d78c9d46e004bd9fb4",
-          createdBy: { kind: "agent", id: "attachment-replay-e2e" }, createdAt: 2_000,
-        } },
-      }], eventEpoch: 1, nextAfter: 1, hasMore: false,
-    }) }));
+  await routeReplayAttachments(page);
   await page.goto("/inline-media-e2e.html?attachmentReplay=1&freshTail=1");
   await expect(page.locator("[data-virtual-key='item:artifact_attached:1']")).toBeVisible();
   const rows = await page.locator("[data-virtual-key^='item:']").evaluateAll((elements) =>

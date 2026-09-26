@@ -74,12 +74,6 @@ export function useTimeline(sessionId: string, events: SessionEvent[] | undefine
   const source = supplemental.length > 0 ? [...supplemental, ...evs] : evs;
 
   const retainedSeqs = new Set(retained?.events.map((event) => event.seq) ?? []);
-  if (eventEpoch > 0 && evs[0]?.seq === 1) {
-    for (const event of evs) {
-      if (event.payload.kind !== "artifact_attached") break;
-      retainedSeqs.add(event.seq);
-    }
-  }
 
   let st = ref.current;
   const untrustworthy = evs !== st?.lastRawArr && isRebuiltEventsArray(evs);
