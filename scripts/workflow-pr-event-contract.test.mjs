@@ -480,6 +480,47 @@ test("PR workflow expressions satisfy the complete event matrix", () => {
   }
 });
 
+test("every CI Node setup retries once with the same pinned action and version", () => {
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
+  const steps = ci.split(/^      - name: /m).slice(1);
+  const setupSteps = steps.filter((step) => /^        uses: actions\/setup-node@/m.test(step));
+  assert.equal(setupSteps.length, 12, "six Node setups each need one retry");
+
+  const versions = [];
+  for (const [index, step] of steps.entries()) {
+    if (!/^        uses: actions\/setup-node@/m.test(step) || step.startsWith("Retry ")) continue;
+
+    const name = step.split("\n", 1)[0];
+    const retry = steps[index + 1];
+    const id = step.match(/^        id: ([a-z0-9_]+)$/m)?.[1];
+    const action = step.match(/^        uses: (actions\/setup-node@[0-9a-f]{40})/m)?.[1];
+    const inputs = step.match(/^        with:\n((?:          [^\n]+\n?)*)/m)?.[1];
+    assert.ok(id, `${name}: first attempt needs an ID`);
+    assert.ok(action, `${name}: setup-node must be pinned by commit SHA`);
+    assert.ok(inputs, `${name}: setup-node needs version inputs`);
+    assert.match(step, /^        continue-on-error: true$/m, `${name}: first attempt must allow a retry`);
+    assert.ok(retry.startsWith(`Retry ${name}\n`), `${name}: retry must immediately follow the first attempt`);
+    assert.ok(retry.includes(`        if: \${{ !cancelled() && steps.${id}.outcome == 'failure' }}\n`),
+      `${name}: retry must run after this attempt fails unless the job is cancelled`);
+    assert.equal(retry.match(/^        uses: (actions\/setup-node@[0-9a-f]{40})/m)?.[1], action,
+      `${name}: retry must use the same pinned action`);
+    assert.equal(retry.match(/^        with:\n((?:          [^\n]+\n?)*)/m)?.[1], inputs,
+      `${name}: retry must use the identical version and cache inputs`);
+    assert.doesNotMatch(retry, /^        continue-on-error:/m,
+      `${name}: a persistent setup failure must fail the job`);
+    versions.push(inputs.trim());
+  }
+
+  assert.deepEqual(versions, [
+    "node-version-file: .nvmrc\n          cache: pnpm",
+    "node-version: 22.13.0",
+    "node-version: 23.2.0",
+    "node-version: 23.4.0",
+    "node-version-file: .nvmrc",
+    "node-version-file: .nvmrc\n          cache: pnpm",
+  ]);
+});
+
 test("every workflow job bounds its own runtime", () => {
   // Without timeout-minutes a hung job runs to GitHub's 360-minute default. CI normally
   // finishes in under 20 minutes, so any bound here is a large improvement; the ceiling
