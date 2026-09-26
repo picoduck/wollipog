@@ -2562,6 +2562,62 @@ test("typed workflow decisions preserve their exact approval snapshot across a d
   }
 });
 
+test("resolving a decision records its resume as owed in the same write only when asked (#1759)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    db.createSession(newSession({ id: "parent" }));
+    db.createSession(newSession({ id: "child", parentSessionId: "parent" }));
+    const snapshot = {
+      category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 1759,
+      headSha: "a".repeat(40), reviewResult: "merge" as const,
+      requiredChecks: { headSha: "a".repeat(40), status: "passed" as const, checkedAt: 1,
+        checks: [{ name: "Required", state: "passed" as const }] },
+    };
+    const create = (suffix: string) => assert.ok(db.createWorkflowDecision({
+      requestId: `merge-${suffix}`, occurrenceId: `workflow-${suffix}`, sessionId: "child",
+      controllingSessionId: "parent", category: "pr_merge", resourceKey: `picoduck/wollipog#${suffix}`,
+      resourceSnapshot: snapshot, resourceDigest: "b".repeat(64), policyRevision: 3,
+      authority: "orchestrator", createdAt: 1_000,
+    }));
+    const resume = (occurrenceId: string) => ({ ...(db.raw().prepare(
+      "SELECT resume_state, resume_command_id, resume_updated_at FROM workflow_decisions WHERE occurrence_id=?",
+    ).get(occurrenceId) as { resume_state: string | null; resume_command_id: string | null; resume_updated_at: number | null }) });
+
+    // Owed: the resolving statement itself records the held resume, so no later write is needed
+    // for the resume to exist.
+    create("owed");
+    const owed = db.resolveWorkflowDecision("workflow-owed", "orchestrator", "approved", 2_000,
+      undefined, undefined, undefined, "Land it.", true);
+    assert.equal(owed?.status, "approved");
+    assert.equal(owed?.childMessage, "Land it.");
+    assert.deepEqual(resume("workflow-owed"), { resume_state: "held", resume_command_id: null, resume_updated_at: 2_000 });
+    assert.deepEqual(db.heldWorkflowDecisionResumes("child").map((held) => held.occurrenceId), ["workflow-owed"]);
+    assert.deepEqual(db.sessionsWithHeldWorkflowDecisionResumes(), ["child"]);
+    // Staging claims it exactly as a recovery-held resume is claimed.
+    const staged = db.stageWorkflowDecisionResume({
+      occurrenceId: "workflow-owed", from: "held",
+      command: {
+        commandId: "prompt_owed", sessionId: "child", runnerId: "runner-1", payloadJson: "{}",
+        payloadSha256: "0".repeat(64), expiresAt: 60_000, now: 3_000,
+      },
+    });
+    assert.deepEqual(resume("workflow-owed"), { resume_state: "delivering", resume_command_id: staged.commandId, resume_updated_at: 3_000 });
+
+    // Not owed (an older runner keeps the ordinary prompt): the resume columns stay untouched.
+    create("plain");
+    assert.equal(db.resolveWorkflowDecision("workflow-plain", "orchestrator", "denied", 4_000)?.status, "denied");
+    assert.deepEqual(resume("workflow-plain"), { resume_state: null, resume_command_id: null, resume_updated_at: null });
+
+    // A decision that is no longer pending is not resolved, and owes nothing.
+    assert.equal(db.resolveWorkflowDecision("workflow-plain", "orchestrator", "approved", 5_000,
+      undefined, undefined, undefined, undefined, true), null);
+    assert.deepEqual(resume("workflow-plain"), { resume_state: null, resume_command_id: null, resume_updated_at: null });
+  } finally {
+    db.close();
+  }
+});
+
 test("PR merge action admission stays durable and consumes only its matching digest", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-workflow-action-restart-"));
   const file = join(root, "control-plane.db");

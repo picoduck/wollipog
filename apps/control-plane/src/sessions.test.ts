@@ -4244,6 +4244,9 @@ test("a resolver's child-facing message reaches the child's decision view and re
       return decision.data;
     };
     const promptsToChild = () => promptsSentTo(hub, child.id);
+    const resumeState = (occurrenceId: string) => (db.raw().prepare(
+      "SELECT resume_state FROM workflow_decisions WHERE occurrence_id=?",
+    ).get(occurrenceId) as { resume_state: string | null }).resume_state;
     const idleWrites: string[] = [];
     const runningWrites: string[] = [];
     const updateSessionStatus = db.updateSessionStatus.bind(db);
@@ -4304,19 +4307,30 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.match(promptsToChild().at(-1)!.text, /Your Orchestrator approved your pr_merge decision/);
     assert.equal(promptsToChild().length, 2);
 
-    // A refused delivery (runner offline) restores the idle child exactly as before and keeps the
-    // message on the record for the child to read.
+    // A resolution while the runner is offline restores the idle child exactly as before and keeps
+    // the message on the record for the child to read, but the resume is owed rather than lost:
+    // the runner's return delivers it once, message included (#1759).
     const offline = requestMerge(504);
     svc.onSessionStatus(child.id, "idle");
     hub.online = false;
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, offline.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny", childMessage: "Offline note." }, () => true).ok);
-    hub.online = true;
     assert.equal(db.getSession(child.id)?.status, "idle");
     assert.equal(promptsToChild().length, 2);
     assert.equal(svc.workflowDecision(child.id, offline.occurrenceId).data?.childMessage, "Offline note.");
     assert.equal(idleEdges.filter((id) => id === child.id).length, 1);
     assert.equal(idleWrites.length, 1);
+    assert.equal(resumeState(offline.occurrenceId), "held", "the resume is owed to the offline runner");
+    svc.retryDuePrompts(Date.now() + 5_000);
+    assert.equal(promptsToChild().length, 2, "nothing is sent while the runner is away");
+    hub.online = true;
+    svc.retryDuePrompts(Date.now() + 10_000, RUNNER_ID);
+    assert.equal(promptsToChild().length, 3, "the runner's return delivers the resume once");
+    assert.ok(promptsToChild().at(-1)!.text.includes("Offline note."), "the message travels with the resume");
+    assert.equal(resumeState(offline.occurrenceId), "delivering");
+    assert.equal(db.getSession(child.id)?.status, "queued", "admitted, not yet started (#1651)");
+    svc.retryDuePrompts(Date.now() + 15_000);
+    assert.equal(promptsToChild().length, 3, "no later sweep sends it again");
 
     // An open policy-hook approval records its own swallowed idle, which the running write would
     // clear and a refused prompt could not restore, so the child is restored to idle as before.
@@ -4335,6 +4349,10 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.equal(db.getSession(child.id)?.status, "idle");
     assert.equal(svc.workflowDecision(child.id, hooked.occurrenceId).data?.childMessage, "Hook note.");
     assert.equal(idleWrites.length, 2);
+    assert.equal(resumeState(hooked.occurrenceId), "failed",
+      "a resume gated by a guardrail stays failed by default; the outcome is on the decision record (#1759)");
+    svc.retryDuePrompts(Date.now() + 20_000);
+    assert.equal(promptsToChild().length, 3, "a failed resume is never retried");
 
     // Without a message there is no field and no digest, but the resolution still resumes the
     // child: typed decisions do not suspend its turn, so nothing else would wake it (#1405).
@@ -4346,7 +4364,7 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.equal(idleEdges.filter((id) => id === child.id).length, 2);
     assert.equal(idleWrites.length, 2);
     assert.equal("childMessage" in (svc.workflowDecision(child.id, silent.occurrenceId).data ?? {}), false);
-    assert.equal(promptsToChild().length, 3);
+    assert.equal(promptsToChild().length, 4);
     assert.match(promptsToChild().at(-1)!.text,
       new RegExp(`Your Orchestrator denied your pr_merge decision ${silent.occurrenceId} \\(resource "picoduck/wollipog#503"\\)\\.\n`));
     assert.equal(svc.governanceAudit(child.id).find((entry) =>
@@ -20916,8 +20934,14 @@ function worktreeRecoveryCampaign(protocolVersion = PROTOCOL_VERSION) {
   const resumeState = (occurrenceId: string) => (db.raw().prepare(
     "SELECT resume_state FROM workflow_decisions WHERE occurrence_id=?",
   ).get(occurrenceId) as { resume_state: string | null }).resume_state;
+  /** Host the Orchestrator on another runner, so a disconnect of the child's runner stops only
+   * the child, as in a campaign whose parent and children run on different machines. */
+  const parentOnOtherRunner = () => {
+    db.registerRunner({ ...runnerMeta(), runnerId: "other-runner" }, Date.now(), PROTOCOL_VERSION);
+    db.raw().prepare("UPDATE sessions SET runner_id='other-runner' WHERE id=?").run(root.id);
+  };
   return { ...harness, root, child, recovery, worktreePath, requestMerge, approve, runnerReports, resolutionPrompts,
-    receipt, resumeState };
+    receipt, resumeState, parentOnOtherRunner };
 }
 
 test("an approved decision for a child whose worktree branch was switched is delivered exactly once after recovery (#1650)", () => {
@@ -21450,6 +21474,414 @@ test("a resume the runner refuses returns the child to idle rather than leaving 
     assert.equal(legacy.db.getSession(legacy.child.id)?.status, "running");
   } finally {
     legacy.db.close();
+  }
+});
+
+test("a decision resolved while the child's runner is offline is delivered exactly once after the runner reconnects (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child } = f;
+  try {
+    // The child asked for a merge and ended its turn behind the card; then its runner went away.
+    // A disconnect detaches the runner and provisionally stops every session it hosted, in one
+    // step, so an offline child always reads stopped. The Orchestrator lives elsewhere.
+    f.parentOnOtherRunner();
+    const merge = f.requestMerge(1759);
+    svc.onSessionStatus(child.id, "idle");
+    assert.equal(db.getSession(child.id)?.status, "input_required");
+    f.hub.online = false;
+    svc.failRunnerSessions(RUNNER_ID);
+    assert.equal(db.getSession(child.id)?.status, "stopped", "provisionally stopped by the disconnect");
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "pending", "a provisional stop revokes nothing");
+
+    // Resolving is accepted: the child has not ended, it is unreachable.
+    f.approve(merge.occurrenceId);
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "approved");
+    assert.equal(f.resumeState(merge.occurrenceId), "held", "the resume is owed, not failed");
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0, "nothing can reach an offline runner");
+    assert.equal(db.getSession(child.id)?.status, "stopped", "settling the card leaves the disconnect's status alone");
+    assert.equal(db.getSession(child.id)?.pendingApproval ?? null, null, "the resolved card is settled");
+    assert.equal(db.getSession(child.id)?.holds, undefined, "an offline runner is not a hold on the child");
+
+    // Sweeps while the runner is away send nothing and keep it owed.
+    svc.retryDuePrompts(Date.now() + 5_000);
+    svc.retryDuePrompts(Date.now() + 10_000, RUNNER_ID);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0);
+    assert.equal(f.resumeState(merge.occurrenceId), "held");
+
+    // The runner registers again. Registration runs the prompt sweep for that runner before it
+    // hydrates the runner's snapshots, while the child still reads stopped: the sweep must keep
+    // the resume, not abandon it.
+    f.hub.online = true;
+    svc.retryDuePrompts(Date.now() + 15_000, RUNNER_ID);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0, "nothing is sent into a provisionally stopped child");
+    assert.equal(f.resumeState(merge.occurrenceId), "held", "the registration sweep keeps the resume for hydration");
+
+    // Hydration restores the child from the runner's snapshot and delivers the resume once.
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    })]);
+    const [resume] = f.resolutionPrompts(merge.occurrenceId);
+    assert.ok(resume, "the resolution goes out once the runner is back");
+    assert.equal(f.resumeState(merge.occurrenceId), "delivering");
+    assert.equal(db.getSession(child.id)?.status, "queued", "admitted, not yet started (#1651)");
+
+    // Every later boundary finds nothing owed.
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    }));
+    svc.retryDuePrompts(Date.now() + 20_000);
+    svc.retryDuePrompts(Date.now() + 25_000, RUNNER_ID);
+    assert.equal(new Set(f.resolutionPrompts(merge.occurrenceId).map((message) => message.commandId)).size, 1,
+      "the child receives the resolution exactly once");
+    assert.equal(f.receipt(resume.commandId, "started", 1), true);
+    assert.equal(db.getSession(child.id)?.status, "running");
+    assert.equal(f.receipt(resume.commandId, "completed", 2), true);
+    assert.equal(f.resumeState(merge.occurrenceId), "delivered");
+    svc.retryDuePrompts(Date.now() + 30_000);
+    assert.equal(new Set(f.resolutionPrompts(merge.occurrenceId).map((message) => message.commandId)).size, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("a runner disconnect after a resolution keeps the owed resume until reconnect hydration, and an ended child owes nothing (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child, recovery } = f;
+  const disconnect = () => { f.hub.online = false; svc.failRunnerSessions(RUNNER_ID); };
+  const register = (offset: number) => { f.hub.online = true; svc.retryDuePrompts(Date.now() + offset, RUNNER_ID); };
+  const hydrate = (status: SessionStatus, worktreeRecovery: typeof recovery | null = null) =>
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status, worktreePath: f.worktreePath, worktreeRecovery,
+    })]);
+  try {
+    f.parentOnOtherRunner();
+    // Held for worktree recovery when the runner drops: the registration sweep runs against a
+    // provisionally stopped child and must not abandon the resume; hydration clears the recovery
+    // and delivers it once.
+    const recovering = f.requestMerge(1766);
+    svc.onSessionStatus(child.id, "idle");
+    f.runnerReports(recovery, "input_required");
+    f.approve(recovering.occurrenceId);
+    assert.equal(f.resumeState(recovering.occurrenceId), "held");
+    disconnect();
+    assert.equal(db.getSession(child.id)?.status, "stopped");
+    register(1_000);
+    assert.equal(f.resumeState(recovering.occurrenceId), "held", "a provisional stop is not an end");
+    assert.equal(f.resolutionPrompts(recovering.occurrenceId).length, 0);
+    hydrate("idle");
+    assert.equal(f.resolutionPrompts(recovering.occurrenceId).length, 1, "hydration restores the child and delivers once");
+    assert.equal(f.resumeState(recovering.occurrenceId), "delivering");
+    register(2_000);
+    assert.equal(new Set(f.resolutionPrompts(recovering.occurrenceId).map((message) => message.commandId)).size, 1);
+
+    // The runner comes back without the child: it has ended for good, so the decision is revoked
+    // and nothing is owed.
+    const absent = f.requestMerge(1767);
+    svc.onSessionStatus(child.id, "idle");
+    disconnect();
+    f.approve(absent.occurrenceId);
+    assert.equal(f.resumeState(absent.occurrenceId), "held");
+    f.hub.online = true;
+    svc.hydrateRunnerSessions(RUNNER_ID, []);
+    assert.equal(db.getSession(child.id)?.status, "stopped");
+    assert.equal(db.workflowDecisionByOccurrence(absent.occurrenceId)?.status, "revoked");
+    assert.equal(f.resumeState(absent.occurrenceId), "abandoned");
+    svc.retryDuePrompts(Date.now() + 3_000, RUNNER_ID);
+    assert.equal(f.resolutionPrompts(absent.occurrenceId).length, 0, "an ended child is never resumed");
+  } finally {
+    db.close();
+  }
+});
+
+test("a provisionally stopped child that was archived meanwhile is ended, so its decision is revoked rather than owed (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  try {
+    f.parentOnOtherRunner();
+    const merge = f.requestMerge(1769);
+    svc.onSessionStatus(child.id, "idle");
+    f.hub.online = false;
+    svc.failRunnerSessions(RUNNER_ID);
+    // Archiving a terminal session records no stop intent; the runner's return stops it instead
+    // of restoring it, so nothing could ever deliver a resume.
+    assert.ok(svc.setArchived(child.id, true).ok);
+    assert.equal(db.getSession(child.id)?.archived, true);
+    assert.equal(db.hasSessionStopIntent(child.id), false);
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "revoked",
+      "archiving the stopped child ends it: its pending decision is revoked at once");
+    const resolved = svc.resolveDescendantRequest(root.id, child.id, merge.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.equal(resolved.status, 409);
+    assert.notEqual(f.resumeState(merge.occurrenceId), "held", "nothing is owed to an archived child");
+    f.hub.online = true;
+    svc.retryDuePrompts(Date.now() + 5_000, RUNNER_ID);
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    })]);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test("archiving a provisionally stopped child abandons the resume it was owed, with or without a reconnect (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child } = f;
+  try {
+    f.parentOnOtherRunner();
+    // Resolved while the runner is away, so the resume is owed to a provisionally stopped child.
+    const merge = f.requestMerge(1773);
+    svc.onSessionStatus(child.id, "idle");
+    f.hub.online = false;
+    svc.failRunnerSessions(RUNNER_ID);
+    f.approve(merge.occurrenceId);
+    assert.equal(f.resumeState(merge.occurrenceId), "held");
+    // The user archives the stopped child before its runner returns: nothing will restore it, so
+    // the owed resume is abandoned now rather than kept on every sweep until a reconnect.
+    assert.ok(svc.setArchived(child.id, true).ok);
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "revoked");
+    assert.equal(f.resumeState(merge.occurrenceId), "abandoned");
+    svc.retryDuePrompts(Date.now() + 5_000);
+    assert.deepEqual(db.sessionsWithHeldWorkflowDecisionResumes(RUNNER_ID), [], "no sweep keeps visiting it");
+    // A later reconnect stops the archived child rather than resuming it.
+    f.hub.online = true;
+    svc.retryDuePrompts(Date.now() + 10_000, RUNNER_ID);
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    })]);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0);
+    assert.equal(db.getSession(child.id)?.status, "stopped");
+  } finally {
+    db.close();
+  }
+});
+
+test("an explicit Stop cut off before it revoked cannot leave a decision the parent can still resolve (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  try {
+    f.parentOnOtherRunner();
+    const merge = f.requestMerge(1770);
+    svc.onSessionStatus(child.id, "idle");
+    // The control plane stopped right after the Stop intent was persisted, before the Stop
+    // revoked the child's decisions; startup settlement then marked the child stopped.
+    db.addSessionStopIntent(child.id, RUNNER_ID, Date.now(), false);
+    db.settleStartupState(Date.now());
+    assert.equal(db.getSession(child.id)?.status, "stopped");
+    assert.equal(db.hasSessionStopIntent(child.id), true);
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "pending");
+
+    // The runner returns without the child: the intent is settled, and although the child already
+    // reads terminal, its decision is revoked, so nothing can later mistake it for a provisional
+    // disconnect stop.
+    f.hub.online = true;
+    svc.hydrateRunnerSessions(RUNNER_ID, []);
+    assert.equal(db.hasSessionStopIntent(child.id), false, "the settled intent is gone");
+    assert.equal(db.getSession(child.id)?.status, "stopped");
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "revoked");
+    const resolved = svc.resolveDescendantRequest(root.id, child.id, merge.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.equal(resolved.status, 409);
+    assert.match(resolved.error ?? "", /stale or already resolved/u);
+    assert.notEqual(f.resumeState(merge.occurrenceId), "held");
+    assert.deepEqual(db.sessionsWithHeldWorkflowDecisionResumes(RUNNER_ID), []);
+
+    // The child is present at reconnect instead: the stop-intent fence re-applies the Stop, and
+    // the runner's later terminal status settles the intent on a path that returns before the
+    // ordinary revocation because the child already reads terminal. Settling revokes.
+    db.updateSessionStatus(root.id, "running", Date.now());
+    db.updateSessionStatus(child.id, "idle", Date.now());
+    const present = f.requestMerge(1772);
+    db.addSessionStopIntent(child.id, RUNNER_ID, Date.now(), false);
+    db.settleStartupState(Date.now());
+    db.updateSessionStatus(root.id, "running", Date.now());
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    })]);
+    assert.equal(db.getSession(child.id)?.status, "stopped", "the fence re-applies the Stop");
+    assert.equal(db.hasSessionStopIntent(child.id), true);
+    svc.onSessionStatus(child.id, "stopped", undefined, undefined, RUNNER_ID);
+    assert.equal(db.hasSessionStopIntent(child.id), false, "the runner's terminal status settled the intent");
+    assert.equal(db.workflowDecisionByOccurrence(present.occurrenceId)?.status, "revoked");
+    assert.equal(svc.resolveDescendantRequest(root.id, child.id, present.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 409);
+    assert.notEqual(f.resumeState(present.occurrenceId), "held");
+
+    // The pre-snapshot reconcile path ends such a session the same way: restored by a reconnect,
+    // it requests again, is stopped provisionally, and is then absent from the runner's inventory.
+    db.updateSessionStatus(root.id, "running", Date.now());
+    db.updateSessionStatus(child.id, "idle", Date.now());
+    const again = f.requestMerge(1771);
+    assert.equal(again.status, "pending");
+    db.updateSessionStatus(child.id, "stopped", Date.now(), true);
+    svc.reconcileRunnerSessions(RUNNER_ID, []);
+    assert.equal(db.workflowDecisionByOccurrence(again.occurrenceId)?.status, "revoked");
+  } finally {
+    db.close();
+  }
+});
+
+test("a runner that reports the child ended abandons the resume owed for a denied decision (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  try {
+    f.parentOnOtherRunner();
+    // Denied while the runner is away; revocation never touches a denied decision, so the
+    // authoritative end must retire its resume itself.
+    const denied = f.requestMerge(1768);
+    svc.onSessionStatus(child.id, "idle");
+    f.hub.online = false;
+    svc.failRunnerSessions(RUNNER_ID);
+    assert.ok(svc.resolveDescendantRequest(root.id, child.id, denied.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "deny", childMessage: "Not this head." }, () => true).ok);
+    assert.equal(f.resumeState(denied.occurrenceId), "held");
+    f.hub.online = true;
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "completed", worktreePath: f.worktreePath, worktreeRecovery: null,
+    })]);
+    assert.equal(db.getSession(child.id)?.status, "completed");
+    assert.equal(db.workflowDecisionByOccurrence(denied.occurrenceId)?.status, "denied", "the record keeps the outcome");
+    assert.equal(f.resumeState(denied.occurrenceId), "abandoned");
+    svc.retryDuePrompts(Date.now() + 5_000, RUNNER_ID);
+    assert.equal(f.resolutionPrompts(denied.occurrenceId).length, 0);
+    assert.deepEqual(db.sessionsWithHeldWorkflowDecisionResumes(RUNNER_ID), [], "nothing stays owed to an ended child");
+  } finally {
+    db.close();
+  }
+});
+
+test("a resolution recorded just before the control plane stops still resumes the child exactly once (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  try {
+    // The resolving write is the only write that happened: the process stopped before settling
+    // the card or staging the resume. Reproduce it with that write alone.
+    const merge = f.requestMerge(1761);
+    svc.onSessionStatus(child.id, "idle");
+    assert.equal(db.getSession(child.id)?.status, "input_required");
+    const resolved = db.resolveWorkflowDecision(merge.occurrenceId, "orchestrator", "approved", Date.now(),
+      undefined, undefined, undefined, "Approved just before the stop.", true);
+    assert.equal(resolved?.status, "approved");
+    assert.equal(f.resumeState(merge.occurrenceId), "held", "the resolving write itself records the resume as owed");
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0);
+    assert.ok(pendingRequests(db.getSession(child.id)?.pendingApproval).some((request) =>
+      request.requestId === merge.occurrenceId), "nothing settled the card");
+
+    // A restart: a fresh service over the same database, whose runner registers. The registration
+    // sweep finds the owed resume with its card still on the child, settles the card as the
+    // resolving call would have, and delivers the resume once.
+    const restarted = new SessionsService(db, f.hub as unknown as Hub, NOOP_LOG);
+    restarted.retryDuePrompts(Date.now() + 1_000, RUNNER_ID);
+    const prompts = () => f.resolutionPrompts(merge.occurrenceId);
+    assert.equal(prompts().length, 1, "the resume is delivered once");
+    const [resume] = prompts();
+    assert.ok(resume!.command.type === "prompt_session" && resume!.command.text.includes("Approved just before the stop."),
+      "the message recorded by the resolving write travels with the resume");
+    assert.equal(f.resumeState(merge.occurrenceId), "delivering");
+    assert.equal(db.getSession(child.id)?.pendingApproval ?? null, null, "the resolved card is settled");
+    assert.equal(db.getSession(child.id)?.status, "queued", "the child leaves the pause into the resumed turn (#1651)");
+    restarted.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    }), snapshot({ id: root.id, title: root.title, status: "running", useWorktree: false, worktreePath: null })]);
+    restarted.retryDuePrompts(Date.now() + 2_000);
+    assert.equal(new Set(prompts().map((message) => message.commandId)).size, 1, "no boundary delivers it again");
+    assert.equal(f.receipt(resume!.commandId, "started", 1), true);
+    assert.equal(f.resumeState(merge.occurrenceId), "delivered");
+
+    // The stop lands between the resolving write and staging inside the live path: the resolution
+    // is recorded, nothing is staged, and the next sweep delivers it once.
+    const second = f.requestMerge(1762);
+    svc.onSessionStatus(child.id, "idle");
+    const stage = db.stageWorkflowDecisionResume.bind(db);
+    db.stageWorkflowDecisionResume = (input) => {
+      db.stageWorkflowDecisionResume = stage;
+      throw new Error("simulated stop before the resume was staged");
+    };
+    f.approve(second.occurrenceId);
+    assert.equal(db.workflowDecisionByOccurrence(second.occurrenceId)?.status, "approved");
+    assert.equal(f.resumeState(second.occurrenceId), "held", "the resume outlives the failed staging");
+    assert.equal(f.resolutionPrompts(second.occurrenceId).length, 0);
+    assert.equal(db.getSession(child.id)?.status, "idle", "nothing was admitted, so the child is idle");
+    svc.retryDuePrompts(Date.now() + 3_000);
+    assert.equal(f.resolutionPrompts(second.occurrenceId).length, 1);
+    assert.equal(f.resumeState(second.occurrenceId), "delivering");
+    assert.equal(db.getSession(child.id)?.status, "queued");
+    svc.retryDuePrompts(Date.now() + 4_000);
+    assert.equal(new Set(f.resolutionPrompts(second.occurrenceId).map((message) => message.commandId)).size, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("a decision revoked or superseded while its resume is owed to an offline runner is never announced (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  const policy = (prMerge: "orchestrator" | "human", revision: number) => assert.ok(svc.setParentControlPolicy(root.id, {
+    implementation_question: "orchestrator", pr_merge: prMerge, merged_branch_deletion: "orchestrator",
+    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+  }, revision).ok);
+  try {
+    // Revoked by a policy change while the runner is away.
+    const revoked = f.requestMerge(1763);
+    svc.onSessionStatus(child.id, "idle");
+    f.hub.online = false;
+    f.approve(revoked.occurrenceId);
+    assert.equal(f.resumeState(revoked.occurrenceId), "held");
+    policy("human", 1);
+    assert.equal(db.workflowDecisionByOccurrence(revoked.occurrenceId)?.status, "revoked");
+    assert.equal(f.resumeState(revoked.occurrenceId), "abandoned");
+    f.hub.online = true;
+    svc.retryDuePrompts(Date.now() + 5_000, RUNNER_ID);
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    }), snapshot({ id: root.id, title: root.title, status: "running", useWorktree: false, worktreePath: null })]);
+    assert.equal(f.resolutionPrompts(revoked.occurrenceId).length, 0, "a revoked outcome is never announced");
+
+    // Superseded by the child's own newer request for the same resource while the resume is owed.
+    policy("orchestrator", 2);
+    const stale = f.requestMerge(1764);
+    svc.onSessionStatus(child.id, "idle");
+    f.hub.online = false;
+    f.approve(stale.occurrenceId);
+    assert.equal(f.resumeState(stale.occurrenceId), "held");
+    f.hub.online = true;
+    const replacement = svc.createWorkflowDecision(child.id, {
+      requestId: "merge-1764-again", resourceKey: "picoduck/wollipog#1764",
+      resourceSnapshot: { ...stale.resourceSnapshot, headSha: "d".repeat(40),
+        requiredChecks: { ...(stale.resourceSnapshot as { requiredChecks: object }).requiredChecks, headSha: "d".repeat(40) } } as never,
+    });
+    assert.ok(replacement.ok, replacement.error);
+    assert.equal(db.workflowDecisionByOccurrence(stale.occurrenceId)?.status, "superseded");
+    assert.equal(f.resumeState(stale.occurrenceId), "abandoned");
+    svc.retryDuePrompts(Date.now() + 10_000, RUNNER_ID);
+    assert.equal(f.resolutionPrompts(stale.occurrenceId).length, 0, "a superseded outcome is never announced");
+  } finally {
+    db.close();
+  }
+});
+
+test("a resume refused behind a cost-budget card stays failed with the outcome on the decision record (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child } = f;
+  try {
+    // The child tripped its cost budget and is parked behind that card when it asks for a merge.
+    db.updateSessionCostBudget(child.id, 1, Date.now());
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, costUsd: 2,
+    }));
+    assert.equal(db.getSession(child.id)?.pendingApproval?.kind, "cost_budget");
+    const merge = f.requestMerge(1765);
+    assert.equal(db.getSession(child.id)?.status, "input_required");
+    f.approve(merge.occurrenceId);
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "approved");
+    assert.equal(f.resumeState(merge.occurrenceId), "failed",
+      "the guardrail card refuses the resume, and by default it is not kept for later");
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0);
+    assert.equal(db.getSession(child.id)?.pendingApproval?.kind, "cost_budget", "the card is the human's to resolve first");
+    svc.retryDuePrompts(Date.now() + 5_000, RUNNER_ID);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0, "a failed resume is never retried");
+  } finally {
+    db.close();
   }
 });
 

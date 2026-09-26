@@ -770,8 +770,9 @@ on the resolved occurrence, returned in the child's own `get_workflow_decision` 
 to the child as an ordinary prompt that wakes an idle child or queues behind a turn still in
 progress. The governance audit records only the message's digest. The runner's tool refuses a
 message when the connected control plane predates v166, because an older control plane would drop
-the field and resolve the decision anyway. A child whose delivery was refused, for example while its
-runner is offline, still finds the message on the decision record.
+the field and resolve the decision anyway. The message is part of the resume the resolution owes, so
+a child whose runner was offline at resolution receives it once the runner returns (#1759); a child
+whose resume a guardrail card refused still finds it on the decision record.
 
 Every approval or denial resumes the child, whether or not it carries a message. A typed decision
 does not suspend the provider turn, so a child that ended its turn behind the card has nothing else
@@ -789,22 +790,39 @@ every turn, and a child that switched its worktree to another branch is parked `
 with no pending request. Before, its decision resume was dropped and nothing told its parent.
 
 - **The resume is kept.** On a runner at protocol v161 or later, the resolution prompt travels the
-  durable prompt lane and its progress is recorded on the decision. If the control plane already
-  knows the child is in recovery, the resume is held unsent. If the runner reports it not sent
-  with `WORKTREE_RECOVERY_REQUIRED`, it is held the same way, and the not-sent row is retired so a
-  manual Retry cannot deliver it a second time. The first boundary that sees the recovery cleared —
-  a runtime update, a reconnect, or the prompt-maintenance sweep — delivers it once, as a fresh
-  durable command with the same text. Staging that command and recording it on the decision happen
-  in one transaction, conditional on the resume still being held. Holding a resume and retiring its
-  not-sent row are also one transaction, and the sweep applies any receipt a restart left
-  unapplied, so a restart can neither lose an owed resume nor send it twice. A resume held for a
-  child that stops, or for a decision later revoked or superseded, is abandoned. Revocation or
-  supersession also withdraws a resume still waiting in the outbox. One already handed to the
-  runner cannot be recalled, but its text defers to the decision record, which now says revoked.
-  Settling the card leaves a recovering child's status as the runner reported it, instead of
-  marking it running or idle. Older runners keep the ordinary prompt path. A resume held before its
-  runner downgraded is settled on that path rather than held on a recovery record the older runner
-  never clears.
+  durable prompt lane and its progress is recorded on the decision. The resume is owed from the
+  moment the decision resolves: the write that records the outcome also records the resume as held
+  (#1759), so a control-plane stop between resolving the decision and staging its prompt cannot
+  lose it. The next boundary finds the resume held, settles the card the stop left on the child, and
+  delivers it. If the control plane already knows the child is in recovery, or the child's runner
+  is offline, the resume stays held unsent. If the runner reports it not sent with
+  `WORKTREE_RECOVERY_REQUIRED`, it is held the same way, and the not-sent row is retired so a
+  manual Retry cannot deliver it a second time. The first boundary that can deliver it — a runtime
+  update, the runner's registration sweep or hydration on reconnect, or the prompt-maintenance
+  sweep — delivers it once, as a fresh durable command with the same text. Staging that command and
+  recording it on the decision happen in one transaction, conditional on the resume still being
+  held. Holding a resume and retiring its not-sent row are also one transaction, and the sweep
+  applies any receipt a restart left unapplied, so a restart can neither lose an owed resume nor
+  send it twice. A resume held for a child that stops, or for a decision later revoked or
+  superseded, is abandoned. Revocation or supersession also withdraws a resume still waiting in the
+  outbox. One already handed to the runner cannot be recalled, but its text defers to the decision
+  record, which now says revoked. Settling the card leaves a recovering child's status as the
+  runner reported it, instead of marking it running or idle. A runner disconnect provisionally
+  stops every session it hosted, and reconnect hydration restores them; a child that reads
+  `stopped` while its decision is still pending was stopped that way, so resolving the decision is
+  accepted and its resume waits, still owed, for hydration to restore the child. The registration
+  sweep that precedes hydration leaves it alone. An archived child is ended regardless: the
+  runner's return stops it rather than restoring it, so archiving a stopped child revokes its
+  unconsumed decisions and abandons the resume it was owed at once, and resolving its decision is
+  refused, as before. An offline runner is not shown as a hold, since the
+  runner's own status already says so. Every authoritative end of a child — a runner-reported
+  terminal status, a session the runner no longer holds at reconnect (whatever status the control
+  plane had stored for it), an explicit Stop or restart, a guardrail Stop — revokes its unconsumed
+  decisions and abandons every resume it still owed, so an ended child is never resumed. A resume refused behind a cost-budget or policy-hook card is
+  recorded `failed` and not retried: the outcome, and any message, stay on the decision record for
+  the child to read once the human resolves the card. Older runners keep the ordinary prompt path.
+  A resume held before its runner downgraded is settled on that path rather than held on a recovery
+  record the older runner never clears.
 - **The parent sees the hold.** A session's `holds` list what keeps its next turn from starting,
   with a stable `holdId`, a reason, the `recoveryAction` that clears it, and any `heldResumes`.
   MCP `get_session` returns them together with `worktreeRecovery`. `list_descendant_requests` lists
