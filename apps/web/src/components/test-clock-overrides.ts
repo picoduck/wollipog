@@ -27,19 +27,30 @@ export async function withCapturedAnimationFrames<T>(
 ): Promise<T> {
   let nextId = 1;
   const callbacks = new Map<number, FrameRequestCallback>();
+  const flushing: Map<number, FrameRequestCallback>[] = [];
   return withScopedClockOverrides(target, {
     requestAnimationFrame: (callback: FrameRequestCallback) => {
       const id = nextId++;
       callbacks.set(id, callback);
       return id;
     },
-    cancelAnimationFrame: (id: number) => { callbacks.delete(id); },
+    cancelAnimationFrame: (id: number) => {
+      callbacks.delete(id);
+      for (const batch of flushing) batch.delete(id);
+    },
   }, () => body({
     pending: () => callbacks.size,
     flush: () => {
-      const ready = [...callbacks.values()];
+      const ready = new Map(callbacks);
       callbacks.clear();
-      for (const callback of ready) callback(0);
+      flushing.push(ready);
+      try {
+        for (const [id, callback] of ready) {
+          if (ready.has(id)) callback(0);
+        }
+      } finally {
+        flushing.pop();
+      }
     },
   }));
 }

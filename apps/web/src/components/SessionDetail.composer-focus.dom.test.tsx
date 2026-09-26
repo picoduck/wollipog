@@ -596,9 +596,14 @@ test("attaching a workspace result restores composer focus in its captured frame
     );
     assert.ok(option);
     await withCapturedAnimationFrames(domWindow, async (frames) => {
-      await act(async () => { option.focus(); option.click(); });
+      await act(async () => {
+        fireDomEvent.pointerDown(option);
+        option.focus();
+      });
+      assert.equal(frames.pending(), 0, "deliberate picker focus does not queue blur recovery");
+      await act(async () => { option.click(); });
       await Promise.resolve();
-      assert.ok(frames.pending() > 0, "attachment creation schedules composer focus");
+      assert.equal(frames.pending(), 1, "attachment creation schedules its own composer focus");
       assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer);
       await act(async () => { frames.flush(); });
       assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
@@ -847,8 +852,13 @@ test("queued message editing loads exact content and Cancel Edit restores the di
       .find((button) => button.textContent === "Cancel Edit") as HTMLButtonElement | undefined;
     assert.ok(cancel);
     await withCapturedAnimationFrames(domWindow, async (frames) => {
-      await act(async () => { cancel.focus(); cancel.click(); });
-      assert.ok(frames.pending() > 0, "leaving queued edit defers the ordinary composer restore");
+      await act(async () => {
+        fireDomEvent.pointerDown(cancel);
+        cancel.focus();
+      });
+      assert.equal(frames.pending(), 0, "deliberate Cancel focus does not queue blur recovery");
+      await act(async () => { cancel.click(); });
+      assert.equal(frames.pending(), 1, "leaving queued edit queues its ordinary composer restore");
       assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer);
       await act(async () => { frames.flush(); });
       assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
@@ -1137,9 +1147,15 @@ test("a live queue revision change disables recovered retry while preserving con
 
     exportFailure = null;
     await withCapturedAnimationFrames(domWindow, async (frames) => {
-      await act(async () => { reuse.focus(); reuse.click(); });
+      await act(async () => {
+        fireDomEvent.pointerDown(reuse);
+        reuse.focus();
+      });
+      assert.equal(frames.pending(), 0, "deliberate Reuse focus does not queue blur recovery");
+      await act(async () => { reuse.click(); });
       await flushAsyncWork(450);
-      assert.ok(frames.pending() > 0, "using a recovered edit schedules composer focus");
+      assert.equal(frames.pending(), 2,
+        "recovered conversion queues final focus separately from its initial reveal");
       assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer);
       await act(async () => { frames.flush(); });
       assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);

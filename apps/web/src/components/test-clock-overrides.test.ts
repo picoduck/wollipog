@@ -40,10 +40,21 @@ test("captured frames run only when flushed and cancellation removes a callback"
     clock.requestAnimationFrame(() => calls.push("restored"));
     clock.cancelAnimationFrame(canceled);
     assert.equal(pending(), 1);
-    assert.deepEqual(calls, []);
+    assert.equal(calls.length, 0);
     flush();
-    assert.deepEqual(calls, ["restored"]);
+    assert.equal(calls.join(","), "restored");
     assert.equal(pending(), 0);
+    clock.requestAnimationFrame(() => {
+      calls.push("first");
+      clock.cancelAnimationFrame(second);
+      clock.requestAnimationFrame(() => calls.push("next frame"));
+    });
+    const second = clock.requestAnimationFrame(() => calls.push("canceled in flush"));
+    flush();
+    assert.equal(calls.join(","), "restored,first");
+    assert.equal(pending(), 1);
+    flush();
+    assert.equal(calls.join(","), "restored,first,next frame");
   });
   assert.equal(clock.requestAnimationFrame(() => {}), 99);
 });

@@ -427,7 +427,7 @@ test("crossing to desktop from the Settings row hands focus to the desktop gear"
       assert.ok(frames.pending() > 0, "the viewport handoff schedules a focus frame");
       const gear = container.querySelector(".rail-settings .settings-trigger");
       assert.ok(gear, "the desktop layout mounts the gear");
-      assert.notEqual(domWindow.document.activeElement, gear, "focus waits for the frame");
+      assert.ok(domWindow.document.activeElement !== (gear as never), "focus waits for the frame");
       await act(async () => { frames.flush(); });
       const focused = domWindow.document.activeElement as unknown as Element | null;
       assert.ok(focused === (gear as never),
