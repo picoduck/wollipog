@@ -384,3 +384,45 @@ test("a job Claude stops on its own ends as killed and no longer holds its sibli
   assert.equal(h.background.flatMap((update) => update.terminalJobs ?? []).length, 2, "each job ends once");
   h.driver.dispose();
 });
+
+test("a job Claude kills because its stdin closed is left for orphan recovery, not ended", async () => {
+  // Claude Code 2.1.283 kills every running task when its stdin closes and reports each one with
+  // the same `killed` patch and `stopped` notification. A one-shot turn always closes stdin.
+  const h = harness({ env: { [CLAUDE_PERSISTENT_FLAG]: "0" } });
+  const turn = h.driver.prompt("launch and finish");
+  await nextTask();
+  const child = h.spawned[0];
+  taskStarted(child, "shell-1", "toolu_shell");
+  frame(child, { type: "result", subtype: "success" });
+  killedReport(child, "shell-1", "toolu_shell");
+  await nextTask();
+  child.emit("close", 0);
+  await turn;
+
+  assert.equal(h.background.some((update) => update.terminalJobs?.length), false, "no job was reported ended");
+  assert.equal(h.background.at(-1)?.state, "orphaned");
+  assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["shell-1"]);
+  h.driver.dispose();
+});
+
+test("only a report inside the model's own stop call ends the job it named", async () => {
+  const h = harness();
+  const child = await launchTwoTasks(h);
+  const turn = h.driver.prompt("stop the monitor");
+  await nextTask();
+  frame(child, { type: "assistant", message: { content: [
+    { type: "tool_use", id: "toolu_stop", name: "TaskStop", input: { task_id: "monitor-1" } },
+  ] } });
+  // A report for a task the call did not name is not proof that the model stopped it.
+  killedReport(child, "shell-2", "toolu_shell");
+  await nextTask();
+  assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1", "shell-2"]);
+  // Nor is a report that arrives after the call returned.
+  frame(child, { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_stop", content: "No task found", is_error: true }] } });
+  killedReport(child, "monitor-1", "toolu_monitor");
+  frame(child, { type: "result", subtype: "success" });
+  assert.equal(await turn, "end_turn");
+  assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1", "shell-2"]);
+  assert.equal(h.background.some((update) => update.terminalJobs?.length), false);
+  h.driver.dispose();
+});

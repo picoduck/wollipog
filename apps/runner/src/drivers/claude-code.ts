@@ -547,6 +547,11 @@ export class ClaudeCodeDriver implements Driver {
    * A later report for one of them still ends the job, through the ordinary killed-task path, so a
    * slow stop cannot leave it pending forever. Bounded; the oldest entries go first. */
   private readonly unconfirmedStopTaskIds = new Set<string>();
+  /** The model's own task-stop tool calls that have not returned yet: tool_use id to task id. Claude
+   * reports the stop before the tool result, so a report inside that window is the proof the model
+   * stopped the task. Outside it the same report is ambiguous: Claude also kills every task and
+   * reports it `killed` then `stopped` when its stdin closes, which is orphan recovery's work. */
+  private readonly modelTaskStops = new Map<string, string>();
   /** Runner-originated control requests awaiting Claude's `control_response`, by request id. */
   private readonly pendingControlResponses = new Map<string, (response: Json | null) => void>();
   private persistentCircuitOpen = false;
@@ -1666,17 +1671,16 @@ export class ClaudeCodeDriver implements Driver {
           this.activeProviderTurnId(),
         );
       } else if (msg.subtype === "task_updated" && taskId) {
-        // Claude patches a stopped task to `killed` before its `stopped` notification, whether the
-        // runner asked for the stop or the model used its own task-stop tool.
+        // Read only for a stop someone asked for: Claude patches the task to `killed` first.
         const patch = msg.patch as Record<string, Json> | undefined;
         const status = typeof patch?.status === "string" ? patch.status.toLowerCase() : "";
         if (status === "killed" && this.stoppingBackgroundTasks.has(taskId)) this.completeStoppedTask(taskId);
-        else if (status === "killed") this.completeProviderStop(taskId, toolUseId);
+        else if (status === "killed" && this.stopWasRequested(taskId)) this.completeProviderStop(taskId, toolUseId);
       } else if (msg.subtype === "task_notification" && taskId) {
         const status = typeof msg.status === "string" ? msg.status.toLowerCase() : "";
         if ((status === "stopped" || status === "killed") && this.stoppingBackgroundTasks.has(taskId)) {
           this.completeStoppedTask(taskId);
-        } else if ((status === "stopped" || status === "killed") && this.unconfirmedStopTaskIds.has(taskId)) {
+        } else if ((status === "stopped" || status === "killed") && this.stopWasRequested(taskId)) {
           this.completeProviderStop(taskId, toolUseId);
         } else if (status === "completed" || status === "failed" || status === "killed") {
           this.completePendingTask(taskId, toolUseId, status);
@@ -1693,6 +1697,8 @@ export class ClaudeCodeDriver implements Driver {
         if (block?.type !== "tool_use" || typeof block.id !== "string") continue;
         const name = String(block.name ?? "");
         const input = block.input as Record<string, Json> | undefined;
+        const stopTarget = taskStopTarget(name, input);
+        if (stopTarget) this.modelTaskStops.set(block.id, stopTarget);
         if (!isBackgroundCapableLaunch(name, input)) continue;
         // A tool_use is provisional. Only a provider task lifecycle event or a structured
         // async-launch result promotes it to a hold that requires separate terminal evidence.
@@ -1712,9 +1718,16 @@ export class ClaudeCodeDriver implements Driver {
       const blocks: Json[] = msg.message?.content ?? [];
       for (const block of blocks) {
         if (block?.type !== "tool_result" || typeof block.tool_use_id !== "string") continue;
+        this.modelTaskStops.delete(block.tool_use_id);
         this.reconcileBackgroundToolResult(block.tool_use_id, block.content, block.is_error === true);
       }
     }
+  }
+
+  /** The runner's stop whose answer came back unconfirmed, or the model's own task-stop call that
+   * has not returned yet, targets this task. */
+  private stopWasRequested(taskId: string): boolean {
+    return this.unconfirmedStopTaskIds.has(taskId) || [...this.modelTaskStops.values()].includes(taskId);
   }
 
   private recordPendingTask(
@@ -2963,6 +2976,8 @@ export class ClaudeCodeDriver implements Driver {
 
       case "result": {
         this.streamingMessageIds.clear();
+        // A stop call never outlives its turn; one left without a tool result proves nothing later.
+        this.modelTaskStops.clear();
         const usage = msg.usage ?? {};
         let costUsd = msg.total_cost_usd;
         if (this.persistentTransport && typeof costUsd === "number" && Number.isFinite(costUsd)) {
@@ -3091,6 +3106,13 @@ function isBackgroundCapableLaunch(name: string, input?: Record<string, Json>): 
   if (name === "Agent" || name === "Task") return input?.run_in_background !== false;
   if (name === "Bash" || name === "PowerShell") return input?.run_in_background === true;
   return name === "Monitor" || name === "Workflow";
+}
+
+/** The task a model's own task-stop tool call targets. `KillShell` is the tool's earlier name. */
+function taskStopTarget(name: string, input?: Record<string, Json>): string | null {
+  if (name === "TaskStop") return typeof input?.task_id === "string" ? input.task_id : null;
+  if (name === "KillShell") return typeof input?.shell_id === "string" ? input.shell_id : null;
+  return null;
 }
 
 function backgroundLaunchType(name: string): DriverBackgroundLaunchType {
