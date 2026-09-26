@@ -5398,7 +5398,13 @@ export class SessionManager {
     // order. Crash-recovery state is cleared before replacing/launching so it cannot intercept them.
     // Steering state goes first: clearing it resets the ordinal counter the carried prompts re-seed.
     const existing = this.active.get(spec.sessionId);
-    if (existing) this.clearSteeringState(spec.sessionId, "session restart discarded steering state");
+    if (existing) {
+      // A queued prompt reserved for steering promotion that never reached the provider is still
+      // queued work: return it to the FIFO before the restart discards its steering attempt. One the
+      // provider may have received stays at most once and is not replayed.
+      this.restoreUnsubmittedPromotions(spec.sessionId, existing);
+      this.clearSteeringState(spec.sessionId, "session restart discarded steering state");
+    }
     this.carryQueuedWorkAcrossRestart(spec.sessionId, existing);
     this.discardRecovery(spec.sessionId);
     // Restart: a start for a session we already run replaces the old process.

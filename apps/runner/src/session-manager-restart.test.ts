@@ -661,3 +661,52 @@ test("a restart reports every owed result, and every job it ended, when there ar
     }
   }
 });
+
+test("a restart keeps a queued prompt whose steering promotion never reached the provider (#1779)", { skip: !haveGit() }, async () => {
+  const f = fixture("promotion");
+  let manager: SessionManager | undefined;
+  try {
+    const fake = fakeProvider();
+    manager = new SessionManager((message) => { f.sent.push(message); }, () => {}, f.store, "runner", undefined,
+      fake.factory as never, f.dataDir, 1);
+    const spec = claudeSpec("s_restart_promotion", f.repo);
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, HELD_TURN);
+    await waitFor(() => fake.prompts.length === 1, "the first turn did not start");
+    const lifecycle: string[] = [];
+    manager.prompt(spec.sessionId, "being promoted", [], undefined, undefined, recordingLifecycle("promoted", lifecycle));
+    manager.prompt(spec.sessionId, "queued after it");
+
+    // The dashboard asked to steer the first queued prompt into the running turn. Admission took it
+    // out of the FIFO and reserved it, as admitSteering does, before any provider write.
+    const internals = manager as unknown as {
+      active: Map<string, { queue: Array<{ id: string; text: string }>; reservedPromotions?: Map<string, unknown> }>;
+      steeringRegistry: Map<string, Map<string, unknown>>;
+    };
+    const entry = internals.active.get(spec.sessionId)!;
+    const source = entry.queue.shift()!;
+    assert.equal(source.text, "being promoted");
+    let settle!: (result: { disposition: string; reason: string }) => void;
+    const promise = new Promise<{ disposition: string; reason: string }>((resolve) => { settle = resolve; });
+    const operation = {
+      request: { submissionId: "promotion-1", sessionId: spec.sessionId, turnId: "turn-a", promotePromptId: source.id },
+      requestHash: "hash", ordinal: 0, effectiveConfig: {}, deadlineAt: Date.now() + 60_000, source,
+      cancelRequested: false, providerStarted: false, fenceInstalled: false, settled: false, references: 1,
+      promise, resolve: settle, lifecyclePromise: Promise.resolve(), resolveLifecycle: () => {}, lastAccessOrdinal: 0,
+    };
+    (entry.reservedPromotions ??= new Map()).set(source.id, operation);
+    internals.steeringRegistry.set(spec.sessionId, new Map([["promotion-1", operation]]));
+
+    assert.equal(await manager.start(spec), true);
+    assert.equal((await promise).disposition, "rejected", "the steering attempt itself ends with the replaced process");
+    await waitFor(() => fake.prompts.filter((prompt) => prompt.provider === 1).length === 2,
+      "the kept prompts did not run after the restart");
+    assert.deepEqual(fake.prompts.filter((prompt) => prompt.provider === 1).map((prompt) => prompt.text),
+      ["being promoted", "queued after it"], "the unsubmitted promotion runs as the queued prompt it was, in order");
+    await waitFor(() => lifecycle.includes("promoted:completed"), "the promoted prompt did not complete");
+    assert.equal(lifecycle.some((entry) => entry.startsWith("promoted:failed")), false, lifecycle.join("\n"));
+  } finally {
+    manager?.shutdownAll();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
