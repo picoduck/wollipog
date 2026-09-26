@@ -1,15 +1,19 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import type { RunnerToControlPlane, SessionLaunchSpec, SessionQueueHoldView } from "@wollipog/protocol";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import { test } from "node:test";
+import { ClaudeCodeDriver } from "./drivers/claude-code.js";
 import type {
   DriverBackgroundJob,
   DriverBackgroundJobStopResult,
   DriverBackgroundTerminalJob,
   DriverCallbacks,
+  DriverOptions,
 } from "./drivers/driver.js";
 import { SessionManager, type DurableCommandLifecycle } from "./session-manager.js";
 import { SessionStore } from "./session-store.js";
@@ -427,11 +431,13 @@ test("a job the model stops with its own tool frees its sibling's result and is 
     onPrompt = (provider, text) => {
       launch(provider, text);
       if (text !== "stop the monitor") return;
-      // What the Claude driver reports for Claude's own `killed` patch: an ordinary killed job whose
-      // parent turn has ended, not one the runner ended.
+      // What the Claude driver reports for the model's own stop inside its turn: a killed job the
+      // runner did not end, which needs no continuation (#1855).
       const monitor = fake.live.get("monitor-1")!;
       fake.live.delete("monitor-1");
-      fake.report(provider, [{ ...monitor, status: "killed", terminalAt: Date.now(), continuationRequired: true }]);
+      fake.report(provider, [{
+        ...monitor, status: "killed", terminalAt: Date.now(), continuationRequired: false, stoppedByModel: true,
+      }]);
     };
     manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 1);
     const spec = claudeSpec("s_job_provider_stop", root);
@@ -447,11 +453,15 @@ test("a job the model stops with its own tool frees its sibling's result and is 
     await waitFor(() => store.readEvents(spec.sessionId)
       .some((event) => event.payload.kind === "background_continuation_delivered"), "the sibling's result was not delivered");
     await new Promise<void>((resolve) => setTimeout(resolve, 50));
-    assert.equal(fake.prompts.filter((prompt) => prompt.text.startsWith(CONTINUATION_PREFIX)).length, 1);
+    const continuations = fake.prompts.filter((prompt) => prompt.text.startsWith(CONTINUATION_PREFIX));
+    assert.equal(continuations.length, 1);
+    assert.match(continuations[0]!.text, /"agent-1"/);
+    assert.doesNotMatch(continuations[0]!.text, /monitor-1/, "the model already knows it stopped the monitor");
 
     const meta = store.readMeta(spec.sessionId)!;
     const monitor = meta.backgroundJobs?.find((job) => job.id === "monitor-1");
     assert.equal(monitor?.terminalStatus, "killed");
+    assert.equal(monitor?.continuationId, undefined);
     assert.equal(monitor?.endedBy, undefined, "Wollipog did not end it");
     assert.deepEqual(stopNotices(store, spec.sessionId), []);
     assert.deepEqual(fake.stopCalls, []);
@@ -474,6 +484,130 @@ test("a job the model stops with its own tool frees its sibling's result and is 
   } finally {
     manager?.shutdownAll();
     restarted?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a lone job the model stops in a later turn starts no continuation turn and is settled (#1855)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-job-model-stop-lone-"));
+  let manager: SessionManager | undefined;
+  try {
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    let onPrompt: (provider: ProviderProcess, text: string) => void = () => {};
+    const fake = fakeProvider({ onPrompt: (provider, text) => onPrompt(provider, text) });
+    onPrompt = (provider, text) => {
+      if (text === "watch CI") {
+        fake.live.set("monitor-1", { id: "monitor-1", launchType: "monitor", startedAt: Date.now() });
+        fake.report(provider);
+      } else if (text === "stop the monitor") {
+        const monitor = fake.live.get("monitor-1")!;
+        fake.live.delete("monitor-1");
+        fake.report(provider, [{
+          ...monitor, status: "killed", terminalAt: Date.now(), continuationRequired: false, stoppedByModel: true,
+        }]);
+      }
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_job_model_stop_lone", root);
+    await manager.start(spec);
+
+    manager.prompt(spec.sessionId, "watch CI");
+    await waitFor(() => fake.prompts.length === 1 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the launching turn did not finish");
+    assert.equal(store.readMeta(spec.sessionId)?.backgroundWorkState, "running");
+    manager.prompt(spec.sessionId, "stop the monitor");
+    await waitFor(() => fake.prompts.length === 2 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the stopping turn did not finish");
+    await new Promise<void>((resolve) => setTimeout(resolve, 150));
+
+    assert.deepEqual(fake.prompts.map((prompt) => prompt.text), ["watch CI", "stop the monitor"],
+      "no automatic turn tells the model what it already did");
+    const meta = store.readMeta(spec.sessionId)!;
+    assert.equal(meta.backgroundWorkState, undefined);
+    assert.deepEqual(meta.pendingBackgroundTaskIds ?? [], []);
+    const monitor = meta.backgroundJobs?.find((job) => job.id === "monitor-1");
+    assert.equal(monitor?.terminalStatus, "killed");
+    assert.equal(monitor?.continuationRequired, false);
+    assert.equal(monitor?.continuationId, undefined);
+    assert.equal(monitor?.endedBy, undefined, "Wollipog did not end it");
+    assert.equal(typeof monitor?.assistantResultPersistedAt, "number",
+      "the job is settled rather than left among unresolved jobs");
+    assert.equal(store.readEvents(spec.sessionId)
+      .some((event) => event.payload.kind === "background_continuation_delivered"), false);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("with the real Claude driver, a model stop in a later turn starts no continuation turn (#1855)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-job-model-stop-driver-"));
+  let manager: SessionManager | undefined;
+  try {
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const child = new EventEmitter() as any;
+    child.pid = 123;
+    child.stdin = new PassThrough();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.kill = () => true;
+    // Every turn Wollipog hands the provider arrives on its stdin as one `user` frame.
+    const submitted: string[] = [];
+    let buffered = "";
+    child.stdin.on("data", (chunk: Buffer) => {
+      buffered += chunk.toString("utf8");
+      let index: number;
+      while ((index = buffered.indexOf("\n")) >= 0) {
+        const line = buffered.slice(0, index);
+        buffered = buffered.slice(index + 1);
+        const value = line.trim() ? JSON.parse(line) : undefined;
+        if (value?.type === "user") submitted.push(JSON.stringify(value.message?.content ?? ""));
+      }
+    });
+    const frame = (value: unknown) => child.stdout.write(JSON.stringify(value) + "\n");
+    const factory = (_kind: unknown, options: DriverOptions, callbacks: DriverCallbacks) =>
+      new ClaudeCodeDriver(options, callbacks, { spawn: () => child, kill: () => {} } as any);
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = claudeSpec("s_job_model_stop_driver", root);
+    await manager.start(spec);
+    const idle = () => store.readMeta(spec.sessionId)?.status === "idle";
+
+    manager.prompt(spec.sessionId, "watch CI");
+    await waitFor(() => submitted.length === 1, "the launching turn was not submitted");
+    frame({ type: "system", subtype: "task_started", task_id: "monitor-1", tool_use_id: "toolu_monitor" });
+    frame({ type: "result", subtype: "success" });
+    await waitFor(() => idle() && store.readMeta(spec.sessionId)?.backgroundWorkState === "running",
+      "the launching turn did not leave its job running");
+
+    // Claude Code 2.1.283's frames for the model's own TaskStop (#1847), in a later turn.
+    manager.prompt(spec.sessionId, "stop the monitor");
+    await waitFor(() => submitted.length === 2, "the stopping turn was not submitted");
+    frame({ type: "assistant", message: { content: [
+      { type: "tool_use", id: "toolu_stop", name: "TaskStop", input: { task_id: "monitor-1" } },
+    ] } });
+    frame({ type: "system", subtype: "task_updated", task_id: "monitor-1", patch: { status: "killed", end_time: 1 } });
+    frame({ type: "system", subtype: "task_notification", task_id: "monitor-1", tool_use_id: "toolu_monitor", status: "stopped" });
+    frame({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: "toolu_stop", content: "ok" }] } });
+    frame({ type: "result", subtype: "success" });
+    await waitFor(() => store.readMeta(spec.sessionId)?.backgroundJobs
+      ?.some((job) => job.id === "monitor-1" && job.terminalStatus === "killed") === true,
+    "the stopping turn did not end the job");
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+
+    assert.equal(submitted.some((text) => text.includes(CONTINUATION_PREFIX)), false,
+      "no automatic turn tells the model what it already did");
+    assert.equal(submitted.length, 2);
+    assert.ok(idle());
+    const meta = store.readMeta(spec.sessionId)!;
+    assert.equal(meta.backgroundWorkState, undefined);
+    const monitor = meta.backgroundJobs?.find((job) => job.id === "monitor-1");
+    assert.equal(monitor?.terminalStatus, "killed");
+    assert.equal(monitor?.continuationRequired, false);
+    assert.equal(typeof monitor?.assistantResultPersistedAt, "number");
+  } finally {
+    manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });

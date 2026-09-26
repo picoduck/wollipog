@@ -15702,6 +15702,9 @@ export class SessionManager {
       durable.continuationRequired = terminal.continuationRequired;
       if (terminal.endedByRunner && end) durable.endedBy = end;
       else if (lateStops.has(terminal.id)) durable.endedBy = lateStops.get(terminal.id);
+      // The model stopped the job itself, so the result is already in its conversation. The job is
+      // settled now: its launching turn may have ended long ago and will not settle it (#1855).
+      if (terminal.stoppedByModel) durable.assistantResultPersistedAt ??= terminal.terminalAt;
     }
 
     const terminalCandidates = [...byId.values()].filter((job) => job.terminalObservedAt &&

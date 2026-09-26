@@ -105,6 +105,9 @@ export interface DriverBackgroundTerminalJob extends DriverBackgroundJob {
    * answered `unconfirmed` for it (#1849): the stop was carried out late, so it is still the
    * requester's stop. Never set for a stop the provider made on its own. */
   stopConfirmedLate?: true;
+  /** Set only when the model ended the job with its own stop tool during a provider turn (#1855).
+   * The model already knows, so the job needs no continuation and nothing is left to deliver. */
+  stoppedByModel?: true;
 }
 
 /** What `endBackgroundWork` did. `none` means nothing was unfinished once receipts were read. */
