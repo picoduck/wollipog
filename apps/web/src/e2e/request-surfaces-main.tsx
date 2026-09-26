@@ -38,7 +38,8 @@ const requestedPollStatus = new URLSearchParams(window.location.search).get("pol
 const descendantRequestStatus: DescendantRequestStatus = requestedPollStatus === "loading" ||
   requestedPollStatus === "unavailable" ? requestedPollStatus : "ready";
 // `artifacts` makes the evidence artifact-backed: `ready` (every item), `mixed` (artifact, URI-only,
-// and video items together), `mismatch` (item 2's bytes do not match its digest), `unavailable`
+// and video items together), `unrenderable` (a PNG artifact, a URI-only item, and two artifacts the card
+// cannot draw, one SVG and one with no media type, both carrying an external copy), `mismatch` (item 2's bytes do not match its digest), `unavailable`
 // (item 2 is gone), or `undecodable` (item 2 has a PNG signature, a correct digest, and a body no
 // browser can draw, which is exactly what the artifact validator's signature check admits). The captures are drawn here so the fixture needs no binary files.
 const artifactMode = new URLSearchParams(window.location.search).get("artifacts");
@@ -112,7 +113,14 @@ function evidenceSession(): SessionView {
       mediaType: "video/webm",
       sha256: artifactDigests.get("art_clip")!,
     };
-    if (artifactMode === "mixed" && index === 1) return base;
+    if ((artifactMode === "mixed" || artifactMode === "unrenderable") && index === 1) return base;
+    if (artifactMode === "unrenderable" && index === 2) {
+      return { ...base, evidenceId: "vector-diagram", uri: "https://evidence.example/diagram.svg?signature=hidden-svg",
+        artifactId: "art_svg", mediaType: "image/svg+xml" };
+    }
+    if (artifactMode === "unrenderable" && index === 3) {
+      return { ...base, evidenceId: "untyped-capture", artifactId: "art_untyped" };
+    }
     if (artifactMode === "mixed" && index === 2) {
       return { ...base, evidenceId: "interaction-clip", artifactId: "art_clip", mediaType: "video/webm",
         sha256: artifactDigests.get("art_clip")! };

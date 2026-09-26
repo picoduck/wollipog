@@ -488,6 +488,14 @@ export function validateParentControlDecisions(value: unknown): value is ParentC
     record[category] === "human" || record[category] === "orchestrator");
 }
 
+/** Media types the human review card shows in place, after checking the bytes against the digest. */
+const RENDERABLE_EVIDENCE_MEDIA_TYPES: readonly string[] = [...PROMPT_IMAGE_MIME_TYPES, "video/mp4", "video/webm"];
+
+/** An evidence item that names an artifact is reviewable only as that artifact's checked bytes. */
+function unrenderableEvidenceArtifact(item: { artifactId?: string; mediaType?: string }): boolean {
+  return item.artifactId !== undefined && !RENDERABLE_EVIDENCE_MEDIA_TYPES.includes(item.mediaType as string);
+}
+
 /** Normalize untrusted JSON into a canonical key order before hashing or persistence. */
 export function normalizeWorkflowDecisionSnapshot(
   input: unknown,
@@ -610,7 +618,7 @@ export function normalizeWorkflowDecisionSnapshot(
     // Without an external link, the human fallback must have an artifact the browser can display.
     // The Orchestrator still applies its own stricter client and artifact checks before delivery.
     if (item.uri === undefined && (!item.artifactId ||
-        ![...PROMPT_IMAGE_MIME_TYPES, "video/mp4", "video/webm"].includes(item.mediaType as string))) return [];
+        !RENDERABLE_EVIDENCE_MEDIA_TYPES.includes(item.mediaType as string))) return [];
     // Optional fields are emitted only when present so a pre-v167 snapshot keeps its digest.
     return [{
       evidenceId: item.evidenceId,
@@ -6581,6 +6589,13 @@ export class SessionsService {
     }
     const normalized = normalizeWorkflowDecisionSnapshot(request.resourceSnapshot);
     if (!normalized.ok || !normalized.data) return fail(normalized.error!, normalized.status);
+    // An item naming an artifact is reviewed as that artifact's checked bytes, so the human review
+    // card must be able to show it; its `uri` never stands in. Checked only for new requests, so an
+    // occurrence approved before this rule can still be consumed with its unchanged snapshot.
+    if (normalized.data.category === "ui_evidence_approval" &&
+        normalized.data.evidence.some(unrenderableEvidenceArtifact)) {
+      return fail("UI evidence references must be unique HTTPS resources or renderable Session artifacts with SHA-256 integrity", 400);
+    }
     const child = this.db.getSession(sessionId);
     if (!child) return fail("session not found", 404);
     if (isTerminal(child.status)) {
@@ -8238,6 +8253,13 @@ export class SessionsService {
           snapshot.evidence.some((item) => item.uri === undefined) &&
           evidenceReviewDigest !== decision.resourceDigest) {
         return fail("Reload the page to review artifact-only evidence before approving this decision", 409);
+      }
+      // A decision stored before request validation refused it can still name an artifact the card
+      // cannot show. Only its unchecked external copy was ever on offer, so it can only be denied.
+      const unshowable = !deny && snapshot.category === "ui_evidence_approval"
+        ? snapshot.evidence.find(unrenderableEvidenceArtifact) : undefined;
+      if (unshowable) {
+        return fail(`Evidence ${JSON.stringify(unshowable.evidenceId)} is an artifact the review card cannot show; deny this decision`, 409);
       }
       const resolution: ResolveWorkflowDecisionRequest = {
         outcome: deny ? "deny" : "approve",

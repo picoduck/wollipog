@@ -33,7 +33,9 @@ import {
   EvidenceArtifactView,
   EvidenceSecureContextNotice,
   evidenceStatusBlocksReview,
+  isArtifactBackedEvidence,
   isRenderableEvidence,
+  UnrenderableEvidenceArtifact,
   type EvidenceArtifactStatus,
 } from "./EvidenceArtifactView.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
@@ -413,11 +415,11 @@ export function SessionApprovalBanner({
   const decisionNeedsRunner = approval.kind !== "policy_hook" && approval.kind !== "workflow_decision";
   // An artifact-backed item counts as reviewed only once its verified image was actually shown. A
   // saved mark from an earlier visit does not survive the artifact turning out missing, mismatched,
-  // or uncheckable in this browser. For an artifact the card can show, its `uri`, if any, never
-  // stands in for the checked bytes.
+  // or uncheckable in this browser. An artifact's `uri`, if any, never stands in for the checked
+  // bytes, so an artifact of a media type the card cannot show stays blocked.
   const [artifactStatus, setArtifactStatus] = useState<Record<string, EvidenceArtifactStatus>>({});
   const evidenceBlocked = (item: (typeof evidence)[number]) => {
-    if (!isRenderableEvidence(item)) return !item.uri;
+    if (!isRenderableEvidence(item)) return isArtifactBackedEvidence(item) || !item.uri;
     return evidenceStatusBlocksReview(artifactStatus[item.evidenceId] ?? "pending");
   };
   const evidenceComplete = evidence.every((item) =>
@@ -533,7 +535,7 @@ export function SessionApprovalBanner({
                 <span className="evidence-review-index" aria-hidden="true">{index + 1}</span>
                 <div>
                   <strong>{item.evidenceId}</strong>
-                  {!isRenderableEvidence(item) && item.uri && (
+                  {!isArtifactBackedEvidence(item) && item.uri && (
                     <a
                       className="btn ghost sm"
                       href={item.uri}
@@ -544,12 +546,14 @@ export function SessionApprovalBanner({
                       View External Evidence
                     </a>
                   )}
-                  {!isRenderableEvidence(item) && !item.uri && (
+                  {!isArtifactBackedEvidence(item) && !item.uri && (
                     <p className="form-error" role="alert">This evidence has no viewable artifact or external link.</p>
                   )}
                 </div>
               </div>
-              {isRenderableEvidence(item) && <EvidenceArtifactView item={item} onStatusChange={onArtifactStatus} />}
+              {isRenderableEvidence(item)
+                ? <EvidenceArtifactView item={item} onStatusChange={onArtifactStatus} />
+                : isArtifactBackedEvidence(item) && <UnrenderableEvidenceArtifact item={item} />}
               <label className="evidence-reviewed-control">
                 <Checkbox
                   label={`Mark ${item.evidenceId} as Reviewed`}
@@ -705,6 +709,11 @@ export function SessionApprovalBanner({
                     <strong>{item.evidenceId}</strong>
                     <EvidenceArtifactView item={item} onStatusChange={onArtifactStatus} />
                   </>
+                : isArtifactBackedEvidence(item)
+                  ? <>
+                      <strong>{item.evidenceId}</strong>
+                      <UnrenderableEvidenceArtifact item={item} />
+                    </>
                 : item.uri
                   ? <a href={item.uri} target="_blank" rel="noreferrer">Open External Evidence: {item.evidenceId}</a>
                   : <p className="form-error" role="alert">This evidence has no viewable artifact or external link.</p>}

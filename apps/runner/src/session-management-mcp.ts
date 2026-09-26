@@ -789,7 +789,7 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
           uri: { type: "string", description: "HTTPS link for external evidence. Optional for a screenshot Session artifact with artifactId and mediaType." },
           sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
           artifactId: { type: "string", description: "Screenshot Session artifact of this session holding the exact bytes. Required for an Orchestrator to review the item; without it the decision goes to a human." },
-          mediaType: { type: "string", description: "Exact media type of the artifact, such as image/png. Video and unknown types go to a human." },
+          mediaType: { type: "string", description: "Exact media type of the artifact, such as image/png. It must be one the review card shows (PNG, JPEG, GIF, WebP, MP4, or WebM); any other or missing type is refused. Video goes to a human." },
         }, required: ["evidenceId", "sha256"], additionalProperties: false } },
       },
       required: ["category", "evidence"], additionalProperties: false,

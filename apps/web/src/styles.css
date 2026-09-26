@@ -2312,7 +2312,8 @@ textarea {
 /* Only a frame that is waiting for an image needs to hold its place. */
 .evidence-artifact[data-status="mismatch"],
 .evidence-artifact[data-status="unavailable"],
-.evidence-artifact[data-status="unverifiable"] {
+.evidence-artifact[data-status="unverifiable"],
+.evidence-artifact[data-status="unsupported"] {
   min-height: 0;
 }
 .evidence-artifact-thumb {
@@ -12073,6 +12074,9 @@ body.shell-dock-dragging * {
   font-size: var(--text-sm);
 }
 .approval-evidence p { color: var(--text-dim); }
+/* An evidence item that cannot be reviewed must not read as ordinary helper text. */
+.approval-evidence p.form-error,
+.approval-evidence .form-error p { color: var(--red); }
 .approval-evidence-item {
   display: flex;
   align-items: center;

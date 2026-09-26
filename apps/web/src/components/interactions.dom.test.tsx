@@ -510,6 +510,81 @@ test("UI evidence approval requires an explicit review acknowledgement and sends
   }
 });
 
+test("the inline evidence card blocks an artifact it cannot show instead of linking to its URI", async () => {
+  const evidence = [
+    { evidenceId: "vector", uri: "https://evidence.example/vector.svg", sha256: "a".repeat(64),
+      artifactId: "art_svg", mediaType: "image/svg+xml" },
+    { evidenceId: "legacy", uri: "https://evidence.example/legacy.png", sha256: "c".repeat(64) },
+  ];
+  const session = {
+    id: "session-evidence-unrenderable",
+    runnerId: "runner-1",
+    title: "Evidence Review",
+    status: "input_required",
+    pendingApproval: {
+      kind: "workflow_decision",
+      requestId: "workflow-evidence-unrenderable",
+      occurrenceId: "workflow-evidence-unrenderable",
+      title: "UI Evidence Approval Required",
+      options: [
+        { optionId: "approve", name: "Approve", kind: "allow_once" },
+        { optionId: "deny", name: "Deny", kind: "reject_once" },
+      ],
+      workflowDecision: {
+        requestId: "evidence-request",
+        occurrenceId: "workflow-evidence-unrenderable",
+        sessionId: "session-evidence-unrenderable",
+        controllingSessionId: "session-parent",
+        category: "ui_evidence_approval",
+        resourceKey: "pr-1790-ui",
+        resourceSnapshot: { category: "ui_evidence_approval", evidence },
+        resourceDigest: "b".repeat(64),
+        policyRevision: 1,
+        authority: "human",
+        status: "pending",
+        createdAt: 1,
+      },
+    },
+  } as SessionView;
+  const requests: unknown[] = [];
+  const client = {
+    ...api,
+    approve: async (_id: string, body: unknown) => {
+      requests.push(body);
+      return { ...session, status: "running", pendingApproval: null } as SessionView;
+    },
+  };
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => {
+      root.render(
+        <ApiProvider client={client}>
+          <SessionApprovalRegion session={session} runnerOnline={false} fallbackFocusRef={{ current: null }} />
+        </ApiProvider>,
+      );
+    });
+    const button = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")]
+      .find((candidate) => candidate.textContent?.includes(name))!;
+    assert.equal(container.querySelector('[href="https://evidence.example/vector.svg"]'), null);
+    assert.ok(container.querySelector('[href="https://evidence.example/legacy.png"]'), "URI-only evidence keeps its link");
+    assert.match(container.querySelector('.evidence-artifact[data-status="unsupported"]')?.textContent ?? "",
+      /This artifact is image\/svg\+xml, which the review card cannot show/u);
+    const checkbox = (evidenceId: string) =>
+      container.querySelector<HTMLInputElement>(`input[aria-label="Mark ${evidenceId} as Reviewed"]`)!;
+    assert.equal(checkbox("vector").disabled, true);
+    await act(async () => { checkbox("legacy").click(); });
+    assert.equal(button("Approve").disabled, true);
+    await act(async () => { button("Deny").click(); await tick(); });
+    assert.deepEqual(requests, [{ requestId: "workflow-evidence-unrenderable", optionId: "deny" }]);
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 function OfflineApprovalHarness({
   requestId,
   withContext,

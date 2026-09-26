@@ -241,6 +241,36 @@ test("mixed decisions show artifacts in place and keep a labelled external link 
   await page.screenshot({ path: `${SHOT}/desktop-mixed.png` });
 });
 
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "mobile", width: 390, height: 844 },
+]) {
+  test(`${viewport.name}: an artifact the card cannot show is blocked with its media type, not linked out`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await openReview(page, "items=4&artifacts=unrenderable");
+    await expect(page.locator(".evidence-review-item").first().getByRole("img")).toBeVisible();
+    await expect(page.locator('a[href*="diagram.svg"]')).toHaveCount(0);
+    for (const [id, reason] of [
+      ["vector-diagram", "This artifact is image/svg+xml, which the review card cannot show"],
+      ["untyped-capture", "This artifact declares no media type"],
+    ]) {
+      const item = page.locator(".evidence-review-item", { hasText: id });
+      await item.scrollIntoViewIfNeeded();
+      await expect(item.getByRole("alert")).toContainText(reason);
+      await expect(item.getByRole("link")).toHaveCount(0);
+      await expect(item.getByRole("checkbox")).toBeDisabled();
+    }
+    const legacy = page.locator(".evidence-review-item", { hasText: "viewport-2" });
+    await expect(legacy.getByRole("link", { name: "View External Evidence: viewport-2" })).toBeVisible();
+    await legacy.getByRole("checkbox").check();
+    await page.locator(".evidence-review-item", { hasText: "viewport-1" }).getByRole("checkbox").check();
+    expect(await artifactRequests(page)).not.toContain("art_svg");
+    await expect(page.getByRole("button", { name: "Approve" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Deny" })).toBeEnabled();
+    await page.screenshot({ path: `${SHOT}/${viewport.name}-unrenderable.png` });
+  });
+}
+
 test("a large review loads images as they approach the viewport, not all at once", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 640 });
   await openReview(page, "items=32&artifacts=ready");

@@ -313,28 +313,60 @@ test("a digest mismatch or an unavailable artifact shows no image and cannot cou
   }
 });
 
-test("URI-only and non-raster evidence keep a labelled external link, and mixed decisions show both", async () => {
+test("URI-only evidence keeps a labelled external link, and mixed decisions show both", async () => {
   domWindow.localStorage.clear();
   const view = await mount(sessionWith([
     artifactItem(),
     { evidenceId: "legacy", uri: "https://evidence.example/legacy.png", sha256: "1".repeat(64) },
     { evidenceId: "clip", uri: "https://evidence.example/clip.webm", sha256: "2".repeat(64), mediaType: "video/webm" },
-    artifactItem({ evidenceId: "vector", artifactId: "art_svg", mediaType: "image/svg+xml" }),
   ]), async () => new Blob([PNG]));
   try {
     assert.deepEqual(view.requests, ["art_desktop"], "only a renderable raster artifact is fetched");
     await view.decode("load");
     assert.equal(view.container.querySelectorAll(".evidence-artifact").length, 1);
-    for (const evidenceId of ["legacy", "clip", "vector"]) {
+    for (const evidenceId of ["legacy", "clip"]) {
       const link = view.container.querySelector(`a[aria-label="View External Evidence: ${evidenceId}"]`);
       assert.ok(link, `${evidenceId} keeps an external link, labelled as external`);
       assert.equal(view.checkbox(evidenceId).disabled, false, `${evidenceId} is reviewable as before`);
     }
     // Every item reviewed, and only then, enables approval.
-    for (const evidenceId of ["desktop-after", "legacy", "clip"]) await act(async () => view.checkbox(evidenceId).click());
+    for (const evidenceId of ["desktop-after", "legacy"]) await act(async () => view.checkbox(evidenceId).click());
     assert.equal(view.button("Approve").disabled, true);
-    await act(async () => view.checkbox("vector").click());
+    await act(async () => view.checkbox("clip").click());
     assert.equal(view.button("Approve").disabled, false);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an artifact the card cannot show is blocked with its media type and never falls back to its URI", async () => {
+  domWindow.localStorage.clear();
+  // A mark saved before this rule existed must not carry over either.
+  saveEvidenceReviewDraft("local", "session-artifact-evidence", "occurrence-1", RESOURCE_DIGEST, ["vector", "untyped"]);
+  const view = await mount(sessionWith([
+    artifactItem(),
+    artifactItem({ evidenceId: "vector", artifactId: "art_svg", mediaType: "image/svg+xml",
+      uri: "https://evidence.example/vector.svg" }),
+    artifactItem({ evidenceId: "untyped", artifactId: "art_untyped", mediaType: undefined,
+      uri: "https://evidence.example/untyped.bin" }),
+  ]), async () => new Blob([PNG]));
+  try {
+    assert.deepEqual(view.requests, ["art_desktop"], "an artifact the card cannot show is not fetched");
+    await view.decode("load");
+    assert.equal(view.container.querySelectorAll("a[href]").length, 0, "no external link stands in for an artifact");
+    const blocked = (evidenceId: string) => [...view.container.querySelectorAll(".evidence-review-item")]
+      .find((item) => item.querySelector("strong")?.textContent === evidenceId)!
+      .querySelector('.evidence-artifact[data-status="unsupported"] [role="alert"]')?.textContent ?? "";
+    assert.match(blocked("vector"), /This artifact is image\/svg\+xml, which the review card cannot show/u);
+    assert.match(blocked("untyped"), /This artifact declares no media type/u);
+    for (const evidenceId of ["vector", "untyped"]) {
+      assert.equal(view.checkbox(evidenceId).disabled, true, `${evidenceId} cannot be marked reviewed`);
+      assert.equal(view.checkbox(evidenceId).checked, false, `${evidenceId} does not show the saved mark`);
+    }
+    await act(async () => view.checkbox("desktop-after").click());
+    assert.equal(view.container.querySelector('[role="status"]')?.textContent, "1 of 3 Reviewed");
+    assert.equal(view.button("Approve").disabled, true, "approval stays blocked");
+    assert.equal(view.button("Deny").disabled, false, "the reviewer can still deny");
   } finally {
     await view.unmount();
   }

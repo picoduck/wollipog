@@ -20187,6 +20187,82 @@ test("a stale human review card cannot approve URI-free evidence without the exa
   }
 });
 
+test("an evidence artifact the review card cannot show is refused at request time, even with a URI (#1790)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const image = h.screenshot(child.id, "after");
+    for (const [requestId, item] of [
+      ["svg", { ...image.item, mediaType: "image/svg+xml" }],
+      ["unknown-media", { ...image.item, mediaType: undefined }],
+      ["svg-artifact-only", { ...image.item, uri: undefined, mediaType: "image/svg+xml" }],
+    ] as const) {
+      const decision = h.request(child.id, requestId, [JSON.parse(JSON.stringify(item))]);
+      assert.equal(decision.status, 400, requestId);
+      assert.match(decision.error ?? "", /renderable Session artifacts/u, requestId);
+    }
+    assert.equal(h.db.pendingWorkflowDecisionsForSession(child.id).length, 0);
+    // Evidence without an artifact is still reviewed through its labelled link.
+    const external = h.request(child.id, "external", [{ evidenceId: "after", uri: image.item.uri, sha256: image.item.sha256 }]);
+    assert.ok(external.ok, external.error);
+  } finally {
+    h.db.close();
+  }
+});
+
+test("a stored decision naming an artifact the review card cannot show can be denied but not approved (#1790)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const image = h.screenshot(child.id, "after");
+    const decision = h.request(child.id, "legacy-svg", [{ evidenceId: "after", uri: image.item.uri, sha256: image.item.sha256 }]);
+    assert.ok(decision.ok && decision.data, decision.error);
+    // A decision created before request validation refused this shape.
+    h.db.raw().prepare("UPDATE workflow_decisions SET resource_snapshot=? WHERE occurrence_id=?").run(JSON.stringify({
+      category: "ui_evidence_approval",
+      evidence: [{ ...image.item, mediaType: "image/svg+xml" }],
+    }), decision.data.occurrenceId);
+    const resolve = (optionId: string) => h.svc.approve(child.id, decision.data!.occurrenceId, optionId,
+      { kind: "human", id: "owner" }, undefined, () => true, optionId === "approve" ? ["after"] : undefined);
+    const approved = resolve("approve");
+    assert.equal(approved.status, 409);
+    assert.match(approved.error ?? "", /"after" is an artifact the review card cannot show; deny this decision/u);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "pending");
+    assert.ok(resolve("deny").ok, "the human can still deny it");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "denied");
+  } finally {
+    h.db.close();
+  }
+});
+
+test("an occurrence approved before the request-time check can still be consumed (#1790)", async () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    assert.ok(h.svc.setParentControlPolicy(h.parent.id,
+      { ...h.decisions, ui_evidence_approval: "human" }, 1, { kind: "human", id: "owner" }).ok);
+    const child = h.createChild("UI Child");
+    const image = h.screenshot(child.id, "after");
+    const decision = h.request(child.id, "legacy-approved", [{ evidenceId: "after", uri: image.item.uri, sha256: image.item.sha256 }]);
+    assert.ok(decision.ok && decision.data, decision.error);
+    assert.ok(h.svc.approve(child.id, decision.data.occurrenceId, "approve",
+      { kind: "human", id: "owner" }, undefined, () => true, ["after"]).ok);
+    // The occurrence as a pre-change control plane could have stored and approved it.
+    const legacy = { category: "ui_evidence_approval", evidence: [{
+      evidenceId: "after", uri: image.item.uri, sha256: image.item.sha256,
+      artifactId: image.item.artifactId, mediaType: "image/svg+xml",
+    }] };
+    h.db.raw().prepare("UPDATE workflow_decisions SET resource_snapshot=?, resource_digest=? WHERE occurrence_id=?").run(
+      JSON.stringify(legacy), createHash("sha256").update(JSON.stringify(legacy), "utf8").digest("hex"),
+      decision.data.occurrenceId);
+    const consumed = await h.svc.consumeWorkflowDecision(child.id, decision.data.occurrenceId,
+      { resourceSnapshot: legacy as never });
+    assert.ok(consumed.ok, consumed.error);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "consumed");
+  } finally {
+    h.db.close();
+  }
+});
+
 test("unreviewable UI evidence falls back to the human with a specific reason and never blocks other work", () => {
   const h = uiEvidenceReviewHarness();
   try {
@@ -20198,8 +20274,6 @@ test("unreviewable UI evidence falls back to the human with a specific reason an
     const cases: Array<[string, unknown, string]> = [
       ["video", clip.item, "media_video_unsupported"],
       ["external", { evidenceId: "after", uri: image.item.uri, sha256: image.item.sha256 }, "provider_untrusted"],
-      ["unknown-media", { ...image.item, mediaType: undefined }, "media_unsupported"],
-      ["svg", { ...image.item, mediaType: "image/svg+xml" }, "media_unsupported"],
       ["digest", { ...image.item, sha256: "c".repeat(64) }, "artifact_mismatch"],
       ["foreign", h.screenshot(other.id, "foreign").item, "artifact_unavailable"],
     ];
