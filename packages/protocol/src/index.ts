@@ -586,7 +586,9 @@
 //      and deletes the runner-created credential home unless a session still depends on it. A new
 //      sign-in whose provider identity matches an account already on the Machine is discarded
 //      instead of being recorded twice. Older runners do not offer removal.
-export const PROTOCOL_VERSION = 188;
+// 189: an Orchestrator may receive every frame of a strictly bounded source video through the
+//      existing one-image MCP result, in manifest order. Old runners must retain human ownership.
+export const PROTOCOL_VERSION = 189;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -816,6 +818,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** Runner attests `AgentCapabilities.imageToolResults`. Before it, nothing states whether a
    * harness shows the model an image returned by a tool, so review cannot be delegated. */
   orchestratorImageToolResults: 179,
+  orchestratorVideoFrameReview: 189,
   /** Pi driver never reports a provider-acknowledged steer as a definite `stale_turn` (#1433).
    * Gates Pi's admission to the automatic mid-turn steering lane; an older runner would re-queue
    * such a steer as an ordinary prompt and deliver the message twice. */
@@ -2113,6 +2116,16 @@ export interface UiEvidenceReviewReceipt {
   artifactId: string;
   sha256: string;
   deliveredAt: number;
+  /** Server-assigned order for a video-frame delivery within this occurrence, including redeliveries. */
+  deliveryOrder?: number;
+  /** Present only for a trusted, complete source-video manifest frame. */
+  videoFrame?: {
+    sourceArtifactId: string;
+    sourceSha256: string;
+    manifestSha256: string;
+    index: number;
+    ptsMs: number;
+  };
 }
 
 /** One digest-verified evidence item as delivered to the reviewing Orchestrator's runner. */
@@ -3689,6 +3702,24 @@ export type WorkflowDecisionResourceSnapshot =
         /** Declared media type. Absent means unknown, which is never Orchestrator-reviewable. */
         mediaType?: string;
       }>;
+      /** Server-derived visual sequence of every presentation frame of one bounded source video.
+       * Child requests cannot supply this: the server computes it from the stored Session bytes. */
+      videoReview?: {
+        sourceEvidenceId: string;
+        sourceArtifactId: string;
+        sourceSha256: string;
+        /** Digest of the child's exact original request, before trusted frame derivation. */
+        originalRequestSha256: string;
+        profile: "short-silent-webm-vp9-v1";
+        manifestSha256: string;
+        frames: Array<{
+          evidenceId: string;
+          artifactId: string;
+          sha256: string;
+          index: number;
+          ptsMs: number;
+        }>;
+      };
     };
 
 export type WorkflowDecisionStatus =
@@ -4032,6 +4063,14 @@ export interface GovernanceAuditEntry {
     evidenceReferences?: string[];
     /** Evidence identity + content digest pairs, and the receipts an Orchestrator approval spent. */
     evidenceDigests?: Array<{ evidenceId: string; sha256: string }>;
+    /** Source and complete-manifest identities for a server-derived video sequence, never media bytes. */
+    videoReview?: {
+      sourceEvidenceId: string;
+      sourceArtifactId: string;
+      sourceSha256: string;
+      manifestSha256: string;
+      frameCount: number;
+    };
     reviewReceiptIds?: string[];
     rationaleDigest?: string;
     /** v166: digest of the child-facing message; its text lives only on the decision. */

@@ -946,15 +946,25 @@ human-owned with a `humanFallback` code and reason shown on the request card:
 
 Video (`media_video_unsupported`), an image type the Orchestrator's client does not accept, such as
 GIF for Codex App Server (`media_unsupported`), and evidence that lives only behind a URI
-(`provider_untrusted`) always go to the human. The control plane never
-fetches a child-supplied URL; the URI is display material for the human reviewer only. A screenshot
-Session artifact can be submitted without a URI when it names its `artifactId`, raster `mediaType`,
-and SHA-256. A first-class MP4 or WebM Session artifact can also be submitted without a URI, but
-video remains human-owned: no installed Orchestrator client is audited to deliver its motion to the
-model, so an artifact and a matching digest alone cannot create a review receipt. An item that names
-an `artifactId` must declare a media type the human review card can show (a raster image, MP4, or
-WebM); any other or missing media type is refused when the decision is requested, with or without a
-URI. URI-only evidence still requires a safe HTTPS link. Campaign-level
+(`provider_untrusted`) normally go to the human. The control plane never fetches a child-supplied
+URL; the URI is display material for the human reviewer only. A screenshot Session artifact can be
+submitted without a URI when it names its `artifactId`, raster `mediaType`, and SHA-256. A first-class
+MP4 or WebM Session artifact can also be submitted without a URI, but video remains human-owned by
+default: an artifact and a matching digest alone cannot create a review receipt.
+Protocol v189 has a candidate short, silent WebM/VP9 path that derives every presentation frame from
+the verified original Session artifact and requires an ordered, acknowledged image receipt for each.
+It is **off** unless a control-plane operator sets
+`CONTROL_PLANE_VIDEO_FRAME_REVIEW_VALIDATION_SESSION_ID` to one exact controlling Session ID
+before startup. The operator must create that dedicated Session before selecting it. Any malformed
+value fails startup; the exact Session remains subject to the existing
+human-set UI Evidence Approval policy and runner/model/client checks. Other Sessions stay human-owned.
+The operator must not set this for ordinary campaigns until the real App Server frame handoff and
+model-cost ceiling have been validated. Removing or changing the value on restart revokes pending
+delegated video decisions for the old Session. This is a dogfood validation scope, not a general
+video capability claim. An item that names an `artifactId` must declare a media type the human review
+card can show (a raster image, MP4, or WebM); any other or missing media type is refused when the
+decision is requested, with or without a URI. URI-only evidence still requires a safe HTTPS link.
+Campaign-level
 unavailability is reported as `uiEvidenceReview.reasonCode` and `reason` on the campaign projection.
 A human fallback is scoped to that one decision: other children and other assigned categories are
 unaffected.

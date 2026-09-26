@@ -789,7 +789,7 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
           uri: { type: "string", description: "HTTPS link for external evidence. Optional for a screenshot Session artifact with artifactId and mediaType." },
           sha256: { type: "string", pattern: "^[0-9a-f]{64}$" },
           artifactId: { type: "string", description: "Screenshot Session artifact of this session holding the exact bytes. Required for an Orchestrator to review the item; without it the decision goes to a human." },
-          mediaType: { type: "string", description: "Exact media type of the artifact, such as image/png. It must be one the review card shows (PNG, JPEG, GIF, WebP, MP4, or WebM); any other or missing type is refused. Video goes to a human." },
+          mediaType: { type: "string", description: "Exact media type of the artifact, such as image/png. It must be one the review card shows (PNG, JPEG, GIF, WebP, MP4, or WebM); any other or missing type is refused. Video normally goes to a human; only exact operator-enabled short-frame validation may delegate it." },
         }, required: ["evidenceId", "sha256"], additionalProperties: false } },
       },
       required: ["category", "evidence"], additionalProperties: false,
@@ -1765,7 +1765,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "attach_session_artifact",
-    description: "Attach an image or short video file from disk to your own session. The runner uploads it directly, so its bytes never enter your context. Returns only metadata. Images (PNG, JPEG, GIF, WebP) are limited to 8 MiB; MP4 and WebM videos to 32 MiB. Cite image artifactId, mediaType, and sha256 in UI evidence for Orchestrator review; video evidence still routes to a human. Never base64 media into a tool argument. Subject to session permissions and governance policies.",
+    description: "Attach an image or short video file from disk to your own session. The runner uploads it directly, so its bytes never enter your context. Returns only metadata. Images (PNG, JPEG, GIF, WebP) are limited to 8 MiB; MP4 and WebM videos to 32 MiB. Cite artifactId, mediaType, and sha256 in UI evidence. Video normally routes to a human; only an operator-enabled validation campaign may delegate bounded short-video frames. Never base64 media into a tool argument. Subject to session permissions and governance policies.",
     inputSchema: {
       type: "object",
       properties: {

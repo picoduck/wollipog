@@ -50,6 +50,7 @@ import { automationCommandDigest, canonicalAutomationCommandJson } from "./autom
 import { Hub, RunnerRequestNotSentError, RunnerRequestTimeoutError, type RunnerRequestResult } from "./hub.js";
 import { agentDelegationAuthorizationError, type AgentPrincipal } from "./identity.js";
 import { pushDecision } from "./push-decision.js";
+import { shortVideoDecoderAvailable } from "./video-frame-decode.js";
 import { SessionTitleGenerationError, type SessionTitleGenerator } from "./session-title-generator.js";
 import {
   SessionsService,
@@ -19955,9 +19956,11 @@ function uiEvidenceReviewHarness(
   protocolVersion = PROTOCOL_VERSION,
   imageModel = true,
   capabilities?: NonNullable<RunnerMetadata["agents"][number]["capabilities"]>,
+  videoFrameReviewCandidateEnabled = false,
 ) {
   const { db, hub } = makeHarness();
-  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG,
+    undefined, undefined, undefined, undefined, undefined, undefined, videoFrameReviewCandidateEnabled);
   const meta = runnerMeta();
   meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = capabilities ?? {
     models: [{ id: "vision", name: "Vision", default: true, inputModalities: imageModel ? ["text", "image"] : ["text"] }],
@@ -20033,6 +20036,353 @@ function uiEvidenceReviewHarness(
   };
   return { db, hub, svc, parent: parent.data, createChild, decisions, screenshot, video, request, review };
 }
+
+const transientVideoBytes = () => readFileSync(new URL(
+  "../test-fixtures/video-review-one-frame-transient.webm", import.meta.url));
+
+test("video review stays human-owned by default and older peers keep a specific fallback", async () => {
+  for (const [version, validated] of [[PROTOCOL_VERSION, false],
+    [RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorVideoFrameReview - 1, true]] as const) {
+    const h = uiEvidenceReviewHarness(version, true, undefined, validated);
+    try {
+      const child = h.createChild("Video Child");
+      const bytes = transientVideoBytes();
+      const attached = h.svc.attachSessionVideo(child.id, {
+        name: "motion.webm", mimeType: "video/webm", data: bytes.toString("base64"),
+      }, { kind: "agent", id: child.id });
+      assert.ok(attached.ok && attached.data, attached.error);
+      const item = { evidenceId: "motion", artifactId: attached.data.artifactId,
+        sha256: attached.data.sha256, mediaType: "video/webm" };
+      const decision = await h.svc.createWorkflowDecisionWithVideo(child.id, {
+        requestId: `video-${version}-${validated}`, resourceKey: "video-ui",
+        resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
+      });
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.equal(decision.data.authority, "human");
+      assert.equal(decision.data.humanFallback?.code, "media_video_unsupported");
+      assert.match(decision.data.humanFallback?.reason ?? "", validated ? /runner cannot attest/ : /live App Server/);
+      assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id,
+        decision.data.occurrenceId, "motion", () => true).status, 403);
+      assert.equal(h.svc.createWorkflowDecision(child.id, {
+        requestId: "forged-video-manifest", resourceKey: "forged-video-manifest",
+        resourceSnapshot: { category: "ui_evidence_approval", evidence: [item], videoReview: {
+          sourceEvidenceId: "motion", sourceArtifactId: item.artifactId,
+          sourceSha256: item.sha256, profile: "short-silent-webm-vp9-v1",
+          manifestSha256: "a".repeat(64), frames: [],
+        } } as never,
+      }).status, 400, "a child cannot supply the server-derived manifest");
+    } finally { h.db.close(); }
+  }
+  const human = uiEvidenceReviewHarness();
+  try {
+    assert.ok(human.svc.setParentControlPolicy(human.parent.id,
+      { ...human.decisions, ui_evidence_approval: "human" }, 1,
+      { kind: "human", id: "owner" }).ok);
+    const child = human.createChild("Human Video Child");
+    const clip = human.video(child.id, "human-clip");
+    const decision = await human.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: "human-video", resourceKey: "human-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [clip.item] },
+    });
+    assert.equal(decision.data?.authority, "human");
+    assert.equal(decision.data?.humanFallback, undefined,
+      "human ownership by choice must not be described as a capability fallback");
+  } finally { human.db.close(); }
+  const textOnly = uiEvidenceReviewHarness(PROTOCOL_VERSION, false);
+  try {
+    const child = textOnly.createChild("Text-Only Video Child");
+    const clip = textOnly.video(child.id, "text-only-clip");
+    const decision = await textOnly.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: "text-only-video", resourceKey: "text-only-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [clip.item] },
+    });
+    assert.equal(decision.data?.humanFallback?.code, "model_unsupported",
+      "the inactive video candidate must not hide a model-specific fallback");
+  } finally { textOnly.db.close(); }
+});
+
+test("operator video validation is confined to one controller and revokes review when scope changes", async (t) => {
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
+  const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, undefined, true);
+  const scoped = (controllerId: string) => new SessionsService(h.db, h.hub as unknown as Hub, NOOP_LOG,
+    undefined, undefined, undefined, undefined, undefined, undefined, true, controllerId);
+  try {
+    const child = h.createChild("Scoped Video Child");
+    const attached = h.svc.attachSessionVideo(child.id, {
+      name: "transient.webm", mimeType: "video/webm", data: transientVideoBytes().toString("base64"),
+    }, { kind: "agent", id: child.id });
+    assert.ok(attached.ok && attached.data, attached.error);
+    const item = { evidenceId: "transient", artifactId: attached.data.artifactId,
+      sha256: attached.data.sha256, mediaType: "video/webm" };
+    const request = (svc: SessionsService, requestId: string) => svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId, resourceKey: requestId,
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
+    });
+    const outside = scoped("s_000000000000");
+    const refused = await request(outside, "not-allowlisted");
+    assert.equal(refused.data?.authority, "human");
+    assert.equal(refused.data?.humanFallback?.code, "media_video_unsupported");
+    assert.match(refused.data?.humanFallback?.reason ?? "", /different controlling Session/u);
+    assert.equal(refused.data?.resourceSnapshot.category === "ui_evidence_approval" &&
+      refused.data.resourceSnapshot.videoReview, undefined,
+    "an unrelated campaign cannot trigger server-side frame derivation");
+
+    const inside = scoped(h.parent.id);
+    const delegated = await request(inside, "allowlisted");
+    assert.ok(delegated.ok && delegated.data, delegated.error);
+    assert.equal(delegated.data.authority, "orchestrator");
+    const snapshot = delegated.data.resourceSnapshot;
+    assert.equal(snapshot.category, "ui_evidence_approval");
+    if (snapshot.category !== "ui_evidence_approval") return;
+    assert.equal(snapshot.videoReview?.frames.length, 6);
+    const first = snapshot.videoReview!.frames[0]!;
+    const delivered = inside.reviewDescendantUiEvidence(h.parent.id, child.id,
+      delegated.data.occurrenceId, first.evidenceId, () => true);
+    assert.ok(delivered.ok && delivered.data, delivered.error);
+    assert.ok(inside.acknowledgeDescendantUiEvidence(h.parent.id,
+      delivered.data.receipt.receiptId, delivered.data.receipt.sha256).ok);
+
+    // A changed operator allowlist has the same effect as a revoked capability: even an
+    // acknowledged old receipt cannot keep the pending decision Orchestrator-owned.
+    const afterScopeChange = outside.reviewDescendantUiEvidence(h.parent.id, child.id,
+      delegated.data.occurrenceId, first.evidenceId, () => true);
+    assert.equal(afterScopeChange.status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(delegated.data.occurrenceId)?.status, "revoked");
+    assert.equal(h.db.validUiEvidenceReviewReceipts(
+      delegated.data.occurrenceId, h.parent.id, Date.now()).length, 0);
+  } finally { h.db.close(); }
+});
+
+test("validated local video path binds all source frames, ordered receipts, source digest, and exact occurrence", async (t) => {
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
+  const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, undefined, true);
+  try {
+    const child = h.createChild("Video Child");
+    const bytes = transientVideoBytes();
+    const attached = h.svc.attachSessionVideo(child.id, {
+      name: "motion.webm", mimeType: "video/webm", data: bytes.toString("base64"),
+    }, { kind: "agent", id: child.id });
+    assert.ok(attached.ok && attached.data, attached.error);
+    const item = { evidenceId: "motion", artifactId: attached.data.artifactId,
+      sha256: attached.data.sha256, mediaType: "video/webm" };
+    const oversizedId = await h.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: "video-long-id", resourceKey: "video-long-id",
+      resourceSnapshot: { category: "ui_evidence_approval",
+        evidence: [{ ...item, evidenceId: "x".repeat(248) }] },
+    });
+    assert.equal(oversizedId.data?.authority, "human");
+    assert.match(oversizedId.data?.humanFallback?.reason ?? "", /identifier is too long/);
+    const request = (id: string) => h.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: id, resourceKey: "video-ui",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
+    });
+    const [pending, concurrentReplay, deniedReplay] = await Promise.all([
+      request("video-first"), request("video-first"),
+      h.svc.createWorkflowDecisionWithVideo(child.id, {
+        requestId: "video-first", resourceKey: "video-ui",
+        resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
+      }, () => false),
+    ]);
+    assert.ok(pending.ok && pending.data, pending.error);
+    assert.equal(deniedReplay.status, 404,
+      "an out-of-audience caller cannot join an authorized in-flight review");
+    assert.equal(concurrentReplay.data?.occurrenceId, pending.data.occurrenceId,
+      "same-key in-flight retries join one derivation and one occurrence");
+    assert.equal((await request("video-first")).data?.occurrenceId, pending.data.occurrenceId,
+      "a retry replays the exact prior decision without a second decode");
+    assert.equal(pending.data.authority, "orchestrator");
+    const snapshot = pending.data.resourceSnapshot;
+    assert.equal(snapshot.category, "ui_evidence_approval");
+    if (snapshot.category !== "ui_evidence_approval") return;
+    const manifest = snapshot.videoReview;
+    assert.ok(manifest);
+    assert.equal(manifest.sourceSha256, createHash("sha256").update(bytes).digest("hex"));
+    assert.deepEqual(manifest.frames.map((frame) => frame.ptsMs), [0, 500, 1000, 1500, 2000, 2500]);
+    assert.equal(new Set(manifest.frames.map((frame) => frame.sha256)).size, 2,
+      "the one-frame visual transient survives the complete manifest");
+    const occurrence = pending.data.occurrenceId;
+    const approve = (id: string) => h.svc.resolveDescendantRequest(h.parent.id, child.id, id,
+      { action: "resolve_workflow_decision", outcome: "approve",
+        evidenceReviewed: manifest.frames.map((frame) => frame.evidenceId) }, () => true);
+    assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, occurrence,
+      manifest.frames[1]!.evidenceId, () => true).status, 409, "later frames cannot arrive first");
+    assert.equal(approve(occurrence).status, 409, "identifiers alone are not review receipts");
+    const first = h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, occurrence,
+      manifest.frames[0]!.evidenceId, () => true);
+    assert.ok(first.ok && first.data, first.error);
+    assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, occurrence,
+      manifest.frames[1]!.evidenceId, () => true).status, 409, "delivery without runner acknowledgement is insufficient");
+    assert.ok(h.svc.acknowledgeDescendantUiEvidence(h.parent.id,
+      first.data.receipt.receiptId, first.data.receipt.sha256).ok);
+    for (const frame of manifest.frames.slice(1)) {
+      const reviewed = h.review(child.id, occurrence, frame.evidenceId);
+      assert.ok(reviewed.ok && reviewed.data, reviewed.error);
+      assert.equal(reviewed.data.receipt.videoFrame?.sourceSha256, manifest.sourceSha256);
+      assert.equal(reviewed.data.receipt.videoFrame?.manifestSha256, manifest.manifestSha256);
+      assert.equal(reviewed.data.receipt.videoFrame?.index, frame.index);
+    }
+    assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id, occurrence,
+      manifest.frames[0]!.evidenceId, () => true).status, 409,
+    "earlier frames cannot be redelivered after later frames");
+    const receipts = h.db.validUiEvidenceReviewReceipts(occurrence, h.parent.id, Date.now());
+    assert.deepEqual(receipts.map((receipt) => receipt.deliveryOrder), [1, 2, 3, 4, 5, 6]);
+    assert.ok(approve(occurrence).ok);
+    const audit = h.db.listGovernanceAudit(child.id).find((record) =>
+      record.requestId === occurrence && record.outcome === "allowed");
+    assert.deepEqual(audit?.workflowDecision?.videoReview, {
+      sourceEvidenceId: "motion", sourceArtifactId: item.artifactId,
+      sourceSha256: manifest.sourceSha256, manifestSha256: manifest.manifestSha256, frameCount: 6,
+    });
+    assert.equal(h.db.validUiEvidenceReviewReceipts(occurrence, h.parent.id, Date.now()).length, 0);
+    const consumed = await h.svc.consumeWorkflowDecision(child.id, occurrence, {
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
+    });
+    assert.ok(consumed.ok, consumed.error);
+    assert.equal(consumed.data?.status, "consumed", "the child can use its exact original request after approval");
+
+    const storedSnapshot = await request("video-stored-snapshot");
+    assert.ok(storedSnapshot.ok && storedSnapshot.data, storedSnapshot.error);
+    for (const frame of manifest.frames) {
+      assert.ok(h.review(child.id, storedSnapshot.data.occurrenceId, frame.evidenceId).ok);
+    }
+    assert.ok(approve(storedSnapshot.data.occurrenceId).ok);
+    const storedConsumed = await h.svc.consumeWorkflowDecision(child.id,
+      storedSnapshot.data.occurrenceId, { resourceSnapshot: storedSnapshot.data.resourceSnapshot });
+    assert.equal(storedConsumed.data?.status, "consumed",
+      "the child can also echo the exact server snapshot returned by get_workflow_decision");
+
+    const superseded = await request("video-stale");
+    assert.ok(superseded.ok && superseded.data, superseded.error);
+    const frameId = manifest.frames[0]!.evidenceId;
+    assert.ok(h.review(child.id, superseded.data.occurrenceId, frameId).ok);
+    const replacement = await request("video-replacement");
+    assert.ok(replacement.ok && replacement.data, replacement.error);
+    assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id,
+      superseded.data.occurrenceId, frameId, () => true).status, 409);
+    assert.equal(approve(replacement.data.occurrenceId).status, 409,
+      "a replacement occurrence cannot reuse prior receipts");
+    h.db.deleteWorkflowArtifact(item.artifactId);
+    assert.equal(h.db.workflowArtifactExportPreflight(manifest.frames[0]!.artifactId), null,
+      "derived frames are removed with their source Session artifact");
+    assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id,
+      replacement.data.occurrenceId, frameId, () => true).status, 409,
+      "source-video removal invalidates derived frames");
+    assert.equal(h.db.workflowDecisionByOccurrence(replacement.data.occurrenceId)?.status, "revoked");
+    h.db.updateSessionConfig(h.parent.id, { model: "text-only", permissionMode: "orchestrator" }, Date.now());
+    assert.equal((await request("video-first")).data?.occurrenceId, pending.data.occurrenceId,
+      "a changed client capability does not turn exact request replay into a digest conflict");
+  } finally { h.db.close(); }
+});
+
+test("video frame tampering and policy revocation invalidate a pending review", async (t) => {
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
+  const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, undefined, true);
+  try {
+    const child = h.createChild("Video Child");
+    const attached = h.svc.attachSessionVideo(child.id, {
+      name: "motion.webm", mimeType: "video/webm", data: transientVideoBytes().toString("base64"),
+    }, { kind: "agent", id: child.id });
+    assert.ok(attached.ok && attached.data, attached.error);
+    const item = { evidenceId: "motion", artifactId: attached.data.artifactId,
+      sha256: attached.data.sha256, mediaType: "video/webm" };
+    const request = (id: string) => h.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: id, resourceKey: "video-ui",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
+    });
+    const tampered = await request("video-frame-tamper");
+    assert.ok(tampered.ok && tampered.data, tampered.error);
+    const snapshot = tampered.data.resourceSnapshot;
+    assert.equal(snapshot.category, "ui_evidence_approval");
+    if (snapshot.category !== "ui_evidence_approval") return;
+    const first = snapshot.videoReview?.frames[0];
+    assert.ok(first);
+    h.db.deleteWorkflowArtifact(first.artifactId);
+    assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id,
+      tampered.data.occurrenceId, first.evidenceId, () => true).status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(tampered.data.occurrenceId)?.status, "revoked");
+    const policy = await request("video-policy-revocation");
+    assert.ok(policy.ok && policy.data, policy.error);
+    assert.equal(policy.data.authority, "orchestrator");
+    assert.ok(h.svc.setParentControlPolicy(h.parent.id,
+      { ...h.decisions, ui_evidence_approval: "human" }, 1, { kind: "human", id: "owner" }).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(policy.data.occurrenceId)?.status, "revoked");
+    assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id,
+      policy.data.occurrenceId, first.evidenceId, () => true).status, 409);
+  } finally { h.db.close(); }
+});
+
+test("retention pruning removes video-derived frames and unsupported mixed evidence stays original", async (t) => {
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
+  const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, undefined, true);
+  try {
+    const child = h.createChild("Video Retention Child");
+    const attached = h.svc.attachSessionVideo(child.id, {
+      name: "motion.webm", mimeType: "video/webm", data: transientVideoBytes().toString("base64"),
+    }, { kind: "agent", id: child.id });
+    assert.ok(attached.ok && attached.data, attached.error);
+    const item = { evidenceId: "motion", artifactId: attached.data.artifactId,
+      sha256: attached.data.sha256, mediaType: "video/webm" };
+    const mixed = await h.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: "mixed-video", resourceKey: "mixed-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [
+        { evidenceId: "external", uri: "https://evidence.example/remote.png", sha256: "a".repeat(64) }, item,
+      ] },
+    });
+    assert.equal(mixed.data?.authority, "human");
+    assert.equal(mixed.data?.resourceSnapshot.category, "ui_evidence_approval");
+    if (mixed.data?.resourceSnapshot.category === "ui_evidence_approval") {
+      assert.deepEqual(mixed.data.resourceSnapshot.evidence[1], item,
+        "a human card retains the original video rather than derived frames");
+      assert.equal(mixed.data.resourceSnapshot.videoReview, undefined);
+    }
+    const derived = await h.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: "retained-video", resourceKey: "retained-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
+    });
+    assert.ok(derived.ok && derived.data, derived.error);
+    const snapshot = derived.data.resourceSnapshot;
+    assert.equal(snapshot.category, "ui_evidence_approval");
+    if (snapshot.category !== "ui_evidence_approval") return;
+    const frameId = snapshot.videoReview?.frames[0]?.artifactId;
+    assert.ok(frameId);
+    assert.ok(h.db.workflowArtifactExportPreflight(frameId));
+    const forgedBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.from("agent screenshot")]);
+    const forged = h.svc.createWorkflowArtifact({
+      sessionId: child.id, kind: "screenshot", name: "agent.png", mimeType: "image/png",
+      encoding: "base64", data: forgedBytes.toString("base64"),
+      metadata: { purpose: "video_review_frame", sourceArtifactId: item.artifactId },
+    }, { kind: "agent", id: child.id });
+    assert.ok(forged.ok && forged.data, forged.error);
+    const unrelated = h.screenshot(child.id, "rollback-safe");
+    const rawDb = (h.db as unknown as { db: { exec: (sql: string) => void } }).db;
+    rawDb.exec("BEGIN IMMEDIATE");
+    try {
+      assert.equal(h.db.deleteWorkflowArtifact(unrelated.item.artifactId), true,
+        "artifact deletion joins an existing transaction");
+    } finally { rawDb.exec("ROLLBACK"); }
+    assert.deepEqual(h.db.readWorkflowArtifactBytes(unrelated.item.artifactId), unrelated.bytes,
+      "rolling back an outer transaction does not lose its artifact blob");
+    assert.ok(h.db.pruneExpiredSessionAttachments(Date.now() + 1000) >= 1);
+    assert.equal(h.db.workflowArtifactExportPreflight(item.artifactId), null);
+    assert.equal(h.db.workflowArtifactExportPreflight(frameId), null,
+      "retention pruning of the source also removes every server-derived frame");
+    assert.ok(h.db.workflowArtifactExportPreflight(forged.data.artifactId),
+      "agent-authored metadata cannot nominate a screenshot for frame cleanup");
+  } finally { h.db.close(); }
+});
 
 test("campaign policy delivered to a child names no manager tool the child toolset lacks (#1278)", async () => {
   const listTools = async (orchestrator: boolean) => {
