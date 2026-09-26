@@ -196,6 +196,12 @@ for (const width of [320, 1280]) {
       await expect(highlighted.locator(".background-delivery-summary")).toContainText("Recovery");
       await expect(highlighted.locator(".background-delivery-summary")).toContainText("Your Action");
       await expect(highlighted.locator("details code")).not.toBeVisible();
+      if (watchdogState === "continuation_blocked") {
+        // Wollipog ends the sibling only for a handoff held past its bound (#1778); otherwise the step is the user's.
+        await expect(highlighted).toContainText(
+          "It ends that job itself only when a queued handoff has waited on it past its bound.");
+        await expect(highlighted).toContainText("Ask the session to stop the unfinished job");
+      }
       if (watchdogState === "accepted_without_result") {
         await expect(highlighted).toContainText("Missing Since");
         await expect(highlighted).toContainText("Acknowledgement Required");

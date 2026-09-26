@@ -24756,6 +24756,7 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
   if (oldest !== undefined && (!oldest || typeof oldest !== "object" ||
       !BACKGROUND_LAUNCH_TYPES.has(oldest.launchType) ||
       !Number.isSafeInteger(oldest.startedAt) || oldest.startedAt < 0)) return undefined;
+  if (value.endsAt !== undefined && (!Number.isSafeInteger(value.endsAt) || value.endsAt < value.since!)) return undefined;
   return {
     kind: value.kind,
     holdId: value.holdId,
@@ -24764,6 +24765,7 @@ function parseQueueHold(raw: string | null): SessionQueueHoldView | undefined {
     queuedPrompts: value.queuedPrompts!,
     unfinishedBackgroundJobs: value.unfinishedBackgroundJobs!,
     ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.startedAt } } : {}),
+    ...(value.endsAt !== undefined ? { endsAt: value.endsAt } : {}),
   };
 }
 

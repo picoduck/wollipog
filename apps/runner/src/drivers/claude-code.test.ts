@@ -16,6 +16,7 @@ import {
   approvalScopeContext,
   buildClaudeUserMessage,
   CLAUDE_GRACEFUL_STOP_BUDGET_MS,
+  CLAUDE_HANDOFF_WAIT_MAX_MS,
   CLAUDE_PENDING_MAX_MS,
   CLAUDE_PERSISTENT_FLAG,
   CLAUDE_PERSISTENT_IDLE_MS,
@@ -215,6 +216,7 @@ test("persistent settings default on, accept zero/unbounded values, and reject f
     enabled: true,
     idleMs: 3_600_000,
     pendingMaxMs: 604_800_000,
+    handoffWaitMaxMs: 3_600_000,
     warnings: [],
   });
   assert.equal(claudePersistentSettings({ [CLAUDE_PERSISTENT_FLAG]: "0" }).enabled, false);
@@ -224,12 +226,30 @@ test("persistent settings default on, accept zero/unbounded values, and reject f
       [CLAUDE_PERSISTENT_IDLE_MS]: "0",
       [CLAUDE_PENDING_MAX_MS]: "0",
     }),
-    { enabled: true, idleMs: 0, pendingMaxMs: 0, warnings: [] },
+    { enabled: true, idleMs: 0, pendingMaxMs: 0, handoffWaitMaxMs: 3_600_000, warnings: [] },
   );
   assert.equal(claudePersistentSettings({ [CLAUDE_PERSISTENT_IDLE_MS]: "999999999999" }).idleMs, 999_999_999_999);
   const rejected = claudePersistentSettings({ [CLAUDE_PERSISTENT_IDLE_MS]: "29999" });
   assert.equal(rejected.idleMs, 3_600_000);
   assert.match(rejected.warnings.join("\n"), /WOLLIPOG_CLAUDE_PERSISTENT_IDLE_MS.*rejected/);
+});
+
+test("the handoff wait bound defaults to an hour, can be disabled, and rejects nonsense (#1778)", () => {
+  assert.equal(claudePersistentSettings({}).handoffWaitMaxMs, 3_600_000);
+  assert.equal(claudePersistentSettings({ [CLAUDE_HANDOFF_WAIT_MAX_MS]: "0" }).handoffWaitMaxMs, 0);
+  assert.equal(claudePersistentSettings({ [CLAUDE_HANDOFF_WAIT_MAX_MS]: "900000" }).handoffWaitMaxMs, 900_000);
+  const rejected = claudePersistentSettings({ [CLAUDE_HANDOFF_WAIT_MAX_MS]: "soon" });
+  assert.equal(rejected.handoffWaitMaxMs, 3_600_000);
+  assert.match(rejected.warnings.join("\n"), /WOLLIPOG_CLAUDE_HANDOFF_WAIT_MAX_MS="soon" was rejected/);
+  // Per-agent configuration wins over the daemon's, as for the other lifetimes.
+  assert.equal(claudePersistentSettingsForAgent(
+    { [CLAUDE_HANDOFF_WAIT_MAX_MS]: "60000" },
+    { [CLAUDE_HANDOFF_WAIT_MAX_MS]: "0" },
+  ).handoffWaitMaxMs, 60_000);
+  assert.equal(claudePersistentSettingsForAgent({}, { [CLAUDE_HANDOFF_WAIT_MAX_MS]: "0" }).handoffWaitMaxMs, 0);
+  const driver = new ClaudeCodeDriver({ ...baseOpts, env: { [CLAUDE_HANDOFF_WAIT_MAX_MS]: "120000" } }, noopCb);
+  assert.equal(driver.handoffWaitMaxMs, 120_000);
+  driver.dispose();
 });
 
 test("persistent settings prefer Wollipog names and warn on legacy fallback", () => {
@@ -241,7 +261,9 @@ test("persistent settings prefer Wollipog names and warn on legacy fallback", ()
     [CLAUDE_PENDING_MAX_MS]: "0",
     [LEGACY_CLAUDE_PENDING_MAX_MS]: "30000",
   });
-  assert.deepEqual(preferred, { enabled: false, idleMs: 30_000, pendingMaxMs: 0, warnings: [] });
+  assert.deepEqual(preferred, {
+    enabled: false, idleMs: 30_000, pendingMaxMs: 0, handoffWaitMaxMs: 3_600_000, warnings: [],
+  });
 
   const legacy = claudePersistentSettings({
     [LEGACY_CLAUDE_PERSISTENT_FLAG]: "0",
@@ -2207,6 +2229,137 @@ test("pending ceiling writes an orphan marker before gracefully reaping the Clau
   assert.deepEqual(killed, [], "the process receives a real grace interval");
   (graceCallback as unknown as () => void)();
   assert.deepEqual(killed, [child]);
+  driver.dispose();
+});
+
+test("ending background work retires the process and reports each unfinished job killed, never orphaned (#1778)", async () => {
+  const first = fakeProcess();
+  const second = fakeProcess();
+  const spawned = [first, second];
+  const killed: any[] = [];
+  const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, config: { permissionMode: "acceptEdits" } },
+    { ...noopCb, onBackgroundWork: (update) => background.push(update) },
+    {
+      spawn: () => spawned.shift()!,
+      kill: (process: any) => killed.push(process),
+      setTimer: () => ({ unref() {} }) as any,
+      clearTimer: () => {},
+    } as any,
+  );
+  assert.deepEqual(await driver.endBackgroundWork(), { status: "none" }, "nothing to end before any work");
+  const turn = driver.prompt("watch CI");
+  await nextTask();
+  first.stdout.write(JSON.stringify({ type: "system", subtype: "task_started", task_id: "monitor-9" }) + "\n");
+  await nextTask();
+  assert.deepEqual(await driver.endBackgroundWork(), { status: "refused", reason: "turn_active" },
+    "a live turn may be the one consuming the work");
+  first.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await turn;
+  assert.equal(background.at(-1)?.state, "running");
+
+  const ending = driver.endBackgroundWork();
+  await nextTask();
+  assert.equal(first.stdin.writableEnded, true, "the owning process is retired");
+  first.emit("close", 0);
+  const result = await ending;
+  assert.equal(result.status, "ended");
+  const jobs = result.status === "ended" ? result.jobs : [];
+  assert.deepEqual(jobs.map((job) => ({
+    id: job.id, status: job.status, continuationRequired: job.continuationRequired, endedByRunner: job.endedByRunner,
+  })), [{ id: "monitor-9", status: "killed", continuationRequired: false, endedByRunner: true }]);
+  assert.equal(background.some((update) => update.state === "orphaned"), false,
+    "ended work is never handed to orphan recovery");
+  assert.deepEqual(background.at(-1), { state: null, pendingTaskIds: [], terminalJobs: jobs });
+  assert.deepEqual(await driver.endBackgroundWork(), { status: "none" });
+
+  // The conversation continues in a fresh process with no pending work.
+  const next = driver.prompt("next");
+  await nextTask();
+  second.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  assert.equal(await next, "end_turn");
+  driver.dispose();
+});
+
+test("a WSL receipt read in flight while the work is ended cannot revive the ended job (#1778)", async () => {
+  const child = fakeProcess();
+  const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
+  const timers: Array<{ callback: () => void; delay: number }> = [];
+  let resolveCeilingRead!: (value: any) => void;
+  let reads = 0;
+  const driver = new ClaudeCodeDriver(
+    {
+      ...baseOpts,
+      context: { kind: "wsl", distro: "Ubuntu" },
+      env: { [CLAUDE_PENDING_MAX_MS]: "30000" },
+      config: { permissionMode: "acceptEdits" },
+    },
+    { ...noopCb, onBackgroundWork: (update) => background.push(update) },
+    {
+      spawn: () => child,
+      kill: () => {},
+      setTimer: (callback: () => void, delay: number) => {
+        timers.push({ callback, delay });
+        return { unref() {} } as any;
+      },
+      clearTimer: () => {},
+      inspectBackgroundWork: () => {
+        reads += 1;
+        // The pending ceiling's read is slow; the one endBackgroundWork makes finds nothing new.
+        if (reads === 1) return new Promise((resolve) => { resolveCeilingRead = resolve; });
+        return Promise.resolve({ incompleteArtifacts: [], terminalTaskIds: new Set<string>() });
+      },
+    } as any,
+  );
+  const turn = driver.prompt("watch CI");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "system", subtype: "task_started", task_id: "monitor-9" }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  await turn;
+  timers.find((timer) => timer.delay === 30_000)!.callback();
+  assert.equal(reads, 1, "the ceiling's receipt read is in flight");
+
+  const ending = driver.endBackgroundWork();
+  await nextTask();
+  await nextTask();
+  // The slow read returns the monitor's markerless task file while the process retires.
+  resolveCeilingRead({
+    incompleteArtifacts: [{ id: "monitor-9", outputFile: "/tmp/monitor-9.output" }],
+    terminalTaskIds: new Set<string>(),
+  });
+  await nextTask();
+  child.emit("close", 0);
+  const result = await ending;
+  assert.equal(result.status, "ended");
+  assert.equal(background.at(-1)?.state, null, "the last report leaves nothing running");
+  assert.deepEqual(background.at(-1)?.pendingTaskIds, []);
+  assert.deepEqual(background.at(-1)?.terminalJobs?.map((job) => [job.id, job.status]), [["monitor-9", "killed"]]);
+
+  // Any later receipt read still finds the markerless file; the ended job stays ended.
+  (driver as any).applyBackgroundInspection({
+    incompleteArtifacts: [{ id: "monitor-9", outputFile: "/tmp/monitor-9.output" }],
+    terminalTaskIds: new Set<string>(),
+  });
+  assert.deepEqual(await driver.endBackgroundWork(), { status: "none" });
+  assert.equal(background.at(-1)?.state, null);
+  driver.dispose();
+});
+
+test("ending background work leaves a one-shot process's work to orphan recovery (#1778)", async () => {
+  const child = fakeProcess();
+  const driver = new ClaudeCodeDriver(
+    { ...baseOpts, env: { [CLAUDE_PERSISTENT_FLAG]: "0" }, config: { permissionMode: "acceptEdits" } },
+    noopCb,
+    { spawn: () => child, kill: () => {} } as any,
+  );
+  const turn = driver.prompt("delegate once");
+  await nextTask();
+  child.stdout.write(JSON.stringify({ type: "system", subtype: "task_started", task_id: "one-shot-task" }) + "\n");
+  child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+  child.emit("close", 0);
+  await turn;
+  assert.deepEqual(await driver.endBackgroundWork(), { status: "refused", reason: "no_live_process" });
   driver.dispose();
 });
 

@@ -18,6 +18,7 @@ import type { RunnerConfig } from "./config.js";
 import { runContextCommand, type ContextCommandResult } from "./context-command.js";
 import { supportsStructuredCodexDeviceLogin } from "./discovery/codex-app-server.js";
 import {
+  CLAUDE_HANDOFF_WAIT_MAX_MS,
   CLAUDE_PENDING_MAX_MS,
   CLAUDE_PERSISTENT_FLAG,
   CLAUDE_PERSISTENT_IDLE_MS,
@@ -384,6 +385,7 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
           CLAUDE_PERSISTENT_FLAG,
           CLAUDE_PERSISTENT_IDLE_MS,
           CLAUDE_PENDING_MAX_MS,
+          CLAUDE_HANDOFF_WAIT_MAX_MS,
           LEGACY_CLAUDE_PERSISTENT_FLAG,
           LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
           LEGACY_CLAUDE_PENDING_MAX_MS,

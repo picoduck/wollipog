@@ -355,3 +355,27 @@ for (const viewport of [
     await expect(held).toHaveCount(0);
   });
 }
+
+for (const viewport of [
+  { name: "desktop", width: 1280, height: 800 },
+  { name: "mobile portrait", width: 390, height: 844 },
+]) {
+  test(`a held child whose handoff the runner bounds says when the work ends, not to restart, at ${viewport.name} (#1778)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=1");
+    const held = page.getByRole("region", { name: "Held Children" });
+    const entry = held.locator(".campaign-held-child");
+    await expect(entry).toHaveCount(1);
+    await expect(entry.getByRole("link", { name: "Fix #1778: Bound a Handoff Held by a Never-Ending Job" })).toBeVisible();
+    await expect(entry).toContainText("Worktree Rebind");
+    await expect(entry.locator("dt")).toHaveText(["Hold", "Reason", "Recovery Action", "Held Decision Resumes"]);
+    await expect(entry).toContainText("waits for 1 background job with no terminal status (a monitor started at");
+    await expect(entry).toContainText(new RegExp(
+      "If it is still running at \\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}Z, Wollipog ends it, records it as killed, and then runs " +
+      "the handoff and the queued messages in order", "u"));
+    await expect(entry).toContainText("Do not restart the session to get past this hold: a restart discards the queued messages.");
+    await expect(entry).not.toContainText("restart_session");
+    await expect(entry).toContainText("wd_occ_merge_1778");
+    await assertNoHorizontalOverflow(page, ".campaign-held-children");
+  });
+}

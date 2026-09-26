@@ -80,7 +80,7 @@ test("every watchdog highlights its delivery and explains completion, recovery, 
   const root = createRoot(container);
   const cases = [
     ["terminal_without_continuation", "Result Pending", /returning the result automatically/, /No action is needed/],
-    ["continuation_blocked", "Result Blocked", /cannot end that job itself/, /stop the unfinished job/],
+    ["continuation_blocked", "Result Blocked", /ends that job itself only when a queued handoff has waited on it past its bound/, /stop the unfinished job/],
     ["accepted_without_result", "Result Missing", /will not repeat an accepted step/, /Acknowledge the missing result/],
     ["result_not_projected", "Transcript Delayed", /updating the transcript automatically/, /No action is needed/],
     ["dashboard_observation_pending", "Notification Pending", /waiting for the dashboard confirmation/, /No action is needed/],

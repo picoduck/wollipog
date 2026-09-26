@@ -343,6 +343,20 @@ export interface ProviderAuthIdentityEvidence {
   fields: Partial<Record<ProviderAuthIdentityField, string>>;
 }
 
+/** Who asked Wollipog to end background work. The runner acts on its own policy today; an explicit
+ * request from outside the session is another actor kind (#1780). */
+export type BackgroundJobEndActor = { kind: "runner" };
+
+/** Why Wollipog ended background work. `handoff_wait_bound`: a worktree or provider-account
+ * handoff, and every prompt queued behind it, waited on the work past the configured bound. */
+export type BackgroundJobEndReason = "handoff_wait_bound";
+
+export interface BackgroundJobEnd {
+  actor: BackgroundJobEndActor;
+  reason: BackgroundJobEndReason;
+  endedAt: number;
+}
+
 export interface DurableBackgroundJob {
   /** Stable provider task identity after provisional tool-use promotion. */
   id: string;
@@ -358,6 +372,8 @@ export interface DurableBackgroundJob {
   outputReference?: string;
   terminalStatus?: "completed" | "failed" | "killed";
   terminalObservedAt?: number;
+  /** Present only when Wollipog ended the job itself (#1778): who asked, why, and when. */
+  endedBy?: BackgroundJobEnd;
   continuationRequired?: boolean;
   /** Stable identity shared by every job in one parent-turn barrier continuation. */
   continuationId?: string;

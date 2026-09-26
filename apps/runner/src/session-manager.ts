@@ -74,6 +74,7 @@ import type {
 } from "@wollipog/protocol";
 import {
   addPendingRequest, removePendingRequest, pendingRequests,
+  backgroundLaunchTypeNoun,
   isOrchestratorLaunch,
   isPromptImageReference,
   isWorkspaceReference,
@@ -98,6 +99,7 @@ import type { ClaudeGuardRefreshOutcome as ManagedWorktreeGuardRefreshOutcome } 
 import { managedWorktreeReadOnlyPaths } from "./managed-worktree-sandbox.js";
 import type {
   CompletedCommandReconciliationProof,
+  DriverBackgroundTerminalJob,
   DriverBackgroundWorkUpdate,
   DriverSteerResult,
   DriverSubscriptionUsageUpdate,
@@ -176,6 +178,9 @@ import {
   SessionStore,
   isAdoptedSession,
   metaToSnapshot,
+  type BackgroundJobEnd,
+  type BackgroundJobEndActor,
+  type BackgroundJobEndReason,
   type DurableBackgroundJob,
   type SessionMeta,
   type StoredEvent,
@@ -812,6 +817,62 @@ function managedBackgroundWorkState(
 }
 const MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS = 4_096;
 const BACKGROUND_CONTINUATION_DELIVERED_PREFIX = "Managed background continuation delivered: ";
+/** setTimeout's ceiling; a longer bound is re-armed in chunks. */
+const MAX_TIMER_MS = 0x7fffffff;
+
+/** A request to end a session's unfinished background work (#1778). */
+export interface BackgroundJobEndRequest {
+  actor: BackgroundJobEndActor;
+  reason: BackgroundJobEndReason;
+  /** Jobs the caller means to end; each must be unfinished. The provider can end its work only
+   * as a whole, so every other unfinished job ends too, and the outcome lists all of them. */
+  jobIds?: string[];
+  /** The hold that waited on the work, for the timeline's account of why it ended. */
+  hold?: SessionQueueHoldView;
+}
+
+export type BackgroundJobEndOutcome =
+  | { status: "ended"; jobIds: string[] }
+  /** Nothing was unfinished by the time the provider's receipts were read. */
+  | { status: "none" }
+  | {
+      status: "refused";
+      reason: "no_session" | "unsupported" | "turn_active" | "in_progress" | "unknown_job" | "no_live_process";
+    };
+
+function waitedFor(ms: number): string {
+  const minutes = Math.round(ms / 60_000);
+  if (minutes >= 120) return `${Math.round(ms / 3_600_000)} hours`;
+  if (minutes >= 1) return minutes === 1 ? "1 minute" : `${minutes} minutes`;
+  const seconds = Math.max(1, Math.round(ms / 1_000));
+  return seconds === 1 ? "1 second" : `${seconds} seconds`;
+}
+
+/** The timeline's account of a kill the runner caused (#952, #1778): which jobs, why, and what
+ * happens next. It is the only transcript record of the kill; the job itself carries `endedBy`. */
+function backgroundWorkEndedNotice(
+  request: BackgroundJobEndRequest & { endedAt: number },
+  jobs: readonly DriverBackgroundTerminalJob[],
+): string {
+  const described = jobs.map((job) => `${backgroundLaunchTypeNoun(job.launchType)} (job ${job.id}, started ` +
+    `${new Date(job.startedAt).toISOString().slice(0, 16)}Z)`);
+  const what = jobs.length === 1
+    ? `Wollipog ended ${described[0]}`
+    : `Wollipog ended ${jobs.length} background jobs: ${described.join("; ")}`;
+  const recorded = jobs.length === 1 ? "It is recorded as killed." : "Each is recorded as killed.";
+  const hold = request.hold;
+  if (request.reason === "handoff_wait_bound" && hold) {
+    // An account label may be an email-shaped alias, and the transcript names no account.
+    const move = hold.kind === "worktree_rebind"
+      ? `move to worktree ${hold.target}`
+      : "switch to the selected provider account";
+    const messages = hold.queuedPrompts === 1 ? "the queued message" : `the ${hold.queuedPrompts} queued messages`;
+    return `${what}. The provider's ${move} had waited ${waitedFor(request.endedAt - hold.since)} for ` +
+      `unfinished background work, and ${messages} waited behind it, so Wollipog stopped the provider process ` +
+      `that owned the work. ${recorded} The ${hold.kind === "worktree_rebind" ? "move" : "switch"} and ${messages} proceed now.`;
+  }
+  return `${what}; Wollipog stopped the provider process that owned the work. ${recorded}`;
+}
 
 function queuedPromptBytes(text: string, images: PromptImageInput[]): number {
   return text.length + images.reduce((n, image) => n + (
@@ -1071,6 +1132,20 @@ export class SessionManager {
   /** The queue hold last published for each session (#1651), kept apart from the active entry so
    * a replacement provider still clears the hold its predecessor reported. */
   private readonly publishedQueueHolds = new Map<string, SessionQueueHoldView>();
+  /** When a hold began (#1778). A turn in between — one the provider starts on its own, or a
+   * continuation that crosses the barrier — interrupts the published hold but not the wait, so the
+   * bound keeps counting from here rather than restarting. It starts only once a hold exists, so a
+   * job launched late in a long turn never inherits time the prompts spent waiting for that turn. */
+  private readonly handoffWaitStarts = new Map<string, { kind: SessionQueueHoldKind; since: number }>();
+  /** One timer per published hold whose wait the driver bounds (#1778). */
+  private readonly handoffWaitTimers = new Map<string, {
+    holdId: string;
+    endsAt: number;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  /** A request to end background work, from before the driver is asked until it answers. The
+   * driver's terminal report arrives inside that window and takes its actor and reason from here. */
+  private readonly endingBackgroundWork = new Map<string, BackgroundJobEndRequest & { endedAt: number }>();
   private readonly activeTurnAdmitted = new Set<string>();
   private activeTurnRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Parking retirements remain serialized while an exact exit is pending. Once an attempt settles
@@ -9434,17 +9509,117 @@ export class SessionManager {
     const oldest = unfinished.reduce<typeof unfinished[number] | undefined>(
       (min, job) => !min || job.registeredAt < min.registeredAt ? job : min, undefined);
     const published = this.publishedQueueHolds.get(sessionId);
-    // One incident keeps its identity while it lasts, however its counts change.
-    const since = published?.kind === kind ? published.since : Date.now();
+    const waitStart = this.handoffWaitStarts.get(sessionId);
+    // One incident keeps its identity while it lasts, however its counts change, and across a turn
+    // that interrupts it while the same prompts keep waiting.
+    const since = waitStart?.kind === kind ? waitStart.since
+      : published?.kind === kind ? published.since : Date.now();
+    const unfinishedBackgroundJobs = Math.max(unfinished.length, meta.pendingBackgroundTaskIds?.length ?? 0);
+    // The bound applies only to work a live provider still owns. Orphaned work already has its
+    // one recovery turn coming, which crosses the barrier; a queued continuation does too.
+    const bound = entry.client.endBackgroundWork ? entry.client.handoffWaitMaxMs ?? 0 : 0;
+    const bounded = bound > 0 && unfinishedBackgroundJobs > 0 && !meta.orphanedWork &&
+      meta.backgroundWorkState !== "orphaned";
     return {
       kind,
       holdId: `${kind.replaceAll("_", "-")}:${since}`,
       since,
       target: kind === "worktree_rebind" ? entry.pendingWorktreeRebind! : entry.pendingProviderAccountSwitch!.label,
       queuedPrompts: waiting.length,
-      unfinishedBackgroundJobs: Math.max(unfinished.length, meta.pendingBackgroundTaskIds?.length ?? 0),
+      unfinishedBackgroundJobs,
       ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.registeredAt } } : {}),
+      ...(bounded ? { endsAt: since + bound } : {}),
     };
+  }
+
+  /** Forget a wait once it is over: the handoff applied, the prompts left, or the background work
+   * stopped holding it back. A hold that forms again after that is a new wait. */
+  private settleHandoffWaitStart(sessionId: string, entry: ActiveSession | undefined): void {
+    const start = this.handoffWaitStarts.get(sessionId);
+    if (!start) return;
+    const kind: SessionQueueHoldKind | null = entry?.pendingProviderAccountSwitch
+      ? "provider_account_switch"
+      : entry?.pendingWorktreeRebind ? "worktree_rebind" : null;
+    const meta = this.store.readMeta(sessionId);
+    const stillWaiting = kind === start.kind && entry!.queue.some((prompt) => !prompt.syntheticRecovery) &&
+      (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
+      !meta?.orphanedWork?.recoveryAttemptedAt;
+    if (!stillWaiting) this.handoffWaitStarts.delete(sessionId);
+  }
+
+  /** Keep exactly one timer per bounded hold, re-armed when the hold changes identity or bound. */
+  private syncHandoffWaitTimer(sessionId: string, hold: SessionQueueHoldView | null): void {
+    const armed = this.handoffWaitTimers.get(sessionId);
+    if (armed && hold?.endsAt !== undefined && armed.holdId === hold.holdId && armed.endsAt === hold.endsAt) return;
+    if (armed) {
+      clearTimeout(armed.timer);
+      this.handoffWaitTimers.delete(sessionId);
+    }
+    if (hold?.endsAt === undefined || this.shuttingDown) return;
+    const { holdId, endsAt } = hold;
+    const timer = setTimeout(() => {
+      if (this.handoffWaitTimers.get(sessionId)?.timer === timer) this.handoffWaitTimers.delete(sessionId);
+      void this.endBackgroundWorkPastHandoffBound(sessionId, holdId).catch((error) => {
+        this.log(`ending background work held past the handoff bound failed for ${sessionId}: ${errText(error)}`);
+      });
+    }, Math.min(Math.max(0, endsAt - Date.now()), MAX_TIMER_MS));
+    timer.unref?.();
+    this.handoffWaitTimers.set(sessionId, { holdId, endsAt, timer });
+  }
+
+  /** The bound elapsed (#1778). Recheck the hold from scratch: the work may have ended, a turn may
+   * have started, or the hold may be a new incident, and each of those leaves the work alone. */
+  private async endBackgroundWorkPastHandoffBound(sessionId: string, holdId: string): Promise<void> {
+    const entry = this.active.get(sessionId);
+    const hold = entry ? this.queueHoldFor(sessionId, entry) : null;
+    if (!hold || hold.holdId !== holdId || hold.endsAt === undefined) return;
+    if (hold.endsAt > Date.now()) {
+      // A bound longer than one timer, or a clock that ran early: wait out the rest.
+      this.syncHandoffWaitTimer(sessionId, hold);
+      return;
+    }
+    const outcome = await this.endBackgroundJobs(sessionId, {
+      actor: { kind: "runner" },
+      reason: "handoff_wait_bound",
+      hold,
+    });
+    if (outcome.status === "refused" && outcome.reason !== "turn_active" && outcome.reason !== "in_progress") {
+      this.log(`background work holding ${sessionId}'s handoff was not ended: ${outcome.reason}`);
+    }
+  }
+
+  /**
+   * End a session's unfinished background work (#1778), and record every kill it causes (#952).
+   * Claude Code can end its detached jobs only by retiring the provider process that owns them, so
+   * a request always ends all of them: each one is recorded as `killed` with the actor and reason,
+   * and the timeline says why. A finished sibling's result still comes back through its managed
+   * continuation, exactly once; the ended jobs are never handed to orphan recovery, whose one
+   * recovery turn could relaunch what was just ended. Once the work is terminal, a deferred handoff
+   * and the prompts queued behind it proceed in their original order.
+   *
+   * Only between turns: a live turn may be the one consuming the work. Callable by job id and
+   * actor, so an explicit request from outside the session can reuse it (#1780).
+   */
+  async endBackgroundJobs(sessionId: string, request: BackgroundJobEndRequest): Promise<BackgroundJobEndOutcome> {
+    const entry = this.active.get(sessionId);
+    if (!entry) return { status: "refused", reason: "no_session" };
+    if (!entry.client.endBackgroundWork) return { status: "refused", reason: "unsupported" };
+    if (entry.running || entry.providerInitiatedTurnActive) return { status: "refused", reason: "turn_active" };
+    if (this.endingBackgroundWork.has(sessionId)) return { status: "refused", reason: "in_progress" };
+    if (request.jobIds?.length) {
+      const unfinished = new Set((this.store.readMeta(sessionId)?.backgroundJobs ?? [])
+        .filter((job) => !job.terminalStatus).map((job) => job.id));
+      if (request.jobIds.some((id) => !unfinished.has(id))) return { status: "refused", reason: "unknown_job" };
+    }
+    this.endingBackgroundWork.set(sessionId, { ...request, endedAt: Date.now() });
+    try {
+      const result = await entry.client.endBackgroundWork();
+      if (result.status === "ended") return { status: "ended", jobIds: result.jobs.map((job) => job.id) };
+      if (result.status === "none") return { status: "none" };
+      return { status: "refused", reason: result.reason };
+    } finally {
+      this.endingBackgroundWork.delete(sessionId);
+    }
   }
 
   /**
@@ -9455,7 +9630,12 @@ export class SessionManager {
    */
   private syncQueueHold(sessionId: string): void {
     const entry = this.active.get(sessionId);
+    this.settleHandoffWaitStart(sessionId, entry);
     const next = entry ? this.queueHoldFor(sessionId, entry) : null;
+    if (next && this.handoffWaitStarts.get(sessionId)?.kind !== next.kind) {
+      this.handoffWaitStarts.set(sessionId, { kind: next.kind, since: next.since });
+    }
+    this.syncHandoffWaitTimer(sessionId, next);
     const published = this.publishedQueueHolds.get(sessionId);
     if (isDeepStrictEqual(next ?? undefined, published)) return;
     if (next) this.publishedQueueHolds.set(sessionId, next);
@@ -14395,6 +14575,9 @@ export class SessionManager {
     this.orphanRecoveryTimers.clear();
     for (const timer of this.backgroundContinuationTimers.values()) clearTimeout(timer);
     this.backgroundContinuationTimers.clear();
+    for (const { timer } of this.handoffWaitTimers.values()) clearTimeout(timer);
+    this.handoffWaitTimers.clear();
+    this.handoffWaitStarts.clear();
     this.approvalStarted.clear();
     if (this.admissionRetryTimer) clearTimeout(this.admissionRetryTimer);
     this.admissionRetryTimer = null;
@@ -15034,15 +15217,20 @@ export class SessionManager {
   private onDriverBackgroundWork(sessionId: string, update: DriverBackgroundWorkUpdate): void {
     const current = this.store.readMeta(sessionId);
     if (!current || current.driver !== "claude-code") return;
+    const ending = this.endingBackgroundWork.get(sessionId);
+    const endedByRunner = ending ? (update.terminalJobs ?? []).filter((job) => job.endedByRunner) : [];
     const { jobs: backgroundJobs, queuedJobIds } = this.mergeDurableBackgroundJobs(
       current,
       update,
       this.active.get(sessionId)?.activeTurnId,
+      ending ? { actor: ending.actor, reason: ending.reason, endedAt: ending.endedAt } : undefined,
     );
     const observedTaskIds = update.observedTaskIds ?? [];
-    const recoveredBackgroundTaskIds = withoutRecoveredBackgroundTaskIds(
-      current.recoveredBackgroundTaskIds,
-      observedTaskIds,
+    // A job Wollipog ended leaves a task file with no completion marker. Tombstone it as orphan
+    // recovery does, so no later receipt read revives it as unfinished work (#1778).
+    const recoveredBackgroundTaskIds = mergeRecoveredBackgroundTaskIds(
+      withoutRecoveredBackgroundTaskIds(current.recoveredBackgroundTaskIds, observedTaskIds),
+      endedByRunner.map((job) => job.id),
     );
     const recovered = new Set(recoveredBackgroundTaskIds);
     const eligiblePendingTaskIds = update.pendingTaskIds.filter((id) => !recovered.has(id));
@@ -15127,6 +15315,11 @@ export class SessionManager {
         orphanedWork: undefined,
       });
     }
+    // Record the kill before anything it unblocks — a continuation, the handoff, a queued prompt —
+    // can reach the timeline.
+    if (ending && endedByRunner.length > 0) {
+      this.emitEvent(sessionId, { kind: "stderr", text: backgroundWorkEndedNotice(ending, endedByRunner) });
+    }
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     const entry = this.active.get(sessionId);
     if (entry) this.reconcileAuthoritativeBackgroundWorkPermit(sessionId, entry, update.state === "running");
@@ -15143,6 +15336,7 @@ export class SessionManager {
     current: SessionMeta,
     update: DriverBackgroundWorkUpdate,
     activeTurnId: string | undefined,
+    end?: BackgroundJobEnd,
   ): { jobs: DurableBackgroundJob[]; queuedJobIds: string[] } {
     const byId = new Map((current.backgroundJobs ?? []).map((job) => [job.id, { ...job }]));
     const findAlias = (id: string, toolUseId?: string) => byId.get(id) ?? (toolUseId
@@ -15177,6 +15371,7 @@ export class SessionManager {
       durable.terminalStatus = terminal.status;
       durable.terminalObservedAt = terminal.terminalAt;
       durable.continuationRequired = terminal.continuationRequired;
+      if (terminal.endedByRunner && end) durable.endedBy = end;
     }
 
     const terminalCandidates = [...byId.values()].filter((job) => job.terminalObservedAt &&
@@ -15201,11 +15396,15 @@ export class SessionManager {
       }
     }
     const all = [...byId.values()].sort((left, right) => left.registeredAt - right.registeredAt);
-    const unresolved = all.filter((job) => !job.assistantResultPersistedAt);
+    // A job Wollipog ended has nothing left to deliver and never gets a delivery receipt, so it is
+    // retained like a delivered one rather than growing the unresolved set without bound (#1778).
+    const settled = (job: DurableBackgroundJob) => job.assistantResultPersistedAt !== undefined ||
+      (job.endedBy !== undefined && job.terminalObservedAt !== undefined && !job.continuationRequired);
+    const unresolved = all.filter((job) => !settled(job));
     const deliveredLimit = Math.max(0, MAX_RETAINED_DELIVERED_BACKGROUND_JOBS - unresolved.length);
     const delivered = deliveredLimit === 0
       ? []
-      : all.filter((job) => job.assistantResultPersistedAt).slice(-deliveredLimit);
+      : all.filter(settled).slice(-deliveredLimit);
     return { jobs: [...unresolved, ...delivered], queuedJobIds };
   }
 
@@ -15374,7 +15573,13 @@ export class SessionManager {
     this.backgroundContinuationLaunching.add(sessionId);
     try {
       const selected = (meta.backgroundJobs ?? []).filter((job) => jobIds.includes(job.id));
-      const resultSummary = selected.filter((job) => job.terminalStatus && job.terminalObservedAt).slice(0, 128).map((job) => ({
+      // A sibling Wollipog ended belongs to the same barrier but has no result of its own. Name it,
+      // or the provider may keep waiting for a job that no longer exists (#1778).
+      const parents = new Set(selected.map((job) => job.parentTurnId));
+      const endedSiblings = (meta.backgroundJobs ?? []).filter((job) => !jobIds.includes(job.id) &&
+        parents.has(job.parentTurnId) && job.endedBy && !job.assistantResultPersistedAt);
+      const resultSummary = [...selected, ...endedSiblings]
+        .filter((job) => job.terminalStatus && job.terminalObservedAt).slice(0, 128).map((job) => ({
         id: job.id,
         launchType: job.launchType,
         status: job.terminalStatus!,

@@ -1585,3 +1585,26 @@ test("a queued prompt held behind a handoff waiting on background work is a hold
     ["worktree_recovery", "worktree_rebind"]);
   assert.deepEqual(sessionHolds({ worktreeRecovery: null, queueHold: null }), []);
 });
+
+test("a hold the runner bounds says when the work ends and does not offer a restart that discards the queue (#1778)", () => {
+  const queueHold = {
+    kind: "worktree_rebind" as const,
+    holdId: "worktree-rebind:5000",
+    since: 5_000,
+    target: "/repos/x/.agent-worktrees/fix-1778",
+    queuedPrompts: 1,
+    unfinishedBackgroundJobs: 1,
+    oldestUnfinishedJob: { launchType: "monitor" as const, startedAt: Date.UTC(2026, 8, 25, 0, 12, 53) },
+    endsAt: Date.UTC(2026, 8, 25, 1, 48, 43),
+  };
+  const [hold] = sessionHolds({ queueHold });
+  assert.equal(hold?.reason, queueHoldReason(queueHold), "the reason is unchanged");
+  assert.equal(hold?.recoveryAction,
+    "Wait for the unfinished background job to end; the handoff and the queued message then proceed on their own. " +
+    "If it is still running at 2026-09-25T01:48Z, Wollipog ends it, records it as killed, and then runs the handoff " +
+    "and the queued message in order; a finished job's result from the same turn is still delivered. " +
+    "Do not restart the session to get past this hold: a restart discards the queued message.");
+  const several = queueHoldRecoveryAction({ ...queueHold, queuedPrompts: 2, unfinishedBackgroundJobs: 3 });
+  assert.match(several, /If they are still running at 2026-09-25T01:48Z, Wollipog ends them, records each as killed/u);
+  assert.match(several, /a restart discards the queued messages\.$/u);
+});

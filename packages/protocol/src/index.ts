@@ -5687,9 +5687,13 @@ export interface SessionQueueHoldView {
   unfinishedBackgroundJobs: number;
   /** The oldest of them, for the reason text. */
   oldestUnfinishedJob?: { launchType: ManagedBackgroundJobSnapshot["launchType"]; startedAt: number };
+  /** When the runner ends the work if it is still unfinished (#1778): it records each job as
+   * killed, then runs the handoff and the queued prompts in order. Absent when the runner cannot
+   * end the work or its bound is disabled, and from runners older than the bound. */
+  endsAt?: number;
 }
 
-function backgroundLaunchTypeNoun(launchType: ManagedBackgroundJobSnapshot["launchType"]): string {
+export function backgroundLaunchTypeNoun(launchType: ManagedBackgroundJobSnapshot["launchType"]): string {
   switch (launchType) {
     case "agent": return "a subagent";
     case "shell": return "a shell command";
@@ -5717,17 +5721,26 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
     ` with no terminal status${oldest}.`;
 }
 
-/** What clears a queue hold. Waiting is the ordinary way; a restart is the bounded way out of a
- * job that never ends, and its costs are stated so nobody is surprised. An explicit restart builds
- * fresh session metadata (no background jobs or orphan marker are carried, and a Claude Code or
- * Codex exec conversation is not resumed), so the provider's background work ends with it and no
- * undelivered result comes back; the runner's restart path rejects every prompt still in the queue
- * ("session restart discarded the queued command"); and the control plane revokes approved
- * decisions the session has not consumed. */
+/** What clears a queue hold. Waiting is the ordinary way. When the runner bounds the wait
+ * (`endsAt`), waiting is also the way out of a job that never ends, so restart is not offered: it
+ * would discard the very prompts the bound is about to run. Otherwise a restart is the bounded way
+ * out, and its costs are stated so nobody is surprised. An explicit restart builds fresh session
+ * metadata (no background jobs or orphan marker are carried, and a Claude Code or Codex exec
+ * conversation is not resumed), so the provider's background work ends with it and no undelivered
+ * result comes back; the runner's restart path rejects every prompt still in the queue ("session
+ * restart discarded the queued command"); and the control plane revokes approved decisions the
+ * session has not consumed. */
 export function queueHoldRecoveryAction(hold: SessionQueueHoldView): string {
   const one = hold.unfinishedBackgroundJobs === 1;
   const jobs = one ? "job" : "jobs";
   const messages = hold.queuedPrompts === 1 ? "message" : "messages";
+  if (hold.endsAt !== undefined) {
+    return `Wait for the unfinished background ${jobs} to end; the handoff and the queued ${messages} then proceed on their own. ` +
+      `If ${one ? "it is" : "they are"} still running at ${new Date(hold.endsAt).toISOString().slice(0, 16)}Z, ` +
+      `Wollipog ends ${one ? "it" : "them"}, records ${one ? "it" : "each"} as killed, and then runs the handoff and ` +
+      `the queued ${messages} in order; a finished job's result from the same turn is still delivered. ` +
+      `Do not restart the session to get past this hold: a restart discards the queued ${messages}.`;
+  }
   return `Wait for the unfinished background ${jobs} to end; the handoff and the queued ${messages} then proceed on their own. ` +
     `If ${one ? "it never ends" : "they never end"} (a monitor whose condition never fires ends only with its provider process), ` +
     "restart the session with restart_session, knowing what that costs: the provider and its background " +
