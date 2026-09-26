@@ -820,8 +820,9 @@ function managedBackgroundWorkState(
 }
 const MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS = 4_096;
 const BACKGROUND_CONTINUATION_DELIVERED_PREFIX = "Managed background continuation delivered: ";
-/** A continuation prompt lists at most this many results (runBackgroundContinuation). */
-const MAX_RESTART_CONTINUATION_JOBS = 128;
+/** One continuation reports at most this many finished jobs; a larger barrier is delivered over
+ * several turns under the same continuation id, so none is marked delivered without being named. */
+const MAX_CONTINUATION_JOBS = 128;
 const RESTART_CONTINUATION_PROMPT =
   "This session was restarted. The conversation that started the background jobs listed below ended with the restart, so their task notifications cannot reach this conversation; Wollipog recorded their results instead. A finished job's output, when listed, is in the named file: read it if the work in front of you needs it. A job the restart ended left no result that can be recovered. Report these results without waiting for another user message.";
 
@@ -859,18 +860,7 @@ function carryBackgroundWorkAcrossRestart(
     endedBy,
     restartedAt: now,
   });
-  // One continuation reports at most MAX_RESTART_CONTINUATION_JOBS results, so a larger backlog is
-  // split: finishing a continuation marks every job in it delivered, and none may be left unnamed.
-  let continuationId = `bgcont_${randomUUID()}`;
-  let continuationJobs = 0;
-  const nextContinuationId = () => {
-    if (continuationJobs === MAX_RESTART_CONTINUATION_JOBS) {
-      continuationId = `bgcont_${randomUUID()}`;
-      continuationJobs = 0;
-    }
-    continuationJobs += 1;
-    return continuationId;
-  };
+  const continuationId = `bgcont_${randomUUID()}`;
   const jobs = (prior.backgroundJobs ?? []).map((job): DurableBackgroundJob => {
     if (job.assistantResultPersistedAt !== undefined) return job;
     if (!job.terminalStatus || job.terminalObservedAt === undefined) return kill(job);
@@ -882,7 +872,7 @@ function carryBackgroundWorkAcrossRestart(
     if (!deliver) return { ...job, continuationMissingResultAt: now, restartedAt: now };
     return {
       ...job,
-      continuationId: job.continuationId ?? nextContinuationId(),
+      continuationId: job.continuationId ?? continuationId,
       continuationQueuedAt: job.continuationQueuedAt ?? now,
       restartedAt: now,
     };
@@ -15811,7 +15801,8 @@ export class SessionManager {
       .sort((left, right) => left.continuationQueuedAt! - right.continuationQueuedAt!);
     const continuationId = queued[0]?.continuationId;
     if (!continuationId) return [];
-    return queued.filter((job) => job.continuationId === continuationId).map((job) => job.id);
+    return queued.filter((job) => job.continuationId === continuationId).map((job) => job.id)
+      .slice(0, MAX_CONTINUATION_JOBS);
   }
 
   /** Lifecycle rejection (Stop/delete) must also drop any pending continuation timer: a stale
@@ -15861,8 +15852,10 @@ export class SessionManager {
         job.endedBy && !job.assistantResultPersistedAt && (restarted
           ? job.endedBy.reason === "session_restart"
           : parents.has(job.parentTurnId)));
-      const resultSummary = [...selected, ...endedSiblings]
-        .filter((job) => job.terminalStatus && job.terminalObservedAt).slice(0, 128).map((job) => ({
+      // Every selected result is named (the selection is already bounded), and the jobs Wollipog
+      // ended get their own bound, so a full selection cannot crowd them out.
+      const resultSummary = [...selected, ...endedSiblings.slice(0, MAX_CONTINUATION_JOBS)]
+        .filter((job) => job.terminalStatus && job.terminalObservedAt).map((job) => ({
         id: job.id,
         launchType: job.launchType,
         status: job.terminalStatus!,
