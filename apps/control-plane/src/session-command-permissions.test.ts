@@ -175,7 +175,8 @@ test("each live client receives its own command permissions for one session chan
   db.updateSessionStatus("s_owned", "idle", 4);
   hub.sessionChangedById("s_owned");
   const upsertPermissions = (messages: ControlPlaneToUi[]) => {
-    const upsert = messages.findLast((message) => message.type === "session_upsert" && message.session.id === "s_owned");
+    const upsert = [...messages].reverse()
+      .find((message) => message.type === "session_upsert" && message.session.id === "s_owned");
     return upsert?.type === "session_upsert" ? upsert.session.commandPermissions : "no upsert";
   };
   assert.deepEqual(upsertPermissions(clients.owner), ALL_ALLOWED);
