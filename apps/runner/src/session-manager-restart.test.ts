@@ -648,6 +648,13 @@ test("a restart reports every owed result, and every job it ended, when there ar
       const listedIds = listed.flatMap((results) => results.filter((job) => job.status === "completed").map((job) => job.id));
       assert.equal(listedIds.length, 129, `${shape}: each owed result is named exactly once`);
       assert.deepEqual(new Set(listedIds), new Set(finished.map((job) => job.id)));
+      // Delivery proof is keyed by continuation id, so no id may cover a job its continuation did
+      // not name: a runner restart between the two turns would otherwise count it delivered.
+      const byId = new Map<string, number>();
+      for (const job of f.store.readMeta(spec.sessionId)?.backgroundJobs ?? []) {
+        if (job.id.startsWith("agent-")) byId.set(job.continuationId!, (byId.get(job.continuationId!) ?? 0) + 1);
+      }
+      assert.deepEqual([...byId.values()].sort((a, b) => a - b), [1, 128], `${shape}: two continuation ids`);
     } finally {
       manager?.shutdownAll();
       rmSync(f.root, { recursive: true, force: true });
