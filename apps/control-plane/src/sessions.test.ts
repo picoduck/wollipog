@@ -1608,13 +1608,12 @@ test("a guardrail-stopped campaign child waits for its runner to confirm the sto
     assert.equal(guardrail.kind, "cost_budget");
     const childReport = report(child, "Child final report");
 
-    // Declining the guardrail sends the runner a Stop and writes `stopped` at once, without the
-    // durable stop intent a requested stop records. Only the recorded provenance says it is
-    // still unconfirmed.
+    // Declining the guardrail records the same durable stop intent a requested stop does, sends
+    // the runner a Stop, and writes `stopped` at once. The provenance says it is unconfirmed.
     hub.sentToRunner.length = 0;
     assert.ok(svc.approve(child, guardrail.requestId, "stop").ok);
     assert.equal(db.getSession(child)?.status, "stopped");
-    assert.equal(db.hasSessionStopIntent(child), false);
+    assert.equal(db.hasSessionStopIntent(child), true);
     assert.ok(hub.sentOfType("stop_session").some((message) => message.sessionId === child));
     assert.deepEqual(db.sessionStopProvenance(child), { cause: "guardrail", confirmation: null, confirmedAt: null });
     const refused = verify(child, childReport);
@@ -1625,6 +1624,7 @@ test("a guardrail-stopped campaign child waits for its runner to confirm the sto
     // The runner's terminal frame lands on a row that already reads `stopped`: it cannot change
     // the status, but it is the confirmation.
     svc.onSessionStatus(child, "stopped");
+    assert.equal(db.hasSessionStopIntent(child), false, "the terminal frame settles the stop intent");
     const confirmed = db.sessionStopProvenance(child);
     assert.equal(confirmed?.cause, "guardrail", "confirming keeps the path that wrote the stop");
     assert.equal(confirmed?.confirmation, "runner_terminal");
@@ -12995,6 +12995,92 @@ test("guardrail Stop aborts queued hooks and cannot leave swallowed idle behind"
     entry.actor.id === "guardrail-stopped"));
 });
 
+/** Park each guardrail card kind whose Stop branch in approve() records the durable intent. */
+const parkGuardrailCard: Record<"cost_budget" | "max_tool_calls" | "cost_checkpoint" | "cost_unpriced" | "daily_budget",
+  (db: ControlPlaneDb, svc: SessionsService, id: string) => void> = {
+  cost_budget: (db, svc, id) => {
+    svc.setConfig(id, { costBudgetUsd: 1 });
+    db.updateSessionStatus(id, "running", Date.now());
+    svc.onSessionEvent(id, { kind: "token_usage", costUsd: 2 });
+  },
+  max_tool_calls: (db, svc, id) => {
+    svc.setConfig(id, { maxToolCalls: 1 });
+    db.updateSessionStatus(id, "running", Date.now());
+    svc.onSessionEvent(id, { kind: "tool_call", toolCallId: "t1", title: "Read", status: "completed" });
+    svc.onSessionStatus(id, "idle");
+  },
+  cost_checkpoint: (db, svc, id) => {
+    svc.setConfig(id, { costCheckpointsUsd: [1] });
+    db.updateSessionStatus(id, "running", Date.now());
+    svc.onSessionEvent(id, { kind: "token_usage", costUsd: 2 });
+  },
+  cost_unpriced: (db, svc, id) => {
+    db.raw().prepare("UPDATE sessions SET model='mystery-model', driver='codex-app-server' WHERE id=?").run(id);
+    svc.setConfig(id, { costBudgetUsd: 5 });
+    db.appendEvent(id, { kind: "token_usage", inputTokens: 500, outputTokens: 20 }, Date.now(), { accrueUsage: true });
+    svc.onSessionStatus(id, "idle");
+  },
+  daily_budget: (db, svc, id) => {
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(id);
+    db.setUsageDailyBudget("org_personal", 2, Date.now());
+    db.appendEvent(id, { kind: "token_usage", inputTokens: 1, costUsd: 2.5 }, Date.now(), { accrueUsage: true });
+    svc.onSessionStatus(id, "idle");
+  },
+};
+
+for (const [card, park] of Object.entries(parkGuardrailCard)) {
+  /** Decline the parked card while the socket is registered but its write fails, so the runner
+   * never sees the Stop and still holds the session live. */
+  const declineWithLostStop = () => {
+    const { db, hub, svc } = makeHarness();
+    const id = seedSession(svc, hub);
+    park(db, svc, id);
+    const guardrail = db.getSession(id)!.pendingApproval!;
+    assert.equal(guardrail.kind, card);
+    hub.deliver = false;
+    hub.sentToRunner.length = 0;
+    assert.ok(svc.approve(id, guardrail.requestId, "stop").ok);
+    assert.equal(db.getSession(id)!.status, "stopped");
+    assert.equal(db.hasSessionStopIntent(id), true, "the guardrail Stop is recorded before the send");
+    assert.equal(hub.sentOfType("stop_session").length, 1);
+    hub.deliver = true;
+    return { db, hub, svc, id };
+  };
+
+  test(`a lost guardrail Stop (${card}) stays stopped across reconnect and is resent (#1835)`, () => {
+    const { db, hub, svc, id } = declineWithLostStop();
+
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "running" })]);
+    assert.equal(hub.sentOfType("stop_session").length, 2, "reconnect resends the undelivered Stop");
+    assert.equal(db.getSession(id)!.status, "stopped", "a live reconnect snapshot cannot undo the guardrail Stop");
+    assert.equal(db.getSession(id)!.pendingApproval, null, "the guardrail card is not re-parked");
+    assert.deepEqual(db.sessionStopProvenance(id), { cause: "guardrail", confirmation: null, confirmedAt: null });
+
+    svc.onSessionStatus(id, "idle", undefined, undefined, RUNNER_ID);
+    assert.equal(db.getSession(id)!.status, "stopped", "a late live status cannot undo it either");
+    assert.equal(hub.sentOfType("stop_session").length, 3);
+
+    svc.onSessionStatus(id, "stopped", undefined, undefined, RUNNER_ID);
+    assert.equal(db.hasSessionStopIntent(id), false, "terminal runner evidence settles the Stop");
+    assert.equal(db.getSession(id)!.status, "stopped");
+    assert.equal(db.sessionStopProvenance(id)?.cause, "guardrail");
+    assert.equal(db.sessionStopProvenance(id)?.confirmation, "runner_terminal");
+  });
+
+  test(`a lost guardrail Stop (${card}) survives legacy reconnect inventory (#1835)`, () => {
+    const { db, hub, svc, id } = declineWithLostStop();
+
+    svc.reconcileRunnerSessions(RUNNER_ID, [id]);
+    assert.equal(hub.sentOfType("stop_session").length, 2, "legacy inventory resends the undelivered Stop");
+    assert.equal(db.getSession(id)!.status, "stopped", "legacy inventory cannot restore the guardrail-stopped session");
+    assert.equal(db.getSession(id)!.pendingApproval, null);
+
+    svc.reconcileRunnerSessions(RUNNER_ID, []);
+    assert.equal(db.hasSessionStopIntent(id), false, "absence from the inventory settles the Stop");
+    assert.equal(db.getSession(id)!.status, "stopped");
+  });
+}
+
 test("a hook ask is a turn-wide barrier and session termination aborts it fail-closed", () => {
   const { db, hub, svc } = makeHarness();
   const id = seedSession(svc, hub);
@@ -19216,6 +19302,8 @@ test("cost checkpoints park once each, approval advances, and a decline stops wi
   assert.ok(declined.ok, declined.error);
   assert.equal(db.getSession(id)!.status, "stopped");
   assert.equal(db.getSession(id)!.costCheckpointApprovedUsd, 1, "declining records nothing");
+  svc.onSessionStatus(id, "stopped");
+  assert.equal(db.hasSessionStopIntent(id), false, "the runner confirms the decline's Stop");
 
   // Restarted and idle again, the same checkpoint asks again.
   db.updateSessionStatus(id, "idle", Date.now());

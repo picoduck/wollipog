@@ -5941,6 +5941,18 @@ export class SessionsService {
     return stopped;
   }
 
+  /** Declining a guardrail card is a Stop, so it is as durable as one: persist the intent before
+   * touching the socket, or a lost frame leaves nothing to resend and the runner's next live
+   * snapshot restores the session the user stopped. */
+  private stopAtGuardrail(session: SessionView, now: number): void {
+    this.abortPolicyHookApprovals(session, now, "guardrail-stopped");
+    this.revokeUnconsumedWorkflowDecisionsForSession(session.id, "guardrail-stopped");
+    this.db.setPendingApproval(session.id, null);
+    this.db.addSessionStopIntent(session.id, session.runnerId, now);
+    this.db.updateSessionStatus(session.id, "stopped", now, { cause: "guardrail" });
+    this.sendStopCommand(session.runnerId, session.id);
+  }
+
   /** Clear a durable stop only after terminal/absence evidence. Any attached archive mutation is
    * committed in the same DB transaction before the changed session is broadcast. The Stop that
    * recorded the intent revokes the session's decisions before it writes the stop, but a
@@ -8935,11 +8947,7 @@ export class SessionsService {
       } else {
         // Declining stops the turn and records nothing, so the same checkpoint asks again on the
         // next turn that crosses it.
-        this.abortPolicyHookApprovals(session, now, "guardrail-stopped");
-        this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "guardrail-stopped");
-        this.db.setPendingApproval(sessionId, null);
-        this.sendStopCommand(session.runnerId, sessionId);
-        this.db.updateSessionStatus(sessionId, "stopped", now, { cause: "guardrail" });
+        this.stopAtGuardrail(session, now);
         this.recordGovernanceAudit(session, pending, "resolution", "denied", actor, now, { optionId });
       }
       this.hub.sessionChangedById(sessionId);
@@ -9015,11 +9023,7 @@ export class SessionsService {
         this.reconcilePolicyHookTimeouts(now, sessionId);
         this.clearSettledPolicyResumeStatus(sessionId);
       } else {
-        this.abortPolicyHookApprovals(session, now, "guardrail-stopped");
-        this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "guardrail-stopped");
-        this.db.setPendingApproval(sessionId, null);
-        this.sendStopCommand(session.runnerId, sessionId);
-        this.db.updateSessionStatus(sessionId, "stopped", now, { cause: "guardrail" });
+        this.stopAtGuardrail(session, now);
       }
       this.recordRunnerGuardrailResolution(
         session,
