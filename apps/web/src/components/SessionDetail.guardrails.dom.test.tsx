@@ -15,6 +15,7 @@ import type {
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { withScopedClockOverrides } from "./test-clock-overrides.js";
 import {
   CampaignContinuationNotice,
   ComposerPlusMenu,
@@ -401,20 +402,14 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
   } as ApiClient;
   let intervalHandler: (() => void) | undefined;
   let intervalRegistrations = 0;
-  const originalSetInterval = domWindow.setInterval;
-  const originalClearInterval = domWindow.clearInterval;
-  Object.defineProperty(domWindow, "setInterval", {
-    configurable: true,
-    value: ((handler: () => void) => {
+  await withScopedClockOverrides(domWindow, {
+    setInterval: ((handler: () => void) => {
       intervalRegistrations += 1;
       intervalHandler = handler;
       return 1 as unknown as ReturnType<typeof domWindow.setInterval>;
     }) as unknown as typeof domWindow.setInterval,
-  });
-  Object.defineProperty(domWindow, "clearInterval", {
-    configurable: true,
-    value: (() => {}) as typeof domWindow.clearInterval,
-  });
+    clearInterval: (() => {}) as typeof domWindow.clearInterval,
+  }, async () => {
   let requestReferenceChanges = 0;
   let exposedRefreshAfterResolution: (() => void) | undefined;
   function Harness({ sessionId, enabled, available }: {
@@ -565,9 +560,8 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
   } finally {
     if (container.isConnected) await act(async () => root.unmount());
     container.remove();
-    Object.defineProperty(domWindow, "setInterval", { configurable: true, value: originalSetInterval });
-    Object.defineProperty(domWindow, "clearInterval", { configurable: true, value: originalClearInterval });
   }
+  });
 });
 
 test("descendant polling keeps replacement deadlines when expired timer ids are reused", async () => {
@@ -586,35 +580,21 @@ test("descendant polling keeps replacement deadlines when expired timer ids are 
   let requestReferenceChanges = 0;
   const reusedTimeoutId = 1;
   const timeouts = new Map<number, { handler: () => void; delay: number }>();
-  const originalSetInterval = domWindow.setInterval;
-  const originalClearInterval = domWindow.clearInterval;
-  const originalSetTimeout = domWindow.setTimeout;
-  const originalClearTimeout = domWindow.clearTimeout;
-  Object.defineProperty(domWindow, "setInterval", {
-    configurable: true,
-    value: ((handler: () => void) => {
+  await withScopedClockOverrides(domWindow, {
+    setInterval: ((handler: () => void) => {
       intervalHandler = handler;
       return 1 as unknown as ReturnType<typeof domWindow.setInterval>;
     }) as unknown as typeof domWindow.setInterval,
-  });
-  Object.defineProperty(domWindow, "clearInterval", {
-    configurable: true,
-    value: (() => {}) as typeof domWindow.clearInterval,
-  });
-  Object.defineProperty(domWindow, "setTimeout", {
-    configurable: true,
-    value: ((handler: () => void, delay = 0) => {
+    clearInterval: (() => {}) as typeof domWindow.clearInterval,
+    setTimeout: ((handler: () => void, delay = 0) => {
       assert.equal(timeouts.has(reusedTimeoutId), false, "polls have at most one active deadline");
       timeouts.set(reusedTimeoutId, { handler, delay });
       return reusedTimeoutId as unknown as ReturnType<typeof domWindow.setTimeout>;
     }) as unknown as typeof domWindow.setTimeout,
-  });
-  Object.defineProperty(domWindow, "clearTimeout", {
-    configurable: true,
-    value: ((id: number) => {
+    clearTimeout: ((id: number) => {
       timeouts.delete(id);
     }) as unknown as typeof domWindow.clearTimeout,
-  });
+  }, async () => {
   const fireActiveTimeout = () => {
     const active = timeouts.get(reusedTimeoutId);
     assert.ok(active);
@@ -710,11 +690,8 @@ test("descendant polling keeps replacement deadlines when expired timer ids are 
   } finally {
     if (container.isConnected) await act(async () => root.unmount());
     container.remove();
-    Object.defineProperty(domWindow, "setInterval", { configurable: true, value: originalSetInterval });
-    Object.defineProperty(domWindow, "clearInterval", { configurable: true, value: originalClearInterval });
-    Object.defineProperty(domWindow, "setTimeout", { configurable: true, value: originalSetTimeout });
-    Object.defineProperty(domWindow, "clearTimeout", { configurable: true, value: originalClearTimeout });
   }
+  });
 });
 
 test("a legacy campaign payload derives Integration Isolation from the preset before strictness", async () => {

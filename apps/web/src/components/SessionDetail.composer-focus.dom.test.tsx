@@ -38,6 +38,7 @@ import {
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { clearSessionDetailComposerRuntimeForInstance, SessionDetail } from "./SessionDetail.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { withCapturedAnimationFrames, withScopedClockOverrides } from "./test-clock-overrides.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 installDomTestCleanup(domWindow);
@@ -211,6 +212,8 @@ interface FixtureOptions {
   sessionPatch?: Partial<SessionView>;
   runnerProtocolVersion?: number;
   strictMode?: boolean;
+  composerFocusIntent?: "message" | "reply" | null;
+  onComposerFocusConsumed?: () => void;
 }
 
 function EventSeeder({ sessionId, payloads }: { sessionId: string; payloads: SessionEvent["payload"][] }) {
@@ -328,7 +331,8 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
               rightPanel={rightPanel}
               onOpenTerminal={() => {}}
               pinnedOpen={false}
-              composerFocusIntent="message"
+              composerFocusIntent={options.composerFocusIntent ?? "message"}
+              onComposerFocusConsumed={options.onComposerFocusConsumed}
               composerDraftLoader={loader}
               composerDraftCleanup={options.composerDraftCleanup}
             />
@@ -443,6 +447,171 @@ async function focusRequestedComposer(fixture: Fixture) {
   await act(async () => { flushFrames(); });
   assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
 }
+
+test("Session Detail schedules its initial reader and composer focus before either frame runs", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  await withCapturedAnimationFrames(domWindow, async (frames) => {
+    const fixture = await mountFixture(draft);
+    try {
+      assert.ok(frames.pending() >= 2, "reader and message-intent focus each schedule a frame");
+      assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer);
+      await act(async () => { frames.flush(); });
+      assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("a collapsed phone composer retries focus on the following captured frame", async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"), media: query, onchange: null,
+    addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const prototype = domWindow.HTMLTextAreaElement.prototype;
+  const originalFocus = prototype.focus;
+  let attempts = 0;
+  prototype.focus = function() {
+    attempts += 1;
+    if (attempts > 1) originalFocus.call(this);
+  };
+  try {
+    await withCapturedAnimationFrames(domWindow, async (frames) => {
+      const fixture = await mountFixture(deferred<ComposerDraft | null>());
+      try {
+        assert.ok(frames.pending() > 0);
+        await act(async () => { frames.flush(); });
+        assert.ok(attempts > 0, "the immediate phone focus attempt ran");
+        assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer);
+        assert.ok(frames.pending() > 0, "failed immediate focus schedules a retry");
+        await act(async () => { frames.flush(); });
+        assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+      } finally {
+        await unmountFixture(fixture);
+      }
+    });
+  } finally {
+    prototype.focus = originalFocus;
+    domWindow.matchMedia = priorMatchMedia;
+  }
+});
+
+test("Inbox Reply consumes its focus request in a captured frame", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  let consumed = 0;
+  await withCapturedAnimationFrames(domWindow, async (frames) => {
+    const fixture = await mountFixture(draft, {
+      composerFocusIntent: "reply",
+      onComposerFocusConsumed: () => { consumed += 1; },
+    });
+    try {
+      assert.ok(frames.pending() > 0);
+      assert.equal(consumed, 0);
+      await act(async () => { frames.flush(); });
+      assert.equal(consumed, 1);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  });
+});
+
+test("selecting a slash command restores the composer caret in its captured frame", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveDraft(draft, "");
+    await focusRequestedComposer(fixture);
+    await act(async () => {
+      fixture.composer.value = "/ren";
+      fixture.composer.setSelectionRange(4, 4);
+      fireDomEvent.change(fixture.composer);
+    });
+    assert.ok(fixture.container.querySelector('[role="listbox"][aria-label="Slash Commands"]'));
+    const option = fixture.container.querySelector<HTMLButtonElement>(
+      '[role="listbox"][aria-label="Slash Commands"] [role="option"]:not([aria-disabled="true"])',
+    );
+    assert.ok(option, "a matching slash command is available");
+    await withCapturedAnimationFrames(domWindow, async (frames) => {
+      await act(async () => {
+        fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", {
+          key: "Enter", bubbles: true, cancelable: true,
+        }) as never);
+      });
+      assert.ok(frames.pending() > 0, "command replacement defers its caret restore");
+      const other = domWindow.document.createElement("button");
+      domWindow.document.body.append(other);
+      await act(async () => { other.focus(); });
+      assert.equal(fixture.composer.ownerDocument.activeElement, other);
+      await act(async () => { frames.flush(); });
+      assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+      assert.equal(fixture.composer.selectionStart, fixture.composer.value.length);
+      other.remove();
+    });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("attaching a workspace result restores composer focus in its captured frame", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 106,
+    client: {
+      searchWorkspaceReferences: async () => ({
+        results: [{ path: "src/index.ts", isDirectory: false }], truncated: false,
+      }),
+      createWorkspaceReference: async () => ({ reference: {
+        ...workspaceReference, artifactId: "workspace:whole-file", kind: "file",
+        path: "src/index.ts",
+      } }),
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    await focusRequestedComposer(fixture);
+    const originalSetTimeout = domWindow.setTimeout;
+    let runSearch: (() => void) | undefined;
+    await withScopedClockOverrides(domWindow, {
+      setTimeout: ((handler: () => void, delay?: number) => {
+        if (delay === 150) {
+          runSearch = handler;
+          return 777 as unknown as ReturnType<typeof domWindow.setTimeout>;
+        }
+        return originalSetTimeout.call(domWindow, handler, delay);
+      }) as typeof domWindow.setTimeout,
+    }, async () => {
+      await act(async () => {
+        fixture.composer.value = "@index";
+        fireDomEvent.change(fixture.composer);
+        fixture.composer.setSelectionRange(6, 6);
+        fireDomEvent.select(fixture.composer);
+      });
+      assert.ok(runSearch, "workspace search is scheduled");
+      await act(async () => { runSearch?.(); });
+    });
+    const option = fixture.container.querySelector<HTMLButtonElement>(
+      '[role="listbox"][aria-label="Workspace Paths"] [role="option"]',
+    );
+    assert.ok(option);
+    await withCapturedAnimationFrames(domWindow, async (frames) => {
+      await act(async () => {
+        fireDomEvent.pointerDown(option);
+        option.focus();
+      });
+      assert.equal(frames.pending(), 0, "deliberate picker focus does not queue blur recovery");
+      await act(async () => { option.click(); });
+      await Promise.resolve();
+      assert.equal(frames.pending(), 1, "attachment creation schedules its own composer focus");
+      assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer);
+      await act(async () => { frames.flush(); });
+      assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    });
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
 
 async function resolveDraft(draft: Deferred<ComposerDraft | null>, text: string) {
   await act(async () => {
@@ -657,8 +826,14 @@ test("queued message editing loads exact content and Cancel Edit restores the di
     await resolveDraft(draft, "Unsent local draft");
     const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
     assert.ok(edit);
-    await act(async () => { edit.click(); });
-    await flushAsyncWork();
+    await withCapturedAnimationFrames(domWindow, async (frames) => {
+      await act(async () => { edit.focus(); edit.click(); });
+      await flushAsyncWork();
+      assert.ok(frames.pending() > 0, "loading a queued edit schedules composer focus");
+      assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer);
+      await act(async () => { frames.flush(); });
+      assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    });
 
     assert.equal(reads.length, 1);
     assert.equal(reads[0]?.promptId, "queue-1");
@@ -676,11 +851,61 @@ test("queued message editing loads exact content and Cancel Edit restores the di
     const cancel = [...fixture.container.querySelectorAll("button")]
       .find((button) => button.textContent === "Cancel Edit") as HTMLButtonElement | undefined;
     assert.ok(cancel);
-    await act(async () => { cancel.click(); });
+    await withCapturedAnimationFrames(domWindow, async (frames) => {
+      await act(async () => {
+        fireDomEvent.pointerDown(cancel);
+        cancel.focus();
+      });
+      assert.equal(frames.pending(), 0, "deliberate Cancel focus does not queue blur recovery");
+      await act(async () => { cancel.click(); });
+      assert.equal(frames.pending(), 1, "leaving queued edit queues its ordinary composer restore");
+      assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer);
+      await act(async () => { frames.flush(); });
+      assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    });
     await flushAsyncWork(450);
     assert.equal(fixture.composer.value, "Unsent local draft");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 0);
     assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("saving a queued edit restores the displaced composer only after its captured frame", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: { queued: [{
+      id: "queue-1", text: "Queued projection", liveQueueObserved: true,
+      editable: true, editRevision: "qer_exact",
+    }] },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({ prompt: {
+        promptId, text: "Queued exact content", images: [], editRevision: "qer_exact",
+      } }),
+      editQueuedPrompt: async (_sessionId, promptId) => ({ prompt: {
+        promptId, text: "Queued exact content", images: [], editRevision: "qer_saved",
+      } }),
+    },
+  });
+  try {
+    await resolveDraft(draft, "Displaced draft");
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    const save = fixture.container.querySelector('button[aria-label="Save Queued Message"]') as HTMLButtonElement;
+    assert.ok(save);
+    await withCapturedAnimationFrames(domWindow, async (frames) => {
+      await act(async () => { save.focus(); save.click(); });
+      await flushAsyncWork();
+      assert.ok(frames.pending() > 0, "successful save defers focus until the draft is restored");
+      assert.equal(fixture.composer.value, "Displaced draft");
+      assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer);
+      await act(async () => { frames.flush(); });
+      assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+      assert.equal(fixture.composer.selectionStart, fixture.composer.value.length);
+    });
   } finally {
     await unmountFixture(fixture);
   }
@@ -921,8 +1146,20 @@ test("a live queue revision change disables recovered retry while preserving con
     assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /attachment could not be retained/i);
 
     exportFailure = null;
-    await act(async () => { reuse.click(); });
-    await flushAsyncWork(450);
+    await withCapturedAnimationFrames(domWindow, async (frames) => {
+      await act(async () => {
+        fireDomEvent.pointerDown(reuse);
+        reuse.focus();
+      });
+      assert.equal(frames.pending(), 0, "deliberate Reuse focus does not queue blur recovery");
+      await act(async () => { reuse.click(); });
+      await flushAsyncWork(450);
+      assert.equal(frames.pending(), 2,
+        "recovered conversion queues final focus separately from its initial reveal");
+      assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer);
+      await act(async () => { frames.flush(); });
+      assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
+    });
     assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
     assert.equal(fixture.composer.value, "Recovered revision for reuse");
     assert.ok(exportedArtifacts.includes(materializedImageReference.artifactId));
@@ -2895,9 +3132,11 @@ test("focus recovery distinguishes background loss from explicit transfer and IM
     fixture.composer.setSelectionRange(1, 9, "forward");
     fixture.composer.scrollTop = 23;
 
-    await act(async () => {
-      fixture.composer.blur();
-      flushFrames();
+    await withCapturedAnimationFrames(domWindow, async (frames) => {
+      await act(async () => { fixture.composer.blur(); });
+      assert.ok(frames.pending() > 0, "background blur defers its restore");
+      assert.notEqual(fixture.composer.ownerDocument.activeElement, fixture.composer);
+      await act(async () => { frames.flush(); });
     });
     assert.equal(fixture.composer.ownerDocument.activeElement, fixture.composer);
     assert.deepEqual([fixture.composer.selectionStart, fixture.composer.selectionEnd], [1, 9]);

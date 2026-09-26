@@ -13,6 +13,7 @@ import { clearQuestionDrafts } from "../question-response.js";
 import { setQuestionResponseStyle } from "../question-response-style.js";
 import { api } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { withScopedClockOverrides } from "./test-clock-overrides.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 (globalThis as typeof globalThis & { React: typeof React }).React = React;
@@ -163,16 +164,11 @@ async function withCapturedZeroDelayTimers(body: () => Promise<void>): Promise<(
   };
   const scheduled: Array<() => void> = [];
   const original = timers.setTimeout;
-  timers.setTimeout = (handler, delay) => {
+  await withScopedClockOverrides(domWindow, { setTimeout: (handler: () => void, delay?: number) => {
     if (delay !== 0) return original.call(domWindow, handler, delay);
     scheduled.push(handler);
     return 0;
-  };
-  try {
-    await body();
-  } finally {
-    timers.setTimeout = original;
-  }
+  } }, body);
   return () => { for (const handler of scheduled.splice(0)) handler(); };
 }
 

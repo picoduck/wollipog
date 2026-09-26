@@ -7,6 +7,7 @@ import { Rail } from "./Rail.js";
 import { saveSessionsViewMode } from "../sessions-view-mode.js";
 import { moveRailView, resetRailPreferencesForTest, setRailViewHidden } from "../rail-preferences.js";
 import type { View } from "../navigation.js";
+import { withCapturedAnimationFrames } from "./test-clock-overrides.js";
 
 const domWindow = new Window();
 const priorWindow = globalThis.window;
@@ -419,17 +420,19 @@ test("crossing to desktop from the Settings row hands focus to the desktop gear"
     // and takes the runner out with it.
     assert.ok(domWindow.document.activeElement === (row as never), "the sheet row owns focus first");
 
-    phone = false;
-    await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize") as never); });
-    await render();
-    // The handoff is deferred to a frame, so let one elapse before reading focus.
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
-
-    const gear = container.querySelector(".rail-settings .settings-trigger");
-    assert.ok(gear, "the desktop layout mounts the gear");
-    const focused = domWindow.document.activeElement as unknown as Element | null;
-    assert.ok(focused === (gear as never),
-      `focus must land on the same page, not on the first destination — got ${focused?.className ?? "nothing"}`);
+    await withCapturedAnimationFrames(domWindow, async (frames) => {
+      phone = false;
+      await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize") as never); });
+      await render();
+      assert.ok(frames.pending() > 0, "the viewport handoff schedules a focus frame");
+      const gear = container.querySelector(".rail-settings .settings-trigger");
+      assert.ok(gear, "the desktop layout mounts the gear");
+      assert.ok(domWindow.document.activeElement !== (gear as never), "focus waits for the frame");
+      await act(async () => { frames.flush(); });
+      const focused = domWindow.document.activeElement as unknown as Element | null;
+      assert.ok(focused === (gear as never),
+        `focus must land on the same page, not on the first destination — got ${focused?.className ?? "nothing"}`);
+    });
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
