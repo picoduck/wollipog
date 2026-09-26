@@ -5271,6 +5271,7 @@ function SessionDetailLoaded({
                       className="btn ghost sm retitle-receipt-retry"
                       disabled={renameRefusal !== null}
                       title={renameRefusal ?? undefined}
+                      aria-describedby={renameRefusal !== null ? `retitle-refusal-${session.id}` : undefined}
                       onPointerDown={() => {
                         retitleRetryPointerActivationRef.current = true;
                       }}
@@ -5294,6 +5295,9 @@ function SessionDetailLoaded({
                     >
                       Retry Rename
                     </button>
+                    {renameRefusal !== null && (
+                      <span className="sr-only" id={`retitle-refusal-${session.id}`}>{renameRefusal}</span>
+                    )}
                   </div>
                 )}
               </div>
@@ -6651,6 +6655,7 @@ export function CampaignContinuationNotice({
   onAcknowledge?: (commandId: string) => void;
   onRetry?: (commandId: string) => void;
 }) {
+  const refusalId = `campaign-continuation-refusal-${useId().replace(/:/gu, "")}`;
   const label = continuation.state === "missing_result"
     ? "Missing Result"
     : titleCaseLabel(continuation.state);
@@ -6683,6 +6688,7 @@ export function CampaignContinuationNotice({
         <span>{explanation}</span>
         <small>{eventLabel} · Attempt {continuation.attemptCount}</small>
         {continuation.error && <small>{continuation.error}</small>}
+        {actionRefusal !== null && (canAcknowledge || canRetry) && <small id={refusalId}>{actionRefusal}</small>}
       </div>
       {canAcknowledge && (
         <button
@@ -6690,6 +6696,7 @@ export function CampaignContinuationNotice({
           className="btn sm"
           disabled={acknowledgementPending || actionRefusal !== null}
           title={actionRefusal ?? undefined}
+          aria-describedby={actionRefusal !== null ? refusalId : undefined}
           onClick={() => onAcknowledge(continuation.commandId!)}
         >
           {acknowledgementPending ? "Acknowledging…" : "Acknowledge Missing Result"}
@@ -6701,6 +6708,7 @@ export function CampaignContinuationNotice({
           className="btn sm"
           disabled={acknowledgementPending || actionRefusal !== null}
           title={actionRefusal ?? undefined}
+          aria-describedby={actionRefusal !== null ? refusalId : undefined}
           onClick={() => onRetry(continuation.commandId!)}
         >
           {acknowledgementPending ? "Retrying…" : "Retry Campaign Continuation"}

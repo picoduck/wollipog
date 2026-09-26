@@ -95,12 +95,14 @@ export function ApprovalSelectorContext({ context }: { context?: ApprovalContext
 }
 
 /** Why the signed-in person may not answer or decide this session's requests (#1857), from the
- * session's view in the store; null without a store or a view, so the server still decides. */
-export function useSessionResponseRefusal(sessionId: string): string | null {
-  return useOptionalStoreSelector((state) => {
+ * session's view in the store. Without a store or a view it is `fallback`: a caller that knows the
+ * requester's verdict from another view passes it, and otherwise the server still decides. */
+export function useSessionResponseRefusal(sessionId: string, fallback: string | null = null): string | null {
+  const stored = useOptionalStoreSelector((state) => {
     const session = state.sessions.get(sessionId);
-    return session ? sessionCommandRefusal(session, "respond") : null;
-  }) ?? null;
+    return session ? sessionCommandRefusal(session, "respond") : undefined;
+  });
+  return stored === undefined ? fallback : stored;
 }
 
 /** Stable focus/live boundary across coalesced approval replacement and final resolution. */

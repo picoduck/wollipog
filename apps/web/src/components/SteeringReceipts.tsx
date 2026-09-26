@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useId, useState } from "react";
 import type { SteeringAttemptView } from "@wollipog/protocol";
 import { steeringReceiptPresentation, type SteeringReceiptTone } from "../conversation-steering.js";
 import type { TimelineItem } from "../timeline.js";
@@ -125,6 +125,8 @@ interface SteeringReceiptCardProps {
   /** Why the signed-in person may not resolve a steering attempt (#1857); its actions are then
    * disabled with this reason. */
   actionRefusal?: string | null;
+  /** The element that states `actionRefusal`, which describes each disabled action. */
+  actionRefusalId?: string;
   onQueueAgain: (submissionId: string) => void;
   onDismiss: (submissionId: string) => void | Promise<void>;
 }
@@ -133,9 +135,11 @@ function SteeringReceiptCard({
   receipt: { attempt, status, label, detail },
   pendingActions,
   actionRefusal = null,
+  actionRefusalId,
   onQueueAgain,
   onDismiss,
 }: SteeringReceiptCardProps) {
+  const refusalDescription = actionRefusal !== null ? actionRefusalId : undefined;
   const pendingAction = pendingActions?.get(attempt.submissionId);
   const actionPending = attempt.resolution?.state === "pending" || pendingAction !== undefined;
   const recoverable = attempt.state === "uncertain" && attempt.resolution?.state !== "applied";
@@ -167,6 +171,7 @@ function SteeringReceiptCard({
           aria-label="Dismiss"
           title={actionRefusal ?? "Dismiss"}
           disabled={actionPending || actionRefusal !== null}
+          aria-describedby={refusalDescription}
           onClick={() => onDismiss(attempt.submissionId)}
         >
           <CloseIcon />
@@ -197,6 +202,7 @@ function SteeringReceiptCard({
             type="button"
             disabled={actionPending || actionRefusal !== null}
             title={actionRefusal ?? undefined}
+            aria-describedby={refusalDescription}
             onClick={() => onQueueAgain(attempt.submissionId)}
           >
             Queue Again
@@ -221,6 +227,9 @@ export function SteeringReceipts({
   const [queuedAgainReceiptsExpanded, setQueuedAgainReceiptsExpanded] = useState(false);
   const [clearingRejected, setClearingRejected] = useState(false);
   const [clearingQueuedAgain, setClearingQueuedAgain] = useState(false);
+  // A disabled control's tooltip is announced by nothing, so the refusal is also a description.
+  const refusalId = useId();
+  const refusalDescription = actionRefusal !== null ? refusalId : undefined;
   const receipts = deriveSteeringReceipts(attempts, timelineItems, activeTurnId, historyPartial);
   if (!receipts.length) return null;
   const rejected = receipts.filter(({ status }) => status === "rejected");
@@ -238,12 +247,14 @@ export function SteeringReceipts({
 
   return (
     <section className="steering-receipts" aria-label="Steering Receipts">
+      {actionRefusal !== null && <p className="sr-only" id={refusalId}>{actionRefusal}</p>}
       {ungrouped.map((receipt) => (
         <SteeringReceiptCard
           key={receipt.attempt.submissionId}
           receipt={receipt}
           pendingActions={pendingActions}
           actionRefusal={actionRefusal}
+          actionRefusalId={refusalId}
           onQueueAgain={onQueueAgain}
           onDismiss={onDismiss}
         />
@@ -266,6 +277,7 @@ export function SteeringReceipts({
               type="button"
               disabled={clearingRejected || clearableRejected.length === 0 || actionRefusal !== null}
               title={actionRefusal ?? undefined}
+              aria-describedby={refusalDescription}
               onClick={async () => {
                 setClearingRejected(true);
                 try {
@@ -288,6 +300,7 @@ export function SteeringReceipts({
                   receipt={receipt}
                   pendingActions={pendingActions}
                   actionRefusal={actionRefusal}
+                  actionRefusalId={refusalId}
                   onQueueAgain={onQueueAgain}
                   onDismiss={onDismiss}
                 />
@@ -314,6 +327,7 @@ export function SteeringReceipts({
               type="button"
               disabled={clearingQueuedAgain || clearableQueuedAgain.length === 0 || actionRefusal !== null}
               title={actionRefusal ?? undefined}
+              aria-describedby={refusalDescription}
               onClick={async () => {
                 setClearingQueuedAgain(true);
                 try {
@@ -336,6 +350,7 @@ export function SteeringReceipts({
                   receipt={receipt}
                   pendingActions={pendingActions}
                   actionRefusal={actionRefusal}
+                  actionRefusalId={refusalId}
                   onQueueAgain={onQueueAgain}
                   onDismiss={onDismiss}
                 />

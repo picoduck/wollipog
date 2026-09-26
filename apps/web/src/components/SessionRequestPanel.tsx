@@ -15,10 +15,12 @@ import {
   type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import { relativeTime } from "../format.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
 import {
   SessionApprovalBanner,
   SessionQuestionBanner,
   standaloneApprovalForReview,
+  useSessionResponseRefusal,
 } from "./SessionApproval.js";
 
 type RequestPanelItem = {
@@ -155,6 +157,12 @@ export function SessionRequestPanel({
       ownRequest, runnerOnline, session]);
   const activeKey = items.some((item) => item.key === selectedKey) ? selectedKey : items[0]?.key ?? null;
   const selected = items.find((item) => item.key === activeKey) ?? null;
+  // A descendant's view may not have reached the store yet. For a person the answer route applies
+  // only the organization role gate, so this session's own verdict stands in for it (#1857).
+  const selectedResponseRefusal = useSessionResponseRefusal(
+    selected?.sessionId ?? session.id,
+    sessionCommandRefusal(session, "respond"),
+  );
   const listId = useId();
   const listRef = useRef<HTMLDivElement>(null);
   const detailHeadingRef = useRef<HTMLHeadingElement>(null);
@@ -287,6 +295,7 @@ export function SessionRequestPanel({
             recoveryReason={selected.request.recoveryReason}
             recoveryAction={selected.request.recoveryAction}
             runnerOnline={selected.runnerOnline}
+            responseRefusal={selectedResponseRefusal}
             onSessionUpdate={selected.descendant ? onDescendantsUpdate : onSessionUpdate}
             showKeyHints={false}
           />

@@ -589,3 +589,65 @@ test("remote evidence resolution clears the stale review draft", async () => {
     container.remove();
   }
 });
+
+test("a Viewer cannot answer a descendant question whose child view has not reached the store (#1857)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const refused = { allowed: false as const, reason };
+  const session = {
+    ...evidenceSession(),
+    pendingApproval: null,
+    commandPermissions: { stop: refused, restart: refused, stopBackgroundJob: refused, respond: refused },
+  } as SessionView;
+  const child: DescendantRequestView = {
+    sessionId: "child-not-in-store",
+    sessionTitle: "Unloaded Child",
+    runnerId: "runner",
+    runnerOnline: true,
+    eventEpoch: 8,
+    createdAt: Date.now() - 60_000,
+    responseOwner: "human",
+    occurrenceId: "child-occurrence",
+    request: {
+      requestId: "child-question",
+      occurrenceId: "child-occurrence",
+      kind: "question",
+      title: "Question",
+      options: [],
+      questions: [{ id: "target", question: "Choose a target", options: [{ label: "Staging" }] }],
+    },
+  };
+  const answered: string[] = [];
+  const client = {
+    ...api,
+    answerQuestion: async (sessionId: string) => { answered.push(sessionId); return session; },
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={client}>
+        <SessionRequestPanel
+          session={session}
+          runnerOnline
+          descendants={[child]}
+          selectedKey={sessionRequestPanelKey(child.sessionId, child.occurrenceId)}
+          onSelectedKeyChange={() => {}}
+          onSessionUpdate={() => {}}
+          onDescendantsUpdate={() => {}}
+          onOpenChild={() => {}}
+        />
+      </ApiProvider>,
+    ));
+    assert.equal(container.querySelector(".question-availability")?.textContent, reason,
+      "the requester's own verdict stands in for the missing child view");
+    const actions = [...container.querySelectorAll<HTMLButtonElement>(".approval-actions button")];
+    assert.ok(actions.length > 0);
+    assert.ok(actions.every((button) => button.disabled));
+    await act(async () => { for (const button of actions) button.click(); });
+    assert.deepEqual(answered, []);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

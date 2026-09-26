@@ -91,6 +91,38 @@ test("campaign continuation status explains missing results and exposes explicit
   }
 });
 
+test("a Viewer reads the campaign continuation's Acknowledge disabled with a visible reason (#1857)", async () => {
+  const acknowledged: string[] = [];
+  const reason = "Your Viewer role is read-only.";
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<CampaignContinuationNotice continuation={{
+      state: "missing_result",
+      pendingEvents: 3,
+      continuationId: "campaign_cont_viewer",
+      commandId: "campaign_prompt_viewer",
+      eventFromSeq: 4,
+      eventThroughSeq: 6,
+      attemptCount: 2,
+      updatedAt: 10,
+      canAcknowledgeMissingResult: true,
+    }} actionRefusal={reason} onAcknowledge={(commandId) => acknowledged.push(commandId)} />);
+  });
+  try {
+    const acknowledge = container.querySelector<HTMLButtonElement>("button")!;
+    assert.equal(acknowledge.disabled, true);
+    const described = acknowledge.getAttribute("aria-describedby");
+    assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason);
+    await act(async () => fireDomEvent.click(acknowledge));
+    assert.deepEqual(acknowledged, []);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("campaign continuation status exposes an explicit retry after automatic retrying stops", async () => {
   const retried: string[] = [];
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;

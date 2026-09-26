@@ -455,6 +455,9 @@ test("a Viewer's Queue Again, Dismiss and Clear All are disabled with the reason
     for (const button of buttons) {
       assert.equal(button.disabled, true, `${button.textContent || button.getAttribute("aria-label")} is disabled`);
       assert.equal(button.title, reason);
+      const described = button.getAttribute("aria-describedby");
+      assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason,
+        "the reason is a description, not only a tooltip");
     }
     await act(async () => { for (const button of buttons) button.click(); });
     assert.deepEqual(actions, []);
