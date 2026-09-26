@@ -20,6 +20,7 @@ function permissions(stopJobs: boolean, restart: boolean): SessionCommandPermiss
     stop: { allowed: true },
     restart: restart ? { allowed: true } : { allowed: false, reason: VIEWER },
     stopBackgroundJob: stopJobs ? { allowed: true } : { allowed: false, reason: VIEWER },
+    cancelTurn: { allowed: true },
   };
 }
 
@@ -40,6 +41,14 @@ test("the server's advice is shown as written when the client cannot tailor it (
   const cases = [
     ["no session view", undefined],
     ["a control plane that sends no permissions", { queueHold }],
+    ["a control plane that predates #1857's verdicts", {
+      queueHold,
+      commandPermissions: {
+        stop: { allowed: true },
+        restart: { allowed: false, reason: VIEWER },
+        stopBackgroundJob: { allowed: false, reason: VIEWER },
+      },
+    }],
     ["a session view without its queue hold", { commandPermissions: permissions(false, false) }],
     ["a later hold incident", { queueHold: { ...queueHold, holdId: "worktree-rebind:2" }, commandPermissions: permissions(false, false) }],
   ] as const;

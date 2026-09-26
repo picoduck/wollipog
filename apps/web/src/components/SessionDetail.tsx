@@ -4340,6 +4340,11 @@ function SessionDetailLoaded({
 
   const saveQueuedPromptEdit = async () => {
     if (!queuedEdit || queuedEditBusy || !queuedEditRetryable || composerMutationRegistry.has(mutationKey)) return;
+    // An edit opened before the person lost queue management is not sent (#1857).
+    if (queueRefusal !== null) {
+      setError(queueRefusal);
+      return;
+    }
     const submittedDraft = {
       text: text.trim(),
       images: images.map((image) => ({ ...image })),

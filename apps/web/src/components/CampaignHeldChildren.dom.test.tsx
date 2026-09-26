@@ -229,6 +229,7 @@ test("a held child's recovery action is the advice written for the reader when o
       stop: { allowed: false as const, reason },
       restart: { allowed: false as const, reason },
       stopBackgroundJob: { allowed: false as const, reason },
+      cancelTurn: { allowed: false as const, reason },
     },
   };
   const recoveryText = (container: HTMLElement) => [...container.querySelectorAll("dt")]

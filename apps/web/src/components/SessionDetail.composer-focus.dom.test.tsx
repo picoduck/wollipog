@@ -943,6 +943,46 @@ test("saving a queued edit restores the displaced composer only after its captur
   }
 });
 
+test("a queued edit opened before the person lost queue management is not saved (#1857)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const saved: string[] = [];
+  const reason = "Your Viewer role is read-only.";
+  const fixture = await mountFixture(draft, {
+    runnerProtocolVersion: 99,
+    sessionPatch: { queued: [{
+      id: "queue-1", text: "Queued projection", liveQueueObserved: true,
+      editable: true, editRevision: "qer_exact",
+    }] },
+    client: {
+      readQueuedPrompt: async (_sessionId, promptId) => ({ prompt: {
+        promptId, text: "Queued exact content", images: [], editRevision: "qer_exact",
+      } }),
+      editQueuedPrompt: async (_sessionId, promptId) => {
+        saved.push(promptId);
+        return { prompt: { promptId, text: "Queued exact content", images: [], editRevision: "qer_saved" } };
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "Displaced draft");
+    const edit = fixture.container.querySelector('button[aria-label="Edit Queued Message"]') as HTMLButtonElement;
+    await act(async () => { edit.click(); });
+    await flushAsyncWork();
+    assert.ok(fixture.container.querySelector('button[aria-label="Save Queued Message"]'), "the edit is open");
+    const refused = { allowed: false as const, reason };
+    await fixture.pushSession({ commandPermissions: {
+      stop: refused, restart: refused, stopBackgroundJob: refused, manageQueue: refused, prompt: refused,
+    } });
+    await act(async () => {
+      fixture.composer.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }) as never);
+    });
+    await flushAsyncWork();
+    assert.deepEqual(saved, [], "the open edit is not sent once queue management is refused");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("navigating away mid-edit preserves the displaced session draft instead of queued content", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft, {
