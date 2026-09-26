@@ -5909,6 +5909,15 @@ export interface SessionCommandPermissions {
   restart: SessionCommandPermission;
   /** Stop Job on one managed background job. */
   stopBackgroundJob: SessionCommandPermission;
+  /** Archive, including Archive and Stop. The following entries are omitted by control planes
+   * that predate them; a surface then offers the command as before. */
+  archive?: SessionCommandPermission;
+  /** Unarchive, and the server-owned Unarchive and Restart. */
+  unarchive?: SessionCommandPermission;
+  /** Send a prompt from the composer. */
+  prompt?: SessionCommandPermission;
+  /** Delete an archived session. */
+  delete?: SessionCommandPermission;
 }
 
 /** Denormalised session record for the UI (board cards + lists). */

@@ -136,12 +136,19 @@ export function pageArchiveSessions(
   return { sessions: sessions.slice(start, start + pageSize), page, pageCount, total };
 }
 
-/** Merge websocket upserts into the REST catalog without making ordering depend on arrival order. */
+/** Merge websocket upserts into the REST catalog without making ordering depend on arrival order.
+ * A mutation's response carries no command permissions, so a row keeps the last verdict it had,
+ * as the store does. */
 export function mergeArchiveSessionCatalog(
   catalog: ReadonlyMap<string, SessionView>,
   upserts: Iterable<SessionView>,
 ): Map<string, SessionView> {
   const merged = new Map(catalog);
-  for (const session of upserts) merged.set(session.id, session);
+  for (const session of upserts) {
+    const previous = merged.get(session.id)?.commandPermissions;
+    merged.set(session.id, session.commandPermissions === undefined && previous
+      ? { ...session, commandPermissions: previous }
+      : session);
+  }
   return merged;
 }

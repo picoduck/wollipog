@@ -220,3 +220,24 @@ test("multi-client upserts replace catalog rows without duplicating them", () =>
   assert.equal(merged.get("shared")?.status, "stopped");
   assert.equal(merged.get("new")?.status, "queued");
 });
+
+test("a mutation's bare response keeps the row's last command permissions; a fresh verdict replaces them", () => {
+  const readOnly = { allowed: false as const, reason: "Your Viewer role is read-only." };
+  const fromPage = session({ id: "row", commandPermissions: {
+    stop: readOnly, restart: readOnly, stopBackgroundJob: readOnly, unarchive: readOnly, delete: readOnly,
+  } });
+  const bare = session({ id: "row", status: "stopped", updatedAt: 11 });
+  const kept = mergeArchiveSessionCatalog(new Map([[fromPage.id, fromPage]]), [bare]).get("row");
+  assert.equal(kept?.status, "stopped");
+  assert.deepEqual(kept?.commandPermissions, fromPage.commandPermissions,
+    "a response without permissions must not re-offer commands the server refuses");
+
+  const allowed = { allowed: true as const };
+  const fresh = session({ id: "row", updatedAt: 12, commandPermissions: {
+    stop: allowed, restart: allowed, stopBackgroundJob: allowed, unarchive: allowed, delete: allowed,
+  } });
+  assert.deepEqual(mergeArchiveSessionCatalog(new Map([["row", kept!]]), [fresh]).get("row")?.commandPermissions,
+    fresh.commandPermissions);
+  assert.equal(mergeArchiveSessionCatalog(new Map(), [bare]).get("row")?.commandPermissions, undefined,
+    "a row that never had a verdict stays without one");
+});

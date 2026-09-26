@@ -4,7 +4,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ControlPlaneToUi, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
+import type { ControlPlaneToUi, SessionCommandPermissions, SessionView, UiSnapshotMessage } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { View, ViewNavigation } from "../navigation.js";
@@ -1069,4 +1069,103 @@ test("Undo revalidates with the filters active when Undo is clicked", async () =
 
   assert.equal(fixture.archiveInputs.at(-1)?.q, "current-filter");
   await fixture.unmount();
+});
+
+const VIEWER = "Your Viewer role is read-only.";
+const viewerPermissions: SessionCommandPermissions = {
+  stop: { allowed: false, reason: VIEWER },
+  restart: { allowed: false, reason: VIEWER },
+  stopBackgroundJob: { allowed: false, reason: VIEWER },
+  archive: { allowed: false, reason: VIEWER },
+  unarchive: { allowed: false, reason: VIEWER },
+  prompt: { allowed: false, reason: VIEWER },
+  delete: { allowed: false, reason: VIEWER },
+};
+
+function buttons(container: HTMLElement, label: string): HTMLButtonElement[] {
+  return [...container.querySelectorAll("button")].filter((candidate) => candidate.textContent?.trim() === label);
+}
+
+function viewerRows(commandPermissions: SessionCommandPermissions | undefined): SessionView[] {
+  const permissions = commandPermissions ? { commandPermissions } : {};
+  return [
+    session(40, { id: "viewer-archived-running", title: "Archived Running", status: "running", ...permissions }),
+    session(41, { id: "viewer-archived-stopped", title: "Archived Stopped", status: "stopped", ...permissions }),
+    session(42, {
+      id: "viewer-stop-failed", title: "Stop Failed", archived: false, status: "running",
+      archiveStatus: "stop_failed",
+      archiveOperation: {
+        operationId: "stop-operation-viewer", status: "stop_failed", requestedAt: 1, lastAttemptAt: 2, attemptCount: 1,
+        capacityReleased: false, failure: { code: "runner_rejected", message: "Stop failed.", failedAt: 3 },
+      },
+      ...permissions,
+    }),
+  ];
+}
+
+function recordingClient(calls: string[]): Partial<ApiClient> {
+  return {
+    setArchived: async (id, archived) => { calls.push(`archived:${id}:${archived}`); return session(0, { id }); },
+    unarchiveAndRestart: async (id) => { calls.push(`unarchive-and-restart:${id}`); return { ok: true } as never; },
+    retryStop: async (id) => { calls.push(`retry-stop:${id}`); return session(0, { id }); },
+    stop: async (id) => { calls.push(`stop:${id}`); return session(0, { id }); },
+    deleteSession: async (id) => { calls.push(`delete:${id}`); return undefined as never; },
+  };
+}
+
+test("a Viewer sees every refused row action disabled with its reason, and nothing is confirmed or sent", async () => {
+  for (const unarchiveAndRestart of [false, true]) {
+    const calls: string[] = [];
+    const fixture = await mount(viewerRows(viewerPermissions), recordingClient(calls), { unarchiveAndRestart });
+    try {
+      const restore = unarchiveAndRestart ? "Unarchive and Restart" : "Unarchive";
+      const refused = [
+        ...buttons(fixture.container, restore),
+        ...buttons(fixture.container, "Stop"),
+        ...buttons(fixture.container, "Retry Stop"),
+        ...buttons(fixture.container, "Delete"),
+      ];
+      assert.deepEqual(refused.map((candidate) => candidate.textContent?.trim()).sort(),
+        [restore, restore, "Delete", "Delete", "Retry Stop", "Stop"].sort(), "every refused action stays listed");
+      for (const action of refused) {
+        const label = action.textContent?.trim();
+        assert.equal(action.disabled, true, `${label} is disabled`);
+        assert.equal(action.title, VIEWER, `${label} states the reason on hover`);
+        const describedBy = action.getAttribute("aria-describedby");
+        assert.ok(describedBy, `${label} is described by its row's reason`);
+        assert.equal(domWindow.document.getElementById(describedBy)?.textContent, VIEWER);
+        await act(async () => { fireDomEvent.click(action); await Promise.resolve(); });
+      }
+      assert.deepEqual(calls, [], "nothing is sent");
+      assert.doesNotMatch(domWindow.document.body.textContent ?? "", /Stop this session\?|Delete this session\?/u,
+        "no confirmation opens");
+      for (const open of buttons(fixture.container, "Open")) assert.equal(open.disabled, false, "Open still works");
+    } finally {
+      await fixture.unmount();
+    }
+  }
+});
+
+test("a person the server allows keeps every row action as before", async () => {
+  const allowed = { allowed: true as const };
+  for (const commandPermissions of [
+    { stop: allowed, restart: allowed, archive: allowed, unarchive: allowed, prompt: allowed, delete: allowed,
+      stopBackgroundJob: { allowed: false as const, reason: "Only the owner." } },
+    undefined,
+  ]) {
+    const calls: string[] = [];
+    const fixture = await mount(viewerRows(commandPermissions), recordingClient(calls));
+    try {
+      for (const label of ["Unarchive", "Stop", "Retry Stop", "Delete"]) {
+        for (const action of buttons(fixture.container, label)) {
+          assert.equal(action.disabled, false, `${label} stays enabled`);
+          assert.equal(action.getAttribute("aria-describedby"), null);
+        }
+      }
+      await act(async () => { fireDomEvent.click(buttons(fixture.container, "Retry Stop")[0]!); await Promise.resolve(); });
+      assert.deepEqual(calls, ["retry-stop:viewer-stop-failed"]);
+    } finally {
+      await fixture.unmount();
+    }
+  }
 });

@@ -272,6 +272,7 @@ import {
   parseUiClientMessage,
 } from "./ui-channel.js";
 import {
+  AGENT_UNARCHIVE_ERROR,
   agentCredentialSessionTargetError,
   agentDelegationAuthorizationError,
   backgroundJobStopActor,
@@ -5315,7 +5316,7 @@ app.post("/api/sessions/:id/archive", async (req, reply) => {
   const body = (req.body ?? {}) as SetArchivedRequest;
   if (typeof body.archived !== "boolean") return reply.code(400).send({ error: "archived must be a boolean" });
   if (requestPrincipal(req)?.kind === "agent" && !body.archived) {
-    return reply.code(403).send({ error: "session credentials may archive descendants, but cannot unarchive them" });
+    return reply.code(403).send({ error: AGENT_UNARCHIVE_ERROR });
   }
   return respond(reply, svc.setArchived(id, body.archived));
 });
@@ -5327,7 +5328,7 @@ app.post("/api/sessions/:id/archive", async (req, reply) => {
 app.post("/api/sessions/:id/unarchive-and-restart", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (requestPrincipal(req)?.kind === "agent") {
-    return reply.code(403).send({ error: "session credentials may archive descendants, but cannot unarchive them" });
+    return reply.code(403).send({ error: AGENT_UNARCHIVE_ERROR });
   }
   const result = svc.unarchiveAndRestart(id);
   if (result.ok) return respond(reply, result);

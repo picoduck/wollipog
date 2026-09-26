@@ -1,5 +1,6 @@
 import type { SessionCommandPermission, SessionCommandPermissions, SessionView } from "@wollipog/protocol";
 import {
+  AGENT_UNARCHIVE_ERROR,
   agentCredentialSessionTargetError,
   backgroundJobStopAuthorizationError,
   mutationAuthorizationError,
@@ -18,9 +19,15 @@ export interface SessionCommandPermissionFacts {
 const STOP_ROUTE = "/api/sessions/:id/stop";
 const RESTART_ROUTE = "/api/sessions/:id/restart";
 const STOP_JOB_ROUTE = "/api/sessions/:id/background-jobs/:jobId/stop";
+const ARCHIVE_ROUTE = "/api/sessions/:id/archive";
+const UNARCHIVE_AND_RESTART_ROUTE = "/api/sessions/:id/unarchive-and-restart";
+const PROMPT_ROUTE = "/api/sessions/:id/prompt";
+const DELETE_ROUTE = "/api/sessions/:id";
 
 const VIEWER_REASON = "Your Viewer role is read-only.";
 const STOP_JOB_OWNER_REASON = "Only the session owner or its controlling Orchestrator can stop its background jobs.";
+/** No agent credential's route allowlist includes deleting a session. */
+const AGENT_DELETE_REASON = "Session credentials cannot delete sessions.";
 
 function sentence(error: string): string {
   const text = error.charAt(0).toUpperCase() + error.slice(1);
@@ -34,8 +41,9 @@ function routeRefusal(
   principal: AuthPrincipal,
   target: { id: string },
   facts: SessionCommandPermissionFacts,
+  method = "POST",
 ): string | null {
-  const roleError = mutationAuthorizationError("POST", routePath, principal);
+  const roleError = mutationAuthorizationError(method, routePath, principal);
   if (roleError) return principal.kind === "human" && principal.role === "viewer" ? VIEWER_REASON : sentence(roleError);
   if (principal.kind !== "agent") return null;
   const targetError = agentCredentialSessionTargetError(routePath, principal, target.id, facts.isDescendant);
@@ -65,6 +73,16 @@ export function sessionCommandPermissions(
     stop: permission(routeRefusal(STOP_ROUTE, principal, target, facts)),
     restart: permission(routeRefusal(RESTART_ROUTE, principal, target, facts)),
     stopBackgroundJob: permission(stopJobRefusal),
+    archive: permission(routeRefusal(ARCHIVE_ROUTE, principal, target, facts)),
+    // Both restore routes refuse every agent credential first; for a person they apply the same
+    // role gate, so Unarchive and Unarchive and Restart share one verdict.
+    unarchive: permission(principal.kind === "agent"
+      ? sentence(AGENT_UNARCHIVE_ERROR)
+      : routeRefusal(UNARCHIVE_AND_RESTART_ROUTE, principal, target, facts)),
+    prompt: permission(routeRefusal(PROMPT_ROUTE, principal, target, facts)),
+    delete: permission(principal.kind === "agent"
+      ? AGENT_DELETE_REASON
+      : routeRefusal(DELETE_ROUTE, principal, target, facts, "DELETE")),
   };
 }
 

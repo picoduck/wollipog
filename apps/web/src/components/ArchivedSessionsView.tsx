@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { isTerminal, type SessionStatus, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { sessionUnarchiveRestarts, unarchiveAndRestartFailureMessage } from "../archive-actions.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
 import {
   archiveSessionMetadata,
   canonicalLifecycleLabel,
@@ -537,6 +538,19 @@ export function ArchivedSessionsView() {
                 const target = { name: "session" as const, id: session.id };
                 const stopPending = (session as SessionView & { archiveStatus?: string }).archiveStatus === "stop_pending";
                 const stopFailed = session.archiveStatus === "stop_failed";
+                const showStop = stopPending || stopFailed || !isTerminal(session.status);
+                // A row action the server would refuse this person stays listed but disabled, and
+                // the row describes why once for every such action.
+                const unarchiveRefusal = session.archived ? sessionCommandRefusal(session, "unarchive") : null;
+                const stopRefusal = showStop ? sessionCommandRefusal(session, "stop") : null;
+                const deleteRefusal = session.archived ? sessionCommandRefusal(session, "delete") : null;
+                const rowRefusal = [...new Set([unarchiveRefusal, stopRefusal, deleteRefusal]
+                  .filter((reason): reason is string => reason !== null))].join(" ");
+                const rowRefusalId = `archive-row-refusal-${session.id}`;
+                const refusedProps = (reason: string | null) => reason === null ? {} : {
+                  title: reason,
+                  "aria-describedby": rowRefusalId,
+                };
                 return (
                   <tr key={session.id}>
                     <td className="archive-session-cell">
@@ -563,12 +577,13 @@ export function ArchivedSessionsView() {
                     <td><div className="archive-row-actions">
                       <button type="button" className="btn ghost sm" disabled={busy} onClick={() => { loadSession(session); navigate(target); }}>Open</button>
                       {session.archived && (sessionUnarchiveRestarts(session, unarchiveAndRestartSupported)
-                        ? <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void unarchiveAndRestart(session)}>Unarchive and Restart</button>
-                        : <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void unarchive(session)}>Unarchive</button>)}
+                        ? <button type="button" className="btn ghost sm" disabled={busy || unarchiveRefusal !== null} {...refusedProps(unarchiveRefusal)} onClick={() => void unarchiveAndRestart(session)}>Unarchive and Restart</button>
+                        : <button type="button" className="btn ghost sm" disabled={busy || unarchiveRefusal !== null} {...refusedProps(unarchiveRefusal)} onClick={() => void unarchive(session)}>Unarchive</button>)}
                       {stopPending || stopFailed
-                        ? <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void retryStop(session)}>Retry Stop</button>
-                        : !isTerminal(session.status) && <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void stop(session)}>Stop</button>}
-                      {session.archived && <button type="button" className="btn danger sm" disabled={busy} onClick={() => void deleteSession(session)}>Delete</button>}
+                        ? <button type="button" className="btn ghost sm" disabled={busy || stopRefusal !== null} {...refusedProps(stopRefusal)} onClick={() => void retryStop(session)}>Retry Stop</button>
+                        : showStop && <button type="button" className="btn ghost sm" disabled={busy || stopRefusal !== null} {...refusedProps(stopRefusal)} onClick={() => void stop(session)}>Stop</button>}
+                      {session.archived && <button type="button" className="btn danger sm" disabled={busy || deleteRefusal !== null} {...refusedProps(deleteRefusal)} onClick={() => void deleteSession(session)}>Delete</button>}
+                      {rowRefusal && <span className="sr-only" id={rowRefusalId}>{rowRefusal}</span>}
                     </div></td>
                   </tr>
                 );

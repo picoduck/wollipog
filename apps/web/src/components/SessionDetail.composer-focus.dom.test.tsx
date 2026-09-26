@@ -3500,6 +3500,46 @@ test("a stopped Session shows the composer's Restart disabled with the reason to
   }
 });
 
+test("a person the server refuses a prompt gets a read-only composer that says why, and nothing is sent", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const refused = { allowed: false as const, reason };
+  for (const commandPermissions of [
+    { stop: refused, restart: refused, stopBackgroundJob: refused, archive: refused, unarchive: refused, prompt: refused, delete: refused },
+    undefined,
+  ]) {
+    const draft = deferred<ComposerDraft | null>();
+    const prompted: string[] = [];
+    const fixture = await mountFixture(draft, {
+      sessionPatch: commandPermissions ? { commandPermissions } : {},
+      client: {
+        prompt: async (_sessionId, text) => {
+          prompted.push(text);
+          return undefined as never;
+        },
+      },
+    });
+    try {
+      await resolveDraft(draft, "Hello");
+      if (!commandPermissions) {
+        assert.equal(fixture.composer.disabled, false, "a control plane without permissions keeps the composer as before");
+        assert.notEqual(fixture.composer.placeholder, reason);
+        continue;
+      }
+      assert.equal(fixture.composer.disabled, true);
+      assert.equal(fixture.composer.placeholder, reason, "the composer states why it is read-only");
+      assert.equal(sendButton(fixture).disabled, true);
+      await act(async () => {
+        fireDomEvent.keyDown(fixture.composer, { key: "Enter" });
+        sendButton(fixture).click();
+      });
+      await flushAsyncWork();
+      assert.deepEqual(prompted, [], "no prompt is sent");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  }
+});
+
 test("a stopped Session with a failed Stop does not offer Restart in the composer", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft, {

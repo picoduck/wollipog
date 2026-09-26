@@ -10,10 +10,20 @@ import { sessionCommandPermissions, withSessionCommandPermissions } from "./sess
 
 const VIEWER = "Your Viewer role is read-only.";
 const STOP_JOB_OWNER = "Only the session owner or its controlling Orchestrator can stop its background jobs.";
+const AGENT_UNARCHIVE = "Session credentials may archive descendants, but cannot unarchive them.";
+const AGENT_DELETE = "Session credentials cannot delete sessions.";
 const ALL_ALLOWED: SessionCommandPermissions = {
   stop: { allowed: true },
   restart: { allowed: true },
   stopBackgroundJob: { allowed: true },
+  archive: { allowed: true },
+  unarchive: { allowed: true },
+  prompt: { allowed: true },
+  delete: { allowed: true },
+};
+const NON_OWNER: SessionCommandPermissions = {
+  ...ALL_ALLOWED,
+  stopBackgroundJob: { allowed: false, reason: STOP_JOB_OWNER },
 };
 
 function human(role: HumanPrincipal["role"], userId = "usr_1"): HumanPrincipal {
@@ -31,17 +41,15 @@ test("a person's command permissions follow the role gate and Stop Job's owner r
     assert.deepEqual(sessionCommandPermissions(human(role), child, owns), ALL_ALLOWED, `an owning ${role} keeps every command`);
   }
   for (const role of ["owner", "admin"] as const) {
-    assert.deepEqual(sessionCommandPermissions(human(role), child, sees), {
-      stop: { allowed: true },
-      restart: { allowed: true },
-      stopBackgroundJob: { allowed: false, reason: STOP_JOB_OWNER },
-    }, `a non-owning ${role} may stop and restart but not stop one job`);
+    assert.deepEqual(sessionCommandPermissions(human(role), child, sees), NON_OWNER,
+      `a non-owning ${role} may stop, restart, archive, unarchive, prompt and delete, but not stop one job`);
   }
   const readOnly = { allowed: false, reason: VIEWER };
   for (const facts of [owns, sees]) {
-    assert.deepEqual(sessionCommandPermissions(human("viewer"), child, facts),
-      { stop: readOnly, restart: readOnly, stopBackgroundJob: readOnly },
-      "a Viewer is read-only even for a session its scope names");
+    assert.deepEqual(sessionCommandPermissions(human("viewer"), child, facts), {
+      stop: readOnly, restart: readOnly, stopBackgroundJob: readOnly,
+      archive: readOnly, unarchive: readOnly, prompt: readOnly, delete: readOnly,
+    }, "a Viewer is read-only even for a session its scope names");
   }
 });
 
@@ -53,8 +61,11 @@ test("an agent credential's command permissions follow descendant confinement an
   };
   const child = { id: "s_child", parentSessionId: "s_parent" };
   const descendant = { ownsSession: false, isDescendant: true };
-  assert.deepEqual(sessionCommandPermissions(orchestrator, child, descendant), ALL_ALLOWED,
-    "the controlling Orchestrator may stop, restart, and stop one job of its child");
+  assert.deepEqual(sessionCommandPermissions(orchestrator, child, descendant), {
+    ...ALL_ALLOWED,
+    unarchive: { allowed: false, reason: AGENT_UNARCHIVE },
+    delete: { allowed: false, reason: AGENT_DELETE },
+  }, "the controlling Orchestrator may stop, restart, stop one job of, archive and prompt its child, but never unarchive or delete it");
 
   const grandchild = sessionCommandPermissions(orchestrator, { id: "s_grandchild", parentSessionId: "s_child" }, descendant);
   assert.deepEqual(grandchild.stop, { allowed: true });
@@ -64,15 +75,20 @@ test("an agent credential's command permissions follow descendant confinement an
   const worker = sessionCommandPermissions({ ...orchestrator, orchestrator: undefined }, child, descendant);
   assert.deepEqual(worker.restart, { allowed: true });
   assert.deepEqual(worker.stopBackgroundJob, { allowed: false, reason: STOP_JOB_OWNER });
+  assert.deepEqual(worker.archive, { allowed: true });
+  assert.deepEqual(worker.prompt, { allowed: true });
+  assert.deepEqual(worker.unarchive, { allowed: false, reason: AGENT_UNARCHIVE });
 
   const self = sessionCommandPermissions(orchestrator, { id: "s_parent", parentSessionId: null },
     { ownsSession: false, isDescendant: false });
-  for (const command of ["stop", "restart", "stopBackgroundJob"] as const) {
+  for (const command of ["stop", "restart", "stopBackgroundJob", "archive", "prompt"] as const) {
     const permission = self[command];
-    assert.equal(permission.allowed, false, `an agent cannot ${command} its own session`);
-    assert.match(permission.allowed ? "" : permission.reason, /^The session credential may manage only its descendants\.$/u,
+    assert.equal(permission?.allowed, false, `an agent cannot ${command} its own session`);
+    assert.match(permission?.allowed === false ? permission.reason : "", /^The session credential may manage only its descendants\.$/u,
       "the refusal is the route's own, as a sentence");
   }
+  assert.deepEqual(self.unarchive, { allowed: false, reason: AGENT_UNARCHIVE });
+  assert.deepEqual(self.delete, { allowed: false, reason: AGENT_DELETE });
 });
 
 test("reads carry the requester's command permissions; a trusted local read is unchanged (#1843)", async (t) => {
@@ -127,6 +143,12 @@ test("reads carry the requester's command permissions; a trusted local read is u
   assert.deepEqual((await read("admin", "s_owned"))?.stop, { allowed: true });
   assert.deepEqual(await read("admin", "s_shared"), ALL_ALLOWED, "an organization-scoped session is the admin's own");
   assert.deepEqual((await read("viewer", "s_shared"))?.restart, { allowed: false, reason: VIEWER });
+  const viewerRead = await read("viewer", "s_shared");
+  for (const command of ["archive", "unarchive", "prompt", "delete"] as const) {
+    assert.deepEqual(viewerRead?.[command], { allowed: false, reason: VIEWER }, `a Viewer's read refuses ${command}`);
+    assert.deepEqual((await read("admin", "s_owned"))?.[command], { allowed: true },
+      `a non-owning admin's read still allows ${command}`);
+  }
 });
 
 test("each live client receives its own command permissions for one session change (#1843)", (t) => {
@@ -167,9 +189,7 @@ test("each live client receives its own command permissions for one session chan
     return snapshot?.type === "snapshot" ? snapshot.sessions.find((s) => s.id === "s_owned")?.commandPermissions : "no snapshot";
   };
   assert.deepEqual(snapshotPermissions(clients.owner), ALL_ALLOWED);
-  assert.deepEqual(snapshotPermissions(clients.admin), {
-    stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: false, reason: STOP_JOB_OWNER },
-  });
+  assert.deepEqual(snapshotPermissions(clients.admin), NON_OWNER);
   assert.equal(snapshotPermissions(clients.local), undefined, "a trusted local client keeps every command offered");
 
   db.updateSessionStatus("s_owned", "idle", 4);

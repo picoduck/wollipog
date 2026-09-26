@@ -107,6 +107,10 @@ export function agentDelegationAuthorizationError(routePath: string, principal: 
   return "the agent session is not delegated organization-wide access to this global resource";
 }
 
+/** Session credentials may archive their descendants but never unarchive a session, either plainly
+ * or through Unarchive and Restart. */
+export const AGENT_UNARCHIVE_ERROR = "session credentials may archive descendants, but cannot unarchive them";
+
 /** Stopping one background job (#1780) belongs to the session owner and to the controlling
  * Orchestrator of the session's campaign: the Orchestrator session that is its direct parent. A
  * person must be named by the session's ownership scope (`humanOwnsSession`); an organization admin

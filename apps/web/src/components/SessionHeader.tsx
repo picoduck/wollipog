@@ -49,7 +49,7 @@ import {
 import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { useIsMobile } from "./useIsMobile.js";
-import { sessionCommandRefusal } from "../session-command-permissions.js";
+import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 
 /**
  * The order badges are offered a place in the measured status row when it cannot hold them all
@@ -214,6 +214,7 @@ export function SessionHeader({
   // A command the server would refuse this person stays listed but disabled, with the reason (#1843).
   const stopRefusal = sessionCommandRefusal(session, "stop");
   const restartRefusal = sessionCommandRefusal(session, "restart");
+  const archiveRefusal = sessionArchiveActionRefusal(session);
   const runtimeCaution = [...new Set([
     showRetryStop || !terminal ? stopRefusal : null,
     showRestart ? restartRefusal : null,
@@ -858,11 +859,18 @@ export function SessionHeader({
                       Dismiss Reminder
                     </button>
                   )}
+                  {archiveRefusal && (
+                    <div className="menu-caution" id="session-archive-caution" role="presentation">
+                      {archiveRefusal}
+                    </div>
+                  )}
                   <button
                     className="menu-item"
                     type="button"
                     role="menuitem"
-                    disabled={busy}
+                    disabled={busy || archiveRefusal !== null}
+                    aria-describedby={archiveRefusal ? "session-archive-caution" : undefined}
+                    title={archiveRefusal ?? undefined}
                     onClick={() => {
                       closeMenu(true);
                       if (!session.archived && onArchive) {

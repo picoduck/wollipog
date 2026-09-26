@@ -245,7 +245,7 @@ import {
   type QueuedPromptEditState,
 } from "../queued-edit-recovery.js";
 import { materializePromptImages } from "../prompt-image-materialization.js";
-import { sessionCommandRefusal } from "../session-command-permissions.js";
+import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
@@ -2712,9 +2712,12 @@ function SessionDetailLoaded({
   const [dismissedAccountSwitchFailureKey, setDismissedAccountSwitchFailureKey] = useState<string | null>(null);
   const accountSwitchFailure = accountSwitchFailureKey !== dismissedAccountSwitchFailureKey
     ? session.providerAccountSwitchFailure : undefined;
+  // A person the server refuses a prompt (a Viewer) gets a read-only composer that says why.
+  const promptRefusal = sessionCommandRefusal(session, "prompt");
   const canPrompt = runnerOnline && !terminal && !policyPaused && !historyQuarantine &&
-    !worktreeRecovery && !accountSwitchFailure;
-  const composerPlaceholder = terminal ? `Session is ${session.status}.`
+    !worktreeRecovery && !accountSwitchFailure && promptRefusal === null;
+  const composerPlaceholder = promptRefusal !== null ? promptRefusal
+    : terminal ? `Session is ${session.status}.`
     : !runnerOnline ? "Runner is offline."
     : accountSwitchFailure ? "Choose another account before sending another message."
     : worktreeRecovery ? "Worktree recovery is required before sending another message."
@@ -3151,17 +3154,22 @@ function SessionDetailLoaded({
     follow: followTail.follow,
   }), [followTail.beginProgrammaticScroll, followTail.follow]);
   usePreviewNavigationRegistration(mode, onPreviewNavigationReady, previewNavigationControls);
+  // The archive shortcut runs the header's archive action, so it is refused for the same people.
+  const archiveRefusal = sessionArchiveActionRefusal(session);
   const readingActions = useMemo<SessionReadingKeyActions>(() => ({
     nextSession: () => onNextSession?.(),
     previousSession: () => onPreviousSession?.(),
     approve: () => onApprove?.(),
     deny: () => onDeny?.(),
-    archive: () => onArchive?.(),
+    archive: () => {
+      if (archiveRefusal === null) onArchive?.();
+      else setError(archiveRefusal);
+    },
     snooze: () => onSnooze?.(),
     reply: canAnswerPendingQuestion ? enterAnswerMode : focusComposerAtDraftEnd,
     pauseFollow: followTail.pause,
     resumeFollow: followTail.follow,
-  }), [canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze]);
+  }), [archiveRefusal, canAnswerPendingQuestion, enterAnswerMode, focusComposerAtDraftEnd, followTail.follow, followTail.pause, onApprove, onArchive, onDeny, onNextSession, onPreviousSession, onSnooze]);
   useSessionReadingKeys({
     enabled: mode === "expanded" && !isMobile,
     sessionId,
