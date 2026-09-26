@@ -67,7 +67,7 @@ test("WebM validation reads the bounded EBML DocType element", () => {
     "a DocType that extends past its parent is invalid");
   assert.equal(accepts(Buffer.concat([signature, Buffer.from([0x87, 0x00]), docType("webm")])), false,
     "an invalid child ID is rejected");
-  assert.equal(accepts(Buffer.concat([signature, Buffer.from([0x87, 0xec, 0xff]), Buffer.from("webm")])), false,
+  assert.equal(accepts(Buffer.concat([signature, Buffer.from([0x86, 0xec, 0xff]), Buffer.from("webm")])), false,
     "an unknown-sized child cannot hide a WebM string");
 
   const size2 = (size: number) => Buffer.from([0x40 | (size >> 8), size & 0xff]);
