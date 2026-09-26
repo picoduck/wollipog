@@ -1666,17 +1666,18 @@ export class ClaudeCodeDriver implements Driver {
           this.activeProviderTurnId(),
         );
       } else if (msg.subtype === "task_updated" && taskId) {
-        // Read only for a stop the runner asked for: Claude patches the task to `killed` first.
+        // Claude patches a stopped task to `killed` before its `stopped` notification, whether the
+        // runner asked for the stop or the model used its own task-stop tool.
         const patch = msg.patch as Record<string, Json> | undefined;
         const status = typeof patch?.status === "string" ? patch.status.toLowerCase() : "";
         if (status === "killed" && this.stoppingBackgroundTasks.has(taskId)) this.completeStoppedTask(taskId);
-        else if (status === "killed" && this.unconfirmedStopTaskIds.has(taskId)) this.completeLateStop(taskId, toolUseId);
+        else if (status === "killed") this.completeProviderStop(taskId, toolUseId);
       } else if (msg.subtype === "task_notification" && taskId) {
         const status = typeof msg.status === "string" ? msg.status.toLowerCase() : "";
         if ((status === "stopped" || status === "killed") && this.stoppingBackgroundTasks.has(taskId)) {
           this.completeStoppedTask(taskId);
         } else if ((status === "stopped" || status === "killed") && this.unconfirmedStopTaskIds.has(taskId)) {
-          this.completeLateStop(taskId, toolUseId);
+          this.completeProviderStop(taskId, toolUseId);
         } else if (status === "completed" || status === "failed" || status === "killed") {
           this.completePendingTask(taskId, toolUseId, status);
         } else {
@@ -1817,10 +1818,11 @@ export class ClaudeCodeDriver implements Driver {
     stop.wake?.();
   }
 
-  /** Claude reported, after the stop request had already been answered, that a task it was asked
-   * to stop has ended. The job is recorded as killed on the ordinary path (its continuation tells
-   * the provider), and tombstoned so the rest of the report cannot revive it. */
-  private completeLateStop(id: string, toolUseId?: string): void {
+  /** Claude reported that a task ended through a stop the runner is not waiting on: one whose
+   * request was already answered, or one the model made with its own task-stop tool. The job is
+   * recorded as killed on the ordinary path (its continuation tells the provider), and tombstoned
+   * so the rest of the report cannot revive it. */
+  private completeProviderStop(id: string, toolUseId?: string): void {
     this.unconfirmedStopTaskIds.delete(id);
     if (!this.pendingBackgroundTasks.has(id)) return;
     this.completePendingTask(id, toolUseId, "killed");

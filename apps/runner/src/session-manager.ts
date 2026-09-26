@@ -15504,11 +15504,12 @@ export class SessionManager {
       ending ? { actor: ending.actor, reason: ending.reason, endedAt: ending.endedAt } : undefined,
     );
     const observedTaskIds = update.observedTaskIds ?? [];
-    // A job Wollipog ended leaves a task file with no completion marker. Tombstone it as orphan
-    // recovery does, so no later receipt read revives it as unfinished work (#1778).
+    // A killed job leaves a task file with no completion marker, whether Wollipog ended it (#1778)
+    // or the model stopped it with its own tool. Tombstone it as orphan recovery does, so no later
+    // receipt read revives it as unfinished work.
     const recoveredBackgroundTaskIds = mergeRecoveredBackgroundTaskIds(
       withoutRecoveredBackgroundTaskIds(current.recoveredBackgroundTaskIds, observedTaskIds),
-      endedByRunner.map((job) => job.id),
+      (update.terminalJobs ?? []).filter((job) => job.status === "killed").map((job) => job.id),
     );
     const recovered = new Set(recoveredBackgroundTaskIds);
     const eligiblePendingTaskIds = update.pendingTaskIds.filter((id) => !recovered.has(id));

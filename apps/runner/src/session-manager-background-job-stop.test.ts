@@ -406,3 +406,67 @@ test("a harness that cannot stop a single job refuses instead of ending all of t
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+test("a job the model stops with its own tool frees its sibling's result and is not recovered after a restart", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-job-provider-stop-"));
+  let manager: SessionManager | undefined;
+  let restarted: SessionManager | undefined;
+  try {
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    let onPrompt: (provider: ProviderProcess, text: string) => void = () => {};
+    const fake = fakeProvider({ onPrompt: (provider, text) => onPrompt(provider, text) });
+    const launch = launches(fake);
+    onPrompt = (provider, text) => {
+      launch(provider, text);
+      if (text !== "stop the monitor") return;
+      // What the Claude driver reports for Claude's own `killed` patch: an ordinary killed job whose
+      // parent turn has ended, not one the runner ended.
+      const monitor = fake.live.get("monitor-1")!;
+      fake.live.delete("monitor-1");
+      fake.report(provider, [{ ...monitor, status: "killed", terminalAt: Date.now(), continuationRequired: true }]);
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_job_provider_stop", root);
+    await manager.start(spec);
+
+    manager.prompt(spec.sessionId, "watch CI and review");
+    await waitFor(() => fake.prompts.length === 1 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the launching turn did not finish");
+    manager.prompt(spec.sessionId, "stop the monitor");
+    await waitFor(() => fake.prompts.length === 2 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the stopping turn did not finish");
+    finishSubagent(fake);
+    await waitFor(() => store.readEvents(spec.sessionId)
+      .some((event) => event.payload.kind === "background_continuation_delivered"), "the sibling's result was not delivered");
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.equal(fake.prompts.filter((prompt) => prompt.text.startsWith(CONTINUATION_PREFIX)).length, 1);
+
+    const meta = store.readMeta(spec.sessionId)!;
+    const monitor = meta.backgroundJobs?.find((job) => job.id === "monitor-1");
+    assert.equal(monitor?.terminalStatus, "killed");
+    assert.equal(monitor?.endedBy, undefined, "Wollipog did not end it");
+    assert.deepEqual(stopNotices(store, spec.sessionId), []);
+    assert.deepEqual(fake.stopCalls, []);
+    assert.equal(meta.backgroundWorkState, undefined);
+    assert.ok(meta.recoveredBackgroundTaskIds?.includes("monitor-1"),
+      "the stopped job is tombstoned so no later receipt read revives it");
+    manager.shutdownAll();
+    manager = undefined;
+
+    // Claude left the stopped task's output file without a completion record, so a restart's
+    // discovery still finds it. The tombstone keeps it from becoming orphaned work to recover.
+    restarted = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 1);
+    Object.assign(restarted as object, {
+      discoverClaudeTasks: () => [{ id: "monitor-1", outputFile: "monitor-1.output" }],
+    });
+    restarted.reconcileStore();
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.equal(store.readMeta(spec.sessionId)?.orphanedWork, undefined);
+    assert.equal(fake.prompts.length, 3, "no recovery turn relaunches the stopped job");
+  } finally {
+    manager?.shutdownAll();
+    restarted?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
