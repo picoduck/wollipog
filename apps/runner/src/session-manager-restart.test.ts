@@ -611,37 +611,46 @@ test("a restart with its own prompt keeps a full queue and refuses the new promp
   }
 });
 
-test("a restart reports every owed result when there are more than one continuation can list (#1779)", { skip: !haveGit() }, async () => {
-  const f = fixture("many-results");
-  let manager: SessionManager | undefined;
-  try {
-    const spec = claudeSpec("s_restart_many_results", f.repo);
-    // 129 finished subagents across parent turns, each still waiting behind an unfinished sibling.
-    const finished = Array.from({ length: 129 }, (_, index) => storedJob(`agent-${index}`, {
-      parentTurnId: `turn-${index}`, launchType: "agent", terminalStatus: "completed",
-      terminalObservedAt: 3_000 + index, continuationRequired: true,
-    }));
-    f.store.create(storedClaudeSession(spec.sessionId, f.repo, {
-      backgroundWorkState: "running",
-      backgroundJobs: [...finished, storedJob("monitor-1", { launchType: "monitor" })],
-      pendingBackgroundTaskIds: ["monitor-1"],
-    }));
-    const fake = fakeProvider();
-    manager = new SessionManager((message) => { f.sent.push(message); }, () => {}, f.store, "runner", undefined,
-      fake.factory as never, f.dataDir, 1);
-    assert.equal(await manager.start(spec), true);
-    const reported = () => fake.prompts.filter((prompt) => prompt.text.startsWith(RESTART_CONTINUATION_PREFIX));
-    await waitFor(() => reported().length === 2, "the owed results were not reported in two continuations");
-    await waitFor(() => (f.store.readMeta(spec.sessionId)?.backgroundJobs ?? [])
-      .filter((job) => job.assistantResultPersistedAt !== undefined).length === 129,
-    "not every reported result was recorded as delivered");
-    const listedIds = reported().flatMap((prompt) =>
-      (JSON.parse(prompt.text.slice(prompt.text.lastIndexOf("\n") + 1)) as Array<{ id: string; status: string }>)
-        .filter((job) => job.status === "completed").map((job) => job.id));
-    assert.equal(listedIds.length, 129, "each owed result is named exactly once");
-    assert.deepEqual(new Set(listedIds), new Set(finished.map((job) => job.id)));
-  } finally {
-    manager?.shutdownAll();
-    rmSync(f.root, { recursive: true, force: true });
+test("a restart reports every owed result, and every job it ended, when there are more than one continuation can list (#1779)", { skip: !haveGit() }, async () => {
+  for (const shape of ["across parent turns", "in one barrier already queued"] as const) {
+    const f = fixture("many-results");
+    let manager: SessionManager | undefined;
+    try {
+      const spec = claudeSpec("s_restart_many_results", f.repo);
+      // 129 finished subagents whose results are still owed, and a monitor that never finished.
+      const finished = Array.from({ length: 129 }, (_, index) => storedJob(`agent-${index}`, {
+        launchType: "agent", terminalStatus: "completed", terminalObservedAt: 3_000 + index, continuationRequired: true,
+        ...(shape === "across parent turns"
+          ? { parentTurnId: `turn-${index}` }
+          : { parentTurnId: "turn-shared", continuationId: "bgcont_shared", continuationQueuedAt: 4_000 }),
+      }));
+      f.store.create(storedClaudeSession(spec.sessionId, f.repo, {
+        backgroundWorkState: "running",
+        backgroundJobs: [...finished, storedJob("monitor-1", { launchType: "monitor" })],
+        pendingBackgroundTaskIds: ["monitor-1"],
+      }));
+      const fake = fakeProvider();
+      manager = new SessionManager((message) => { f.sent.push(message); }, () => {}, f.store, "runner", undefined,
+        fake.factory as never, f.dataDir, 1);
+      assert.equal(await manager.start(spec), true);
+      const reported = () => fake.prompts.filter((prompt) => prompt.text.startsWith(RESTART_CONTINUATION_PREFIX));
+      await waitFor(() => reported().length === 2, `${shape}: the owed results were not reported in two continuations`);
+      await waitFor(() => (f.store.readMeta(spec.sessionId)?.backgroundJobs ?? [])
+        .filter((job) => job.assistantResultPersistedAt !== undefined).length === 129,
+      `${shape}: not every reported result was recorded as delivered`);
+      const listed = reported().map((prompt) =>
+        JSON.parse(prompt.text.slice(prompt.text.lastIndexOf("\n") + 1)) as Array<{ id: string; status: string }>);
+      for (const results of listed) {
+        assert.ok(results.filter((job) => job.status === "completed").length <= 128, `${shape}: one continuation is bounded`);
+        assert.ok(results.some((job) => job.id === "monitor-1" && job.status === "killed"),
+          `${shape}: every continuation names the job the restart ended`);
+      }
+      const listedIds = listed.flatMap((results) => results.filter((job) => job.status === "completed").map((job) => job.id));
+      assert.equal(listedIds.length, 129, `${shape}: each owed result is named exactly once`);
+      assert.deepEqual(new Set(listedIds), new Set(finished.map((job) => job.id)));
+    } finally {
+      manager?.shutdownAll();
+      rmSync(f.root, { recursive: true, force: true });
+    }
   }
 });
