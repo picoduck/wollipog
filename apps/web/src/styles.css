@@ -2349,6 +2349,30 @@ textarea {
 .evidence-artifact-state p {
   margin: 0;
 }
+.evidence-artifact-check {
+  margin: 0;
+  font-size: var(--text-xs);
+}
+/* Shown once per card when this page cannot check artifact evidence at all. */
+.evidence-secure-context-notice {
+  display: grid;
+  gap: 6px;
+  margin: 0 0 11px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
+  border-radius: var(--radius);
+  color: var(--warning-on-tint);
+  background: color-mix(in srgb, var(--warning) 10%, transparent);
+  font-size: var(--text-sm);
+}
+.evidence-secure-context-notice p {
+  margin: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.evidence-secure-context-notice code {
+  overflow-wrap: anywhere;
+}
 .evidence-artifact-full {
   display: block;
   max-width: 100%;

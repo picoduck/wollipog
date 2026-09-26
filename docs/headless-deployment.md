@@ -123,7 +123,11 @@ that works for a loopback-bound control plane behind a proxy. A bind
 beyond loopback without an HTTPS public origin, or a plain-HTTP public origin beyond loopback, is
 accepted only with an explicit warning: pairing tokens and session data would travel unencrypted,
 and the desktop app refuses plain HTTP to anything other than loopback or a literal Tailscale
-address.
+address. A browser on such a plain-HTTP page also cannot review artifact-backed UI evidence: the
+review card checks each artifact against its digest before showing it, and browsers allow that check
+only on HTTPS or localhost pages (see
+[What the Human Reviewer Sees](agent-control.md#what-the-human-reviewer-sees)). Remote review,
+including from a phone, needs one of the HTTPS routes below.
 
 - **Tailscale Serve:** `tailscale serve --bg https+insecure://127.0.0.1:4317` is not needed; use
   `tailscale serve --bg 4317` to publish the loopback control plane at your tailnet HTTPS name, and

@@ -31,6 +31,7 @@ import { StructuredQuestionText } from "./StructuredQuestionText.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 import {
   EvidenceArtifactView,
+  EvidenceSecureContextNotice,
   evidenceStatusBlocksReview,
   isRenderableEvidence,
   type EvidenceArtifactStatus,
@@ -411,15 +412,20 @@ export function SessionApprovalBanner({
   const isPolicy = isPolicyApproval(approval);
   const decisionNeedsRunner = approval.kind !== "policy_hook" && approval.kind !== "workflow_decision";
   // An artifact-backed item counts as reviewed only once its verified image was actually shown. A
-  // saved mark from an earlier visit does not survive the artifact turning out missing or mismatched.
+  // saved mark from an earlier visit does not survive the artifact turning out missing, mismatched,
+  // or uncheckable in this browser. For an artifact the card can show, its `uri`, if any, never
+  // stands in for the checked bytes.
   const [artifactStatus, setArtifactStatus] = useState<Record<string, EvidenceArtifactStatus>>({});
   const evidenceBlocked = (item: (typeof evidence)[number]) => {
     if (!isRenderableEvidence(item)) return !item.uri;
-    const status = artifactStatus[item.evidenceId] ?? "pending";
-    return evidenceStatusBlocksReview(status) || (status === "unverifiable" && !item.uri);
+    return evidenceStatusBlocksReview(artifactStatus[item.evidenceId] ?? "pending");
   };
   const evidenceComplete = evidence.every((item) =>
     reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item));
+  // The total counts what the checkboxes show, so a saved mark on an item this page cannot show
+  // is not reported as reviewed.
+  const reviewedCount = evidence.filter((item) =>
+    reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item)).length;
   const onArtifactStatus = (evidenceId: string, status: EvidenceArtifactStatus) =>
     setArtifactStatus((current) => current[evidenceId] === status ? current : { ...current, [evidenceId]: status });
 
@@ -514,10 +520,13 @@ export function SessionApprovalBanner({
             </p>}
           </div>
           <strong role="status" aria-live="polite">
-            {reviewedEvidence.length} of {evidence.length} Reviewed
+            {reviewedCount} of {evidence.length} Reviewed
           </strong>
         </div>
         <div className="evidence-review-list" aria-label="Evidence Items">
+          {/* In the list rather than the summary: it needs the full width, and in a short panel it
+              scrolls with the items instead of crowding them out. */}
+          <EvidenceSecureContextNotice evidence={evidence} />
           {evidence.map((item, index) => (
             <article className="evidence-review-item" key={item.evidenceId}>
               <div className="evidence-review-item-main">
@@ -688,6 +697,7 @@ export function SessionApprovalBanner({
       {evidence.length > 0 && (
         <div className="approval-evidence" aria-label="Evidence Review">
           <p>Open and inspect each evidence item, then mark it as reviewed.</p>
+          <EvidenceSecureContextNotice evidence={evidence} />
           {evidence.map((item) => (
             <div className="approval-evidence-item" key={item.evidenceId}>
               {isRenderableEvidence(item)

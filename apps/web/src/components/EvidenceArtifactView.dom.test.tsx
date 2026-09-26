@@ -340,45 +340,81 @@ test("URI-only and non-raster evidence keep a labelled external link, and mixed 
   }
 });
 
-test("without SubtleCrypto the artifact is not shown unverified and the reviewer gets the external link", async () => {
-  domWindow.localStorage.clear();
+async function withoutSubtleCrypto(run: () => Promise<void>): Promise<void> {
   const subtle = Object.getOwnPropertyDescriptor(globalThis.crypto, "subtle") ??
     Object.getOwnPropertyDescriptor(Object.getPrototypeOf(globalThis.crypto), "subtle")!;
   Object.defineProperty(globalThis.crypto, "subtle", { configurable: true, value: undefined });
   try {
-    const view = await mount(sessionWith([artifactItem()]), async () => new Blob([PNG]));
-    try {
-      assert.equal(view.container.querySelector(".evidence-artifact img"), null, "unchecked bytes are not displayed");
-      assert.match(view.container.querySelector(".evidence-artifact")?.textContent ?? "", /require HTTPS or localhost/u);
-      assert.ok(view.container.querySelector('a[aria-label="View External Evidence: desktop-after"]'));
-      assert.equal(view.checkbox("desktop-after").disabled, false, "review stays possible through the external copy");
-    } finally {
-      await view.unmount();
-    }
+    await run();
   } finally {
     Object.defineProperty(globalThis.crypto, "subtle", subtle);
   }
-});
+}
 
-test("an artifact-only item without SubtleCrypto cannot be approved unseen", async () => {
+for (const [label, withUri] of [["artifact-only", false], ["artifact-plus-URI", true]] as const) {
+  test(`without SubtleCrypto an ${label} item is neither fetched, shown, linked out, nor approvable`, async () => {
+    domWindow.localStorage.clear();
+    // A mark saved on an earlier visit from a secure page must not carry over to this one.
+    saveEvidenceReviewDraft("local", "session-artifact-evidence", "occurrence-1", RESOURCE_DIGEST, ["desktop-after"]);
+    await withoutSubtleCrypto(async () => {
+      const { uri: _externalCopy, ...artifactOnly } = artifactItem();
+      const view = await mount(sessionWith([withUri ? artifactItem() : artifactOnly]), async () => new Blob([PNG]));
+      try {
+        assert.deepEqual(view.requests, [], "bytes nobody can check are not downloaded");
+        assert.equal(view.container.querySelector(".evidence-artifact img"), null, "unchecked bytes are not displayed");
+        assert.match(view.container.querySelector(".evidence-artifact")?.textContent ?? "",
+          /^Not shown: this browser can check the artifact against the request's digest only over HTTPS or on localhost\.$/u);
+        assert.equal(view.container.querySelector(".evidence-review-item a"), null,
+          "an artifact-backed item never falls back to its external copy");
+        assert.doesNotMatch(view.container.innerHTML, /signature=secret/u);
+        assert.doesNotMatch(view.container.textContent ?? "", /Checked by this browser/u);
+        const notice = view.container.querySelector('[role="note"][aria-label="HTTPS or Localhost Required"]');
+        assert.ok(notice, "the card says what is required, once");
+        assert.match(notice.textContent ?? "", /This page is open at http:\/\/localhost\./u);
+        assert.match(notice.textContent ?? "", /reopen Wollipog over HTTPS, for example through tailscale serve, or on localhost/u);
+        assert.equal(view.checkbox("desktop-after").disabled, true);
+        assert.equal(view.checkbox("desktop-after").checked, false);
+        assert.match(view.container.querySelector(".evidence-review-summary [role=\"status\"]")?.textContent ?? "",
+          /^0 of 1 Reviewed$/u, "a saved mark on an item this page cannot show is not counted");
+        assert.equal(view.button("Approve").disabled, true);
+        assert.equal(view.button("Deny").disabled, false, "rejecting stays possible");
+      } finally {
+        await view.unmount();
+      }
+    });
+  });
+}
+
+test("without SubtleCrypto URI-only evidence keeps its link while artifact evidence stays blocked", async () => {
   domWindow.localStorage.clear();
-  const subtle = Object.getOwnPropertyDescriptor(globalThis.crypto, "subtle") ??
-    Object.getOwnPropertyDescriptor(Object.getPrototypeOf(globalThis.crypto), "subtle")!;
-  Object.defineProperty(globalThis.crypto, "subtle", { configurable: true, value: undefined });
-  try {
-    const { uri: _externalCopy, ...item } = artifactItem();
-    const view = await mount(sessionWith([item]), async () => new Blob([PNG]));
+  await withoutSubtleCrypto(async () => {
+    const view = await mount(sessionWith([
+      artifactItem(),
+      { evidenceId: "legacy", uri: "https://evidence.example/legacy.png", sha256: "1".repeat(64) },
+    ]), async () => new Blob([PNG]));
     try {
-      assert.equal(view.container.querySelector(".evidence-artifact img"), null);
-      assert.equal(view.container.querySelector(".evidence-artifact a"), null);
+      assert.ok(view.container.querySelector('a[aria-label="View External Evidence: legacy"]'));
+      assert.equal(view.checkbox("legacy").disabled, false);
       assert.equal(view.checkbox("desktop-after").disabled, true);
+      await act(async () => view.checkbox("legacy").click());
       assert.equal(view.button("Approve").disabled, true);
-      assert.equal(view.button("Deny").disabled, false);
     } finally {
       await view.unmount();
     }
+  });
+});
+
+test("a secure page shows no HTTPS notice and says who checked each shown artifact", async () => {
+  domWindow.localStorage.clear();
+  const view = await mount(sessionWith([artifactItem()]), async () => new Blob([PNG]));
+  try {
+    assert.equal(view.container.querySelector(".evidence-secure-context-notice"), null);
+    assert.equal(view.container.querySelector(".evidence-artifact-check"), null, "nothing is claimed before the draw");
+    await view.decode("load");
+    assert.equal(view.container.querySelector(".evidence-artifact-check")?.textContent,
+      "Checked by this browser against the request's digest.");
   } finally {
-    Object.defineProperty(globalThis.crypto, "subtle", subtle);
+    await view.unmount();
   }
 });
 
