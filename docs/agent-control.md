@@ -804,9 +804,9 @@ with no pending request. Before, its decision resume was dropped and nothing tol
   runner's return stops it rather than restoring it, so resolving its decision is refused and the
   decision revoked, as before. An offline runner is not shown as a hold, since the
   runner's own status already says so. Every authoritative end of a child — a runner-reported
-  terminal status, a session the runner no longer holds at reconnect, an explicit Stop or restart,
-  a guardrail Stop — revokes its unconsumed decisions and abandons every resume it still owed, so
-  an ended child is never resumed. A resume refused behind a cost-budget or policy-hook card is
+  terminal status, a session the runner no longer holds at reconnect (whatever status the control
+  plane had stored for it), an explicit Stop or restart, a guardrail Stop — revokes its unconsumed
+  decisions and abandons every resume it still owed, so an ended child is never resumed. A resume refused behind a cost-budget or policy-hook card is
   recorded `failed` and not retried: the outcome, and any message, stay on the decision record for
   the child to read once the human resolves the card. Older runners keep the ordinary prompt path.
   A resume held before its runner downgraded is settled on that path rather than held on a recovery

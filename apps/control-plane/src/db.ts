@@ -15225,6 +15225,16 @@ export class ControlPlaneDb {
     ).run(now, sessionId).changes);
   }
 
+  /** Sessions on a runner that still owe typed-decision work: an unconsumed (pending or approved)
+   * decision, or a held resume. Reconnect ends the ones the runner no longer holds without walking
+   * every retained session (#1759). */
+  sessionsOwingWorkflowDecisionWork(runnerId: string): string[] {
+    return (this.stmt(
+      `SELECT DISTINCT d.session_id AS id FROM workflow_decisions d JOIN sessions s ON s.id=d.session_id
+       WHERE s.runner_id=? AND (d.status IN ('pending','approved') OR d.resume_state='held')`,
+    ).all(runnerId) as Array<{ id: string }>).map((row) => row.id);
+  }
+
   sessionsWithHeldWorkflowDecisionResumes(runnerId?: string): string[] {
     return (this.stmt(
       `SELECT DISTINCT d.session_id AS id FROM workflow_decisions d JOIN sessions s ON s.id=d.session_id

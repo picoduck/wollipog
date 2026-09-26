@@ -21504,6 +21504,50 @@ test("a provisionally stopped child that was archived meanwhile is ended, so its
   }
 });
 
+test("an explicit Stop cut off before it revoked cannot leave a decision the parent can still resolve (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  try {
+    f.parentOnOtherRunner();
+    const merge = f.requestMerge(1770);
+    svc.onSessionStatus(child.id, "idle");
+    // The control plane stopped right after the Stop intent was persisted, before the Stop
+    // revoked the child's decisions; startup settlement then marked the child stopped.
+    db.addSessionStopIntent(child.id, RUNNER_ID, Date.now(), false);
+    db.settleStartupState(Date.now());
+    assert.equal(db.getSession(child.id)?.status, "stopped");
+    assert.equal(db.hasSessionStopIntent(child.id), true);
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "pending");
+
+    // The runner returns without the child: the intent is settled, and although the child already
+    // reads terminal, its decision is revoked, so nothing can later mistake it for a provisional
+    // disconnect stop.
+    f.hub.online = true;
+    svc.hydrateRunnerSessions(RUNNER_ID, []);
+    assert.equal(db.hasSessionStopIntent(child.id), false, "the settled intent is gone");
+    assert.equal(db.getSession(child.id)?.status, "stopped");
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "revoked");
+    const resolved = svc.resolveDescendantRequest(root.id, child.id, merge.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.equal(resolved.status, 409);
+    assert.match(resolved.error ?? "", /stale or already resolved/u);
+    assert.notEqual(f.resumeState(merge.occurrenceId), "held");
+    assert.deepEqual(db.sessionsWithHeldWorkflowDecisionResumes(RUNNER_ID), []);
+
+    // The pre-snapshot reconcile path ends such a session the same way: restored by a reconnect,
+    // it requests again, is stopped provisionally, and is then absent from the runner's inventory.
+    db.updateSessionStatus(root.id, "running", Date.now());
+    db.updateSessionStatus(child.id, "idle", Date.now());
+    const again = f.requestMerge(1771);
+    assert.equal(again.status, "pending");
+    db.updateSessionStatus(child.id, "stopped", Date.now(), true);
+    svc.reconcileRunnerSessions(RUNNER_ID, []);
+    assert.equal(db.workflowDecisionByOccurrence(again.occurrenceId)?.status, "revoked");
+  } finally {
+    db.close();
+  }
+});
+
 test("a runner that reports the child ended abandons the resume owed for a denied decision (#1759)", () => {
   const f = worktreeRecoveryCampaign();
   const { db, svc, root, child } = f;

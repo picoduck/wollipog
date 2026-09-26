@@ -11544,6 +11544,7 @@ export class SessionsService {
   reconcileRunnerSessions(runnerId: string, live: string[]): void {
     const now = Date.now();
     const liveSet = new Set(live);
+    this.endAbsentWorkflowDecisionWork(runnerId, (sessionId) => !liveSet.has(sessionId));
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId !== runnerId) continue;
       if (this.db.hasSessionStopIntent(s.id)) {
@@ -11583,6 +11584,18 @@ export class SessionsService {
           this.hub.sessionChangedById(s.id);
           this.publishCampaignAttentionTransition(campaignBefore);
         }
+      }
+    }
+  }
+
+  /** At reconnect, a terminal session the runner no longer holds that still owes typed-decision
+   * work has ended for good: revoke what is unconsumed and abandon what is owed (#1759). A live
+   * absent session is stopped by the caller, which revokes on that path. */
+  private endAbsentWorkflowDecisionWork(runnerId: string, absent: (sessionId: string) => boolean): void {
+    for (const sessionId of this.db.sessionsOwingWorkflowDecisionWork(runnerId)) {
+      const status = this.db.getSession(sessionId)?.status;
+      if (absent(sessionId) && status && isTerminal(status)) {
+        this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "provider-session-absent");
       }
     }
   }
@@ -11702,14 +11715,11 @@ export class SessionsService {
       this.hub.sessionChangedById(snap.id);
       this.publishCampaignAttentionTransition(campaignBefore);
     }
-    // A session a disconnect stopped provisionally, and that the runner no longer holds, has ended
-    // for good: nothing will restore it, so its decisions are revoked and it owes no resume (#1759).
-    for (const sessionId of this.db.sessionsWithHeldWorkflowDecisionResumes(runnerId)) {
-      const status = this.db.getSession(sessionId)?.status;
-      if (!byId.has(sessionId) && status && isTerminal(status)) {
-        this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "provider-session-absent");
-      }
-    }
+    // A session the runner no longer holds has ended for good, whatever its stored status says: a
+    // disconnect or startup settlement stopped it provisionally, or an explicit Stop was cut off
+    // before it revoked. Nothing will restore it, so it can answer nothing: its unconsumed
+    // decisions are revoked and it owes no resume (#1759). A live absent session is ended below.
+    this.endAbsentWorkflowDecisionWork(runnerId, (sessionId) => !byId.has(sessionId));
     for (const s of this.db.listSessions({ includeArchived: true })) {
       if (s.runnerId === runnerId && !byId.has(s.id)) {
         const campaignBefore = this.campaignAttentionController(s);
