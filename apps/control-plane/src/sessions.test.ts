@@ -22344,6 +22344,166 @@ test("a resume refused behind a cost-budget card stays failed with the outcome o
   }
 });
 
+/**
+ * A child whose decision resume is already on the durable lane when a provisional stop lands
+ * (#1827). `sent` is marked sent to the runner; `never_sent` is staged but was never flushed, as
+ * when the process stops in between. `disconnect` is the runner's socket closing; `startup` is the
+ * control plane restarting, which settles every mid-flight session as a fresh service would.
+ */
+function inFlightResumeCampaign(flight: "sent" | "never_sent", stop: "disconnect" | "startup") {
+  const f = worktreeRecoveryCampaign();
+  const { db, child } = f;
+  f.parentOnOtherRunner();
+  const merge = f.requestMerge(1827);
+  f.svc.onSessionStatus(child.id, "idle");
+  const markSent = db.markSessionPromptCommandSent.bind(db);
+  if (flight === "never_sent") db.markSessionPromptCommandSent = () => null;
+  try {
+    f.approve(merge.occurrenceId);
+  } finally {
+    db.markSessionPromptCommandSent = markSent;
+  }
+  const commandId = (db.raw().prepare("SELECT resume_command_id AS id FROM workflow_decisions WHERE occurrence_id=?")
+    .get(merge.occurrenceId) as { id: string }).id;
+  const command = () => db.raw().prepare(
+    "SELECT state, error_code AS errorCode, dismissed_at AS dismissedAt FROM session_prompt_commands WHERE command_id=?",
+  ).get(commandId) as { state: string; errorCode: string | null; dismissedAt: number | null } | undefined;
+  assert.equal(f.resumeState(merge.occurrenceId), "delivering");
+  assert.equal(command()?.state, flight === "sent" ? "sent" : "pending");
+  assert.equal(f.resolutionPrompts(merge.occurrenceId).length, flight === "sent" ? 1 : 0);
+  f.hub.online = false;
+  let svc = f.svc;
+  if (stop === "disconnect") {
+    svc.failRunnerSessions(RUNNER_ID);
+  } else {
+    db.settleStartupState(Date.now());
+    svc = new SessionsService(db, f.hub as unknown as Hub, NOOP_LOG);
+  }
+  assert.equal(db.sessionStopProvenance(child.id)?.cause, stop === "disconnect" ? "runner_disconnect" : "startup_settlement");
+  assert.equal(db.sessionStopProvenance(child.id)?.confirmation, null, "the stop is provisional");
+  const hydrate = (snapshots: SessionSnapshot[]) => {
+    f.hub.online = true;
+    // Registration runs the prompt sweep for the runner before it hydrates its snapshots.
+    svc.retryDuePrompts(Date.now() + 1_000, RUNNER_ID);
+    svc.hydrateRunnerSessions(RUNNER_ID, snapshots);
+  };
+  const liveChild = (status: SessionStatus = "idle") => snapshot({
+    id: child.id, title: child.title, status, worktreePath: f.worktreePath, worktreeRecovery: null,
+  });
+  return { ...f, svc, merge, commandId, command, hydrate, liveChild };
+}
+
+test("a provisional stop keeps a decision resume already in flight, and the restored child receives it once under its original command id (#1827)", () => {
+  for (const stop of ["disconnect", "startup"] as const) {
+    for (const flight of ["sent", "never_sent"] as const) {
+      const label = `${stop}, ${flight}`;
+      const f = inFlightResumeCampaign(flight, stop);
+      const { db, child, merge } = f;
+      try {
+        assert.equal(db.getSession(child.id)?.status, "stopped", label);
+        assert.equal(f.command()?.state, flight === "sent" ? "sent" : "pending", `${label}: the stop keeps the command`);
+        assert.equal(f.resumeState(merge.occurrenceId), "delivering", label);
+
+        // Nothing is sent while the child reads stopped: not while the runner is away, not by the
+        // registration sweep that runs before hydration.
+        const before = f.resolutionPrompts(merge.occurrenceId).length;
+        f.svc.retryDuePrompts(Date.now() + 60_000);
+        f.hub.online = true;
+        f.svc.retryDuePrompts(Date.now() + 120_000, RUNNER_ID);
+        assert.equal(f.resolutionPrompts(merge.occurrenceId).length, before, `${label}: nothing goes into a stopped child`);
+        assert.equal(f.resumeState(merge.occurrenceId), "delivering", label);
+
+        // Hydration restores the child; the next sweep delivers the same command.
+        f.hydrate([f.liveChild()]);
+        assert.equal(db.getSession(child.id)?.status, "idle", label);
+        f.svc.retryDuePrompts(Date.now() + 180_000);
+        const sent = f.resolutionPrompts(merge.occurrenceId);
+        assert.equal(sent.length, before + 1, `${label}: the restored child is sent the resume`);
+        assert.deepEqual([...new Set(sent.map((message) => message.commandId))], [f.commandId],
+          `${label}: under its original command id, which the runner's journal deduplicates`);
+        assert.equal(f.receipt(f.commandId, "started", 1), true);
+        assert.equal(db.getSession(child.id)?.status, "running", label);
+        assert.equal(f.receipt(f.commandId, "completed", 2), true);
+        assert.equal(f.resumeState(merge.occurrenceId), "delivered", label);
+        f.svc.retryDuePrompts(Date.now() + 240_000);
+        assert.equal(f.resolutionPrompts(merge.occurrenceId).length, before + 1, `${label}: delivered exactly once`);
+      } finally {
+        db.close();
+      }
+    }
+  }
+});
+
+test("a provisional stop still fences every other durable prompt (#1827)", () => {
+  const f = inFlightResumeCampaign("sent", "disconnect");
+  const { db, child } = f;
+  try {
+    // Restore the child, send it a human's durable prompt, and disconnect again: the resume is
+    // kept, the human's prompt is fenced exactly as before.
+    f.hydrate([f.liveChild()]);
+    const human = f.svc.prompt(child.id, "and one more thing", [], undefined, undefined, undefined, "session", true);
+    assert.ok(human.ok, human.error);
+    const humanCommand = db.raw().prepare(
+      "SELECT command_id AS id FROM session_prompt_commands WHERE session_id=? AND command_id<>? ORDER BY rowid DESC LIMIT 1",
+    ).get(child.id, f.commandId) as { id: string };
+    f.hub.online = false;
+    f.svc.failRunnerSessions(RUNNER_ID);
+    const state = (id: string) => (db.raw().prepare("SELECT state FROM session_prompt_commands WHERE command_id=?")
+      .get(id) as { state: string }).state;
+    assert.notEqual(state(f.commandId), "uncertain", "the resume's command is kept");
+    assert.equal(state(humanCommand.id), "uncertain", "an ordinary prompt is fenced as before");
+  } finally {
+    db.close();
+  }
+});
+
+test("when a provisional stop proves final, a kept decision resume is cancelled and never delivered (#1827)", () => {
+  const ends: Record<string, (f: ReturnType<typeof inFlightResumeCampaign>) => void> = {
+    "runner reports the child absent": (f) => f.hydrate([]),
+    "runner reports the child terminal": (f) => {
+      f.hub.online = true;
+      f.svc.onSessionStatus(f.child.id, "stopped");
+    },
+    "explicit Stop": (f) => assert.ok(f.svc.stop(f.child.id).ok),
+    "archive": (f) => assert.ok(f.svc.setArchived(f.child.id, true).ok),
+    "restart": (f) => {
+      f.hub.online = true;
+      const restarted = f.svc.restart(f.child.id);
+      assert.ok(restarted.ok, restarted.error);
+    },
+  };
+  for (const [end, finish] of Object.entries(ends)) {
+    for (const flight of ["sent", "never_sent"] as const) {
+      const label = `${end}, ${flight}`;
+      const f = inFlightResumeCampaign(flight, "disconnect");
+      const { db, child, merge } = f;
+      try {
+        const before = f.resolutionPrompts(merge.occurrenceId).length;
+        finish(f);
+        if (flight === "sent") {
+          assert.equal(f.command()?.state, "uncertain", `${label}: a command that may have reached the runner is uncertain`);
+          assert.equal(f.command()?.errorCode, "COMMAND_CANCELLED", label);
+          assert.equal(f.resumeState(merge.occurrenceId), "uncertain", label);
+        } else {
+          assert.equal(f.command()?.state, "failed", `${label}: a never-sent command is cancelled`);
+          assert.ok(f.command()?.dismissedAt, `${label}: and retired, so no one can Retry it by hand`);
+          assert.equal(f.resumeState(merge.occurrenceId), "abandoned", label);
+        }
+        // Whatever happens next, the child is never sent the resume.
+        f.hub.online = true;
+        const session = db.getSession(child.id)!;
+        if (!session.archived && session.status === "stopped") f.hydrate([f.liveChild()]);
+        f.svc.retryDuePrompts(Date.now() + 300_000);
+        f.svc.retryDuePrompts(Date.now() + 360_000, RUNNER_ID);
+        assert.equal(f.resolutionPrompts(merge.occurrenceId).length, before, `${label}: never delivered`);
+        assert.equal(f.resumeState(merge.occurrenceId), flight === "sent" ? "uncertain" : "abandoned", label);
+      } finally {
+        db.close();
+      }
+    }
+  }
+});
+
 test("a prompt into a session that reads running while its runner reports no active turn is not reported as queued behind a running turn (#1651)", () => {
   const { db, hub, svc } = makeHarness();
   try {
