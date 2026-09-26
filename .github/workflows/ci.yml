@@ -38,6 +38,14 @@ jobs:
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node 24
+        id: setup_node_24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Retry Setup Node 24
+        if: ${{ !cancelled() && steps.setup_node_24.outcome == 'failure' }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -54,6 +62,13 @@ jobs:
           npm install --prefix "$RUNNER_TEMP/engine-pnpm-current" --ignore-scripts --no-audit --no-fund --package-lock=false "$package_manager"
 
       - name: Setup Minimum Node 22
+        id: setup_node_22
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version: 22.13.0
+      - name: Retry Setup Minimum Node 22
+        if: ${{ !cancelled() && steps.setup_node_22.outcome == 'failure' }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22.13.0
@@ -61,6 +76,13 @@ jobs:
         run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
 
       - name: Setup Excluded Node 23
+        id: setup_excluded_node_23
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version: 23.2.0
+      - name: Retry Setup Excluded Node 23
+        if: ${{ !cancelled() && steps.setup_excluded_node_23.outcome == 'failure' }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 23.2.0
@@ -68,6 +90,13 @@ jobs:
         run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
 
       - name: Setup Minimum Node 23
+        id: setup_node_23
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version: 23.4.0
+      - name: Retry Setup Minimum Node 23
+        if: ${{ !cancelled() && steps.setup_node_23.outcome == 'failure' }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 23.4.0
@@ -75,6 +104,13 @@ jobs:
         run: node scripts/check-node-engines.mjs "$RUNNER_TEMP/engine-pnpm-10/node_modules/pnpm/bin/pnpm.cjs" "$RUNNER_TEMP/engine-pnpm-current/node_modules/pnpm/bin/pnpm.cjs"
 
       - name: Restore Node 24
+        id: restore_node_24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version-file: .nvmrc
+      - name: Retry Restore Node 24
+        if: ${{ !cancelled() && steps.restore_node_24.outcome == 'failure' }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
@@ -126,6 +162,14 @@ jobs:
         uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
 
       - name: Setup Node 24
+        id: setup_node_24
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        continue-on-error: true
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Retry Setup Node 24
+        if: ${{ !cancelled() && steps.setup_node_24.outcome == 'failure' }}
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
