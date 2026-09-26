@@ -940,7 +940,8 @@ external. An artifact-backed item never falls back to its `uri`, even when it ha
 approves the checked artifact or nothing. The control plane refuses a new request naming an artifact
 the card cannot show. A decision stored before that check can still name one, and the card shows it
 as blocked with its media type and no link, so it cannot be marked reviewed; Deny still works, and
-the control plane refuses a human approval of such a decision.
+the control plane refuses a human approval of such a decision. One already approved before the check
+can still be consumed with its unchanged snapshot.
 
 **Reviewing artifact evidence requires HTTPS or localhost.** Browsers provide SubtleCrypto, which
 the digest check needs, only in a secure context: an HTTPS page, or `localhost` on the machine that

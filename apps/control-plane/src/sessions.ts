@@ -615,11 +615,10 @@ export function normalizeWorkflowDecisionSnapshot(
     if (item.artifactId !== undefined && !boundedDecisionString(item.artifactId, 256)) return [];
     if (item.mediaType !== undefined &&
         (typeof item.mediaType !== "string" || !/^[a-z0-9][a-z0-9.+-]{0,62}\/[a-z0-9][a-z0-9.+-]{0,62}$/u.test(item.mediaType))) return [];
-    // An item naming an artifact must be one the human review card can show and check; its `uri`
-    // is never reviewed in the artifact's place. Evidence without an artifact needs its link.
+    // Without an external link, the human fallback must have an artifact the browser can display.
     // The Orchestrator still applies its own stricter client and artifact checks before delivery.
-    if (item.artifactId === undefined && item.uri === undefined) return [];
-    if (unrenderableEvidenceArtifact(item as { artifactId?: string; mediaType?: string })) return [];
+    if (item.uri === undefined && (!item.artifactId ||
+        !RENDERABLE_EVIDENCE_MEDIA_TYPES.includes(item.mediaType as string))) return [];
     // Optional fields are emitted only when present so a pre-v167 snapshot keeps its digest.
     return [{
       evidenceId: item.evidenceId,
@@ -6590,6 +6589,13 @@ export class SessionsService {
     }
     const normalized = normalizeWorkflowDecisionSnapshot(request.resourceSnapshot);
     if (!normalized.ok || !normalized.data) return fail(normalized.error!, normalized.status);
+    // An item naming an artifact is reviewed as that artifact's checked bytes, so the human review
+    // card must be able to show it; its `uri` never stands in. Checked only for new requests, so an
+    // occurrence approved before this rule can still be consumed with its unchanged snapshot.
+    if (normalized.data.category === "ui_evidence_approval" &&
+        normalized.data.evidence.some(unrenderableEvidenceArtifact)) {
+      return fail("UI evidence references must be unique HTTPS resources or renderable Session artifacts with SHA-256 integrity", 400);
+    }
     const child = this.db.getSession(sessionId);
     if (!child) return fail("session not found", 404);
     if (isTerminal(child.status)) {

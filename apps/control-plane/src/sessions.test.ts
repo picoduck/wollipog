@@ -20235,6 +20235,34 @@ test("a stored decision naming an artifact the review card cannot show can be de
   }
 });
 
+test("an occurrence approved before the request-time check can still be consumed (#1790)", async () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    assert.ok(h.svc.setParentControlPolicy(h.parent.id,
+      { ...h.decisions, ui_evidence_approval: "human" }, 1, { kind: "human", id: "owner" }).ok);
+    const child = h.createChild("UI Child");
+    const image = h.screenshot(child.id, "after");
+    const decision = h.request(child.id, "legacy-approved", [{ evidenceId: "after", uri: image.item.uri, sha256: image.item.sha256 }]);
+    assert.ok(decision.ok && decision.data, decision.error);
+    assert.ok(h.svc.approve(child.id, decision.data.occurrenceId, "approve",
+      { kind: "human", id: "owner" }, undefined, () => true, ["after"]).ok);
+    // The occurrence as a pre-change control plane could have stored and approved it.
+    const legacy = { category: "ui_evidence_approval", evidence: [{
+      evidenceId: "after", uri: image.item.uri, sha256: image.item.sha256,
+      artifactId: image.item.artifactId, mediaType: "image/svg+xml",
+    }] };
+    h.db.raw().prepare("UPDATE workflow_decisions SET resource_snapshot=?, resource_digest=? WHERE occurrence_id=?").run(
+      JSON.stringify(legacy), createHash("sha256").update(JSON.stringify(legacy), "utf8").digest("hex"),
+      decision.data.occurrenceId);
+    const consumed = await h.svc.consumeWorkflowDecision(child.id, decision.data.occurrenceId,
+      { resourceSnapshot: legacy as never });
+    assert.ok(consumed.ok, consumed.error);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "consumed");
+  } finally {
+    h.db.close();
+  }
+});
+
 test("unreviewable UI evidence falls back to the human with a specific reason and never blocks other work", () => {
   const h = uiEvidenceReviewHarness();
   try {
