@@ -21487,11 +21487,11 @@ test("a provisionally stopped child that was archived meanwhile is ended, so its
     assert.ok(svc.setArchived(child.id, true).ok);
     assert.equal(db.getSession(child.id)?.archived, true);
     assert.equal(db.hasSessionStopIntent(child.id), false);
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "revoked",
+      "archiving the stopped child ends it: its pending decision is revoked at once");
     const resolved = svc.resolveDescendantRequest(root.id, child.id, merge.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
     assert.equal(resolved.status, 409);
-    assert.match(resolved.error ?? "", /revoked or superseded/u);
-    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "revoked");
     assert.notEqual(f.resumeState(merge.occurrenceId), "held", "nothing is owed to an archived child");
     f.hub.online = true;
     svc.retryDuePrompts(Date.now() + 5_000, RUNNER_ID);
@@ -21499,6 +21499,38 @@ test("a provisionally stopped child that was archived meanwhile is ended, so its
       id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
     })]);
     assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test("archiving a provisionally stopped child abandons the resume it was owed, with or without a reconnect (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child } = f;
+  try {
+    f.parentOnOtherRunner();
+    // Resolved while the runner is away, so the resume is owed to a provisionally stopped child.
+    const merge = f.requestMerge(1773);
+    svc.onSessionStatus(child.id, "idle");
+    f.hub.online = false;
+    svc.failRunnerSessions(RUNNER_ID);
+    f.approve(merge.occurrenceId);
+    assert.equal(f.resumeState(merge.occurrenceId), "held");
+    // The user archives the stopped child before its runner returns: nothing will restore it, so
+    // the owed resume is abandoned now rather than kept on every sweep until a reconnect.
+    assert.ok(svc.setArchived(child.id, true).ok);
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "revoked");
+    assert.equal(f.resumeState(merge.occurrenceId), "abandoned");
+    svc.retryDuePrompts(Date.now() + 5_000);
+    assert.deepEqual(db.sessionsWithHeldWorkflowDecisionResumes(RUNNER_ID), [], "no sweep keeps visiting it");
+    // A later reconnect stops the archived child rather than resuming it.
+    f.hub.online = true;
+    svc.retryDuePrompts(Date.now() + 10_000, RUNNER_ID);
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    })]);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0);
+    assert.equal(db.getSession(child.id)?.status, "stopped");
   } finally {
     db.close();
   }

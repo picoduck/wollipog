@@ -801,8 +801,9 @@ with no pending request. Before, its decision resume was dropped and nothing tol
   `stopped` while its decision is still pending was stopped that way, so resolving the decision is
   accepted and its resume waits, still owed, for hydration to restore the child. The registration
   sweep that precedes hydration leaves it alone. An archived child is ended regardless: the
-  runner's return stops it rather than restoring it, so resolving its decision is refused and the
-  decision revoked, as before. An offline runner is not shown as a hold, since the
+  runner's return stops it rather than restoring it, so archiving a stopped child revokes its
+  unconsumed decisions and abandons the resume it was owed at once, and resolving its decision is
+  refused, as before. An offline runner is not shown as a hold, since the
   runner's own status already says so. Every authoritative end of a child — a runner-reported
   terminal status, a session the runner no longer holds at reconnect (whatever status the control
   plane had stored for it), an explicit Stop or restart, a guardrail Stop — revokes its unconsumed

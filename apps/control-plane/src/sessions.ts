@@ -8941,6 +8941,10 @@ export class SessionsService {
       return ok(pending, 202);
     }
     if (session.archived) return ok(session);
+    // Archiving a terminal session needs no Stop, but it is an end all the same: a runner that
+    // returns stops an archived session rather than restoring it, so a child a disconnect had
+    // provisionally stopped can answer nothing and is owed no resume from here on (#1759).
+    this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-archived");
     this.db.setSessionArchived(sessionId, true, now);
     const updated = this.db.getSession(sessionId)!;
     this.hub.sessionChanged(updated, refreshProject);
