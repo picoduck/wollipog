@@ -15623,9 +15623,13 @@ export class SessionManager {
     const register = (job: NonNullable<DriverBackgroundWorkUpdate["jobs"]>[number]) => {
       let prior = findAlias(job.id, job.toolUseId);
       // A record a restart carried over describes the replaced conversation, never a job of the
-      // current one, even when a provider task id repeats (#1779): the new job gets a fresh record.
+      // current one, even when a provider task id repeats (#1779): the new job gets a fresh record,
+      // and the carried one moves aside under a distinct id so a result it still owes is reported.
       if (prior?.restartedAt !== undefined) {
         byId.delete(prior.id);
+        const { toolUseId: _replacedAlias, ...carried } = prior;
+        const movedId = `${prior.id}~restart-${prior.restartedAt}`;
+        byId.set(movedId, { ...carried, id: movedId });
         prior = undefined;
       }
       if (prior && prior.id !== job.id) byId.delete(prior.id);

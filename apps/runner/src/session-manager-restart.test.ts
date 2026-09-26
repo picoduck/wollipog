@@ -756,3 +756,44 @@ test("a job the restarted conversation starts under a reused task id gets its ow
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test("a reused task id does not cost the replaced conversation's result that is still owed (#1779)", { skip: !haveGit() }, async () => {
+  const f = fixture("reused-owed-id");
+  let manager: SessionManager | undefined;
+  try {
+    const spec = claudeSpec("s_restart_reused_owed_id", f.repo);
+    // The replaced conversation's task-1 finished, and its result is still owed.
+    f.store.create(storedClaudeSession(spec.sessionId, f.repo, {
+      backgroundWorkState: "continuation_pending",
+      backgroundJobs: [storedJob("task-1", {
+        terminalStatus: "completed", terminalObservedAt: 2_100, continuationRequired: true,
+      })],
+    }));
+    const fake = fakeProvider({
+      onPrompt: (provider, text) => {
+        if (text !== "start work") return;
+        const job = { id: "task-1", launchType: "shell" as const, startedAt: Date.now() };
+        provider.cb.onBackgroundWork?.({ state: "running", pendingTaskIds: [job.id], jobs: [job], observedTaskIds: [job.id] });
+      },
+    });
+    manager = new SessionManager((message) => { f.sent.push(message); }, () => {}, f.store, "runner", undefined,
+      fake.factory as never, f.dataDir, 1);
+    // The restart's own prompt starts a job under the same id before the owed result is reported.
+    assert.equal(await manager.start(spec, "start work"), true);
+    const reported = () => fake.prompts.find((prompt) => prompt.text.startsWith(RESTART_CONTINUATION_PREFIX));
+    await waitFor(() => reported() !== undefined, "the owed result was not reported");
+    assert.equal(fake.prompts[0]!.text, "start work");
+    const listed = JSON.parse(reported()!.text.slice(reported()!.text.lastIndexOf("\n") + 1)) as Array<{ id: string; status: string }>;
+    assert.deepEqual(listed.map((job) => job.status), ["completed"]);
+    assert.match(listed[0]!.id, /^task-1~restart-\d+$/u, "the carried record moved aside under a distinct id");
+    await waitFor(() => (f.store.readMeta(spec.sessionId)?.backgroundJobs ?? [])
+      .some((job) => job.id === listed[0]!.id && job.assistantResultPersistedAt !== undefined),
+    "the owed result was not recorded as delivered");
+    const current = f.store.readMeta(spec.sessionId)?.backgroundJobs?.find((job) => job.id === "task-1");
+    assert.equal(current?.restartedAt, undefined, "the new job keeps the original id with a fresh record");
+    assert.equal(current?.terminalStatus, undefined);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
