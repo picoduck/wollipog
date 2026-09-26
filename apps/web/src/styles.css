@@ -6987,6 +6987,11 @@ button.file-head.source-path-link {
   color: var(--text-dim);
   font-size: var(--text-sm);
 }
+.provider-account-remove-target {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
 .provider-login-card {
   margin-top: 10px;
   padding: 12px;

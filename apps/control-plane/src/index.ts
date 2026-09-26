@@ -1511,6 +1511,7 @@ app.register(async (instance) => {
       case "read_queued_prompt_result":
       case "edit_queued_prompt_result":
       case "provider_login_result":
+      case "remove_provider_account_result":
         hub.resolveRunnerRequest(msg, runnerId!);
         break;
       case "skills_state": {
@@ -2722,6 +2723,43 @@ app.delete("/api/runners/:id/provider-logins/:operationId", async (req, reply) =
       return reply.code(409).send({ error: result.error ?? "Provider sign-in could not be cancelled" });
     }
     return { login: result.login };
+  } catch (error) {
+    return reply.code(504).send({ error: (error as Error).message });
+  }
+});
+
+app.delete("/api/runners/:id/provider-accounts/:accountId", async (req, reply) => {
+  const { id, accountId } = req.params as { id: string; accountId: string };
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(accountId)) {
+    return reply.code(400).send({ error: "accountId is invalid" });
+  }
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  const runner = db.getRunner(id);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
+  const unsupported = runnerCapabilityError(id, "providerAccountRemoval", "Provider Account Removal");
+  if (unsupported) return reply.code(409).send({ error: unsupported });
+  if (!runner.providerAccounts?.some((account) => account.id === accountId)) {
+    return reply.code(404).send({ error: "The provider account is not available on this Machine." });
+  }
+  const requestId = `provider_account_remove_${randomUUID()}`;
+  try {
+    const result = await hub.requestFromRunner(id, requestId, {
+      type: "remove_provider_account",
+      requestId,
+      runnerId: id,
+      accountId,
+    });
+    if (result.type !== "remove_provider_account_result") {
+      return reply.code(502).send({ error: "unexpected runner reply" });
+    }
+    if (!result.ok) {
+      return reply.code(409).send({ error: result.error ?? "The provider account could not be removed" });
+    }
+    return { removed: true, credentialsRetained: result.credentialsRetained === true };
   } catch (error) {
     return reply.code(504).send({ error: (error as Error).message });
   }

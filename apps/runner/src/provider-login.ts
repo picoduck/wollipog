@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
-import { readdirSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { agentContextKey, type AgentContext, type AgentDefinition, type ProviderLoginView } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
 import { writeProviderAccountsConfig } from "./config.js";
@@ -8,7 +8,11 @@ import { runContextCommand } from "./context-command.js";
 import { supportsStructuredCodexDeviceLogin } from "./discovery/codex-app-server.js";
 import { launchTargetStillMatches } from "./discovery/resolve.js";
 import { JsonRpcPeer, type RpcError } from "./jsonrpc.js";
-import { agentForProviderAccount, providerAccountEnvironment } from "./provider-accounts.js";
+import {
+  agentForProviderAccount,
+  providerAccountAgentContextCompatible,
+  providerAccountEnvironment,
+} from "./provider-accounts.js";
 import { killTreeAndWait, spawnAgent, trackPendingKill, type AgentProcess } from "./spawn.js";
 
 const LOGIN_OUTPUT_LIMIT = 64 * 1024;
@@ -129,12 +133,18 @@ export interface ProviderLoginSupervisorOptions {
   releaseLease: (directory: string) => boolean;
   onUpdate: (logins: ProviderLoginView[]) => void;
   onAccountAdded: (account: RunnerProviderAccount) => void | Promise<void>;
+  onAccountRemoved?: (account: RunnerProviderAccount) => void | Promise<void>;
+  /** A reason the runner cannot forget this account, such as an agent default that names it. */
+  removalBlocker?: (account: RunnerProviderAccount) => string | undefined;
+  /** Whether any session on this Machine is bound to the account's credential home. */
+  credentialHomeInUse?: (account: RunnerProviderAccount) => boolean;
   timeoutMs?: number;
   ceremonyTimeoutMs?: number;
   spawn?: typeof spawnAgent;
   kill?: typeof killTreeAndWait;
   writeAccounts?: typeof writeProviderAccountsConfig;
   probe?: (login: ResolvedProviderLogin) => Promise<boolean>;
+  identify?: (login: ResolvedProviderLogin) => Promise<string | undefined>;
   now?: () => number;
 }
 
@@ -240,6 +250,45 @@ function accountSlug(label: string): string {
     .slice(0, 48) || "account";
 }
 
+function providerName(provider: "claude" | "codex"): string {
+  return provider === "claude" ? "Claude" : "Codex";
+}
+
+function comparableLabel(label: string): string {
+  return label.trim().toLocaleLowerCase();
+}
+
+/** Account identity from `claude auth status`: the email and organization together, because one
+ * email can belong to a personal and a team organization that are different subscriptions. */
+export function claudeStatusIdentity(stdout: string): string | undefined {
+  const value = JSON.parse(stdout) as Record<string, unknown>;
+  if (value?.loggedIn !== true) return undefined;
+  const email = typeof value.email === "string" && value.email.trim()
+    ? value.email.trim().toLocaleLowerCase()
+    : null;
+  const orgId = typeof value.orgId === "string" && value.orgId ? value.orgId : null;
+  return email || orgId ? JSON.stringify(["claude", email, orgId]) : undefined;
+}
+
+/** Account identity from Codex's ChatGPT credential file: the user and the workspace account.
+ * Only these claims are read; tokens are never retained. API-key homes have no account identity. */
+export function codexCredentialIdentity(authJson: string): string | undefined {
+  const value = JSON.parse(authJson) as { tokens?: { id_token?: unknown; account_id?: unknown } };
+  const idToken = value?.tokens?.id_token;
+  if (typeof idToken !== "string") return undefined;
+  const payload = idToken.split(".")[1];
+  if (!payload) return undefined;
+  const claims = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as Record<string, unknown>;
+  const auth = claims["https://api.openai.com/auth"] && typeof claims["https://api.openai.com/auth"] === "object"
+    ? claims["https://api.openai.com/auth"] as Record<string, unknown>
+    : {};
+  const user = [auth.chatgpt_user_id, auth.user_id, claims.sub]
+    .find((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+  const account = [auth.chatgpt_account_id, value.tokens?.account_id]
+    .find((candidate): candidate is string => typeof candidate === "string" && candidate.length > 0);
+  return user ? JSON.stringify(["codex", user, account ?? null]) : undefined;
+}
+
 export class ProviderLoginSupervisor {
   private readonly active = new Map<string, ActiveLogin>();
   private readonly recent = new Map<string, ProviderLoginView>();
@@ -279,6 +328,17 @@ export class ProviderLoginSupervisor {
         throw new Error("Account label must contain 1 to 100 characters.");
       }
       if (this.options.accounts.length >= 32) throw new Error("This Machine already has 32 provider accounts.");
+      const comparable = comparableLabel(label);
+      if (this.options.accounts.some((candidate) =>
+        candidate.provider === input.provider && comparableLabel(candidate.label) === comparable)) {
+        throw new Error(`A ${providerName(input.provider)} account with this label is already on this Machine. ` +
+          "Use Sign In on that account to refresh its login.");
+      }
+      // Settled operations stay active until the account is recorded, which includes the identity check.
+      if ([...this.active.values()].some((operation) => operation.resolved.persistAccount &&
+        operation.resolved.provider === input.provider && comparableLabel(operation.resolved.label) === comparable)) {
+        throw new Error("A sign-in for an account with this label is already running.");
+      }
       let id: string;
       do id = `${accountSlug(label)}-${randomUUID().slice(0, 8)}`;
       while (this.options.accounts.some((candidate) => candidate.id === id));
@@ -360,7 +420,7 @@ export class ProviderLoginSupervisor {
       });
     } catch {
       const released = this.options.releaseLease(resolved.directory);
-      if (released && resolved.persistAccount) this.cleanupUnusedDirectory(resolved.directory);
+      if (released && resolved.persistAccount) this.cleanupUnusedDirectory(resolved);
       throw new Error("The provider sign-in command could not be started.");
     }
     const timer = setTimeout(() => {
@@ -470,6 +530,28 @@ export class ProviderLoginSupervisor {
       void this.terminate(operation);
     }
     return { ...operation.view };
+  }
+
+  /** Forget one configured account. The runner-created credential home is deleted only when no
+   * session or process on this Machine still depends on it; otherwise it is kept so those sessions
+   * continue to authenticate. Operator-configured homes are never deleted. */
+  async removeAccount(accountId: string): Promise<{ credentialsRetained: boolean }> {
+    const account = this.options.accounts.find((candidate) => candidate.id === accountId);
+    if (!account) throw new Error("Provider account is not configured on this Machine.");
+    if ([...this.active.values()].some((operation) => operation.resolved.accountId === accountId)) {
+      throw new Error("A sign-in is running for this account. Cancel it before removing the account.");
+    }
+    const blocker = this.options.removalBlocker?.(account);
+    if (blocker) throw new Error(blocker);
+    try {
+      this.writeAccounts(this.options.configPath, this.options.accounts.filter((candidate) => candidate !== account));
+    } catch {
+      throw new Error("The runner configuration could not be updated.");
+    }
+    this.options.accounts.splice(this.options.accounts.indexOf(account), 1);
+    const credentialsRetained = !this.deleteRemovedCredentialHome(account);
+    await this.options.onAccountRemoved?.(account);
+    return { credentialsRetained };
   }
 
   cancelAccount(accountId: string): boolean {
@@ -643,6 +725,7 @@ export class ProviderLoginSupervisor {
     this.clearCeremonyTimer(operation);
     const reaped = await this.terminate(operation);
     let result: "completed" | "cancelled" | "failed" = "failed";
+    let duplicate: RunnerProviderAccount | undefined;
     if (operation.cancelled) {
       result = "cancelled";
       this.update(operation, {
@@ -676,7 +759,25 @@ export class ProviderLoginSupervisor {
         verificationUrl: undefined,
         userCode: undefined,
       });
-    } else if (await this.authenticationConfirmed(operation, exitCode)) {
+    } else if (!await this.authenticationConfirmed(operation, exitCode)) {
+      this.update(operation, {
+        status: "failed",
+        expectsCode: false,
+        error: "The provider did not confirm authentication.",
+        verificationUrl: undefined,
+        userCode: undefined,
+      });
+    } else if (operation.resolved.persistAccount &&
+        (duplicate = await this.existingAccountWithSameIdentity(operation.resolved))) {
+      this.update(operation, {
+        status: "failed",
+        expectsCode: false,
+        error: `This ${providerName(duplicate.provider)} account is already on this Machine. ` +
+          "The duplicate sign-in was discarded.",
+        verificationUrl: undefined,
+        userCode: undefined,
+      });
+    } else {
       try {
         if (operation.resolved.persistAccount) {
           const account: RunnerProviderAccount = {
@@ -714,20 +815,14 @@ export class ProviderLoginSupervisor {
           userCode: undefined,
         });
       }
-    } else {
-      this.update(operation, {
-        status: "failed",
-        expectsCode: false,
-        error: "The provider did not confirm authentication.",
-        verificationUrl: undefined,
-        userCode: undefined,
-      });
     }
     this.active.delete(operation.view.operationId);
     this.pruneRecent();
     const released = reaped && this.options.releaseLease(operation.resolved.directory);
     if (released && result !== "completed" && operation.resolved.persistAccount) {
-      this.cleanupUnusedDirectory(operation.resolved.directory);
+      // A duplicate's fresh credentials belong to no configured account, so nothing may keep them.
+      if (duplicate) this.removeDirectory(operation.resolved.directory);
+      else this.cleanupUnusedDirectory(operation.resolved);
     }
     operation.resolve(result);
   }
@@ -736,6 +831,44 @@ export class ProviderLoginSupervisor {
     if (!operation.peer) return exitCode === 0 && await this.probe(operation.resolved);
     return operation.structuredSucceeded &&
       (operation.structuredAccountUpdated || await this.probe(operation.resolved));
+  }
+
+  /** Compare a new sign-in with the other accounts of the same provider. Identities stay in memory
+   * for this comparison only; an account whose identity cannot be read never counts as a match. */
+  private async existingAccountWithSameIdentity(
+    login: ResolvedProviderLogin,
+  ): Promise<RunnerProviderAccount | undefined> {
+    const candidates = this.options.accounts.filter((account) =>
+      account.provider === login.provider && account.id !== login.accountId &&
+      providerAccountAgentContextCompatible(account, { context: login.context }));
+    if (candidates.length === 0) return undefined;
+    const identity = await this.identity(login);
+    if (!identity) return undefined;
+    const identities = await Promise.all(candidates.map((account) => this.identity({
+      ...login,
+      accountId: account.id,
+      label: account.label,
+      directory: account.directory,
+      env: {
+        ...login.env,
+        ...providerAccountEnvironment({ provider: account.provider, credentialHome: account.directory }),
+      },
+      persistAccount: false,
+    })));
+    return candidates.find((_account, index) => identities[index] === identity);
+  }
+
+  private async identity(login: ResolvedProviderLogin): Promise<string | undefined> {
+    try {
+      if (this.options.identify) return await this.options.identify(login);
+      if (login.provider === "codex") {
+        return codexCredentialIdentity(readFileSync(join(login.directory, "auth.json"), "utf8"));
+      }
+      const stdout = await this.statusStdout(login);
+      return stdout === undefined ? undefined : claudeStatusIdentity(stdout);
+    } catch {
+      return undefined;
+    }
   }
 
   private pruneRecent(): void {
@@ -768,6 +901,18 @@ export class ProviderLoginSupervisor {
 
   private async probe(login: ResolvedProviderLogin): Promise<boolean> {
     if (this.options.probe) return this.options.probe(login);
+    const stdout = await this.statusStdout(login);
+    if (stdout === undefined) return false;
+    try {
+      return PROVIDER_LOGIN_DESCRIPTORS[login.provider].authenticated(stdout);
+    } catch {
+      return false;
+    }
+  }
+
+  /** Output of the provider's status command. Claude may print its structured status before a
+   * non-zero exit, so that payload is kept; any other failure yields no output. */
+  private async statusStdout(login: ResolvedProviderLogin): Promise<string | undefined> {
     try {
       const result = await runContextCommand(login.context, login.command, statusArgs(login), {
         cwd: login.directory,
@@ -775,29 +920,54 @@ export class ProviderLoginSupervisor {
         timeoutMs: 15_000,
         maxBuffer: 64 * 1024,
       });
-      return PROVIDER_LOGIN_DESCRIPTORS[login.provider].authenticated(result.stdout);
+      return result.stdout;
     } catch (error) {
       if (login.provider === "claude" && error && typeof error === "object" && "stdout" in error) {
         const rawStdout = (error as { stdout?: unknown }).stdout;
         const stdout = Buffer.isBuffer(rawStdout) ? rawStdout.toString("utf8") : rawStdout;
-        if (typeof stdout === "string") {
-          try {
-            return PROVIDER_LOGIN_DESCRIPTORS.claude.authenticated(stdout);
-          } catch {
-            return false;
-          }
-        }
+        if (typeof stdout === "string") return stdout;
       }
+      return undefined;
+    }
+  }
+
+  /** Delete a removed account's credential home only when Wollipog created it and nothing on this
+   * Machine still depends on it. Returns whether the home is gone. */
+  private deleteRemovedCredentialHome(account: RunnerProviderAccount): boolean {
+    const managedRoot = resolve(this.options.dataDir, "provider-accounts");
+    if (dirname(resolve(account.directory)) !== managedRoot) return false;
+    if (!existsSync(account.directory)) return true;
+    if (this.options.credentialHomeInUse?.(account)) return false;
+    let exclusive: boolean;
+    try {
+      // The lease is reference-counted per runner and exclusive across runners. Releasing the
+      // reference taken here reports true only when no session or probe was holding the home.
+      this.options.acquireLease(account.directory, account.provider);
+      exclusive = this.options.releaseLease(account.directory);
+    } catch {
+      return false;
+    }
+    return exclusive && this.removeDirectory(account.directory);
+  }
+
+  private removeDirectory(directory: string): boolean {
+    try {
+      rmSync(directory, { recursive: true, force: true });
+      return true;
+    } catch {
       return false;
     }
   }
 
-  private cleanupUnusedDirectory(directory: string): void {
+  /** Remove a new account's directory after a failed sign-in unless the provider wrote credentials
+   * into it. Providers create logs and scratch space before authenticating (Codex writes `log` and
+   * `tmp`), and that state alone must not leave an orphaned account directory behind. */
+  private cleanupUnusedDirectory(login: Pick<ResolvedProviderLogin, "directory" | "provider">): void {
     try {
-      const providerEntries = readdirSync(directory).filter((entry) => entry !== ".agent-manager");
-      if (providerEntries.length === 0) rmSync(directory, { recursive: true, force: true });
+      const marker = login.provider === "claude" ? ".credentials.json" : "auth.json";
+      if (!readdirSync(login.directory).includes(marker)) rmSync(login.directory, { recursive: true, force: true });
     } catch {
-      // Cleanup is best-effort; partial provider state is retained for operator inspection.
+      // Cleanup is best-effort; provider credentials are retained for operator inspection.
     }
   }
 

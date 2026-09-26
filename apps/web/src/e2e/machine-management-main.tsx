@@ -357,6 +357,12 @@ const client = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { login: cancelled };
   },
+  removeProviderAccount: async (_runnerId: string, accountId: string) => {
+    if (!runner) throw new Error("runner not found");
+    runner.providerAccounts = runner.providerAccounts?.filter((account) => account.id !== accountId);
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { removed: true as const, credentialsRetained: false };
+  },
   removeRunner: async () => {
     if (!runner) throw new Error("runner not found");
     const runnerId = runner.runnerId;

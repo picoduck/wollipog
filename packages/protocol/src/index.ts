@@ -582,7 +582,11 @@
 //      `worktree_rebind` or `provider_account_switch` hold from it beside the v161 worktree
 //      recovery hold. Older runners leave the field absent, so a queued prompt behind such a
 //      barrier is invisible to them as before.
-export const PROTOCOL_VERSION = 187;
+// 188: a Machine owner can remove a provider account. The runner drops it from its configuration
+//      and deletes the runner-created credential home unless a session still depends on it. A new
+//      sign-in whose provider identity matches an account already on the Machine is discarded
+//      instead of being recorded twice. Older runners do not offer removal.
+export const PROTOCOL_VERSION = 188;
 export const CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL = 127;
 
 /**
@@ -728,6 +732,7 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerAuthenticationAccountRecovery: 180,
   providerAccounts: 170,
   providerLogin: 171,
+  providerAccountRemoval: 188,
   accountScopedAgentSkills: 172,
   piHarness: 155,
   piExternalSessions: 156,
@@ -7327,6 +7332,15 @@ export interface ProviderLoginResultMessage {
   error?: string;
 }
 
+export interface RemoveProviderAccountResultMessage {
+  type: "remove_provider_account_result";
+  requestId: string;
+  ok: boolean;
+  /** True when the credential home was kept because a session on this Machine still uses it. */
+  credentialsRetained?: boolean;
+  error?: string;
+}
+
 /** Authoritative live capacity/queue accounting after registration and every admission change. */
 export interface RunnerCapacityStatusMessage {
   type: "runner_capacity_status";
@@ -7569,6 +7583,7 @@ export type RunnerToControlPlane =
   | AgentsUpdatedMessage
   | ProviderLoginsUpdatedMessage
   | ProviderLoginResultMessage
+  | RemoveProviderAccountResultMessage
   | RunnerCapacityStatusMessage
   | SubscriptionUsageUpdatedMessage
   | SubscriptionUsageInventoryMessage
@@ -8306,6 +8321,14 @@ export interface CancelProviderLoginMessage {
   requestId: string;
   runnerId: string;
   operationId: string;
+}
+
+/** Protocol v188: forget one opaque provider account on the runner. */
+export interface RemoveProviderAccountMessage {
+  type: "remove_provider_account";
+  requestId: string;
+  runnerId: string;
+  accountId: string;
 }
 
 export type AcpRegistryApprovalAction = "approve" | "revoke";
@@ -9224,6 +9247,7 @@ export type ControlPlaneToRunner =
   | StartProviderLoginMessage
   | SubmitProviderLoginCodeMessage
   | CancelProviderLoginMessage
+  | RemoveProviderAccountMessage
   | AcpRegistryApprovalMessage
   | SkillsSyncMessage
   | SkillSnapshotMessage

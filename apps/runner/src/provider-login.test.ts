@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter, once } from "node:events";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -10,6 +10,8 @@ import fc from "fast-check";
 import type { AgentProcess, SpawnAgentOptions } from "./spawn.js";
 import {
   agentsMatchingHarnessInstallationSelections,
+  claudeStatusIdentity,
+  codexCredentialIdentity,
   parseCodexDeviceLoginOutput,
   ProviderLoginSupervisor,
   type ResolvedProviderLogin,
@@ -86,6 +88,10 @@ function fixture(options: {
   writeFails?: boolean;
   kill?: (child: AgentProcess) => Promise<boolean>;
   probe?: ((login: ResolvedProviderLogin) => Promise<boolean>) | null;
+  identify?: (login: ResolvedProviderLogin) => Promise<string | undefined>;
+  releaseLease?: (directory: string) => boolean;
+  credentialHomeInUse?: () => boolean;
+  removalBlocker?: () => string | undefined;
 } = {}) {
   const root = mkdtempSync(join(tmpdir(), "wollipog-provider-login-"));
   const configPath = join(root, "runner.config.json");
@@ -95,6 +101,7 @@ function fixture(options: {
   const updates: ProviderLoginView[][] = [];
   const releases: string[] = [];
   const added: string[] = [];
+  const removed: string[] = [];
   const accounts: Array<{ id: string; label: string; provider: "claude" | "codex"; directory: string }> = [];
   const supervisor = new ProviderLoginSupervisor({
     dataDir: root,
@@ -107,9 +114,13 @@ function fixture(options: {
       : agents,
     resolveEnv: () => ({ HOME: root }),
     acquireLease: () => true,
-    releaseLease: (directory) => { releases.push(directory); return true; },
+    releaseLease: (directory) => { releases.push(directory); return options.releaseLease?.(directory) ?? true; },
     onUpdate: (value) => updates.push(value),
     onAccountAdded: (account) => { added.push(account.id); },
+    onAccountRemoved: (account) => { removed.push(account.id); },
+    identify: options.identify ?? (async () => undefined),
+    ...(options.credentialHomeInUse ? { credentialHomeInUse: options.credentialHomeInUse } : {}),
+    ...(options.removalBlocker ? { removalBlocker: options.removalBlocker } : {}),
     timeoutMs: options.timeoutMs,
     ceremonyTimeoutMs: options.ceremonyTimeoutMs,
     spawn: ((spawnOptions: SpawnAgentOptions) => {
@@ -135,6 +146,7 @@ function fixture(options: {
     updates,
     releases,
     added,
+    removed,
     accounts,
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
@@ -484,6 +496,29 @@ test("cancel reaps the supervised process, releases its lease, and records no ac
   }
 });
 
+test("a failed new-account sign-in removes provider scratch state but keeps any credentials", async () => {
+  const fx = fixture();
+  try {
+    await fx.supervisor.startAccount({ provider: "claude", label: "Scratch Only" });
+    const scratch = fx.spawns[0]!.cwd as string;
+    mkdirSync(join(scratch, "log"), { recursive: true });
+    mkdirSync(join(scratch, "tmp"), { recursive: true });
+    fx.supervisor.cancel(fx.supervisor.views()[0]!.operationId);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(existsSync(scratch), false);
+
+    await fx.supervisor.startAccount({ provider: "claude", label: "Has Credentials" });
+    const credentialed = fx.spawns[1]!.cwd as string;
+    mkdirSync(credentialed, { recursive: true });
+    writeFileSync(join(credentialed, ".credentials.json"), "{}");
+    fx.supervisor.cancel(fx.supervisor.views().at(-1)!.operationId);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(existsSync(join(credentialed, ".credentials.json")), true);
+  } finally {
+    fx.cleanup();
+  }
+});
+
 test("late provider output and timeout cannot revive a cancelled sign-in", async () => {
   let finishReap!: (complete: boolean) => void;
   const reap = new Promise<boolean>((resolve) => { finishReap = resolve; });
@@ -709,5 +744,174 @@ test("configuration write failure reports failure and does not publish the new a
     assert.equal(fx.releases.length, 1);
   } finally {
     fx.cleanup();
+  }
+});
+
+function codexAuthJson(claims: Record<string, unknown>, accountId?: string): string {
+  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return JSON.stringify({
+    auth_mode: "chatgpt",
+    tokens: {
+      id_token: `${encode({ alg: "none" })}.${encode(claims)}.signature`,
+      access_token: "access",
+      refresh_token: "refresh",
+      ...(accountId ? { account_id: accountId } : {}),
+    },
+  });
+}
+
+test("provider identities compare the account, not the credential or the email's case", () => {
+  const personal = claudeStatusIdentity(JSON.stringify({ loggedIn: true, email: "Dev@Example.com", orgId: "org-1" }));
+  assert.equal(personal, claudeStatusIdentity(JSON.stringify({ loggedIn: true, email: "dev@example.com", orgId: "org-1" })));
+  assert.notEqual(personal, claudeStatusIdentity(JSON.stringify({ loggedIn: true, email: "dev@example.com", orgId: "org-2" })),
+    "one email in two organizations is two subscriptions");
+  assert.equal(claudeStatusIdentity(JSON.stringify({ loggedIn: false, email: "dev@example.com" })), undefined);
+  assert.equal(claudeStatusIdentity(JSON.stringify({ loggedIn: true })), undefined);
+
+  const auth = { chatgpt_user_id: "user-1", chatgpt_account_id: "workspace-1" };
+  const codex = codexCredentialIdentity(codexAuthJson({ email: "dev@example.com", "https://api.openai.com/auth": auth }));
+  assert.ok(codex);
+  assert.equal(codex, codexCredentialIdentity(codexAuthJson({ "https://api.openai.com/auth": auth })),
+    "a refreshed token for the same user and workspace is the same account");
+  assert.notEqual(codex, codexCredentialIdentity(codexAuthJson({
+    "https://api.openai.com/auth": { ...auth, chatgpt_account_id: "workspace-2" },
+  })));
+  assert.equal(codexCredentialIdentity(JSON.stringify({ OPENAI_API_KEY: "sk-test", tokens: null })), undefined);
+});
+
+test("a new account whose label is already on the Machine is refused before sign-in starts", async () => {
+  const fx = fixture();
+  try {
+    fx.accounts.push({ id: "work", label: "Work", provider: "claude", directory: join(fx.root, "work") });
+    await assert.rejects(fx.supervisor.startAccount({ provider: "claude", label: " work " }),
+      /already on this Machine.*Sign In on that account/i);
+    assert.equal(fx.spawns.length, 0);
+    await fx.supervisor.startAccount({ provider: "codex", label: "Work" });
+    await assert.rejects(fx.supervisor.startAccount({ provider: "codex", label: "WORK" }), /already running/i,
+      "a second click cannot start a parallel sign-in that would record the same account twice");
+    fx.supervisor.shutdown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("a new sign-in to an account already on the Machine is discarded instead of recorded twice", async () => {
+  const fx = fixture({
+    identify: async (login) => login.accountId === "other" ? "someone-else" : "dev@example.com",
+  });
+  try {
+    const existing = { id: "existing", label: "Personal", provider: "claude" as const, directory: join(fx.root, "existing") };
+    const other = { id: "other", label: "Team", provider: "claude" as const, directory: join(fx.root, "other") };
+    fx.accounts.push(existing, other);
+    await fx.supervisor.startAccount({ provider: "claude", label: "dev@example.com" });
+    const directory = fx.spawns[0]!.cwd as string;
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, ".credentials.json"), "{}");
+    fx.children[0]!.close(0);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const view = fx.supervisor.views()[0]!;
+    assert.equal(view.status, "failed");
+    assert.match(view.error ?? "", /already on this Machine.*discarded/i);
+    assert.doesNotMatch(view.error ?? "", /Personal|dev@example\.com/u, "the card never names the account");
+    assert.deepEqual(fx.accounts.map((account) => account.id), ["existing", "other"]);
+    assert.equal(fx.added.length, 0);
+    assert.equal(existsSync(directory), false, "the duplicate's fresh credentials are deleted");
+    const saved = JSON.parse(readFileSync(fx.configPath, "utf8")) as Record<string, unknown>;
+    assert.equal(saved.providerAccounts, undefined);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("a new sign-in to a different account is recorded when the existing identities differ", async () => {
+  const fx = fixture({ identify: async (login) => login.accountId === "existing" ? "first" : "second" });
+  try {
+    fx.accounts.push({ id: "existing", label: "Personal", provider: "claude", directory: join(fx.root, "existing") });
+    await fx.supervisor.startAccount({ provider: "claude", label: "Work" });
+    fx.children[0]!.close(0);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(fx.supervisor.views()[0]?.status, "succeeded");
+    assert.equal(fx.accounts.length, 2);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("removing an account forgets it and deletes the credential home Wollipog created", async () => {
+  const fx = fixture();
+  try {
+    const directory = join(fx.root, "provider-accounts", "work-1234");
+    mkdirSync(directory, { recursive: true });
+    writeFileSync(join(directory, "auth.json"), "{}");
+    const keep = { id: "keep", label: "Keep", provider: "claude" as const, directory: join(fx.root, "provider-accounts", "keep") };
+    fx.accounts.push({ id: "work-1234", label: "Work", provider: "codex", directory }, keep);
+    assert.deepEqual(await fx.supervisor.removeAccount("work-1234"), { credentialsRetained: false });
+    assert.deepEqual(fx.accounts, [keep]);
+    assert.deepEqual(fx.removed, ["work-1234"]);
+    assert.equal(existsSync(directory), false);
+    const saved = JSON.parse(readFileSync(fx.configPath, "utf8")) as { providerAccounts: Array<{ id: string }>; untouched: boolean };
+    assert.deepEqual(saved.providerAccounts.map((account) => account.id), ["keep"]);
+    assert.equal(saved.untouched, true);
+    await assert.rejects(fx.supervisor.removeAccount("work-1234"), /not configured/i);
+  } finally {
+    fx.cleanup();
+  }
+});
+
+test("removing an account keeps credentials that a session, another process, or the operator owns", async () => {
+  for (const [name, options, directory] of [
+    ["bound session", { credentialHomeInUse: () => true }, "provider-accounts/bound"],
+    ["held lease", { releaseLease: () => false }, "provider-accounts/held"],
+    ["operator home", {}, "operator-claude-home"],
+  ] as const) {
+    const fx = fixture(options);
+    try {
+      const home = join(fx.root, directory);
+      mkdirSync(home, { recursive: true });
+      fx.accounts.push({ id: "account", label: "Account", provider: "claude", directory: home });
+      assert.deepEqual(await fx.supervisor.removeAccount("account"), { credentialsRetained: true }, name);
+      assert.equal(fx.accounts.length, 0, name);
+      assert.equal(existsSync(home), true, name);
+    } finally {
+      fx.cleanup();
+    }
+  }
+});
+
+test("removing an account is refused while it signs in, while an agent defaults to it, or if the config cannot change", async () => {
+  const directory = (root: string) => join(root, "provider-accounts", "account");
+  const signingIn = fixture();
+  try {
+    signingIn.accounts.push({ id: "account", label: "Account", provider: "claude", directory: directory(signingIn.root) });
+    await signingIn.supervisor.startAccount({ accountId: "account" });
+    await assert.rejects(signingIn.supervisor.removeAccount("account"), /sign-in is running/i);
+    assert.equal(signingIn.accounts.length, 1);
+    signingIn.supervisor.shutdown();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  } finally {
+    signingIn.cleanup();
+  }
+  const defaulted = fixture({ removalBlocker: () => "Agent 'claude' uses this account as its default." });
+  try {
+    defaulted.accounts.push({ id: "account", label: "Account", provider: "claude", directory: directory(defaulted.root) });
+    await assert.rejects(defaulted.supervisor.removeAccount("account"), /uses this account as its default/i);
+    assert.equal(defaulted.accounts.length, 1);
+  } finally {
+    defaulted.cleanup();
+  }
+  const unwritable = fixture({ writeFails: true });
+  try {
+    const home = directory(unwritable.root);
+    mkdirSync(home, { recursive: true });
+    unwritable.accounts.push({ id: "account", label: "Account", provider: "claude", directory: home });
+    await assert.rejects(unwritable.supervisor.removeAccount("account"), /configuration could not be updated/i);
+    assert.equal(unwritable.accounts.length, 1);
+    assert.equal(existsSync(home), true, "credentials stay while the configuration still names the account");
+    assert.deepEqual(unwritable.removed, []);
+  } finally {
+    unwritable.cleanup();
   }
 });

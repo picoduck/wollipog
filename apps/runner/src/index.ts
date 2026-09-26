@@ -768,6 +768,26 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
     void subscriptionUsage.refreshAccount(account.id)
       .catch(() => log("subscription usage refresh after Provider Sign-In failed"));
   },
+  removalBlocker: (account) => {
+    const agent = config.agents.find((candidate) => candidate.defaultProviderAccountId === account.id);
+    return agent
+      ? `Agent '${agent.id}' uses this account as its default in the runner configuration. ` +
+        "Change that setting before removing the account."
+      : undefined;
+  },
+  credentialHomeInUse: (account) => store.listSessions().some((meta) =>
+    meta.providerAccountId === account.id || meta.providerCredentialHome === account.directory),
+  onAccountRemoved: (account) => {
+    providerAccountAuthStatus.delete(account.id);
+    sendUp({
+      type: "agents_updated",
+      runnerId: config.runnerId,
+      agents: agentsForControlPlane(),
+      providerAccounts: providerAccountsForControlPlane(),
+      editors: metadata.editors,
+    });
+    publishSubscriptionUsageInventory(false);
+  },
 });
 // The box's on-disk session store (source of truth, shared across runner instances on this box).
 const store = new SessionStore(resolve(config.dataDir, "sessions"));
@@ -2580,6 +2600,31 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           error: errText(error),
         });
       }
+      break;
+    case "remove_provider_account":
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerAccountRemoval")) break;
+      if (msg.runnerId !== config.runnerId) {
+        sendUp({
+          type: "remove_provider_account_result",
+          requestId: msg.requestId,
+          ok: false,
+          error: "Account removal targeted a different Machine.",
+        });
+        break;
+      }
+      runCommandTask("remove_provider_account", providerLoginSupervisor.removeAccount(msg.accountId)
+        .then(({ credentialsRetained }) => sendUp({
+          type: "remove_provider_account_result",
+          requestId: msg.requestId,
+          ok: true,
+          credentialsRetained,
+        }))
+        .catch((error) => sendUp({
+          type: "remove_provider_account_result",
+          requestId: msg.requestId,
+          ok: false,
+          error: errText(error),
+        })));
       break;
     case "generate_session_title": {
       if (msg.mode === "custom_model_endpoint") {
