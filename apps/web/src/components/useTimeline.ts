@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { SessionEvent } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
+import { TransportRequestError } from "../api-transport.js";
 import { useApi } from "../api-context.js";
 import {
   placeRetainedAttachmentItems,
@@ -33,7 +34,7 @@ interface BuilderState {
 const RETAINED_PAGE_RETRY_DELAYS_MS = [100, 200, 400];
 
 function retryableRetainedPageError(error: unknown): boolean {
-  return error instanceof TypeError ||
+  return error instanceof TypeError || error instanceof TransportRequestError ||
     (error instanceof ApiError && error.status >= 500 && error.status < 600);
 }
 

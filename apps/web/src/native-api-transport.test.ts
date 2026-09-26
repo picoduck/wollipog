@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { TransportRequestError } from "./api-transport.js";
 import { createNativeApiTransport, NATIVE_API_METHODS, type NativeInvokeRuntime } from "./native-api-transport.js";
 
 test("every explicit ApiClient method is supported by the native transport contract", () => {
@@ -40,11 +41,11 @@ test("native API transport presents IPC string rejections as Errors", async () =
   });
   await assert.rejects(
     () => transport.request("/api/identity"),
-    (error: unknown) => error instanceof Error && error.message === "native request failed",
+    (error: unknown) => error instanceof TransportRequestError && error.message === "native request failed",
   );
 });
 
-test("native API transport preserves Error rejections", async () => {
+test("native API transport identifies Error rejections as request failures", async () => {
   const failure = new TypeError("native request failed");
   const desktop: NativeInvokeRuntime = {
     async invoke<T>(): Promise<T> { throw failure; },
@@ -55,7 +56,8 @@ test("native API transport preserves Error rejections", async () => {
     publicOrigin: "https://a.test",
     desktop,
   });
-  await assert.rejects(() => transport.request("/api/identity"), (error: unknown) => error === failure);
+  await assert.rejects(() => transport.request("/api/identity"), (error: unknown) =>
+    error instanceof TransportRequestError && error.message === failure.message && error.cause === failure);
 });
 
 function responseFrame(status: number, body: Uint8Array): Uint8Array {

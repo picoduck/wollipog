@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import type { ApiTransport } from "./api-transport.js";
+import { TransportRequestError, type ApiTransport } from "./api-transport.js";
 import { decodeNativeHttpResponse, encodeNativeHttpRequest } from "./native-ipc-codec.js";
 
 export interface NativeInvokeRuntime {
@@ -26,11 +26,12 @@ function abortError(message: string): DOMException {
 }
 
 function nativeRequestError(cause: unknown): Error {
-  if (cause instanceof Error) return cause;
-  if (typeof cause === "string" && cause.trim()) return new Error(cause);
+  if (cause instanceof DOMException && cause.name === "AbortError") return cause;
+  if (cause instanceof Error) return new TransportRequestError(cause.message, cause);
+  if (typeof cause === "string" && cause.trim()) return new TransportRequestError(cause, cause);
   if (cause !== null && typeof cause === "object" && "message" in cause &&
-      typeof cause.message === "string" && cause.message.trim()) return new Error(cause.message);
-  return new Error("The native request failed.");
+      typeof cause.message === "string" && cause.message.trim()) return new TransportRequestError(cause.message, cause);
+  return new TransportRequestError("The native request failed.", cause);
 }
 
 export interface NativeApiTransportOptions {

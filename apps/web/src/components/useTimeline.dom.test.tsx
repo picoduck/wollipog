@@ -6,6 +6,7 @@ import { Window } from "happy-dom";
 import type { SessionEvent } from "@wollipog/protocol";
 import { ApiProvider } from "../api-context.js";
 import { ApiError } from "../api.js";
+import { TransportRequestError } from "../api-transport.js";
 import type { ApiClient } from "../api.js";
 import type { TimelineItem } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
@@ -60,6 +61,14 @@ function Timeline({ events, eventEpoch = 1, onItems }: {
 
 function ReplayTimeline(props: Parameters<typeof Timeline>[0]) {
   return <ApiProvider client={retainedClient}><Timeline {...props} /></ApiProvider>;
+}
+
+async function waitFor(condition: () => boolean): Promise<void> {
+  const deadline = Date.now() + 5_000;
+  while (!condition()) {
+    assert.ok(Date.now() < deadline, "timed out waiting for retained attachment retry");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
+  }
 }
 
 test("an open transcript moves a retained attachment into replayed context without duplicating it", async () => {
@@ -166,7 +175,7 @@ test("a transient network failure retries the same retained page without duplica
       <Timeline events={[beforeMessage, afterEvent]} />
     </ApiProvider>));
     assert.equal(container.textContent, "user_message:2;user_message:3;");
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 150)); });
+    await waitFor(() => cursors.length === 2 && container.textContent?.includes("artifact_attached:1;") === true);
     assert.deepEqual(cursors, [0, 0]);
     assert.equal(container.textContent, "user_message:2;artifact_attached:1;user_message:3;");
   } finally {
@@ -191,7 +200,7 @@ test("a 5xx on a later retained page retries its cursor and preserves earlier ro
     await act(async () => root.render(<ApiProvider client={client}>
       <Timeline events={[beforeMessage, afterEvent]} />
     </ApiProvider>));
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 150)); });
+    await waitFor(() => cursors.length === 3 && container.textContent?.includes("artifact_attached:1;") === true);
     assert.deepEqual(cursors, [0, 1, 1]);
     assert.equal(container.textContent, "user_message:2;artifact_attached:1;user_message:3;");
   } finally {
@@ -213,6 +222,35 @@ test("permanent retained-page errors do not retry", async () => {
       </ApiProvider>));
       await act(async () => { await new Promise((resolve) => setTimeout(resolve, 150)); });
       assert.equal(calls, 1, `HTTP ${status} must not retry`);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  }
+});
+
+test("a native transport request failure retries while a generic error stops", async () => {
+  for (const error of [new TransportRequestError("connection reset"), new Error("invalid response")]) {
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    const root = createRoot(container);
+    let calls = 0;
+    const client = {
+      getRetainedAttachmentEventPage: async (_id: string, _after: number, eventEpoch: number) => {
+        calls++;
+        if (calls === 1) throw error;
+        return { events: [retained], eventEpoch, nextAfter: 1, hasMore: false };
+      },
+    } as unknown as ApiClient;
+    try {
+      await act(async () => root.render(<ApiProvider client={client}>
+        <Timeline events={[beforeMessage, afterEvent]} />
+      </ApiProvider>));
+      if (error instanceof TransportRequestError) {
+        await waitFor(() => calls === 2 && container.textContent?.includes("artifact_attached:1;") === true);
+        assert.equal(calls, 2);
+      } else {
+        await act(async () => { await new Promise((resolve) => setTimeout(resolve, 150)); });
+        assert.equal(calls, 1);
+      }
     } finally {
       await act(async () => root.unmount());
     }
@@ -252,7 +290,7 @@ test("retained-page retries stop after their bounded backoff budget", async () =
     await act(async () => root.render(<ApiProvider client={client}>
       <Timeline events={[beforeMessage, afterEvent]} />
     </ApiProvider>));
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 850)); });
+    await waitFor(() => calls === 4);
     assert.equal(calls, 4, "the initial request and three retries exhaust the budget");
     await new Promise((resolve) => setTimeout(resolve, 150));
     assert.equal(calls, 4, "exhaustion must not start another retry loop");
