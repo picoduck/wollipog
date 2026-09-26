@@ -426,3 +426,18 @@ test("only a report inside the model's own stop call ends the job it named", asy
   assert.equal(h.background.some((update) => update.terminalJobs?.length), false);
   h.driver.dispose();
 });
+
+test("a subagent's result does not close the model's stop call", async () => {
+  const h = harness();
+  const child = await launchTwoTasks(h);
+  h.driver.prompt("stop the monitor");
+  await nextTask();
+  frame(child, { type: "assistant", message: { content: [
+    { type: "tool_use", id: "toolu_stop", name: "TaskStop", input: { task_id: "monitor-1" } },
+  ] } });
+  frame(child, { type: "result", subtype: "success", parent_tool_use_id: "toolu_agent" });
+  killedReport(child, "monitor-1", "toolu_monitor");
+  await nextTask();
+  assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["shell-2"]);
+  h.driver.dispose();
+});

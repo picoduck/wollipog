@@ -2977,7 +2977,8 @@ export class ClaudeCodeDriver implements Driver {
       case "result": {
         this.streamingMessageIds.clear();
         // A stop call never outlives its turn; one left without a tool result proves nothing later.
-        this.modelTaskStops.clear();
+        // A subagent's result ends only its own lane.
+        if (!parentId) this.modelTaskStops.clear();
         const usage = msg.usage ?? {};
         let costUsd = msg.total_cost_usd;
         if (this.persistentTransport && typeof costUsd === "number" && Number.isFinite(costUsd)) {
