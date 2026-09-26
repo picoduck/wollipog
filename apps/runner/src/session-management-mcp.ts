@@ -593,12 +593,14 @@ async function readSessionEventPage(
     const lastSeq = page.at(-1)?.seq;
     const probeAfter = after === undefined ? undefined : typeof lastSeq === "number" ? lastSeq : after;
     const state = await bounded(probeAfter, 1, epoch);
-    if (!state.ok && state.status === 409) {
+    if (!state.ok) {
+      // Without this proof the page may belong to another log, so it is never returned unverified.
+      if (state.status !== 409) return state;
       if (retry) continue;
       return replaced;
     }
-    const complete = state.ok && state.data?.cacheComplete === true;
-    const beyond = state.ok && Array.isArray(state.data?.events) && state.data.events.length > 0;
+    const complete = state.data?.cacheComplete === true;
+    const beyond = Array.isArray(state.data?.events) && state.data.events.length > 0;
     const hasMore = after !== undefined && (all.length > limit || !complete || beyond);
     return { ok: true, events: page, hasMore, incomplete: !complete, eventEpoch: epoch };
   }

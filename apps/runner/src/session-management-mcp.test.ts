@@ -1163,6 +1163,22 @@ test("get_session_events rejects a fallback page read across a history replaceme
   const data = resultJson(await callTool(unpinned.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
   assert.equal(data.eventEpoch, 3);
   assert.deepEqual(data.lines.map(seqOf), [11, 12, 13, 14, 15]);
+
+  // The same-epoch proof itself fails: the unverified fallback page is never returned.
+  let fallbackRead = false;
+  const events = Array.from({ length: 12 }, (_, i) => ({ seq: i + 1, ts: i, payload: { kind: "agent_message", text: "t" } }));
+  const failing = makeDeps((call) => {
+    const q = new URL(call.url).searchParams;
+    if (!q.has("limit")) {
+      fallbackRead = true;
+      return { status: 200, body: { events: events.filter((e) => e.seq > Number(q.get("after"))) } };
+    }
+    if (fallbackRead) return { status: 500, body: { error: "database unavailable" } };
+    return { status: 200, body: { events: events.slice(10), eventEpoch: 2, nextAfter: 12, hasMoreCached: false, cacheComplete: false } };
+  });
+  const unverified = await callTool(failing.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5, eventEpoch: 2 });
+  assert.equal(unverified.isError, true);
+  assert.match(resultText(unverified), /database unavailable/);
 });
 
 test("get_session_events pages forward against a control plane without bounded pages", async () => {
