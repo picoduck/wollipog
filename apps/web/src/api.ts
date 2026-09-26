@@ -747,10 +747,11 @@ export function createApiClient(transport: ApiTransport) {
     return req<SessionEventsResponse>(`/api/sessions/${encodeURIComponent(id)}/events?${query}`);
   },
 
-  getRetainedAttachmentEventPage: (id: string, after: number, eventEpoch: number, limit = 200) => {
+  getRetainedAttachmentEventPage: (id: string, after: number, eventEpoch: number, limit = 200, signal?: AbortSignal) => {
     const query = new URLSearchParams({ after: String(after), limit: String(limit), eventEpoch: String(eventEpoch) });
     return req<{ events: SessionEvent[]; eventEpoch: number; nextAfter: number; hasMore: boolean }>(
       `/api/sessions/${encodeURIComponent(id)}/retained-attachment-events?${query}`,
+      { signal },
     );
   },
 

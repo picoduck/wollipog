@@ -5,6 +5,7 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type { SessionEvent } from "@wollipog/protocol";
 import { ApiProvider } from "../api-context.js";
+import { ApiError } from "../api.js";
 import type { ApiClient } from "../api.js";
 import type { TimelineItem } from "../timeline.js";
 import { useTimeline } from "./useTimeline.js";
@@ -146,5 +147,146 @@ test("a live attachment added before hydration keeps its sequence position", asy
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+test("a transient network failure retries the same retained page without duplicating its row", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const cursors: number[] = [];
+  const client = {
+    getRetainedAttachmentEventPage: async (_id: string, after: number, eventEpoch: number) => {
+      cursors.push(after);
+      if (cursors.length === 1) throw new TypeError("network unavailable");
+      return { events: [retained], eventEpoch, nextAfter: 1, hasMore: false };
+    },
+  } as unknown as ApiClient;
+  try {
+    await act(async () => root.render(<ApiProvider client={client}>
+      <Timeline events={[beforeMessage, afterEvent]} />
+    </ApiProvider>));
+    assert.equal(container.textContent, "user_message:2;user_message:3;");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 150)); });
+    assert.deepEqual(cursors, [0, 0]);
+    assert.equal(container.textContent, "user_message:2;artifact_attached:1;user_message:3;");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("a 5xx on a later retained page retries its cursor and preserves earlier rows", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const cursors: number[] = [];
+  const client = {
+    getRetainedAttachmentEventPage: async (_id: string, after: number, eventEpoch: number) => {
+      cursors.push(after);
+      if (after === 1 && cursors.length === 2) throw new ApiError("temporary", 503);
+      return after === 0
+        ? { events: [retained], eventEpoch, nextAfter: 1, hasMore: true }
+        : { events: [], eventEpoch, nextAfter: 1, hasMore: false };
+    },
+  } as unknown as ApiClient;
+  try {
+    await act(async () => root.render(<ApiProvider client={client}>
+      <Timeline events={[beforeMessage, afterEvent]} />
+    </ApiProvider>));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 150)); });
+    assert.deepEqual(cursors, [0, 1, 1]);
+    assert.equal(container.textContent, "user_message:2;artifact_attached:1;user_message:3;");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("permanent retained-page errors do not retry", async () => {
+  for (const status of [401, 403, 404, 409]) {
+    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    const root = createRoot(container);
+    let calls = 0;
+    const client = {
+      getRetainedAttachmentEventPage: async () => { calls++; throw new ApiError("permanent", status); },
+    } as unknown as ApiClient;
+    try {
+      await act(async () => root.render(<ApiProvider client={client}>
+        <Timeline events={[beforeMessage, afterEvent]} />
+      </ApiProvider>));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 150)); });
+      assert.equal(calls, 1, `HTTP ${status} must not retry`);
+    } finally {
+      await act(async () => root.unmount());
+    }
+  }
+});
+
+test("unmount cancels a pending retained-page retry", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  let calls = 0;
+  let signal: AbortSignal | undefined;
+  const client = {
+    getRetainedAttachmentEventPage: async (_id: string, _after: number, _epoch: number,
+      _limit: number, requestSignal: AbortSignal) => {
+      calls++;
+      signal = requestSignal;
+      throw new TypeError("network unavailable");
+    },
+  } as unknown as ApiClient;
+  await act(async () => root.render(<ApiProvider client={client}>
+    <Timeline events={[beforeMessage, afterEvent]} />
+  </ApiProvider>));
+  await act(async () => root.unmount());
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(signal?.aborted, true);
+  assert.equal(calls, 1);
+});
+
+test("retained-page retries stop after their bounded backoff budget", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  let calls = 0;
+  const client = {
+    getRetainedAttachmentEventPage: async () => { calls++; throw new ApiError("temporary", 500); },
+  } as unknown as ApiClient;
+  try {
+    await act(async () => root.render(<ApiProvider client={client}>
+      <Timeline events={[beforeMessage, afterEvent]} />
+    </ApiProvider>));
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 850)); });
+    assert.equal(calls, 4, "the initial request and three retries exhaust the budget");
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.equal(calls, 4, "exhaustion must not start another retry loop");
+  } finally {
+    await act(async () => root.unmount());
+  }
+});
+
+test("an epoch change cancels an old retry and fetches the new epoch", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const epochs: number[] = [];
+  const signals: AbortSignal[] = [];
+  const client = {
+    getRetainedAttachmentEventPage: async (_id: string, _after: number, eventEpoch: number,
+      _limit: number, signal: AbortSignal) => {
+      epochs.push(eventEpoch);
+      signals.push(signal);
+      if (eventEpoch === 1) throw new TypeError("network unavailable");
+      return { events: [retained], eventEpoch, nextAfter: 1, hasMore: false };
+    },
+  } as unknown as ApiClient;
+  try {
+    await act(async () => root.render(<ApiProvider client={client}>
+      <Timeline events={[beforeMessage, afterEvent]} eventEpoch={1} />
+    </ApiProvider>));
+    await act(async () => root.render(<ApiProvider client={client}>
+      <Timeline events={[beforeMessage, afterEvent]} eventEpoch={2} />
+    </ApiProvider>));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    assert.deepEqual(epochs, [1, 2]);
+    assert.equal(signals[0]?.aborted, true);
+    assert.equal(container.textContent, "user_message:2;artifact_attached:1;user_message:3;");
+  } finally {
+    await act(async () => root.unmount());
   }
 });

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import type { SessionEvent } from "@wollipog/protocol";
+import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
 import {
   placeRetainedAttachmentItems,
@@ -29,6 +30,26 @@ interface BuilderState {
   displayWasOrdered: boolean;
 }
 
+const RETAINED_PAGE_RETRY_DELAYS_MS = [100, 200, 400];
+
+function retryableRetainedPageError(error: unknown): boolean {
+  return error instanceof TypeError ||
+    (error instanceof ApiError && error.status >= 500 && error.status < 600);
+}
+
+function waitForRetainedPageRetry(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve) => {
+    if (signal.aborted) { resolve(); return; }
+    const done = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", done);
+      resolve();
+    };
+    const timer = setTimeout(done, ms);
+    signal.addEventListener("abort", done, { once: true });
+  });
+}
+
 /** Keep the reset-owned prefix available even when the ordinary opening page starts at a much
  * newer sequence. Each request is count-bounded and a changed epoch discards the whole chain. */
 function useRetainedAttachments(sessionId: string, eventEpoch: number): RetainedAttachments | null {
@@ -36,13 +57,25 @@ function useRetainedAttachments(sessionId: string, eventEpoch: number): Retained
   const [loaded, setLoaded] = useState<RetainedAttachments | null>(null);
   useEffect(() => {
     if (eventEpoch <= 0) return;
-    let current = true;
+    const controller = new AbortController();
+    const { signal } = controller;
     void (async () => {
       const events: SessionEvent[] = [];
       let after = 0;
       for (let pageIndex = 0; pageIndex < 21; pageIndex++) {
-        const page = await api.getRetainedAttachmentEventPage(sessionId, after, eventEpoch);
-        if (!current || page.eventEpoch !== eventEpoch || page.nextAfter < after ||
+        let page: Awaited<ReturnType<typeof api.getRetainedAttachmentEventPage>>;
+        for (let retry = 0;; retry++) {
+          try {
+            page = await api.getRetainedAttachmentEventPage(sessionId, after, eventEpoch, 200, signal);
+            break;
+          } catch (error) {
+            if (signal.aborted || !retryableRetainedPageError(error) ||
+                retry >= RETAINED_PAGE_RETRY_DELAYS_MS.length) return;
+            await waitForRetainedPageRetry(RETAINED_PAGE_RETRY_DELAYS_MS[retry]!, signal);
+            if (signal.aborted) return;
+          }
+        }
+        if (signal.aborted || page.eventEpoch !== eventEpoch || page.nextAfter < after ||
             (page.hasMore && page.nextAfter === after)) return;
         events.push(...page.events);
         if (!page.hasMore) {
@@ -51,8 +84,8 @@ function useRetainedAttachments(sessionId: string, eventEpoch: number): Retained
         }
         after = page.nextAfter;
       }
-    })().catch(() => { /* older control planes and offline sessions retain their streamed rows */ });
-    return () => { current = false; };
+    })().catch(() => { /* unexpected failures retain streamed rows */ });
+    return () => { controller.abort(); };
   }, [api, sessionId, eventEpoch]);
   return loaded?.sessionId === sessionId && loaded.eventEpoch === eventEpoch ? loaded : null;
 }
