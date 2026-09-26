@@ -10533,6 +10533,16 @@ export class SessionManager {
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
   }
 
+  /** A later successful turn proves the current provider can run this conversation. Retire an
+   * earlier failed handoff so it cannot keep the composer parked after that recovery. */
+  private clearProviderAccountSwitchFailureAfterTurn(sessionId: string): void {
+    if (!this.store.readMeta(sessionId)?.providerAccountSwitchFailure) return;
+    const updated = this.store.patchMeta(sessionId, { providerAccountSwitchFailure: undefined });
+    if (!updated) return;
+    this.store.flush(sessionId);
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
   /** Validate and durably schedule a same-provider account handoff. An idle process switches now;
    * a running process keeps its credential home through the current turn and switches afterward. */
   async switchProviderAccount(
@@ -11949,6 +11959,7 @@ export class SessionManager {
       if (stop !== "cancelled" && stop !== "refusal") {
         const scopeId = this.store.readMeta(sessionId)?.providerCredentialScopeId;
         if (scopeId) this.providerAuthAutomaticAttempted.delete(scopeId);
+        if (!entry.governanceTripped) this.clearProviderAccountSwitchFailureAfterTurn(sessionId);
       }
       if (stop === "refusal" && !interrupted && !entry.governanceTripped) {
         this.scheduleAutomaticProviderAccountSwitch(sessionId, entry);
@@ -12291,6 +12302,10 @@ export class SessionManager {
           lifecycle.failed("provider authentication is required", "PROVIDER_AUTHENTICATION_REQUIRED");
         }
         return;
+      }
+
+      if (stop !== "cancelled" && stop !== "refusal" && !entry.governanceTripped) {
+        this.clearProviderAccountSwitchFailureAfterTurn(sessionId);
       }
 
       if (interrupted) {

@@ -433,6 +433,38 @@ async function unmountFixture(fixture: Fixture) {
   frames = [];
 }
 
+test("a failed account switch notice can be dismissed to edit and retry the current session", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const failure = {
+    providerAccountId: "other-account",
+    providerAccountLabel: "Other Account",
+    reason: "the provider conversation cannot be resumed under another account",
+    detectedAt: 5,
+  };
+  const fixture = await mountFixture(draft, {
+    sessionPatch: { providerAccountSwitchFailure: failure },
+  });
+  try {
+    assert.equal(fixture.composer.disabled, true);
+    const banner = fixture.container.querySelector('[aria-label="Account Switch Failed"]');
+    assert.ok(banner);
+    const dismiss = [...banner.querySelectorAll("button")].find((button) =>
+      button.textContent?.trim() === "Dismiss and Retry");
+    assert.ok(dismiss);
+    await act(async () => { dismiss.click(); });
+    assert.equal(fixture.container.querySelector('[aria-label="Account Switch Failed"]'), null);
+    assert.equal(fixture.composer.disabled, false);
+    await act(async () => fireDomEvent.change(fixture.composer, { target: { value: "Continue" } }));
+    assert.equal(fixture.composer.value, "Continue");
+
+    await fixture.pushSession({ providerAccountSwitchFailure: { ...failure, detectedAt: 6 } });
+    assert.ok(fixture.container.querySelector('[aria-label="Account Switch Failed"]'));
+    assert.equal(fixture.composer.disabled, true, "a new failure still requires acknowledgement");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 function recordSelections(composer: HTMLTextAreaElement) {
   const calls: Array<{ value: string; start: number | null; end: number | null }> = [];
   const original = composer.setSelectionRange.bind(composer);
