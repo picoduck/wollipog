@@ -7513,10 +7513,12 @@ export class SessionsService {
    * authoritative end instead revokes the child's unconsumed decisions, so a child that reads
    * `stopped` while its decision is still pending was stopped provisionally. Resolving such a
    * decision owes the resume for the runner's return rather than refusing the resolution (#1759).
+   * An archived child is ended either way: archiving a terminal session records no stop intent,
+   * but the runner's return stops it rather than restoring it.
    */
   private workflowDecisionChildEnded(child: SessionView): boolean {
     return isTerminal(child.status) &&
-      !(child.status === "stopped" && !this.db.hasSessionStopIntent(child.id));
+      !(child.status === "stopped" && !child.archived && !this.db.hasSessionStopIntent(child.id));
   }
 
   /** Whether a resolution's resume is recorded as owed by the resolving write itself (#1759).

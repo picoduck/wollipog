@@ -21473,6 +21473,37 @@ test("a runner disconnect after a resolution keeps the owed resume until reconne
   }
 });
 
+test("a provisionally stopped child that was archived meanwhile is ended, so its decision is revoked rather than owed (#1759)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  try {
+    f.parentOnOtherRunner();
+    const merge = f.requestMerge(1769);
+    svc.onSessionStatus(child.id, "idle");
+    f.hub.online = false;
+    svc.failRunnerSessions(RUNNER_ID);
+    // Archiving a terminal session records no stop intent; the runner's return stops it instead
+    // of restoring it, so nothing could ever deliver a resume.
+    assert.ok(svc.setArchived(child.id, true).ok);
+    assert.equal(db.getSession(child.id)?.archived, true);
+    assert.equal(db.hasSessionStopIntent(child.id), false);
+    const resolved = svc.resolveDescendantRequest(root.id, child.id, merge.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.equal(resolved.status, 409);
+    assert.match(resolved.error ?? "", /revoked or superseded/u);
+    assert.equal(db.workflowDecisionByOccurrence(merge.occurrenceId)?.status, "revoked");
+    assert.notEqual(f.resumeState(merge.occurrenceId), "held", "nothing is owed to an archived child");
+    f.hub.online = true;
+    svc.retryDuePrompts(Date.now() + 5_000, RUNNER_ID);
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    })]);
+    assert.equal(f.resolutionPrompts(merge.occurrenceId).length, 0);
+  } finally {
+    db.close();
+  }
+});
+
 test("a runner that reports the child ended abandons the resume owed for a denied decision (#1759)", () => {
   const f = worktreeRecoveryCampaign();
   const { db, svc, root, child } = f;
