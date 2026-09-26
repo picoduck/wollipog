@@ -19956,11 +19956,11 @@ function uiEvidenceReviewHarness(
   protocolVersion = PROTOCOL_VERSION,
   imageModel = true,
   capabilities?: NonNullable<RunnerMetadata["agents"][number]["capabilities"]>,
-  videoFrameReviewValidated = false,
+  videoFrameReviewCandidateEnabled = false,
 ) {
   const { db, hub } = makeHarness();
   const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG,
-    undefined, undefined, undefined, undefined, undefined, undefined, videoFrameReviewValidated);
+    undefined, undefined, undefined, undefined, undefined, undefined, videoFrameReviewCandidateEnabled);
   const meta = runnerMeta();
   meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = capabilities ?? {
     models: [{ id: "vision", name: "Vision", default: true, inputModalities: imageModel ? ["text", "image"] : ["text"] }],
@@ -20099,6 +20099,61 @@ test("video review stays human-owned by default and older peers keep a specific 
     assert.equal(decision.data?.humanFallback?.code, "model_unsupported",
       "the inactive video candidate must not hide a model-specific fallback");
   } finally { textOnly.db.close(); }
+});
+
+test("operator video validation is confined to one controller and revokes review when scope changes", async (t) => {
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
+  const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, undefined, true);
+  const scoped = (controllerId: string) => new SessionsService(h.db, h.hub as unknown as Hub, NOOP_LOG,
+    undefined, undefined, undefined, undefined, undefined, undefined, true, controllerId);
+  try {
+    const child = h.createChild("Scoped Video Child");
+    const attached = h.svc.attachSessionVideo(child.id, {
+      name: "transient.webm", mimeType: "video/webm", data: transientVideoBytes().toString("base64"),
+    }, { kind: "agent", id: child.id });
+    assert.ok(attached.ok && attached.data, attached.error);
+    const item = { evidenceId: "transient", artifactId: attached.data.artifactId,
+      sha256: attached.data.sha256, mediaType: "video/webm" };
+    const request = (svc: SessionsService, requestId: string) => svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId, resourceKey: requestId,
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
+    });
+    const outside = scoped("s_000000000000");
+    const refused = await request(outside, "not-allowlisted");
+    assert.equal(refused.data?.authority, "human");
+    assert.equal(refused.data?.humanFallback?.code, "media_video_unsupported");
+    assert.match(refused.data?.humanFallback?.reason ?? "", /different controlling Session/u);
+    assert.equal(refused.data?.resourceSnapshot.category === "ui_evidence_approval" &&
+      refused.data.resourceSnapshot.videoReview, undefined,
+    "an unrelated campaign cannot trigger server-side frame derivation");
+
+    const inside = scoped(h.parent.id);
+    const delegated = await request(inside, "allowlisted");
+    assert.ok(delegated.ok && delegated.data, delegated.error);
+    assert.equal(delegated.data.authority, "orchestrator");
+    const snapshot = delegated.data.resourceSnapshot;
+    assert.equal(snapshot.category, "ui_evidence_approval");
+    if (snapshot.category !== "ui_evidence_approval") return;
+    assert.equal(snapshot.videoReview?.frames.length, 6);
+    const first = snapshot.videoReview!.frames[0]!;
+    const delivered = inside.reviewDescendantUiEvidence(h.parent.id, child.id,
+      delegated.data.occurrenceId, first.evidenceId, () => true);
+    assert.ok(delivered.ok && delivered.data, delivered.error);
+    assert.ok(inside.acknowledgeDescendantUiEvidence(h.parent.id,
+      delivered.data.receipt.receiptId, delivered.data.receipt.sha256).ok);
+
+    // A changed operator allowlist has the same effect as a revoked capability: even an
+    // acknowledged old receipt cannot keep the pending decision Orchestrator-owned.
+    const afterScopeChange = outside.reviewDescendantUiEvidence(h.parent.id, child.id,
+      delegated.data.occurrenceId, first.evidenceId, () => true);
+    assert.equal(afterScopeChange.status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(delegated.data.occurrenceId)?.status, "revoked");
+    assert.equal(h.db.validUiEvidenceReviewReceipts(
+      delegated.data.occurrenceId, h.parent.id, Date.now()).length, 0);
+  } finally { h.db.close(); }
 });
 
 test("validated local video path binds all source frames, ordered receipts, source digest, and exact occurrence", async (t) => {

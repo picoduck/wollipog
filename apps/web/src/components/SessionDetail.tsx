@@ -6836,7 +6836,7 @@ export function ComposerPlusMenu({
                       </>}
                     </dl>
                     {session.orchestratorCampaign?.uiEvidenceReview.status === "unavailable" && <span className="muted" role="status">UI Evidence Approval is assigned to the Orchestrator but is routed to a human. {session.orchestratorCampaign.uiEvidenceReview.reason ?? "This Orchestrator client cannot inspect the evidence bytes."}</span>}
-                    {session.orchestratorCampaign?.uiEvidenceReview.status === "available" && session.orchestratorCampaign.uiEvidenceReview.effectiveOwner === "orchestrator" && <span className="muted" role="status">The Orchestrator reviews image evidence attached as Session artifacts. Video and externally stored evidence is still routed to a human.</span>}
+                    {session.orchestratorCampaign?.uiEvidenceReview.status === "available" && session.orchestratorCampaign.uiEvidenceReview.effectiveOwner === "orchestrator" && <span className="muted" role="status">The Orchestrator reviews image evidence attached as Session artifacts. Video normally goes to a human; one operator-enabled short-frame validation campaign may delegate it. Externally stored evidence goes to a human.</span>}
                   </section>}
                   <div className="parent-control-setting">
                     <span className="parent-control-setting-label">Descendant Requests</span>

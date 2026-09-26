@@ -118,10 +118,10 @@ test("Orchestrator settings separate policy areas, validate accessibly, and pers
     assert.deepEqual([...container.querySelectorAll("h3")].map((node) => node.textContent),
       ["Behavior", "Execution Permissions", "Decision Delegation"]);
     assert.match(container.textContent ?? "", /Human-Only Decisions/);
-    assert.match(container.textContent ?? "", /provider may retain them in provider-local transcripts or media logs/,
+    assert.match(container.textContent ?? "", /provider may retain images in provider-local transcripts or media logs/,
       "the retention disclosure is visible while Human is still selected");
     assert.match(container.textContent ?? "", /control-plane audit records evidence references, digests, and review receipts, not raw image bytes/);
-    assert.match(container.textContent ?? "", /Video evidence requires human review, including video attached as a Session artifact/);
+    assert.match(container.textContent ?? "", /Video evidence otherwise requires human review, including video attached as a Session artifact/);
     assert.equal(container.querySelectorAll('[aria-label*="Approval"]').length > 0, true);
 
     const limit = container.querySelector<HTMLInputElement>("#orchestrator-max-children")!;

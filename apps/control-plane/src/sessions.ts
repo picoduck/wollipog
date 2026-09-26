@@ -1415,7 +1415,9 @@ export class SessionsService {
     private readonly titleGenerationEnabled?: (sessionId: string) => boolean,
     private readonly titleGenerationRevision?: (sessionId: string) => string,
     /** Candidate implementation remains off until live App Server delivery and cost validation. */
-    private readonly videoFrameReviewValidated = false,
+    private readonly videoFrameReviewCandidateEnabled = false,
+    /** Operator-selected controlling Session for the dogfood validation. Omitted only in tests. */
+    private readonly videoFrameReviewValidationSessionId?: string,
   ) {
     this.promptOutbox = new SessionPromptOutbox(this.db, this.hub, this.log);
     // A restart can happen after a prompt reached a runner but before the delivery marker was
@@ -6495,7 +6497,7 @@ export class SessionsService {
       "Cross-model review, exact-head CI, issue sanitization, dependency checks, and stacked-branch checks remain required regardless of owner. An enqueued PR is unfinished until merge-group CI passes and the forge reports actual MERGED state. Authentication, secrets, persistent permission grants, governance, budgets, and tool guardrails remain human-only.",
       "Leave any helper session you spawn idle once it has posted its final report, so the Orchestrator can verify it before verifying you; do not stop or archive one yourself, and never leave it working when you finish.",
       projection.uiEvidenceReview.effectiveOwner === "orchestrator"
-        ? "The controlling Orchestrator can inspect artifact-backed image evidence and must review every item before approving. Children attach each capture from disk with attach_session_artifact (or `wollipog artifact attach --file`), never as base64 in a tool argument, and cite the returned artifactId, mediaType, and sha256; video or externally stored evidence is routed to a human."
+        ? "The controlling Orchestrator can inspect artifact-backed image evidence and must review every item before approving. Children attach each capture from disk with attach_session_artifact (or `wollipog artifact attach --file`), never as base64 in a tool argument, and cite the returned artifactId, mediaType, and sha256; video normally routes to a human, except for an exact operator-enabled short-frame validation campaign. Externally stored evidence routes to a human."
         : `UI evidence remains human-owned: ${projection.uiEvidenceReview.reason ?? "the human owns UI Evidence Approval under this policy."}`,
       // Name no tool here: children do not share the Orchestrator's toolset, and a test holds this block to theirs.
       "Report every follow-up you identify in your final report, each with a proposed title and repository; the controlling Orchestrator records and deduplicates it before anyone acts on it.",
@@ -6635,6 +6637,12 @@ export class SessionsService {
     return null;
   }
 
+  private videoFrameReviewEnabledFor(controllingSessionId: string): boolean {
+    return this.videoFrameReviewCandidateEnabled &&
+      (!this.videoFrameReviewValidationSessionId ||
+        this.videoFrameReviewValidationSessionId === controllingSessionId);
+  }
+
   /** The HTTP ingress for a video evidence request. A child may cite the original video, never
    * derived frames or a manifest. This method constructs all frame evidence from the exact stored
    * bytes before the immutable decision is created. Decoder failures retain human ownership. */
@@ -6644,7 +6652,7 @@ export class SessionsService {
     canAccess: (sessionId: string) => boolean = () => true,
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const snapshot = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
-    if (!this.videoFrameReviewValidated || !boundedDecisionString(request?.requestId, 256) ||
+    if (!this.videoFrameReviewCandidateEnabled || !boundedDecisionString(request?.requestId, 256) ||
         !snapshot.ok || snapshot.data?.category !== "ui_evidence_approval" ||
         !snapshot.data.evidence.some((item) => item.mediaType?.startsWith("video/"))) {
       return this.createWorkflowDecisionWithVideoInner(sessionId, request, canAccess);
@@ -6677,7 +6685,7 @@ export class SessionsService {
     }
     const video = normalized.data.evidence.filter((item) => item.mediaType?.startsWith("video/"));
     if (!video.length) return this.createWorkflowDecision(sessionId, request, canAccess);
-    if (!this.videoFrameReviewValidated) {
+    if (!this.videoFrameReviewCandidateEnabled) {
       return this.createWorkflowDecision(sessionId, request, canAccess, {
         videoFallbackReason: "Delegated video-frame review awaits live App Server delivery and model-cost validation.",
       });
@@ -6719,6 +6727,9 @@ export class SessionsService {
     const fallback = (reason: string) => this.createWorkflowDecision(sessionId, request, canAccess, {
       videoFallbackReason: reason,
     });
+    if (!this.videoFrameReviewEnabledFor(controller.session.id)) {
+      return fallback("Delegated video-frame validation is enabled only for a different controlling Session.");
+    }
     if (![child, controller.session].every((owner) => runnerSupportsProtocol(
       this.db.getRunner(owner.runnerId)?.protocolVersion, "orchestratorVideoFrameReview",
     ))) {
@@ -7600,9 +7611,9 @@ export class SessionsService {
     if (snapshot.category !== "ui_evidence_approval") {
       return { effectiveOwner: this.effectiveWorkflowDecisionAuthority(controller, policy, snapshot.category) };
     }
-    if (snapshot.videoReview && !this.videoFrameReviewValidated) {
+    if (snapshot.videoReview && !this.videoFrameReviewEnabledFor(controller.id)) {
       return { effectiveOwner: "human", fallback: { code: "media_video_unsupported",
-        reason: "Delegated video-frame review awaits live App Server delivery and model-cost validation." } };
+        reason: "Delegated video-frame validation is not enabled for this controlling Session." } };
     }
     const client = evaluateUiEvidenceReviewClient(
       this.db.uiEvidenceReviewClient(controller, policy.decisions.ui_evidence_approval),

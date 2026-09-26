@@ -210,6 +210,7 @@ import {
   sessionBlocksConversationFork,
   SessionsService,
 } from "./sessions.js";
+import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
 import { pushDecision } from "./push-decision.js";
@@ -295,6 +296,9 @@ const TAILNET_ONLY = process.env.CONTROL_PLANE_TAILNET_ONLY === "1";
 const TOKEN = process.env.CONTROL_PLANE_TOKEN ?? "dev-local-token";
 const DB_PATH = process.env.CONTROL_PLANE_DB ?? "data/control-plane.db";
 const ARTIFACT_BLOB_DIR = process.env.CONTROL_PLANE_ARTIFACT_DIR;
+const VIDEO_FRAME_VALIDATION_SESSION_ID = videoFrameValidationSessionId(
+  process.env.CONTROL_PLANE_VIDEO_FRAME_REVIEW_VALIDATION_SESSION_ID,
+);
 
 function parseUiProtocolVersion(query: unknown): number | null {
   if (!query || typeof query !== "object") return null;
@@ -918,7 +922,13 @@ const svc = new SessionsService(
   sessionNamingSettings.timeoutForSession,
   sessionNamingSettings.enabledForSession,
   sessionNamingSettings.revisionForSession,
+  VIDEO_FRAME_VALIDATION_SESSION_ID !== undefined,
+  VIDEO_FRAME_VALIDATION_SESSION_ID,
 );
+if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
+  app.log.warn({ controllingSessionId: VIDEO_FRAME_VALIDATION_SESSION_ID },
+    "experimental video-frame review validation is enabled for one controlling Session");
+}
 
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
