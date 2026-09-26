@@ -12304,6 +12304,7 @@ export class SessionManager {
       }
       entry.currentBackgroundJobIds = undefined;
     } catch (err) {
+      this.settleModelStoppedJobs(sessionId, queued.id, false);
       if (backgroundJobIds?.length && !entry.backgroundPromptAccepted) {
         this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
         this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
@@ -15562,20 +15563,25 @@ export class SessionManager {
     });
     for (const job of update.terminalJobs ?? []) unconfirmedStops?.delete(job.id);
     if (unconfirmedStops?.size === 0) this.unconfirmedJobStops.delete(sessionId);
-    const activeTurnId = this.active.get(sessionId)?.activeTurnId;
+    // The model stopped these jobs itself (#1855). In a runner turn, that turn's outcome settles them
+    // (settleModelStoppedJobs). A provider-initiated turn has no such outcome, and a runner prompt
+    // waiting behind it may already hold the active turn id, so its stops are settled at once.
+    const active = this.active.get(sessionId);
     const stoppedByModel = (update.terminalJobs ?? []).filter((job) => job.stoppedByModel).map((job) => job.id);
-    if (activeTurnId !== undefined && stoppedByModel.length > 0) {
+    const runnerTurnId = active && !active.providerInitiatedTurnActive ? active.activeTurnId : undefined;
+    if (runnerTurnId !== undefined && stoppedByModel.length > 0) {
       const tracked = this.modelStoppedJobs.get(sessionId);
-      const jobIds = tracked?.turnId === activeTurnId ? tracked.jobIds : new Set<string>();
+      const jobIds = tracked?.turnId === runnerTurnId ? tracked.jobIds : new Set<string>();
       for (const id of stoppedByModel) jobIds.add(id);
-      this.modelStoppedJobs.set(sessionId, { turnId: activeTurnId, jobIds });
+      this.modelStoppedJobs.set(sessionId, { turnId: runnerTurnId, jobIds });
     }
     const { jobs: backgroundJobs, queuedJobIds } = this.mergeDurableBackgroundJobs(
       current,
       update,
-      activeTurnId,
+      active?.activeTurnId,
       ending ? { actor: ending.actor, reason: ending.reason, endedAt: ending.endedAt } : undefined,
       new Map(confirmedLate.map(({ job, end }) => [job.id, end])),
+      runnerTurnId === undefined ? new Set(stoppedByModel) : new Set(),
     );
     const observedTaskIds = update.observedTaskIds ?? [];
     // A killed job leaves a task file with no completion marker, whether Wollipog ended it (#1778)
@@ -15694,6 +15700,7 @@ export class SessionManager {
     activeTurnId: string | undefined,
     end?: BackgroundJobEnd,
     lateStops: ReadonlyMap<string, BackgroundJobEnd> = new Map(),
+    settledModelStops: ReadonlySet<string> = new Set(),
   ): { jobs: DurableBackgroundJob[]; queuedJobIds: string[] } {
     const byId = new Map((current.backgroundJobs ?? []).map((job) => [job.id, { ...job }]));
     const findAlias = (id: string, toolUseId?: string) => byId.get(id) ?? (toolUseId
@@ -15740,10 +15747,9 @@ export class SessionManager {
       durable.continuationRequired = terminal.continuationRequired;
       if (terminal.endedByRunner && end) durable.endedBy = end;
       else if (lateStops.has(terminal.id)) durable.endedBy = lateStops.get(terminal.id);
-      // The model stopped the job itself, so the result is already in its conversation (#1855). Its
-      // launching turn may have ended long ago and will not settle it. The runner turn it was stopped
-      // in settles it when that turn completes (settleModelStoppedJobs); with none, it settles now.
-      if (terminal.stoppedByModel && activeTurnId === undefined) {
+      // The model stopped the job itself outside a runner turn, so the result is already in its
+      // conversation and its launching turn, which may have ended long ago, will not settle it (#1855).
+      if (terminal.stoppedByModel && settledModelStops.has(terminal.id)) {
         durable.assistantResultPersistedAt ??= terminal.terminalAt;
       }
     }
@@ -16251,7 +16257,7 @@ export class SessionManager {
       backgroundJobs,
       ...(completed ? {} : { backgroundWorkState: managedBackgroundWorkState(backgroundJobs) }),
     });
-    if (updated && !completed) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     if (queuedJobIds.length > 0) this.scheduleBackgroundContinuation(sessionId);
   }
 

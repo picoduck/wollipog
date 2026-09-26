@@ -62,7 +62,7 @@ interface ProviderProcess {
 function fakeProvider(options: {
   canStop?: boolean;
   onPrompt?: (provider: ProviderProcess, text: string) => void;
-  stopReason?: (text: string) => "end_turn" | "cancelled" | "refusal";
+  stopReason?: (text: string) => "end_turn" | "cancelled" | "refusal" | "throw";
 } = {}) {
   const providers: ProviderProcess[] = [];
   const prompts: Array<{ cwd: string; text: string }> = [];
@@ -115,6 +115,7 @@ function fakeProvider(options: {
         cb.onPromptAccepted?.();
         options.onPrompt?.(provider, text);
         const reason = options.stopReason?.(text) ?? "end_turn";
+        if (reason === "throw") throw new Error("provider transport failed");
         if (reason !== "end_turn") return reason;
         cb.onEvent({ kind: "agent_message", text: `answer to: ${text.slice(0, 40)}`, final: true });
         return "end_turn" as const;
@@ -588,6 +589,97 @@ test("a model stop whose turn is cancelled keeps the job's continuation (#1855)"
     assert.ok(monitor()?.continuationId);
     assert.equal(monitor()?.assistantResultPersistedAt, undefined);
     assert.equal(store.readMeta(spec.sessionId)?.backgroundWorkState, "continuation_pending");
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a model stop whose turn fails outright keeps the job's continuation (#1855)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-job-model-stop-thrown-"));
+  let manager: SessionManager | undefined;
+  try {
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    let onPrompt: (provider: ProviderProcess, text: string) => void = () => {};
+    const fake = fakeProvider({
+      onPrompt: (provider, text) => onPrompt(provider, text),
+      stopReason: (text) => text === "stop the monitor" ? "throw" : "end_turn",
+    });
+    onPrompt = (provider, text) => {
+      if (text === "watch CI") {
+        fake.live.set("monitor-1", { id: "monitor-1", launchType: "monitor", startedAt: Date.now() });
+        fake.report(provider);
+      } else if (text === "stop the monitor") {
+        const monitor = fake.live.get("monitor-1")!;
+        fake.live.delete("monitor-1");
+        fake.report(provider, [{
+          ...monitor, status: "killed", terminalAt: Date.now(), continuationRequired: false, stoppedByModel: true,
+        }]);
+      }
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_job_model_stop_thrown", root);
+    await manager.start(spec);
+
+    manager.prompt(spec.sessionId, "watch CI");
+    await waitFor(() => fake.prompts.length === 1 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the launching turn did not finish");
+    manager.prompt(spec.sessionId, "stop the monitor");
+    const monitor = () => store.readMeta(spec.sessionId)?.backgroundJobs?.find((job) => job.id === "monitor-1");
+    await waitFor(() => monitor()?.continuationQueuedAt !== undefined,
+      "the stopped job's continuation was not restored after the prompt failed");
+    assert.equal(monitor()?.continuationRequired, true);
+    assert.equal(monitor()?.assistantResultPersistedAt, undefined);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a model stop in a provider-initiated turn is settled by that turn, not by a runner prompt waiting behind it (#1855)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-job-model-stop-provider-turn-"));
+  let manager: SessionManager | undefined;
+  try {
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    let onPrompt: (provider: ProviderProcess, text: string) => void = () => {};
+    const fake = fakeProvider({
+      onPrompt: (provider, text) => onPrompt(provider, text),
+      stopReason: (text) => text === "carry on" ? "cancelled" : "end_turn",
+    });
+    onPrompt = (provider, text) => {
+      if (text === "watch CI") {
+        fake.live.set("monitor-1", { id: "monitor-1", launchType: "monitor", startedAt: Date.now() });
+        fake.report(provider);
+      } else if (text === "carry on") {
+        // The runner prompt already holds the active turn id while Claude runs a turn of its own, in
+        // which the model stops the monitor. The runner prompt is then cancelled.
+        provider.cb.onProviderInitiatedTurn?.("started", "provider:1");
+        const monitor = fake.live.get("monitor-1")!;
+        fake.live.delete("monitor-1");
+        fake.report(provider, [{
+          ...monitor, status: "killed", terminalAt: Date.now(), continuationRequired: false, stoppedByModel: true,
+        }]);
+        provider.cb.onProviderInitiatedTurn?.("settled", "provider:1");
+      }
+    };
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, fake.factory as never, dataDir, 1);
+    const spec = claudeSpec("s_job_model_stop_provider_turn", root);
+    await manager.start(spec);
+
+    manager.prompt(spec.sessionId, "watch CI");
+    await waitFor(() => fake.prompts.length === 1 && store.readMeta(spec.sessionId)?.status === "idle",
+      "the launching turn did not finish");
+    manager.prompt(spec.sessionId, "carry on");
+    await waitFor(() => fake.prompts.length === 2 && store.readMeta(spec.sessionId)?.status !== "running",
+      "the runner prompt did not end");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    const monitor = store.readMeta(spec.sessionId)?.backgroundJobs?.find((job) => job.id === "monitor-1");
+    assert.equal(monitor?.terminalStatus, "killed");
+    assert.equal(monitor?.continuationRequired, false, "the cancelled runner prompt did not make the stop");
+    assert.equal(monitor?.continuationQueuedAt, undefined);
+    assert.equal(typeof monitor?.assistantResultPersistedAt, "number");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
