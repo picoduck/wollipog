@@ -2854,6 +2854,53 @@ test("cleanup throwing after provider acceptance cannot recover the accepted dra
   }
 });
 
+test("direct steering follows the queue-management verdict even when prompting is allowed (#1857)", async () => {
+  const reason = "Session credentials cannot use this command.";
+  for (const manageQueue of [{ allowed: false as const, reason }, { allowed: true as const }]) {
+    const draft = deferred<ComposerDraft | null>();
+    const calls: string[] = [];
+    const fixture = await mountFixture(draft, {
+      runnerProtocolVersion: 73,
+      sessionPatch: {
+        status: "running",
+        activeTurnId: "turn-1",
+        commandPermissions: {
+          stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true },
+          prompt: { allowed: true }, manageQueue,
+        },
+      },
+      sessionCapabilities: {
+        models: [],
+        effortLevels: [],
+        slashCommands: [],
+        supportsImages: true,
+        supportsApprovals: false,
+        supportsSteering: true,
+      },
+      client: {
+        steer: async (_sessionId, request) => {
+          calls.push(request.text ?? "");
+          return {
+            submissionId: request.submissionId, turnId: request.turnId, source: "direct",
+            text: request.text ?? "", state: "accepted", reason: "accepted", createdAt: 1, updatedAt: 1,
+          };
+        },
+      },
+    });
+    try {
+      await resolveDraft(draft, "steer once");
+      await act(async () => {
+        fireDomEvent.keyDown(fixture.composer, { key: "Enter", ctrlKey: true, metaKey: false, shiftKey: false, altKey: false });
+      });
+      await flushAsyncWork();
+      assert.deepEqual(calls, manageQueue.allowed ? ["steer once"] : [],
+        manageQueue.allowed ? "an allowed person steers as before" : "a refused steer is not sent");
+    } finally {
+      await unmountFixture(fixture);
+    }
+  }
+});
+
 test("cleanup throwing after accepted steering cannot recover the accepted draft", async () => {
   const draft = deferred<ComposerDraft | null>();
   const calls: string[] = [];

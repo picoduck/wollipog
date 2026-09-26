@@ -4098,7 +4098,12 @@ function SessionDetailLoaded({
   };
 
   const steerDraft = async () => {
+    // Direct steering posts to the same route as queued steering, so it follows that verdict (#1857).
     if (composerMutationRegistry.has(mutationKey) || stopTurnPendingRef.current || !canSend) return;
+    if (queueRefusal !== null) {
+      setError(queueRefusal);
+      return;
+    }
     if (!directSteeringAvailability.available) {
       setError(directSteeringAvailability.reason);
       return;

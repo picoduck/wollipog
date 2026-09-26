@@ -43,6 +43,9 @@ const STOP_JOB_OWNER_REASON = "Only the session owner or its controlling Orchest
 const AGENT_DELETE_REASON = "Session credentials cannot delete sessions.";
 /** An agent credential authenticates only on the exact routes its allowlist names (#1857). */
 const AGENT_ROUTE_REASON = "Session credentials cannot use this command.";
+/** The config service's own rule: on its own session an agent may set only `maxChildSessions`, so
+ * none of the configuration this verdict describes (approvals mode, Plan, model, effort) is allowed. */
+const AGENT_SELF_CONFIG_REASON = "An agent may change only its own maxChildSessions.";
 
 function sentence(error: string): string {
   const text = error.charAt(0).toUpperCase() + error.slice(1);
@@ -121,7 +124,8 @@ export function sessionCommandPermissions(
     cancelTurn: permission(allowlistedRouteRefusal([CANCEL_TURN_ROUTE], principal, target, facts)),
     manageQueue: permission(allowlistedRouteRefusal(QUEUE_ROUTES, principal, target, facts)),
     rename: permission(allowlistedRouteRefusal(RENAME_ROUTES, principal, target, facts)),
-    configure: permission(allowlistedRouteRefusal([CONFIG_ROUTE], principal, target, facts)),
+    configure: permission(allowlistedRouteRefusal([CONFIG_ROUTE], principal, target, facts) ??
+      (principal.kind === "agent" && principal.credentialSessionId === target.id ? AGENT_SELF_CONFIG_REASON : null)),
     respond: permission(allowlistedRouteRefusal(RESPOND_ROUTES, principal, target, facts)),
   };
 }

@@ -136,8 +136,8 @@ test("the commands #1857 added follow the role gate, the agent route allowlist a
   }, "configure keeps descendant confinement");
   const own = sessionCommandPermissions(worker, { id: "s_parent", parentSessionId: null },
     { ownsSession: false, isDescendant: false });
-  assert.deepEqual(own.configure, { allowed: true },
-    "the config route admits a credential's own session; its service then limits what may change");
+  assert.deepEqual(own.configure, { allowed: false, reason: "An agent may change only its own maxChildSessions." },
+    "the config route admits a credential's own session, but its service refuses every setting this verdict describes");
 });
 
 test("reads carry the requester's command permissions; a trusted local read is unchanged (#1843)", async (t) => {
