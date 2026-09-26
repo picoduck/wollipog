@@ -277,6 +277,7 @@ export function BackgroundWorkPanel({
     useState<ReadonlyMap<string, AcknowledgementFeedback>>(() => new Map());
   const inventorySupported = runnerSupportsProtocol(runnerProtocolVersion, "managedBackgroundInventory");
   const jobStop = backgroundJobStopAvailability(session, runnerProtocolVersion, runnerOnline);
+  const restartReportsResult = runnerSupportsProtocol(runnerProtocolVersion, "restartKeepsQueuedWork");
   const jobs = useMemo(() => (session.backgroundJobs ?? []).filter((job) =>
     selectedJobId === undefined || job.id === selectedJobId), [session.backgroundJobs, selectedJobId]);
   const deliveries = useMemo(() => (session.backgroundDeliveries ?? []).filter((delivery) =>
@@ -448,7 +449,7 @@ export function BackgroundWorkPanel({
                           <div><dt>Still Pending</dt><dd>{status.outstanding}</dd></div>
                           <div><dt>Recovery</dt><dd>{status.recovery}</dd></div>
                           <div><dt>Your Action</dt><dd>{recoveryState
-                            ? backgroundDeliveryAction(recoveryState, jobStop, stoppableJobListed)
+                            ? backgroundDeliveryAction(recoveryState, jobStop, stoppableJobListed, restartReportsResult)
                             : status.action}</dd></div>
                         </>}
                         {isMissing && (

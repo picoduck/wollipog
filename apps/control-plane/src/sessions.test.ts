@@ -22344,6 +22344,68 @@ test("a resume refused behind a cost-budget card stays failed with the outcome o
   }
 });
 
+test("a restart keeps revoking unconsumed decisions and tells the restarted child each one it revoked (#1779)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, hub, svc, child } = f;
+  try {
+    const restartNotices = () => hub.sentOfType("durable_session_command").filter((message) =>
+      message.command.type === "prompt_session" && message.command.sessionId === child.id &&
+      message.command.text.includes("[Wollipog Session Restart]"));
+    // One merge was approved while the child worked, so its resume waits behind the running turn;
+    // another is still pending. A third was consumed and is not the restart's to revoke.
+    const approved = f.requestMerge(1779);
+    f.approve(approved.occurrenceId);
+    assert.equal(db.workflowDecisionByOccurrence(approved.occurrenceId)?.status, "approved");
+    const pending = f.requestMerge(1780);
+    const consumed = f.requestMerge(1781);
+    f.approve(consumed.occurrenceId);
+    db.raw().prepare("UPDATE workflow_decisions SET status='consumed' WHERE occurrence_id=?").run(consumed.occurrenceId);
+
+    assert.ok(svc.restart(child.id).ok);
+    for (const occurrenceId of [approved.occurrenceId, pending.occurrenceId]) {
+      assert.equal(db.workflowDecisionByOccurrence(occurrenceId)?.status, "revoked", "revocation is unchanged");
+      assert.ok(svc.governanceAudit(child.id).some((entry) => entry.requestId === occurrenceId &&
+        entry.outcome === "revoked" && entry.actor.id === "session-restarted"));
+    }
+    assert.equal(db.workflowDecisionByOccurrence(consumed.occurrenceId)?.status, "consumed");
+
+    const [notice, ...more] = restartNotices();
+    assert.ok(notice, "the restarted child is sent a notice on the durable lane");
+    assert.equal(more.length, 0, "exactly one notice");
+    const text = notice.command.type === "prompt_session" ? notice.command.text : "";
+    assert.match(text, /Restarting this session revoked 2 workflow decisions it had not consumed:/u);
+    assert.ok(text.includes(`- ${approved.occurrenceId}: pr_merge decision (resource "picoduck/wollipog#1779"), approved before the restart`), text);
+    assert.ok(text.includes(`- ${pending.occurrenceId}: pr_merge decision (resource "picoduck/wollipog#1780"), still pending before the restart`), text);
+    assert.equal(text.includes(consumed.occurrenceId), false, "a consumed decision is not named");
+    assert.match(text, /request again with request_workflow_decision each decision you still need/u);
+    assert.ok(db.getSession(child.id)?.pendingPrompts?.some((prompt) => prompt.commandId === notice.commandId),
+      "the notice is a durable prompt the session owns, like any other queued message");
+
+    // A restart that revokes nothing sends nothing.
+    assert.ok(svc.restart(child.id).ok);
+    assert.equal(restartNotices().length, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("Stop still revokes unconsumed decisions without sending a restart notice (#1779)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, hub, svc, child } = f;
+  try {
+    const approved = f.requestMerge(1779);
+    f.approve(approved.occurrenceId);
+    assert.ok(svc.stop(child.id).ok);
+    assert.equal(db.workflowDecisionByOccurrence(approved.occurrenceId)?.status, "revoked");
+    assert.ok(svc.governanceAudit(child.id).some((entry) => entry.requestId === approved.occurrenceId &&
+      entry.outcome === "revoked" && entry.actor.id === "session-stopped"));
+    assert.equal(hub.sentOfType("durable_session_command").some((message) =>
+      message.command.type === "prompt_session" && message.command.text.includes("[Wollipog Session Restart]")), false);
+  } finally {
+    db.close();
+  }
+});
+
 test("a prompt into a session that reads running while its runner reports no active turn is not reported as queued behind a running turn (#1651)", () => {
   const { db, hub, svc } = makeHarness();
   try {
