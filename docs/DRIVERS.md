@@ -471,9 +471,11 @@ The lifetime policy is quiescence-aware and fail-safe:
   orphan recovery. A report that carries out a runner stop already answered `unconfirmed` is marked
   `stopConfirmedLate`, so the job keeps the actor who asked (#1849); while a model `TaskStop` call
   naming the task is outstanding, that call counts as the cause and no actor is recorded.
-  The model already knows about a job it stopped itself, so that job is marked `stoppedByModel`,
-  requires no continuation, and is settled at once, even when an earlier turn launched it (#1855).
-  It is not named in its siblings' continuation, and it never starts an automatic turn of its own.
+  When the report arrives in the provider turn that made the `TaskStop` call, the model already
+  knows the job ended. The job is then marked `stoppedByModel`, requires no continuation, and is
+  settled at once, even when an earlier turn launched it (#1855). It is not named in its siblings'
+  continuation, and it never starts an automatic turn of its own. A call that a cancelled or failed
+  turn left without a result still ends the job, but it keeps the ordinary continuation rule.
 - Eviction and runner-shutdown stops send EOF first and allow five seconds for a clean exit before
   `killTree` reaps the remaining native or WSL process group; explicit Stop and cancellation kill
   immediately. A stop with pending work writes the

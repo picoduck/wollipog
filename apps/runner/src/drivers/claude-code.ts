@@ -547,11 +547,12 @@ export class ClaudeCodeDriver implements Driver {
    * A later report for one of them still ends the job, through the ordinary killed-task path, so a
    * slow stop cannot leave it pending forever. Bounded; the oldest entries go first. */
   private readonly unconfirmedStopTaskIds = new Set<string>();
-  /** The model's own task-stop tool calls that have not returned yet: tool_use id to task id. Claude
-   * reports the stop before the tool result, so a report inside that window is the proof the model
-   * stopped the task. Outside it the same report is ambiguous: Claude also kills every task and
-   * reports it `killed` then `stopped` when its stdin closes, which is orphan recovery's work. */
-  private readonly modelTaskStops = new Map<string, string>();
+  /** The model's own task-stop tool calls that have not returned yet: tool_use id to the task it
+   * names and the provider turn that made the call. Claude reports the stop before the tool result,
+   * so a report inside that window is the proof the model stopped the task. Outside it the same
+   * report is ambiguous: Claude also kills every task and reports it `killed` then `stopped` when
+   * its stdin closes, which is orphan recovery's work. */
+  private readonly modelTaskStops = new Map<string, { taskId: string; turnId: number | undefined }>();
   /** Runner-originated control requests awaiting Claude's `control_response`, by request id. */
   private readonly pendingControlResponses = new Map<string, (response: Json | null) => void>();
   private persistentCircuitOpen = false;
@@ -1698,7 +1699,7 @@ export class ClaudeCodeDriver implements Driver {
         const name = String(block.name ?? "");
         const input = block.input as Record<string, Json> | undefined;
         const stopTarget = taskStopTarget(name, input);
-        if (stopTarget) this.modelTaskStops.set(block.id, stopTarget);
+        if (stopTarget) this.modelTaskStops.set(block.id, { taskId: stopTarget, turnId: this.activeProviderTurnId() });
         if (!isBackgroundCapableLaunch(name, input)) continue;
         // A tool_use is provisional. Only a provider task lifecycle event or a structured
         // async-launch result promotes it to a hold that requires separate terminal evidence.
@@ -1727,7 +1728,16 @@ export class ClaudeCodeDriver implements Driver {
   /** The runner's stop whose answer came back unconfirmed, or the model's own task-stop call that
    * has not returned yet, targets this task. */
   private stopWasRequested(taskId: string): boolean {
-    return this.unconfirmedStopTaskIds.has(taskId) || [...this.modelTaskStops.values()].includes(taskId);
+    return this.unconfirmedStopTaskIds.has(taskId) || this.modelStopOutstanding(taskId);
+  }
+
+  /** A task-stop call naming this task is outstanding; with `inActiveTurn`, one the current provider
+   * turn made. Only the latter shows the model is still in the turn that knows the task ended. */
+  private modelStopOutstanding(taskId: string, inActiveTurn = false): boolean {
+    const turnId = this.activeProviderTurnId();
+    if (inActiveTurn && turnId == null) return false;
+    return [...this.modelTaskStops.values()]
+      .some((stop) => stop.taskId === taskId && (!inActiveTurn || stop.turnId === turnId));
   }
 
   private recordPendingTask(
@@ -1839,17 +1849,15 @@ export class ClaudeCodeDriver implements Driver {
    * recorded as killed on the ordinary path, and tombstoned so the rest of the report cannot revive
    * it. Only the late confirmation of the runner's stop is marked as such, so it keeps its
    * requester (#1849); while the model's own call naming the task is outstanding, that call is the
-   * evident cause and nobody is named. The model then already knows the job ended, so inside its
-   * turn no continuation is required to tell it, even for a job an earlier turn launched (#1855). */
+   * evident cause and nobody is named. When the report arrives in the turn that made that call, the
+   * model already knows the job ended, so no continuation is required to tell it, even for a job an
+   * earlier turn launched (#1855). A call a cancelled or failed turn left behind does not count. */
   private completeProviderStop(id: string, toolUseId?: string): void {
-    const modelStop = [...this.modelTaskStops.values()].includes(id);
-    const runnerStop = this.unconfirmedStopTaskIds.delete(id) && !modelStop;
+    const runnerStop = this.unconfirmedStopTaskIds.delete(id) && !this.modelStopOutstanding(id);
     if (!this.pendingBackgroundTasks.has(id)) return;
     this.completePendingTask(id, toolUseId, "killed", runnerStop
       ? { stopConfirmedLate: true }
-      : modelStop && this.activeProviderTurnId() != null
-        ? { continuationRequired: false, stoppedByModel: true }
-        : {});
+      : this.modelStopOutstanding(id, true) ? { continuationRequired: false, stoppedByModel: true } : {});
     this.endedBackgroundTaskIds.add(id);
   }
 
