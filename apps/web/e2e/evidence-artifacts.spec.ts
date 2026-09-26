@@ -202,10 +202,19 @@ for (const viewport of [
 }
 
 test("over plain HTTP a short desktop panel with child requests keeps the whole HTTPS notice", async ({ page }, testInfo) => {
-  // The compact layout drops the summary's own lines at this height; the way forward must survive it.
+  // The compact layout drops the summary's own lines at this height; the way forward must survive it
+  // without crowding out the items or spilling past the actions.
   await page.setViewportSize({ width: 900, height: 480 });
   await openReviewFromNetworkAddress(page, "items=2&artifacts=artifact-only&children=1");
   const notice = page.getByRole("note", { name: "HTTPS or Localhost Required" });
+  const layout = await page.locator(".evidence-review-surface").evaluate((surface) => ({
+    overflow: surface.scrollHeight - surface.clientHeight,
+    listHeight: surface.querySelector(".evidence-review-list")!.clientHeight,
+    noticeInList: Boolean(surface.querySelector(".evidence-review-list .evidence-secure-context-notice")),
+  }));
+  expect(layout.overflow).toBeLessThanOrEqual(1);
+  expect(layout.listHeight).toBeGreaterThan(40);
+  expect(layout.noticeInList).toBe(true);
   await notice.scrollIntoViewIfNeeded();
   await expect(notice.getByText(`This page is open at ${NETWORK_ORIGIN}.`, { exact: false })).toBeVisible();
   await expect(notice.getByText("reopen Wollipog over HTTPS", { exact: false })).toBeVisible();

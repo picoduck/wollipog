@@ -374,6 +374,8 @@ for (const [label, withUri] of [["artifact-only", false], ["artifact-plus-URI", 
         assert.match(notice.textContent ?? "", /reopen Wollipog over HTTPS, for example through tailscale serve, or on localhost/u);
         assert.equal(view.checkbox("desktop-after").disabled, true);
         assert.equal(view.checkbox("desktop-after").checked, false);
+        assert.match(view.container.querySelector(".evidence-review-summary [role=\"status\"]")?.textContent ?? "",
+          /^0 of 1 Reviewed$/u, "a saved mark on an item this page cannot show is not counted");
         assert.equal(view.button("Approve").disabled, true);
         assert.equal(view.button("Deny").disabled, false, "rejecting stays possible");
       } finally {

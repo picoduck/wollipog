@@ -422,6 +422,10 @@ export function SessionApprovalBanner({
   };
   const evidenceComplete = evidence.every((item) =>
     reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item));
+  // The total counts what the checkboxes show, so a saved mark on an item this page cannot show
+  // is not reported as reviewed.
+  const reviewedCount = evidence.filter((item) =>
+    reviewedEvidence.includes(item.evidenceId) && !evidenceBlocked(item)).length;
   const onArtifactStatus = (evidenceId: string, status: EvidenceArtifactStatus) =>
     setArtifactStatus((current) => current[evidenceId] === status ? current : { ...current, [evidenceId]: status });
 
@@ -514,13 +518,15 @@ export function SessionApprovalBanner({
             {evidenceDecision.humanFallback && <p className="muted">
               UI Evidence Approval is assigned to the Orchestrator, but this request needs a human. {evidenceDecision.humanFallback.reason}
             </p>}
-            <EvidenceSecureContextNotice evidence={evidence} />
           </div>
           <strong role="status" aria-live="polite">
-            {reviewedEvidence.length} of {evidence.length} Reviewed
+            {reviewedCount} of {evidence.length} Reviewed
           </strong>
         </div>
         <div className="evidence-review-list" aria-label="Evidence Items">
+          {/* In the list rather than the summary: it needs the full width, and in a short panel it
+              scrolls with the items instead of crowding them out. */}
+          <EvidenceSecureContextNotice evidence={evidence} />
           {evidence.map((item, index) => (
             <article className="evidence-review-item" key={item.evidenceId}>
               <div className="evidence-review-item-main">
