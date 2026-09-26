@@ -67,8 +67,10 @@ function hasWebmDocType(bytes: Buffer): boolean {
     const size = readEbmlVint(bytes, id.next, headerEnd, true);
     if (!size || size.next + size.value > headerEnd) return false;
     if (id.value === 0x4282) {
-      if (foundDocType || size.value !== WEBM_DOC_TYPE.length ||
-        !bytes.subarray(size.next, size.next + size.value).equals(WEBM_DOC_TYPE)) return false;
+      // EBML strings may contain a null terminator and padding after their value.
+      if (foundDocType || size.value < WEBM_DOC_TYPE.length ||
+        !bytes.subarray(size.next, size.next + WEBM_DOC_TYPE.length).equals(WEBM_DOC_TYPE) ||
+        (size.value > WEBM_DOC_TYPE.length && bytes[size.next + WEBM_DOC_TYPE.length] !== 0)) return false;
       foundDocType = true;
     }
     offset = size.next + size.value;

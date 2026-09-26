@@ -48,6 +48,9 @@ test("WebM validation reads the bounded EBML DocType element", () => {
   const version = Buffer.from([0x42, 0x86, 0x81, 0x01]);
 
   assert.equal(accepts(header(version, docType("webm"))), true, "DocType may follow another EBML header element");
+  assert.equal(accepts(header(Buffer.from([0x42, 0x82, 0x86]), Buffer.from("webm\0x"))), true,
+    "EBML ignores bytes after a null-terminated DocType value");
+  assert.equal(accepts(header(docType("webmx"))), false, "a non-null suffix changes the DocType");
   assert.equal(accepts(Buffer.concat([header(docType("matroska")), Buffer.from("webm")])), false,
     "a WebM string after the Matroska header is not the DocType");
   assert.equal(accepts(header(Buffer.from([0xec, 0x84]), Buffer.from("webm"))), false,
