@@ -2297,9 +2297,16 @@ textarea {
   color: var(--text-dim);
   cursor: pointer;
 }
-.evidence-reviewed-control:has(input:disabled) {
+/* The inline approval card's "reviewed" label gets the same disabled treatment as the review
+   surface's, so an item that still blocks approval does not read as markable. */
+.evidence-reviewed-control:has(input:disabled),
+.approval-evidence-item label:has(input:disabled) {
   cursor: not-allowed;
   opacity: 0.6;
+}
+/* The native checkbox does not inherit the label's cursor; the browser gives it its own. */
+.approval-evidence-item label input:disabled {
+  cursor: not-allowed;
 }
 /* An artifact-backed evidence image, shown in place. The frame reserves its height before the
    image arrives so a long review does not jump as items load. */
