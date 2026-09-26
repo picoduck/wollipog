@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { devices, expect, test, type Page } from "@playwright/test";
 
 const OWNER = "owner@example.com";
 const NEXT_OWNER = "next.owner@example.net";
@@ -10,12 +10,19 @@ async function expectNoEmailLeak(page: Page): Promise<void> {
   for (const email of EMAILS) expect(markup).not.toContain(email);
 }
 
-for (const viewport of [
-  { name: "desktop", width: 1280, height: 900 },
-  { name: "phone", width: 390, height: 844 },
-] as const) {
-  test(`People & Devices masks names across rendered ${viewport.name} surfaces until reveal (#1667)`, async ({ page }) => {
-    await page.setViewportSize(viewport);
+for (const formFactor of ["desktop", "phone"] as const) {
+  test.describe(formFactor, () => {
+    const phone = devices["Pixel 7"];
+    test.use(formFactor === "phone" ? {
+      viewport: phone.viewport,
+      hasTouch: phone.hasTouch,
+      isMobile: phone.isMobile,
+      userAgent: phone.userAgent,
+      deviceScaleFactor: phone.deviceScaleFactor,
+      screen: phone.screen,
+    } : { viewport: { width: 1280, height: 900 } });
+
+  test(`People & Devices masks names across rendered ${formFactor} surfaces until reveal (#1667)`, async ({ page }) => {
     await page.goto("/people-devices-e2e.html");
     await expect(page.getByRole("heading", { name: "People & Devices" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Paired Devices" })).toBeVisible();
@@ -79,11 +86,29 @@ for (const viewport of [
     await expect(dialog).toContainText(MEMBER);
     await dialog.getByRole("button", { name: "Hide Person Name" }).click();
     await expectNoEmailLeak(page);
-    await page.keyboard.press("Escape");
+    await dialog.getByRole("textbox", { name: "Device Name" }).fill("Pat's Tablet");
+    await dialog.getByRole("button", { name: "Create Pairing" }).click();
+    dialog = page.getByRole("dialog", { name: "Device Ready to Pair" });
+    await expect(dialog).toBeVisible();
+    await expect(dialog.getByRole("button", { name: "Show Person Name" })).toBeVisible();
+    await expectNoEmailLeak(page);
+    await dialog.getByRole("button", { name: "Show Person Name" }).click();
+    await expect(dialog).toContainText(MEMBER);
+    await dialog.getByRole("button", { name: "Done" }).click();
     await page.getByRole("button", { name: "Pair Device" }).click();
     dialog = page.getByRole("dialog", { name: "Who is this device for?" });
     await expect(dialog.getByRole("button", { name: "Show Person Names" })).toBeVisible();
     await expectNoEmailLeak(page);
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+
+    const teamRow = page.getByRole("region", { name: "Teams" }).locator(".access-row").first();
+    await teamRow.getByRole("button", { name: "Manage" }).click();
+    dialog = page.getByRole("dialog", { name: "Manage Support" });
+    await expect(dialog.getByRole("checkbox", { name: /Hidden Name 1/ })).toBeVisible();
+    await expect(dialog.getByRole("checkbox", { name: /Hidden Name 2/ })).toBeVisible();
+    await expectNoEmailLeak(page);
+    await dialog.getByRole("button", { name: "Show Person Names" }).click();
+    await expect(dialog).toContainText(MEMBER);
     await dialog.getByRole("button", { name: "Cancel" }).click();
 
     await page.getByRole("button", { name: "Create Team" }).click();
@@ -103,14 +128,35 @@ for (const viewport of [
 
     await context.getByRole("button", { name: "Show Your Name" }).click();
     await expect(context).toContainText(OWNER);
+    await page.evaluate((target) => {
+      const leaks: string[] = [];
+      const observer = new MutationObserver((records) => {
+        for (const record of records) {
+          for (const node of record.addedNodes) {
+            if (node.textContent?.includes(target)) leaks.push("added text");
+          }
+          if (record.type === "characterData" && record.target.textContent?.includes(target)) leaks.push("changed text");
+          if (record.type === "attributes" && record.target instanceof Element && record.attributeName
+            && record.target.getAttribute(record.attributeName)?.includes(target)) leaks.push(record.attributeName);
+        }
+      });
+      observer.observe(document.body, { subtree: true, childList: true, characterData: true, attributes: true });
+      (window as typeof window & { takeIdentifierLeaks?: () => string[] }).takeIdentifierLeaks = () => {
+        observer.disconnect();
+        return leaks;
+      };
+    }, NEXT_OWNER);
     await page.getByRole("button", { name: "Change Identity" }).click();
     await expect(context.getByRole("button", { name: "Show Your Name" })).toBeVisible();
     await expectNoEmailLeak(page);
+    expect(await page.evaluate(() => (window as typeof window & { takeIdentifierLeaks?: () => string[] })
+      .takeIdentifierLeaks?.())).toEqual([]);
     await context.getByRole("button", { name: "Show Your Name" }).click();
     await expect(context).toContainText(NEXT_OWNER);
     await page.getByRole("tab", { name: "Machines" }).click();
     await page.getByRole("tab", { name: "People & Devices" }).click();
     await expect(context.getByRole("button", { name: "Show Your Name" })).toBeVisible();
     await expectNoEmailLeak(page);
+  });
   });
 }

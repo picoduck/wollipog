@@ -29,7 +29,7 @@ function identity(ownerName: string): IdentityAdministrationView {
       { organizationId, organizationName, userId: "owner-1", userName: ownerName, userStatus: "active", role: "owner", createdAt: 1 },
       { organizationId, organizationName, userId: "member-1", userName: member, userStatus: "active", role: "operator", createdAt: 2 },
     ],
-    teams: [],
+    teams: [{ teamId: "team-1", organizationId, name: "Support", memberUserIds: ["member-1"], createdAt: 3 }],
   };
 }
 
@@ -50,6 +50,11 @@ const client: ApiClient = {
   ...api,
   getIdentity: async () => currentIdentity,
   listDevices: async () => ({ devices }),
+  pairDevice: async (name, userId) => ({
+    device: { ...devices[0]!, deviceId: "device-2", name, userId: userId ?? "member-1" },
+    token: "fixture_pairing_token",
+    pairing: { hosts: [], port: 443, webServed: false, boundBeyondLoopback: false },
+  }),
 };
 
 function Fixture() {
