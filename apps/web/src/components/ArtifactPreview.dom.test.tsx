@@ -64,25 +64,40 @@ test("artifact preview fences stale loads and revokes its selected image URL on 
     return value;
   };
   URL.revokeObjectURL = (value: string) => { revoked.push(value); };
+  // The superseded load changes no visible state, so observe the end of its verification instead.
+  const digested: string[] = [];
+  const subtle = globalThis.crypto.subtle;
+  const priorDigest = subtle.digest;
+  subtle.digest = async function (this: SubtleCrypto, ...args: Parameters<SubtleCrypto["digest"]>) {
+    const digest = await priorDigest.apply(this, args);
+    digested.push(Buffer.from(digest).toString("hex"));
+    return digest;
+  };
 
+  const first = artifact("first", firstBytes);
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   try {
-    await act(async () => { root.render(<ArtifactPreview artifact={artifact("first", firstBytes)} />); });
+    await act(async () => { root.render(<ArtifactPreview artifact={first} />); });
     await act(async () => { root.render(<ArtifactPreview artifact={artifact("second", secondBytes)} />); });
     await act(async () => { resolveSecond(new Blob([secondBytes], { type: "image/png" })); });
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    await waitForPreview(() => !!container.querySelector("img")?.getAttribute("src"), "the selected image");
     assert.equal(container.querySelector("img")?.getAttribute("src"), "blob:preview-1");
 
     await act(async () => { resolveFirst(new Blob([firstBytes], { type: "image/png" })); });
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+    await waitForPreview(() => digested.includes(first.sha256), "the superseded load's verification");
+    // Only microtasks remain between the digest and the stale-request check; one task drains them.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     assert.deepEqual(created, ["blob:preview-1"], "superseded bytes never receive an object URL");
+    assert.equal(container.querySelector("img")?.getAttribute("src"), "blob:preview-1");
 
     await act(async () => { root.unmount(); });
     assert.deepEqual(revoked, ["blob:preview-1"]);
   } finally {
+    await act(async () => root.unmount());
+    subtle.digest = priorDigest;
     api.artifactExport = priorExport;
     URL.createObjectURL = priorCreate;
     URL.revokeObjectURL = priorRevoke;
@@ -105,7 +120,10 @@ test("verified video artifacts render a private inline player and release their 
   const root = createRoot(container);
   try {
     await act(async () => root.render(<ArtifactPreview artifact={item} />));
-    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    await waitForPreview(
+      () => !!container.querySelector("video.artifact-preview-video")?.getAttribute("src"),
+      "the verified video player",
+    );
     const video = container.querySelector("video.artifact-preview-video");
     assert.equal(video?.getAttribute("src"), "blob:private-video");
     assert.equal(video?.hasAttribute("controls"), true);
@@ -116,6 +134,7 @@ test("verified video artifacts render a private inline player and release their 
     await act(async () => root.unmount());
     assert.deepEqual(revoked, ["blob:private-video"]);
   } finally {
+    await act(async () => root.unmount());
     api.artifactExport = priorExport;
     URL.createObjectURL = priorCreate;
     URL.revokeObjectURL = priorRevoke;
