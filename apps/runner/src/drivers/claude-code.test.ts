@@ -2283,9 +2283,19 @@ test("ending background work retires the process and reports each unfinished job
 });
 
 test("a WSL receipt read in flight while the work is ended cannot revive the ended job (#1778)", async () => {
-  const child = fakeProcess();
+  // Every step is gated on an explicit signal rather than a count of event-loop turns, and the
+  // clock is fixed, so CI load cannot reorder the read, the retirement, or the ceiling's deadline.
+  let retirementStarted!: () => void;
+  const retiring = new Promise<void>((resolve) => { retirementStarted = resolve; });
+  const stdin = new PassThrough();
+  const endStdin = stdin.end.bind(stdin);
+  stdin.end = ((...args: any[]) => {
+    retirementStarted();
+    return endStdin(...args);
+  }) as typeof stdin.end;
+  const child = fakeProcess(stdin);
   const background: Parameters<NonNullable<DriverCallbacks["onBackgroundWork"]>>[0][] = [];
-  const timers: Array<{ callback: () => void; delay: number }> = [];
+  const liveTimers = new Set<{ callback: () => void; delay: number }>();
   let resolveCeilingRead!: (value: any) => void;
   let reads = 0;
   const driver = new ClaudeCodeDriver(
@@ -2299,11 +2309,13 @@ test("a WSL receipt read in flight while the work is ended cannot revive the end
     {
       spawn: () => child,
       kill: () => {},
+      now: () => 1_000,
       setTimer: (callback: () => void, delay: number) => {
-        timers.push({ callback, delay });
-        return { unref() {} } as any;
+        const timer = { callback, delay, unref() {} };
+        liveTimers.add(timer);
+        return timer as any;
       },
-      clearTimer: () => {},
+      clearTimer: (timer: any) => { liveTimers.delete(timer); },
       inspectBackgroundWork: () => {
         reads += 1;
         // The pending ceiling's read is slow; the one endBackgroundWork makes finds nothing new.
@@ -2312,23 +2324,39 @@ test("a WSL receipt read in flight while the work is ended cannot revive the end
       },
     } as any,
   );
+  // Each receipt read's full application, so the test can wait for the ceiling's to land.
+  const reconciles: Promise<void>[] = [];
+  const reconcile = (driver as any).reconcilePendingTaskFilesInContext.bind(driver);
+  (driver as any).reconcilePendingTaskFilesInContext = (...args: unknown[]) => {
+    const applied = reconcile(...args);
+    reconciles.push(applied);
+    return applied;
+  };
   const turn = driver.prompt("watch CI");
   await nextTask();
   child.stdout.write(JSON.stringify({ type: "system", subtype: "task_started", task_id: "monitor-9" }) + "\n");
   child.stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
   await turn;
-  timers.find((timer) => timer.delay === 30_000)!.callback();
+  const [ceiling, ...otherTimers] = liveTimers;
+  assert.equal(otherTimers.length, 0, "only the pending ceiling is armed between turns");
+  assert.equal(ceiling?.delay, 30_000);
+  liveTimers.delete(ceiling!);
+  ceiling!.callback();
   assert.equal(reads, 1, "the ceiling's receipt read is in flight");
 
   const ending = driver.endBackgroundWork();
-  await nextTask();
-  await nextTask();
+  await retiring;
+  assert.equal(reads, 2, "ending read its own receipts before retiring the process");
+  assert.equal(background.at(-1)?.state, "running", "the ended job is not reported until the process closes");
   // The slow read returns the monitor's markerless task file while the process retires.
   resolveCeilingRead({
     incompleteArtifacts: [{ id: "monitor-9", outputFile: "/tmp/monitor-9.output" }],
     terminalTaskIds: new Set<string>(),
   });
-  await nextTask();
+  await reconciles[0];
+  assert.equal((driver as any).pendingBackgroundTasks.has("monitor-9"), false,
+    "the late receipt does not restore the job being ended");
+  assert.equal(liveTimers.size, 1, "the late receipt re-arms no pending ceiling; only the retirement grace timer remains");
   child.emit("close", 0);
   const result = await ending;
   assert.equal(result.status, "ended");
