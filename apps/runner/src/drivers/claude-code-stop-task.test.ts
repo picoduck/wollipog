@@ -205,10 +205,18 @@ test("an answer without Claude's report leaves the job as it was (#1780)", async
   assert.deepEqual(await stopping, { status: "refused", reason: "unconfirmed" });
   assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1", "shell-2"]);
 
-  // A report that arrives only later is not treated as a stop the runner asked for.
+  // A report that arrives only after the window still ends the job, on the ordinary killed path,
+  // so a slow stop cannot leave it blocking a sibling or a handoff forever. Its trailing
+  // notification does not revive it.
   killedReport(child, "monitor-1", "toolu_monitor");
   await nextTask();
-  assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["monitor-1", "shell-2"]);
+  const late = h.background.at(-1)!;
+  assert.deepEqual(late.pendingTaskIds, ["shell-2"]);
+  assert.deepEqual(late.terminalJobs?.map((job) => [job.id, job.status, job.endedByRunner]), [["monitor-1", "killed", undefined]]);
+  assert.equal(late.terminalJobs?.[0]?.continuationRequired, true, "outside a turn, the provider is told the job ended");
+  frame(child, { type: "system", subtype: "task_notification", task_id: "monitor-1", status: "stopped" });
+  await nextTask();
+  assert.deepEqual(h.background.at(-1)?.pendingTaskIds, ["shell-2"]);
   h.driver.dispose();
 });
 
@@ -234,6 +242,10 @@ test("a refused, unanswered, or interrupted stop leaves the job running (#1780)"
   controlResponse(rejectedChild, stopRequest(rejected, "monitor-1").request_id, "error");
   assert.deepEqual(await refusing, { status: "refused", reason: "provider_rejected" });
   assert.deepEqual(rejected.background.at(-1)?.pendingTaskIds, ["monitor-1", "shell-2"]);
+  // A refused stop is not remembered: a later `stopped` report keeps its previous meaning.
+  frame(rejectedChild, { type: "system", subtype: "task_notification", task_id: "monitor-1", status: "stopped" });
+  await nextTask();
+  assert.deepEqual(rejected.background.at(-1)?.pendingTaskIds, ["monitor-1", "shell-2"]);
   rejected.driver.dispose();
 
   const silent = harness();
@@ -242,6 +254,10 @@ test("a refused, unanswered, or interrupted stop leaves the job running (#1780)"
   await nextTask();
   silent.timers.find((timer) => timer.delay === CLAUDE_STOP_TASK_RESPONSE_MS)!.callback();
   assert.deepEqual(await waiting, { status: "refused", reason: "unconfirmed" });
+  // An unanswered stop that Claude carries out later still ends the job.
+  frame(silent.spawned[0], { type: "system", subtype: "task_notification", task_id: "monitor-1", status: "stopped" });
+  await nextTask();
+  assert.deepEqual(silent.background.at(-1)?.pendingTaskIds, ["shell-2"]);
   silent.driver.dispose();
 
   const exiting = harness();

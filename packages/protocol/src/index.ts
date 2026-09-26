@@ -7477,7 +7477,8 @@ export interface InterruptTurnResultMessage {
  * other background work of the session is being ended right now. `no_live_process`: no live
  * provider process owns the job (the session is not running, or its process exited). `not_owned`:
  * the live process did not launch the job. `provider_rejected`: the provider refused the request.
- * `unconfirmed`: the provider answered without proof the job ended, so it is left as it was. */
+ * `unconfirmed`: the provider gave no proof in time that the job ended, so it is left running; if
+ * the provider later reports that it ended, the job is recorded as killed then. */
 export type StopBackgroundJobRefusal =
   | "session_not_found"
   | "unsupported"

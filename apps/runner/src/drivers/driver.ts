@@ -112,7 +112,8 @@ export type DriverBackgroundWorkEndResult =
 /** What `stopBackgroundJob` did (#1780). `finished`: the job ended on its own before the stop
  * landed. `not_running`: the driver holds no such unfinished job. `not_owned`: the job is not one
  * the live process launched (a seed from before a restart, or an unconfirmed launch).
- * `unconfirmed`: the provider answered without proof the job ended, so it is left as it was. */
+ * `unconfirmed`: the provider gave no proof in time that the job ended, so it is left as it was;
+ * a later report that it ended still records it as killed. */
 export type DriverBackgroundJobStopResult =
   | { status: "stopped"; job: DriverBackgroundTerminalJob }
   | { status: "finished"; job: DriverBackgroundTerminalJob }

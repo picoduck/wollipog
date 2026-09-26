@@ -84,6 +84,7 @@ export const CLAUDE_STOP_TASK_RESPONSE_MS = 10_000;
 /** Claude reports the ended task before it answers the control request. If its answer arrives
  * first, the report may still be in flight for this long; after it the job is left as it was. */
 export const CLAUDE_STOP_TASK_CONFIRM_MS = 2_000;
+const MAX_UNCONFIRMED_STOPS = 64;
 
 interface ClaudeDriverDeps {
   spawn: (opts: SpawnAgentOptions) => AgentProcess;
@@ -542,6 +543,10 @@ export class ClaudeCodeDriver implements Driver {
   /** Tasks the runner asked Claude to stop (#1780), by task id. The provider's own `killed` or
    * `stopped` report for one of them is the proof that it ended. */
   private readonly stoppingBackgroundTasks = new Map<string, PendingBackgroundTaskStop>();
+  /** Stops Claude accepted, or left unanswered, without reporting the task ended in time (#1780).
+   * A later report for one of them still ends the job, through the ordinary killed-task path, so a
+   * slow stop cannot leave it pending forever. Bounded; the oldest entries go first. */
+  private readonly unconfirmedStopTaskIds = new Set<string>();
   /** Runner-originated control requests awaiting Claude's `control_response`, by request id. */
   private readonly pendingControlResponses = new Map<string, (response: Json | null) => void>();
   private persistentCircuitOpen = false;
@@ -1665,10 +1670,13 @@ export class ClaudeCodeDriver implements Driver {
         const patch = msg.patch as Record<string, Json> | undefined;
         const status = typeof patch?.status === "string" ? patch.status.toLowerCase() : "";
         if (status === "killed" && this.stoppingBackgroundTasks.has(taskId)) this.completeStoppedTask(taskId);
+        else if (status === "killed" && this.unconfirmedStopTaskIds.has(taskId)) this.completeLateStop(taskId, toolUseId);
       } else if (msg.subtype === "task_notification" && taskId) {
         const status = typeof msg.status === "string" ? msg.status.toLowerCase() : "";
         if ((status === "stopped" || status === "killed") && this.stoppingBackgroundTasks.has(taskId)) {
           this.completeStoppedTask(taskId);
+        } else if ((status === "stopped" || status === "killed") && this.unconfirmedStopTaskIds.has(taskId)) {
+          this.completeLateStop(taskId, toolUseId);
         } else if (status === "completed" || status === "failed" || status === "killed") {
           this.completePendingTask(taskId, toolUseId, status);
         } else {
@@ -1807,6 +1815,16 @@ export class ClaudeCodeDriver implements Driver {
     stop.ended = { stopped: true, job };
     this.pendingWorkChanged([job]);
     stop.wake?.();
+  }
+
+  /** Claude reported, after the stop request had already been answered, that a task it was asked
+   * to stop has ended. The job is recorded as killed on the ordinary path (its continuation tells
+   * the provider), and tombstoned so the rest of the report cannot revive it. */
+  private completeLateStop(id: string, toolUseId?: string): void {
+    this.unconfirmedStopTaskIds.delete(id);
+    if (!this.pendingBackgroundTasks.has(id)) return;
+    this.completePendingTask(id, toolUseId, "killed");
+    this.endedBackgroundTaskIds.add(id);
   }
 
   private reconcileBackgroundToolResult(toolUseId: string, content: Json, isError: boolean): void {
@@ -2116,9 +2134,18 @@ export class ClaudeCodeDriver implements Driver {
       if (stop.ended) return { status: stop.ended.stopped ? "stopped" : "finished", job: stop.ended.job };
       if (this.child !== child) return { status: "refused", reason: "no_live_process" };
       if (response && !succeeded) return { status: "refused", reason: "provider_rejected" };
+      this.rememberUnconfirmedStop(jobId);
       return { status: "refused", reason: "unconfirmed" };
     } finally {
       this.stoppingBackgroundTasks.delete(jobId);
+    }
+  }
+
+  private rememberUnconfirmedStop(jobId: string): void {
+    this.unconfirmedStopTaskIds.delete(jobId);
+    this.unconfirmedStopTaskIds.add(jobId);
+    while (this.unconfirmedStopTaskIds.size > MAX_UNCONFIRMED_STOPS) {
+      this.unconfirmedStopTaskIds.delete(this.unconfirmedStopTaskIds.values().next().value!);
     }
   }
 

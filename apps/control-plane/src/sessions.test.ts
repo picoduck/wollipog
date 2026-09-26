@@ -22344,7 +22344,7 @@ test("stopBackgroundJob maps an unknown job, refusals, and transport failures to
     ["unsupported", /cannot stop a single background job/],
     ["in_progress", /try again shortly/],
     ["provider_rejected", /refused/],
-    ["unconfirmed", /left as it was/],
+    ["unconfirmed", /left running; if the provider reports it ended later/],
   ] as const) {
     answer("refused", reason);
     const result = await svc.stopBackgroundJob(id, "monitor-1", actor);

@@ -1390,7 +1390,8 @@ function backgroundJobStopRefusal(reason: StopBackgroundJobRefusal | undefined):
     case "no_live_process": return "no running provider process owns this job, so it cannot be stopped by itself";
     case "not_owned": return "the session's current provider process did not start this job, so it cannot stop it";
     case "provider_rejected": return "the provider refused to stop the job";
-    default: return "the provider did not confirm that the job ended, so it was left as it was";
+    default: return "the provider did not confirm in time that the job ended, so it is left running; " +
+      "if the provider reports it ended later, its status updates on its own";
   }
 }
 

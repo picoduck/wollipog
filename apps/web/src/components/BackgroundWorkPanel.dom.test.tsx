@@ -831,7 +831,7 @@ test("Stop Job reports a refusal and a job that had already ended without claimi
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   const answers: Array<() => Promise<BackgroundJobStopResponse>> = [
-    async () => { throw new Error("the provider did not confirm that the job ended, so it was left as it was"); },
+    async () => { throw new Error("the provider did not confirm in time that the job ended, so it is left running"); },
     async () => ({ sessionId: "session", jobId: "monitor-1", outcome: "already_terminal", terminalStatus: "completed" }),
   ];
   const client = { stopBackgroundJob: () => answers.shift()!() } as unknown as ApiClient;
@@ -852,7 +852,7 @@ test("Stop Job reports a refusal and a job that had already ended without claimi
     };
     await confirmAndStop();
     assert.equal(container.querySelector("[role='alert']")?.textContent,
-      "the provider did not confirm that the job ended, so it was left as it was");
+      "the provider did not confirm in time that the job ended, so it is left running");
     const retry = stopJobButton(container, "Monitor Job")!;
     assert.equal(retry.disabled, false, "a refused stop can be tried again");
     await confirmAndStop();
