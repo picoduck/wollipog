@@ -49,6 +49,7 @@ import {
 import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { useIsMobile } from "./useIsMobile.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
 
 /**
  * The order badges are offered a place in the measured status row when it cannot hold them all
@@ -207,6 +208,16 @@ export function SessionHeader({
     descendantRequests?.count,
   ]);
   const terminal = isTerminal(session.status);
+  const showRetryStop = session.stopOperation?.status === "stop_failed" && !session.archiveStatus;
+  const showRestart = terminal && runnerOnline && session.stopOperation?.status !== "stop_failed" &&
+    !sessionUnarchiveRestarts(session, unarchiveAndRestartSupported);
+  // A command the server would refuse this person stays listed but disabled, with the reason (#1843).
+  const stopRefusal = sessionCommandRefusal(session, "stop");
+  const restartRefusal = sessionCommandRefusal(session, "restart");
+  const runtimeCaution = [...new Set([
+    showRetryStop || !terminal ? stopRefusal : null,
+    showRestart ? restartRefusal : null,
+  ].filter((reason): reason is string => reason !== null))].join(" ");
   const visibleBackgroundWorkState = session.backgroundWorkState === "resumed"
     ? undefined
     : session.backgroundWorkState;
@@ -963,13 +974,19 @@ export function SessionHeader({
                     !terminal || session.archived) && (
                     <div className="menu-label" role="presentation">Runtime</div>
                   )}
-                  {session.stopOperation?.status === "stop_failed" && !session.archiveStatus && (
+                  {runtimeCaution && (
+                    <div className="menu-caution" id="session-runtime-caution" role="presentation">
+                      {runtimeCaution}
+                    </div>
+                  )}
+                  {showRetryStop && (
                     <button
                       className="menu-item menu-danger"
                       type="button"
                       role="menuitem"
-                      disabled={busy}
-                      title="Retry the same Stop operation without archiving the session"
+                      disabled={busy || stopRefusal !== null}
+                      aria-describedby={stopRefusal ? "session-runtime-caution" : undefined}
+                      title={stopRefusal ?? "Retry the same Stop operation without archiving the session"}
                       onClick={() => {
                         closeMenu(true);
                         void run(() => api.retryStop(session.id));
@@ -978,13 +995,14 @@ export function SessionHeader({
                       Retry Stop
                     </button>
                   )}
-                  {terminal && runnerOnline && session.stopOperation?.status !== "stop_failed" &&
-                    !sessionUnarchiveRestarts(session, unarchiveAndRestartSupported) && (
+                  {showRestart && (
                     <button
                       className="menu-item"
                       type="button"
                       role="menuitem"
-                      disabled={busy}
+                      disabled={busy || restartRefusal !== null}
+                      aria-describedby={restartRefusal ? "session-runtime-caution" : undefined}
+                      title={restartRefusal ?? undefined}
                       onClick={() => {
                         closeMenu(true);
                         void run(() => api.restart(session.id));
@@ -1001,8 +1019,9 @@ export function SessionHeader({
                       className="menu-item menu-danger menu-separated"
                       type="button"
                       role="menuitem"
-                      disabled={busy}
-                      title="Terminate the agent process and discard queued messages"
+                      disabled={busy || stopRefusal !== null}
+                      aria-describedby={stopRefusal ? "session-runtime-caution" : undefined}
+                      title={stopRefusal ?? "Terminate the agent process and discard queued messages"}
                       onClick={() => {
                         closeMenu(false);
                         void (async () => {

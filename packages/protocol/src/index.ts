@@ -5894,6 +5894,22 @@ export function sessionHolds(
   return holds;
 }
 
+/** Whether the requesting principal may run one session command (#1843), and if not, the
+ * sentence a surface shows instead of offering it. */
+export type SessionCommandPermission = { allowed: true } | { allowed: false; reason: string };
+
+/** Session commands the requesting principal may run, from the same rules their routes enforce
+ * (#1843). A Viewer is read-only; stopping one background job belongs to the session owner and
+ * its controlling Orchestrator alone (#1780), while an organization owner or admin who merely can
+ * see the session may still stop or restart it. */
+export interface SessionCommandPermissions {
+  /** Stop Session, and Retry Stop of a stop that failed. */
+  stop: SessionCommandPermission;
+  restart: SessionCommandPermission;
+  /** Stop Job on one managed background job. */
+  stopBackgroundJob: SessionCommandPermission;
+}
+
 /** Denormalised session record for the UI (board cards + lists). */
 export interface SessionView {
   id: string;
@@ -5914,6 +5930,10 @@ export interface SessionView {
   orchestratorPolicy?: OrchestratorCampaignPolicy;
   /** Current effective campaign state. Omitted by older control planes and non-Orchestrators. */
   orchestratorCampaign?: OrchestratorCampaignProjection;
+  /** What the principal that received this view may do to the session (#1843). Computed per
+   * requester, so it is never stored. Omitted by older control planes and by responses to a
+   * mutation; a client then keeps the value it last received, or offers the commands as before. */
+  commandPermissions?: SessionCommandPermissions;
   runnerId: string;
   workspaceId: string | null;
   workspaceName: string | null;

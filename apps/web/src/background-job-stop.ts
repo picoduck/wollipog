@@ -1,4 +1,5 @@
 import { runnerCapabilityRequirement, runnerSupportsProtocol, type SessionView } from "@wollipog/protocol";
+import { sessionCommandRefusal } from "./session-command-permissions.js";
 
 /** Whether a surface can offer Stop Job for this session's background jobs (#1780), and if not, why. */
 export type BackgroundJobStopAvailability = { available: true } | { available: false; reason: string };
@@ -6,14 +7,17 @@ export type BackgroundJobStopAvailability = { available: true } | { available: f
 /**
  * Stop Job ends one managed background job through the runner, without ending the session. Only a
  * Claude Code session has managed jobs to stop. `null` means the action does not apply at all, so
- * no control is shown; an older or offline runner shows it as unavailable with the reason.
+ * no control is shown; a person the server would refuse (#1843), or an older or offline runner,
+ * shows it as unavailable with the reason.
  */
 export function backgroundJobStopAvailability(
-  session: Pick<SessionView, "driver" | "backgroundWorkTracking">,
+  session: Pick<SessionView, "driver" | "backgroundWorkTracking" | "commandPermissions">,
   runnerProtocolVersion: number | null | undefined,
   runnerOnline: boolean,
 ): BackgroundJobStopAvailability | null {
   if (session.driver !== "claude-code" || session.backgroundWorkTracking === "untracked") return null;
+  const refusal = sessionCommandRefusal(session, "stopBackgroundJob");
+  if (refusal) return { available: false, reason: refusal };
   if (!runnerSupportsProtocol(runnerProtocolVersion, "backgroundJobStop")) {
     return { available: false, reason: runnerCapabilityRequirement(runnerProtocolVersion, "backgroundJobStop", "Stop Job") };
   }

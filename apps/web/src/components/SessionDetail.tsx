@@ -245,6 +245,7 @@ import {
   type QueuedPromptEditState,
 } from "../queued-edit-recovery.js";
 import { materializePromptImages } from "../prompt-image-materialization.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
 
 const NO_IMAGE_MIME_TYPES: readonly string[] = [];
 const STOP_TURN_RETRY_MS = 8_000;
@@ -3345,9 +3346,10 @@ function SessionDetailLoaded({
   const queuedEditRetryable = queuedEditReconciliation === null ||
     queuedEditReconciliation.status === "retryable";
   const canSend = canPrompt && (text.trim().length > 0 || images.length > 0);
+  const restartRefusal = sessionCommandRefusal(session, "restart");
   const restartFromComposer = useCallback(async () => {
     if (session.status !== "stopped" || session.stopOperation?.status === "stop_failed" ||
-      !runnerOnline || busy || restartPending) return;
+      !runnerOnline || busy || restartPending || restartRefusal !== null) return;
     const generation = viewGenerationRef.current;
     setError(null);
     setBusy(true);
@@ -3362,7 +3364,7 @@ function SessionDetailLoaded({
         setBusy(false);
       }
     }
-  }, [api, busy, loadSession, restartPending, runnerOnline, session.id, session.status,
+  }, [api, busy, loadSession, restartPending, restartRefusal, runnerOnline, session.id, session.status,
     session.stopOperation?.status]);
   const failedSetupWorktree = session.worktrees?.find((worktree) => worktree.setup?.status === "failed");
   const { creation: recoveryCreation, create: createRecoveryWorktreeWithProgress } =
@@ -5658,8 +5660,8 @@ function SessionDetailLoaded({
                       className="send-btn"
                       onPointerDown={(e) => e.preventDefault()}
                       onClick={() => void restartFromComposer()}
-                      disabled={!runnerOnline || composerRequestBusy}
-                      title={restartPending ? "Restarting Session" : "Restart Session"}
+                      disabled={!runnerOnline || composerRequestBusy || restartRefusal !== null}
+                      title={restartPending ? "Restarting Session" : restartRefusal ?? "Restart Session"}
                       aria-label={restartPending ? "Restarting Session" : "Restart Session"}
                     >
                       {restartPending ? <Spinner /> : <RefreshIcon size={14} />}

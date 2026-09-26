@@ -3464,6 +3464,42 @@ test("a stopped Session replaces Send with an accessible restart action until re
   }
 });
 
+test("a stopped Session shows the composer's Restart disabled with the reason to a person the server would refuse (#1843)", async () => {
+  const draft = deferred<ComposerDraft | null>();
+  const restarted: string[] = [];
+  const reason = "Your Viewer role is read-only.";
+  const fixture = await mountFixture(draft, {
+    sessionPatch: {
+      status: "stopped",
+      commandPermissions: {
+        stop: { allowed: false, reason },
+        restart: { allowed: false, reason },
+        stopBackgroundJob: { allowed: false, reason },
+      },
+    },
+    client: {
+      restart: async (sessionId) => {
+        restarted.push(sessionId);
+        return session(sessionId);
+      },
+    },
+  });
+  try {
+    await resolveDraft(draft, "");
+    const restart = fixture.container.querySelector(
+      'button[aria-label="Restart Session"]',
+    ) as HTMLButtonElement | null;
+    assert.ok(restart, "the action stays in place so the person can see why it is unavailable");
+    assert.equal(restart.disabled, true);
+    assert.equal(restart.title, reason);
+    await act(async () => { restart.click(); });
+    await flushAsyncWork();
+    assert.deepEqual(restarted, [], "no request is sent");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("a stopped Session with a failed Stop does not offer Restart in the composer", async () => {
   const draft = deferred<ComposerDraft | null>();
   const fixture = await mountFixture(draft, {

@@ -1176,11 +1176,17 @@ function reducer(state: State, action: Action): State {
         case "session_upsert": {
           const sessions = new Map(state.sessions);
           const previousSession = sessions.get(msg.session.id);
-          sessions.set(msg.session.id, msg.session);
+          // Only reads carry this client's command permissions (#1843); a mutation's response
+          // does not. They follow who is looking and who owns the session, not its state, so keep
+          // the last verdict rather than re-offer a command the server refuses.
+          const session = msg.session.commandPermissions === undefined && previousSession?.commandPermissions
+            ? { ...msg.session, commandPermissions: previousSession.commandPermissions }
+            : msg.session;
+          sessions.set(msg.session.id, session);
           state.activity.set(msg.session.id, reconcileSessionActivity(
             state.activity.get(msg.session.id),
             previousSession,
-            msg.session,
+            session,
           ));
           const nextEpoch = sessionEventEpoch(msg.session);
           const cachedEpoch = state.eventEpochs.get(msg.session.id) ?? 0;

@@ -167,6 +167,7 @@ import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { readSshConfigHosts } from "./ssh-config.js";
 import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
+import { withSessionCommandPermissions } from "./session-command-permissions.js";
 import {
   sanitizeSessionNamingCustomModelResult,
   sanitizeSessionNamingRunnerResult,
@@ -3568,7 +3569,12 @@ app.delete("/api/boxes/:id", async (req, reply) => {
 app.get("/api/sessions", async (req) => {
   const includeArchived = (req.query as { archived?: string })?.archived === "true";
   const principal = requestPrincipal(req);
-  return { sessions: principal ? db.listSessionsForPrincipal(principal, includeArchived) : [] };
+  return {
+    sessions: principal
+      ? db.listSessionsForPrincipal(principal, includeArchived)
+        .map((session) => withSessionCommandPermissions(db, principal, session))
+      : [],
+  };
 });
 
 app.get("/api/sessions/archive-page", async (req, reply) => {
@@ -3590,7 +3596,7 @@ app.get("/api/sessions/archive-page", async (req, reply) => {
   if ("error" in page) return reply.code(400).send(page);
   const sessions = page.sessionIds.flatMap((sessionId) => {
     const session = db.getSession(sessionId);
-    return session ? [session] : [];
+    return session ? [withSessionCommandPermissions(db, principal, session)] : [];
   });
   const snippets = q.length >= 2
     ? Object.fromEntries(db.searchEvents(q, Math.max(1, sessions.length), sessions.map((session) => session.id))
@@ -3611,7 +3617,7 @@ app.get("/api/sessions/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const session = db.getSession(id);
   if (!session) return reply.code(404).send({ error: "session not found" });
-  return { session };
+  return { session: withSessionCommandPermissions(db, requestPrincipals.get(req) ?? requestPrincipal(req), session) };
 });
 
 app.post("/api/sessions/:id/parent-control", async (req, reply) => {

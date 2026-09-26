@@ -19,6 +19,26 @@ test("Stop Job applies to Claude Code sessions with managed work, and says why i
   assert.equal(backgroundJobStopAvailability({ ...claude, backgroundWorkTracking: "untracked" }, PROTOCOL_VERSION, true), null);
 });
 
+test("Stop Job is unavailable to a person the server would refuse, before any runner reason (#1843)", () => {
+  const claude = { driver: "claude-code" as const, backgroundWorkTracking: "managed" as const };
+  const reason = "Only the session owner or its controlling Orchestrator can stop its background jobs.";
+  const refused = {
+    ...claude,
+    commandPermissions: {
+      stop: { allowed: true as const },
+      restart: { allowed: true as const },
+      stopBackgroundJob: { allowed: false as const, reason },
+    },
+  };
+  assert.deepEqual(backgroundJobStopAvailability(refused, PROTOCOL_VERSION, true), { available: false, reason });
+  assert.deepEqual(backgroundJobStopAvailability(refused, 189, false), { available: false, reason },
+    "the person's refusal is the reason even where the runner could not stop the job either");
+  assert.equal(backgroundJobStopAvailability({ ...refused, driver: "codex" }, PROTOCOL_VERSION, true), null,
+    "a session with no managed jobs still offers nothing");
+  const allowed = { ...refused, commandPermissions: { ...refused.commandPermissions, stopBackgroundJob: { allowed: true as const } } };
+  assert.deepEqual(backgroundJobStopAvailability(allowed, PROTOCOL_VERSION, true), { available: true });
+});
+
 test("only Result Blocked guidance changes with Stop Job availability (#1780)", () => {
   const blocked = BACKGROUND_DELIVERY_STATUS.continuation_blocked.action;
   assert.equal(backgroundDeliveryAction("continuation_blocked"), blocked, "a surface that does not know keeps the shared copy");

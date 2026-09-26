@@ -1199,6 +1199,7 @@ test("legacy UI clients never receive the no-timer shape or expose pending Somed
     listSessionsForPrincipal: () => [liveSession],
     listSessionReminders: () => [someday("pending")],
     canAccessSession: () => true,
+    isSessionOwner: () => true,
     getSession: () => liveSession,
   } as unknown as ControlPlaneDb;
   const hub = new Hub(db);

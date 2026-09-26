@@ -62,6 +62,30 @@ test("session upserts retain and clear the projected interruption queue hold", (
   assert.equal(store.getState().sessions.get("s1")?.queueHeld, undefined);
 });
 
+test("a session upsert without command permissions keeps the last ones this client received (#1843)", () => {
+  const store = new Store();
+  const refused = {
+    stop: { allowed: false as const, reason: "Your Viewer role is read-only." },
+    restart: { allowed: false as const, reason: "Your Viewer role is read-only." },
+    stopBackgroundJob: { allowed: false as const, reason: "Your Viewer role is read-only." },
+  };
+  message(store, {
+    type: "snapshot", runners: [], boxes: [], sessions: [{ ...session("s1"), commandPermissions: refused }], runs: [], pods: [],
+  });
+  // A mutation's response reaches the store as an upsert without the requester's permissions.
+  message(store, { type: "session_upsert", session: { ...session("s1"), status: "stopped" } });
+  assert.equal(store.getState().sessions.get("s1")?.status, "stopped");
+  assert.deepEqual(store.getState().sessions.get("s1")?.commandPermissions, refused);
+
+  const allowed = { stop: { allowed: true as const }, restart: { allowed: true as const }, stopBackgroundJob: { allowed: true as const } };
+  message(store, { type: "session_upsert", session: { ...session("s1"), commandPermissions: allowed } });
+  assert.deepEqual(store.getState().sessions.get("s1")?.commandPermissions, allowed, "a fresh verdict replaces the last one");
+
+  message(store, { type: "session_upsert", session: session("s2") });
+  assert.equal(store.getState().sessions.get("s2")?.commandPermissions, undefined,
+    "a control plane that never sends permissions leaves them absent");
+});
+
 test("authoritative snapshots replace durable steering receipts and queue reservation state without duplication", () => {
   const store = new Store();
   const pending: SteeringAttemptView = {

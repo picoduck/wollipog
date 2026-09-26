@@ -899,6 +899,56 @@ test("Stop Job is shown as unavailable on an older runner, and Result Blocked sa
   }
 });
 
+test("Stop Job is unavailable to a person the server would refuse, and Result Blocked says why (#1843)", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  let called = false;
+  const client = { stopBackgroundJob: async () => { called = true; } } as unknown as ApiClient;
+  const reason = "Only the session owner or its controlling Orchestrator can stop its background jobs.";
+  const render = (session: SessionView) => act(async () => root.render(
+    <ApiProvider client={client}>
+      <BackgroundWorkPanel session={session} runnerOnline runnerProtocolVersion={PROTOCOL_VERSION}
+        parentTurnEventIds={new Map()} onOpenParentTurn={() => undefined} />
+    </ApiProvider>,
+  ));
+  try {
+    await render(resultBlockedSession({
+      commandPermissions: {
+        stop: { allowed: true },
+        restart: { allowed: true },
+        stopBackgroundJob: { allowed: false, reason },
+      },
+    }));
+    const button = stopJobButton(container, "Monitor Job")!;
+    assert.equal(button.disabled, true);
+    assert.equal(button.title, reason);
+    assert.match(describedBy(button), /^Stops Monitor Job \d+\. Stop Job is unavailable: /u);
+    assert.ok(describedBy(button).endsWith(reason));
+    const summary = container.querySelector<HTMLElement>(".background-delivery-summary")?.textContent ?? "";
+    assert.doesNotMatch(summary, /Use Stop Job/, "Result Blocked does not direct this person to Stop Job");
+    assert.ok(summary.includes(`Stop Job is unavailable: ${reason} Ask the session to stop the unfinished job`), summary);
+    await act(async () => button.click());
+    assert.equal(container.querySelector(".background-work-job-confirm"), null, "no confirmation opens");
+    assert.equal(called, false, "no request is sent");
+
+    // The session owner keeps Stop Job exactly as before.
+    await render(resultBlockedSession({
+      commandPermissions: {
+        stop: { allowed: true },
+        restart: { allowed: true },
+        stopBackgroundJob: { allowed: true },
+      },
+    }));
+    assert.equal(stopJobButton(container, "Monitor Job")!.disabled, false);
+    assert.match(container.querySelector(".background-delivery-summary")?.textContent ?? "", /Use Stop Job on the unfinished job below/);
+  } finally {
+    await act(async () => root.unmount());
+    happyContainer.remove();
+  }
+});
+
 test("Result Blocked in a view focused on the finished sibling says where Stop Job is (#1780)", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);

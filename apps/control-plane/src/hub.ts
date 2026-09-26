@@ -68,6 +68,7 @@ import type {
 import type { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal } from "./identity.js";
 import { LOCAL_OWNER_USER_ID, PERSONAL_ORGANIZATION_ID } from "./identity.js";
+import { withSessionCommandPermissions } from "./session-command-permissions.js";
 
 export function reminderWakeReasonForEvent(
   payload: SessionEventPayload,
@@ -592,7 +593,7 @@ export class Hub {
       },
       runners,
       boxes: globalAdmin ? this.db.listBoxes() : [],
-      sessions: sessions.map((s) => this.withQueue(s)),
+      sessions: sessions.map((s) => withSessionCommandPermissions(this.db, info.principal, this.withQueue(s))),
       projects,
       reminders,
       worktreeSetupNoticeDismissals,
@@ -1157,6 +1158,9 @@ export class Hub {
     // O(clients × payload) on the streamed-delta hot path.
     if (this.uiClients.size === 0) return;
     const data = JSON.stringify(msg);
+    // A session view carries the receiving principal's command permissions (#1843). Most clients
+    // share one verdict, so serialize once per distinct verdict rather than once per client.
+    const sessionDataByPermissions = new Map<string, string>();
     for (const [client, info] of this.uiClients) {
       if (!this.isSubscribed(info, msg)) continue;
       if (!(predicate ? predicate(info.principal, info) : this.canReceive(info.principal, msg))) continue;
@@ -1173,6 +1177,13 @@ export class Hub {
           const project = this.db.getProjectForPrincipal(info.principal, projected.project.id);
           if (!project) continue;
           clientData = JSON.stringify({ type: "project_upsert", project } satisfies ControlPlaneToUi);
+        }
+        if (projected.type === "session_upsert" && info.principal !== undefined) {
+          const session = withSessionCommandPermissions(this.db, info.principal, projected.session);
+          const key = JSON.stringify(session.commandPermissions);
+          const shared = projected === msg ? sessionDataByPermissions.get(key) : undefined;
+          clientData = shared ?? JSON.stringify({ ...projected, session } satisfies ControlPlaneToUi);
+          if (projected === msg && shared === undefined) sessionDataByPermissions.set(key, clientData);
         }
         if (projected.type === "session_upsert") info.visibleSessionIds?.add(projected.session.id);
         if (projected.type === "runner_upsert") info.visibleRunnerIds?.add(projected.runner.runnerId);
