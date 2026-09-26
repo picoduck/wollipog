@@ -358,8 +358,10 @@ test("a restart that only ended unfinished work reports it as unrecoverable with
     const meta = f.store.readMeta(spec.sessionId)!;
     assert.equal(meta.orphanedWork, undefined, "orphan recovery has nothing left to resume");
     assert.equal(meta.backgroundWorkState, undefined);
-    assert.deepEqual(meta.backgroundJobs?.find((job) => job.id === finishedInTurn.id), finishedInTurn,
-      "a result the old conversation already received is kept as history, unchanged");
+    const history = meta.backgroundJobs?.find((job) => job.id === finishedInTurn.id);
+    assert.ok(history?.restartedAt, "history is marked as the replaced conversation's");
+    assert.deepEqual({ ...history, restartedAt: undefined }, { ...finishedInTurn, restartedAt: undefined },
+      "a result the old conversation already received is otherwise kept as history, unchanged");
     assert.deepEqual(meta.backgroundJobs?.filter((job) => job.id !== finishedInTurn.id)
       .map((job) => [job.id, job.launchType, job.terminalStatus, job.endedBy?.reason]), [
       ["monitor-1", "monitor", "killed", "session_restart"],
@@ -705,6 +707,50 @@ test("a restart keeps a queued prompt whose steering promotion never reached the
       ["being promoted", "queued after it"], "the unsubmitted promotion runs as the queued prompt it was, in order");
     await waitFor(() => lifecycle.includes("promoted:completed"), "the promoted prompt did not complete");
     assert.equal(lifecycle.some((entry) => entry.startsWith("promoted:failed")), false, lifecycle.join("\n"));
+  } finally {
+    manager?.shutdownAll();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("a job the restarted conversation starts under a reused task id gets its own record and result (#1779)", { skip: !haveGit() }, async () => {
+  const f = fixture("reused-id");
+  let manager: SessionManager | undefined;
+  try {
+    const spec = claudeSpec("s_restart_reused_id", f.repo);
+    // The replaced conversation's task-1 finished and was delivered long ago.
+    f.store.create(storedClaudeSession(spec.sessionId, f.repo, {
+      backgroundJobs: [storedJob("task-1", {
+        terminalStatus: "completed", terminalObservedAt: 2_100, continuationRequired: false, assistantResultPersistedAt: 2_200,
+      })],
+    }));
+    const fake = fakeProvider({
+      onPrompt: (provider, text) => {
+        if (text !== "start work") return;
+        const job = { id: "task-1", launchType: "shell" as const, startedAt: Date.now() };
+        provider.cb.onBackgroundWork?.({ state: "running", pendingTaskIds: [job.id], jobs: [job], observedTaskIds: [job.id] });
+      },
+    });
+    manager = new SessionManager((message) => { f.sent.push(message); }, () => {}, f.store, "runner", undefined,
+      fake.factory as never, f.dataDir, 1);
+    assert.equal(await manager.start(spec), true);
+    manager.prompt(spec.sessionId, "start work");
+    await waitFor(() => f.store.readMeta(spec.sessionId)?.status === "idle" && fake.prompts.length === 1,
+      "the launching turn did not finish");
+    const record = f.store.readMeta(spec.sessionId)?.backgroundJobs?.find((job) => job.id === "task-1");
+    assert.equal(record?.restartedAt, undefined, "the new job does not inherit the replaced conversation's record");
+    assert.equal(record?.assistantResultPersistedAt, undefined);
+
+    // It finishes after its turn; its result is owed to this conversation and delivered.
+    fake.providers[0]!.cb.onBackgroundWork?.({
+      state: null, pendingTaskIds: [],
+      terminalJobs: [{ id: "task-1", launchType: "shell", startedAt: Date.now(), status: "completed",
+        terminalAt: Date.now(), continuationRequired: true }],
+    });
+    await waitFor(() => fake.prompts.some((prompt) => prompt.text.startsWith("Managed background jobs reached")),
+      "the new job's result was not delivered");
+    await waitFor(() => f.store.readMeta(spec.sessionId)?.backgroundJobs?.find((job) => job.id === "task-1")
+      ?.assistantResultPersistedAt !== undefined, "the new job's result was not recorded as delivered");
   } finally {
     manager?.shutdownAll();
     rmSync(f.root, { recursive: true, force: true });

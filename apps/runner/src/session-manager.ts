@@ -895,13 +895,17 @@ function carryBackgroundWorkAcrossRestart(
       registeredAt: prior.orphanedWork?.markedAt ?? now,
     }));
   }
+  // Every carried record belongs to the replaced conversation. The stamp keeps a job the new
+  // conversation starts under a reused provider task id from merging into it (#1779).
+  const carried = jobs.map((job) => job.restartedAt === undefined ? { ...job, restartedAt: now } : job);
   return {
-    jobs,
-    killed: jobs.filter((job) => job.restartedAt === now && job.endedBy?.reason === "session_restart"),
-    delivering: jobs.filter((job) => job.restartedAt === now && job.continuationRequired &&
-      job.continuationSubmittedAt === undefined && job.continuationMissingResultAt === undefined),
-    undeliverable: jobs.filter((job) => job.restartedAt === now && job.continuationRequired &&
-      job.continuationSubmittedAt === undefined && job.continuationMissingResultAt !== undefined),
+    jobs: carried,
+    killed: carried.filter((job) => job.endedBy?.reason === "session_restart" && job.endedBy.endedAt === now),
+    delivering: carried.filter((job) => job.restartedAt === now && job.continuationRequired &&
+      job.assistantResultPersistedAt === undefined && job.continuationSubmittedAt === undefined &&
+      job.continuationMissingResultAt === undefined),
+    undeliverable: carried.filter((job) => job.continuationRequired && job.assistantResultPersistedAt === undefined &&
+      job.continuationSubmittedAt === undefined && job.continuationMissingResultAt === now),
   };
 }
 
@@ -15617,7 +15621,13 @@ export class SessionManager {
       ? [...byId.values()].find((job) => job.toolUseId === toolUseId)
       : undefined);
     const register = (job: NonNullable<DriverBackgroundWorkUpdate["jobs"]>[number]) => {
-      const prior = findAlias(job.id, job.toolUseId);
+      let prior = findAlias(job.id, job.toolUseId);
+      // A record a restart carried over describes the replaced conversation, never a job of the
+      // current one, even when a provider task id repeats (#1779): the new job gets a fresh record.
+      if (prior?.restartedAt !== undefined) {
+        byId.delete(prior.id);
+        prior = undefined;
+      }
       if (prior && prior.id !== job.id) byId.delete(prior.id);
       const outputReference = job.outputFile?.slice(0, MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS);
       byId.set(job.id, {
