@@ -41,6 +41,7 @@ test("the merged working row shows observable progress and links to transcript a
   await expect(target).toBeVisible();
   await expect(target).toContainText("Coordinate Release Audit");
   await expect.poll(() => target.evaluate((element) => element === document.activeElement)).toBe(true);
+  await target.scrollIntoViewIfNeeded();
   await expect(target).toBeInViewport();
 
   await progress.getByRole("button", { name: "Open Subagent" }).click();
