@@ -386,9 +386,10 @@ for (const viewport of [
     await expect(entry).toHaveCount(1);
     await expect(entry.locator("dt")).toHaveText(["Hold", "Reason", "Recovery Action", "Held Decision Resumes"]);
     await expect(entry).toContainText(
-      "restart the session with restart_session, knowing what that costs: the provider and its background job end, and " +
-      "the new conversation is told each job's result or that it cannot be recovered; the queued messages are kept and " +
-      "run after the restart; and any approved workflow decision the session has not yet consumed is revoked, and the " +
+      "restart the session with restart_session, knowing what that costs: the provider and its background job end, " +
+      "with unfinished work recorded as killed and unrecoverable and a finished result still owed reported to the new " +
+      "conversation; the queued messages are kept and run after the restart; and any approved workflow " +
+      "decision the session has not yet consumed is revoked, and the " +
       "restarted session is told which ones to request again.");
     await expect(entry).not.toContainText("discarded");
     await assertNoHorizontalOverflow(page, ".campaign-held-children");

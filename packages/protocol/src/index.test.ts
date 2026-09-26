@@ -1652,8 +1652,9 @@ test("a hold whose runner keeps the queue across a restart states what a restart
   assert.equal(queueHoldRecoveryAction(queueHold),
     "Wait for the unfinished background job to end; the handoff and the queued messages then proceed on their own. " +
     "If it never ends (a monitor whose condition never fires ends only with its provider process), restart the session " +
-    "with restart_session, knowing what that costs: the provider and its background job end, and the new conversation " +
-    "is told each job's result or that it cannot be recovered; the queued messages are kept and run after the restart; " +
+    "with restart_session, knowing what that costs: the provider and its background job end, with unfinished work " +
+    "recorded as killed and unrecoverable and a finished result still owed reported to the new conversation; " +
+    "the queued messages are kept and run after the restart; " +
     "and any approved workflow decision the session has not yet consumed is revoked, and the restarted session is told " +
     "which ones to request again.");
   for (const hold of [

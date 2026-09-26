@@ -6354,7 +6354,15 @@ export class SessionsService {
       // Queued behind the launch on the durable lane, after any prompt the runner carries across it.
       const notice = this.prompt(sessionId, restartRevokedDecisionsPrompt(revokedByRestart));
       if (!notice.ok) {
+        // A guardrail refusing the turn (a daily budget, worktree recovery) is not bypassed for it.
+        // The loss is recorded where the owner and the controlling Orchestrator read the session.
         this.log.warn(`restart revocation notice not delivered to ${sessionId}: ${notice.error}`);
+        const ev = this.db.appendEvent(sessionId, {
+          kind: "error",
+          message: `Restarting this session revoked ${revokedByRestart.map((decision) => decision.occurrenceId).join(", ")}, ` +
+            `but the notice naming them was not queued (${notice.error}); request each decision again as needed.`,
+        }, Date.now());
+        this.hub.sessionEvent(ev);
       }
     }
     // The runner replaces any existing process for this sessionId (no separate

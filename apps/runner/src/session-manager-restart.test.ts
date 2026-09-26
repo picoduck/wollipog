@@ -482,3 +482,123 @@ test("restarting a session held behind a job that never ends moves it, runs the 
     rmSync(f.root, { recursive: true, force: true });
   }
 });
+
+test("a restart that overtakes a launch keeps that launch's queued prompts in order and drops its old continuation (#1779)", { skip: !haveGit() }, async () => {
+  const f = fixture("overtaken");
+  let manager: SessionManager | undefined;
+  try {
+    let releaseInitialize = () => {};
+    const initializeGate = new Promise<void>((resolve) => { releaseInitialize = resolve; });
+    const fake = fakeProvider({ initializeGate: (index) => index === 1 ? initializeGate : undefined });
+    manager = new SessionManager((message) => { f.sent.push(message); }, () => {}, f.store, "runner", undefined,
+      fake.factory as never, f.dataDir, 1);
+    const spec = claudeSpec("s_restart_overtaken", f.repo);
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, HELD_TURN);
+    await waitFor(() => fake.prompts.length === 1, "the first turn did not start");
+    manager.prompt(spec.sessionId, "first queued");
+    // An overtaken launch (a rebind, say) left its own pre-admission FIFO: a prompt it accepted, and
+    // a runner-owned continuation written for the conversation the restart replaces.
+    const lifecycle: string[] = [];
+    // The continuation it holds is for a finished subagent whose result is still owed.
+    f.store.patchMeta(spec.sessionId, {
+      backgroundJobs: [storedJob("agent-old", {
+        launchType: "agent", terminalStatus: "completed", terminalObservedAt: 3_000, continuationRequired: true,
+        continuationId: "bgcont_old", continuationQueuedAt: 3_100,
+      })],
+    });
+    const internals = manager as unknown as { preLaunchQueues: Map<string, unknown[]> };
+    internals.preLaunchQueues.set(spec.sessionId, [
+      { id: "pre-admission", ordinal: 40, text: "accepted by the overtaken launch", images: [],
+        durable: recordingLifecycle("pre-admission", lifecycle) },
+      { id: "old-continuation", ordinal: 41, text: "Managed background jobs reached their terminal barrier.",
+        images: [], syntheticRecovery: true, backgroundJobIds: ["agent-old"] },
+    ]);
+
+    const restarted = manager.start(spec);
+    await waitFor(() => fake.providers.length === 2, "the replacement provider was not constructed");
+    manager.prompt(spec.sessionId, "sent during restart");
+    releaseInitialize();
+    assert.equal(await restarted, true);
+    await waitFor(() => fake.prompts.filter((prompt) => prompt.provider === 1).length === 4,
+      "the kept prompts and the restart report did not run after the restart");
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+    assert.deepEqual(fake.prompts.filter((prompt) => prompt.provider === 1).map((prompt) => prompt.text.startsWith(RESTART_CONTINUATION_PREFIX) ? RESTART_CONTINUATION_PREFIX : prompt.text),
+      ["first queued", "accepted by the overtaken launch", "sent during restart", RESTART_CONTINUATION_PREFIX],
+      "a later prompt queues behind every kept one, and the owed result is reported in the restart's own words");
+    assert.equal(fake.prompts.some((prompt) => prompt.text.startsWith("Managed background jobs")), false,
+      "the overtaken launch's continuation, written for the replaced conversation, never runs");
+    await waitFor(() => lifecycle.includes("pre-admission:completed"), "the kept prompt did not complete");
+    assert.deepEqual(lifecycle, ["pre-admission:started", "pre-admission:completed"]);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("a restart onto another provider records the Claude jobs it ended and the result it cannot report (#1779)", { skip: !haveGit() }, async () => {
+  const f = fixture("driver-change");
+  let manager: SessionManager | undefined;
+  try {
+    const spec = { ...claudeSpec("s_restart_driver_change", f.repo), driver: "codex" as const, command: "codex" };
+    f.store.create(storedClaudeSession(spec.sessionId, f.repo, {
+      backgroundWorkState: "running",
+      backgroundJobs: [
+        storedJob("monitor-1", { launchType: "monitor" }),
+        storedJob("agent-1", {
+          launchType: "agent", terminalStatus: "completed", terminalObservedAt: 3_000, continuationRequired: true,
+          outputReference: "/tmp/claude/tasks/agent-1.output",
+        }),
+      ],
+      pendingBackgroundTaskIds: ["monitor-1"],
+    }));
+    const fake = fakeProvider();
+    manager = new SessionManager((message) => { f.sent.push(message); }, () => {}, f.store, "runner", undefined,
+      fake.factory as never, f.dataDir, 1);
+    assert.equal(await manager.start(spec), true);
+    await new Promise<void>((resolve) => setTimeout(resolve, 50));
+
+    assert.deepEqual(fake.prompts, [], "a Claude result is never handed to another provider");
+    const meta = f.store.readMeta(spec.sessionId)!;
+    assert.equal(meta.driver, "codex");
+    assert.equal(meta.backgroundJobs?.find((job) => job.id === "monitor-1")?.endedBy?.reason, "session_restart");
+    assert.ok(meta.backgroundJobs?.find((job) => job.id === "agent-1")?.continuationMissingResultAt,
+      "the owed result is recorded as missing rather than pending");
+    assert.equal(meta.backgroundWorkState, undefined);
+    const notice = timelineText(f.store, spec.sessionId).find((text) => text.startsWith("The restart ended")) ?? "";
+    assert.match(notice, /a monitor \(job monitor-1, [^)]+\)\. It is recorded as killed/u);
+    assert.match(notice, /The result of a subagent \(job agent-1, [^)]+\), which finished before the restart, never reached the conversation and cannot be reported: the restarted session uses a different provider\./u);
+    assert.equal(notice.includes("agent-1.output"), false);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
+
+test("a restart with its own prompt keeps a full queue and refuses the new prompt instead (#1779)", { skip: !haveGit() }, async () => {
+  const f = fixture("full-queue");
+  let manager: SessionManager | undefined;
+  try {
+    const fake = fakeProvider();
+    manager = new SessionManager((message) => { f.sent.push(message); }, () => {}, f.store, "runner", undefined,
+      fake.factory as never, f.dataDir, 1);
+    const spec = claudeSpec("s_restart_full_queue", f.repo);
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, HELD_TURN);
+    await waitFor(() => fake.prompts.length === 1, "the first turn did not start");
+    const lifecycle: string[] = [];
+    for (let index = 0; index < 99; index++) manager.prompt(spec.sessionId, `queued ${index}`);
+    assert.equal(manager.prompt(spec.sessionId, "last accepted", [], undefined, undefined,
+      recordingLifecycle("last", lifecycle)), true);
+    assert.equal(manager.prompt(spec.sessionId, "over the limit"), false, "the queue is full");
+
+    assert.equal(await manager.start(spec, "restart prompt", [], recordingLifecycle("initial", lifecycle)), true);
+    await waitFor(() => lifecycle.includes("last:completed"), "the last accepted prompt did not run");
+    assert.ok(lifecycle.includes("initial:failed:prompt queue is full"), lifecycle.join("\n"));
+    assert.equal(lifecycle.some((entry) => entry.startsWith("last:failed")), false, "no accepted prompt is evicted");
+    assert.equal(fake.prompts.filter((prompt) => prompt.provider === 1).length, 100);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(f.root, { recursive: true, force: true });
+  }
+});
