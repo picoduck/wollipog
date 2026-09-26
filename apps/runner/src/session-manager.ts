@@ -820,6 +820,8 @@ function managedBackgroundWorkState(
 }
 const MAX_BACKGROUND_OUTPUT_REFERENCE_CHARS = 4_096;
 const BACKGROUND_CONTINUATION_DELIVERED_PREFIX = "Managed background continuation delivered: ";
+/** A continuation prompt lists at most this many results (runBackgroundContinuation). */
+const MAX_RESTART_CONTINUATION_JOBS = 128;
 const RESTART_CONTINUATION_PROMPT =
   "This session was restarted. The conversation that started the background jobs listed below ended with the restart, so their task notifications cannot reach this conversation; Wollipog recorded their results instead. A finished job's output, when listed, is in the named file: read it if the work in front of you needs it. A job the restart ended left no result that can be recovered. Report these results without waiting for another user message.";
 
@@ -857,20 +859,30 @@ function carryBackgroundWorkAcrossRestart(
     endedBy,
     restartedAt: now,
   });
-  const continuationId = `bgcont_${randomUUID()}`;
+  // One continuation reports at most MAX_RESTART_CONTINUATION_JOBS results, so a larger backlog is
+  // split: finishing a continuation marks every job in it delivered, and none may be left unnamed.
+  let continuationId = `bgcont_${randomUUID()}`;
+  let continuationJobs = 0;
+  const nextContinuationId = () => {
+    if (continuationJobs === MAX_RESTART_CONTINUATION_JOBS) {
+      continuationId = `bgcont_${randomUUID()}`;
+      continuationJobs = 0;
+    }
+    continuationJobs += 1;
+    return continuationId;
+  };
   const jobs = (prior.backgroundJobs ?? []).map((job): DurableBackgroundJob => {
     if (job.assistantResultPersistedAt !== undefined) return job;
     if (!job.terminalStatus || job.terminalObservedAt === undefined) return kill(job);
     // A job that finished inside a provider turn reached the conversation there, and one Wollipog
-    // ended has no result: neither is owed a continuation.
-    if (!job.continuationRequired) return job;
-    if (job.continuationSubmittedAt !== undefined) {
-      return job.continuationMissingResultAt !== undefined ? job : { ...job, continuationMissingResultAt: now };
-    }
+    // ended has no result: neither is owed a continuation. A result already recorded missing is
+    // settled too, and is never reported again by a later restart.
+    if (!job.continuationRequired || job.continuationMissingResultAt !== undefined) return job;
+    if (job.continuationSubmittedAt !== undefined) return { ...job, continuationMissingResultAt: now };
     if (!deliver) return { ...job, continuationMissingResultAt: now, restartedAt: now };
     return {
       ...job,
-      continuationId: job.continuationId ?? continuationId,
+      continuationId: job.continuationId ?? nextContinuationId(),
       continuationQueuedAt: job.continuationQueuedAt ?? now,
       restartedAt: now,
     };
@@ -5613,7 +5625,8 @@ export class SessionManager {
       }
       // The replaced Claude conversation's background work is carried, not dropped (#1779). No
       // pending task id is carried: the fresh provider must not wait on work that died with the old.
-      if (prior?.driver === "claude-code") {
+      // A session that left Claude Code keeps the records an earlier restart carried as history.
+      if (prior && (prior.driver === "claude-code" || prior.backgroundJobs?.length)) {
         restartBackground = carryBackgroundWorkAcrossRestart(prior, this.runnerId, Date.now(), driver === "claude-code");
         if (restartBackground.jobs.length) {
           meta.backgroundJobs = restartBackground.jobs;
@@ -16006,7 +16019,12 @@ export class SessionManager {
       backgroundWorkState: managedBackgroundWorkState(backgroundJobs),
     });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
-    if (this.queuedBackgroundJobIds(updated).length > 0) this.scheduleBackgroundContinuation(sessionId);
+    if (this.queuedBackgroundJobIds(updated).length > 0) {
+      // The next queued continuation (a restart can split its results across several, #1779) goes
+      // now; the retry timer armed while this one was in flight is only a fallback.
+      this.cancelBackgroundContinuationTimer(sessionId);
+      this.scheduleBackgroundContinuation(sessionId);
+    }
     if (!updated?.backgroundWorkState) this.resumeDeferredHandoff(sessionId);
   }
 
