@@ -5868,8 +5868,14 @@ export class SessionsService {
   }
 
   /** Clear a durable stop only after terminal/absence evidence. Any attached archive mutation is
-   * committed in the same DB transaction before the changed session is broadcast. */
+   * committed in the same DB transaction before the changed session is broadcast. The Stop that
+   * recorded the intent revokes the session's decisions before it writes the stop, but a
+   * control-plane stop between those writes leaves them pending, and the terminal evidence that
+   * settles the intent can arrive on a path that skips revocation because the session already
+   * reads terminal. Settlement therefore revokes again, idempotently, so a session whose Stop is
+   * confirmed never keeps a decision its parent could still resolve (#1759). */
   private settleStopIntent(sessionId: string, now: number): void {
+    this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-stopped");
     const projectId = this.db.getSession(sessionId)?.projectId;
     const settled = this.db.settleSessionStopIntent(sessionId, now);
     this.hub.sessionChangedById(sessionId);

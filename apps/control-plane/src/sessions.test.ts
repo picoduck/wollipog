@@ -21534,6 +21534,27 @@ test("an explicit Stop cut off before it revoked cannot leave a decision the par
     assert.notEqual(f.resumeState(merge.occurrenceId), "held");
     assert.deepEqual(db.sessionsWithHeldWorkflowDecisionResumes(RUNNER_ID), []);
 
+    // The child is present at reconnect instead: the stop-intent fence re-applies the Stop, and
+    // the runner's later terminal status settles the intent on a path that returns before the
+    // ordinary revocation because the child already reads terminal. Settling revokes.
+    db.updateSessionStatus(root.id, "running", Date.now());
+    db.updateSessionStatus(child.id, "idle", Date.now());
+    const present = f.requestMerge(1772);
+    db.addSessionStopIntent(child.id, RUNNER_ID, Date.now(), false);
+    db.settleStartupState(Date.now());
+    db.updateSessionStatus(root.id, "running", Date.now());
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: f.worktreePath, worktreeRecovery: null,
+    })]);
+    assert.equal(db.getSession(child.id)?.status, "stopped", "the fence re-applies the Stop");
+    assert.equal(db.hasSessionStopIntent(child.id), true);
+    svc.onSessionStatus(child.id, "stopped", undefined, undefined, RUNNER_ID);
+    assert.equal(db.hasSessionStopIntent(child.id), false, "the runner's terminal status settled the intent");
+    assert.equal(db.workflowDecisionByOccurrence(present.occurrenceId)?.status, "revoked");
+    assert.equal(svc.resolveDescendantRequest(root.id, child.id, present.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).status, 409);
+    assert.notEqual(f.resumeState(present.occurrenceId), "held");
+
     // The pre-snapshot reconcile path ends such a session the same way: restored by a reconnect,
     // it requests again, is stopped provisionally, and is then absent from the runner's inventory.
     db.updateSessionStatus(root.id, "running", Date.now());
