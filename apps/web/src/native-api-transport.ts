@@ -27,11 +27,18 @@ function abortError(message: string): DOMException {
 
 function nativeRequestError(cause: unknown): Error {
   if (cause instanceof DOMException && cause.name === "AbortError") return cause;
-  if (cause instanceof Error) return new TransportRequestError(cause.message, cause);
-  if (typeof cause === "string" && cause.trim()) return new TransportRequestError(cause, cause);
-  if (cause !== null && typeof cause === "object" && "message" in cause &&
-      typeof cause.message === "string" && cause.message.trim()) return new TransportRequestError(cause.message, cause);
-  return new TransportRequestError("The native request failed.", cause);
+  const message = cause instanceof Error ? cause.message
+    : typeof cause === "string" ? cause
+    : cause !== null && typeof cause === "object" && "message" in cause &&
+      typeof cause.message === "string" ? cause.message
+    : "The native request failed.";
+  // The Rust transport uses these exact messages for send and response-stream failures. Other
+  // IPC rejections include deterministic path, connection-state, and credential refusals.
+  if (message === "The remote instance request failed." ||
+      message === "The remote instance response was interrupted.") {
+    return new TransportRequestError(message, cause);
+  }
+  return cause instanceof Error ? cause : new Error(message.trim() || "The native request failed.");
 }
 
 export interface NativeApiTransportOptions {
