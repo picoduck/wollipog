@@ -691,6 +691,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   last_event_at  INTEGER,
   hydrated_seq   INTEGER NOT NULL DEFAULT 0,
   event_epoch    INTEGER NOT NULL DEFAULT 0,
+  retained_attachment_through_seq INTEGER,
   runner_history_epoch INTEGER,
   runner_history_tail_seq INTEGER NOT NULL DEFAULT 0,
   runner_snapshot_fingerprint TEXT,
@@ -5279,6 +5280,8 @@ export class ControlPlaneDb {
       // CP-owned event-log generation. Reprocess increments it so reconnecting dashboards can
       // distinguish a replacement timeline from an append-only history gap.
       "event_epoch INTEGER NOT NULL DEFAULT 0",
+      // NULL marks a pre-upgrade reset; its retained prefix is inferred until the next reset.
+      "retained_attachment_through_seq INTEGER",
       // Protocol v54 runner-owned log generation. NULL means a migrated/pre-v54 row whose current
       // cached events may be adopted into the first known epoch without destructive replacement.
       "runner_history_epoch INTEGER",
@@ -13605,10 +13608,12 @@ export class ControlPlaneDb {
       this.stmt(
         `UPDATE sessions
             SET runner_history_epoch=?, runner_history_tail_seq=?, hydrated_seq=0,
-                message_count=?, last_event_at=?, preview=NULL, event_epoch=event_epoch+1
+                message_count=?, last_event_at=?, preview=NULL, event_epoch=event_epoch+1,
+                retained_attachment_through_seq=?
           WHERE id=?`,
       ).run(historyEpoch, settledTail, attachments.length,
         attachments.length ? attachments.reduce((latest, attachment) => Math.max(latest, attachment.ts), 0) : null,
+        attachments.length,
         id);
     } else if (historyEpoch !== undefined) {
       this.stmt(
@@ -13685,7 +13690,7 @@ export class ControlPlaneDb {
         `UPDATE sessions SET hydrated_seq=0, message_count=0, last_event_at=NULL, preview=NULL,
             runner_history_epoch=NULL, runner_history_tail_seq=0, runner_snapshot_fingerprint=NULL,
             runner_registration_snapshot_fingerprint=NULL,
-            event_epoch=event_epoch+1 WHERE id=?`,
+            event_epoch=event_epoch+1, retained_attachment_through_seq=0 WHERE id=?`,
       ).run(id);
       this.db.exec("COMMIT");
       this.collectWorkflowArtifactBlobs();
@@ -19547,6 +19552,40 @@ export class ControlPlaneDb {
       ts: r.ts,
       payload: JSON.parse(r.payload) as SessionEventPayload,
     }));
+  }
+
+  /** The control-plane-owned prefix retained across a runner-history reset. Read it separately
+   * from the normal event window so a recent tail page does not lose an attachment whose durable
+   * sequence was compacted to the start of the new epoch. This cursor never advances the normal
+   * transcript cursor, and the caller bounds each page. */
+  listRetainedAttachmentEventPage(sessionId: string, afterSeq: number, limit: number): CachedEventPage {
+    if (!Number.isSafeInteger(afterSeq) || afterSeq < 0 ||
+        !Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      throw new RangeError("retained attachment cursor and limit must be bounded");
+    }
+    const boundary = this.stmt(
+      "SELECT retained_attachment_through_seq FROM sessions WHERE id=?",
+    ).get(sessionId) as { retained_attachment_through_seq: number | null } | undefined;
+    if (!boundary) return { events: [], nextAfterSeq: afterSeq, hasMore: false };
+    const firstRunner = boundary.retained_attachment_through_seq === null ? this.stmt(
+      `SELECT seq FROM session_events WHERE session_id=? AND kind!='artifact_attached'
+         ORDER BY seq LIMIT 1`,
+    ).get(sessionId) as { seq: number } | undefined : undefined;
+    const throughSeq = boundary.retained_attachment_through_seq;
+    const rows = this.stmt(
+      `SELECT id, session_id, seq, ts, payload FROM session_events
+         WHERE session_id=? AND kind='artifact_attached' AND seq>?
+           AND (? IS NULL OR seq<=?) AND (? IS NULL OR seq<?)
+         ORDER BY seq LIMIT ?`,
+    ).all(sessionId, afterSeq, throughSeq, throughSeq,
+      firstRunner?.seq ?? null, firstRunner?.seq ?? null, limit + 1) as unknown as Array<{
+      id: number; session_id: string; seq: number; ts: number; payload: string;
+    }>;
+    const events = rows.slice(0, limit).map((row) => ({
+      id: row.id, sessionId: row.session_id, seq: row.seq, ts: row.ts,
+      payload: JSON.parse(row.payload) as SessionEventPayload,
+    }));
+    return { events, nextAfterSeq: events.at(-1)?.seq ?? afterSeq, hasMore: rows.length > limit };
   }
 
   /** A bounded, SQL-filtered page for child projections. Unrelated root messages and tools remain

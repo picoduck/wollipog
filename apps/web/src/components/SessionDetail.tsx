@@ -2525,7 +2525,7 @@ function SessionDetailLoaded({
 
   // Incremental derivation: streamed chunks push only the NEW events into a per-session
   // builder instead of re-folding the whole array (O(n²) over a long session).
-  const items = useTimeline(sessionId, evs);
+  const items = useTimeline(sessionId, evs, session.eventEpoch ?? 0);
   const ownApprovalHasTimelineRow = timelineApprovalRequestId !== undefined && items.some((item) =>
     item.kind === "permission" && item.requestId === timelineApprovalRequestId &&
     item.resolvedOptionId === undefined);

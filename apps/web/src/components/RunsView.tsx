@@ -33,7 +33,7 @@ function MemberColumn({ sessionId }: { sessionId: string }) {
     ? state.runners.get(session.runnerId)?.status === "online"
     : true);
   const conn = useStoreSelector((state) => state.conn);
-  const items = useTimeline(sessionId, evs);
+  const items = useTimeline(sessionId, evs, session?.eventEpoch ?? 0);
   const scrollRef = useRef<HTMLDivElement>(null);
   if (!session) return null;
   const presentation = transcriptPresentation({ itemCount: items.length, hasOptimistic: false, working: false, history, conn });

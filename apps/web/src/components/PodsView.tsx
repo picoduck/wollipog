@@ -62,7 +62,7 @@ const PodMemberTimeline = memo(function PodMemberTimeline({
   const events = useStoreSelector((state) => selectComparisonEvents(state, sessionId));
   const history = useStoreSelector((state) => selectComparisonHistory(state, sessionId));
   const conn = useStoreSelector((state) => state.conn);
-  const items = useTimeline(sessionId, events);
+  const items = useTimeline(sessionId, events, eventEpoch);
   const presentation = transcriptPresentation({ itemCount: items.length, hasOptimistic: false, working: false, history, conn });
   const scrollRef = useRef<HTMLDivElement>(null);
   return (

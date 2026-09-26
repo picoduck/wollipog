@@ -94,6 +94,7 @@ import type {
   OrchestratorSettingsView,
   UpdateOrchestratorSettingsRequest,
   SessionEventsResponse,
+  SessionEvent,
   SessionFileEntry,
   SessionView,
   SessionProviderAccountOptionsResponse,
@@ -744,6 +745,13 @@ export function createApiClient(transport: ApiTransport) {
     // omit the flag so their count cursors remain exact and disjoint.
     if (alignToTurn) query.set("align", "turn");
     return req<SessionEventsResponse>(`/api/sessions/${encodeURIComponent(id)}/events?${query}`);
+  },
+
+  getRetainedAttachmentEventPage: (id: string, after: number, eventEpoch: number, limit = 200) => {
+    const query = new URLSearchParams({ after: String(after), limit: String(limit), eventEpoch: String(eventEpoch) });
+    return req<{ events: SessionEvent[]; eventEpoch: number; nextAfter: number; hasMore: boolean }>(
+      `/api/sessions/${encodeURIComponent(id)}/retained-attachment-events?${query}`,
+    );
   },
 
   transcriptExport: (id: string, format: "json" | "markdown") => transcriptExport(transport, id, format),

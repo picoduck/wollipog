@@ -1398,6 +1398,16 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.equal((await ownerFetch(
     "/api/sessions/session-target/events?after=0&limit=201&eventEpoch=0",
   )).status, 400);
+  const noRetainedAttachments = await (await ownerFetch(
+    "/api/sessions/session-target/retained-attachment-events?after=0&limit=1&eventEpoch=0",
+  )).json() as { events: unknown[]; eventEpoch: number; nextAfter: number; hasMore: boolean };
+  assert.deepEqual(noRetainedAttachments, { events: [], eventEpoch: 0, nextAfter: 0, hasMore: false });
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/retained-attachment-events?after=0&limit=1&eventEpoch=99",
+  )).status, 409);
+  assert.equal((await ownerFetch(
+    "/api/sessions/session-target/retained-attachment-events?after=0&limit=201&eventEpoch=0",
+  )).status, 400);
 
   // The bounded opening window reads backwards: the newest rows first, then older pages below an
   // explicit cursor. Opening a session must never start at the oldest cached event.

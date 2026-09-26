@@ -5373,9 +5373,51 @@ test("runner history resets preserve attachment rows, timestamps, and retry iden
       );
       assert.equal(hydrated.applied, true);
       assert.deepEqual(db.listEvents(id).map((event) => event.seq), [1, 2, 3]);
+      const firstAttachmentPage = db.listRetainedAttachmentEventPage(id, 0, 1);
+      assert.deepEqual(firstAttachmentPage.events.map((event) => event.id), [imageEvent.id]);
+      assert.equal(firstAttachmentPage.hasMore, true);
+      const secondAttachmentPage = db.listRetainedAttachmentEventPage(id, firstAttachmentPage.nextAfterSeq, 1);
+      assert.deepEqual(secondAttachmentPage.events.map((event) => event.id), [videoEvent.id]);
+      assert.deepEqual(secondAttachmentPage.events.map((event) => event.ts), [200]);
+      assert.equal(secondAttachmentPage.hasMore, false);
       assert.equal(db.appendHydratedPage(id, { afterSeq: 0, historyEpoch: epoch, eventEpoch }, []).applied,
         false, "replaying hydration cannot duplicate attachment rows");
     }
+    const laterImage = createScreenshotArtifact(db, { sessionId: id }, "later-image",
+      { purpose: "session_attachment" });
+    db.appendEvent(id, { kind: "artifact_attached", artifact: laterImage }, 500);
+    assert.deepEqual(db.listRetainedAttachmentEventPage(id, 0, 200).events.map((event) => event.id), originalIds,
+      "a live attachment after runner history is not part of the retained reset prefix");
+  } finally {
+    db.close();
+  }
+});
+
+test("a live attachment between reset and hydration stays outside the retained prefix", () => {
+  const db = withRunner();
+  try {
+    const id = "attachment-reset-window";
+    db.createSessionFromSnapshot(snapshot({ id, historyEpoch: 4, seq: 1 }), "runner-1", 1_000);
+    db.appendHydratedPage(id, { afterSeq: 0, historyEpoch: 4, eventEpoch: 0 }, [
+      { seq: 1, ts: 10, payload: { kind: "agent_message", text: "old history" } },
+    ]);
+    const original = createScreenshotArtifact(db, { sessionId: id }, "original-attachment",
+      { purpose: "session_attachment" });
+    const originalEvent = db.appendEvent(id, { kind: "artifact_attached", artifact: original }, 20);
+    assert.equal(db.reconcileRunnerHistory(id, 5, 1)?.eventEpoch, 1);
+
+    const live = createScreenshotArtifact(db, { sessionId: id }, "live-attachment",
+      { purpose: "session_attachment" });
+    const liveEvent = db.appendEvent(id, { kind: "artifact_attached", artifact: live }, 30);
+    assert.deepEqual(db.listRetainedAttachmentEventPage(id, 0, 200).events.map((event) => event.id),
+      [originalEvent.id]);
+    db.appendHydratedPage(id, { afterSeq: 0, historyEpoch: 5, eventEpoch: 1 }, [
+      { seq: 1, ts: 40, payload: { kind: "agent_message", text: "replayed history" } },
+    ]);
+    assert.deepEqual(db.listEvents(id).map((event) => event.id).slice(0, 2),
+      [originalEvent.id, liveEvent.id]);
+    assert.deepEqual(db.listRetainedAttachmentEventPage(id, 0, 200).events.map((event) => event.id),
+      [originalEvent.id]);
   } finally {
     db.close();
   }
