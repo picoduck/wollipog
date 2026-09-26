@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  queueHoldReason,
+  queueHoldRecoveryAction,
   sessionHolds,
   worktreeRecoveryAction,
   agentContextKey,
@@ -211,8 +213,10 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 186", () => {
-  assert.equal(PROTOCOL_VERSION, 186);
+test("PROTOCOL_VERSION is 187", () => {
+  assert.equal(PROTOCOL_VERSION, 187);
+  assert.equal(runnerSupportsProtocol(186, "queueHolds"), false);
+  assert.equal(runnerSupportsProtocol(187, "queueHolds"), true);
   assert.equal(runnerSupportsProtocol(184, "skillKeptAsideCopies"), false);
   assert.equal(runnerSupportsProtocol(185, "skillKeptAsideCopies"), true);
   assert.equal(runnerSupportsProtocol(183, "wslMachineSkillAdoption"), false);
@@ -1527,4 +1531,55 @@ test("a worktree-recovery hold names its recovery step with a pasteable command 
     heldResumes: [{ kind: "workflow_decision_resolution", occurrenceId: "wd_1", since: 8 }],
   });
   assert.equal(Object.hasOwn(sessionHolds({ worktreeRecovery: recovery })[0]!, "heldResumes"), false);
+});
+
+test("a queued prompt held behind a handoff waiting on background work is a hold that names its way out (#1651)", () => {
+  const queueHold = {
+    kind: "worktree_rebind" as const,
+    holdId: "worktree-rebind:5000",
+    since: 5_000,
+    target: "/repos/x/.agent-worktrees/fix-1651",
+    queuedPrompts: 1,
+    unfinishedBackgroundJobs: 1,
+    oldestUnfinishedJob: { launchType: "monitor" as const, startedAt: Date.UTC(2026, 8, 25, 0, 12, 53) },
+  };
+  const [hold] = sessionHolds({ queueHold });
+  assert.equal(hold?.kind, "worktree_rebind");
+  assert.equal(hold?.holdId, "worktree-rebind:5000");
+  assert.equal(hold?.since, 5_000);
+  assert.equal(hold?.reason, queueHoldReason(queueHold));
+  assert.equal(hold?.recoveryAction, queueHoldRecoveryAction(queueHold));
+  assert.match(hold!.reason, /The queued message cannot start: the provider must first move to worktree \/repos\/x\/\.agent-worktrees\/fix-1651/u);
+  assert.match(hold!.reason, /waits for 1 background job with no terminal status \(a monitor started at 2026-09-25T00:12Z\)\./u);
+  assert.match(hold!.recoveryAction, /Wait for the unfinished background job to end/u);
+  assert.match(hold!.recoveryAction, /restart_session/u);
+  // Every cost of the bounded way out is stated, not discovered: an explicit restart carries no
+  // background work forward, the runner rejects the queued prompts, and the control plane revokes
+  // unconsumed approvals.
+  assert.match(hold!.recoveryAction, /background job end and no undelivered result is recovered/u);
+  assert.match(hold!.recoveryAction, /the queued message is discarded and must be sent again/u);
+  assert.match(hold!.recoveryAction, /is revoked and must be requested again/u);
+  assert.doesNotMatch(hold!.recoveryAction, /keeps the queued|recovers the/u);
+  assert.equal(Object.hasOwn(hold!, "heldResumes"), false);
+
+  const several = sessionHolds({ queueHold: {
+    ...queueHold, kind: "provider_account_switch", holdId: "provider-account-switch:7", target: "work@example.com",
+    queuedPrompts: 3, unfinishedBackgroundJobs: 2, oldestUnfinishedJob: { launchType: "agent", startedAt: 0 },
+  } }, [{ kind: "workflow_decision_resolution", occurrenceId: "wd_9", since: 9 }]);
+  assert.equal(several[0]?.kind, "provider_account_switch");
+  assert.match(several[0]!.reason, /^The 3 queued messages cannot start: the provider must first switch to provider account work@example\.com/u);
+  assert.match(several[0]!.reason, /2 background jobs with no terminal status \(the oldest, a subagent started at 1970-01-01T00:00Z\)/u);
+  assert.match(several[0]!.recoveryAction, /If they never end/u);
+  assert.match(several[0]!.recoveryAction, /background jobs end and no undelivered result is recovered/u);
+  assert.match(several[0]!.recoveryAction, /the queued messages are discarded and must be sent again/u);
+  assert.deepEqual(several[0]?.heldResumes, [{ kind: "workflow_decision_resolution", occurrenceId: "wd_9", since: 9 }]);
+
+  // Both holds can coexist, and each keeps its own identity and reason.
+  const recovery = {
+    recoveryId: "worktree-recovery:x", detectedAt: 7, selectedPath: "/w/s_1", expectedBranch: "agent/s_1",
+    detail: "the selected worktree could not be verified before a live turn",
+  };
+  assert.deepEqual(sessionHolds({ worktreeRecovery: recovery, queueHold }).map((item) => item.kind),
+    ["worktree_recovery", "worktree_rebind"]);
+  assert.deepEqual(sessionHolds({ worktreeRecovery: null, queueHold: null }), []);
 });

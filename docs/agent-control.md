@@ -816,8 +816,52 @@ with no pending request. Before, its decision resume was dropped and nothing tol
 The mechanism is not specific to worktrees. A hold is one `SessionHoldView` kind, derived in one
 place (`sessionHolds` in the protocol package, fed by the control plane's session row). The
 session view, the descendant view, the campaign projection, and the `child_blocked` wake event all
-read that shape. A later runner-side hold, such as a prompt queued behind a handoff barrier, adds a
-kind and its derivation, and every surface picks it up.
+read that shape. A runner-side hold adds a kind and its derivation, and every surface picks it up.
+
+#### Queue Holds
+
+The second case (#1651) is a prompt the runner has accepted but cannot start. The runner defers a
+worktree or provider-account handoff while the provider's detached background work is unfinished,
+because retiring the provider would end that work, and every ordinary queued prompt waits behind
+the deferred handoff. A background job that never reaches a terminal status — a `Monitor` whose
+condition never fires, say — therefore held every queued prompt, including a decision resume, for
+as long as the provider lived. Nothing said so: the control plane had written `running` when it
+admitted the resume, the runner emitted no event, and `prompt_session` reported the next message as
+queued behind a turn that had never started.
+
+- **The runner reports the hold.** On protocol v187, when a queued prompt waits behind a handoff
+  that only unfinished background work is holding back, the runner sets the session to `queued`
+  and reports a `queueHold` in its snapshot: the kind (`worktree_rebind` or
+  `provider_account_switch`), the handoff target, how many prompts wait, how many listed jobs have
+  no terminal status, and the oldest of them. Every other reason a handoff waits — a guardrail card,
+  an interrupt, an unanswered question — already shows on the session and is not a hold. The hold
+  is cleared explicitly, with `queueHold: null`, when the work ends, the prompt runs, or the queue
+  empties, and a reconnect re-sends the current truth, so a stale hold cannot survive a restart.
+- **The control plane derives the hold.** `sessionHolds` turns the snapshot field into a hold with
+  the same `holdId`, `reason`, and `recoveryAction` shape as worktree recovery, and lists the
+  decision resumes the runner has accepted but not started under `heldResumes`. It reaches MCP
+  `get_session` (with `queueHold` beside `worktreeRecovery`), `list_descendant_requests`'s
+  `blockedChildren`, the campaign projection, and one `child_blocked` wake event per incident.
+- **Status follows the runner.** A decision resume delivered through the durable lane to a child
+  that had settled idle is admitted as `queued`, and the runner's started receipt (or its own
+  running status) is what makes the child `running`. A refused resume returns the child to `idle`
+  unless the runner itself queued it. `prompt_session` names a hold when one exists, and when the
+  session reads `running` but its runner reports no active turn it says the message waits for a
+  turn that has not started, not behind one already running.
+- **The way out is stated.** The hold's recovery action says to wait for the job, or, if it never
+  ends, to restart the session, and what that costs: an explicit restart builds fresh session
+  metadata, so the provider's background jobs end with it and no undelivered result is recovered;
+  the runner discards the prompts still in its queue (they must be sent again); and approved
+  decisions the session has not yet consumed are revoked and must be requested again.
+- **The job is reported, too.** A listed job with no terminal status for more than an hour carries
+  `stalledSince` in the session's job inventory and reads **Stalled** in the Background Work panel.
+  That is a report, not proof it ended. A finished job whose result cannot be returned because a
+  sibling from the same turn is unfinished is a `continuation_blocked` delivery, shown as **Result
+  Blocked** with the step that clears it (ask the session to stop the unfinished job; a restart or
+  stop ends the job but discards the result), rather than **Result Pending** with "No action is
+  needed".
+  Older runners leave all of this absent, and a queued prompt behind such a barrier stays invisible
+  to them as before.
 
 The control plane owns this lifecycle. A generic question answer or provider permission response
 cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,

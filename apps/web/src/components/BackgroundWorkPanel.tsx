@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import {
+  BACKGROUND_JOB_STALL_MS,
   MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
   runnerSupportsProtocol,
   type BackgroundDeliveryView,
@@ -14,6 +15,7 @@ import { useApi } from "../api-context.js";
 
 export type BackgroundJobCurrentState =
   | "Running"
+  | "Stalled"
   | "Completed"
   | "Failed"
   | "Killed"
@@ -25,6 +27,7 @@ export function backgroundJobCurrentState(
   backgroundWorkState: BackgroundWorkState | undefined,
   runnerOnline: boolean,
   inventorySupported: boolean,
+  now?: number,
 ): BackgroundJobCurrentState {
   if (job.terminalStatus === "completed") return "Completed";
   if (job.terminalStatus === "failed") return "Failed";
@@ -32,9 +35,13 @@ export function backgroundJobCurrentState(
   if (backgroundWorkState === "orphaned" && job.sourcePresent) return "Orphaned";
   const aggregateCurrent = backgroundWorkState === "running" ||
     backgroundWorkState === "continuation_pending";
-  return aggregateCurrent && inventorySupported && runnerOnline && job.sourcePresent
-    ? "Running"
-    : "Status Unverified";
+  if (!(aggregateCurrent && inventorySupported && runnerOnline && job.sourcePresent)) return "Status Unverified";
+  // A job the runner still lists with no terminal status past the bound is reported, not declared
+  // ended (#1651). The control plane marks it on read; the clock keeps the label current between
+  // broadcasts.
+  const stalled = job.stalledSince != null ||
+    (now != null && now - job.registeredAt >= BACKGROUND_JOB_STALL_MS);
+  return stalled ? "Stalled" : "Running";
 }
 
 export function backgroundJobDeliveryStage(job: ManagedBackgroundJobView): string {
@@ -466,8 +473,9 @@ export function BackgroundWorkPanel({
                       session.backgroundWorkState,
                       runnerOnline,
                       inventorySupported,
+                      now,
                     );
-                    const end = job.terminalObservedAt ?? (state === "Running" ? now : job.lastObservedAt);
+                    const end = job.terminalObservedAt ?? (state === "Running" || state === "Stalled" ? now : job.lastObservedAt);
                     const duration = formatDuration(Math.max(0, end - job.registeredAt));
                     return (
                       <li className="background-work-job" key={job.id}>

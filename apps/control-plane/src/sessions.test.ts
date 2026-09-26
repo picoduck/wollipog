@@ -4171,8 +4171,9 @@ test("typed workflow decisions isolate categories and fail closed across stale p
       "a restored card remembers that the provider had already settled idle");
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, reconnect.data.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
-    assert.equal(db.getSession(child.id)?.status, "running",
-      "resolving a restored card resumes the provider that had settled idle behind it");
+    assert.equal(db.getSession(child.id)?.status, "queued",
+      "resolving a restored card resumes the provider that had settled idle behind it; the runner's " +
+      "started receipt, not admission, makes it running (#1651)");
     assert.ok(promptsSentTo(hub, child.id).some((message) =>
       message.text.includes(`[Wollipog Workflow Decision — ${reconnect.data!.occurrenceId}]`)));
     const terminal = svc.createWorkflowDecision(child.id, {
@@ -4277,7 +4278,7 @@ test("a resolver's child-facing message reaches the child's decision view and re
     assert.ok(prompts[0]!.text.includes(message));
     assert.match(prompts[0]!.text, /Your Orchestrator denied your pr_merge decision/);
     assert.equal(prompts[0]!.text.includes(rationale), false, "the audit rationale never reaches the child");
-    assert.equal(db.getSession(child.id)?.status, "running");
+    assert.equal(db.getSession(child.id)?.status, "queued", "admitted, not yet started (#1651)");
     assert.equal(idleEdges.filter((id) => id === child.id).length, 0,
       "the resumed turn continues the work, so the idle edge swallowed by the card is not replayed first");
     assert.equal(idleWrites.length, 0,
@@ -4341,7 +4342,7 @@ test("a resolver's child-facing message reaches the child's decision view and re
     svc.onSessionStatus(child.id, "idle");
     assert.ok(svc.resolveDescendantRequest(parent.data.id, child.id, silent.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
-    assert.equal(db.getSession(child.id)?.status, "running");
+    assert.equal(db.getSession(child.id)?.status, "queued", "admitted, not yet started (#1651)");
     assert.equal(idleEdges.filter((id) => id === child.id).length, 2);
     assert.equal(idleWrites.length, 2);
     assert.equal("childMessage" in (svc.workflowDecision(child.id, silent.occurrenceId).data ?? {}), false);
@@ -4442,7 +4443,8 @@ test("resolving any Orchestrator-owned typed decision resumes the idle child wit
           action: "resolve_workflow_decision", outcome, ...(selectedOptionId ? { selectedOptionId } : {}),
         }, () => true).ok);
         const label = `${category}/${outcome}`;
-        assert.equal(db.getSession(child.id)?.status, "running", `${label}: the child leaves idle into the resumed turn`);
+        assert.equal(db.getSession(child.id)?.status, "queued",
+          `${label}: the child leaves idle into the resumed turn, which reads queued until the runner starts it (#1651)`);
         assert.equal(promptsToChild().length, before + 1, `${label}: exactly one resuming prompt`);
         const text = promptsToChild().at(-1)!.text;
         assert.ok(text.includes(`[Wollipog Workflow Decision — ${decision.data.occurrenceId}]\n`), label);
@@ -4472,7 +4474,7 @@ test("resolving any Orchestrator-owned typed decision resumes the idle child wit
     svc.onSessionStatus(child.id, "idle");
     const beforeHuman = promptsToChild().length;
     assert.ok(svc.approve(child.id, human.data.occurrenceId, "poll", { kind: "human", id: "owner" }).ok);
-    assert.equal(db.getSession(child.id)?.status, "running");
+    assert.equal(db.getSession(child.id)?.status, "queued", "admitted, not yet started (#1651)");
     assert.equal(promptsToChild().length, beforeHuman + 1);
     assert.match(promptsToChild().at(-1)!.text,
       /A human reviewer approved your implementation_question decision .* with option "poll"\./);
@@ -5814,8 +5816,9 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
       { kind: "human", id: "owner" }, undefined, () => true).ok);
     assert.equal(db.workflowDecisionByOccurrence(choice.data.occurrenceId)?.selectedOptionId, "deny",
       "an offered option named deny is selected rather than treated as the synthetic denial action");
-    assert.equal(db.getSession(child.data.id)?.status, "running",
-      "resolving a control-plane gate resumes the provider's swallowed idle with the outcome");
+    assert.equal(db.getSession(child.data.id)?.status, "queued",
+      "resolving a control-plane gate resumes the provider's swallowed idle with the outcome; the turn " +
+      "reads queued until the runner starts it (#1651)");
     assert.equal(db.policyResumeStatus(child.data.id), null);
     assert.ok((await svc.consumeWorkflowDecision(child.data.id, choice.data.occurrenceId, {
       resourceSnapshot: implementationSnapshot,
@@ -5929,8 +5932,9 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
     assert.equal(db.policyResumeStatus(child.data.id), "idle");
     assert.ok(svc.approve(child.data.id, idleDecision.data.occurrenceId, "approve",
       { kind: "human", id: "owner" }, undefined, () => true).ok);
-    assert.equal(db.getSession(child.data.id)?.status, "running",
-      "a decision created from provider Idle resumes the child when settled");
+    assert.equal(db.getSession(child.data.id)?.status, "queued",
+      "a decision created from provider Idle resumes the child when settled; it reads queued until the runner " +
+      "starts the turn (#1651)");
     assert.ok((await svc.consumeWorkflowDecision(child.data.id, idleDecision.data.occurrenceId, {
       resourceSnapshot: implementationSnapshot,
     })).ok);
@@ -5953,8 +5957,9 @@ test("typed workflow decisions preserve provider settlement and cannot be replac
       "supersession preserves the swallowed Idle proof for the replacement occurrence");
     assert.ok(svc.approve(child.data.id, replacementIdle.data.occurrenceId, "approve",
       { kind: "human", id: "owner" }, undefined, () => true).ok);
-    assert.equal(db.getSession(child.data.id)?.status, "running",
-      "the replacement occurrence inherits the swallowed Idle, so its resolution resumes the child");
+    assert.equal(db.getSession(child.data.id)?.status, "queued",
+      "the replacement occurrence inherits the swallowed Idle, so its resolution resumes the child, " +
+      "queued until the runner starts the turn (#1651)");
 
     const terminalApproval = svc.createWorkflowDecision(child.data.id, {
       requestId: "approved-before-terminal", resourceKey: "implementation:terminal-consume",
@@ -20860,7 +20865,8 @@ test("an approved decision for a child whose worktree branch was switched is del
     assert.notEqual(second.commandId, first.commandId, "the held resume is a fresh delivery, not a replay");
     assert.equal(second.command.type === "prompt_session" ? second.command.text : "",
       first.command.type === "prompt_session" ? first.command.text : "", "the same resolution text is delivered");
-    assert.equal(db.getSession(child.id)?.status, "running");
+    assert.equal(db.getSession(child.id)?.status, "queued",
+      "the resume is admitted as queued until the runner starts the turn (#1651)");
     assert.equal(db.getSession(child.id)?.holds, undefined);
     assert.equal(svc.descendantRequests(root.id, () => true).data?.blockedChildren, undefined);
     assert.equal(db.campaignProjection(root.id)?.heldChildren, undefined);
@@ -20873,6 +20879,8 @@ test("an approved decision for a child whose worktree branch was switched is del
     svc.retryDuePrompts(Date.now() + 120_000);
     assert.equal(new Set(f.resolutionPrompts(merge.occurrenceId).map((message) => message.commandId)).size, 2);
     assert.equal(f.receipt(second.commandId, "started", 1), true);
+    assert.equal(db.getSession(child.id)?.status, "running",
+      "the runner starting the turn is what makes the child running (#1651)");
     assert.equal(f.receipt(second.commandId, "completed", 2), true);
     assert.equal(f.resumeState(merge.occurrenceId), "delivered");
     const startedResumes = f.resolutionPrompts(merge.occurrenceId).filter((message) =>
@@ -21178,6 +21186,181 @@ test("only a campaign Orchestrator sees held descendants past Parent Control off
     assert.ok(db.getSession(child.id)?.holds?.length, "the child itself reports its hold");
     const refused = svc.descendantRequests(parent.data.id, () => true);
     assert.equal(refused.status, 403, "Parent Control off still refuses a parent that is not a campaign Orchestrator");
+  } finally {
+    db.close();
+  }
+});
+
+test("approving a decision while a sibling background job is unterminated and a worktree rebind is pending shows a blocked child, never a phantom running turn (#1651)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, root, child } = f;
+  try {
+    // The child created a worktree during its turn (a provider rebind is pending), started a
+    // monitor that never fires, requested a merge, and ended its turn behind the card.
+    const merge = f.requestMerge(1651);
+    svc.onSessionStatus(child.id, "idle");
+    assert.equal(db.getSession(child.id)?.status, "input_required");
+    f.approve(merge.occurrenceId);
+    const [resume] = f.resolutionPrompts(merge.occurrenceId);
+    assert.ok(resume, "the resolution is sent as a durable prompt");
+    assert.equal(db.getSession(child.id)?.status, "queued",
+      "admission says queued: nothing is running until the runner says so");
+
+    // The runner accepts the resume but cannot start it: the handoff to the selected worktree
+    // waits for the monitor, so it reports the session queued with the hold.
+    assert.equal(f.receipt(resume.commandId, "accepted", 1), true);
+    assert.equal(db.getSession(child.id)?.status, "queued");
+    const queueHold = {
+      kind: "worktree_rebind" as const,
+      holdId: "worktree-rebind:5000",
+      since: 5_000,
+      target: `${f.worktreePath}-next`,
+      queuedPrompts: 1,
+      unfinishedBackgroundJobs: 1,
+      oldestUnfinishedJob: { launchType: "monitor" as const, startedAt: 4_000 },
+    };
+    const runnerSnapshot = (hold: typeof queueHold | null, status: SessionStatus) => snapshot({
+      id: child.id, title: child.title, status, worktreePath: f.worktreePath, worktreeRecovery: null,
+      queueHold: hold,
+      backgroundWorkState: hold ? "running" : undefined,
+      backgroundJobs: [{
+        id: "monitor-1", parentTurnId: "turn-1", runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+        launchType: "monitor", registeredAt: 4_000,
+        ...(hold ? {} : { terminalStatus: "killed" as const, terminalObservedAt: 6_000, continuationRequired: false }),
+      }],
+    });
+    svc.applySessionRuntimeUpdate(RUNNER_ID, runnerSnapshot(queueHold, "queued"));
+    const held = db.getSession(child.id)!;
+    assert.equal(held.status, "queued");
+    assert.deepEqual(held.queueHold, queueHold);
+    assert.equal(held.holds?.length, 1);
+    assert.equal(held.holds?.[0]?.kind, "worktree_rebind");
+    assert.equal(held.holds?.[0]?.holdId, queueHold.holdId);
+    assert.equal(held.holds?.[0]?.since, 5_000);
+    assert.match(held.holds?.[0]?.reason ?? "", /waits for 1 background job with no terminal status \(a monitor started at/u);
+    assert.match(held.holds?.[0]?.reason ?? "", new RegExp(`move to worktree ${f.worktreePath}-next`, "u"));
+    assert.match(held.holds?.[0]?.recoveryAction ?? "", /restart_session/u);
+    assert.deepEqual(held.holds?.[0]?.heldResumes?.map((item) => item.occurrenceId), [merge.occurrenceId],
+      "the resume the runner keeps in its queue is listed with the hold");
+    assert.equal(f.resumeState(merge.occurrenceId), "delivering");
+
+    // The parent sees a blocked child everywhere it looks, and is woken exactly once for it.
+    const descendants = svc.descendantRequests(root.id, () => true);
+    assert.ok(descendants.ok && descendants.data);
+    assert.deepEqual(descendants.data.requests, [], "a hold is not a request");
+    assert.deepEqual(descendants.data.blockedChildren?.map((item) => [item.sessionId, item.status, item.holds[0]?.kind]),
+      [[child.id, "queued", "worktree_rebind"]]);
+    const campaign = db.campaignProjection(root.id)!;
+    assert.equal(campaign.children.blocked, 1);
+    assert.equal(campaign.children.active, 0, "a held child is not progressing");
+    assert.deepEqual(campaign.heldChildren?.map((item) => [item.sessionId, item.holds[0]?.kind]), [[child.id, "worktree_rebind"]]);
+    const blockedEvents = () => db.campaignContinuationEvents(root.id).filter((event) => event.kind === "child_blocked");
+    assert.deepEqual(blockedEvents().map((event) => [event.subjectSessionId, event.occurrenceId, event.subjectStatus]),
+      [[child.id, queueHold.holdId, "worktree_rebind"]]);
+
+    // A follow-up prompt is accepted, but its report names the hold, never a running turn.
+    const followUp = svc.prompt(child.id, "are you there?");
+    assert.ok(followUp.ok && followUp.data, followUp.error);
+    assert.equal(followUp.data.promptDelivery?.lane, "queued");
+    assert.match(followUp.data.promptDelivery?.detail ?? "", /Queued behind a hold on this session, not behind a running turn/u);
+    assert.match(followUp.data.promptDelivery?.detail ?? "", /a monitor started at/u);
+    assert.doesNotMatch(followUp.data.promptDelivery?.detail ?? "", /turn already running/u);
+    assert.equal(db.getSession(child.id)?.status, "queued", "a prompt into a held session does not invent running");
+
+    // The runner reports the same incident with a changed count: the same hold, no new wake-up.
+    svc.applySessionRuntimeUpdate(RUNNER_ID, runnerSnapshot({ ...queueHold, queuedPrompts: 2 }, "queued"));
+    assert.equal(db.getSession(child.id)?.queueHold?.queuedPrompts, 2);
+    assert.equal(blockedEvents().length, 1);
+    svc.hydrateRunnerSessions(RUNNER_ID, [runnerSnapshot({ ...queueHold, queuedPrompts: 2 }, "queued"),
+      snapshot({ id: root.id, title: root.title, status: "running", useWorktree: false, worktreePath: null })]);
+    assert.equal(blockedEvents().length, 1, "a reconnect re-reporting the hold is the same incident");
+    assert.equal(db.getSession(child.id)?.holds?.length, 1);
+
+    // The monitor ends: the runner clears the hold explicitly, starts the resume, and only then
+    // is the child running.
+    svc.applySessionRuntimeUpdate(RUNNER_ID, runnerSnapshot(null, "queued"));
+    assert.equal(db.getSession(child.id)?.holds, undefined);
+    assert.equal(db.getSession(child.id)?.queueHold, undefined);
+    assert.equal(svc.descendantRequests(root.id, () => true).data?.blockedChildren, undefined);
+    assert.equal(db.campaignProjection(root.id)?.children.blocked, 0);
+    assert.equal(db.campaignProjection(root.id)?.heldChildren, undefined);
+    assert.equal(db.getSession(child.id)?.status, "queued", "cleared is not started");
+    assert.equal(f.receipt(resume.commandId, "started", 2), true);
+    assert.equal(db.getSession(child.id)?.status, "running", "the runner starting the turn makes the child running");
+    assert.equal(f.resumeState(merge.occurrenceId), "delivered");
+    assert.equal(blockedEvents().length, 1);
+  } finally {
+    db.close();
+  }
+});
+
+test("a resume the runner refuses returns the child to idle rather than leaving it queued forever, and an older runner keeps running (#1651)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, svc, child } = f;
+  try {
+    const merge = f.requestMerge(1652);
+    svc.onSessionStatus(child.id, "idle");
+    f.approve(merge.occurrenceId);
+    const [resume] = f.resolutionPrompts(merge.occurrenceId);
+    assert.ok(resume);
+    assert.equal(db.getSession(child.id)?.status, "queued");
+    assert.equal(svc.onDurablePromptReceipt(RUNNER_ID, {
+      type: "durable_session_command_update", commandId: resume.commandId, sessionId: child.id,
+      state: "failed", revision: 1, code: "COMMAND_CANCELLED", error: "session command queue is full",
+    }), true);
+    assert.equal(f.resumeState(merge.occurrenceId), "failed");
+    assert.equal(db.getSession(child.id)?.status, "idle", "nothing started, so the child is as idle as it was");
+
+    // A child still inside its turn queues the resume behind that turn and stays running.
+    const busy = f.requestMerge(1653);
+    svc.onSessionStatus(child.id, "running");
+    f.approve(busy.occurrenceId);
+    assert.equal(db.getSession(child.id)?.status, "running", "typed decisions do not suspend the provider turn");
+  } finally {
+    db.close();
+  }
+
+  // A runner that predates the durable resume lane has no receipt to follow: admission still
+  // reports running there, exactly as before.
+  const legacy = worktreeRecoveryCampaign(RUNNER_CAPABILITY_MIN_PROTOCOL.worktreeRecovery - 1);
+  try {
+    const merge = legacy.requestMerge(1654);
+    legacy.svc.onSessionStatus(legacy.child.id, "idle");
+    legacy.approve(merge.occurrenceId);
+    assert.equal(legacy.db.getSession(legacy.child.id)?.status, "running");
+  } finally {
+    legacy.db.close();
+  }
+});
+
+test("a prompt into a session that reads running while its runner reports no active turn is not reported as queued behind a running turn (#1651)", () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const id = seedSession(svc, hub);
+    svc.onSessionStatus(id, "idle");
+    // The first prompt is admitted from idle: the control plane writes running before the runner
+    // has started anything.
+    const first = svc.prompt(id, "first");
+    assert.ok(first.ok && first.data, first.error);
+    assert.equal(first.data.promptDelivery?.lane, "immediate");
+    assert.equal(db.getSession(id)?.status, "running");
+    // No queue projection with an active turn has arrived: the runner has no turn to queue behind.
+    const second = svc.prompt(id, "second");
+    assert.ok(second.ok && second.data, second.error);
+    assert.equal(second.data.promptDelivery?.lane, "queued");
+    assert.match(second.data.promptDelivery?.detail ?? "", /runner reports no active turn/u);
+    assert.doesNotMatch(second.data.promptDelivery?.detail ?? "", /turn already running/u);
+    // Once the runner reports the turn, a further prompt is queued behind it.
+    assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], false, "turn-1"));
+    const third = svc.prompt(id, "third");
+    assert.ok(third.ok && third.data, third.error);
+    assert.match(third.data.promptDelivery?.detail ?? "", /Queued behind the turn already running/u);
+    // A runner that predates turn coordinates cannot be read as reporting none.
+    db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.turnInterruptionAck - 1);
+    assert.ok(svc.onSessionQueue(RUNNER_ID, id, [], false, undefined));
+    const legacy = svc.prompt(id, "fourth");
+    assert.ok(legacy.ok && legacy.data, legacy.error);
+    assert.match(legacy.data.promptDelivery?.detail ?? "", /Queued behind the turn already running/u);
   } finally {
     db.close();
   }

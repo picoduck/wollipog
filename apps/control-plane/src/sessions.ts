@@ -121,6 +121,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type RunnerCapacityBlocker,
   type SessionConfig,
   type SessionEventPayload,
+  type SessionHoldView,
   type SessionLaunchSpec,
   type SessionSnapshot,
   type SessionStatus,
@@ -430,6 +431,10 @@ export interface PreStagedDeliveryOptions {
    * materialization must derive launch metadata from these snapshots instead of mutable runner
    * discovery state. Initial staging omits this field and continues to build a fresh plan. */
   commandSnapshots?: DurableSessionCommand[];
+  /** Admit the prompt as `queued` rather than `running` (#1651). Only for a caller that knows the
+   * provider is idle and follows the command's receipts: the runner's started receipt, or its own
+   * running status, then reports the turn once it has actually begun. */
+  admitAs?: "queued";
   stage: (plan: PreStagedDeliveryPlan) => void;
   activate: (plan: PreStagedDeliveryPlan) => void;
 }
@@ -647,14 +652,27 @@ export function normalizeWorkflowDecisionAction(
   return ok({ kind: "pr_merge_enqueue", command: canonical });
 }
 
+/** What the runner says about the session beyond its status, for the delivery report. */
+interface PromptAdmissionContext {
+  /** What keeps the session's next turn from starting, if anything (#1650, #1651). */
+  holds?: SessionHoldView[];
+  /** The capacity boundary a queued session waits at. */
+  capacityWait?: RunnerCapacityBlocker;
+  /** Whether the runner currently reports a turn in progress; undefined when it cannot say. */
+  activeTurn?: boolean;
+}
+
 /** Classify an accepted prompt by the lane it took, using the session status observed BEFORE
  * admission moved it to `running`. Only a session that was idle starts this prompt as its current
  * turn; every other admission state means work is already in flight and the prompt waits behind
  * it. Reporting this is the difference between a sender that knows its message is parked and one
- * that assumes it was delivered — see issue #1406. */
+ * that assumes it was delivered — see issue #1406. A `running` status alone is not proof of a
+ * turn: the control plane writes it at admission, before the runner starts anything, so when the
+ * runner reports no active turn the message is parked behind a turn that has not begun (#1651). */
 function promptDeliveryReport(
   admittedFrom: SessionStatus,
   pendingInputBarrier: boolean,
+  context: PromptAdmissionContext = {},
 ): PromptDelivery {
   if (admittedFrom === "idle" && !pendingInputBarrier) {
     return { lane: "immediate", admittedFrom, detail: "Delivered immediately: it starts the session's next turn." };
@@ -666,11 +684,38 @@ function promptDeliveryReport(
       detail: "Queued behind input the session is still waiting on; it runs once that input resolves.",
     };
   }
-  if (admittedFrom === "queued" || admittedFrom === "starting") {
+  const hold = context.holds?.[0];
+  if (hold) {
+    return {
+      lane: "queued",
+      admittedFrom,
+      detail: `Queued behind a hold on this session, not behind a running turn: ${hold.reason} ` +
+        `It runs once the hold clears. ${hold.recoveryAction}`,
+    };
+  }
+  if (admittedFrom === "starting") {
     return {
       lane: "queued",
       admittedFrom,
       detail: "Queued: the session has not finished starting, so the message runs once it is admitted.",
+    };
+  }
+  if (admittedFrom === "queued") {
+    return {
+      lane: "queued",
+      admittedFrom,
+      detail: context.capacityWait
+        ? `Queued behind runner capacity (${context.capacityWait.description}); the message runs once ` +
+          "the session's turn is admitted."
+        : "Queued behind a message the session accepted earlier that has not started yet; this one runs after it.",
+    };
+  }
+  if (context.activeTurn === false) {
+    return {
+      lane: "queued",
+      admittedFrom,
+      detail: "Queued: the session reads running, but its runner reports no active turn, so the message " +
+        "waits for the session's next turn to start rather than behind one already running.",
     };
   }
   return {
@@ -4530,7 +4575,10 @@ export class SessionsService {
     if (!pendingInputBarrier && (!durablePrompt || (session.status !== "queued" && session.status !== "starting"))) {
       // The socket send below can still reject synchronously. Defer campaign-attestation
       // invalidation until its success boundary so an undelivered prompt is a true no-op.
-      this.db.updateSessionStatus(sessionId, "running", now, false, false);
+      // A caller that knows the provider is idle and follows the durable receipts admits the
+      // prompt as `queued`: the runner's started receipt, or its own running status, is what
+      // makes it `running` (#1651).
+      this.db.updateSessionStatus(sessionId, delivery?.admitAs ?? "running", now, false, false);
     }
     if (delivery) {
       delivery.activate(plan!);
@@ -4555,7 +4603,14 @@ export class SessionsService {
     this.hub.sessionChangedById(sessionId);
     return ok({
       ...this.db.getSession(sessionId)!,
-      promptDelivery: promptDeliveryReport(session.status, pendingInputBarrier),
+      promptDelivery: promptDeliveryReport(session.status, pendingInputBarrier, {
+        holds: session.holds,
+        capacityWait: session.capacityWait,
+        // Only a runner that assigns turn coordinates can be read as reporting none.
+        activeTurn: runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "turnInterruptionAck")
+          ? this.hub.activeTurnIdForSession(sessionId) !== undefined
+          : undefined,
+      }),
     });
   }
 
@@ -6696,7 +6751,8 @@ export class SessionsService {
     // turn still in progress, and a child whose worktree needs recovery keeps the resume until it
     // recovers (#1650). Any other refusal (runner offline, a guardrail pause) leaves the outcome,
     // and any message, on the decision record.
-    const deliverResolution = () => this.deliverWorkflowDecisionResume(resolved, now);
+    const deliverResolution = (childIdle: boolean) =>
+      this.deliverWorkflowDecisionResume(resolved, now, null, childIdle);
     if (child) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now, deliverResolution);
     this.recordWorkflowDecisionAudit(
       resolved,
@@ -7394,12 +7450,15 @@ export class SessionsService {
   }
 
   /** Settle a server-owned workflow card against the provider state it temporarily covered.
-   * `resume` delivers a turn that continues the child; it returns whether the turn was admitted. */
+   * `resume` delivers a turn that continues the child; it returns whether the turn was admitted.
+   * It is told whether the child had settled idle behind the card, so its admission can say
+   * `queued` until the runner starts the turn, rather than `running` for a turn that has not begun
+   * (#1651). A child still inside its turn queues the resume behind that turn and stays running. */
   private settleWorkflowDecisionPause(
     sessionId: string,
     occurrenceId: string,
     now: number,
-    resume?: () => boolean,
+    resume?: (childIdle: boolean) => boolean,
   ): void {
     const current = this.db.getSession(sessionId);
     if (!current) return;
@@ -7418,8 +7477,9 @@ export class SessionsService {
       // readiness, and push-to-wake early; the resumed turn's own idle settles them instead.
       // The running write clears swallowed-idle markers, so an open policy-hook approval, whose
       // marker a refused prompt could not restore, keeps the ordinary idle restoration below.
+      // A resume that follows durable receipts then admits its prompt as `queued` over this.
       this.db.updateSessionStatus(sessionId, "running", now);
-      if (resume()) return;
+      if (resume(true)) return;
       // Refused: the child really is idle, so restore it exactly as a card without a resume would.
       this.db.updateSessionStatus(sessionId, "idle", now);
       this.replayRestoredPolicyIdle(current, sessionId, now);
@@ -7441,7 +7501,7 @@ export class SessionsService {
       // the card is present, so the last settlement must immediately surface any deferred gate.
       if (!remaining) this.gateOnPolicy(sessionId, now);
       this.clearSettledPolicyResumeStatus(sessionId);
-      resume?.();
+      resume?.(false);
     }
   }
 
@@ -7457,11 +7517,17 @@ export class SessionsService {
    * boundary that sees the recovery cleared delivers it. Staging binds the command to the decision
    * in one transaction, conditional on the resume state observed here (`from`), so a restart can
    * neither lose an owed resume nor send it twice. Returns whether the child will be resumed.
+   *
+   * `childIdle` says the provider had settled idle, so the durable lane admits the resume as
+   * `queued`: the runner's started receipt makes it `running`, and a runner that cannot start it
+   * — a worktree handoff waiting on unfinished background work, say — reports the hold instead of
+   * the control plane reporting a turn that never began (#1651).
    */
   private deliverWorkflowDecisionResume(
     decision: WorkflowDecisionView,
     now: number,
     from: WorkflowDecisionResumeState | null = null,
+    childIdle = false,
   ): boolean {
     const child = this.db.getSession(decision.sessionId);
     if (!child) return false;
@@ -7487,6 +7553,7 @@ export class SessionsService {
     let delivered: ReturnType<SessionsService["prompt"]>;
     try {
       delivered = this.prompt(child.id, text, [], undefined, undefined, {
+        ...(childIdle ? { admitAs: "queued" as const } : {}),
         // Staging is the success boundary: once the payload is durable, a failed flush is retried by
         // the outbox rather than reported, exactly as for a human's durable prompt.
         stage: (plan) => {
@@ -7538,6 +7605,18 @@ export class SessionsService {
     if (state === "failed") {
       this.log.warn(`workflow decision ${resume.occurrenceId} resume failed for ${command.sessionId}: ${command.error ?? "unknown error"}`);
     }
+    // The resume was admitted as `queued` (#1651). The runner starting it is what makes the child
+    // running; a refusal leaves the child as idle as it was, unless the runner itself queued it.
+    const session = this.db.getSession(command.sessionId);
+    if (!session || isTerminal(session.status)) return;
+    if (command.state === "started" && (session.status === "queued" || session.status === "idle")) {
+      this.db.updateSessionStatus(command.sessionId, "running", now);
+      this.hub.sessionChangedById(command.sessionId);
+    } else if (state === "failed" && session.status === "queued" && !session.pendingApproval &&
+        !session.capacityWait && !session.queueHold) {
+      this.db.updateSessionStatus(command.sessionId, "idle", now);
+      this.hub.sessionChangedById(command.sessionId);
+    }
   }
 
   /** Deliver each resume held for this session once nothing holds it any more (#1650). Every
@@ -7561,7 +7640,7 @@ export class SessionsService {
       }
       // Keep it held while the runner is away; its reconnect is another boundary that retries.
       if (!this.hub.isRunnerOnline(session.runnerId)) return;
-      this.deliverWorkflowDecisionResume(decision, now, "held");
+      this.deliverWorkflowDecisionResume(decision, now, "held", session.status === "idle");
     }
   }
 

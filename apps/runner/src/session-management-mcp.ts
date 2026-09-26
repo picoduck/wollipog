@@ -924,6 +924,8 @@ export const TOOLS: McpTool[] = [
                 useWorktree: s.useWorktree ?? false,
                 worktreePath: s.worktreePath ?? null,
                 worktreeRecovery: s.worktreeRecovery ?? null,
+                // A prompt the runner accepted but cannot start (#1651); `holds` carries its reason.
+                queueHold: s.queueHold ?? null,
                 createdAt: s.createdAt,
                 lastEventAt: s.lastEventAt ?? null,
                 messageCount: s.messageCount,

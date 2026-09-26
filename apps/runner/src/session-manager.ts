@@ -79,10 +79,13 @@ import {
   isWorkspaceReference,
   PROTOCOL_VERSION,
   providerSupportsConversationFork,
+  queueHoldReason,
   runnerSupportsProtocol,
   validatePromptImageInputs,
   validateQuestionAnswers,
   worktreeRecoveryAction,
+  type SessionQueueHoldKind,
+  type SessionQueueHoldView,
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdir, rm } from "node:fs/promises";
@@ -1065,6 +1068,9 @@ export class SessionManager {
   private readonly activeTurnLimitConfigured: boolean;
   private readonly idleProcessPolicy: "retain" | "park_when_needed";
   private readonly activeTurnWaiters = new Map<string, AdmissionRequest>();
+  /** The queue hold last published for each session (#1651), kept apart from the active entry so
+   * a replacement provider still clears the hold its predecessor reported. */
+  private readonly publishedQueueHolds = new Map<string, SessionQueueHoldView>();
   private readonly activeTurnAdmitted = new Set<string>();
   private activeTurnRetryTimer: ReturnType<typeof setTimeout> | null = null;
   /** Parking retirements remain serialized while an exact exit is pending. Once an attempt settles
@@ -4116,10 +4122,10 @@ export class SessionManager {
   sessionSnapshots(exactEventSeq = false) {
     const protocolVersion = this.controlPlaneProtocolVersion();
     return this.store.snapshots(protocolVersion, exactEventSeq).map((snapshot) =>
-      this.overlayRuntimeSteering(
+      this.overlayQueueHold(this.overlayRuntimeSteering(
         this.sessionCommandAuthority.overlaySnapshot(snapshot, protocolVersion),
         protocolVersion,
-      ));
+      ), protocolVersion));
   }
 
   /** Re-publish runner-owned queue holds after reconnect. The notice is deliberately idempotent:
@@ -4139,10 +4145,18 @@ export class SessionManager {
 
   private snapshot(meta: SessionMeta) {
     const protocolVersion = this.controlPlaneProtocolVersion();
-    return this.overlayRuntimeSteering(
+    return this.overlayQueueHold(this.overlayRuntimeSteering(
       this.sessionCommandAuthority.overlaySnapshot(metaToSnapshot(meta, protocolVersion), protocolVersion),
       protocolVersion,
-    );
+    ), protocolVersion);
+  }
+
+  /** A supporting control plane always hears the current truth about a queue hold (#1651),
+   * including its absence: `null` is what clears a hold it stored, so a restart or a replacement
+   * provider can never leave one behind. Older peers get no field and keep what they had. */
+  private overlayQueueHold(snapshot: SessionSnapshot, protocolVersion: number | null): SessionSnapshot {
+    if (!runnerSupportsProtocol(protocolVersion, "queueHolds")) return snapshot;
+    return { ...snapshot, queueHold: this.publishedQueueHolds.get(snapshot.id) ?? null };
   }
 
   private overlayRuntimeSteering(snapshot: SessionSnapshot, protocolVersion: number | null): SessionSnapshot {
@@ -9383,6 +9397,83 @@ export class SessionManager {
         ? { activeTurnId: entry.providerInitiatedTurnId }
         : entry?.running && entry.activeTurnId ? { activeTurnId: entry.activeTurnId } : {}),
     });
+    // Every queue edge is where a hold can begin or end: a prompt arrives behind a deferred
+    // handoff, or the queue drains, empties, or is rejected.
+    this.syncQueueHold(sessionId);
+  }
+
+  /**
+   * The silent wait a queued prompt is in, if any (#1651). A worktree or provider-account handoff
+   * is deferred while the provider's detached background work is unfinished, because retiring the
+   * provider would end that work, and drain() lets nothing but a runner-generated recovery prompt
+   * past the deferred handoff. A job that never terminates therefore held every queued prompt,
+   * including a workflow-decision resume, for as long as the provider lived, with no status change
+   * and no event. Every other reason a handoff waits — a guardrail card, an interrupt, an unanswered
+   * question, a lifecycle operation — is already visible on the session, so it is not a hold.
+   */
+  private queueHoldFor(sessionId: string, entry: ActiveSession): SessionQueueHoldView | null {
+    if (entry.running || entry.providerInitiatedTurnActive) return null;
+    const waiting = entry.queue.filter((prompt) => !prompt.syntheticRecovery);
+    if (waiting.length === 0) return null;
+    const kind: SessionQueueHoldKind | null = entry.pendingProviderAccountSwitch
+      ? "provider_account_switch"
+      : entry.pendingWorktreeRebind ? "worktree_rebind" : null;
+    if (!kind) return null;
+    const meta = this.store.readMeta(sessionId);
+    if (!meta) return null;
+    const backgroundWorkBlocksHandoff =
+      (!!meta.backgroundWorkState || !!meta.pendingBackgroundTaskIds?.length) &&
+      !meta.orphanedWork?.recoveryAttemptedAt;
+    if (!backgroundWorkBlocksHandoff) return null;
+    if (entry.authenticationBlocked || entry.historyQuarantined || entry.historyIntegrityFailure ||
+        entry.governanceTripped || this.queueHeld(entry) || this.hasPendingApproval(sessionId) ||
+        this.steerFences(entry).size || this.reservedPromotionPrecedesQueue(sessionId, entry) ||
+        this.rewinding.has(sessionId) || this.forking.has(sessionId) || this.loggingOut.has(sessionId) ||
+        this.closing.has(sessionId) || this.deleting.has(sessionId)) return null;
+    const unfinished = (meta.backgroundJobs ?? []).filter((job) => !job.terminalStatus);
+    const oldest = unfinished.reduce<typeof unfinished[number] | undefined>(
+      (min, job) => !min || job.registeredAt < min.registeredAt ? job : min, undefined);
+    const published = this.publishedQueueHolds.get(sessionId);
+    // One incident keeps its identity while it lasts, however its counts change.
+    const since = published?.kind === kind ? published.since : Date.now();
+    return {
+      kind,
+      holdId: `${kind.replaceAll("_", "-")}:${since}`,
+      since,
+      target: kind === "worktree_rebind" ? entry.pendingWorktreeRebind! : entry.pendingProviderAccountSwitch!.label,
+      queuedPrompts: waiting.length,
+      unfinishedBackgroundJobs: Math.max(unfinished.length, meta.pendingBackgroundTaskIds?.length ?? 0),
+      ...(oldest ? { oldestUnfinishedJob: { launchType: oldest.launchType, startedAt: oldest.registeredAt } } : {}),
+    };
+  }
+
+  /**
+   * Publish both edges of a queue hold (#1651). While a prompt waits behind the barrier the session
+   * reports `queued` — not `idle`, which invites another prompt into the same wait, and not
+   * `running`, which the control plane wrote at admission although nothing had started — and its
+   * snapshot names the hold. Clearing is explicit, so the control plane never keeps a stale one.
+   */
+  private syncQueueHold(sessionId: string): void {
+    const entry = this.active.get(sessionId);
+    const next = entry ? this.queueHoldFor(sessionId, entry) : null;
+    const published = this.publishedQueueHolds.get(sessionId);
+    if (isDeepStrictEqual(next ?? undefined, published)) return;
+    if (next) this.publishedQueueHolds.set(sessionId, next);
+    else this.publishedQueueHolds.delete(sessionId);
+    const meta = this.store.readMeta(sessionId);
+    if (!meta || this.store.isDeleted(sessionId)) return;
+    if (next) {
+      if (meta.status === "idle" || meta.status === "queued") {
+        this.emitStatus(sessionId, "queued", queueHoldReason(next));
+      }
+    } else if (entry && meta.status === "queued" && !entry.running && entry.queue.length === 0 &&
+        !this.activeTurnWaiters.has(sessionId)) {
+      // The held prompt left the queue without running (cancelled or rejected): nothing is queued.
+      this.emitStatus(sessionId, "idle");
+    }
+    if (!runnerSupportsProtocol(this.controlPlaneProtocolVersion(), "queueHolds")) return;
+    const latest = this.store.readMeta(sessionId);
+    if (latest) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(latest) });
   }
 
   /** Publish both edges of the interruption hold so clients never infer it from queue contents. */
@@ -9943,14 +10034,21 @@ export class SessionManager {
         await this.rebindSelectedProviderAccount(sessionId, entry);
         return;
       }
-      if (!this.promoteQueuedHandoffPrerequisite(sessionId, entry.queue)) return;
+      if (!this.promoteQueuedHandoffPrerequisite(sessionId, entry.queue)) {
+        // The queued prompt waits behind the deferred handoff; say so rather than fall silent.
+        this.syncQueueHold(sessionId);
+        return;
+      }
     }
     if (entry.pendingWorktreeRebind) {
       if (this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
         return;
       }
-      if (!this.promoteQueuedHandoffPrerequisite(sessionId, entry.queue)) return;
+      if (!this.promoteQueuedHandoffPrerequisite(sessionId, entry.queue)) {
+        this.syncQueueHold(sessionId);
+        return;
+      }
     }
     // Schedulers may race with cancellation or interruption and leave an empty generation. Do not
     // claim—or queue for—an active-work permit when there is no provider work to dispatch.
@@ -15037,6 +15135,8 @@ export class SessionManager {
       this.scheduleOrphanRecovery(sessionId);
     }
     if (!updated?.backgroundWorkState) this.resumeDeferredHandoff(sessionId);
+    // The work a deferred handoff waits on changed: the hold's counts follow, or it ends.
+    this.syncQueueHold(sessionId);
   }
 
   private mergeDurableBackgroundJobs(

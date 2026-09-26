@@ -1,6 +1,7 @@
 import type { BackgroundDeliveryWatchdogState } from "@wollipog/protocol";
 
-export type BackgroundDeliverySeverity = "pending" | "missing";
+/** `pending` progresses on its own; `blocked` and `missing` do not and ask for a step. */
+export type BackgroundDeliverySeverity = "pending" | "blocked" | "missing";
 
 export interface BackgroundDeliveryStatusCopy {
   label: string;
@@ -24,6 +25,16 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
     action: "No action is needed.",
     diagnostic: "The job is terminal, but no continuation has been recorded.",
     severity: "pending",
+  },
+  continuation_blocked: {
+    label: "Result Blocked",
+    description: "A background job finished, but its result cannot be returned while another job from the same turn is still running.",
+    completed: "The background job finished.",
+    outstanding: "Its result waits until every job started by the same turn has finished.",
+    recovery: "Wollipog returns the result automatically once the remaining job ends, but it cannot end that job itself.",
+    action: "Ask the session to stop the unfinished job (a monitor that never fires ends only with its provider process); restarting or stopping the session ends that job but discards this result.",
+    diagnostic: "The job is terminal, but a sibling job from its parent turn has no terminal status, so no continuation can be recorded.",
+    severity: "blocked",
   },
   accepted_without_result: {
     label: "Result Missing",

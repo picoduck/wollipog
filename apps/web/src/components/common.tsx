@@ -310,7 +310,7 @@ export function SessionStatusIndicators({
   attention = "badge",
 }: {
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
-    "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait" |
+    "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait" | "queueHold" | "holds" |
     "orchestratorCampaign" | "pendingRequestOwners">;
   disconnected?: boolean;
   onOpenAttention?: () => void;
@@ -363,6 +363,19 @@ export function SessionStatusIndicators({
                         : "Queue Order"}
         </span>
       )}
+      {session.status === "queued" && !session.capacityWait && session.queueHold && (() => {
+        const reason = session.holds?.find((hold) => hold.holdId === session.queueHold?.holdId)?.reason;
+        return (
+          <span
+            className="status-badge st-idle"
+            title={reason}
+            aria-label={`Queue Reason: ${reason ?? "A handoff is waiting on background work."}`}
+          >
+            <span className="status-dot2" aria-hidden="true" />
+            {session.queueHold.kind === "worktree_rebind" ? "Worktree Handoff" : "Account Handoff"}
+          </span>
+        );
+      })()}
       {attention === "pills"
         ? <AttentionPills session={session} />
         : <AttentionBadge session={session} ariaLabel={attentionStatus
@@ -564,19 +577,21 @@ export function ActiveSubagentsBadge({ count, onOpen, workers = false }: { count
 export function BackgroundDeliveryBadge({ state, onOpen }: { state: BackgroundDeliveryWatchdogState; onOpen?: () => void }) {
   const status = BACKGROUND_DELIVERY_STATUS[state];
   const accessibleName = backgroundDeliveryAccessibleName(state);
+  // Only a state that progresses on its own reads as pending; a blocked or missing result asks
+  // for a step, so it wears the attention treatment.
   if (onOpen) return (
-    <button type="button" className={status.severity === "missing"
-      ? "background-work-badge background-work-orphaned"
-      : "background-work-badge background-delivery-pending"}
+    <button type="button" className={status.severity === "pending"
+      ? "background-work-badge background-delivery-pending"
+      : "background-work-badge background-work-orphaned"}
       aria-label={accessibleName} aria-controls="right-panel" title={status.description} onClick={onOpen}>
       <span className="background-work-dot" aria-hidden="true" />
       {status.label}
     </button>
   );
   return (
-    <span className={status.severity === "missing"
-      ? "background-work-badge background-work-orphaned"
-      : "background-work-badge background-delivery-pending"}
+    <span className={status.severity === "pending"
+      ? "background-work-badge background-delivery-pending"
+      : "background-work-badge background-work-orphaned"}
       aria-label={accessibleName} title={status.description}>
       <span className="background-work-dot" aria-hidden="true" />
       {status.label}
