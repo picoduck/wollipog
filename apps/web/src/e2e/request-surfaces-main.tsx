@@ -36,6 +36,8 @@ const evidenceCount = Number(new URLSearchParams(window.location.search).get("it
 // `bounded=legacy` shows the same hold as a runner without the bound reports it.
 const boundedParam = new URLSearchParams(window.location.search).get("bounded");
 const boundedHold = boundedParam === "1" || boundedParam === "legacy";
+// `restart=keeps` reports that hold as a v191 runner does, whose restart keeps the queue (#1779).
+const restartKeepsQueue = new URLSearchParams(window.location.search).get("restart") === "keeps";
 const includeDescendants = scenario === "descendants" || scenario === "held" ||
   new URLSearchParams(window.location.search).get("children") === "1";
 const requestedPollStatus = new URLSearchParams(window.location.search).get("pollStatus");
@@ -354,6 +356,7 @@ function boundedHandoffHeldChild() {
       unfinishedBackgroundJobs: 1,
       oldestUnfinishedJob: { launchType: "monitor", startedAt: since - 36 * 60_000 },
       ...(boundedParam === "1" ? { endsAt: since + 60 * 60_000 } : {}),
+      ...(restartKeepsQueue ? { restartKeepsQueue: true as const } : {}),
     },
   }, [{ kind: "workflow_decision_resolution", occurrenceId: "wd_occ_merge_1778", since: since + 60_000 }]);
   return { sessionId: "held-child-3", holds: [hold!] };

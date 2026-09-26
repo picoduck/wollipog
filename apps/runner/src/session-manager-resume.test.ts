@@ -6544,7 +6544,7 @@ test("Stop during recovery initialization cancels that launch without leaving a 
   }
 });
 
-test("explicit Restart clears a retained recovery queue after a retryable conflict", async () => {
+test("explicit Restart carries a retained recovery queue after a retryable conflict (#1779)", async () => {
   const h = harness({ status: "running" });
   try {
     (h.manager as any).createDriver = (_kind: AgentDriverKind, options: DriverOptions): Driver => ({
@@ -6559,7 +6559,7 @@ test("explicit Restart clears a retained recovery queue after a retryable confli
       sessionId: "resume-session",
       client: { resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {}, agentSessionId: () => "thread-persisted" },
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
-      queue: [{ id: "held", text: "discarded by restart", images: [] }],
+      queue: [{ id: "held", text: "kept by restart", images: [] }],
     });
     exitActive(h.manager, "resume-session", 1);
     await tick();
@@ -6570,8 +6570,10 @@ test("explicit Restart clears a retained recovery queue after a retryable confli
     await h.manager.start(launchSpec(h.root), "restart prompt");
     await tick();
     await tick();
-    assert.equal((h.manager as any).recoveryQueues.has("resume-session"), false);
-    assert.deepEqual(h.prompts, ["restart prompt"]);
+    assert.equal((h.manager as any).recoveryQueues.has("resume-session"), false,
+      "no stale recovery map can intercept later prompts");
+    assert.deepEqual(h.prompts, ["restart prompt", "kept by restart"],
+      "the launch's own prompt runs first, then the recovered prompt the restart carried");
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
@@ -6639,7 +6641,7 @@ test("Restart superseding deferred queued recovery keeps the replacement admissi
       sessionId: "resume-session",
       client: { resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {}, agentSessionId: () => "thread-persisted" },
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
-      queue: [{ id: "held", text: "discarded by restart", images: [], durable }],
+      queue: [{ id: "held", text: "kept by restart", images: [], durable }],
     });
     exitActive(h.manager, "resume-session", 1);
     await entered[0]!.promise;
@@ -6665,11 +6667,8 @@ test("Restart superseding deferred queued recovery keeps the replacement admissi
     assert.equal((h.manager as any).recoveryQueues.has("resume-session"), false);
     assert.equal(h.launches.length, 0, "both generations are still before driver construction");
     assert.deepEqual(h.disposals, [], "the stale recovery has no replacement cleanup authority");
-    assert.deepEqual(
-      failures,
-      [["session lifecycle discarded the recovered command queue", "COMMAND_CANCELLED"]],
-      "Restart rejects the recovered receipt exactly once; the stale recovery adds no duplicate",
-    );
+    assert.deepEqual(failures, [],
+      "Restart carries the recovered receipt (#1779); the stale recovery neither rejects nor takes it back");
     assert.equal(
       h.sent.some((message) =>
         message.type === "session_event" && message.payload.kind === "error" &&
@@ -6680,6 +6679,9 @@ test("Restart superseding deferred queued recovery keeps the replacement admissi
 
     gates[1]!.resolve();
     assert.equal(await restart, true);
+    for (let attempt = 0; attempt < 50 && !h.prompts.length; attempt++) await tick();
+    assert.deepEqual(h.prompts, ["kept by restart"], "the carried prompt runs once, after the restart");
+    assert.deepEqual(failures, []);
   } finally {
     gates[0]!.resolve();
     gates[1]!.resolve();
@@ -6719,7 +6721,7 @@ test("Restart superseding capacity-queued recovery keeps the replacement admissi
       sessionId: "resume-session",
       client: { resolvePermission: () => false, cancel: () => {}, dispose: () => {}, setConfig: () => {}, agentSessionId: () => "thread-persisted" },
       repoPath: h.root, cwd: h.root, worktree: null, status: "running", running: true,
-      queue: [{ id: "held", text: "discarded by restart", images: [], durable }],
+      queue: [{ id: "held", text: "kept by restart", images: [], durable }],
     });
     exitActive(h.manager, "resume-session", 1);
     await tick();
@@ -6743,11 +6745,8 @@ test("Restart superseding capacity-queued recovery keeps the replacement admissi
       false,
       "the stale recovery admission cancellation cannot release the replacement-owned lock",
     );
-    assert.deepEqual(
-      failures,
-      [["session lifecycle discarded the recovered command queue", "COMMAND_CANCELLED"]],
-      "Restart rejects the recovered receipt once; the stale waiter adds no duplicate",
-    );
+    assert.deepEqual(failures, [],
+      "Restart carries the recovered receipt (#1779); the stale waiter neither rejects nor takes it back");
     assert.equal(h.launches.length, 0);
     assert.deepEqual(h.disposals, []);
     assert.equal(
@@ -6761,6 +6760,9 @@ test("Restart superseding capacity-queued recovery keeps the replacement admissi
     internals.releaseAdmission("capacity-blocker");
     assert.equal(await restart, true);
     assert.deepEqual([...internals.admitted], ["resume-session"]);
+    for (let attempt = 0; attempt < 50 && !h.prompts.length; attempt++) await tick();
+    assert.deepEqual(h.prompts, ["kept by restart"], "the carried prompt runs once, after the restart");
+    assert.deepEqual(failures, []);
   } finally {
     internals.releaseAdmission("capacity-blocker");
     h.manager.shutdownAll();

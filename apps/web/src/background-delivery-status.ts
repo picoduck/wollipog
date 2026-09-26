@@ -33,7 +33,7 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
     completed: "The background job finished.",
     outstanding: "Its result waits until every job started by the same turn has finished.",
     recovery: "Wollipog returns the result automatically once the remaining job ends. It ends that job itself only when a queued handoff has waited on it past its bound.",
-    action: "Ask the session to stop the unfinished job (a monitor that never fires ends only with its provider process); restarting or stopping the session ends that job but discards this result.",
+    action: "Ask the session to stop the unfinished job (a monitor that never fires ends only with its provider process); stopping or restarting the session also ends that job, together with every other job.",
     diagnostic: "The job is terminal, but a sibling job from its parent turn has no terminal status, so no continuation can be recorded.",
     severity: "blocked",
   },
@@ -72,12 +72,14 @@ export const BACKGROUND_DELIVERY_STATUS: Record<BackgroundDeliveryWatchdogState,
 /**
  * The step a watchdog state asks for, where the surface knows whether this runner can stop one job
  * (#1780). Result Blocked then offers Stop Job, or says why it is unavailable; every other state,
- * and a surface that does not know, keeps the shared copy.
+ * and a surface that does not know, keeps the shared copy. `restartReportsResult` says the runner's
+ * restart hands this result to the new conversation rather than discarding it (v191, #1779).
  */
 export function backgroundDeliveryAction(
   state: BackgroundDeliveryWatchdogState,
   jobStop?: BackgroundJobStopAvailability | null,
   stoppableJobListed = true,
+  restartReportsResult = false,
 ): string {
   const status = BACKGROUND_DELIVERY_STATUS[state];
   if (state !== "continuation_blocked" || !jobStop) return status.action;
@@ -86,7 +88,10 @@ export function backgroundDeliveryAction(
       ? "Use Stop Job on the unfinished job below"
       : "Use Stop Job on the unfinished job from the same turn, listed in Background Work";
     return `${where}: only that job ends, it is recorded as killed, and this result is then returned. ` +
-      "Restarting or stopping the session also ends it, but ends every other job and discards this result.";
+      (restartReportsResult
+        ? "Stopping the session also ends it but discards this result; restarting the session ends every job " +
+          "and reports this result to the new conversation instead."
+        : "Restarting or stopping the session also ends it, but ends every other job and discards this result.");
   }
   return `Stop Job is unavailable: ${jobStop.reason} ${status.action}`;
 }

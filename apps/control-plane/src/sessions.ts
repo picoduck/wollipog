@@ -463,27 +463,48 @@ function boundedDecisionString(value: unknown, max: number): value is string {
     !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
 }
 
+/** The resource key and option ids come from the child's own request and may contain line breaks,
+ * so they are quoted as single-line literals and can never forge an envelope's framing lines. */
+function decisionLiteral(value: string): string {
+  return JSON.stringify(value).replace(/\u2028/gu, "\\u2028").replace(/\u2029/gu, "\\u2029");
+}
+
 /** The prompt that resumes a child after its decision resolves. Typed decisions do not suspend the
  * provider turn, so a child that ended its turn behind the card has nothing else to wake it. The
  * decision record stays authoritative: a child polling inside its turn may already have read it. */
 function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): string {
   const resolver = decision.authority === "orchestrator" ? "Your Orchestrator" : "A human reviewer";
-  // The resource key and option ids come from the child's own request and may contain line breaks,
-  // so they are quoted as single-line literals and can never forge the envelope's framing lines.
-  const literal = (value: string) =>
-    JSON.stringify(value).replace(/\u2028/gu, "\\u2028").replace(/\u2029/gu, "\\u2029");
   const option = decision.selectedOptionId === undefined
     ? ""
-    : ` with option ${literal(decision.selectedOptionId)}`;
+    : ` with option ${decisionLiteral(decision.selectedOptionId)}`;
   return [
     `[Wollipog Workflow Decision — ${decision.occurrenceId}]`,
     `${resolver} ${decision.status} your ${decision.category} decision ${decision.occurrenceId} ` +
-      `(resource ${literal(decision.resourceKey)})${option}` +
+      `(resource ${decisionLiteral(decision.resourceKey)})${option}` +
       (decision.childMessage ? " and left this message for you:" : "."),
     ...(decision.childMessage ? [decision.childMessage] : []),
     "The decision record is authoritative: read it with get_workflow_decision before acting. " +
       "If you have already acted on this outcome, continue from where you are.",
     "[End Wollipog Workflow Decision]",
+  ].join("\n");
+}
+
+/** What a restarted child is told about the decisions its restart revoked (#1779). Revocation on a
+ * lifecycle end is deliberate and stays: a relaunched provider must never act on a grant made to the
+ * process it replaced. Naming each occurrence lets the child request again what it still needs,
+ * instead of finding the revocation only when it tries to consume one. */
+function restartRevokedDecisionsPrompt(revoked: readonly WorkflowDecisionView[]): string {
+  return [
+    "[Wollipog Session Restart]",
+    `Restarting this session revoked ${revoked.length === 1 ? "a workflow decision" : `${revoked.length} workflow decisions`} ` +
+      "it had not consumed:",
+    ...revoked.map((decision) => `- ${decision.occurrenceId}: ${decision.category} decision (resource ` +
+      `${decisionLiteral(decision.resourceKey)}), ${decision.status === "approved" ? "approved" : "still pending"} ` +
+      "before the restart"),
+    "Do not act on an earlier approval of any of them, including one in a message still queued for this session. " +
+      "Read each record with get_workflow_decision (an armed merge that already landed is settled from the forge as " +
+      "consumed), and request again with request_workflow_decision each decision you still need.",
+    "[End Wollipog Session Restart]",
   ].join("\n");
 }
 
@@ -6311,6 +6332,8 @@ export class SessionsService {
       if (restartLaunchId) this.db.clearSessionStopRestartLaunchId(sessionId);
       return fail("runner is offline", 409);
     }
+    // Revocation stays; the restarted child is told which grants it lost (#1779).
+    const revokedByRestart = this.db.unconsumedWorkflowDecisionsForSession(sessionId);
     this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-restarted");
     this.abortPolicyHookApprovals(session, now, "session-restarted");
     this.db.setPendingApproval(sessionId, null);
@@ -6327,6 +6350,13 @@ export class SessionsService {
       this.db.setSessionArchived(sessionId, false, now);
     }
     this.db.updateSessionStatus(sessionId, "starting", now);
+    if (revokedByRestart.length) {
+      // Queued behind the launch on the durable lane, after any prompt the runner carries across it.
+      const notice = this.prompt(sessionId, restartRevokedDecisionsPrompt(revokedByRestart));
+      if (!notice.ok) {
+        this.log.warn(`restart revocation notice not delivered to ${sessionId}: ${notice.error}`);
+      }
+    }
     // The runner replaces any existing process for this sessionId (no separate
     // stop_session, which would emit a terminal 'stopped' that blocks the restart).
     this.hub.sessionChangedById(sessionId);

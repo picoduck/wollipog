@@ -351,8 +351,9 @@ export type BackgroundJobEndActor = { kind: "runner" } | BackgroundJobStopActor;
 
 /** Why Wollipog ended background work. `handoff_wait_bound`: a worktree or provider-account
  * handoff, and every prompt queued behind it, waited on the work past the configured bound.
- * `stop_request`: an authorized actor asked to stop this one job (#1780). */
-export type BackgroundJobEndReason = "handoff_wait_bound" | "stop_request";
+ * `stop_request`: an authorized actor asked to stop this one job (#1780). `session_restart`: an
+ * explicit Restart replaced the provider process, and the conversation, that ran the job (#1779). */
+export type BackgroundJobEndReason = "handoff_wait_bound" | "stop_request" | "session_restart";
 
 export interface BackgroundJobEnd {
   actor: BackgroundJobEndActor;
@@ -377,6 +378,9 @@ export interface DurableBackgroundJob {
   terminalObservedAt?: number;
   /** Present only when Wollipog ended the job itself (#1778): who asked, why, and when. */
   endedBy?: BackgroundJobEnd;
+  /** When an explicit Restart replaced the conversation that started this job (#1779). Its result
+   * can no longer arrive as a provider task notification, so its continuation says so. */
+  restartedAt?: number;
   continuationRequired?: boolean;
   /** Stable identity shared by every job in one parent-turn barrier continuation. */
   continuationId?: string;

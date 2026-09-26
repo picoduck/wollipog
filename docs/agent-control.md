@@ -818,7 +818,10 @@ with no pending request. Before, its decision resume was dropped and nothing tol
   runner's own status already says so. Every authoritative end of a child — a runner-reported
   terminal status, a session the runner no longer holds at reconnect (whatever status the control
   plane had stored for it), an explicit Stop or restart, a guardrail Stop — revokes its unconsumed
-  decisions and abandons every resume it still owed, so an ended child is never resumed. A resume refused behind a cost-budget or policy-hook card is
+  decisions and abandons every resume it still owed, so an ended child is never resumed. A restart
+  is the one end the child continues past, so the control plane then queues one durable notice for
+  it, `[Wollipog Session Restart]`, naming each occurrence the restart revoked and whether it was
+  approved or still pending; the child requests again what it still needs (#1779). A resume refused behind a cost-budget or policy-hook card is
   recorded `failed` and not retried: the outcome, and any message, stay on the decision record for
   the child to read once the human resolves the card. Older runners keep the ordinary prompt path.
   A resume held before its runner downgraded is settled on that path rather than held on a recovery
@@ -893,21 +896,34 @@ queued behind a turn that had never started.
   hold but not the wait: the hold keeps its identity and deadline, and the work is ended as soon as
   that turn settles if the deadline has passed. Orphaned work is not bounded: its one recovery turn
   already crosses the barrier.
-- **The way out is stated.** For a bounded hold, the recovery action says to wait, gives the
-  time Wollipog ends the work, and warns that restarting discards the queued prompts. Otherwise —
-  an older runner, a disabled bound, or a provider that cannot end its work — it says to wait for
-  the job, or, if it never ends, to restart the session, and what that costs: an explicit restart
-  builds fresh session metadata, so the provider's background jobs end with it and no undelivered
-  result is recovered; the runner discards the prompts still in its queue (they must be sent
-  again); and approved decisions the session has not yet consumed are revoked and must be
-  requested again.
+- **The way out is stated.** For a bounded hold, or one whose runner can stop a single job, the
+  recovery action says to wait or stop that job and advises against a restart. Otherwise — an older
+  runner, a disabled bound, or a provider that cannot end its work — it says to wait for the job,
+  or, if it never ends, to restart the session, and what that costs. What a restart costs depends
+  on the runner, and the hold says which applies (`restartKeepsQueue`, v191):
+  - **A v191 runner keeps the queued work (#1779).** Every prompt still in the queue, decision
+    resumes included, runs after the restart in its original order and can still be removed
+    before it starts. A Claude Code restart starts a new conversation, and the old provider
+    process ends with every job it ran, so the runner carries the job records instead of dropping
+    them: an unfinished job, and a pending or orphaned task id with no record, is recorded as
+    `killed` by the restart, and its result is unrecoverable. A finished job whose result still
+    waited for its continuation joins one managed continuation into the new conversation. That
+    continuation names each job, its status, and a finished job's provider output file, under
+    the ordinary at-most-once fences and governance holds. A continuation already submitted to the
+    old conversation is never repeated; it is recorded as missing its result. The timeline gets
+    a notice naming the ended and reported jobs by type and id, never a provider path. Approved
+    decisions the session has not consumed are still revoked, and the restarted child is told which.
+  - **An older runner discards it.** It builds fresh session metadata, so the provider's background
+    jobs end with it and no undelivered result is recovered; it discards the prompts still in its
+    queue (they must be sent again); and approved decisions the session has not yet consumed are
+    revoked and must be requested again.
 - **The job is reported, too.** A listed job with no terminal status for more than an hour carries
   `stalledSince` in the session's job inventory and reads **Stalled** in the Background Work panel.
   That is a report, not proof it ended. A finished job whose result cannot be returned because a
   sibling from the same turn is unfinished is a `continuation_blocked` delivery, shown as **Result
-  Blocked** with the step that clears it (ask the session to stop the unfinished job; a restart or
-  stop ends the job but discards the result), rather than **Result Pending** with "No action is
-  needed".
+  Blocked** with the step that clears it (ask the session to stop the unfinished job; a stop or a
+  restart ends every job, a stop discards the result, and a v191 restart reports it to the new
+  conversation), rather than **Result Pending** with "No action is needed".
   Older runners leave all of this absent, and a queued prompt behind such a barrier stays invisible
   to them as before.
 

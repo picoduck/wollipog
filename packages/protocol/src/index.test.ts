@@ -213,8 +213,10 @@ test("machine skill adoption is capability-gated per platform", () => {
   assert.equal(machineSkillAdoptionRecoveryRequirement(undefined), null);
 });
 
-test("PROTOCOL_VERSION is 190", () => {
-  assert.equal(PROTOCOL_VERSION, 190);
+test("PROTOCOL_VERSION is 191", () => {
+  assert.equal(PROTOCOL_VERSION, 191);
+  assert.equal(runnerSupportsProtocol(190, "restartKeepsQueuedWork"), false);
+  assert.equal(runnerSupportsProtocol(191, "restartKeepsQueuedWork"), true);
   assert.equal(runnerSupportsProtocol(189, "backgroundJobStop"), false);
   assert.equal(runnerSupportsProtocol(190, "backgroundJobStop"), true);
   assert.equal(runnerSupportsProtocol(188, "orchestratorVideoFrameReview"), false);
@@ -1635,4 +1637,33 @@ test("a hold whose runner can stop one job names that action before the bound or
   assert.match(bounded, /To end one now, stop it by its job id with stop_background_job/u);
   assert.match(bounded, /the queued messages run in order; Wollipog also ends any job still running at 2026-09-25T01:48Z\. /u);
   assert.doesNotMatch(bounded, /restart_session/u);
+});
+
+test("a hold whose runner keeps the queue across a restart states what a restart keeps and what it costs (#1779)", () => {
+  const queueHold = {
+    kind: "worktree_rebind" as const,
+    holdId: "worktree-rebind:5000",
+    since: 5_000,
+    target: "/repos/x/.agent-worktrees/fix-1779",
+    queuedPrompts: 2,
+    unfinishedBackgroundJobs: 1,
+    restartKeepsQueue: true as const,
+  };
+  assert.equal(queueHoldRecoveryAction(queueHold),
+    "Wait for the unfinished background job to end; the handoff and the queued messages then proceed on their own. " +
+    "If it never ends (a monitor whose condition never fires ends only with its provider process), restart the session " +
+    "with restart_session, knowing what that costs: the provider and its background job end, and the new conversation " +
+    "is told each job's result or that it cannot be recovered; the queued messages are kept and run after the restart; " +
+    "and any approved workflow decision the session has not yet consumed is revoked, and the restarted session is told " +
+    "which ones to request again.");
+  for (const hold of [
+    { ...queueHold, canStopJobs: true as const },
+    { ...queueHold, endsAt: Date.UTC(2026, 8, 25, 1, 48, 43) },
+  ]) {
+    const action = queueHoldRecoveryAction(hold);
+    assert.match(action, /to restarting the session: a restart keeps the queued messages but ends every background job and starts a new conversation\.$/u);
+    assert.doesNotMatch(action, /discard/u);
+  }
+  assert.match(queueHoldRecoveryAction({ ...queueHold, restartKeepsQueue: undefined }),
+    /the queued messages are discarded and must be sent again/u, "an older runner's restart still discards the queue");
 });
