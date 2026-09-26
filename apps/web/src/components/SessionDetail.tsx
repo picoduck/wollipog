@@ -5172,8 +5172,8 @@ function SessionDetailLoaded({
                   </p>
                   <p>
                     The session is parked. Use <strong>Switch Account…</strong> in More Actions to
-                    retry this account or choose another account with usage headroom. You can also
-                    dismiss this notice to retry the current account.
+                    choose an account with usage headroom. You can also dismiss this notice to send
+                    a new message with the session&rsquo;s configured account.
                   </p>
                 </div>
                 <div className="quarantine-actions">
@@ -5182,7 +5182,7 @@ function SessionDetailLoaded({
                     className="btn ghost sm"
                     onClick={() => setDismissedAccountSwitchFailureKey(accountSwitchFailureKey)}
                   >
-                    Dismiss and Retry
+                    Dismiss Notice
                   </button>
                 </div>
               </div>

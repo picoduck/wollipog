@@ -449,7 +449,7 @@ test("a failed account switch notice can be dismissed to edit and retry the curr
     const banner = fixture.container.querySelector('[aria-label="Account Switch Failed"]');
     assert.ok(banner);
     const dismiss = [...banner.querySelectorAll("button")].find((button) =>
-      button.textContent?.trim() === "Dismiss and Retry");
+      button.textContent?.trim() === "Dismiss Notice");
     assert.ok(dismiss);
     await act(async () => { dismiss.click(); });
     assert.equal(fixture.container.querySelector('[aria-label="Account Switch Failed"]'), null);
