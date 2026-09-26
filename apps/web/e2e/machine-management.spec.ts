@@ -280,6 +280,26 @@ test("Machine cards show account-scoped login status", async ({ page }) => {
   await page.screenshot({ path: "test-results/provider-accounts/machine-accounts.png", fullPage: true });
 });
 
+test("Machine owners can remove a provider account after confirming", async ({ page }) => {
+  await page.getByText("Accounts", { exact: true }).click();
+  const accounts = page.locator("details.runner-agents").filter({ hasText: "Accounts" });
+  const personal = accounts.locator(".agent-row").filter({ hasText: "Personal" });
+  await personal.getByRole("button", { name: "Remove" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Remove Account?" });
+  await expect(confirmation).toContainText("deletes the credentials it stored");
+  await expect(confirmation).toContainText("Personal");
+  await page.screenshot({ path: "test-results/provider-accounts/remove-account-confirm.png", fullPage: true });
+  await confirmation.getByRole("button", { name: "Cancel" }).click();
+  await expect(personal).toBeVisible();
+
+  await personal.getByRole("button", { name: "Remove" }).click();
+  await page.getByRole("dialog", { name: "Remove Account?" }).getByRole("button", { name: "Remove Account" }).click();
+  await expect(personal).toHaveCount(0);
+  await expect(page.getByText("Account removed.", { exact: true })).toBeVisible();
+  await expect(accounts.locator(".agent-row").filter({ hasText: "Work" })).toBeVisible();
+  await page.screenshot({ path: "test-results/provider-accounts/remove-account-done.png", fullPage: true });
+});
+
 test("Machine owners can start both provider sign-in flow shapes", async ({ page }) => {
   await page.getByText("Accounts", { exact: true }).click();
   await page.getByRole("button", { name: "Add Account" }).click();

@@ -167,6 +167,11 @@ an agent's `defaultProviderAccountId`. Wollipog maps the selected directory to
 label, provider, and login state. Omitting `providerAccounts` preserves the provider's ordinary
 default home exactly.
 
+Machine owners can also add and remove accounts from the Machine card. A sign-in to an account
+that is already on the Machine is discarded rather than recorded twice. Removing an account deletes
+the credential directory Wollipog created for it, unless a session on that Machine still uses it;
+directories you configured yourself are never deleted.
+
 ## Security Model
 
 Wollipog runs tools that can modify source code and execute commands. Its primary trust boundaries are:

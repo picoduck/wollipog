@@ -717,6 +717,72 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   )).json() as { runners: Array<{ runnerId: string; providerLogins?: unknown[] }> })
     .runners.find((candidate) => candidate.runnerId === "runner-ui-route")?.providerLogins;
   assert.equal(ordinaryProviderLogins, undefined, "one-time provider sign-in material is visible only to Machine managers");
+
+  runner.send(JSON.stringify({
+    type: "agents_updated",
+    runnerId: "runner-ui-route",
+    agents: [{
+      id: "agent-1",
+      name: "Agent",
+      command: "agent",
+      args: [],
+      env: {},
+      driver: "claude-code",
+      available: true,
+      context: { kind: "native" },
+    }],
+    providerAccounts: [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }],
+  }));
+  await waitForValue(
+    async () => (await (await fetchWithBearer(`${httpBase}/api/runners`, ownerToken)).json() as {
+      runners: Array<{ runnerId: string; providerAccounts?: Array<{ id: string }> }>;
+    }).runners.find((candidate) => candidate.runnerId === "runner-ui-route")?.providerAccounts,
+    (accounts) => accounts?.some((account) => account.id === "work") === true,
+    "the advertised provider account in the Machine view",
+  );
+  const ordinaryAccountRemoval = await fetch(`${httpBase}/api/runners/runner-ui-route/provider-accounts/work`, {
+    method: "DELETE",
+    headers: { authorization: `Bearer ${operatorToken}` },
+  });
+  assert.equal(ordinaryAccountRemoval.status, 403, "an ordinary member cannot remove Machine credentials");
+  const unknownAccountRemoval = await fetchWithBearer(
+    `${httpBase}/api/runners/runner-ui-route/provider-accounts/not-advertised`,
+    ownerToken,
+    { method: "DELETE" },
+  );
+  assert.equal(unknownAccountRemoval.status, 404);
+  const refusedRemovalResponse = fetchWithBearer(
+    `${httpBase}/api/runners/runner-ui-route/provider-accounts/work`,
+    ownerToken,
+    { method: "DELETE" },
+  );
+  const refusedRemoval = await runnerInbox.take((message) => message.type === "remove_provider_account");
+  runner.send(JSON.stringify({
+    type: "remove_provider_account_result",
+    requestId: refusedRemoval.requestId,
+    ok: false,
+    error: "A sign-in is running for this account. Cancel it before removing the account.",
+  }));
+  const refusedRemovalReply = await refusedRemovalResponse;
+  assert.equal(refusedRemovalReply.status, 409);
+  assert.match((await refusedRemovalReply.json() as { error: string }).error, /sign-in is running/u);
+  const accountRemovalResponse = fetchWithBearer(
+    `${httpBase}/api/runners/runner-ui-route/provider-accounts/work`,
+    ownerToken,
+    { method: "DELETE" },
+  );
+  const accountRemoval = await runnerInbox.take((message) => message.type === "remove_provider_account");
+  assert.equal(accountRemoval.accountId, "work");
+  assert.equal(accountRemoval.runnerId, "runner-ui-route");
+  runner.send(JSON.stringify({
+    type: "remove_provider_account_result",
+    requestId: accountRemoval.requestId,
+    ok: true,
+    credentialsRetained: true,
+  }));
+  const accountRemovalReply = await accountRemovalResponse;
+  assert.equal(accountRemovalReply.status, 200);
+  assert.deepEqual(await accountRemovalReply.json(), { removed: true, credentialsRetained: true });
   runner.send(JSON.stringify({
     type: "agent_control_credential",
     sessionId: "session-agent-parent",

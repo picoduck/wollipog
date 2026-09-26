@@ -51,6 +51,7 @@ import type {
   ProjectView,
   PolicyHookDecisionRecordedMessage,
   ProviderLoginResultMessage,
+  RemoveProviderAccountResultMessage,
   WorkflowActionAdmissionRecordedMessage,
   WorkflowActionReconciliationResultMessage,
   SessionEvent,
@@ -244,7 +245,8 @@ export type RunnerRequestResult =
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
   | WorkflowActionReconciliationResultMessage
-  | ProviderLoginResultMessage;
+  | ProviderLoginResultMessage
+  | RemoveProviderAccountResultMessage;
 
 interface PendingRequest {
   runnerId: string;

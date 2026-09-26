@@ -1,6 +1,7 @@
 import React, { useState } from "react";
-import { runnerSupportsProtocol, type RunnerView } from "@wollipog/protocol";
+import { runnerSupportsProtocol, type ProviderAccountDefinition, type RunnerView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronRightIcon, PlusIcon } from "./Icons.js";
 import { Modal } from "./common.js";
 import { PersonalIdentifier } from "./PersonalIdentifier.js";
@@ -9,12 +10,14 @@ import { Select } from "./ui/ChoiceControls.js";
 
 export function ProviderAccountsSection({ runner, online }: { runner: RunnerView; online: boolean }) {
   const api = useApi();
+  const { confirm, showToast } = useFeedback();
   const [adding, setAdding] = useState(false);
   const [provider, setProvider] = useState<"claude" | "codex">("claude");
   const [label, setLabel] = useState("");
   const [busyAccountId, setBusyAccountId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const supported = runnerSupportsProtocol(runner.protocolVersion, "providerLogin");
+  const removalSupported = runnerSupportsProtocol(runner.protocolVersion, "providerAccountRemoval");
   const canManage = runner.canManage === true;
   const logins = (runner.providerLogins ?? []).filter((login) =>
     login.status !== "succeeded" && login.status !== "cancelled");
@@ -38,6 +41,36 @@ export function ProviderAccountsSection({ runner, online }: { runner: RunnerView
     setError(null);
     try {
       await api.startProviderLogin(runner.runnerId, { accountId });
+    } catch (cause) {
+      setError((cause as Error).message);
+    } finally {
+      setBusyAccountId(null);
+    }
+  };
+
+  const remove = async (account: ProviderAccountDefinition) => {
+    const approved = await confirm({
+      title: "Remove Account?",
+      message: "Wollipog stops offering this account on the Machine and deletes the credentials it stored " +
+        "for it. If a session on this Machine still uses the account, its credentials are kept so that " +
+        "session can continue. The account itself is not affected.",
+      details: (
+        <span className="provider-account-remove-target">
+          <PersonalIdentifier value={account.label} label="Account Email" />
+          <span className="atag">{account.provider === "claude" ? "Claude" : "Codex"}</span>
+        </span>
+      ),
+      confirmLabel: "Remove Account",
+      tone: "danger",
+    });
+    if (!approved) return;
+    setBusyAccountId(account.id);
+    setError(null);
+    try {
+      const result = await api.removeProviderAccount(runner.runnerId, account.id);
+      showToast(result.credentialsRetained
+        ? "Account removed. Its credentials were kept because a session on this Machine still uses them."
+        : "Account removed.", { tone: "success" });
     } catch (cause) {
       setError((cause as Error).message);
     } finally {
@@ -76,6 +109,16 @@ export function ProviderAccountsSection({ runner, online }: { runner: RunnerView
                       onClick={() => void signIn(account.id)}
                     >
                       {busyAccountId === account.id ? "Starting…" : "Sign In"}
+                    </button>
+                  )}
+                  {removalSupported && canManage && (
+                    <button
+                      type="button"
+                      className="btn sm ghost"
+                      disabled={!online || busyAccountId !== null}
+                      onClick={() => void remove(account)}
+                    >
+                      Remove
                     </button>
                   )}
                 </div>

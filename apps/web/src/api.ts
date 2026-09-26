@@ -1270,6 +1270,12 @@ export function createApiClient(transport: ApiTransport) {
     { method: "POST", body: JSON.stringify(body) },
   ),
 
+  removeProviderAccount: (runnerId: string, accountId: string) =>
+    req<{ removed: true; credentialsRetained: boolean }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/provider-accounts/${encodeURIComponent(accountId)}`,
+      { method: "DELETE" },
+    ),
+
   submitProviderLoginCode: (runnerId: string, operationId: string, code: string) =>
     req<{ login: ProviderLoginView }>(
       `/api/runners/${encodeURIComponent(runnerId)}/provider-logins/${encodeURIComponent(operationId)}/code`,
