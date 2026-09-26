@@ -972,7 +972,12 @@ export class AutomationsService {
           }
         }
       } else if (execution.actionKind === "create_session" && execution.sessionId && failed.state === "rejected") {
-        this.db.updateSessionStatus(execution.sessionId, "stopped", now);
+        // A rejected launch is a runner failure receipt, or a command never sent: either way no
+        // provider process started for it.
+        this.db.updateSessionStatus(execution.sessionId, "stopped", now, {
+          cause: "launch_rejected",
+          confirmation: "launch_rejected",
+        });
         this.hub.sessionChangedById(execution.sessionId);
       }
       const settled = this.db.settleAutomationExecution({

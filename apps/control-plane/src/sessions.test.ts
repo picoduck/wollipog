@@ -1440,66 +1440,71 @@ test("approved UI evidence and implementation-question decisions do not block ca
   }
 });
 
-test("a stopped campaign child with a final report can still be verified, and archived by that verification", () => {
+/** A Stop and Archive campaign whose children the tests stop, report from, and verify. */
+function stopAndArchiveCampaignFixture() {
   const { db, svc, hub } = makeHarness();
-  try {
-    const meta = runnerMeta();
-    const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
-    planner.capabilities = {
-      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
-      permissionModes: ["default", "orchestrator"],
-    };
-    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
-    const decisions = {
-      implementation_question: "human",
-      pr_merge: "human",
-      merged_branch_deletion: "human",
-      follow_up_issue_publication: "human",
-      ui_evidence_approval: "human",
-    } as const;
-    const created = svc.createSession({
-      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
-      config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issue 1440.",
-      orchestrator: { behavior: { completion: "stop_and_archive" } },
-    }, undefined, undefined, false, false, false, {
-      defaultOwnerUserId: "owner",
-      orchestratorDefaults: {
-        source: "user_default",
-        defaults: {
-          behavior: {
-            childHarness: null, childModel: null, childEffort: null,
-            maximumConcurrentChildren: 4, followUps: "recommend_only", completion: "stop_and_archive",
-          },
-          delegation: { parentControl: "questions", decisions: { ...decisions } },
-          execution: { strictProjectIsolation: false, integrationIsolation: false },
+  const meta = runnerMeta();
+  const planner = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+  planner.capabilities = {
+    models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+    permissionModes: ["default", "orchestrator"],
+  };
+  db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+  const decisions = {
+    implementation_question: "human",
+    pr_merge: "human",
+    merged_branch_deletion: "human",
+    follow_up_issue_publication: "human",
+    ui_evidence_approval: "human",
+  } as const;
+  const created = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+    config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issue 1440.",
+    orchestrator: { behavior: { completion: "stop_and_archive" } },
+  }, undefined, undefined, false, false, false, {
+    defaultOwnerUserId: "owner",
+    orchestratorDefaults: {
+      source: "user_default",
+      defaults: {
+        behavior: {
+          childHarness: null, childModel: null, childEffort: null,
+          maximumConcurrentChildren: 4, followUps: "recommend_only", completion: "stop_and_archive",
         },
-        capabilities: {
-          models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available",
-        },
+        delegation: { parentControl: "questions", decisions: { ...decisions } },
+        execution: { strictProjectIsolation: false, integrationIsolation: false },
       },
-      validateOrchestratorDefaults: () => null,
-    });
-    assert.ok(created.ok && created.data, created.error);
-    const parent = created.data;
-    db.updateSessionStatus(parent.id, "running", Date.now());
-    const spawn = (parentSessionId: string, prompt: string) => {
-      const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt };
-      let session = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
-      if (session.status === 428) {
-        assert.ok(svc.approve(parentSessionId,
-          db.getSession(parentSessionId)!.pendingApproval!.requestId, "allow").ok);
-        session = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
-      }
-      assert.ok(session.ok && session.data, session.error);
-      db.updateSessionStatus(session.data.id, "running", Date.now());
-      return session.data.id;
-    };
-    const report = (sessionId: string, text: string) =>
-      db.appendEvent(sessionId, { kind: "agent_message", text, final: true }, Date.now()).seq;
-    const verify = (sessionId: string, reportEventSeq: number) => svc.verifyCampaignChild(parent.id, {
-      childSessionId: sessionId, reportEventSeq, followUpsAccounted: true,
-    });
+      capabilities: {
+        models: [], effortLevels: [], installations: 1, compatibleInstallations: 1, status: "available",
+      },
+    },
+    validateOrchestratorDefaults: () => null,
+  });
+  assert.ok(created.ok && created.data, created.error);
+  const parent = created.data;
+  db.updateSessionStatus(parent.id, "running", Date.now());
+  const spawn = (parentSessionId: string, prompt: string) => {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, prompt };
+    let session = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+    if (session.status === 428) {
+      assert.ok(svc.approve(parentSessionId,
+        db.getSession(parentSessionId)!.pendingApproval!.requestId, "allow").ok);
+      session = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+    }
+    assert.ok(session.ok && session.data, session.error);
+    db.updateSessionStatus(session.data.id, "running", Date.now());
+    return session.data.id;
+  };
+  const report = (sessionId: string, text: string) =>
+    db.appendEvent(sessionId, { kind: "agent_message", text, final: true }, Date.now()).seq;
+  const verify = (sessionId: string, reportEventSeq: number) => svc.verifyCampaignChild(parent.id, {
+    childSessionId: sessionId, reportEventSeq, followUpsAccounted: true,
+  });
+  return { db, svc, hub, parent, spawn, report, verify };
+}
 
+test("a stopped campaign child with a final report can still be verified, and archived by that verification", () => {
+  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+  try {
     const child = spawn(parent.id, "Implement the assigned issue");
     assert.match(hub.sentOfType("start_session").find((message) => message.spec.sessionId === child)?.initialPrompt ?? "",
       /Leave any helper session you spawn idle once it has posted its final report/,
@@ -1560,10 +1565,13 @@ test("a stopped campaign child with a final report can still be verified, and ar
     assert.ok(svc.stop(stoppingHelper).ok);
     assert.equal(db.getSession(stoppingHelper)?.status, "stopped");
     assert.equal(db.hasSessionStopIntent(stoppingHelper), true);
-    assert.match(verify(stoppingHelper, stoppingReport).error ?? "", /stop is not settled yet/,
+    assert.deepEqual(db.sessionStopProvenance(stoppingHelper),
+      { cause: "requested", confirmation: null, confirmedAt: null });
+    assert.match(verify(stoppingHelper, stoppingReport).error ?? "", /stop is provisional.*Wait for the runner/,
       "an unconfirmed stop is not proof that the child finished");
     svc.reconcileRunnerSessions(RUNNER_ID, [parent.id, secondChild]);
     assert.equal(db.hasSessionStopIntent(stoppingHelper), false);
+    assert.equal(db.sessionStopProvenance(stoppingHelper)?.confirmation, "runner_absent");
     assert.ok(verify(stoppingHelper, stoppingReport).ok,
       "settling that stop against the runner's own inventory makes the same report verifiable");
 
@@ -1581,8 +1589,109 @@ test("a stopped campaign child with a final report can still be verified, and ar
     db.markOffline(RUNNER_ID, Date.now());
     svc.failRunnerSessions(RUNNER_ID);
     assert.equal(db.hasSessionStopIntent(thirdChild), false);
+    assert.equal(db.sessionStopProvenance(thirdChild)?.confirmation, "runner_terminal",
+      "the disconnect does not downgrade a stop the runner already confirmed (#1466)");
     const thirdVerified = verify(thirdChild, thirdChildReport);
     assert.ok(thirdVerified.ok, thirdVerified.error);
+  } finally {
+    db.close();
+  }
+});
+
+test("a guardrail-stopped campaign child waits for its runner to confirm the stop (#1466)", () => {
+  const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+  try {
+    const child = spawn(parent.id, "Implement the assigned issue");
+    svc.setConfig(child, { costBudgetUsd: 1 });
+    svc.onSessionEvent(child, { kind: "token_usage", costUsd: 2 });
+    const guardrail = db.getSession(child)!.pendingApproval!;
+    assert.equal(guardrail.kind, "cost_budget");
+    const childReport = report(child, "Child final report");
+
+    // Declining the guardrail sends the runner a Stop and writes `stopped` at once, without the
+    // durable stop intent a requested stop records. Only the recorded provenance says it is
+    // still unconfirmed.
+    hub.sentToRunner.length = 0;
+    assert.ok(svc.approve(child, guardrail.requestId, "stop").ok);
+    assert.equal(db.getSession(child)?.status, "stopped");
+    assert.equal(db.hasSessionStopIntent(child), false);
+    assert.ok(hub.sentOfType("stop_session").some((message) => message.sessionId === child));
+    assert.deepEqual(db.sessionStopProvenance(child), { cause: "guardrail", confirmation: null, confirmedAt: null });
+    const refused = verify(child, childReport);
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", /stop is provisional.*Wait for the runner/);
+    assert.equal(db.getSession(child)?.archived, false, "a refused verification archives nothing");
+
+    // The runner's terminal frame lands on a row that already reads `stopped`: it cannot change
+    // the status, but it is the confirmation.
+    svc.onSessionStatus(child, "stopped");
+    const confirmed = db.sessionStopProvenance(child);
+    assert.equal(confirmed?.cause, "guardrail", "confirming keeps the path that wrote the stop");
+    assert.equal(confirmed?.confirmation, "runner_terminal");
+    const verified = verify(child, childReport);
+    assert.ok(verified.ok, verified.error);
+    assert.equal(db.getSession(child)?.archived, true);
+  } finally {
+    db.close();
+  }
+});
+
+test("a disconnect-stopped campaign child is verifiable only once its runner confirms the stop (#1466)", () => {
+  const { db, svc, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+  try {
+    const restored = spawn(parent.id, "Child the runner still holds");
+    const ended = spawn(parent.id, "Child the runner no longer holds");
+    svc.onSessionStatus(restored, "idle");
+    svc.onSessionStatus(ended, "idle");
+    const restoredReport = report(restored, "Restored child final report");
+    const endedReport = report(ended, "Ended child final report");
+
+    db.markOffline(RUNNER_ID, Date.now());
+    svc.failRunnerSessions(RUNNER_ID);
+    for (const child of [restored, ended]) {
+      assert.equal(db.getSession(child)?.status, "stopped");
+      assert.deepEqual(db.sessionStopProvenance(child),
+        { cause: "runner_disconnect", confirmation: null, confirmedAt: null });
+      assert.match(verify(child, child === restored ? restoredReport : endedReport).error ?? "",
+        /stop is provisional.*Wait for the runner/,
+        "a disconnect may be restored by the runner's return, so it proves nothing yet");
+    }
+
+    // The runner returns holding only the parent and one child: that child is restored, and its
+    // provenance goes with its stop; the absent one is confirmed ended by the same inventory.
+    db.registerRunner(runnerMeta(), Date.now(), PROTOCOL_VERSION);
+    svc.reconcileRunnerSessions(RUNNER_ID, [parent.id, restored]);
+    assert.equal(db.getSession(restored)?.status, "idle");
+    assert.equal(db.sessionStopProvenance(restored), null);
+    assert.equal(db.raw().prepare("SELECT stop_cause FROM sessions WHERE id=?").get(restored)?.stop_cause, null);
+    assert.equal(db.getSession(ended)?.status, "stopped");
+    assert.equal(db.sessionStopProvenance(ended)?.cause, "runner_disconnect");
+    assert.equal(db.sessionStopProvenance(ended)?.confirmation, "runner_absent");
+
+    // The confirmation is durable: the runner going away again does not make the stop provisional.
+    db.markOffline(RUNNER_ID, Date.now());
+    svc.failRunnerSessions(RUNNER_ID);
+    assert.equal(db.sessionStopProvenance(ended)?.confirmation, "runner_absent");
+    const verified = verify(ended, endedReport);
+    assert.ok(verified.ok, verified.error);
+    assert.match(verify(restored, restoredReport).error ?? "", /stop is provisional/,
+      "the restored child was stopped provisionally again by the second disconnect");
+  } finally {
+    db.close();
+  }
+});
+
+test("startup settlement stops sessions provisionally and the runner's terminal snapshot confirms them (#1466)", () => {
+  const { db, hub, svc } = makeHarness();
+  try {
+    const id = seedSession(svc, hub);
+    db.updateSessionStatus(id, "running", Date.now());
+    db.settleStartupState(Date.now());
+    assert.deepEqual(db.sessionStopProvenance(id),
+      { cause: "startup_settlement", confirmation: null, confirmedAt: null });
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({ id, status: "stopped" })]);
+    assert.equal(db.sessionStopProvenance(id)?.cause, "startup_settlement");
+    assert.equal(db.sessionStopProvenance(id)?.confirmation, "runner_terminal");
   } finally {
     db.close();
   }
@@ -22063,7 +22172,7 @@ test("an explicit Stop cut off before it revoked cannot leave a decision the par
     db.updateSessionStatus(child.id, "idle", Date.now());
     const again = f.requestMerge(1771);
     assert.equal(again.status, "pending");
-    db.updateSessionStatus(child.id, "stopped", Date.now(), true);
+    db.updateSessionStatus(child.id, "stopped", Date.now(), { cause: "runner_disconnect" });
     svc.reconcileRunnerSessions(RUNNER_ID, []);
     assert.equal(db.workflowDecisionByOccurrence(again.occurrenceId)?.status, "revoked");
   } finally {

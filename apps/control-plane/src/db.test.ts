@@ -36,6 +36,7 @@ import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import {
   ControlPlaneDb,
   GOVERNANCE_AUDIT_RETENTION_MS,
+  RUNNER_REPORTED_STOP,
   TAIL_TURN_ALIGNMENT_MAX_EVENTS,
   TAIL_TURN_ALIGNMENT_MAX_PAYLOAD_BYTES,
   type NewSessionInput,
@@ -4714,6 +4715,72 @@ test("legacy session rows add event_epoch at zero before the first replacement",
     upgraded.close();
   } finally {
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy stopped rows start provisional until their runner confirms the stop (#1466)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-stop-provenance-migration-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession({ id: "requested" }));
+    initial.createSession(newSession({ id: "unrecorded" }));
+    initial.createSession(newSession({ id: "live" }));
+    initial.updateSessionStatus("requested", "stopped", 600, { cause: "requested" });
+    initial.addSessionStopIntent("requested", "runner-1", 600);
+    initial.updateSessionStatus("unrecorded", "stopped", 600, RUNNER_REPORTED_STOP);
+    initial.updateSessionStatus("live", "idle", 600);
+    initial.close();
+
+    const legacy = new DatabaseSync(path);
+    for (const column of ["stop_cause", "stop_confirmation", "stop_confirmed_at"]) {
+      legacy.exec(`ALTER TABLE sessions DROP COLUMN ${column}`);
+    }
+    legacy.close();
+
+    const upgraded = ControlPlaneDb.open(path);
+    assert.deepEqual(upgraded.sessionStopProvenance("requested"),
+      { cause: "requested", confirmation: null, confirmedAt: null });
+    assert.deepEqual(upgraded.sessionStopProvenance("unrecorded"),
+      { cause: "unrecorded", confirmation: null, confirmedAt: null },
+      "a stop recorded without provenance has no evidence its runner confirmed it");
+    assert.equal(upgraded.sessionStopProvenance("live"), null);
+    assert.equal(upgraded.confirmSessionStop("unrecorded", "runner_absent", 700), true);
+    assert.deepEqual(upgraded.sessionStopProvenance("unrecorded"),
+      { cause: "unrecorded", confirmation: "runner_absent", confirmedAt: 700 });
+    assert.equal(upgraded.confirmSessionStop("unrecorded", "runner_terminal", 800), false,
+      "an already confirmed stop keeps its first evidence");
+    assert.equal(upgraded.confirmSessionStop("live", "runner_terminal", 800), false,
+      "only a stopped session has a stop to confirm");
+    upgraded.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a stop write while already stopped can confirm the stop but never downgrade it (#1466)", () => {
+  const db = withRunner();
+  try {
+    db.createSession(newSession({ id: "sess" }));
+    db.updateSessionStatus("sess", "stopped", 1_000, { cause: "guardrail" });
+    db.updateSessionStatus("sess", "stopped", 1_100, { cause: "requested" });
+    assert.deepEqual(db.sessionStopProvenance("sess"), { cause: "guardrail", confirmation: null, confirmedAt: null },
+      "a second provisional write keeps the episode's original cause");
+    db.updateSessionStatus("sess", "stopped", 1_200, RUNNER_REPORTED_STOP);
+    assert.deepEqual(db.sessionStopProvenance("sess"),
+      { cause: "guardrail", confirmation: "runner_terminal", confirmedAt: 1_200 });
+    db.updateSessionStatus("sess", "stopped", 1_300, { cause: "requested" });
+    assert.equal(db.sessionStopProvenance("sess")?.confirmation, "runner_terminal",
+      "a redundant Stop cannot make a confirmed stop provisional again");
+    db.updateSessionStatus("sess", "starting", 1_400);
+    assert.equal(db.sessionStopProvenance("sess"), null);
+    db.updateSessionStatus("sess", "stopped", 1_500, { cause: "runner_disconnect" });
+    assert.deepEqual(db.sessionStopProvenance("sess"),
+      { cause: "runner_disconnect", confirmation: null, confirmedAt: null },
+      "a new stop episode starts from its own path, not the previous confirmation");
+  } finally {
+    db.close();
   }
 });
 
