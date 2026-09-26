@@ -5,10 +5,54 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { MAX_PROMPT_IMAGE_BYTES, MAX_SESSION_VIDEO_BYTES } from "@wollipog/protocol";
-import { readImageFileForAttach, readMediaFileForAttach, sniffImageMediaType } from "./session-artifact-file.js";
+import { readImageFileForAttach, readMediaFileForAttach, sniffImageMediaType, sniffVideoMediaType } from "./session-artifact-file.js";
 
 const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("pixels")]);
 const WEBM = Buffer.concat([Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x87, 0x42, 0x82, 0x84]), Buffer.from("webm"), Buffer.alloc(8)]);
+
+test("video sniffing reads the bounded EBML DocType and preserves MP4 recognition", () => {
+  const signature = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
+  const docType = (value: string) => Buffer.concat([Buffer.from([0x42, 0x82, 0x80 | value.length]), Buffer.from(value)]);
+  const header = (...elements: Buffer[]) => {
+    const content = Buffer.concat(elements);
+    assert.ok(content.length < 127);
+    return Buffer.concat([signature, Buffer.from([0x80 | content.length]), content]);
+  };
+  const version = Buffer.from([0x42, 0x86, 0x81, 0x01]);
+  const mp4 = Buffer.concat([Buffer.from([0, 0, 0, 24]), Buffer.from("ftypisom"), Buffer.alloc(12)]);
+  assert.equal(sniffVideoMediaType(mp4), "video/mp4");
+  assert.equal(sniffVideoMediaType(WEBM), "video/webm");
+  assert.equal(sniffVideoMediaType(header(version, docType("webm"))), "video/webm",
+    "DocType may follow another header element");
+  assert.equal(sniffVideoMediaType(header(Buffer.from([0x42, 0x82, 0x86]), Buffer.from("webm\0x"))), "video/webm",
+    "a null terminator may follow the WebM DocType");
+
+  const rejected: Array<[string, Buffer]> = [
+    ["Matroska with trailing decoy", Buffer.concat([header(docType("matroska")), Buffer.from("webm")])],
+    ["WebM text in another element", header(Buffer.from([0xec, 0x84]), Buffer.from("webm"))],
+    ["missing DocType with trailing decoy", Buffer.concat([header(version), Buffer.from("webm")])],
+    ["non-null DocType suffix", header(docType("webmx"))],
+    ["invalid DocType bytes with decoy", Buffer.concat([
+      header(Buffer.from([0x42, 0x82, 0x84, 0xf7, 0xe5, 0xe2, 0xed])), Buffer.from("webm"),
+    ])],
+    ["duplicate DocTypes", header(docType("webm"), docType("matroska"))],
+    ["unknown header size", Buffer.concat([signature, Buffer.from([0xff]), docType("webm")])],
+    ["truncated header", Buffer.concat([signature, Buffer.from([0x89]), docType("webm")])],
+    ["out-of-bounds DocType", Buffer.concat([signature, Buffer.from([0x87, 0x42, 0x82, 0x85]), Buffer.from("webm")])],
+    ["invalid child ID", Buffer.concat([signature, Buffer.from([0x87, 0x00]), docType("webm")])],
+    ["unknown child size", Buffer.concat([signature, Buffer.from([0x86, 0xec, 0xff]), Buffer.from("webm")])],
+  ];
+  for (const [name, bytes] of rejected) assert.equal(sniffVideoMediaType(bytes), null, name);
+
+  const size2 = (size: number) => Buffer.from([0x40 | (size >> 8), size & 0xff]);
+  const bounded = Buffer.concat([
+    signature, size2(4090), Buffer.from([0xec]), size2(4080), Buffer.alloc(4080), docType("webm"),
+  ]);
+  assert.equal(bounded.length, 4096);
+  assert.equal(sniffVideoMediaType(bounded), "video/webm", "DocType at the scan limit is valid");
+  assert.equal(sniffVideoMediaType(Buffer.concat([signature, size2(4091), bounded.subarray(6), Buffer.alloc(1)])), null,
+    "a header beyond the scan limit is rejected");
+});
 
 test("video attachment reads a content-typed bounded file without trusting its extension", async () => {
   const dir = mkdtempSync(join(tmpdir(), "artifact-video-"));
@@ -20,6 +64,11 @@ test("video attachment reads a content-typed bounded file without trusting its e
     if (found.ok) assert.deepEqual({ kind: found.kind, mediaType: found.mediaType, sizeBytes: found.sizeBytes },
       { kind: "video", mediaType: "video/webm", sizeBytes: WEBM.length });
     assert.equal((await readImageFileForAttach(file)).ok, false);
+    writeFileSync(file, Buffer.concat([
+      Buffer.from([0x1a, 0x45, 0xdf, 0xa3, 0x8b, 0x42, 0x82, 0x88]), Buffer.from("matroska"), Buffer.from("webm"),
+    ]));
+    const mislabeled = await readMediaFileForAttach(file);
+    assert.equal(mislabeled.ok, false, "a Matroska file with decoy WebM text is not attached as video/webm");
     truncateSync(file, MAX_SESSION_VIDEO_BYTES + 1);
     const oversized = await readMediaFileForAttach(file);
     assert.match(oversized.ok ? "" : oversized.error, /at most 33554432 bytes/u);
