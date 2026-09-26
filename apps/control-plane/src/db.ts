@@ -13169,7 +13169,9 @@ export class ControlPlaneDb {
 
   /** Monotonic mirror of projection-safe runner facts. Absence means a pre-v82 runner and leaves
    * prior evidence intact; a present array is authoritative, so missing jobs become inactive
-   * tombstones while their audit and delivery evidence remains durable. */
+   * tombstones while their audit and delivery evidence remains durable. Monotonicity holds per runner
+   * record: a record registered later under the same provider task id is a different job, and a
+   * continuation id is settled only once it was submitted (#1858). */
   private upsertManagedBackgroundJobsInTransaction(
     sessionId: string,
     jobs: readonly ManagedBackgroundJobSnapshot[] | undefined,
@@ -13211,7 +13213,11 @@ export class ControlPlaneDb {
            WHEN managed_background_jobs.continuation_required=1 OR excluded.continuation_required=1 THEN 1
            WHEN managed_background_jobs.continuation_required=0 OR excluded.continuation_required=0 THEN 0
            ELSE NULL END,
-         continuation_id=COALESCE(managed_background_jobs.continuation_id, excluded.continuation_id),
+         -- The runner moves a barrier's overflow to its own continuation before submitting it, so
+         -- the id follows the runner until the job's continuation was submitted.
+         continuation_id=CASE WHEN managed_background_jobs.continuation_submitted_at IS NULL
+                              THEN COALESCE(excluded.continuation_id, managed_background_jobs.continuation_id)
+                              ELSE COALESCE(managed_background_jobs.continuation_id, excluded.continuation_id) END,
          continuation_queued_at=COALESCE(managed_background_jobs.continuation_queued_at, excluded.continuation_queued_at),
          continuation_submitted_at=COALESCE(managed_background_jobs.continuation_submitted_at, excluded.continuation_submitted_at),
          continuation_accepted_at=COALESCE(managed_background_jobs.continuation_accepted_at, excluded.continuation_accepted_at),
@@ -13230,6 +13236,9 @@ export class ControlPlaneDb {
                           THEN excluded.ended_by_at ELSE managed_background_jobs.ended_by_at END,
          ended_by_reason=CASE WHEN ${ADOPT_BACKGROUND_JOB_END}
                               THEN excluded.ended_by_reason ELSE managed_background_jobs.ended_by_reason END`,
+    );
+    const replacedJob = this.stmt(
+      "DELETE FROM managed_background_jobs WHERE session_id=? AND job_id=? AND registered_at < ?",
     );
     const upsertDelivery = this.stmt(
       `INSERT INTO managed_background_deliveries
@@ -13269,6 +13278,10 @@ export class ControlPlaneDb {
         : job.continuationMissingResultAt ?? null;
       // A malformed account of who ended the job drops only that account, never the job.
       const endedBy = job.terminalStatus === "killed" ? validBackgroundJobEnd(job.endedBy) : null;
+      // The runner keeps a record's registration time for its whole life, so a later one under the
+      // same id is a new job: a task id repeated after a Restart moved the carried record aside
+      // (#1779), or one repeating a pruned job's id. None of the earlier job's facts describe it.
+      replacedJob.run(sessionId, job.id, job.registeredAt);
       upsertJob.run(
         sessionId,
         job.id,

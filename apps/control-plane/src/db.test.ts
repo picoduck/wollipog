@@ -4247,6 +4247,157 @@ test("multiple terminal missing continuations remain individually resolvable", (
   );
 });
 
+test("jobs the runner moves to an overflow continuation before submission are grouped under it (#1858)", () => {
+  const db = withRunner();
+  const job = (index: number, continuationId: string, stages: Record<string, number> = {}) => ({
+    id: `job-${String(index).padStart(3, "0")}`,
+    parentTurnId: "wide-barrier",
+    runnerId: "runner-1",
+    workspaceId: null,
+    launchType: "shell" as const,
+    registeredAt: 100 + index,
+    terminalStatus: "completed" as const,
+    terminalObservedAt: 400,
+    continuationRequired: true,
+    continuationId,
+    continuationQueuedAt: 500,
+    ...stages,
+  });
+  const barrier = (overflowId: string, stages: (index: number) => Record<string, number> = () => ({})) =>
+    Array.from({ length: 130 }, (_, index) => job(index, index < 128 ? "bgcont-first" : overflowId, stages(index)));
+  const counts = () => new Map(db.getSession("background-overflow")?.backgroundDeliveries?.map((delivery) =>
+    [delivery.continuationId, [delivery.jobCount, delivery.terminalCount, delivery.watchdogState]]));
+
+  // The runner queues the whole barrier under one id, then splits the jobs past the 128 one
+  // prompt lists onto their own continuation before anything is submitted.
+  db.createSessionFromSnapshot(snapshot({
+    id: "background-overflow",
+    driver: "claude_code",
+    backgroundJobs: barrier("bgcont-first"),
+  }), "runner-1", 1_000);
+  assert.deepEqual(counts(), new Map([["bgcont-first", [130, 130, undefined]]]));
+  db.updateSessionFromSnapshot("background-overflow", snapshot({
+    id: "background-overflow",
+    driver: "claude_code",
+    backgroundJobs: barrier("bgcont-overflow"),
+  }), 1_100);
+  assert.deepEqual(counts(), new Map([
+    ["bgcont-first", [128, 128, undefined]],
+    ["bgcont-overflow", [2, 2, undefined]],
+  ]));
+
+  // The overflow continuation's own watchdog sees its jobs.
+  db.updateSessionFromSnapshot("background-overflow", snapshot({
+    id: "background-overflow",
+    driver: "claude_code",
+    backgroundJobs: barrier("bgcont-overflow", (index) => index < 128
+      ? { continuationSubmittedAt: 600, continuationAcceptedAt: 610, assistantResultPersistedAt: 620 }
+      : { continuationSubmittedAt: 700, continuationAcceptedAt: 710, continuationMissingResultAt: 720 }),
+  }), 1_200);
+  assert.equal(counts().get("bgcont-overflow")?.[2], "accepted_without_result");
+
+  // Once a job's continuation was submitted, its id is settled: a later report cannot move it.
+  db.updateSessionFromSnapshot("background-overflow", snapshot({
+    id: "background-overflow",
+    driver: "claude_code",
+    backgroundJobs: barrier("bgcont-first", (index) => index < 128
+      ? { continuationSubmittedAt: 600, continuationAcceptedAt: 610, assistantResultPersistedAt: 620 }
+      : { continuationSubmittedAt: 700, continuationAcceptedAt: 710, continuationMissingResultAt: 720 }),
+  }), 1_300);
+  assert.deepEqual(counts().get("bgcont-first")?.[0], 128);
+  assert.deepEqual(counts().get("bgcont-overflow")?.[0], 2);
+});
+
+test("a job the runner records under a reused task id replaces the earlier job's row (#1858)", () => {
+  const db = withRunner();
+  const restartEnd = { actor: { kind: "runner" as const }, reason: "session_restart" as const, endedAt: 2_000 };
+  const carried = {
+    id: "task-a",
+    parentTurnId: "turn-before",
+    runnerId: "runner-1",
+    workspaceId: null,
+    launchType: "agent" as const,
+    registeredAt: 1_000,
+    terminalStatus: "killed" as const,
+    terminalObservedAt: 2_000,
+    continuationRequired: false,
+    endedBy: restartEnd,
+  };
+  db.createSessionFromSnapshot(snapshot({
+    id: "background-reused",
+    driver: "claude_code",
+    backgroundJobs: [carried],
+  }), "runner-1", 2_100);
+
+  // The restarted conversation starts a job that repeats the id. The runner gives it a fresh record
+  // and moves the carried one aside under a distinct id.
+  const reused = {
+    id: "task-a",
+    parentTurnId: "turn-after",
+    runnerId: "runner-1",
+    workspaceId: null,
+    launchType: "monitor" as const,
+    registeredAt: 3_000,
+  };
+  const sibling = {
+    id: "task-b",
+    parentTurnId: "turn-after",
+    runnerId: "runner-1",
+    workspaceId: null,
+    launchType: "shell" as const,
+    registeredAt: 3_010,
+    terminalStatus: "completed" as const,
+    terminalObservedAt: 3_100,
+    continuationRequired: true,
+  };
+  db.updateSessionFromSnapshot("background-reused", snapshot({
+    id: "background-reused",
+    driver: "claude_code",
+    backgroundJobs: [{ ...carried, id: "task-a~restart-2000" }, reused, sibling],
+  }), 3_200);
+
+  const now = 3_000 + BACKGROUND_JOB_STALL_MS;
+  const jobs = new Map(db.listManagedBackgroundJobs("background-reused", now).map((job) => [job.id, job]));
+  assert.deepEqual(jobs.get("task-a"), {
+    id: "task-a",
+    parentTurnId: "turn-after",
+    launchType: "monitor",
+    registeredAt: 3_000,
+    lastObservedAt: 3_200,
+    sourcePresent: true,
+    stalledSince: now,
+  }, "the unfinished job is neither shown as the earlier job's result nor exempt from the stall watchdog");
+  assert.deepEqual(
+    [jobs.get("task-a~restart-2000")?.terminalStatus, jobs.get("task-a~restart-2000")?.endedBy],
+    ["killed", restartEnd],
+  );
+  assert.deepEqual(
+    db.getSession("background-reused")?.backgroundDeliveries?.map((delivery) =>
+      [delivery.parentTurnId, delivery.watchdogState, delivery.unfinishedSiblingJobs]),
+    [["turn-after", "continuation_blocked", 1]],
+    "the finished sibling is held behind the unfinished job, not reported as missing its continuation",
+  );
+
+  // Later reports of the same record merge monotonically as before.
+  db.updateSessionFromSnapshot("background-reused", snapshot({
+    id: "background-reused",
+    driver: "claude_code",
+    backgroundJobs: [
+      { ...carried, id: "task-a~restart-2000" },
+      { ...reused, terminalStatus: "completed", terminalObservedAt: 3_300, continuationRequired: true },
+      sibling,
+    ],
+  }), 3_400);
+  db.updateSessionFromSnapshot("background-reused", snapshot({
+    id: "background-reused",
+    driver: "claude_code",
+    backgroundJobs: [{ ...carried, id: "task-a~restart-2000" }, reused, sibling],
+  }), 3_500);
+  const settled = db.listManagedBackgroundJobs("background-reused", now).find((job) => job.id === "task-a");
+  assert.deepEqual([settled?.terminalStatus, settled?.terminalObservedAt, settled?.registeredAt],
+    ["completed", 3_300, 3_000]);
+});
+
 test("background push receipts are per-endpoint, retryable, capability-authenticated, and restart durable", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-background-push-"));
   const dbPath = join(root, "control-plane.db");
