@@ -22739,7 +22739,27 @@ test("a restart keeps revoking unconsumed decisions and tells the restarted chil
   }
 });
 
-test("a restart whose notice a guardrail refuses records the revoked occurrences on the session instead (#1779)", () => {
+/** Every distinct restart notice sent to the child, on the durable lane or as an immediate prompt
+ * (#1861). The outbox re-sends an unacknowledged command under its own id, which the runner's
+ * journal deduplicates, so a notice is one command id, not one frame. */
+function restartNoticesTo(hub: ReturnType<typeof makeHarness>["hub"], sessionId: string) {
+  const durable = new Map<string, { commandId: string | undefined; text: string }>();
+  for (const message of hub.sentOfType("durable_session_command")) {
+    if (message.command.type !== "prompt_session" || message.command.sessionId !== sessionId) continue;
+    durable.set(message.commandId, { commandId: message.commandId, text: message.command.text });
+  }
+  return [
+    ...durable.values(),
+    ...hub.sentOfType("prompt_session").filter((message) => message.sessionId === sessionId)
+      .map((message) => ({ commandId: undefined, text: message.text })),
+  ].filter((notice) => notice.text.includes("[Wollipog Session Restart]"));
+}
+
+function restartNoticeState(db: ReturnType<typeof makeHarness>["db"], occurrenceId: string) {
+  return db.restartNoticeState(occurrenceId)?.state ?? null;
+}
+
+test("a restart notice worktree recovery refuses is held and delivered exactly once after recovery (#1861)", () => {
   const f = worktreeRecoveryCampaign();
   const { db, hub, svc, child, recovery } = f;
   try {
@@ -22749,15 +22769,185 @@ test("a restart whose notice a guardrail refuses records the revoked occurrences
     f.runnerReports(recovery, "input_required");
     assert.ok(db.getSession(child.id)?.worktreeRecovery);
     assert.ok(svc.restart(child.id).ok);
-    assert.equal(db.workflowDecisionByOccurrence(approved.occurrenceId)?.status, "revoked");
-    assert.equal(hub.sentOfType("durable_session_command").some((message) =>
-      message.command.type === "prompt_session" && message.command.text.includes("[Wollipog Session Restart]")), false,
-    "the guardrail is not bypassed for the notice");
+    assert.equal(db.workflowDecisionByOccurrence(approved.occurrenceId)?.status, "revoked", "revocation is unchanged");
+    assert.equal(restartNoticesTo(hub, child.id).length, 0, "the guardrail is not bypassed for the notice");
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "held");
     const recorded = db.listEvents(child.id).map((event) => event.payload)
       .find((payload) => payload.kind === "error" && payload.message.startsWith("Restarting this session revoked"));
-    assert.ok(recorded, "the loss is recorded on the session");
+    assert.ok(recorded, "the revocation is recorded on the session timeline");
     assert.ok(recorded.kind === "error" && recorded.message.includes(approved.occurrenceId));
-    assert.match(recorded.kind === "error" ? recorded.message : "", /the notice naming them was not queued \(worktree recovery is required/u);
+    assert.match(recorded.kind === "error" ? recorded.message : "",
+      /the notice naming them was not queued \(worktree recovery is required.*\); it will be sent once that clears/u);
+
+    // Nothing goes out while the recovery lasts, however often the runner reports it or the sweep runs.
+    f.runnerReports(recovery, "input_required");
+    svc.retryDuePrompts(Date.now() + 60_000);
+    assert.equal(restartNoticesTo(hub, child.id).length, 0);
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "held");
+
+    // Recovery clears: the notice goes out once, on the durable lane, bound to the revoked occurrence.
+    f.runnerReports(null, "idle");
+    const [notice, ...more] = restartNoticesTo(hub, child.id);
+    assert.ok(notice, "the held notice is delivered once the guardrail clears");
+    assert.equal(more.length, 0);
+    assert.ok(notice.commandId);
+    assert.ok(notice.text.includes(`- ${approved.occurrenceId}: pr_merge decision (resource "picoduck/wollipog#1779"), ` +
+      "approved before the restart"), notice.text);
+    assert.match(notice.text, /A decision you already requested again since the restart has its own occurrence/u);
+    assert.deepEqual(db.restartNoticeState(approved.occurrenceId), { state: "delivering", commandId: notice.commandId });
+    assert.equal(db.getSession(child.id)?.status, "queued", "admitted as queued until the runner starts it (#1651)");
+
+    assert.equal(f.receipt(notice.commandId, "started", 1), true);
+    assert.equal(db.getSession(child.id)?.status, "running");
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "delivered");
+    assert.equal(f.receipt(notice.commandId, "completed", 2), true);
+    svc.onSessionStatus(child.id, "idle");
+    f.runnerReports(null, "idle");
+    svc.retryDuePrompts(Date.now() + 120_000);
+    assert.equal(restartNoticesTo(hub, child.id).length, 1, "delivered exactly once");
+    assert.equal(db.workflowDecisionByOccurrence(approved.occurrenceId)?.status, "revoked", "the record stays authoritative");
+  } finally {
+    db.close();
+  }
+});
+
+test("a restart notice the runner refuses for worktree recovery is held again and re-sent once after recovery (#1861)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, hub, svc, child, recovery } = f;
+  try {
+    const approved = f.requestMerge(1779);
+    f.approve(approved.occurrenceId);
+    // The control plane knows of no recovery, so the restart queues the notice on the durable lane.
+    assert.ok(svc.restart(child.id).ok);
+    const [first] = restartNoticesTo(hub, child.id);
+    assert.ok(first?.commandId, "the notice is queued behind the launch");
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "delivering");
+
+    // The relaunch finds the worktree on another branch and reports the notice not sent.
+    f.runnerReports(recovery, "input_required");
+    assert.equal(f.receipt(first.commandId, "failed", 1, "WORKTREE_RECOVERY_REQUIRED"), true);
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "held", "the notice is kept, not dropped");
+    assert.equal(db.getSession(child.id)?.pendingPrompts?.some((prompt) => prompt.commandId === first.commandId) ?? false,
+      false, "the not-sent row is retired so a manual Retry cannot deliver it a second time");
+    svc.retryDuePrompts(Date.now() + 60_000);
+    assert.equal(restartNoticesTo(hub, child.id).length, 1);
+
+    f.runnerReports(null, "idle");
+    const sent = restartNoticesTo(hub, child.id);
+    assert.equal(sent.length, 2, "recovery releases the held notice once");
+    assert.notEqual(sent[1]!.commandId, first.commandId, "a fresh delivery, not a replay of the refused one");
+    assert.equal(f.receipt(sent[1]!.commandId!, "started", 1), true);
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "delivered");
+    svc.retryDuePrompts(Date.now() + 120_000);
+    assert.equal(restartNoticesTo(hub, child.id).length, 2);
+  } finally {
+    db.close();
+  }
+});
+
+test("a restart notice the daily budget refuses waits for the budget to be raised and the pause continued (#1861)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, hub, svc, child } = f;
+  try {
+    const approved = f.requestMerge(1779);
+    f.approve(approved.occurrenceId);
+    db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_local_owner' WHERE session_id=?").run(child.id);
+    db.setUsageDailyBudget("org_personal", 2, Date.now());
+    db.appendEvent(child.id, { kind: "token_usage", inputTokens: 1, costUsd: 2.5 }, Date.now(), { accrueUsage: true });
+
+    assert.ok(svc.restart(child.id).ok);
+    assert.equal(db.workflowDecisionByOccurrence(approved.occurrenceId)?.status, "revoked");
+    assert.equal(restartNoticesTo(hub, child.id).length, 0, "the daily budget is not bypassed for the notice");
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "held");
+    assert.equal(db.getSession(child.id)?.pendingApproval?.kind, "daily_budget", "the refusal parks the session as before");
+    const recorded = db.listEvents(child.id).map((event) => event.payload)
+      .find((payload) => payload.kind === "error" && payload.message.startsWith("Restarting this session revoked"));
+    assert.match(recorded?.kind === "error" ? recorded.message : "", /not queued \(daily budget reached.*it will be sent once that clears/u);
+
+    // The relaunch settles behind the card. Raising the budget alone does not release the notice:
+    // the card still gates the session until someone continues it.
+    f.runnerReports(null, "idle");
+    db.setUsageDailyBudget("org_personal", 50, Date.now());
+    svc.retryDuePrompts(Date.now() + 60_000);
+    assert.equal(restartNoticesTo(hub, child.id).length, 0);
+
+    // Continue while the budget is still reached re-parks, and still sends nothing.
+    db.setUsageDailyBudget("org_personal", 2, Date.now());
+    const card = db.getSession(child.id)!.pendingApproval!;
+    assert.ok(svc.approve(child.id, card.requestId, "continue").ok);
+    assert.equal(db.getSession(child.id)?.pendingApproval?.kind, "daily_budget");
+    assert.equal(restartNoticesTo(hub, child.id).length, 0);
+
+    db.setUsageDailyBudget("org_personal", 50, Date.now());
+    assert.ok(svc.approve(child.id, db.getSession(child.id)!.pendingApproval!.requestId, "continue").ok);
+    assert.equal(db.getSession(child.id)?.pendingApproval, null);
+    const [notice, ...more] = restartNoticesTo(hub, child.id);
+    assert.ok(notice, "the notice goes out once the pause is continued under a raised budget");
+    assert.equal(more.length, 0);
+    assert.ok(notice.text.includes(approved.occurrenceId));
+    svc.retryDuePrompts(Date.now() + 120_000);
+    f.runnerReports(null, "idle");
+    assert.equal(restartNoticesTo(hub, child.id).length, 1, "delivered exactly once");
+  } finally {
+    db.close();
+  }
+});
+
+test("a held restart notice is abandoned, never sent, when the session ends before the guardrail clears (#1861)", () => {
+  const ends: Record<string, (f: ReturnType<typeof worktreeRecoveryCampaign>) => void> = {
+    "explicit Stop": (f) => assert.ok(f.svc.stop(f.child.id).ok),
+    "archive": (f) => assert.ok(f.svc.setArchived(f.child.id, true).ok),
+    "runner reports the child terminal": (f) => f.svc.onSessionStatus(f.child.id, "stopped"),
+    "runner reports the child absent": (f) => f.svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: f.root.id, title: f.root.title, status: "running",
+    })]),
+  };
+  for (const [end, finish] of Object.entries(ends)) {
+    const f = worktreeRecoveryCampaign();
+    const { db, hub, svc, child, recovery } = f;
+    try {
+      const approved = f.requestMerge(1779);
+      f.approve(approved.occurrenceId);
+      f.runnerReports(recovery, "input_required");
+      assert.ok(svc.restart(child.id).ok);
+      assert.equal(restartNoticeState(db, approved.occurrenceId), "held", end);
+      finish(f);
+      assert.equal(restartNoticeState(db, approved.occurrenceId), "abandoned", end);
+      svc.retryDuePrompts(Date.now() + 60_000);
+      assert.equal(restartNoticesTo(hub, child.id).length, 0, `${end}: never sent`);
+    } finally {
+      db.close();
+    }
+  }
+});
+
+test("a later restart names the notice an earlier one still owes together with its own, in one notice (#1861)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, hub, svc, child, recovery } = f;
+  try {
+    const first = f.requestMerge(1779);
+    f.approve(first.occurrenceId);
+    f.runnerReports(recovery, "input_required");
+    assert.ok(svc.restart(child.id).ok);
+    assert.equal(restartNoticeState(db, first.occurrenceId), "held");
+
+    // The runner reports the relaunch recovered and settled; the child requests a second merge
+    // before the notice is swept, and is then restarted again while its worktree needs recovery.
+    db.raw().prepare("UPDATE sessions SET status='running' WHERE id=?").run(child.id);
+    const second = f.requestMerge(1780);
+    f.runnerReports(recovery, "input_required");
+    assert.ok(svc.restart(child.id).ok);
+    assert.equal(db.workflowDecisionByOccurrence(second.occurrenceId)?.status, "revoked");
+    assert.equal(restartNoticeState(db, first.occurrenceId), "held", "the earlier notice is still owed");
+    assert.equal(restartNoticeState(db, second.occurrenceId), "held");
+
+    f.runnerReports(null, "idle");
+    const [notice, ...more] = restartNoticesTo(hub, child.id);
+    assert.ok(notice);
+    assert.equal(more.length, 0, "one notice names both");
+    assert.match(notice.text, /revoked 2 workflow decisions/u);
+    assert.ok(notice.text.includes(`- ${first.occurrenceId}: pr_merge decision (resource "picoduck/wollipog#1779"), approved`), notice.text);
+    assert.ok(notice.text.includes(`- ${second.occurrenceId}: pr_merge decision (resource "picoduck/wollipog#1780"), still pending`), notice.text);
   } finally {
     db.close();
   }

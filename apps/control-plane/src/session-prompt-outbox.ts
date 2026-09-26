@@ -83,6 +83,29 @@ export class SessionPromptOutbox {
     });
   }
 
+  /** Stage the command that carries a restart notice, bound to every occurrence it names in the
+   * same transaction (#1861). Throws, staging nothing, unless each is still held. */
+  stageRestartNotice(
+    occurrenceIds: readonly string[],
+    sessionId: string,
+    runnerId: string,
+    command: DurableSessionCommand,
+    now = Date.now(),
+  ): SessionPromptCommandRecord {
+    return this.db.stageRestartNotice({
+      occurrenceIds,
+      command: {
+        commandId: `prompt_${randomUUID()}`,
+        sessionId,
+        runnerId,
+        payloadJson: canonicalAutomationCommandJson(command),
+        payloadSha256: automationCommandDigest(command),
+        expiresAt: now + RECEIPT_HORIZON_MS,
+        now,
+      },
+    });
+  }
+
   stageCampaignContinuation(input: {
     continuationId: string;
     campaignSessionId: string;

@@ -832,8 +832,13 @@ with no pending request. Before, its decision resume was dropped and nothing tol
   is the one end the child continues past, so the control plane then queues one durable notice for
   it, `[Wollipog Session Restart]`, naming each occurrence the restart revoked and whether it was
   approved or still pending; the child requests again what it still needs (#1779). A guardrail that
-  refuses the notice, such as a daily budget or worktree recovery, is not bypassed for it; the
-  session's timeline records the revoked occurrences instead. A resume refused behind a cost-budget or policy-hook card is
+  refuses the notice, such as a daily budget or worktree recovery, is not bypassed for it: the
+  session's timeline records the revoked occurrences at once, and the notice stays owed. The first
+  boundary that finds nothing refusing it — a runner snapshot after recovery, Continue on the budget
+  card, or the prompt retry sweep — sends it once, while the session is between turns, naming every
+  occurrence still owed; a later restart adds to it rather than replacing it. The child's worktree
+  needing recovery after the notice was queued holds it again the same way. Every other authoritative
+  end abandons an owed notice, so an ended child is never sent one (#1861). A resume refused behind a cost-budget or policy-hook card is
   recorded `failed` and not retried: the outcome, and any message, stay on the decision record for
   the child to read once the human resolves the card. Older runners keep the ordinary prompt path.
   A resume held before its runner downgraded is settled on that path rather than held on a recovery

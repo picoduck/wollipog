@@ -176,6 +176,7 @@ import {
   type AgentLaunch,
   type CampaignContinuationRecord,
   type ControlPlaneDb,
+  type RestartNoticeEntry,
   type SessionPromptCommandRecord,
   type SessionAutomationOrigin,
   type SessionStopConfirmation,
@@ -493,18 +494,20 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
 /** What a restarted child is told about the decisions its restart revoked (#1779). Revocation on a
  * lifecycle end is deliberate and stays: a relaunched provider must never act on a grant made to the
  * process it replaced. Naming each occurrence lets the child request again what it still needs,
- * instead of finding the revocation only when it tries to consume one. */
-function restartRevokedDecisionsPrompt(revoked: readonly WorkflowDecisionView[]): string {
+ * instead of finding the revocation only when it tries to consume one. A guardrail can hold the
+ * notice past later turns (#1861), so it also says that a decision requested since is unaffected. */
+function restartRevokedDecisionsPrompt(revoked: readonly RestartNoticeEntry[]): string {
   return [
     "[Wollipog Session Restart]",
     `Restarting this session revoked ${revoked.length === 1 ? "a workflow decision" : `${revoked.length} workflow decisions`} ` +
       "it had not consumed:",
     ...revoked.map((decision) => `- ${decision.occurrenceId}: ${decision.category} decision (resource ` +
-      `${decisionLiteral(decision.resourceKey)}), ${decision.status === "approved" ? "approved" : "still pending"} ` +
+      `${decisionLiteral(decision.resourceKey)}), ${decision.priorStatus === "approved" ? "approved" : "still pending"} ` +
       "before the restart"),
     "Do not act on an earlier approval of any of them, including one in a message still queued for this session. " +
       "Read each record with get_workflow_decision (an armed merge that already landed is settled from the forge as " +
-      "consumed), and request again with request_workflow_decision each decision you still need.",
+      "consumed), and request again with request_workflow_decision each decision you still need. " +
+      "A decision you already requested again since the restart has its own occurrence and is not affected.",
     "[End Wollipog Session Restart]",
   ].join("\n");
 }
@@ -4422,6 +4425,13 @@ export class SessionsService {
     delivery?: PreStagedDeliveryOptions,
     imageScope: "session" | "run" = "session",
     retainAcrossWorktreeRecovery = false,
+    /** Control-plane-owned text that must be bound to its own record when it is persisted: `stage`
+     * replaces the plain outbox write whenever this prompt takes the durable lane, and `admitAs`
+     * then applies as it does for a pre-staged delivery. Unused on the immediate lane. */
+    durable?: {
+      stage: (runnerId: string, command: DurableSessionCommand, now: number) => SessionPromptCommandRecord;
+      admitAs?: "queued";
+    },
   ): ServiceResult<PromptAdmissionView> {
     const snapshotCommand = delivery?.commandSnapshots?.[0];
     if (delivery?.commandSnapshots &&
@@ -4660,7 +4670,8 @@ export class SessionsService {
       ));
     if (durablePrompt) {
       try {
-        this.promptOutbox.stage(sessionId, session.runnerId, command, now);
+        if (durable) durable.stage(session.runnerId, command, now);
+        else this.promptOutbox.stage(sessionId, session.runnerId, command, now);
       } catch (error) {
         return fail(`prompt could not be persisted: ${(error as Error).message}`, 500);
       }
@@ -4674,7 +4685,8 @@ export class SessionsService {
       // A caller that knows the provider is idle and follows the durable receipts admits the
       // prompt as `queued`: the runner's started receipt, or its own running status, is what
       // makes it `running` (#1651).
-      this.db.updateSessionStatus(sessionId, delivery?.admitAs ?? "running", now, undefined, false);
+      this.db.updateSessionStatus(sessionId, delivery?.admitAs ?? (durablePrompt ? durable?.admitAs : undefined) ?? "running",
+        now, undefined, false);
     }
     if (delivery) {
       delivery.activate(plan!);
@@ -4719,6 +4731,13 @@ export class SessionsService {
     for (const sessionId of this.db.sessionsWithHeldWorkflowDecisionResumes(runnerId)) {
       this.deliverHeldWorkflowDecisionResumes(sessionId, now);
     }
+    // The same for a restart notice; the sweep is also what finds a daily budget raised (#1861).
+    for (const commandId of this.db.settledRestartNoticeCommands(runnerId)) {
+      this.reconcileRestartNoticeCommand(commandId, now);
+    }
+    for (const sessionId of this.db.sessionsWithHeldRestartNotices(runnerId)) {
+      this.deliverHeldRestartNotices(sessionId, now);
+    }
     return this.promptOutbox.flush(now, runnerId);
   }
 
@@ -4734,6 +4753,7 @@ export class SessionsService {
     if (handled) {
       this.reconcileCampaignContinuationCommand(message.commandId, Date.now());
       this.reconcileWorkflowDecisionResumeCommand(message.commandId, Date.now());
+      this.reconcileRestartNoticeCommand(message.commandId, Date.now());
     }
     return handled;
   }
@@ -6345,9 +6365,18 @@ export class SessionsService {
       if (restartLaunchId) this.db.clearSessionStopRestartLaunchId(sessionId);
       return fail("runner is offline", 409);
     }
-    // Revocation stays; the restarted child is told which grants it lost (#1779).
+    // Revocation stays; the restarted child is told which grants it lost (#1779). The notice is owed
+    // from the revocation onward, so a guardrail that refuses it now only delays it (#1861).
     const revokedByRestart = this.db.unconsumedWorkflowDecisionsForSession(sessionId);
     this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-restarted");
+    this.db.oweRestartNotices(sessionId, revokedByRestart
+      .filter((decision) => this.db.workflowDecisionByOccurrence(decision.occurrenceId)?.status === "revoked")
+      .map((decision) => ({
+        occurrenceId: decision.occurrenceId,
+        category: decision.category,
+        resourceKey: decision.resourceKey,
+        priorStatus: decision.status === "approved" ? "approved" as const : "pending" as const,
+      })), now);
     this.abortPolicyHookApprovals(session, now, "session-restarted");
     this.db.setPendingApproval(sessionId, null);
     // Record a reconciled placement now rather than waiting for the runner's first snapshot to echo
@@ -6363,20 +6392,21 @@ export class SessionsService {
       this.db.setSessionArchived(sessionId, false, now);
     }
     this.db.updateSessionStatus(sessionId, "starting", now);
-    if (revokedByRestart.length) {
-      // Queued behind the launch on the durable lane, after any prompt the runner carries across it.
-      const notice = this.prompt(sessionId, restartRevokedDecisionsPrompt(revokedByRestart));
-      if (!notice.ok) {
-        // A guardrail refusing the turn (a daily budget, worktree recovery) is not bypassed for it.
-        // The loss is recorded where the owner and the controlling Orchestrator read the session.
-        this.log.warn(`restart revocation notice not delivered to ${sessionId}: ${notice.error}`);
-        const ev = this.db.appendEvent(sessionId, {
-          kind: "error",
-          message: `Restarting this session revoked ${revokedByRestart.map((decision) => decision.occurrenceId).join(", ")}, ` +
-            `but the notice naming them was not queued (${notice.error}); request each decision again as needed.`,
-        }, Date.now());
-        this.hub.sessionEvent(ev);
-      }
+    // Queued behind the launch on the durable lane, after any prompt the runner carries across it,
+    // together with any notice an earlier restart still owes.
+    const refused = this.deliverHeldRestartNotices(sessionId, Date.now(), true);
+    const stillOwed = refused === null || !revokedByRestart.length ? [] : this.db.heldRestartNotices(sessionId);
+    if (stillOwed.length) {
+      // A guardrail refusing the turn (a daily budget, worktree recovery) is not bypassed for it:
+      // the notice stays owed, and the first boundary that finds the guardrail cleared sends it.
+      // The revocation is recorded now where the owner and the controlling Orchestrator read it.
+      const ev = this.db.appendEvent(sessionId, {
+        kind: "error",
+        message: `Restarting this session revoked ${stillOwed.map((decision) => decision.occurrenceId).join(", ")}, ` +
+          `but the notice naming them was not queued (${refused}); it will be sent once that clears. ` +
+          "Request each decision again as needed.",
+      }, Date.now());
+      this.hub.sessionEvent(ev);
     }
     // The runner replaces any existing process for this sessionId (no separate
     // stop_session, which would emit a terminal 'stopped' that blocks the restart).
@@ -8194,18 +8224,96 @@ export class SessionsService {
     if (state === "failed") {
       this.log.warn(`workflow decision ${resume.occurrenceId} resume failed for ${command.sessionId}: ${command.error ?? "unknown error"}`);
     }
-    // The resume was admitted as `queued` (#1651). The runner starting it is what makes the child
-    // running; a refusal leaves the child as idle as it was, unless the runner itself queued it.
+    this.settleQueuedAdmission(command, now);
+  }
+
+  /** A control-plane prompt admitted as `queued` (#1651): the runner starting it is what makes the
+   * child running; a refusal leaves the child as idle as it was, unless the runner itself queued it. */
+  private settleQueuedAdmission(command: SessionPromptCommandRecord, now: number): void {
     const session = this.db.getSession(command.sessionId);
     if (!session || isTerminal(session.status)) return;
     if (command.state === "started" && (session.status === "queued" || session.status === "idle")) {
       this.db.updateSessionStatus(command.sessionId, "running", now);
       this.hub.sessionChangedById(command.sessionId);
-    } else if (state === "failed" && session.status === "queued" && !session.pendingApproval &&
+    } else if (command.state === "failed" && session.status === "queued" && !session.pendingApproval &&
         !session.capacityWait && !session.queueHold) {
       this.db.updateSessionStatus(command.sessionId, "idle", now);
       this.hub.sessionChangedById(command.sessionId);
     }
+  }
+
+  /**
+   * Deliver the restart notice this session owes (#1861): one prompt naming every revocation still
+   * held, bound to those rows in the transaction that persists it, so the notice goes out once.
+   *
+   * The restart itself (`atRestart`) offers the notice exactly as #1779 did, and a guardrail's
+   * refusal there — a daily budget, worktree recovery — keeps it held rather than forcing it through.
+   * Every later boundary (a runner snapshot, a guardrail card's Continue, the retry sweep) only
+   * offers it to an idle session nothing would refuse it for: a sweep must neither bypass a
+   * guardrail nor be what parks the session on one. A session mid-turn takes it at its next settle.
+   * Returns why the notice is still held, or null once nothing is owed.
+   */
+  private deliverHeldRestartNotices(sessionId: string, now = Date.now(), atRestart = false): string | null {
+    const held = this.db.heldRestartNotices(sessionId);
+    if (!held.length) return null;
+    const session = this.db.getSession(sessionId);
+    if (!session) return "session not found";
+    if (!atRestart) {
+      if (session.status !== "idle") return `session is ${session.status}`;
+      if (!this.hub.isRunnerOnline(session.runnerId)) return "runner is offline";
+      if (session.worktreeRecovery) return "worktree recovery is required";
+      if (hasBlockingPendingRequest(session.pendingApproval)) return "a request is waiting for an answer";
+      const daily = this.dailyBudgetFor(sessionId);
+      if (daily && daily.spentUsd >= daily.budgetUsd) return "daily budget reached";
+    }
+    const occurrenceIds = held.map((entry) => entry.occurrenceId);
+    let staged = false;
+    const notice = this.prompt(
+      sessionId, restartRevokedDecisionsPrompt(held), [], undefined, undefined, undefined, "session", true, {
+        // An idle child admits it the way a decision's resume is admitted, following its receipts.
+        ...(session.status === "idle" ? { admitAs: "queued" as const } : {}),
+        stage: (runnerId, command, at) => {
+          const record = this.promptOutbox.stageRestartNotice(occurrenceIds, sessionId, runnerId, command, at);
+          staged = true;
+          return record;
+        },
+      },
+    );
+    if (!notice.ok) {
+      // Only the restart reports it: the sweep offers it again every few seconds.
+      if (atRestart) this.log.warn(`restart revocation notice held for ${sessionId}: ${notice.error}`);
+      return notice.error ?? "the notice was refused";
+    }
+    // Without a durable command there is no receipt to follow: the accepted prompt is the delivery.
+    if (!staged) this.db.settleHeldRestartNotices(sessionId, occurrenceIds, "delivered", now);
+    return null;
+  }
+
+  /** Follow the durable command that carries a restart notice (#1861), as a decision's resume is
+   * followed: a worktree-recovery refusal holds the notice again and retires the not-sent row. */
+  private reconcileRestartNoticeCommand(commandId: string, now: number): void {
+    const sessionId = this.db.restartNoticeSessionForCommand(commandId);
+    if (!sessionId) return;
+    const command = this.db.getSessionPromptCommand(commandId);
+    if (!command) return;
+    if (command.state === "failed" && command.errorCode === "WORKTREE_RECOVERY_REQUIRED" &&
+        command.userEventSeq === undefined) {
+      if (!this.db.holdRestartNoticeCommand(sessionId, commandId, now)) return;
+      this.hub.sessionChangedById(sessionId);
+      // The recovery may already be over by the time this receipt arrives.
+      this.deliverHeldRestartNotices(sessionId, now);
+      return;
+    }
+    const state = command.state === "started" || command.state === "completed" ? "delivered" as const
+      : command.state === "uncertain" ? "uncertain" as const
+      : command.state === "failed" ? "failed" as const
+      : null;
+    if (!state) return;
+    this.db.setRestartNoticeCommandState(commandId, state, now);
+    if (state === "failed") {
+      this.log.warn(`restart revocation notice failed for ${sessionId}: ${command.error ?? "unknown error"}`);
+    }
+    this.settleQueuedAdmission(command, now);
   }
 
   /** Deliver each resume held for this session once nothing holds it any more (#1650). Every
@@ -8288,6 +8396,9 @@ export class SessionsService {
       this.hub.sessionChangedById(sessionId);
     }
     this.db.abandonHeldWorkflowDecisionResumes(sessionId, Date.now());
+    // A restart owes its child the notice it cannot yet deliver, and a later restart adds to that
+    // notice rather than replacing it; every other end means no child is left to tell (#1861).
+    if (actorId !== "session-restarted") this.db.abandonHeldRestartNotices(sessionId, Date.now());
   }
 
   /** A Claude Code child's armed enqueue never produces a permission receipt in auto or Full Access
@@ -8986,6 +9097,8 @@ export class SessionsService {
         this.gateOnPolicy(sessionId, now);
         this.reconcilePolicyHookTimeouts(now, sessionId);
         this.clearSettledPolicyResumeStatus(sessionId);
+        // A restart notice this card kept back goes out now if nothing else holds it (#1861).
+        this.deliverHeldRestartNotices(sessionId, now);
       } else {
         // Declining stops the turn and records nothing, so the same checkpoint asks again on the
         // next turn that crosses it.
@@ -12188,6 +12301,7 @@ export class SessionsService {
       if (!existing || existing.runnerId !== runnerId || !isTerminal(existing.status) ||
           this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
           this.db.heldWorkflowDecisionResumes(snap.id).length > 0 ||
+          this.db.heldRestartNotices(snap.id).length > 0 ||
           this.db.listOpenPolicyHookApprovals(snap.id).length > 0 ||
           this.db.policyResumeStatus(snap.id) !== null) return [];
       return [{ snap, snapshotIndex, campaignBefore: this.campaignAttentionController(existing) }];
@@ -12272,6 +12386,7 @@ export class SessionsService {
       this.gateOnPolicy(snap.id, now);
       this.restorePendingWorkflowDecisionCards(snap.id);
       this.deliverHeldWorkflowDecisionResumes(snap.id, now);
+      this.deliverHeldRestartNotices(snap.id, now);
       this.hub.sessionChangedById(snap.id);
       this.publishCampaignAttentionTransition(campaignBefore);
     }
@@ -12393,6 +12508,7 @@ export class SessionsService {
     }
     this.restorePendingWorkflowDecisionCards(snapshot.id);
     this.deliverHeldWorkflowDecisionResumes(snapshot.id, now);
+    this.deliverHeldRestartNotices(snapshot.id, now);
     this.hub.sessionChangedById(snapshot.id);
     this.publishCampaignAttentionTransition(campaignBefore);
   }
