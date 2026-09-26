@@ -2976,6 +2976,8 @@ export class SessionManager {
     if (releaseLease) this.releaseActiveWorktreeLease(active);
     const deleted = this.active.delete(sessionId);
     if (deleted) {
+      // Only the provider process that answered `unconfirmed` can carry that stop out late (#1849).
+      this.unconfirmedJobStops.delete(sessionId);
       this.cancelActiveTurnWait(sessionId);
       this.releaseActiveTurn(sessionId);
       if (refreshCapacityInventory) this.refreshCapacityInventorySession(sessionId);

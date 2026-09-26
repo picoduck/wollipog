@@ -13220,14 +13220,16 @@ export class ControlPlaneDb {
          source_present=1,
          last_observed_at=MAX(managed_background_jobs.last_observed_at, excluded.last_observed_at),
          -- The first recorded account of who ended the job is kept whole; a later snapshot never
-         -- mixes its actor with an earlier reason.
-         ended_by_actor=CASE WHEN managed_background_jobs.ended_by_reason IS NULL
+         -- mixes its actor with an earlier reason. An account is adopted only while the job's
+         -- recorded terminal status is (or becomes) killed: the status above keeps its first value.
+         ended_by_actor=CASE WHEN ${ADOPT_BACKGROUND_JOB_END}
                              THEN excluded.ended_by_actor ELSE managed_background_jobs.ended_by_actor END,
-         ended_by_session_id=CASE WHEN managed_background_jobs.ended_by_reason IS NULL
+         ended_by_session_id=CASE WHEN ${ADOPT_BACKGROUND_JOB_END}
                                   THEN excluded.ended_by_session_id ELSE managed_background_jobs.ended_by_session_id END,
-         ended_by_at=CASE WHEN managed_background_jobs.ended_by_reason IS NULL
+         ended_by_at=CASE WHEN ${ADOPT_BACKGROUND_JOB_END}
                           THEN excluded.ended_by_at ELSE managed_background_jobs.ended_by_at END,
-         ended_by_reason=COALESCE(managed_background_jobs.ended_by_reason, excluded.ended_by_reason)`,
+         ended_by_reason=CASE WHEN ${ADOPT_BACKGROUND_JOB_END}
+                              THEN excluded.ended_by_reason ELSE managed_background_jobs.ended_by_reason END`,
     );
     const upsertDelivery = this.stmt(
       `INSERT INTO managed_background_deliveries
@@ -25179,6 +25181,11 @@ function validBackgroundLaunchType(
   return value === "agent" || value === "shell" || value === "monitor" ||
     value === "workflow" || value === "unknown";
 }
+
+/** Upsert condition for adopting a snapshot's account of who ended a job (#1849): none is recorded
+ * yet, and the job's stored terminal status, which never changes once set, is killed. */
+const ADOPT_BACKGROUND_JOB_END = `managed_background_jobs.ended_by_reason IS NULL AND
+  COALESCE(managed_background_jobs.terminal_status, excluded.terminal_status) = 'killed'`;
 
 /** Who ended a job, as a v192 runner reports it (#1849); `null` when absent or malformed. A person is
  * accepted only by role: a snapshot naming an account is refused rather than stored. */

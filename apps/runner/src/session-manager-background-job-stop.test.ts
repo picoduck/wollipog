@@ -367,8 +367,15 @@ test("an unknown job fails, a finished job is reported without change, and a ref
       "the shell job was not registered");
     await waitFor(() => store.readMeta(spec.sessionId)?.status === "idle", "the turn did not finish");
     const shell = store.readMeta(spec.sessionId)!.backgroundJobs!.find((job) => job.id === "shell-3")!;
+    // An unconfirmed stop's requester is kept only while the process that could carry it out lives.
+    fake.stopResult = () => ({ status: "refused", reason: "unconfirmed" });
+    await manager.stopBackgroundJob(spec.sessionId, "shell-3", actor);
+    const unconfirmed = (manager as unknown as { unconfirmedJobStops: Map<string, unknown> }).unconfirmedJobStops;
+    assert.equal(unconfirmed.has(spec.sessionId), true);
+    fake.stopResult = undefined;
     manager.stop(spec.sessionId);
     await waitFor(() => store.readMeta(spec.sessionId)?.status === "stopped", "the session did not stop");
+    assert.equal(unconfirmed.has(spec.sessionId), false, "a stopped session keeps no requester");
     assert.deepEqual(await manager.stopBackgroundJob(spec.sessionId, "shell-3", actor), { outcome: "unknown_job" },
       "stopping the session already ended its jobs");
     // As after a runner restart: the job is on record, but no live process owns it.

@@ -3839,11 +3839,17 @@ test("who ended a killed job reaches the job view by role, keeps its first accou
     // runner reconnecting) does not erase it.
     db.updateSessionFromSnapshot("ended", snapshot({
       id: "ended", driver: "claude_code",
-      backgroundJobs: [killed("owner", orchestrator), killed("orchestrator"), killed("on-its-own", bound)],
+      backgroundJobs: [
+        killed("owner", orchestrator), killed("orchestrator"), killed("on-its-own", bound),
+        // A conflicting report cannot attach an account to a job already recorded as completed.
+        killed("completed", owner),
+      ],
     }), 4_000);
     assert.deepEqual(endedBy().get("owner"), owner);
     assert.deepEqual(endedBy().get("orchestrator"), orchestrator);
     assert.deepEqual(endedBy().get("on-its-own"), bound, "an account arriving after the terminal status is kept");
+    const completed = db.listManagedBackgroundJobs("ended", 3_000).find((job) => job.id === "completed");
+    assert.deepEqual([completed?.terminalStatus, completed?.endedBy], ["completed", undefined]);
 
     db.close();
     db = ControlPlaneDb.open(dbPath);
