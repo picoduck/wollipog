@@ -5833,19 +5833,30 @@ export class ControlPlaneDb {
     );
     // Stop provenance (#1466). A row stopped before this column existed has no evidence that its
     // runner confirmed the stop, so it starts provisional; the runner's next terminal snapshot or
-    // absent inventory confirms it, exactly as it would a fresh disconnect stop.
-    const stopProvenanceColumns = db.prepare("PRAGMA table_info(sessions)")
-      .all() as unknown as Array<{ name: string }>;
-    if (!stopProvenanceColumns.some((column) => column.name === "stop_cause")) {
-      db.exec("ALTER TABLE sessions ADD COLUMN stop_cause TEXT");
-      db.exec("ALTER TABLE sessions ADD COLUMN stop_confirmation TEXT");
-      db.exec("ALTER TABLE sessions ADD COLUMN stop_confirmed_at INTEGER");
-      db.exec(
-        `UPDATE sessions SET stop_cause=CASE
-           WHEN EXISTS (SELECT 1 FROM session_stop_intents i WHERE i.session_id=sessions.id) THEN 'requested'
-           ELSE 'unrecorded' END
-         WHERE status='stopped'`,
-      );
+    // absent inventory confirms it, exactly as it would a fresh disconnect stop. One transaction,
+    // so an interrupted upgrade cannot leave some columns added and the backfill skipped.
+    const stopProvenanceColumns = new Set((db.prepare("PRAGMA table_info(sessions)")
+      .all() as unknown as Array<{ name: string }>).map((column) => column.name));
+    const missingStopProvenance = [
+      "stop_cause TEXT",
+      "stop_confirmation TEXT",
+      "stop_confirmed_at INTEGER",
+    ].filter((column) => !stopProvenanceColumns.has(column.split(" ")[0]!));
+    if (missingStopProvenance.length > 0) {
+      db.exec("BEGIN");
+      try {
+        for (const column of missingStopProvenance) db.exec(`ALTER TABLE sessions ADD COLUMN ${column}`);
+        db.exec(
+          `UPDATE sessions SET stop_cause=CASE
+             WHEN EXISTS (SELECT 1 FROM session_stop_intents i WHERE i.session_id=sessions.id) THEN 'requested'
+             ELSE 'unrecorded' END
+           WHERE status='stopped' AND stop_cause IS NULL`,
+        );
+        db.exec("COMMIT");
+      } catch (error) {
+        db.exec("ROLLBACK");
+        throw error;
+      }
     }
     const controlPlane = new ControlPlaneDb(db, artifactBlobs, instanceId);
     try {

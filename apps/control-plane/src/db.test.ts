@@ -4759,6 +4759,34 @@ test("legacy stopped rows start provisional until their runner confirms the stop
   }
 });
 
+test("a partially applied stop-provenance migration completes on the next open (#1466)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-stop-provenance-partial-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const initial = ControlPlaneDb.open(path);
+    initial.registerRunner(meta(), 500);
+    initial.createSession(newSession({ id: "stopped" }));
+    initial.updateSessionStatus("stopped", "stopped", 600, RUNNER_REPORTED_STOP);
+    initial.close();
+
+    // An upgrade interrupted after its first column, before the backfill.
+    const legacy = new DatabaseSync(path);
+    legacy.exec("ALTER TABLE sessions DROP COLUMN stop_confirmation");
+    legacy.exec("ALTER TABLE sessions DROP COLUMN stop_confirmed_at");
+    legacy.exec("UPDATE sessions SET stop_cause=NULL");
+    legacy.close();
+
+    const upgraded = ControlPlaneDb.open(path);
+    assert.deepEqual(upgraded.sessionStopProvenance("stopped"),
+      { cause: "unrecorded", confirmation: null, confirmedAt: null });
+    upgraded.settleStartupState(700);
+    assert.equal(upgraded.confirmSessionStop("stopped", "runner_terminal", 800), true);
+    upgraded.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a stop write while already stopped can confirm the stop but never downgrade it (#1466)", () => {
   const db = withRunner();
   try {
