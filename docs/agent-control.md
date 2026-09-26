@@ -76,7 +76,9 @@ wollipog help [doctor|update|pair|service|admin|session|worktree|artifact|decisi
 events (default 30, at most 100). With `--after SEQ` it pages forward: the first `--limit` events
 whose seq is greater than `SEQ`, oldest first. Pass the returned `lastSeq` as the next `--after` while
 `hasMore` is true to read every event exactly once. Each call is one bounded control-plane read; it
-falls back to the full read only while the control plane's event cache is still hydrating.
+falls back to the full read only while the control plane's event cache is still hydrating. If the
+cache still cannot hold the whole log (for example, the runner is offline), the result carries
+`historyIncomplete: true` and a forward page keeps `hasMore` true, so retry later instead of stopping.
 
 `wollipog admin` is host administration for an SSH operator on the control-plane machine. It
 authenticates with the control plane's protected local credential over loopback instead of a

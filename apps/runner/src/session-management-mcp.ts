@@ -534,42 +534,49 @@ function renderEventLine(ev: Json): string {
  * newest `limit` events when `after` is undefined. The bounded control-plane read is pinned to the
  * session's event epoch; a replacement between the metadata read and the page read retries once.
  * The CP cache hydrates forward from the runner, so a short page from an incomplete cache is not
- * authoritative. Only then does this fall back to the unbounded read, which waits for hydration.
+ * authoritative. Only then does this fall back to the unbounded read, which waits for hydration, and
+ * then re-reads the cache state: hydration cannot finish while the runner is offline, so the result
+ * reports `incomplete` (and a forward page `hasMore`) until the cache holds the whole log.
  */
 async function readSessionEventPage(
   deps: McpDeps,
   sessionId: string,
   after: number | undefined,
   limit: number,
-): Promise<{ ok: true; events: Json[]; hasMore: boolean } | { ok: false; message: string }> {
+): Promise<{ ok: true; events: Json[]; hasMore: boolean; incomplete: boolean } | { ok: false; message: string }> {
   const base = `/api/sessions/${encodeURIComponent(sessionId)}`;
-  const select = (events: Json[]) => {
-    const page = after === undefined ? events.slice(-limit) : events.slice(0, limit);
-    return { ok: true as const, events: page, hasMore: after !== undefined && events.length > limit };
-  };
-  const unbounded = async () => {
-    const r = await cpFetch(deps, "GET", `${base}/events?after=${after ?? 0}`);
-    if (!r.ok) return r;
-    return select(Array.isArray(r.data?.events) ? r.data.events : []);
-  };
+  const bounded = (cursor: number | undefined, count: number, epoch: number) =>
+    cpFetch(deps, "GET", `${base}/events?${cursor === undefined ? "direction=backward" : `after=${cursor}`}` +
+      `&limit=${count}&eventEpoch=${epoch}`);
   for (let attempt = 0; ; attempt++) {
     const s = await cpFetch(deps, "GET", base);
     if (!s.ok) return s;
     const epoch = typeof s.data?.session?.eventEpoch === "number" ? s.data.session.eventEpoch : 0;
-    const cursor = after === undefined ? "direction=backward" : `after=${after}`;
-    const r = await cpFetch(deps, "GET", `${base}/events?${cursor}&limit=${limit}&eventEpoch=${epoch}`);
+    const r = await bounded(after, limit, epoch);
     if (!r.ok) {
       if (r.status === 409 && attempt === 0) continue;
       return r;
     }
     const events: Json[] = Array.isArray(r.data?.events) ? r.data.events : [];
+    const select = (all: Json[]) => after === undefined ? all.slice(-limit) : all.slice(0, limit);
     // A control plane without bounded pages ignores the page parameters and returns everything.
-    if (typeof r.data?.cacheComplete !== "boolean") return select(events);
-    if (r.data.cacheComplete === true) {
-      return { ok: true, events, hasMore: after !== undefined && r.data.hasMoreCached === true };
+    if (typeof r.data?.cacheComplete !== "boolean") {
+      return { ok: true, events: select(events), hasMore: after !== undefined && events.length > limit, incomplete: false };
     }
-    if (after !== undefined && events.length === limit) return { ok: true, events, hasMore: true };
-    return unbounded();
+    if (r.data.cacheComplete === true) {
+      return { ok: true, events, hasMore: after !== undefined && r.data.hasMoreCached === true, incomplete: false };
+    }
+    if (after !== undefined && events.length === limit) return { ok: true, events, hasMore: true, incomplete: false };
+    const full = await cpFetch(deps, "GET", `${base}/events?after=${after ?? 0}`);
+    if (!full.ok) return full;
+    const all: Json[] = Array.isArray(full.data?.events) ? full.data.events : [];
+    const page = select(all);
+    if (after !== undefined && all.length > limit) return { ok: true, events: page, hasMore: true, incomplete: false };
+    const lastSeq = page.at(-1)?.seq;
+    const state = await bounded(after === undefined ? undefined : typeof lastSeq === "number" ? lastSeq : after, 1, epoch);
+    const complete = state.ok && state.data?.cacheComplete === true;
+    const beyond = state.ok && Array.isArray(state.data?.events) && state.data.events.length > 0;
+    return { ok: true, events: page, hasMore: after !== undefined && (!complete || beyond), incomplete: !complete };
   }
 }
 
@@ -1348,7 +1355,9 @@ export const TOOLS: McpTool[] = [
     description: "Read a session's timeline events. Without `after`: the newest `limit` events (\"what just " +
       "happened?\"). With `after`: the first `limit` events whose seq is greater than `after`, oldest " +
       "first; pass the returned `lastSeq` as the next `after` to read every event exactly once, " +
-      "while `hasMore` is true. `lastSeq` is the seq of the last returned event (or `after` when none).",
+      "while `hasMore` is true. `lastSeq` is the seq of the last returned event (or `after` when none). " +
+      "`historyIncomplete` means the control plane has not yet loaded the whole log (for example, the runner is " +
+      "offline); later events may exist, so retry later rather than treating the page as the end.",
     inputSchema: {
       type: "object",
       properties: {
@@ -1372,6 +1381,7 @@ export const TOOLS: McpTool[] = [
         lines: page.events.map(renderEventLine),
         lastSeq: typeof last?.seq === "number" ? last.seq : after ?? 0,
         ...(after !== undefined ? { hasMore: page.hasMore } : {}),
+        ...(page.incomplete ? { historyIncomplete: true } : {}),
       });
     },
   },

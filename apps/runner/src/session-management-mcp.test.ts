@@ -965,13 +965,16 @@ test("get_session redacts pendingApproval to its title and caps the preview (no 
 
 /** A control plane that serves `GET /api/sessions/:id` and the bounded and unbounded events routes
  * over `total` events, with a forward-hydrated cache holding the first `cached` of them. */
-function eventsCp(total: number, options: { cached?: number; eventEpoch?: number; text?: (seq: number) => string } = {}) {
+function eventsCp(
+  total: number,
+  options: { cached?: number; eventEpoch?: number; text?: (seq: number) => string; runnerOffline?: boolean } = {},
+) {
   const events = Array.from({ length: total }, (_, i) => ({
     seq: i + 1,
     ts: 1000 + i,
     payload: { kind: "agent_message", text: options.text?.(i + 1) ?? `line ${i + 1}` },
   }));
-  const cached = options.cached ?? total;
+  let cached = options.cached ?? total;
   const eventEpoch = options.eventEpoch ?? 2;
   return makeDeps((call) => {
     const url = new URL(call.url);
@@ -979,7 +982,11 @@ function eventsCp(total: number, options: { cached?: number; eventEpoch?: number
     assert.equal(url.pathname, "/api/sessions/s_1/events");
     const q = url.searchParams;
     const after = Number(q.get("after") ?? 0);
-    if (!q.has("limit")) return { status: 200, body: { events: events.filter((e) => e.seq > after) } };
+    if (!q.has("limit")) {
+      // The unbounded read awaits hydration, which completes the cache unless the runner is offline.
+      if (!options.runnerOffline) cached = total;
+      return { status: 200, body: { events: events.slice(0, cached).filter((e) => e.seq > after) } };
+    }
     if (Number(q.get("eventEpoch")) !== eventEpoch) {
       return { status: 409, body: { error: "session event history was replaced", code: "stale_event_epoch", eventEpoch } };
     }
@@ -1072,6 +1079,29 @@ test("get_session_events falls back to the hydrating read only when the cache ca
   const newest = resultJson(await callTool(tail.deps, "get_session_events", { sessionId: "s_1", limit: 3 }));
   assert.equal(tail.calls[2]!.url, `${CP_URL}/api/sessions/s_1/events?after=0`);
   assert.deepEqual(newest.lines.map(seqOf), [28, 29, 30]);
+});
+
+test("get_session_events never reports the end of the log while hydration cannot finish", async () => {
+  // The runner is offline: the cache holds seq 1-12 of 30 and the hydrating read cannot add more.
+  const offline = eventsCp(30, { cached: 12, runnerOffline: true });
+  const page = resultJson(await callTool(offline.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
+  assert.deepEqual(page.lines.map(seqOf), [11, 12]);
+  assert.equal(page.lastSeq, 12);
+  assert.equal(page.hasMore, true, "unread events exist beyond the cache");
+  assert.equal(page.historyIncomplete, true);
+  const drained = resultJson(await callTool(offline.deps, "get_session_events", { sessionId: "s_1", after: 12, limit: 5 }));
+  assert.deepEqual(drained, { lines: [], lastSeq: 12, hasMore: true, historyIncomplete: true });
+  const newest = resultJson(await callTool(offline.deps, "get_session_events", { sessionId: "s_1", limit: 3 }));
+  assert.equal(newest.historyIncomplete, true, "a stale cached tail is flagged");
+
+  // Hydration completes during the fallback read: the short page is the true end of the log.
+  const online = eventsCp(14, { cached: 12 });
+  const end = resultJson(await callTool(online.deps, "get_session_events", { sessionId: "s_1", after: 10, limit: 5 }));
+  assert.deepEqual(end, {
+    lines: ["(11) agent_message: line 11", "(12) agent_message: line 12", "(13) agent_message: line 13", "(14) agent_message: line 14"],
+    lastSeq: 14,
+    hasMore: false,
+  });
 });
 
 test("get_session_events retries once when the event history is replaced between reads", async () => {
