@@ -142,6 +142,9 @@ test("Codex prompts and skills are labeled by source and $name dispatches the sa
   await composer.fill("$review pr 42");
   await page.keyboard.press("Enter");
   await composer.fill("/review pr 43");
+  // Enter is ignored until the previous submission releases the composer, which follows the
+  // provider receipt by its draft bookkeeping; Send enables at exactly that point.
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await page.keyboard.press("Enter");
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.sessionCommandRequests()
     .map(({ request }) => [request.providerCommandId, request.argumentText])))
@@ -157,6 +160,7 @@ test("Codex prompts and skills are labeled by source and $name dispatches the sa
 
   // The reverse: a prompt receipt stays /name when a later catalog keeps only the same-named skill.
   await composer.fill("/user:review notes");
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
   await page.keyboard.press("Enter");
   await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("/review notes");
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([
