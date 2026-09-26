@@ -5918,12 +5918,14 @@ export class ControlPlaneDb {
       ).run(now);
       // Terminality is the retry fence on every path: a runner disconnect already fences these
       // commands, and a control-plane restart is no less disruptive — without this the outbox
-      // re-delivers into sessions this settlement just stopped.
+      // re-delivers into sessions this settlement just stopped. Like a disconnect, the stop is
+      // provisional, so a decision's resume is kept for the runner's return (#1827).
       for (const { id } of midFlight) {
         this.cancelSessionPromptCommands(
           id,
           "session became stopped before durable prompt delivery completed",
           now,
+          true,
         );
       }
     });
@@ -13886,7 +13888,13 @@ export class ControlPlaneDb {
       // Session terminality is the retry fence, regardless of which service path observed it.
       // A never-sent prompt is definitely failed; anything marked before send may have reached
       // the runner and is conservatively uncertain until a later receipt narrows the outcome.
-      this.cancelSessionPromptCommands(id, `session became ${status} before durable prompt delivery completed`, now);
+      // A restorable stop keeps a decision's resume for the runner's return (#1827).
+      this.cancelSessionPromptCommands(
+        id,
+        `session became ${status} before durable prompt delivery completed`,
+        now,
+        restorableStop,
+      );
       // An authoritative terminal transition orphans any armed-but-unsettled delivery marker: the
       // trailing idle it awaited will never belong to this run, and leaving it pending would
       // suppress the Ready of an unrelated later run. Restorable stops (runner disconnect,
@@ -13971,14 +13979,17 @@ export class ControlPlaneDb {
       `UPDATE sessions SET stop_cause=COALESCE(stop_cause, 'unrecorded'), stop_confirmation=?, stop_confirmed_at=?
         WHERE id=? AND status='stopped' AND stop_confirmation IS NULL`,
     ).run(confirmation, now, id);
-    return Number(result.changes) > 0;
+    if (Number(result.changes) === 0) return false;
+    // The stop is final now, so a decision's resume a provisional stop kept ends with it (#1827).
+    this.cancelSessionPromptCommands(id, "session stop was confirmed before durable prompt delivery completed", now);
+    return true;
   }
 
   /** Upgrade a provisional stop once the runner proves no provider process remains: a terminal
    * status or snapshot, or a reconnect inventory that no longer holds the session. A no-op for a
    * session that is not stopped or whose stop is already confirmed. */
   confirmSessionStop(id: string, confirmation: SessionStopConfirmation, now: number): boolean {
-    return this.confirmSessionStopInTransaction(id, confirmation, now);
+    return this.atomic(() => this.confirmSessionStopInTransaction(id, confirmation, now));
   }
 
   /** The recorded provenance of a stopped session, or null for any other status. */
@@ -18392,26 +18403,53 @@ export class ControlPlaneDb {
     return [...sessions];
   }
 
-  cancelSessionPromptCommands(sessionId: string, reason: string, now: number): number {
-    const rows = this.stmt(
-      `SELECT command_id,state FROM session_prompt_commands
-       WHERE session_id=? AND state IN ('pending','sent','accepted','queued','started')`,
-    ).all(sessionId) as Array<{ command_id: string; state: SessionPromptCommandState }>;
-    for (const row of rows) {
-      // `sent` is mark-before-send, so only a never-attempted pending row is definitely cancelled.
-      // Anything later may already have reached provider admission and is explicitly uncertain.
-      this.stmt(
-        `UPDATE session_prompt_commands SET state=?,revision=revision+1,error=?,error_code='COMMAND_CANCELLED',
-         next_attempt_at=NULL,expires_at=?,updated_at=? WHERE command_id=?`,
-      ).run(
-        row.state === "pending" ? "failed" : "uncertain",
-        reason,
-        now + SESSION_PROMPT_TERMINAL_RETENTION_MS,
-        now,
-        row.command_id,
-      );
-    }
-    return rows.length;
+  /**
+   * Fence a session's unfinished durable prompts: its stop means none of them may be delivered.
+   *
+   * A provisional stop (`keepWorkflowDecisionResumes`) keeps each command that carries a resolved
+   * decision's resume (#1827). The outbox sends nothing into a stopped session, so the command
+   * waits; if reconnect restores the child it goes out under its original id, which the runner's
+   * journal deduplicates, and if the stop proves final a later call without the flag ends it. A
+   * resume whose command this does cancel ends with it: never sent is `abandoned` and its row is
+   * retired, as when its decision is revoked; anything later is `uncertain` and never re-sent.
+   */
+  cancelSessionPromptCommands(
+    sessionId: string,
+    reason: string,
+    now: number,
+    keepWorkflowDecisionResumes = false,
+  ): number {
+    return this.atomic(() => {
+      const rows = this.stmt(
+        `SELECT c.command_id, c.state, d.occurrence_id FROM session_prompt_commands c
+         LEFT JOIN workflow_decisions d ON d.resume_command_id=c.command_id AND d.resume_state='delivering'
+         WHERE c.session_id=? AND c.state IN ('pending','sent','accepted','queued','started')`,
+      ).all(sessionId) as Array<{ command_id: string; state: SessionPromptCommandState; occurrence_id: string | null }>;
+      let cancelled = 0;
+      for (const row of rows) {
+        if (keepWorkflowDecisionResumes && row.occurrence_id) continue;
+        // `sent` is mark-before-send, so only a never-attempted pending row is definitely cancelled.
+        // Anything later may already have reached provider admission and is explicitly uncertain.
+        const state = row.state === "pending" ? "failed" : "uncertain";
+        this.stmt(
+          `UPDATE session_prompt_commands SET state=?,revision=revision+1,error=?,error_code='COMMAND_CANCELLED',
+           next_attempt_at=NULL,expires_at=?,updated_at=? WHERE command_id=?`,
+        ).run(state, reason, now + SESSION_PROMPT_TERMINAL_RETENTION_MS, now, row.command_id);
+        cancelled += 1;
+        if (!row.occurrence_id) continue;
+        if (state === "failed") this.dismissTerminalSessionPromptCommand(sessionId, row.command_id, now);
+        this.stmt(
+          `UPDATE workflow_decisions SET resume_state=?, resume_command_id=?, resume_updated_at=?
+           WHERE occurrence_id=?`,
+        ).run(
+          state === "failed" ? "abandoned" : "uncertain",
+          state === "failed" ? null : row.command_id,
+          now,
+          row.occurrence_id,
+        );
+      }
+      return cancelled;
+    });
   }
 
   cancelPendingSessionPromptCommand(

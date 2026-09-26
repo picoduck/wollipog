@@ -8226,6 +8226,13 @@ export class SessionsService {
       this.revokeWorkflowDecision(decision, { kind: "system", id: actorId });
       if (settle) void this.settleArmedMergeFromForge(child!, decision);
     }
+    // A child that already reads terminal was stopped provisionally, which kept any in-flight
+    // resume for the runner's return (#1827). This end is final, so that resume ends too; a live
+    // child's commands are fenced by the stop its caller writes.
+    if (child && isTerminal(child.status) &&
+        this.db.cancelSessionPromptCommands(sessionId, "session ended before durable prompt delivery completed", Date.now())) {
+      this.hub.sessionChangedById(sessionId);
+    }
     this.db.abandonHeldWorkflowDecisionResumes(sessionId, Date.now());
   }
 
@@ -12079,7 +12086,7 @@ export class SessionsService {
           this.db.updateSessionStatus(s.id, "stopped", now, { cause: "runner_absent", confirmation: "runner_absent" });
         } else {
           // An inventory without a provisionally stopped session is the runner's confirmation
-          // that nothing of it still runs (#1466).
+          // that nothing of it still runs (#1466). Confirming ends any resume the stop kept (#1827).
           this.db.confirmSessionStop(s.id, "runner_absent", now);
         }
         if (hadOpenHookApproval || !isTerminal(s.status)) {
@@ -12235,7 +12242,7 @@ export class SessionsService {
           this.db.updateSessionStatus(s.id, "stopped", now, { cause: "runner_absent", confirmation: "runner_absent" });
         } else {
           // An inventory without a provisionally stopped session is the runner's confirmation
-          // that nothing of it still runs (#1466).
+          // that nothing of it still runs (#1466). Confirming ends any resume the stop kept (#1827).
           this.db.confirmSessionStop(s.id, "runner_absent", now);
         }
         if (hadOpenHookApproval || !isTerminal(s.status)) {
