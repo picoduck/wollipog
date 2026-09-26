@@ -10,6 +10,7 @@ import {
   type WorkflowDecisionAuthority,
   type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
+import { claudeStableAliasCatalogModel } from "./claude-model-aliases.js";
 
 /** Whether an Orchestrator assigned UI Evidence Approval can actually exercise it. Human is always
  * a safe owner, so every unknown, unsupported, or unverifiable input resolves to the human. */
@@ -70,14 +71,23 @@ export function evaluateUiEvidenceReviewClient(client: UiEvidenceReviewClient): 
     );
   }
   // The default model stands in only when no model was selected. A selected model the catalog does
-  // not know has advertised nothing, so it must not inherit the installation's attestation.
+  // not know has advertised nothing, so it must not inherit the installation's attestation. The one
+  // exception is the one launch validation makes: a Claude stable alias the catalog stopped listing
+  // is judged by the catalog entry of its family. Dated pins and unknown ids still fail closed, and
+  // so does a family the installation does not offer: the runner backfills hidden bare aliases into
+  // every live Claude catalog, and those placeholders are not offers.
   const model = client.modelId
     ? capabilities.models.find((candidate) => candidate.id === client.modelId)
+      ?? (client.driver === "claude-code"
+        ? claudeStableAliasCatalogModel(client.modelId, capabilities.models.filter((candidate) => !candidate.hidden))
+        : undefined)
     : capabilities.models.find((candidate) => candidate.default && !candidate.hidden);
   if (!model) {
     return human(
       "model_unsupported",
-      `The Orchestrator model ${JSON.stringify(client.modelId ?? "default")} is not in its installation's model catalog, so whether it accepts images is unknown.`,
+      client.modelId
+        ? `The Orchestrator model ${JSON.stringify(client.modelId)} is no longer offered by its installation, so whether it accepts images is unknown. Reselect the Orchestrator's model to restore Orchestrator review.`
+        : `The Orchestrator model "default" is not in its installation's model catalog, so whether it accepts images is unknown.`,
     );
   }
   // A model that lists its input types must list images. One that lists none is covered by the

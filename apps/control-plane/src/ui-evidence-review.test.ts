@@ -17,7 +17,15 @@ import { evaluateUiEvidenceReviewClient, type UiEvidenceReviewClient } from "./u
 
 /** What a runner publishes for a discovered Claude Code installation, built by the runner's own
  * discovery path: the live control-protocol catalog lists no input modalities for any model. */
-function publishedClaudeCode(installedVersion: string, streamJsonImages = true): AgentCapabilities {
+function publishedClaudeCode(
+  installedVersion: string,
+  streamJsonImages = true,
+  liveModels: readonly Record<string, string>[] = [
+    { value: "default", displayName: "Default (recommended)", resolvedModel: "claude-opus-5-5" },
+    { value: "opus[1m]", displayName: "Opus (1M context)", resolvedModel: "claude-opus-5-5[1m]" },
+    { value: "haiku", displayName: "Haiku", resolvedModel: "claude-haiku-4-5-20251001" },
+  ],
+): AgentCapabilities {
   const claudeCode: ClaudeCodeCapabilities = {
     status: "ready",
     installedVersion,
@@ -37,11 +45,7 @@ function publishedClaudeCode(installedVersion: string, streamJsonImages = true):
     capabilities: claudeCapabilitiesFromProbe(capabilitiesFor("claude-code")!, claudeCode),
   }, {
     source: "live",
-    models: parseClaudeModels({ models: [
-      { value: "default", displayName: "Default (recommended)", resolvedModel: "claude-opus-5-5" },
-      { value: "opus[1m]", displayName: "Opus (1M context)", resolvedModel: "claude-opus-5-5[1m]" },
-      { value: "haiku", displayName: "Haiku", resolvedModel: "claude-haiku-4-5-20251001" },
-    ] }),
+    models: parseClaudeModels({ models: liveModels }),
   });
   return agent.capabilities!;
 }
@@ -122,10 +126,69 @@ test("a model that cannot take images, or that the catalog does not know, falls 
   // A selected model missing from the catalog must not inherit the installation's attestation.
   const uncatalogued = fallbackCode({ modelId: "claude-custom-gateway-model" });
   assert.equal(uncatalogued?.code, "model_unsupported");
-  assert.match(uncatalogued?.reason ?? "", /"claude-custom-gateway-model" is not in its installation's model catalog/);
+  assert.equal(uncatalogued?.reason,
+    "The Orchestrator model \"claude-custom-gateway-model\" is no longer offered by its installation, so whether it accepts images is unknown. Reselect the Orchestrator's model to restore Orchestrator review.");
   const noDefault = fallbackCode({ capabilities: { ...codexAppServer, models: [{ id: "text-model", inputModalities: ["text"] }] } });
   assert.equal(noDefault?.code, "model_unsupported");
   assert.match(noDefault?.reason ?? "", /"default" is not in its installation's model catalog/);
+});
+
+test("a saved Claude alias the catalog stopped listing is judged by its family's catalog entry, as launch is (#1776)", () => {
+  // The observed catalog: `opus[1m]` is gone while `opus` is still offered.
+  const withoutOneMillion = publishedClaudeCode(CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION, true, [
+    { value: "default", displayName: "Default (recommended)", resolvedModel: "claude-opus-5-5" },
+    { value: "opus", displayName: "Opus", resolvedModel: "claude-opus-5-5" },
+    { value: "claude-fable-5-1", displayName: "Fable 5.1", resolvedModel: "claude-fable-5-1" },
+  ]);
+  assert.ok(!withoutOneMillion.models.some((model) => model.id === "opus[1m]"), "the premise: the saved alias is not listed");
+  for (const modelId of ["opus[1m]", "OPUS[1m]", "fable[1m]"]) {
+    assert.deepEqual(evaluateUiEvidenceReviewClient(client({ capabilities: withoutOneMillion, modelId })),
+      { effectiveOwner: "orchestrator" }, modelId);
+  }
+
+  // The runner backfills hidden bare aliases for families the installation does not offer; those
+  // placeholders must not stand in for a missing alias.
+  assert.ok(withoutOneMillion.models.some((model) => model.id === "sonnet" && model.hidden), "the premise: a hidden backfill");
+  for (const modelId of ["sonnet[1m]", "haiku[1m]"]) {
+    assert.equal(fallbackCode({ capabilities: withoutOneMillion, modelId })?.reason,
+      `The Orchestrator model ${JSON.stringify(modelId)} is no longer offered by its installation, so whether it accepts images is unknown. Reselect the Orchestrator's model to restore Orchestrator review.`,
+      modelId);
+  }
+
+  // The family entry must still pass every existing check.
+  const unattested = fallbackCode({ capabilities: { ...withoutOneMillion, imageToolResults: false }, modelId: "opus[1m]" });
+  assert.equal(unattested?.code, "harness_unsupported");
+  const textOnlyFamily = fallbackCode({
+    capabilities: { ...withoutOneMillion, models: [{ id: "opus", inputModalities: ["text"] }] },
+    modelId: "opus[1m]",
+  });
+  assert.deepEqual(textOnlyFamily, { code: "model_unsupported", reason: "The Orchestrator model \"opus\" does not accept image input." });
+});
+
+test("a dated pin, a non-Claude model, or an alias with no family entry still falls back with a reselect reason (#1776)", () => {
+  const opusOnly = { ...publishedClaudeCode(CLAUDE_IMAGE_TOOL_RESULT_MIN_VERSION), models: [{ id: "default", default: true }, { id: "opus" }] };
+  const reason = (modelId: string) =>
+    `The Orchestrator model ${JSON.stringify(modelId)} is no longer offered by its installation, so whether it accepts images is unknown. Reselect the Orchestrator's model to restore Orchestrator review.`;
+  for (const modelId of [
+    // Exact pins stay exact even when their family is offered.
+    "claude-opus-4-5-20251101",
+    "claude-opus-5-5",
+    // No catalog entry of this family.
+    "sonnet[1m]",
+    "fable",
+    // Not a Claude alias at all.
+    "gpt-6-sol",
+    "opus-custom",
+  ]) {
+    assert.deepEqual(fallbackCode({ capabilities: opusOnly, modelId }), { code: "model_unsupported", reason: reason(modelId) }, modelId);
+  }
+  // A non-Claude harness never resolves Claude aliases, whatever its catalog lists.
+  const codexAppServer: AgentCapabilities = {
+    models: [{ id: "opus", default: true, inputModalities: ["text", "image"] }],
+    effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true, imageToolResults: true,
+  };
+  assert.deepEqual(fallbackCode({ driver: "codex-app-server", capabilities: codexAppServer, modelId: "opus[1m]" }),
+    { code: "model_unsupported", reason: reason("opus[1m]") });
 });
 
 test("a runner that predates the attestation keeps the gate human-owned with an upgrade reason", () => {
