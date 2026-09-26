@@ -109,7 +109,8 @@ import { runnerReentryCommand } from "./runner-reentry.js";
 import {
   agentControlRegistrationsToResend,
   defaultAgentControlHost,
-  isCurrentAgentControlCredential,
+  forgetAgentControlRegistrationAnswers,
+  isStaleAgentControlAnswer,
   markAgentControlCredentialReady,
   markAgentControlCredentialRejected,
   provisionAgentControl,
@@ -2067,9 +2068,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         const pendingKey = agentControlRegistrationKey(msg.sessionId, msg.tokenHash);
         const pending = pendingAgentControlRegistrations.get(pendingKey);
         // Registrations are re-sent until answered (#1841), so an answer can arrive after its
-        // credential was superseded or torn down. It says nothing about the current credential,
-        // which it must neither make ready nor revoke.
-        if (!isCurrentAgentControlCredential(agentControlHost.configDir, msg.sessionId, msg.tokenHash)) {
+        // credential was superseded, torn down, or re-armed by a relaunch. It says nothing about
+        // the current fence, which it must neither open nor revoke.
+        if (isStaleAgentControlAnswer(agentControlHost.configDir, msg.sessionId, msg.tokenHash)) {
           if (pending) {
             clearTimeout(pending.timer);
             pendingAgentControlRegistrations.delete(pendingKey);
@@ -3647,6 +3648,7 @@ function connect(): void {
   socket.on("close", () => {
     stopHeartbeat();
     registered = false;
+    forgetAgentControlRegistrationAnswers();
     controlPlaneProtocolVersion = null;
     automaticAccountSwitchConfigurationSynchronized = false;
     sessions.setAutomaticAccountSwitchAuthorityReady(false);

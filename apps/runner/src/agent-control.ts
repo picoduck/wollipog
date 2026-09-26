@@ -127,6 +127,24 @@ const agentControlMemory = new Map<string, AgentControlMemoryState>();
  * for the rest of the provider's life (#1841), so the runner re-sends these until answered. */
 const unacknowledgedRegistrations = new Map<string, { tokenHash: string; sentAt: number }>();
 
+/** Registration frames of each session's current hash that the control plane has not answered on
+ * the current socket. It answers every frame, in order, on the socket that carried it, so when a
+ * relaunch re-arms the fence with the same hash, the next `stale` answers belong to frames sent
+ * before it. Re-sending makes such duplicate answers routine; counting them keeps a late answer
+ * to an earlier frame from opening the new fence. */
+const registrationAnswers = new Map<string, { tokenHash: string; unanswered: number; stale: number }>();
+
+function noteRegistrationSent(sessionId: string, tokenHash: string): void {
+  const answers = registrationAnswers.get(sessionId);
+  if (answers?.tokenHash === tokenHash) answers.unanswered++;
+  else registrationAnswers.set(sessionId, { tokenHash, unanswered: 1, stale: 0 });
+}
+
+/** The control-plane socket closed: no answer to a frame it carried can arrive any more. */
+export function forgetAgentControlRegistrationAnswers(): void {
+  registrationAnswers.clear();
+}
+
 /** Current unacknowledged registrations last sent at least `minAgeMs` ago, each marked as sent
  * now: the caller re-sends every entry it receives. */
 export function agentControlRegistrationsToResend(
@@ -137,9 +155,23 @@ export function agentControlRegistrationsToResend(
   for (const [sessionId, registration] of unacknowledgedRegistrations) {
     if (now - registration.sentAt < minAgeMs) continue;
     registration.sentAt = now;
+    noteRegistrationSent(sessionId, registration.tokenHash);
     due.push({ sessionId, tokenHash: registration.tokenHash });
   }
   return due;
+}
+
+/** Consume one control-plane answer and report whether it is stale: it names a superseded
+ * credential, or it answers a frame sent before the current fence was armed. A stale answer must
+ * neither ready nor revoke the current credential. */
+export function isStaleAgentControlAnswer(configDir: string, sessionId: string, tokenHash: string): boolean {
+  if (!isCurrentAgentControlCredential(configDir, sessionId, tokenHash)) return true;
+  const answers = registrationAnswers.get(sessionId);
+  if (!answers || answers.tokenHash !== tokenHash) return false;
+  if (answers.unanswered > 0) answers.unanswered--;
+  if (answers.stale === 0) return false;
+  answers.stale--;
+  return true;
 }
 
 /** Whether `tokenHash` names the session's current credential. An acknowledgement for any other
@@ -580,6 +612,12 @@ export function provisionAgentControl(
     rmSync(readyFile, { force: true });
   }
   unacknowledgedRegistrations.set(spec.sessionId, { tokenHash, sentAt: Date.now() });
+  const answers = registrationAnswers.get(spec.sessionId);
+  if (answers?.tokenHash === tokenHash) answers.stale = answers.unanswered;
+  else registrationAnswers.delete(spec.sessionId);
+  if (config.registerCredential || (wslOrchestrator && config.registerCredentialAndWait)) {
+    noteRegistrationSent(spec.sessionId, tokenHash);
+  }
   const credentialRegistration = wslOrchestrator && config.registerCredentialAndWait
     ? config.registerCredentialAndWait(spec.sessionId, tokenHash)
     : (config.registerCredential?.(spec.sessionId, tokenHash), undefined);
@@ -751,6 +789,7 @@ export function removeAgentControlFiles(sessionId: string, configDir: string): v
   wslLaunches.delete(sessionId);
   agentControlMemory.delete(sessionId);
   unacknowledgedRegistrations.delete(sessionId);
+  registrationAnswers.delete(sessionId);
   for (const file of [
     agentControlTokenPath(configDir, sessionId),
     agentControlMcpConfigPath(configDir, sessionId),

@@ -21,7 +21,9 @@ import {
   agentControlRegistrationsToResend,
   agentControlTokenPath,
   agentControlReadyPath,
+  forgetAgentControlRegistrationAnswers,
   isCurrentAgentControlCredential,
+  isStaleAgentControlAnswer,
   markAgentControlCredentialReady,
   markAgentControlCredentialRejected,
   piAgentControlExtensionPath,
@@ -617,6 +619,54 @@ test("an unacknowledged registration is re-sent until answered, and only for the
 
     removeAgentControlFiles(launch.sessionId, root);
     assert.deepEqual(due(0, Date.now()), [], "teardown stops the retry");
+  } finally {
+    removeAgentControlFiles(launch.sessionId, root);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a late answer to a frame sent before a same-hash relaunch cannot open the relaunch's fence (#1841)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-agent-control-stale-answer-"));
+  const launch = { ...spec("claude-code"), sessionId: "s_stale_answer" };
+  try {
+    const host: AgentControlHost = { isSea: true, execPath: "/runner", execArgv: [], configDir: root, platform: "linux" };
+    const hashes: string[] = [];
+    const control = {
+      controlPlaneUrl: "ws://127.0.0.1:4317/runner",
+      controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "provider" as const,
+      providerRelayEndpoint: "tcp://127.0.0.1:4318",
+      registerCredential: (_id: string, hash: string) => hashes.push(hash),
+    };
+    // The control plane answers each frame in order. Mirror index.ts: a stale answer is dropped.
+    const answer = () => {
+      if (!isStaleAgentControlAnswer(root, launch.sessionId, hashes[0]!)) {
+        markAgentControlCredentialReady(root, launch.sessionId, hashes[0]!);
+      }
+    };
+    const relay = () => relayAgentControlRequest(launch.sessionId, {
+      key: launch.env[AGENT_CONTROL_RELAY_KEY_ENV]!, method: "GET", path: "/api/compatibility",
+    }, AbortSignal.timeout(400), async () => new Response("{}", { status: 200 }));
+
+    provisionAgentControl(launch, control, () => {}, host);
+    const resent = agentControlRegistrationsToResend(0).filter((entry) => entry.sessionId === launch.sessionId);
+    assert.equal(resent.length, 1, "the unanswered registration was re-sent: two frames are now in flight");
+    answer();
+    assert.equal((await relay()).status, 200, "the first answer opened the fence");
+
+    provisionAgentControl(launch, control, () => {}, host);
+    assert.equal(hashes.at(-1), hashes[0], "the relaunch re-registers the same credential");
+    answer();
+    await assert.rejects(relay, /cancelled/,
+      "the answer to the re-sent frame from before the relaunch leaves the new fence closed");
+    answer();
+    assert.equal((await relay()).status, 200, "the relaunch's own answer opens it");
+
+    forgetAgentControlRegistrationAnswers();
+    provisionAgentControl(launch, control, () => {}, host);
+    answer();
+    assert.equal((await relay()).status, 200,
+      "a new socket carries no earlier frames, so its first answer is the relaunch's own");
   } finally {
     removeAgentControlFiles(launch.sessionId, root);
     rmSync(root, { recursive: true, force: true });
