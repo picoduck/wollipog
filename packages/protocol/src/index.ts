@@ -2116,7 +2116,7 @@ export interface UiEvidenceReviewReceipt {
   artifactId: string;
   sha256: string;
   deliveredAt: number;
-  /** Server-assigned order within this occurrence, including redeliveries. */
+  /** Server-assigned order for a video-frame delivery within this occurrence, including redeliveries. */
   deliveryOrder?: number;
   /** Present only for a trusted, complete source-video manifest frame. */
   videoFrame?: {
@@ -3708,6 +3708,8 @@ export type WorkflowDecisionResourceSnapshot =
         sourceEvidenceId: string;
         sourceArtifactId: string;
         sourceSha256: string;
+        /** Digest of the child's exact original request, before trusted frame derivation. */
+        originalRequestSha256: string;
         profile: "short-silent-webm-vp9-v1";
         manifestSha256: string;
         frames: Array<{

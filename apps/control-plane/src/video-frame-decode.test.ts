@@ -53,3 +53,13 @@ test("the source-byte limit fails before a decoder or artifact write", async () 
   assert.equal(decoded.ok, false);
   if (!decoded.ok) assert.match(decoded.reason, /size limit/);
 });
+
+test("a third simultaneous decode fails closed at the process resource bound", async (t) => {
+  if (!await shortVideoDecoderAvailable()) return t.skip("no isolated video decoder on this host");
+  const source = fixture("video-review-one-frame-transient.webm");
+  const results = await Promise.all(Array.from({ length: 3 }, () => decodeShortSilentWebm(source)));
+  assert.equal(results.filter((result) => result.ok).length, 2);
+  assert.equal(results.filter((result) => !result.ok).length, 1);
+  const rejected = results.find((result) => !result.ok);
+  if (rejected && !rejected.ok) assert.match(rejected.reason, /decoder is busy/);
+});

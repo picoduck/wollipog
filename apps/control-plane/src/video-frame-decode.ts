@@ -39,6 +39,8 @@ const PRLIMIT = "/usr/bin/prlimit";
 const FFMPEG = "/usr/bin/ffmpeg";
 const FFPROBE = "/usr/bin/ffprobe";
 const DECODER_OUTPUT_LIMIT = 128 * 1024;
+const MAX_CONCURRENT_DECODES = 2;
+let activeDecodes = 0;
 
 export async function shortVideoDecoderAvailable(): Promise<boolean> {
   if (process.platform !== "linux") return false;
@@ -65,7 +67,7 @@ function isolatedArgs(inputPath: string, tool: string, args: string[]): string[]
     "--ro-bind", "/etc/ld.so.cache", "/etc/ld.so.cache",
     "--ro-bind", inputPath, "/input.webm",
     "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
-    "--unshare-net", "--unshare-pid", "--new-session", "--die-with-parent",
+    "--clearenv", "--unshare-all", "--new-session", "--die-with-parent",
     "--", tool, ...args,
   ];
 }
@@ -78,7 +80,7 @@ async function runIsolated(
 ): Promise<{ ok: true; stdout: Buffer } | { ok: false }> {
   return new Promise((resolve) => {
     const child = spawn(PRLIMIT, isolatedArgs(inputPath, tool, args), {
-      stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env: {},
     });
     const chunks: Buffer[] = [];
     let stdoutBytes = 0;
@@ -112,7 +114,8 @@ async function runIsolated(
 }
 
 type ProbeStream = { codec_type?: unknown; codec_name?: unknown; width?: unknown; height?: unknown };
-type ProbeFrame = { media_type?: unknown; best_effort_timestamp_time?: unknown; pkt_duration_time?: unknown };
+type ProbeFrame = { media_type?: unknown; best_effort_timestamp_time?: unknown;
+  duration_time?: unknown; pkt_duration_time?: unknown };
 
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
@@ -150,75 +153,87 @@ export async function decodeShortSilentWebm(source: Buffer): Promise<VideoFrameD
   if (!videoBytesMatchMime("video/webm", source)) {
     return unsupported("Only WebM video is supported for delegated review.");
   }
-  if (!await shortVideoDecoderAvailable()) {
-    return unsupported("An isolated video decoder is unavailable on this server.");
+  if (activeDecodes >= MAX_CONCURRENT_DECODES) {
+    return unsupported("The bounded video decoder is busy; this review needs a human.");
   }
-  const root = await mkdtemp(join(tmpdir(), "wollipog-video-review-"));
-  const inputPath = join(root, "input.webm");
+  activeDecodes++;
   try {
-    await writeFile(inputPath, source, { mode: 0o400, flag: "wx" });
-    const probe = await runIsolated(inputPath, FFPROBE, [
-      "-v", "error", "-show_streams", "-show_frames",
-      "-show_entries", "stream=codec_type,codec_name,width,height:frame=media_type,best_effort_timestamp_time,pkt_duration_time",
-      "-of", "json", "/input.webm",
-    ], DECODER_OUTPUT_LIMIT);
-    if (!probe.ok) return unsupported("The video could not be completely inspected within the review limits.");
-    let streams: ProbeStream[];
-    let frames: ProbeFrame[];
+    if (!await shortVideoDecoderAvailable()) {
+      return unsupported("An isolated video decoder is unavailable on this server.");
+    }
+    const root = await mkdtemp(join(tmpdir(), "wollipog-video-review-"));
+    const inputPath = join(root, "input.webm");
     try {
-      const parsed = JSON.parse(probe.stdout.toString("utf8")) as { streams?: ProbeStream[]; frames?: ProbeFrame[] };
-      streams = parsed.streams ?? [];
-      frames = parsed.frames ?? [];
-    } catch {
-      return unsupported("The video decoder returned invalid frame metadata.");
-    }
-    if (streams.length !== 1 || streams[0]?.codec_type !== "video" ||
-        streams[0]?.codec_name !== "vp9" ||
-        !Number.isSafeInteger(streams[0]?.width) || !Number.isSafeInteger(streams[0]?.height) ||
-        Number(streams[0]?.width) < 1 || Number(streams[0]?.width) > SHORT_VIDEO_PROFILE.width ||
-        Number(streams[0]?.height) < 1 || Number(streams[0]?.height) > SHORT_VIDEO_PROFILE.height) {
-      return unsupported("Only silent, short WebM/VP9 video within the review dimensions is supported.");
-    }
-    if (frames.length < 2 || frames.length > SHORT_VIDEO_PROFILE.frames ||
-        frames.some((frame) => frame.media_type !== "video")) {
-      return unsupported("The video has an unsupported number or type of frames.");
-    }
-    const pts = frames.map((frame) => Number(frame.best_effort_timestamp_time) * 1000);
-    const durations = frames.map((frame) => Number(frame.pkt_duration_time) * 1000);
-    if (pts.some((value, index) => !Number.isFinite(value) || value < 0 ||
-        value > SHORT_VIDEO_PROFILE.durationMs ||
-        (index === 0 ? value !== 0 : value - pts[index - 1]! < SHORT_VIDEO_PROFILE.minimumFrameIntervalMs)) ||
-        durations.some((value) => !Number.isFinite(value) || value < 0) ||
-        pts.at(-1)! + durations.at(-1)! > SHORT_VIDEO_PROFILE.durationMs) {
-      return unsupported("The video has unsupported or ambiguous frame timing.");
-    }
-    const decoded = await runIsolated(inputPath, FFMPEG, [
-      "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-err_detect", "explode",
-      "-threads", "1",
-      "-i", "/input.webm", "-map", "0:v:0", "-vsync", "0",
-      "-frames:v", String(SHORT_VIDEO_PROFILE.frames + 1),
-      "-f", "image2pipe", "-vcodec", "png", "pipe:1",
-    ], SHORT_VIDEO_PROFILE.totalFrameBytes + SHORT_VIDEO_PROFILE.frameBytes);
-    if (!decoded.ok) return unsupported("The video could not be completely decoded within the review limits.");
-    const images = splitPngStream(decoded.stdout);
-    if (!images || images.length !== frames.length) {
-      return unsupported("The decoded frames do not match the complete source frame list.");
-    }
-    let totalBytes = 0;
-    const result: DecodedVideoFrame[] = [];
-    for (const [index, bytes] of images.entries()) {
-      totalBytes += bytes.length;
-      if (!bytes.length || bytes.length > SHORT_VIDEO_PROFILE.frameBytes ||
-          totalBytes > SHORT_VIDEO_PROFILE.totalFrameBytes ||
-          !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
-        return unsupported("Decoded frames exceed the review byte limits or are not PNG images.");
+      await writeFile(inputPath, source, { mode: 0o400, flag: "wx" });
+      const probe = await runIsolated(inputPath, FFPROBE, [
+        "-v", "error", "-show_streams", "-show_frames",
+        "-show_entries", "stream=codec_type,codec_name,width,height:frame=media_type,best_effort_timestamp_time,duration_time,pkt_duration_time",
+        "-of", "json", "/input.webm",
+      ], DECODER_OUTPUT_LIMIT);
+      if (!probe.ok) return unsupported("The video could not be completely inspected within the review limits.");
+      let streams: ProbeStream[];
+      let frames: ProbeFrame[];
+      try {
+        const parsed = JSON.parse(probe.stdout.toString("utf8")) as { streams?: ProbeStream[]; frames?: ProbeFrame[] };
+        streams = parsed.streams ?? [];
+        frames = parsed.frames ?? [];
+      } catch {
+        return unsupported("The video decoder returned invalid frame metadata.");
       }
-      result.push({ index, ptsMs: pts[index]!, sha256: createHash("sha256").update(bytes).digest("hex"), bytes });
+      if (streams.length !== 1 || streams[0]?.codec_type !== "video" ||
+          streams[0]?.codec_name !== "vp9" ||
+          !Number.isSafeInteger(streams[0]?.width) || !Number.isSafeInteger(streams[0]?.height) ||
+          Number(streams[0]?.width) < 1 || Number(streams[0]?.width) > SHORT_VIDEO_PROFILE.width ||
+          Number(streams[0]?.height) < 1 || Number(streams[0]?.height) > SHORT_VIDEO_PROFILE.height) {
+        return unsupported("Only silent, short WebM/VP9 video within the review dimensions is supported.");
+      }
+      if (frames.length < 2 || frames.length > SHORT_VIDEO_PROFILE.frames ||
+          frames.some((frame) => frame.media_type !== "video")) {
+        return unsupported("The video has an unsupported number or type of frames.");
+      }
+      const rawPts = frames.map((frame) => Number(frame.best_effort_timestamp_time) * 1000);
+      // The profile represents timestamps in whole milliseconds. Reject sub-ms timing instead of
+      // silently shifting motion; rounding only removes binary floating-point representation noise.
+      const pts = rawPts.map(Math.round);
+      const durations = frames.map((frame) => Number(frame.duration_time ?? frame.pkt_duration_time) * 1000);
+      if (pts.some((value, index) => !Number.isFinite(value) || value < 0 ||
+          Math.abs(rawPts[index]! - value) > 0.01 ||
+          value > SHORT_VIDEO_PROFILE.durationMs ||
+          (index === 0 ? value !== 0 : value - pts[index - 1]! < SHORT_VIDEO_PROFILE.minimumFrameIntervalMs)) ||
+          durations.some((value) => !Number.isFinite(value) || value < 0) ||
+          pts.at(-1)! + durations.at(-1)! > SHORT_VIDEO_PROFILE.durationMs) {
+        return unsupported("The video has unsupported or ambiguous frame timing.");
+      }
+      const decoded = await runIsolated(inputPath, FFMPEG, [
+        "-nostdin", "-hide_banner", "-loglevel", "error", "-xerror", "-err_detect", "explode",
+        "-threads", "1",
+        "-i", "/input.webm", "-map", "0:v:0", "-vsync", "0",
+        "-frames:v", String(SHORT_VIDEO_PROFILE.frames + 1),
+        "-f", "image2pipe", "-vcodec", "png", "pipe:1",
+      ], SHORT_VIDEO_PROFILE.totalFrameBytes + SHORT_VIDEO_PROFILE.frameBytes);
+      if (!decoded.ok) return unsupported("The video could not be completely decoded within the review limits.");
+      const images = splitPngStream(decoded.stdout);
+      if (!images || images.length !== frames.length) {
+        return unsupported("The decoded frames do not match the complete source frame list.");
+      }
+      let totalBytes = 0;
+      const result: DecodedVideoFrame[] = [];
+      for (const [index, bytes] of images.entries()) {
+        totalBytes += bytes.length;
+        if (!bytes.length || bytes.length > SHORT_VIDEO_PROFILE.frameBytes ||
+            totalBytes > SHORT_VIDEO_PROFILE.totalFrameBytes ||
+            !bytes.subarray(0, 8).equals(PNG_SIGNATURE)) {
+          return unsupported("Decoded frames exceed the review byte limits or are not PNG images.");
+        }
+        result.push({ index, ptsMs: pts[index]!, sha256: createHash("sha256").update(bytes).digest("hex"), bytes });
+      }
+      return { ok: true, sourceSha256: createHash("sha256").update(source).digest("hex"), frames: result };
+    } catch {
+      return unsupported("The isolated video decoder could not complete safely.");
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
-    return { ok: true, sourceSha256: createHash("sha256").update(source).digest("hex"), frames: result };
-  } catch {
-    return unsupported("The isolated video decoder could not complete safely.");
   } finally {
-    await rm(root, { recursive: true, force: true });
+    activeDecodes--;
   }
 }

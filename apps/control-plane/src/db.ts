@@ -22069,7 +22069,21 @@ export class ControlPlaneDb {
   }
 
   deleteWorkflowArtifact(artifactId: string): boolean {
-    const deleted = Number(this.stmt("DELETE FROM artifacts WHERE id=?").run(artifactId).changes) > 0;
+    this.db.exec("BEGIN IMMEDIATE");
+    let deleted: boolean;
+    try {
+      deleted = Number(this.stmt("DELETE FROM artifacts WHERE id=?").run(artifactId).changes) > 0;
+      if (deleted) {
+        // Derived video frames must never outlive deletion of their source Session artifact.
+        this.stmt(`DELETE FROM artifacts WHERE kind='screenshot' AND json_valid(metadata)
+          AND json_extract(metadata, '$.purpose')='video_review_frame'
+          AND json_extract(metadata, '$.sourceArtifactId')=?`).run(artifactId);
+      }
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
     if (deleted) this.collectWorkflowArtifactBlobs();
     return deleted;
   }

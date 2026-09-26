@@ -20073,6 +20073,32 @@ test("video review stays human-owned by default and older peers keep a specific 
       }).status, 400, "a child cannot supply the server-derived manifest");
     } finally { h.db.close(); }
   }
+  const human = uiEvidenceReviewHarness();
+  try {
+    assert.ok(human.svc.setParentControlPolicy(human.parent.id,
+      { ...human.decisions, ui_evidence_approval: "human" }, 1,
+      { kind: "human", id: "owner" }).ok);
+    const child = human.createChild("Human Video Child");
+    const clip = human.video(child.id, "human-clip");
+    const decision = await human.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: "human-video", resourceKey: "human-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [clip.item] },
+    });
+    assert.equal(decision.data?.authority, "human");
+    assert.equal(decision.data?.humanFallback, undefined,
+      "human ownership by choice must not be described as a capability fallback");
+  } finally { human.db.close(); }
+  const textOnly = uiEvidenceReviewHarness(PROTOCOL_VERSION, false);
+  try {
+    const child = textOnly.createChild("Text-Only Video Child");
+    const clip = textOnly.video(child.id, "text-only-clip");
+    const decision = await textOnly.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: "text-only-video", resourceKey: "text-only-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [clip.item] },
+    });
+    assert.equal(decision.data?.humanFallback?.code, "model_unsupported",
+      "the inactive video candidate must not hide a model-specific fallback");
+  } finally { textOnly.db.close(); }
 });
 
 test("validated local video path binds all source frames, ordered receipts, source digest, and exact occurrence", async (t) => {
@@ -20087,12 +20113,21 @@ test("validated local video path binds all source frames, ordered receipts, sour
     assert.ok(attached.ok && attached.data, attached.error);
     const item = { evidenceId: "motion", artifactId: attached.data.artifactId,
       sha256: attached.data.sha256, mediaType: "video/webm" };
+    const oversizedId = await h.svc.createWorkflowDecisionWithVideo(child.id, {
+      requestId: "video-long-id", resourceKey: "video-long-id",
+      resourceSnapshot: { category: "ui_evidence_approval",
+        evidence: [{ ...item, evidenceId: "x".repeat(248) }] },
+    });
+    assert.equal(oversizedId.data?.authority, "human");
+    assert.match(oversizedId.data?.humanFallback?.reason ?? "", /identifier is too long/);
     const request = (id: string) => h.svc.createWorkflowDecisionWithVideo(child.id, {
       requestId: id, resourceKey: "video-ui",
       resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
     });
     const pending = await request("video-first");
     assert.ok(pending.ok && pending.data, pending.error);
+    assert.equal((await request("video-first")).data?.occurrenceId, pending.data.occurrenceId,
+      "a retry replays the exact prior decision without a second decode");
     assert.equal(pending.data.authority, "orchestrator");
     const snapshot = pending.data.resourceSnapshot;
     assert.equal(snapshot.category, "ui_evidence_approval");
@@ -20137,6 +20172,22 @@ test("validated local video path binds all source frames, ordered receipts, sour
       sourceSha256: manifest.sourceSha256, manifestSha256: manifest.manifestSha256, frameCount: 6,
     });
     assert.equal(h.db.validUiEvidenceReviewReceipts(occurrence, h.parent.id, Date.now()).length, 0);
+    const consumed = await h.svc.consumeWorkflowDecision(child.id, occurrence, {
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] },
+    });
+    assert.ok(consumed.ok, consumed.error);
+    assert.equal(consumed.data?.status, "consumed", "the child can use its exact original request after approval");
+
+    const storedSnapshot = await request("video-stored-snapshot");
+    assert.ok(storedSnapshot.ok && storedSnapshot.data, storedSnapshot.error);
+    for (const frame of manifest.frames) {
+      assert.ok(h.review(child.id, storedSnapshot.data.occurrenceId, frame.evidenceId).ok);
+    }
+    assert.ok(approve(storedSnapshot.data.occurrenceId).ok);
+    const storedConsumed = await h.svc.consumeWorkflowDecision(child.id,
+      storedSnapshot.data.occurrenceId, { resourceSnapshot: storedSnapshot.data.resourceSnapshot });
+    assert.equal(storedConsumed.data?.status, "consumed",
+      "the child can also echo the exact server snapshot returned by get_workflow_decision");
 
     const superseded = await request("video-stale");
     assert.ok(superseded.ok && superseded.data, superseded.error);
@@ -20149,6 +20200,8 @@ test("validated local video path binds all source frames, ordered receipts, sour
     assert.equal(approve(replacement.data.occurrenceId).status, 409,
       "a replacement occurrence cannot reuse prior receipts");
     h.db.deleteWorkflowArtifact(item.artifactId);
+    assert.equal(h.db.workflowArtifactExportPreflight(manifest.frames[0]!.artifactId), null,
+      "derived frames are removed with their source Session artifact");
     assert.equal(h.svc.reviewDescendantUiEvidence(h.parent.id, child.id,
       replacement.data.occurrenceId, frameId, () => true).status, 409,
       "source-video removal invalidates derived frames");

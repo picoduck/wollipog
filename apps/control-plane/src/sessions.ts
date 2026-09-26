@@ -641,6 +641,7 @@ export function normalizeWorkflowDecisionSnapshot(
   const source = value.videoReview as Record<string, unknown>;
   if (!boundedDecisionString(source.sourceEvidenceId, 256) ||
       !boundedDecisionString(source.sourceArtifactId, 256) || !sha(source.sourceSha256, 64) ||
+      !sha(source.originalRequestSha256, 64) ||
       source.profile !== "short-silent-webm-vp9-v1" || !sha(source.manifestSha256, 64) ||
       !Array.isArray(source.frames) || source.frames.length < 2 || source.frames.length > 16) {
     return fail("derived video review manifest is invalid");
@@ -669,6 +670,7 @@ export function normalizeWorkflowDecisionSnapshot(
     sourceEvidenceId: source.sourceEvidenceId as string,
     sourceArtifactId: source.sourceArtifactId as string,
     sourceSha256: source.sourceSha256 as string,
+    originalRequestSha256: source.originalRequestSha256 as string,
     profile: "short-silent-webm-vp9-v1",
     manifestSha256: source.manifestSha256 as string,
     frames,
@@ -1374,6 +1376,8 @@ function workflowArtifactPage(rows: WorkflowArtifactView[], limit: number): Work
 }
 
 export class SessionsService {
+  /** Bound stored-video reads and derivation across all service instances in this process. */
+  private static readonly videoReviewRequests = new Set<string>();
   private readonly automaticQuestions = new Map<string, Set<string>>();
   /** Sessions with an in-flight lazy history fetch, so a burst of gapped live events fans into one. */
   private readonly hydrating = new Map<string, Promise<void>>();
@@ -6667,6 +6671,20 @@ export class SessionsService {
     const fallback = (reason: string) => this.createWorkflowDecision(sessionId, request, canAccess, {
       videoFallbackReason: reason,
     });
+    const previous = this.db.workflowDecisionByRequestId(sessionId, request.requestId);
+    if (previous) {
+      const priorVideo = previous.resourceSnapshot.category === "ui_evidence_approval"
+        ? previous.resourceSnapshot.videoReview : undefined;
+      if (previous.resourceKey !== request.resourceKey ||
+          previous.controllingSessionId !== controller.session.id ||
+          previous.policyRevision !== controller.policy.revision ||
+          (priorVideo?.originalRequestSha256 !== auditDigest(normalized.data) &&
+            previous.resourceDigest !== auditDigest(normalized.data))) {
+        return fail("requestId was already used for different workflow decision content", 409);
+      }
+      if (previous.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
+      return ok(previous);
+    }
     if (![child, controller.session].every((owner) => runnerSupportsProtocol(
       this.db.getRunner(owner.runnerId)?.protocolVersion, "orchestratorVideoFrameReview",
     ))) {
@@ -6676,88 +6694,115 @@ export class SessionsService {
       return fallback("Only one short video with at most 16 complete frames can be delegated in one decision.");
     }
     const item = video[0]!;
+    if (item.evidenceId.length + ":frame:001".length > 256) {
+      return fallback("The video evidence identifier is too long for bounded frame identifiers.");
+    }
     if (item.mediaType !== "video/webm" || !item.artifactId) {
       return fallback("Only a child-owned WebM Session artifact can receive delegated video review.");
     }
-    const source = this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact;
-    if (!source || source.sessionId !== sessionId || source.kind !== "video" ||
-        source.mimeType !== "video/webm" || source.sha256 !== item.sha256) {
-      return fallback("The video evidence does not match a child-owned Session artifact.");
+    if (SessionsService.videoReviewRequests.has(sessionId) ||
+        SessionsService.videoReviewRequests.size >= 2) {
+      return fallback("The bounded video review service is busy; this review needs a human.");
     }
-    let sourceBytes: Buffer | null;
-    try { sourceBytes = this.db.readWorkflowArtifactBytes(source.artifactId); } catch { sourceBytes = null; }
-    if (!sourceBytes || createHash("sha256").update(sourceBytes).digest("hex") !== item.sha256) {
-      return fallback("The video bytes no longer match the digest bound to this decision.");
-    }
-    const decoded = await decodeShortSilentWebm(sourceBytes);
-    if (!decoded.ok) return fallback(decoded.reason);
-    if (normalized.data.evidence.length - 1 + decoded.frames.length > 32) {
-      return fallback("This video has too many complete frames for one UI evidence decision.");
-    }
-    const frames = decoded.frames.map((frame) => {
-      const identity = `${sessionId}:${source.artifactId}:${source.sha256}:${frame.index}:${frame.sha256}:short-silent-webm-vp9-v1`;
-      return {
-        evidenceId: `${item.evidenceId}:frame:${String(frame.index + 1).padStart(3, "0")}`,
-        artifactId: `art_${createHash("sha256").update(identity).digest("hex").slice(0, 32)}`,
-        sha256: frame.sha256,
-        index: frame.index,
-        ptsMs: frame.ptsMs,
-        bytes: frame.bytes,
-      };
-    });
-    const originalEvidence = normalized.data.evidence;
-    if (frames.some((frame) => originalEvidence.some((existing) => existing.evidenceId === frame.evidenceId))) {
-      return fallback("Derived frame identifiers collide with another evidence item.");
-    }
+    SessionsService.videoReviewRequests.add(sessionId);
     try {
+      const source = this.db.workflowArtifactExportPreflight(item.artifactId)?.artifact;
+      if (!source || source.sessionId !== sessionId || source.kind !== "video" ||
+          source.mimeType !== "video/webm" || source.sha256 !== item.sha256) {
+        return fallback("The video evidence does not match a child-owned Session artifact.");
+      }
+      let sourceBytes: Buffer | null;
+      try { sourceBytes = this.db.readWorkflowArtifactBytes(source.artifactId); } catch { sourceBytes = null; }
+      if (!sourceBytes || createHash("sha256").update(sourceBytes).digest("hex") !== item.sha256) {
+        return fallback("The video bytes no longer match the digest bound to this decision.");
+      }
+      const decoded = await decodeShortSilentWebm(sourceBytes);
+      if (!decoded.ok) return fallback(decoded.reason);
+      if (normalized.data.evidence.length - 1 + decoded.frames.length > 32) {
+        return fallback("This video has too many complete frames for one UI evidence decision.");
+      }
+      const frames = decoded.frames.map((frame) => {
+        const identity = `${sessionId}:${source.artifactId}:${source.sha256}:${frame.index}:${frame.sha256}:short-silent-webm-vp9-v1`;
+        return {
+          evidenceId: `${item.evidenceId}:frame:${String(frame.index + 1).padStart(3, "0")}`,
+          artifactId: `art_${createHash("sha256").update(identity).digest("hex").slice(0, 32)}`,
+          sha256: frame.sha256,
+          index: frame.index,
+          ptsMs: frame.ptsMs,
+          bytes: frame.bytes,
+        };
+      });
+      const originalEvidence = normalized.data.evidence;
+      if (frames.some((frame) => originalEvidence.some((existing) => existing.evidenceId === frame.evidenceId))) {
+        return fallback("Derived frame identifiers collide with another evidence item.");
+      }
+      const manifest = {
+        sourceEvidenceId: item.evidenceId,
+        sourceArtifactId: source.artifactId,
+        sourceSha256: source.sha256,
+        originalRequestSha256: auditDigest(normalized.data)!,
+        profile: "short-silent-webm-vp9-v1" as const,
+        frames: frames.map(({ evidenceId, artifactId, sha256, index, ptsMs }) =>
+          ({ evidenceId, artifactId, sha256, index, ptsMs })),
+      };
+      const replacement: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }> = {
+        category: "ui_evidence_approval",
+        evidence: normalized.data.evidence.flatMap((candidate) => candidate === item
+          ? frames.map((frame) => ({ evidenceId: frame.evidenceId, artifactId: frame.artifactId,
+            sha256: frame.sha256, mediaType: "image/png" }))
+          : [candidate]),
+        videoReview: { ...manifest, manifestSha256: auditDigest(manifest)! },
+      };
+      if (!normalizeWorkflowDecisionSnapshot(replacement, true).ok) {
+        return fallback("The complete video-frame manifest cannot be validated.");
+      }
+      const missing: typeof frames = [];
       for (const frame of frames) {
         const existing = this.db.workflowArtifactExportPreflight(frame.artifactId)?.artifact;
-        if (existing) {
-          if (existing.sessionId !== sessionId || existing.kind !== "screenshot" ||
-              existing.mimeType !== "image/png" || existing.sha256 !== frame.sha256 ||
-              existing.createdBy.kind !== "system" || existing.createdBy.id !== "video-review-v1") {
-            return fallback("A derived video frame conflicts with a stored artifact.");
-          }
-          continue;
+        if (!existing) { missing.push(frame); continue; }
+        if (existing.sessionId !== sessionId || existing.kind !== "screenshot" ||
+            existing.mimeType !== "image/png" || existing.sha256 !== frame.sha256 ||
+            existing.createdBy.kind !== "system" || existing.createdBy.id !== "video-review-v1" ||
+            existing.metadata?.purpose !== "video_review_frame" ||
+            existing.metadata.sourceArtifactId !== source.artifactId ||
+            existing.metadata.sourceSha256 !== source.sha256 ||
+            existing.metadata.frameIndex !== frame.index || existing.metadata.ptsMs !== frame.ptsMs) {
+          return fallback("A derived video frame conflicts with a stored artifact.");
         }
-        const artifact: WorkflowArtifactView = {
-          artifactId: frame.artifactId,
-          sessionId,
-          kind: "screenshot",
-          name: `Video frame ${frame.index + 1}.png`,
-          mimeType: "image/png",
-          encoding: "base64",
-          sizeBytes: frame.bytes.length,
-          sha256: frame.sha256,
-          createdBy: { kind: "system", id: "video-review-v1" },
-          metadata: { purpose: "video_review_frame", sourceArtifactId: source.artifactId,
-            sourceSha256: source.sha256, frameIndex: frame.index, ptsMs: frame.ptsMs },
-          createdAt: Date.now(),
-        };
-        this.db.createWorkflowArtifactBytes(artifact, frame.bytes);
       }
-    } catch {
-      return fallback("The verified video frames could not be stored safely.");
+      const created: string[] = [];
+      const cleanup = () => { for (const id of created) this.db.deleteWorkflowArtifact(id); };
+      try {
+        for (const frame of missing) {
+          const artifact: WorkflowArtifactView = {
+            artifactId: frame.artifactId,
+            sessionId,
+            kind: "screenshot",
+            name: `Video frame ${frame.index + 1}.png`,
+            mimeType: "image/png",
+            encoding: "base64",
+            sizeBytes: frame.bytes.length,
+            sha256: frame.sha256,
+            createdBy: { kind: "system", id: "video-review-v1" },
+            metadata: { purpose: "video_review_frame", sourceArtifactId: source.artifactId,
+              sourceSha256: source.sha256, frameIndex: frame.index, ptsMs: frame.ptsMs },
+            createdAt: Date.now(),
+          };
+          this.db.createWorkflowArtifactBytes(artifact, frame.bytes);
+          created.push(frame.artifactId);
+        }
+        const decided = this.createWorkflowDecision(sessionId, { ...request, resourceSnapshot: replacement }, canAccess, {
+          trustedDerivedVideo: true,
+        });
+        if (!decided.ok) cleanup();
+        return decided;
+      } catch {
+        cleanup();
+        return fallback("The verified video frames could not be stored safely.");
+      }
+    } finally {
+      SessionsService.videoReviewRequests.delete(sessionId);
     }
-    const manifest = {
-      sourceEvidenceId: item.evidenceId,
-      sourceArtifactId: source.artifactId,
-      sourceSha256: source.sha256,
-      profile: "short-silent-webm-vp9-v1" as const,
-      frames: frames.map(({ evidenceId, artifactId, sha256, index, ptsMs }) =>
-        ({ evidenceId, artifactId, sha256, index, ptsMs })),
-    };
-    const replacement: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }> = {
-      category: "ui_evidence_approval",
-      evidence: normalized.data.evidence.flatMap((candidate) => candidate === item
-        ? frames.map((frame) => ({ evidenceId: frame.evidenceId, artifactId: frame.artifactId,
-          sha256: frame.sha256, mediaType: "image/png" }))
-        : [candidate]),
-      videoReview: { ...manifest, manifestSha256: auditDigest(manifest)! },
-    };
-    return this.createWorkflowDecision(sessionId, { ...request, resourceSnapshot: replacement }, canAccess, {
-      trustedDerivedVideo: true,
-    });
   }
 
   createWorkflowDecision(
@@ -6802,7 +6847,8 @@ export class SessionsService {
       controller.session, controller.policy, sessionId, normalized.data,
     );
     if (internal?.videoFallbackReason && normalized.data.category === "ui_evidence_approval" &&
-        evaluated.effectiveOwner === "human" && normalized.data.evidence.some((item) =>
+        evaluated.effectiveOwner === "human" && evaluated.fallback?.code === "media_video_unsupported" &&
+        normalized.data.evidence.some((item) =>
           item.mediaType?.startsWith("video/"))) {
       evaluated = { effectiveOwner: "human", fallback: {
         code: "media_video_unsupported", reason: internal.videoFallbackReason,
@@ -6997,11 +7043,31 @@ export class SessionsService {
     if (decision.status !== "approved") {
       return fail(`workflow decision cannot be consumed from ${decision.status} state`, 409);
     }
-    const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
-    if (!normalized.ok || !normalized.data) return fail(normalized.error!, normalized.status);
-    if (normalized.data.category !== decision.category || auditDigest(normalized.data) !== decision.resourceDigest) {
+    const video = decision.resourceSnapshot.category === "ui_evidence_approval"
+      ? decision.resourceSnapshot.videoReview : undefined;
+    const supplied = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot, Boolean(video));
+    const original = video ? normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot) : null;
+    const matchesStored = supplied.ok && supplied.data &&
+      supplied.data.category === decision.category && auditDigest(supplied.data) === decision.resourceDigest;
+    const matchesOriginal = video && original?.ok && original.data?.category === "ui_evidence_approval" &&
+      auditDigest(original.data) === video.originalRequestSha256;
+    if (!matchesStored && !matchesOriginal && !supplied.ok && !original?.ok) {
+      return fail(supplied.error!, supplied.status);
+    }
+    if (!matchesStored && !matchesOriginal) {
       this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
       return fail("workflow decision resource snapshot is stale", 409);
+    }
+    // A child can echo the original video request or the exact server-derived snapshot from get;
+    // neither can nominate new frames. The stored snapshot remains the action's authority.
+    const normalized = { data: decision.resourceSnapshot };
+    if (video) {
+      let sourceBytes: Buffer | null;
+      try { sourceBytes = this.db.readWorkflowArtifactBytes(video.sourceArtifactId); } catch { sourceBytes = null; }
+      if (!sourceBytes || createHash("sha256").update(sourceBytes).digest("hex") !== video.sourceSha256) {
+        this.revokeWorkflowDecision(decision, { kind: "agent", id: sessionId });
+        return fail("the source video no longer matches the digest bound to this decision", 409);
+      }
     }
     const child = this.db.getSession(sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
@@ -7449,10 +7515,7 @@ export class SessionsService {
     return policy.decisions[category];
   }
 
-  /** UI evidence is the one category whose saved owner is not automatically effective: the
-   * Orchestrator owns it only when its client and every required artifact support audited review.
-   * Reads the runner, the session row, and artifact metadata — never the campaign projection, so
-   * it stays cheap inside list and recovery loops. */
+  /** Verify the immutable source and every server-created frame that the decision manifest names. */
   private videoReviewIntegrity(
     childSessionId: string,
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }>,
@@ -7479,6 +7542,10 @@ export class SessionsService {
     });
   }
 
+  /** UI evidence is the one category whose saved owner is not automatically effective: the
+   * Orchestrator owns it only when its client and every required artifact support audited review.
+   * Reads the runner, the session row, and artifact metadata — never the campaign projection, so
+   * it stays cheap inside list and recovery loops. */
   private evaluateWorkflowDecisionAuthority(
     controller: SessionView,
     policy: ParentControlPolicy,
