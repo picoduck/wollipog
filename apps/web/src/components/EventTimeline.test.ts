@@ -367,6 +367,14 @@ test("completed turn messages own compact rewind, fork, and handoff actions", ()
   assert.match(html, /aria-label="Copy assistant message"[\s\S]*?aria-label="Fork Conversation After This Turn/,
     "Fork follows Copy in assistant metadata");
   assert.match(html, /<details class="tl-message-action-unavailable">[\s\S]*?Claude Code can fork only its latest completed conversation checkpoint\./);
+  // light-theme.test.ts holds the unavailable summary to the 3:1 glyph floor, which is sound only
+  // while it renders the icon alone: its name is the aria-label and its reason the sibling span.
+  const summaries = [...html.matchAll(/<summary(?=[\s>])[^>]*>([\s\S]*?)<\/summary>/g)].map((match) => match[1]!);
+  assert.ok(summaries.length > 0, "an unavailable action renders a summary");
+  for (const content of summaries) {
+    assert.match(content, /^<svg[\s\S]*<\/svg>$/, "the summary holds only its icon");
+    assert.equal(content.replace(/<[^>]*>/g, "").trim(), "", "the summary renders no text");
+  }
   assert.match(html, /title="Fork with the same provider and its native conversation history\."/);
   assert.match(html, /title="Hand off to a different provider in a fresh conversation with portable context\."/);
   assert.doesNotMatch(html, /Rewind Files to Here|Hand Off to Another Agent/,

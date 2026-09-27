@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { customProperties, rulesWith, topLevelRule } from "./css-rules.js";
+import { allDeclarations, customProperties, rulesWith, topLevelRule, type TintedRule } from "./css-rules.js";
 import { COLOR_SCHEMES } from "./theme.js";
 
 /**
@@ -270,6 +270,29 @@ const ICON_ONLY = new Set([
   // The microphone GLYPH, not the button: scoping the exemption to the svg makes it structurally
   // true, so giving the control a visible label later cannot silently inherit the looser bar.
   ".voice-btn.voice-recording > svg",
+  // An unavailable message action's `<summary>`, whose only content is the action's icon: its name
+  // is an aria-label and its reason sits in a sibling span, which EventTimeline.test.ts pins. The
+  // colour lives on the summary rather than the svg because the slash's `currentColor` reads it.
+  [
+    ".tl-message-action-unavailable > .tl-message-icon",
+    ".tl-message-action-unavailable > .tl-message-icon:hover",
+    ".tl-message-action-unavailable > .tl-message-icon:focus-visible",
+  ].join(", "),
+]);
+
+/**
+ * Transparent rules that provably sit on ONE surface, each with the rule that paints it.
+ *
+ * A transparent rule is measured on every base surface, like a translucent fill, because the
+ * stylesheet does not say which one is behind it. These are the exceptions where it does: the
+ * element only ever renders inside a parent whose own fill is opaque, so that fill is its backdrop
+ * wherever the parent goes. The parent's fill is asserted below, and the component test pins the
+ * nesting, so neither half of the claim can drift silently.
+ */
+const KNOWN_SURFACE: ReadonlyMap<string, { surface: (typeof SURFACES)[number]; paintedBy: string }> = new Map([
+  // `var(--red)` is a fill hue, not a text token, and clears 4.5:1 on --bg-elev but not on
+  // --bg-elev-3. Discard renders only in the file head row (GitDiffViewer.test.tsx).
+  [".diff-discard", { surface: "--bg-elev", paintedBy: ".diff-file-head-row" }],
 ]);
 
 /**
@@ -291,42 +314,39 @@ const TOKEN_BLOCK_SELECTORS = new Set([DARK_SELECTOR, LIGHT_SELECTOR].map((s) =>
  *
  * It proves: every rule that declares BOTH a text colour and a fill resolves, in both themes, to a
  * pair clearing 4.5:1 over any of the four base surfaces. That is a real property, it caught 38
- * rules that had never been measured, and it fails when a token regresses.
+ * rules that had never been measured, and it fails when a token regresses. A `transparent` or
+ * `none` fill counts: its ink is measured on the surfaces themselves.
  *
  * It does NOT prove that the app renders at AA. It reads declarations, so it cannot see the
  * cascade, an ancestor's tint, or a descendant inheriting one — and every round found production
  * text failing exactly there: the diff gutter, then `.slash-src`, `.approval-title`,
- * `.approval-text`, `.diff-syntax-comment`. Each was fixed; none was found BY this check.
+ * `.approval-text`, `.diff-syntax-comment`. Each was fixed; none was found BY this check. Nor does
+ * it model `opacity`, or measure a rule that sets a colour and no fill at all.
  *
  * The gap is not a threshold to tighten. A static reader cannot compute what Chromium composites,
  * and patching it against that claim is what the last two rounds were. Closing it means measuring
  * rendered pixels on whole screens, which is §25 and §26's machinery and its own piece of work.
  */
-test("every declared colour/fill pair clears WCAG AA in both themes", () => {
-  const tinted = rulesWith(css, ["color", "background"], ALTERNATE_TEXT_PAINT)
-    .concat(rulesWith(css, ["color", "background-color"], ALTERNATE_TEXT_PAINT))
-    // Only the token blocks themselves. Filtering every selector STARTING WITH `:root` also
-    // discarded theme-scoped component rules — `:root[data-theme="dark"] .btn.primary` carries the
-    // exact pair this check exists to measure, and was silently dropped.
-    .filter(({ selector }) => !TOKEN_BLOCK_SELECTORS.has(selector));
-
-  assert.ok(tinted.length > 40,
-    `expected the stylesheet to pair a colour and a fill in many rules, found ${tinted.length}`);
-
+function measure(rules: readonly TintedRule[]): { checked: number; unresolved: string[]; failures: string[] } {
   const unresolved: string[] = [];
   const failures: string[] = [];
   let checked = 0;
 
-  for (const { selector, declarations } of tinted) {
+  for (const { selector, declarations } of rules) {
     const fillValue = declarations.background ?? declarations["background-color"]!;
     const repaint = ALTERNATE_TEXT_PAINT.filter((prop) => prop in declarations);
     if (repaint.length > 0) {
       unresolved.push(`${selector}: repaints glyphs via ${repaint.join(", ")}`);
       continue;
     }
-    // No fill at all means the text sits on whatever is behind the element, which the surface
-    // pairs in `theme.test.ts` already cover. There is no tint here to check.
-    if (fillValue === "none" || fillValue === "transparent") continue;
+    // A transparent fill paints nothing, so the ink sits directly on whatever is behind the
+    // element. Skipping these on the grounds that `theme.test.ts` covers the surfaces let #1880's
+    // first pass ship a still-pressable glyph at 1.9:1 with this test green: that file measures
+    // named text tokens, never a `color-mix` fade. They are measured as a fully translucent fill.
+    const transparent = fillValue === "none" || fillValue === "transparent";
+    // `color: inherit` on a transparent fill declares no pair at all: the ink and the surface are
+    // both an ancestor's, and there is nothing in this rule to measure.
+    if (transparent && declarations.color === "inherit") continue;
     // An image is not a colour. Reported, not skipped: `background: linear-gradient(var(--bg),
     // var(--bg)), url("")` made a 1:1 button and simply left the loop.
     if (/url\(/i.test(fillValue)) {
@@ -338,6 +358,8 @@ test("every declared colour/fill pair clears WCAG AA in both themes", () => {
     // entirely left the two rules this phase exists to fix — .btn.primary and .user-bubble, both
     // gradients — covered only by the "no hardcoded colour" test, which cannot see contrast.
     const stopValues = gradientStops(fillValue);
+    const pinned = KNOWN_SURFACE.get(selector);
+    const surfaces = pinned ? [pinned.surface] : SURFACES;
 
     for (const theme of PALETTES) {
       const text = resolve(declarations.color!, theme);
@@ -354,7 +376,8 @@ test("every declared colour/fill pair clears WCAG AA in both themes", () => {
         }
         fills = sampleGradient(stops as Rgba[]);
       } else {
-        const fill = resolve(fillValue, theme, 0, text);
+        // `none` is no image over the initial `transparent` colour, which is what renders.
+        const fill = resolve(transparent ? "transparent" : fillValue, theme, 0, text);
         if (!fill) {
           unresolved.push(`${selector} (${theme}): background=${fillValue}`);
           continue;
@@ -367,7 +390,7 @@ test("every declared colour/fill pair clears WCAG AA in both themes", () => {
         // An opaque fill is its own backdrop; a translucent one takes the surface behind it.
         const backdrops = fill.a >= 1
           ? [fill]
-          : SURFACES.map((name) => resolve(`var(${name})`, theme)!).map((surface) => over(fill, surface));
+          : surfaces.map((name) => resolve(`var(${name})`, theme)!).map((surface) => over(fill, surface));
         for (const backdrop of backdrops) {
           checked += 1;
           const ratio = contrast(over(text, backdrop), backdrop);
@@ -378,6 +401,22 @@ test("every declared colour/fill pair clears WCAG AA in both themes", () => {
       }
     }
   }
+  return { checked, unresolved, failures };
+}
+
+/** Every rule that declares a text colour and a fill, token blocks aside. */
+const TINTED = rulesWith(css, ["color", "background"], ALTERNATE_TEXT_PAINT)
+  .concat(rulesWith(css, ["color", "background-color"], ALTERNATE_TEXT_PAINT))
+  // Only the token blocks themselves. Filtering every selector STARTING WITH `:root` also
+  // discarded theme-scoped component rules — `:root[data-theme="dark"] .btn.primary` carries the
+  // exact pair this check exists to measure, and was silently dropped.
+  .filter(({ selector }) => !TOKEN_BLOCK_SELECTORS.has(selector));
+
+test("every declared colour/fill pair clears WCAG AA in both themes", () => {
+  assert.ok(TINTED.length > 40,
+    `expected the stylesheet to pair a colour and a fill in many rules, found ${TINTED.length}`);
+
+  const { checked, unresolved, failures } = measure(TINTED);
 
   assert.ok(checked > 200, `expected to check many pairs, checked ${checked}`);
   // Reported rather than tolerated: an unresolvable value is coverage this test does not have, and
@@ -385,4 +424,51 @@ test("every declared colour/fill pair clears WCAG AA in both themes", () => {
   assert.deepEqual(unresolved, [], "every colour pair must be resolvable, or the check is not running");
   assert.deepEqual(failures, [],
     "a DECLARED colour/fill pair must clear 4.5:1 on any base surface — see the note above for what this does not cover");
+});
+
+test("a faded glyph on a transparent fill fails in every palette, even at the glyph floor", () => {
+  // #1880's first pass, verbatim: the unavailable message action faded to 45% of --text-faint.
+  // It rendered at 1.9–2.7:1, so it fails even the 3:1 bar its icon-only selector is held to.
+  const faded = "color-mix(in srgb, var(--text-faint) 45%, transparent)";
+  const unavailable = [...ICON_ONLY].find((selector) => selector.startsWith(".tl-message-action-unavailable"))!;
+  for (const fill of ["transparent", "none"]) {
+    for (const rule of [
+      { selector: unavailable, declarations: { color: faded, background: fill } },
+      { selector: ".faded-label", declarations: { color: faded, "background-color": fill } },
+    ]) {
+      const { unresolved, failures } = measure([rule]);
+      assert.deepEqual(unresolved, []);
+      const failing = new Set(failures.map((failure) => failure.slice(rule.selector.length).match(/\((\S+)\)/)![1]));
+      assert.deepEqual([...failing].sort(), [...PALETTES].sort(),
+        `${rule.selector} on ${fill} must fail in every palette, got ${failures.join("; ")}`);
+    }
+  }
+});
+
+test("a legible ink on a transparent fill is measured on every base surface and passes", () => {
+  const { checked, unresolved, failures } = measure([
+    { selector: ".legible-label", declarations: { color: "var(--text)", background: "transparent" } },
+  ]);
+  assert.deepEqual([unresolved, failures], [[], []]);
+  assert.equal(checked, PALETTES.length * SURFACES.length);
+});
+
+test("a rule pinned to a known surface is measured there, and its parent paints that surface", () => {
+  for (const [selector, { surface, paintedBy }] of KNOWN_SURFACE) {
+    const rules = TINTED.filter((rule) => rule.selector === selector);
+    assert.equal(rules.length, 1, `${selector} must still be one measured rule, or its pin is stale`);
+    const fill = rules[0]!.declarations.background ?? rules[0]!.declarations["background-color"];
+    assert.ok(fill === "transparent" || fill === "none", `${selector} is pinned only because it is transparent`);
+    assert.equal(measure(rules).checked, PALETTES.length, `${selector} must be measured on ${surface} alone`);
+    // What makes the pin sound: the parent's own fill is that opaque surface, so nothing further
+    // out can show through to the element, wherever the parent is placed.
+    // Every rule for the parent is read, conditional blocks included, so a phone layout that
+    // repaints the row cannot slip past a check of the base rule alone.
+    const painted = allDeclarations(css)
+      .filter(({ selectors, prop }) => selectors.includes(paintedBy) && (prop === "background" || prop === "background-color"))
+      .map(({ value }) => value);
+    assert.ok(painted.length > 0, `${paintedBy} must paint a fill for ${selector} to sit on`);
+    assert.deepEqual([...new Set(painted)], [`var(${surface})`],
+      `${paintedBy} must paint ${surface} and nothing else, the surface ${selector} is measured against`);
+  }
 });

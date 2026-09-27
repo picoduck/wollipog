@@ -245,6 +245,17 @@ test("the Discard suppression is specific to untracked files, not blanket", () =
   );
 });
 
+test("Discard renders only inside the file head row, the surface its contrast is measured on", () => {
+  // light-theme.test.ts measures the transparent `.diff-discard` on --bg-elev alone, because
+  // `.diff-file-head-row` paints that surface. Rendered anywhere else, its --red text would sit on
+  // a surface the contrast check no longer measures.
+  const html = renderDiff({ path: "src/app.ts", status: "modified", binary: false, hunks: [TEXT_HUNK] }, STAGING);
+  const row = html.match(/<div class="diff-file-head-row">([\s\S]*?)<\/div>/);
+  assert.ok(row, "the file head row renders");
+  assert.equal(elementsWithClass(row[1]!, "button", "diff-discard").length, 1, "Discard sits in the head row");
+  assert.equal(elementsWithClass(html, "button", "diff-discard").length, 1, "and nowhere else");
+});
+
 test("a renamed file that also changed content renders its patch, not the rename note", () => {
   // `parseDiff` emits oldPath AND hunks for this (apps/runner/src/git-ops.test.ts:671). Hoisting the
   // renamed check above the `hunks.length === 0` arm would replace a real patch with the note.
