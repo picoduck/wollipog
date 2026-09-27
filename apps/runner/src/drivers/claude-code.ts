@@ -2596,11 +2596,12 @@ export class ClaudeCodeDriver implements Driver {
           // own hook state is off limits to every tool, and only then does the worktree veto run.
           const guardStateRefusal = this.managedWorktreeGuardStateVeto(req.tool_name, req.input);
           // With no hook, the control channel is the only worktree veto for file edits. A
-          // control request has no cwd, so use the session directory as for mediated Bash calls.
-          // With a hook, its PreToolUse payload has the real cwd and has already judged the edit.
-          const fileVerdict = !guardStateRefusal && !this.managedWorktreeGuardActive &&
-            typeof req.tool_name === "string"
-            ? editToolTargetsManagedWorktree(req.tool_name, req.input, this.cwd, protections)
+          // control request has no cwd, so a relative path cannot be placed safely. The
+          // launch-bound mediation mode identifies the running child's transport even if a later
+          // preparedBaseArgs() recomputed the hook state for its NEXT launch.
+          const fileVerdict = !guardStateRefusal && this.launchedManagedEmulationMode !== null &&
+            protections.length > 0 && typeof req.tool_name === "string"
+            ? editToolTargetsManagedWorktree(req.tool_name, req.input, null, protections)
             : null;
           const managedRefusal = guardStateRefusal ??
             (fileVerdict === "malformed"

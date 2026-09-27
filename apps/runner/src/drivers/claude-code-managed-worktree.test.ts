@@ -25,7 +25,10 @@ import {
   writeHookCircuitState,
   type ClaudeHookHost,
 } from "../hook-settings.js";
-import { MANAGED_WORKTREE_REFUSAL } from "../managed-worktree-protection.js";
+import {
+  MANAGED_WORKTREE_EDIT_UNRESOLVED_REFUSAL,
+  MANAGED_WORKTREE_REFUSAL,
+} from "../managed-worktree-protection.js";
 import { ClaudeCodeDriver, protectedClaudePermissionMode } from "./claude-code.js";
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 
@@ -347,6 +350,58 @@ test("the mediated fallback refuses Claude file edits of protected Git state", a
   for (const frame of responses.filter((frame) => frame.response?.response?.behavior === "deny")) {
     assert.equal(frame.response?.response?.message, MANAGED_WORKTREE_REFUSAL);
   }
+});
+
+test("the mediated fallback refuses a relative edit path it cannot locate", async (t) => {
+  const run = launch([], "bypassPermissions", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  run.child.stdout.write(JSON.stringify({
+    type: "control_request", request_id: "relative",
+    request: { subtype: "can_use_tool", tool_name: "Write", input: { file_path: "../.git" } },
+  }) + "\n");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const response = run.writes.join("").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as {
+      type?: string; response: { response: { behavior: string; message: string } };
+    })
+    .find((frame) => frame.type === "control_response");
+  assert.ok(response);
+  assert.equal(response.response.response.behavior, "deny");
+  assert.equal(response.response.response.message, MANAGED_WORKTREE_EDIT_UNRESOLVED_REFUSAL);
+});
+
+test("the running mediated child keeps its edit veto after hook preparation changes", async (t) => {
+  const run = launch([], "bypassPermissions", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  // A later preparedBaseArgs() can describe the next spawn while this persistent child still uses
+  // its original mediated argv. The veto must follow the child, as permission emulation already does.
+  (run.driver as unknown as { managedWorktreeGuardActive: boolean }).managedWorktreeGuardActive = true;
+  run.child.stdout.write(JSON.stringify({
+    type: "control_request", request_id: "still-mediated",
+    request: { subtype: "can_use_tool", tool_name: "Edit", input: { file_path: `${WORKTREE}/.git` } },
+  }) + "\n");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const response = run.writes.join("").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as {
+      type?: string; response?: { response?: { behavior?: string; message?: string } };
+    })
+    .find((frame) => frame.type === "control_response");
+  assert.equal(response?.response?.response?.behavior, "deny");
+  assert.equal(response?.response?.response?.message, MANAGED_WORKTREE_REFUSAL);
+});
+
+test("a session without protected worktrees leaves malformed edits to Claude", async (t) => {
+  const run = launch([], "default", []);
+  t.after(() => run.driver.dispose());
+  run.child.stdout.write(JSON.stringify({
+    type: "control_request", request_id: "empty",
+    request: { subtype: "can_use_tool", tool_name: "Write", input: {} },
+  }) + "\n");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const responses = run.writes.join("").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as { type?: string })
+    .filter((frame) => frame.type === "control_response");
+  assert.deepEqual(responses, []);
 });
 
 test("a rewritten file-form hook command falls back to mediation and reports the tamper (#1475)", (t) => {
