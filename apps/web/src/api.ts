@@ -1345,6 +1345,14 @@ export function createApiClient(transport: ApiTransport) {
     `/api/runners/${encodeURIComponent(runnerId)}/automatic-account-switching`,
     { method: "PUT", body: JSON.stringify(body) },
   ),
+  updateMachineProviderAccountDefault: (
+    runnerId: string,
+    provider: "claude" | "codex",
+    body: { accountId: string | null; expectedRevision: number },
+  ) => req<{ providerAccountDefault: import("@wollipog/protocol").RunnerProviderAccountDefault }>(
+    `/api/runners/${encodeURIComponent(runnerId)}/provider-account-defaults/${provider}`,
+    { method: "PUT", body: JSON.stringify(body) },
+  ),
 
   // Phase 3: external (CLI-started) sessions on a box.
   listExternalSessions: (runnerId: string, agentId?: string) =>

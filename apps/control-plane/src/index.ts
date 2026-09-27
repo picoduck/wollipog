@@ -2997,6 +2997,45 @@ app.put("/api/runners/:id/automatic-account-switching", async (req, reply) => {
   return { automaticAccountSwitching: changed.configuration };
 });
 
+app.put("/api/runners/:id/provider-account-defaults/:provider", async (req, reply) => {
+  const { id, provider } = req.params as { id: string; provider: string };
+  const principal = requestPrincipal(req);
+  if (!principal || !db.canManageRunner(principal, id)) {
+    return reply.code(403).send({ error: "Machine owner or organization admin permission is required" });
+  }
+  if (provider !== "claude" && provider !== "codex") {
+    return reply.code(400).send({ error: "provider must be Claude or Codex" });
+  }
+  const body = (req.body ?? {}) as { accountId?: unknown; expectedRevision?: unknown };
+  if (body.accountId !== null &&
+      (typeof body.accountId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(body.accountId))) {
+    return reply.code(400).send({ error: "accountId must be an account id or null" });
+  }
+  if (!Number.isSafeInteger(body.expectedRevision) || (body.expectedRevision as number) < 0) {
+    return reply.code(400).send({ error: "expectedRevision must be a non-negative integer" });
+  }
+  const runner = db.getRunner(id);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")) {
+    return reply.code(409).send({ error: runnerCapabilityRequirement(
+      runner.protocolVersion, "providerAccounts", "Default Provider Account changes",
+    ) });
+  }
+  if (body.accountId !== null && !runner.providerAccounts?.some((account) =>
+    account.provider === provider && account.id === body.accountId)) {
+    return reply.code(409).send({ error: "The provider account is not available on this Machine." });
+  }
+  const changed = db.setMachineProviderAccountDefault(
+    id, provider, body.accountId as string | null, body.expectedRevision as number, Date.now(),
+  );
+  if (!changed.ok) return reply.code(409).send({
+    error: "Default Provider Account changed in another client",
+    current: changed.choice,
+  });
+  hub.runnerChanged(id);
+  return { providerAccountDefault: changed.choice };
+});
+
 app.delete("/api/runners/:id", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is online — stop it before removing" });

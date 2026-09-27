@@ -3566,17 +3566,25 @@ export class SessionsService {
       : [];
     const defaultProviderAccountId = runner.agents.find((agent) => agent.id === req.agentId)
       ?.defaultProviderAccountId;
+    const savedProviderAccountId = usesRunnerProviderAccount && launchProvider &&
+      (launch.context?.kind ?? "native") === "native" &&
+      runnerSupportsProtocol(runner.protocolVersion, "providerAccounts")
+      ? this.db.machineProviderAccountDefault(runner.runnerId, launchProvider)?.accountId
+      : undefined;
     const implicitProviderAccountId = (launch.context?.kind ?? "native") === "native"
       ? compatibleProviderAccounts[0]?.id
       : undefined;
     const providerAccountId = usesRunnerProviderAccount
       ? snapshotSpec?.providerAccountId ?? req.providerAccountId ??
-        defaultProviderAccountId ?? implicitProviderAccountId
+        savedProviderAccountId ?? defaultProviderAccountId ?? implicitProviderAccountId
       : undefined;
     const providerAccount = providerAccountId
       ? compatibleProviderAccounts.find((account) => account.id === providerAccountId)
       : undefined;
     if (providerAccountId && !providerAccount) {
+      if (providerAccountId === savedProviderAccountId && !req.providerAccountId && !snapshotSpec?.providerAccountId) {
+        return fail("The saved default provider account is unavailable on this Machine. Choose another account or update Machine settings.", 409);
+      }
       return fail(`provider account '${providerAccountId}' is not available for the selected agent`, 409);
     }
     const acpSessionContext = snapshotSpec?.acpSessionContext ?? req.acpSessionContext;

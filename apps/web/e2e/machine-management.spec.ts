@@ -500,6 +500,45 @@ test("Machine settings require the terms warning before enabling Automatic Accou
   });
 });
 
+test("Machine settings save independent Claude and Codex default accounts", async ({ page }) => {
+  await page.getByRole("button", { name: "Manage" }).click();
+  const dialog = page.getByRole("dialog", { name: "Manage Design Workstation" });
+  await expect(dialog.getByRole("heading", { name: "Default Provider Accounts" })).toBeVisible();
+  const defaults = dialog.locator("section.machine-settings-section")
+    .filter({ hasText: "Default Provider Accounts" });
+  const claude = dialog.getByRole("button", { name: /Default Claude Account:/u });
+  const codex = dialog.getByRole("button", { name: /Default Codex Account:/u });
+  await expect(claude).toHaveAccessibleName(/Use Existing Behavior/u);
+  await expect(codex).toHaveAccessibleName(/Use Existing Behavior/u);
+  await defaults.screenshot({ path: "test-results/provider-accounts/defaults-before-desktop.png" });
+
+  await claude.click();
+  await page.getByRole("option", { name: /Personal/u }).click();
+  await expect(claude).toHaveAccessibleName(/Personal/u);
+  await codex.click();
+  await page.getByRole("option", { name: /Codex Solo/u }).click();
+  await expect(codex).toHaveAccessibleName(/Codex Solo/u);
+  await defaults.screenshot({ path: "test-results/provider-accounts/defaults-after-desktop.png" });
+
+  await page.setViewportSize({ width: 390, height: 844 });
+  await defaults.screenshot({ path: "test-results/provider-accounts/defaults-after-mobile.png" });
+  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+  await defaults.screenshot({ path: "test-results/provider-accounts/defaults-after-mobile-light.png" });
+  await page.setViewportSize({ width: 1280, height: 720 });
+  await defaults.screenshot({ path: "test-results/provider-accounts/defaults-after-desktop-light.png" });
+
+  await dialog.getByRole("button", { name: "Close", exact: true }).last().click();
+  await page.getByText("Accounts", { exact: true }).click();
+  const personal = page.locator("details.runner-agents .agent-row").filter({ hasText: "Personal" });
+  await personal.getByRole("button", { name: "Remove" }).click();
+  await page.getByRole("dialog", { name: "Remove Account?" }).getByRole("button", { name: "Remove Account" }).click();
+  await page.getByRole("button", { name: "Manage" }).click();
+  const reopened = page.getByRole("dialog", { name: "Manage Design Workstation" });
+  const missing = reopened.locator("section.machine-settings-section").filter({ hasText: "Default Provider Accounts" });
+  await expect(missing).toContainText("The saved account is no longer on this Machine");
+  await missing.screenshot({ path: "test-results/provider-accounts/defaults-missing-desktop.png" });
+});
+
 test("ordinary members can inspect Runner Capacity but cannot change it", async ({ page }) => {
   await page.goto("/machine-management-e2e.html?role=viewer");
   await expect(page.getByRole("heading", { name: "Design Workstation" })).toBeVisible();

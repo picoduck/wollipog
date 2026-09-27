@@ -172,6 +172,7 @@ import {
   type RunnerCapacityConfiguration,
   type RunnerCapacityState,
   type RunnerAutomaticAccountSwitchConfiguration,
+  type RunnerProviderAccountDefault,
   type RunnerRuntimeInfo,
   type RunnerCredentialView,
   type RunnerStatus,
@@ -519,6 +520,18 @@ CREATE TABLE IF NOT EXISTS machine_overrides (
   automatic_account_switch INTEGER NOT NULL DEFAULT 0 CHECK (automatic_account_switch IN (0, 1)),
   automatic_account_switch_revision INTEGER NOT NULL DEFAULT 0 CHECK (automatic_account_switch_revision >= 0),
   automatic_account_switch_updated_at INTEGER
+);
+
+-- A missing account remains an unresolved preference until the owner chooses a replacement.
+-- New sessions must never silently fall through to another subscription.
+CREATE TABLE IF NOT EXISTS machine_provider_account_defaults (
+  runner_id TEXT NOT NULL,
+  provider TEXT NOT NULL CHECK (provider IN ('claude', 'codex')),
+  account_id TEXT,
+  revision INTEGER NOT NULL CHECK (revision > 0),
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY (runner_id, provider),
+  FOREIGN KEY (runner_id) REFERENCES runners(runner_id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS workspaces (
@@ -6406,6 +6419,47 @@ export class ControlPlaneDb {
     });
   }
 
+  machineProviderAccountDefaults(runnerId: string): RunnerProviderAccountDefault[] {
+    return (this.stmt(
+      "SELECT provider, account_id, revision FROM machine_provider_account_defaults WHERE runner_id=? ORDER BY provider",
+    ).all(runnerId) as unknown as Array<{
+      provider: RunnerProviderAccountDefault["provider"];
+      account_id: string | null;
+      revision: number;
+    }>).map((row) => ({ provider: row.provider, accountId: row.account_id, revision: row.revision }));
+  }
+
+  machineProviderAccountDefault(
+    runnerId: string,
+    provider: RunnerProviderAccountDefault["provider"],
+  ): RunnerProviderAccountDefault | null {
+    return this.machineProviderAccountDefaults(runnerId).find((choice) => choice.provider === provider) ?? null;
+  }
+
+  setMachineProviderAccountDefault(
+    runnerId: string,
+    provider: RunnerProviderAccountDefault["provider"],
+    accountId: string | null,
+    expectedRevision: number,
+    now: number,
+  ): { ok: true; choice: RunnerProviderAccountDefault } |
+     { ok: false; choice: RunnerProviderAccountDefault | null } {
+    return this.atomic(() => {
+      const current = this.machineProviderAccountDefault(runnerId, provider);
+      if ((current?.revision ?? 0) !== expectedRevision) return { ok: false, choice: current };
+      const revision = expectedRevision + 1;
+      this.stmt(
+        `INSERT INTO machine_provider_account_defaults (runner_id, provider, account_id, revision, updated_at)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(runner_id, provider) DO UPDATE SET
+           account_id=excluded.account_id,
+           revision=excluded.revision,
+           updated_at=excluded.updated_at`,
+      ).run(runnerId, provider, accountId, revision, now);
+      return { ok: true, choice: { provider, accountId, revision } };
+    });
+  }
+
   setMachineRunnerCapacity(
     runnerId: string,
     configuredUnits: number,
@@ -10971,6 +11025,9 @@ export class ControlPlaneDb {
       harnessSelections,
       providerAccounts: runnerSupportsProtocol(row.protocol_version, "providerAccounts")
         ? (parseJson<RunnerView["providerAccounts"]>(row.provider_accounts) ?? [])
+        : undefined,
+      providerAccountDefaults: runnerSupportsProtocol(row.protocol_version, "providerAccounts")
+        ? this.machineProviderAccountDefaults(row.runner_id)
         : undefined,
       providerLogins: runnerSupportsProtocol(row.protocol_version, "providerLogin")
         ? (parseJson<ProviderLoginView[]>(row.provider_logins) ?? [])

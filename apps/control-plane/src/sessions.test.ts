@@ -7085,6 +7085,54 @@ test("provider account selection is capability-gated, persisted, and sent on res
   assert.equal(restart.spec.providerAccountLabel, "Personal");
 });
 
+test("saved per-provider defaults govern new sessions but explicit choices and existing sessions keep their accounts", () => {
+  const { db, hub, svc } = makeHarness();
+  const accountMeta = runnerMeta();
+  accountMeta.providerAccounts = [
+    { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+    { id: "codex-work", label: "Codex Work", provider: "codex", authStatus: "authenticated" },
+    { id: "codex-personal", label: "Codex Personal", provider: "codex", authStatus: "authenticated" },
+  ];
+  accountMeta.agents = accountMeta.agents.map((agent) => agent.id === AGENT_ID
+    ? { ...agent, defaultProviderAccountId: "work" }
+    : agent);
+  db.registerRunner(accountMeta, Date.now(), PROTOCOL_VERSION);
+  db.setMachineProviderAccountDefault(RUNNER_ID, "claude", "personal", 0, Date.now());
+  db.setMachineProviderAccountDefault(RUNNER_ID, "codex", "codex-personal", 0, Date.now());
+
+  const first = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(first.ok && first.data, first.error);
+  assert.equal(first.data.providerAccountId, "personal", "the saved provider choice wins over agent configuration");
+  assert.equal(hub.sentOfType("start_session").at(-1)!.spec.providerAccountId, "personal");
+
+  const codex = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_AGENT_ID });
+  assert.ok(codex.ok && codex.data, codex.error);
+  assert.equal(codex.data.providerAccountId, "codex-personal", "provider defaults are independent");
+
+  const explicit = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, providerAccountId: "work",
+  });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.equal(explicit.data.providerAccountId, "work");
+
+  db.setMachineProviderAccountDefault(RUNNER_ID, "claude", "work", 1, Date.now());
+  assert.equal(db.getSession(first.data.id)?.providerAccountId, "personal");
+  const next = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(next.ok && next.data, next.error);
+  assert.equal(next.data.providerAccountId, "work");
+
+  db.setMachineProviderAccountDefault(RUNNER_ID, "claude", "removed", 2, Date.now());
+  const missing = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.equal(missing.status, 409);
+  assert.match(missing.error ?? "", /saved default provider account is unavailable/u);
+  const override = svc.createSession({
+    runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, providerAccountId: "personal",
+  });
+  assert.ok(override.ok && override.data, override.error);
+  assert.equal(override.data.providerAccountId, "personal");
+});
+
 test("a WSL agent does not implicitly inherit a runner-host provider account", () => {
   const { db, hub, svc } = makeHarness();
   const accountMeta = runnerMeta();

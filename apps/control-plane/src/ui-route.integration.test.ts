@@ -740,6 +740,36 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     (accounts) => accounts?.some((account) => account.id === "work") === true,
     "the advertised provider account in the Machine view",
   );
+  const defaultUrl = `${httpBase}/api/runners/runner-ui-route/provider-account-defaults/claude`;
+  const defaultBody = { accountId: "work", expectedRevision: 0 };
+  const ordinaryDefaultChange = await fetchWithBearer(defaultUrl, operatorToken, {
+    method: "PUT", body: JSON.stringify(defaultBody), headers: { "content-type": "application/json" },
+  });
+  assert.equal(ordinaryDefaultChange.status, 403, "only a Machine manager can change the default account");
+  const wrongProviderDefault = await fetchWithBearer(
+    `${httpBase}/api/runners/runner-ui-route/provider-account-defaults/codex`, ownerToken,
+    { method: "PUT", body: JSON.stringify(defaultBody), headers: { "content-type": "application/json" } },
+  );
+  assert.equal(wrongProviderDefault.status, 409, "a default cannot point at another provider's account");
+  const savedDefault = await fetchWithBearer(defaultUrl, ownerToken, {
+    method: "PUT", body: JSON.stringify(defaultBody), headers: { "content-type": "application/json" },
+  });
+  assert.equal(savedDefault.status, 200);
+  assert.deepEqual(await savedDefault.json(), {
+    providerAccountDefault: { provider: "claude", accountId: "work", revision: 1 },
+  });
+  const staleDefaultChange = await fetchWithBearer(defaultUrl, ownerToken, {
+    method: "PUT", body: JSON.stringify(defaultBody), headers: { "content-type": "application/json" },
+  });
+  assert.equal(staleDefaultChange.status, 409);
+  const projectedDefaults = await waitForValue(
+    async () => (await (await fetchWithBearer(`${httpBase}/api/runners`, ownerToken)).json() as {
+      runners: Array<{ runnerId: string; providerAccountDefaults?: Array<{ provider: string; accountId: string }> }>;
+    }).runners.find((candidate) => candidate.runnerId === "runner-ui-route")?.providerAccountDefaults,
+    (choices) => choices?.some((choice) => choice.provider === "claude" && choice.accountId === "work") === true,
+    "the saved provider account default in the Machine view",
+  );
+  assert.equal(projectedDefaults?.length, 1);
   const ordinaryAccountRemoval = await fetch(`${httpBase}/api/runners/runner-ui-route/provider-accounts/work`, {
     method: "DELETE",
     headers: { authorization: `Bearer ${operatorToken}` },

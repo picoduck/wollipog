@@ -1485,6 +1485,49 @@ test("Automatic Account Switching is disabled by default and persists revisioned
   }
 });
 
+test("provider account defaults persist per Machine and provider across reconnects", () => {
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-provider-account-default-"));
+  const location = join(temp, "control-plane.sqlite");
+  let db: ControlPlaneDb | undefined;
+  const accountMeta = meta({ providerAccounts: [
+    { id: "claude-work", label: "Work", provider: "claude", authStatus: "authenticated" },
+    { id: "codex-personal", label: "Personal", provider: "codex", authStatus: "authenticated" },
+  ] });
+  try {
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(accountMeta, 100, PROTOCOL_VERSION);
+    assert.deepEqual(db.getRunner("runner-1")?.providerAccountDefaults, []);
+    assert.deepEqual(db.setMachineProviderAccountDefault("runner-1", "claude", "claude-work", 0, 101), {
+      ok: true, choice: { provider: "claude", accountId: "claude-work", revision: 1 },
+    });
+    assert.deepEqual(db.setMachineProviderAccountDefault("runner-1", "codex", "codex-personal", 0, 102), {
+      ok: true, choice: { provider: "codex", accountId: "codex-personal", revision: 1 },
+    });
+    assert.deepEqual(db.setMachineProviderAccountDefault("runner-1", "claude", null, 0, 103), {
+      ok: false, choice: { provider: "claude", accountId: "claude-work", revision: 1 },
+    });
+    db.close();
+    db = ControlPlaneDb.open(location);
+    db.registerRunner(accountMeta, 200, PROTOCOL_VERSION);
+    assert.deepEqual(db.getRunner("runner-1")?.providerAccountDefaults, [
+      { provider: "claude", accountId: "claude-work", revision: 1 },
+      { provider: "codex", accountId: "codex-personal", revision: 1 },
+    ]);
+    db.updateRunnerAgents("runner-1", accountMeta.agents, 201, undefined, []);
+    assert.equal(db.getRunner("runner-1")?.providerAccountDefaults?.[0]?.accountId, "claude-work",
+      "a removed account remains an explicit unresolved preference");
+    assert.deepEqual(db.setMachineProviderAccountDefault("runner-1", "claude", null, 1, 202), {
+      ok: true, choice: { provider: "claude", accountId: null, revision: 2 },
+    });
+    db.registerRunner(accountMeta, 203, RUNNER_CAPABILITY_MIN_PROTOCOL.providerAccounts - 1);
+    assert.equal(db.getRunner("runner-1")?.providerAccountDefaults, undefined,
+      "older runners must not advertise a preference they cannot enforce");
+  } finally {
+    db?.close();
+    rmSync(temp, { recursive: true, force: true });
+  }
+});
+
 test("capacity dimensions and overflow diagnostics are accepted only from protocol-v135 runners", () => {
   const db = ControlPlaneDb.open(":memory:");
   const runtime = {

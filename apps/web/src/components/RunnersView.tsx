@@ -49,6 +49,7 @@ import { PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
 import { AgentSessionDiscoveryDialog } from "./AgentSessionDiscoveryDialog.js";
 import { InstancesPanel } from "./InstancesPanel.js";
 import { ProviderAccountsSection } from "./ProviderAccountsSection.js";
+import { ProviderAccountDefaultsSettings } from "./ProviderAccountDefaultsSettings.js";
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { formatHarnessLaunchCommand } from "../harness-command.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
@@ -1115,6 +1116,8 @@ function MachineSettingsDialog({
           )}
         </section>
       )}
+
+      {runner && <ProviderAccountDefaultsSettings runner={runner} />}
 
       {runner && (
         <section className="machine-settings-section">

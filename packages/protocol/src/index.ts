@@ -2765,6 +2765,14 @@ export interface RunnerAutomaticAccountSwitchConfiguration {
   revision: number;
 }
 
+/** Control-plane-owned default for new host sessions on one Machine and provider. */
+export interface RunnerProviderAccountDefault {
+  provider: ProviderAccountDefinition["provider"];
+  /** Null restores the existing agent/default-order behavior without losing the revision. */
+  accountId: string | null;
+  revision: number;
+}
+
 export interface RunnerCapacityDimension {
   used: number;
   limit: number | null;
@@ -2837,6 +2845,8 @@ export interface RunnerView {
   harnessSelections?: HarnessInstallationSelection[];
   targetHarnessSelections?: TargetHarnessInstallationSelection[];
   providerAccounts?: ProviderAccountDefinition[];
+  /** Saved choices remain visible if an account disappears, so the UI can explain the conflict. */
+  providerAccountDefaults?: RunnerProviderAccountDefault[];
   providerLogins?: ProviderLoginView[];
   workspaces: WorkspaceInfo[];
   /** Editors found on the host (for "Open in …"); absent/empty hides the control. */

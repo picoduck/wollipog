@@ -383,17 +383,31 @@ export function NewSessionDialog({
   const providerAccounts = (runner?.providerAccounts ?? []).filter((account) =>
     account.provider === provider &&
     ((agent?.context?.kind ?? "native") === "native" || account.id === agent?.defaultProviderAccountId));
+  const savedProviderAccount = (agent?.context?.kind ?? "native") === "native"
+    ? runner?.providerAccountDefaults?.find((choice) => choice.provider === provider)
+    : undefined;
+  const savedProviderAccountMissing = !!savedProviderAccount?.accountId &&
+    !providerAccounts.some((account) => account.id === savedProviderAccount.accountId);
   const providerAccountTitles = maskedAccountTitles(providerAccounts.map((account) => account.label));
   // Bound to this exact account list: another Machine or Agent offers other accounts, hidden again.
   const [accountIdentifiersRevealed, toggleAccountIdentifiers] = usePersonalIdentifierReveal(
     providerAccounts.map((account) => account.label).join("\n"),
   );
+  const accountSelectionKey = `${runnerId}\0${agentId}`;
+  const previousAccountSelectionKey = useRef(accountSelectionKey);
+  const accountChosenByUser = useRef(false);
   useEffect(() => {
-    const preferred = agent?.defaultProviderAccountId;
-    setProviderAccountId((current) => providerAccounts.some((account) => account.id === current)
-      ? current
-      : providerAccounts.find((account) => account.id === preferred)?.id ?? providerAccounts[0]?.id ?? "");
-  }, [agent?.defaultProviderAccountId, agentId, runnerId, providerAccounts.map((account) => account.id).join("\0")]);
+    const selectionChanged = previousAccountSelectionKey.current !== accountSelectionKey;
+    previousAccountSelectionKey.current = accountSelectionKey;
+    if (selectionChanged) accountChosenByUser.current = false;
+    const preferred = savedProviderAccount?.accountId ?? agent?.defaultProviderAccountId;
+    setProviderAccountId((current) => {
+      if (accountChosenByUser.current && providerAccounts.some((account) => account.id === current)) return current;
+      if (savedProviderAccountMissing) return "";
+      return providerAccounts.find((account) => account.id === preferred)?.id ?? providerAccounts[0]?.id ?? "";
+    });
+  }, [accountSelectionKey, agent?.defaultProviderAccountId, savedProviderAccount?.accountId,
+    savedProviderAccountMissing, providerAccounts.map((account) => account.id).join("\0")]);
   const nativeTuiAccountingExplanation = nativeTuiAccountingDetail(agent);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
   const savedPiModeUnavailableForTarget = agent?.driver === "pi" && executionTarget !== undefined &&
@@ -473,6 +487,7 @@ export function NewSessionDialog({
     runnerSupportsProtocol(runner?.protocolVersion, "wslSafeLauncher") &&
     runner?.runtime?.executionIsolation?.mode === "bwrap";
   const hostExecutionTarget = !executionTarget || executionTarget.adapter === "host";
+  const missingRequiredAccountChoice = hostExecutionTarget && savedProviderAccountMissing && !providerAccountId;
   // Availability is DERIVED from the sentence that explains it, so the two cannot disagree. The
   // preset card is rendered either way now — §11.3 — and a disabled card whose reason contradicted
   // why it was disabled would be worse than the omission it replaced.
@@ -956,6 +971,7 @@ export function NewSessionDialog({
     : savedPermissionMode ? `Saved Default — ${titleCaseLabel(permissionModeLabel(savedPermissionMode, agent?.driver))}`
     : "Harness Default";
   const valid = projectPlacementValid && !!agentId && !!selectedAgentOption && !selectedAgentOption.disabled &&
+    !missingRequiredAccountChoice &&
     (!executionTarget || executionTarget.available) && cloudBudgetValid &&
     (launchSurface !== "native_tui" || nativeTuiSupported) &&
     (defaultsReady || orchestrator) &&
@@ -970,7 +986,7 @@ export function NewSessionDialog({
     setValidationError(null);
   }, [
     projectSelection, selectedProject?.id, projectLocationId, projectLocationLaunchable,
-    runnerId, workspaceId, browsedPath, agentId, selectedAgentOption?.disabled,
+    runnerId, workspaceId, browsedPath, agentId, selectedAgentOption?.disabled, providerAccountId,
     defaultsReady, harnessDefaults?.error, roleOverride, orchestrator, orchestratorSupported,
     directWslRequiresSafeOrchestrator, launchSurface, nativeTuiSupported,
     executionTargetId, executionTarget?.id, executionTarget?.available,
@@ -1051,6 +1067,9 @@ export function NewSessionDialog({
       } else if (!agentId || !selectedAgentOption || selectedAgentOption.disabled) {
         setValidationError("Pick a runner, workspace, and agent.");
         focusValidationProblem('.agent-select [aria-haspopup="listbox"]');
+      } else if (missingRequiredAccountChoice) {
+        setValidationError("Choose an account because the saved default is no longer available.");
+        focusValidationProblem('button[aria-label^="Account:"]');
       } else if (!defaultsReady && !orchestrator) {
         setValidationError(harnessDefaults?.error
           ? "Retry loading saved permission defaults before creating a session."
@@ -1506,7 +1525,7 @@ export function NewSessionDialog({
             )}
           </div>
 
-          {hostExecutionTarget && providerAccounts.length > 1 && (
+          {hostExecutionTarget && (providerAccounts.length > 1 || savedProviderAccountMissing) && (
             <div className="field">
               <div className="personal-identifier-field-head">
                 <label className="new-session-field-label">Account</label>
@@ -1523,7 +1542,7 @@ export function NewSessionDialog({
                 className="new-session-choice-control"
                 label="Account"
                 value={providerAccountId || null}
-                onChange={setProviderAccountId}
+                onChange={(accountId) => { accountChosenByUser.current = true; setProviderAccountId(accountId); }}
                 options={providerAccounts.map((account, index) => ({
                   value: account.id,
                   label: accountIdentifiersRevealed ? account.label : providerAccountTitles[index]!,
@@ -1532,6 +1551,9 @@ export function NewSessionDialog({
                 }))}
                 placeholder="Choose an Account…"
               />
+              {missingRequiredAccountChoice && (
+                <p className="hint" role="alert">The saved default account is no longer on this Machine. Choose an account or change the default in Machine settings.</p>
+              )}
             </div>
           )}
 

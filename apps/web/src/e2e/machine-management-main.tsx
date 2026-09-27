@@ -87,7 +87,10 @@ let runner: RunnerView | null = {
       provider: "claude",
       authStatus: "unauthenticated",
     },
+    { id: "codex-team", label: "Codex Team", provider: "codex", authStatus: "authenticated" },
+    { id: "codex-solo", label: "Codex Solo", provider: "codex", authStatus: "authenticated" },
   ],
+  providerAccountDefaults: [],
   workspaces: [{ id: "home", name: "Home", path: "C:\\Users\\misko" }],
   connectedAt: 1,
   lastSeen: 1,
@@ -292,6 +295,26 @@ const client = {
     };
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { automaticAccountSwitching: structuredClone(runner.automaticAccountSwitching) };
+  },
+  updateMachineProviderAccountDefault: async (
+    _runnerId: string,
+    provider: "claude" | "codex",
+    body: { accountId: string | null; expectedRevision: number },
+  ) => {
+    if (!runner) throw new Error("runner not found");
+    const current = runner.providerAccountDefaults?.find((choice) => choice.provider === provider);
+    if (body.expectedRevision !== (current?.revision ?? 0)) throw new Error("Default Provider Account changed in another client");
+    if (body.accountId && !runner.providerAccounts?.some((account) =>
+      account.provider === provider && account.id === body.accountId)) throw new Error("Account unavailable");
+    const providerAccountDefault = {
+      provider, accountId: body.accountId, revision: body.expectedRevision + 1,
+    };
+    runner.providerAccountDefaults = [
+      ...(runner.providerAccountDefaults ?? []).filter((choice) => choice.provider !== provider),
+      providerAccountDefault,
+    ];
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { providerAccountDefault };
   },
   listDirectory: async (_runnerId: string, path: string) => {
     if (!path) {

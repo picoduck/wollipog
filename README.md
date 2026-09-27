@@ -172,6 +172,12 @@ that is already on the Machine is discarded rather than recorded twice. Removing
 the credential directory Wollipog created for it, unless a session on that Machine still uses it;
 directories you configured yourself are never deleted.
 
+In Machine settings, owners can choose a default Claude and Codex account for new native host
+sessions. A choice in New Session takes precedence, and existing sessions keep their recorded
+account. Clearing the setting restores the agent's configured default or the first account. If a
+saved default is removed, new sessions ask for an explicit account until the owner replaces or
+clears that setting.
+
 ## Security Model
 
 Wollipog runs tools that can modify source code and execute commands. Its primary trust boundaries are:

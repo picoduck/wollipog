@@ -1307,6 +1307,49 @@ test("multiple provider accounts expose a picker and submit the selected account
   }
 });
 
+test("New Session uses the saved provider default and still accepts a one-session override", async () => {
+  const accountRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    agents: runner.agents.map((agent) => ({ ...agent, defaultProviderAccountId: "work" })),
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+    ],
+    providerAccountDefaults: [{ provider: "claude", accountId: "personal", revision: 1 }],
+  };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+  try {
+    assert.match(fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Account:"]')?.getAttribute("aria-label") ?? "",
+      /Account: Personal/u);
+    await chooseSelectOption(fixture.container, "Account", "Work");
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.providerAccountId, "work");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a missing saved default requires an explicit account choice", async () => {
+  const accountRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    providerAccounts: [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }],
+    providerAccountDefaults: [{ provider: "claude", accountId: "removed", revision: 1 }],
+  };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+  try {
+    assert.equal(createButton(fixture.container).disabled, true);
+    assert.match(fixture.container.textContent ?? "", /saved default account is no longer on this Machine/u);
+    await chooseSelectOption(fixture.container, "Account", "Work");
+    assert.equal(createButton(fixture.container).disabled, false);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.providerAccountId, "work");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("a WSL agent does not submit an implicit runner-host provider account", async () => {
   const accountRunner: RunnerView = {
     ...runner,
@@ -1319,6 +1362,7 @@ test("a WSL agent does not submit an implicit runner-host provider account", asy
     providerAccounts: [
       { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
     ],
+    providerAccountDefaults: [{ provider: "claude", accountId: "work", revision: 1 }],
   };
   const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
   try {
