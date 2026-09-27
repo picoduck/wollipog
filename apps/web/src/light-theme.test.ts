@@ -514,7 +514,9 @@ function specificity(selector: string): number {
  * `.atag` matches too: the stylesheet does state the pair, across two rules.
  *
  * A fill rule is implied when its subject's simple selectors are a subset of the colour rule's
- * subject, and its context (everything before the subject) is empty or identical. Of the implied
+ * subject, and its context (everything before the subject) is empty or identical. A pseudo-element
+ * is its own box, which can be positioned off its host, so both subjects must name the same
+ * pseudo-element or none: `.chip::before` never borrows `.chip`'s fill. Of the implied
  * fills the most specific wins, then the latest, as in the cascade. Only unconditional rules are
  * read, and only a fill that is opaque in every palette is a ground: a transparent or translucent
  * fill shows whatever is behind the element, which is the ancestor this file cannot see.
@@ -530,6 +532,7 @@ function impliedFillPairs(source: string): TintedRule[] {
     const subject = compounds(selector).at(-1) ?? "";
     return { subject, context: selector.slice(0, selector.length - subject.length).trim() };
   };
+  const pseudoElement = (simples: string[]) => simples.filter((simple) => simple.startsWith("::")).join("");
   const rules = topLevelRules(source);
   const fills = rules.flatMap((rule) => {
     const fill = rule.declarations.background ?? rule.declarations["background-color"];
@@ -546,10 +549,12 @@ function impliedFillPairs(source: string): TintedRule[] {
     if (color === "inherit" || color === "currentColor") continue;
     for (const selector of rule.selectors) {
       const { subject, context } = split(selector);
-      const own = new Set(simpleSelectors(subject));
+      const simples = simpleSelectors(subject);
+      const own = new Set(simples);
       const implied = fills.filter((fill) => {
         const needed = simpleSelectors(fill.subject);
         return needed.length > 0 && needed.every((simple) => own.has(simple)) &&
+          pseudoElement(needed) === pseudoElement(simples) &&
           (fill.context === "" || fill.context === context);
       });
       if (implied.length === 0) continue;
@@ -591,6 +596,9 @@ test("a colour-only modifier is measured on the winning fill its selector implie
     .chip:hover { background: var(--bg); }
     .other { background: var(--bg-elev-3); }
     .chip-label { color: var(--amber); }
+    .chip.mark::before { color: var(--red); }
+    .chip::after { background: var(--bg-elev); }
+    .chip.tip::after { color: var(--amber); }
     @media (max-width: 600px) { .chip.narrow { color: var(--red); } }
   `);
   assert.deepEqual(pairs.map(({ selector, declarations }) => [selector, declarations.background]), [
@@ -598,7 +606,9 @@ test("a colour-only modifier is measured on the winning fill its selector implie
     [".panel .chip", "var(--bg-elev-3)"],
     // The contextual fill outranks the base one, so the amber is measured where it renders.
     [".card .chip.warn", "var(--bg-elev)"],
-  ], "a transparent winner, an unimplied :hover or sibling class, and a conditional rule pair with nothing");
+    // A pseudo-element pairs only with its own box's fill, never its host's.
+    [".chip.tip::after", "var(--bg-elev)"],
+  ], "a transparent winner, an unimplied :hover or sibling class, a host's fill under its pseudo-element, and a conditional rule pair with nothing");
 
   const failing = (selector: string) => new Set(measure(pairs.filter((pair) => pair.selector === selector)).failures
     .map((failure) => failure.slice(selector.length).match(/\((\S+)\)/)![1]));
