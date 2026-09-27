@@ -170,7 +170,7 @@ import { registerSessionLookupRoute } from "./session-lookup-route.js";
 import {
   sessionHoldReaderFor,
   withCampaignHoldAdviceFor,
-  withHoldAdviceFor,
+  withSessionHoldAdviceFor,
   withSessionCommandPermissions,
 } from "./session-command-permissions.js";
 import {
@@ -4209,14 +4209,15 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
   // control; an agent parent sending to a descendant has neither, which is why its mid-turn
   // message used to vanish (#1406). Give only the agent lane the steer-first admission.
   if (human) return respond(reply, svc.promptFromUser(human.userId, id, text, images, slashCommand, body?.config));
-  // Hold advice in the refusal, the delivery report and the returned view names only the tools
-  // this agent credential may call (#1863).
+  // Hold advice in the refusal, the delivery report and the returned view, including a nested
+  // Orchestrator's campaign, names only the tools this agent credential may call (#1863).
+  const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
   const target = db.getSession(id);
-  const holdReader = target
-    ? sessionHoldReaderFor(db, requestPrincipals.get(req) ?? requestPrincipal(req), target)
-    : undefined;
+  const holdReader = target ? sessionHoldReaderFor(db, principal, target) : undefined;
   const result = await svc.promptOrSteer(id, text, images, slashCommand, body?.config, holdReader);
-  return respond(reply, result.ok && result.data ? { ...result, data: withHoldAdviceFor(result.data, holdReader) } : result);
+  return respond(reply, result.ok && result.data
+    ? { ...result, data: withSessionHoldAdviceFor(db, principal, result.data, holdReader) }
+    : result);
 });
 
 app.post("/api/sessions/:id/command-invocations", async (req, reply) => {

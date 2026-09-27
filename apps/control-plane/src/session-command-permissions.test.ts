@@ -15,8 +15,11 @@ import { registerSessionLookupRoute } from "./session-lookup-route.js";
 import {
   sessionCommandPermissions,
   sessionHoldReader,
+  withCampaignHoldAdviceFor,
   withHoldAdviceFor,
   withSessionCommandPermissions,
+  withSessionHoldAdviceFor,
+  type SessionCommandPermissionSource,
 } from "./session-command-permissions.js";
 
 const VIEWER = "Your Viewer role is read-only.";
@@ -200,6 +203,57 @@ test("an agent credential's hold reader follows the routes its advice names (#18
   const stale = { ...view, queueHold: { ...queueHold, holdId: "qh_2" } };
   assert.equal(withHoldAdviceFor(stale, reader(false, false, false)).holds?.[1], view.holds[1],
     "a hold with no matching record is left as written");
+});
+
+test("a campaign's held children are written for the agent credential reading it, wherever the campaign is embedded (#1863)", () => {
+  const scope = { organizationId: "org_1", owner: { kind: "user" as const, userId: "usr_1" } };
+  // A nested Orchestrator: its root campaign lists every descendant, its own session included.
+  const nested: AgentPrincipal = {
+    kind: "agent", actorId: "s_nested", credentialSessionId: "s_nested", orchestrator: true,
+    organizationId: "org_1", delegatedScope: scope,
+  };
+  const recovery = { recoveryId: "wr_1", detectedAt: 1, selectedPath: "/w/n", expectedBranch: "fix/n", detail: "switched" };
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "qh_1", since: 1, target: "/w/next", queuedPrompts: 1,
+    unfinishedBackgroundJobs: 1, canStopJobs: true as const,
+  };
+  const policy = (strictProjectIsolation: boolean) =>
+    ({ execution: { strictProjectIsolation } }) as unknown as SessionView["orchestratorPolicy"];
+  const records = new Map<string, ReturnType<SessionCommandPermissionSource["sessionHoldRecords"]> extends
+    Map<string, infer R> ? R : never>([
+    ["s_nested", { parentSessionId: "s_root", orchestratorPolicy: policy(false), worktreeRecovery: recovery }],
+    ["s_grandchild", { parentSessionId: "s_child", queueHold }],
+  ]);
+  const source: SessionCommandPermissionSource = {
+    isSessionOwner: () => false,
+    isSessionDescendant: (ancestor, target) => ancestor === "s_nested" && target === "s_grandchild",
+    sessionHoldRecords: (ids) => new Map(ids.flatMap((id) => records.has(id) ? [[id, records.get(id)!] as const] : [])),
+  };
+  const projection = {
+    heldChildren: [
+      { sessionId: "s_nested", holds: sessionHolds({ worktreeRecovery: recovery }) },
+      { sessionId: "s_grandchild", holds: sessionHolds({ queueHold }) },
+      { sessionId: "s_gone", holds: sessionHolds({ queueHold }) },
+    ],
+  };
+  const advice = (value: typeof projection) => value.heldChildren.map((child) => child.holds[0]?.recoveryAction ?? "");
+
+  const [own, grandchild, gone] = advice(withCampaignHoldAdviceFor(source, nested, projection));
+  assert.match(own!, /select_worktree/u, "an Orchestrator without Strict Project Isolation may recover its own worktree");
+  assert.doesNotMatch(grandchild!, /stop_background_job/u, "a grandchild's jobs are not the Orchestrator's to stop");
+  assert.match(grandchild!, /restart/u, "it may still restart a descendant");
+  assert.equal(gone, projection.heldChildren[2]!.holds[0]!.recoveryAction, "a child with no record is left as written");
+  records.set("s_nested", { ...records.get("s_nested")!, orchestratorPolicy: policy(true) });
+  assert.doesNotMatch(advice(withCampaignHoldAdviceFor(source, nested, projection))[0]!, /select_worktree/u,
+    "under Strict Project Isolation it may not");
+  assert.equal(withCampaignHoldAdviceFor(source, human("owner"), projection), projection, "a person's projection is unchanged");
+
+  // The same rewrite reaches a campaign embedded in a session view, which prompt_session returns
+  // for a nested Orchestrator as get_session does.
+  const view = { id: "s_nested", orchestratorCampaign: projection } as unknown as SessionView;
+  const embedded = withSessionHoldAdviceFor(source, nested, view, undefined).orchestratorCampaign as typeof projection;
+  assert.deepEqual(advice(embedded), advice(withCampaignHoldAdviceFor(source, nested, projection)));
+  assert.doesNotMatch(advice(embedded)[1]!, /stop_background_job/u);
 });
 
 test("reads carry the requester's command permissions; a trusted local read is unchanged (#1843)", async (t) => {

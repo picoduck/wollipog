@@ -15766,22 +15766,26 @@ export class ControlPlaneDb {
   }
 
   /** The records behind each listed session's holds, so a projection that carries only the holds
-   * can have their advice rewritten for its reader (#1863). Unknown ids are omitted. */
+   * can have their advice rewritten for its reader (#1863). The Orchestrator policy is included
+   * because Strict Project Isolation decides whether a nested Orchestrator may manage its own
+   * worktrees. Unknown ids are omitted. */
   sessionHoldRecords(ids: readonly string[]): Map<string, {
     parentSessionId: string | null;
+    orchestratorPolicy?: OrchestratorCampaignPolicy;
     worktreeRecovery?: WorktreeRecoveryView;
     queueHold?: SessionQueueHoldView;
   }> {
     if (!ids.length) return new Map();
     const rows = this.stmt(
-      `SELECT id, parent_session_id, status, worktree_recovery, queue_hold
+      `SELECT id, parent_session_id, status, orchestrator_policy, worktree_recovery, queue_hold
        FROM sessions WHERE id IN (${ids.map(() => "?").join(",")})`,
     ).all(...ids) as unknown as Array<{
-      id: string; parent_session_id: string | null; status: SessionStatus;
+      id: string; parent_session_id: string | null; status: SessionStatus; orchestrator_policy: string | null;
       worktree_recovery: string | null; queue_hold: string | null;
     }>;
     return new Map(rows.map((row) => [row.id, {
       parentSessionId: row.parent_session_id,
+      orchestratorPolicy: orchestratorCampaignPolicyFromJson(row.orchestrator_policy) ?? undefined,
       worktreeRecovery: parseWorktreeRecovery(row.worktree_recovery),
       queueHold: isTerminal(row.status) ? undefined : parseQueueHold(row.queue_hold),
     }]));
