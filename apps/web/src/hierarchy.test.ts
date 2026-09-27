@@ -88,12 +88,18 @@ test("the empty states a user actually sees have an icon", () => {
   // rather than an empty screen, and decorating it would be claiming the app has nothing when it
   // simply does not know yet. Those are recognised by their content, not exempted by file: they
   // render a `detailPlaceholder` result or a connection-dependent message.
-  const transient = (props: string) => /placeholder\.|Unavailable|Waiting|Pair to load/.test(props);
+  const transient = (props: string) => /placeholder\.|Unavailable|Waiting|Pair to Load/.test(props);
   const terminal = sites.filter((site) => !transient(site.props));
   assert.ok(terminal.length >= 4, `expected several terminal empty states, found ${terminal.length}`);
   const withoutIcon = terminal.filter((site) => !/icon=/.test(site.props)).map((site) => site.file);
   assert.deepEqual([...new Set(withoutIcon)], [],
     "an empty screen with no icon is the 2015 pattern §F8 asked to replace");
+});
+
+test("the session activity placeholder names the unpaired state in Title Case", () => {
+  const activity = emptyCallSites().filter((site) => site.file === "SessionDetail.tsx" && /Activity Unavailable/.test(site.props));
+  assert.equal(activity.length, 1);
+  assert.match(activity[0]!.props, /"Pair to Load Activity"/);
 });
 
 test("the empty states a user actually sees offer the action that ends them", () => {
@@ -105,7 +111,7 @@ test("the empty states a user actually sees offer the action that ends them", ()
   // Board, Runs and Pods open their dialogs from the shell, so each takes one callback rather than
   // reaching for it — that plumbing is the reason this was a separate commit from the icons.
   const terminal = emptyCallSites().filter((site) =>
-    !/placeholder\.|Unavailable|Waiting|Pair to load/.test(site.props));
+    !/placeholder\.|Unavailable|Waiting|Pair to Load/.test(site.props));
   const withoutAction = terminal.filter((site) => !/action=/.test(site.props)).map((site) => site.file);
   assert.deepEqual([...new Set(withoutAction)], [],
     "a terminal empty state has to offer the thing that ends it");

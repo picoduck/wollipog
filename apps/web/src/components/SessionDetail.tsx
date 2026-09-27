@@ -5015,7 +5015,7 @@ function SessionDetailLoaded({
                 <TranscriptSkeleton />
               ) : transcript.body === "unavailable" ? (
                 <Empty
-                  title={conn === "unauthorized" ? "Pair to load activity" : "Activity Unavailable"}
+                  title={conn === "unauthorized" ? "Pair to Load Activity" : "Activity Unavailable"}
                   hint={transcript.error ?? (conn === "offline" ? "Reconnect to load this transcript." : "This device needs access to the control plane.")}
                 />
               ) : transcript.body === "empty" && (session.pendingPrompts?.length ?? 0) === 0 ? (

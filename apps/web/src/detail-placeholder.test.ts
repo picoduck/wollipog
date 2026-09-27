@@ -10,10 +10,21 @@ import {
 
 test("detail placeholders do not claim a resource is missing before authoritative data", () => {
   assert.deepEqual(detailPlaceholder("Session", { authoritative: false, conn: "connecting" }), {
-    title: "Loading session…", hint: "Waiting for the control-plane snapshot.",
+    title: "Loading Session…", hint: "Waiting for the control-plane snapshot.",
   });
   assert.equal(detailPlaceholder("Run", { authoritative: false, conn: "offline" }).title, "Run Unavailable");
-  assert.equal(detailPlaceholder("Pod", { authoritative: false, conn: "unauthorized" }).title, "Pair to load pod");
+  assert.equal(detailPlaceholder("Pod", { authoritative: false, conn: "unauthorized" }).title, "Pair to Load Pod");
+});
+
+test("detail placeholder loading and unpaired titles are in Title Case with sentence-case hints", () => {
+  for (const resource of ["Session", "Run", "Pod"] as const) {
+    assert.deepEqual(detailPlaceholder(resource, { authoritative: false, conn: "connecting" }), {
+      title: `Loading ${resource}…`, hint: "Waiting for the control-plane snapshot.",
+    });
+    assert.deepEqual(detailPlaceholder(resource, { authoritative: false, conn: "unauthorized" }), {
+      title: `Pair to Load ${resource}`, hint: "This device needs access to the control plane.",
+    });
+  }
 });
 
 test("list placeholders name the loading, offline and unpaired states in Title Case", () => {
@@ -38,7 +49,7 @@ test("only an authoritative miss renders Not Found and transport errors stay dis
 test("current pairing and offline state outrank a stale lookup error", () => {
   const failed = { sessionId: "session-a", complete: true, error: "request failed" };
   assert.deepEqual(routedSessionPlaceholder("session-a", failed, "unauthorized"), {
-    title: "Pair to load session", hint: "This device needs access to the control plane.",
+    title: "Pair to Load Session", hint: "This device needs access to the control plane.",
   });
   assert.deepEqual(routedSessionPlaceholder("session-a", failed, "offline"), {
     title: "Session Unavailable", hint: "Reconnect to the control plane to load this link.",
@@ -67,14 +78,14 @@ test("archived revalidation waits for an authenticated online connection", () =>
 test("a completed lookup cannot leak a false missing state into the next session route", () => {
   const previousMiss = { sessionId: "session-a", complete: true, error: null };
   assert.equal(routedSessionPlaceholder("session-a", previousMiss, "online").title, "Session Not Found");
-  assert.equal(routedSessionPlaceholder("session-b", previousMiss, "online").title, "Loading session…");
+  assert.equal(routedSessionPlaceholder("session-b", previousMiss, "online").title, "Loading Session…");
 
   const previousFailure = { sessionId: "session-a", complete: true, error: "request failed" };
-  assert.equal(routedSessionPlaceholder("session-b", previousFailure, "online").title, "Loading session…");
+  assert.equal(routedSessionPlaceholder("session-b", previousFailure, "online").title, "Loading Session…");
 });
 
 test("an unauthenticated lookup race never becomes an authoritative missing session", () => {
   const unauthenticatedMiss = { sessionId: "session-a", complete: true, error: null };
-  assert.equal(routedSessionPlaceholder("session-a", unauthenticatedMiss, "connecting").title, "Loading session…");
-  assert.equal(routedSessionPlaceholder("session-a", unauthenticatedMiss, "unauthorized").title, "Pair to load session");
+  assert.equal(routedSessionPlaceholder("session-a", unauthenticatedMiss, "connecting").title, "Loading Session…");
+  assert.equal(routedSessionPlaceholder("session-a", unauthenticatedMiss, "unauthorized").title, "Pair to Load Session");
 });

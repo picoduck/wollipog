@@ -32,10 +32,10 @@ export function detailPlaceholder(
   state: { authoritative: boolean; conn: ConnState; error?: string | null },
 ): DetailPlaceholder {
   if (state.authoritative) return { title: `${resource} Not Found`, hint: "It may have been deleted or you may not have access." };
-  if (state.conn === "unauthorized") return { title: `Pair to load ${resource.toLowerCase()}`, hint: "This device needs access to the control plane." };
+  if (state.conn === "unauthorized") return { title: `Pair to Load ${resource}`, hint: "This device needs access to the control plane." };
   if (state.conn === "offline") return { title: `${resource} Unavailable`, hint: "Reconnect to the control plane to load this link." };
   if (state.error) return { title: `${resource} Unavailable`, hint: state.error };
-  return { title: `Loading ${resource.toLowerCase()}…`, hint: "Waiting for the control-plane snapshot." };
+  return { title: `Loading ${resource}…`, hint: "Waiting for the control-plane snapshot." };
 }
 
 /** A resource list before the first snapshot. An empty map proves nothing until then, so the list
