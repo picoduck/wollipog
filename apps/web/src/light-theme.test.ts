@@ -456,21 +456,37 @@ test("a legible ink on a transparent fill is measured on every base surface and 
 /**
  * Whether `selector` styles an element carrying `className` itself, not a descendant of one.
  *
- * Only the last compound names the element a rule paints. Attribute values are blanked first so a
- * space or combinator inside quotes cannot split a compound.
+ * Only the last compound names the element a rule paints, so the selector is split on its
+ * TOP-LEVEL combinators alone: a combinator inside an attribute value or a functional pseudo-class
+ * such as `:has(> .x)` belongs to the compound around it. Splitting there made
+ * `.row:has(> .x)` look like a rule for `.x`. A class named anywhere in the last compound counts,
+ * even inside `:not()`, which errs towards reading a rule that does not repaint the parent — the
+ * safe direction for a guard.
  */
 function targets(selector: string, className: string): boolean {
-  const subject = selector.replace(/\[[^\]]*\]/g, "[]").split(/\s*[\s>+~]\s*/).pop() ?? "";
+  let subject = "";
+  let depth = 0;
+  for (const char of selector) {
+    if (char === "(" || char === "[") depth += 1;
+    if (char === ")" || char === "]") depth -= 1;
+    if (depth === 0 && /[\s>+~]/.test(char)) {
+      subject = "";
+      continue;
+    }
+    subject += char;
+  }
   return new RegExp(`${className.replace(/\./g, "\\.")}(?![\\w-])`).test(subject);
 }
 
 test("the known-surface guard reads every rule whose subject is the parent", () => {
   const row = ".diff-file-head-row";
   for (const selector of [row, `${row}:hover`, `:root[data-theme="dark"] ${row}`, `.diff-file > ${row}`,
-    `${row}[data-state="a b"]`, `${row}.is-open`]) {
+    `${row}[data-state="a b"]`, `${row}[data-state="a > b"]`, `${row}.is-open`, `${row}:has(> .diff-discard)`,
+    `${row}:has(.a ~ .b)`, `.diff-file :is(${row})`, `${row}:not(.a .b):hover`]) {
     assert.equal(targets(selector, row), true, selector);
   }
-  for (const selector of [`${row} .diff-discard`, `${row} > button`, `${row}-extra`, `${row}s`]) {
+  for (const selector of [`${row} .diff-discard`, `${row} > button`, `${row}-extra`, `${row}s`,
+    `${row}:has(> .a) .diff-discard`, `${row}[data-state="a b"] > button`]) {
     assert.equal(targets(selector, row), false, selector);
   }
 });
