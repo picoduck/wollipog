@@ -22953,6 +22953,136 @@ test("a later restart names the notice an earlier one still owes together with i
   }
 });
 
+test("a restart notice in flight when the session stops is abandoned, and a late not-sent receipt cannot revive it (#1861)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, hub, svc, child, recovery } = f;
+  try {
+    const approved = f.requestMerge(1779);
+    f.approve(approved.occurrenceId);
+    assert.ok(svc.restart(child.id).ok);
+    const [queued] = restartNoticesTo(hub, child.id);
+    assert.ok(queued?.commandId);
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "delivering");
+
+    assert.ok(svc.stop(child.id).ok);
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "abandoned", "the end retires the notice in flight");
+    // The runner's late report that the notice was not sent, for worktree recovery.
+    f.runnerReports(recovery, "input_required");
+    f.receipt(queued.commandId, "failed", 1, "WORKTREE_RECOVERY_REQUIRED");
+    svc.retryDuePrompts(Date.now() + 60_000);
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "abandoned", "it is not held again");
+
+    // A later restart that revokes nothing has nothing to announce, even once recovery clears.
+    assert.ok(svc.restart(child.id).ok);
+    f.runnerReports(null, "idle");
+    svc.retryDuePrompts(Date.now() + 120_000);
+    assert.equal(restartNoticesTo(hub, child.id).length, 1, "the stopped session's notice is never sent again");
+  } finally {
+    db.close();
+  }
+});
+
+test("a provisional disconnect stop keeps a restart notice in flight for the restored child (#1861)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, hub, svc, child, worktreePath } = f;
+  try {
+    const approved = f.requestMerge(1779);
+    f.approve(approved.occurrenceId);
+    f.runnerReports(null, "idle");
+    // The restart queues the notice behind its launch; the runner then drops before any receipt.
+    assert.ok(svc.restart(child.id).ok);
+    const [queued] = restartNoticesTo(hub, child.id);
+    assert.ok(queued?.commandId);
+    const commandState = () => (db.raw().prepare("SELECT state FROM session_prompt_commands WHERE command_id=?")
+      .get(queued.commandId!) as { state: string }).state;
+
+    hub.online = false;
+    svc.failRunnerSessions(RUNNER_ID);
+    assert.equal(db.getSession(child.id)?.status, "stopped");
+    assert.notEqual(commandState(), "uncertain", "the notice's command is kept for the runner's return");
+    assert.notEqual(commandState(), "failed");
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "delivering");
+
+    // Reconnect restores the child; the same command goes out, and its receipt settles the notice.
+    hub.online = true;
+    svc.retryDuePrompts(Date.now() + 1_000, RUNNER_ID);
+    svc.hydrateRunnerSessions(RUNNER_ID, [snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath, worktreeRecovery: null,
+    })]);
+    svc.retryDuePrompts(Date.now() + 60_000);
+    const sent = restartNoticesTo(hub, child.id);
+    assert.deepEqual(sent.map((notice) => notice.commandId), [queued.commandId], "under its original command id");
+    assert.equal(f.receipt(queued.commandId, "started", 1), true);
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "delivered");
+  } finally {
+    db.close();
+  }
+});
+
+test("a notice owed before its restart's revocation committed counts only once the decision reads revoked (#1861)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, hub, svc, child } = f;
+  try {
+    const approved = f.requestMerge(1779);
+    f.approve(approved.occurrenceId);
+    f.runnerReports(null, "idle");
+    // The restart records what it owes, then the control plane stops before it revokes anything.
+    db.oweRestartNotices(child.id, [{
+      occurrenceId: approved.occurrenceId, category: "pr_merge", resourceKey: approved.resourceKey, priorStatus: "approved",
+    }], Date.now());
+    svc.retryDuePrompts(Date.now() + 60_000);
+    assert.equal(restartNoticesTo(hub, child.id).length, 0, "a decision that still reads approved is not announced as revoked");
+    assert.deepEqual(db.heldRestartNotices(child.id), []);
+
+    // Once the revocation is on record, the obligation it came with is delivered once.
+    db.markWorkflowDecisionRevoked(approved.occurrenceId, Date.now());
+    svc.retryDuePrompts(Date.now() + 120_000);
+    const [notice, ...more] = restartNoticesTo(hub, child.id);
+    assert.ok(notice?.text.includes(approved.occurrenceId));
+    assert.equal(more.length, 0);
+  } finally {
+    db.close();
+  }
+});
+
+test("on the immediate lane a restart notice is recorded delivered before it is sent, and a refused send owes it again (#1861)", () => {
+  const f = worktreeRecoveryCampaign();
+  const { db, hub, svc, child, recovery } = f;
+  try {
+    const approved = f.requestMerge(1779);
+    f.approve(approved.occurrenceId);
+    f.runnerReports(recovery, "input_required");
+    assert.ok(svc.restart(child.id).ok);
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "held");
+
+    // A session with no worktree to recover takes an ordinary prompt: no durable command, no receipt.
+    const statesAtSend: Array<string | null> = [];
+    let refuse = true;
+    hub.deliveryHandler = (_runnerId, msg) => {
+      if (msg.type !== "prompt_session" || !msg.text.includes("[Wollipog Session Restart]")) return true;
+      statesAtSend.push(restartNoticeState(db, approved.occurrenceId));
+      return !refuse;
+    };
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+      id: child.id, title: child.title, status: "idle", worktreePath: null, worktreeRecovery: null,
+    }));
+    assert.deepEqual(statesAtSend, ["delivered"], "the claim is on record before the frame leaves");
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "held", "a send the socket refused is owed again");
+
+    refuse = false;
+    svc.retryDuePrompts(Date.now() + 60_000);
+    assert.deepEqual(statesAtSend, ["delivered", "delivered"]);
+    assert.equal(restartNoticeState(db, approved.occurrenceId), "delivered");
+    svc.onSessionStatus(child.id, "idle");
+    svc.retryDuePrompts(Date.now() + 120_000);
+    assert.equal(statesAtSend.length, 2, "an accepted immediate notice is never sent again");
+    assert.equal(hub.sentOfType("durable_session_command").some((message) => message.command.type === "prompt_session" &&
+      message.command.text.includes("[Wollipog Session Restart]")), false);
+  } finally {
+    db.close();
+  }
+});
+
 test("Stop still revokes unconsumed decisions without sending a restart notice (#1779)", () => {
   const f = worktreeRecoveryCampaign();
   const { db, hub, svc, child } = f;

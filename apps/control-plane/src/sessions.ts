@@ -4425,11 +4425,14 @@ export class SessionsService {
     delivery?: PreStagedDeliveryOptions,
     imageScope: "session" | "run" = "session",
     retainAcrossWorktreeRecovery = false,
-    /** Control-plane-owned text that must be bound to its own record when it is persisted: `stage`
-     * replaces the plain outbox write whenever this prompt takes the durable lane, and `admitAs`
-     * then applies as it does for a pre-staged delivery. Unused on the immediate lane. */
-    durable?: {
+    /** Control-plane-owned text bound to its own record as it is admitted. On the durable lane
+     * `stage` replaces the plain outbox write, and `admitAs` then applies as it does for a
+     * pre-staged delivery. On the immediate lane `claimImmediate` runs just before the socket send
+     * and may refuse it; a send that then fails is reported as a failed prompt, for the caller to
+     * release its claim. */
+    binding?: {
       stage: (runnerId: string, command: DurableSessionCommand, now: number) => SessionPromptCommandRecord;
+      claimImmediate: () => boolean;
       admitAs?: "queued";
     },
   ): ServiceResult<PromptAdmissionView> {
@@ -4670,11 +4673,13 @@ export class SessionsService {
       ));
     if (durablePrompt) {
       try {
-        if (durable) durable.stage(session.runnerId, command, now);
+        if (binding) binding.stage(session.runnerId, command, now);
         else this.promptOutbox.stage(sessionId, session.runnerId, command, now);
       } catch (error) {
         return fail(`prompt could not be persisted: ${(error as Error).message}`, 500);
       }
+    } else if (!delivery && binding && !binding.claimImmediate()) {
+      return fail("prompt was already claimed", 409);
     }
     // A prompt admitted behind authoritative input is runner-queued work, not a new turn. Keep the
     // input card intact; the runner advances status only after the input resolves and this dequeues.
@@ -4685,7 +4690,7 @@ export class SessionsService {
       // A caller that knows the provider is idle and follows the durable receipts admits the
       // prompt as `queued`: the runner's started receipt, or its own running status, is what
       // makes it `running` (#1651).
-      this.db.updateSessionStatus(sessionId, delivery?.admitAs ?? (durablePrompt ? durable?.admitAs : undefined) ?? "running",
+      this.db.updateSessionStatus(sessionId, delivery?.admitAs ?? (durablePrompt ? binding?.admitAs : undefined) ?? "running",
         now, undefined, false);
     }
     if (delivery) {
@@ -6366,17 +6371,16 @@ export class SessionsService {
       return fail("runner is offline", 409);
     }
     // Revocation stays; the restarted child is told which grants it lost (#1779). The notice is owed
-    // from the revocation onward, so a guardrail that refuses it now only delays it (#1861).
+    // before anything is revoked, and counts once its decision reads revoked, so neither a crash nor
+    // a guardrail that refuses it now can lose it; the guardrail only delays it (#1861).
     const revokedByRestart = this.db.unconsumedWorkflowDecisionsForSession(sessionId);
+    this.db.oweRestartNotices(sessionId, revokedByRestart.map((decision) => ({
+      occurrenceId: decision.occurrenceId,
+      category: decision.category,
+      resourceKey: decision.resourceKey,
+      priorStatus: decision.status === "approved" ? "approved" as const : "pending" as const,
+    })), now);
     this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-restarted");
-    this.db.oweRestartNotices(sessionId, revokedByRestart
-      .filter((decision) => this.db.workflowDecisionByOccurrence(decision.occurrenceId)?.status === "revoked")
-      .map((decision) => ({
-        occurrenceId: decision.occurrenceId,
-        category: decision.category,
-        resourceKey: decision.resourceKey,
-        priorStatus: decision.status === "approved" ? "approved" as const : "pending" as const,
-      })), now);
     this.abortPolicyHookApprovals(session, now, "session-restarted");
     this.db.setPendingApproval(sessionId, null);
     // Record a reconciled placement now rather than waiting for the runner's first snapshot to echo
@@ -8267,25 +8271,24 @@ export class SessionsService {
       if (daily && daily.spentUsd >= daily.budgetUsd) return "daily budget reached";
     }
     const occurrenceIds = held.map((entry) => entry.occurrenceId);
-    let staged = false;
+    let claimed = false;
     const notice = this.prompt(
       sessionId, restartRevokedDecisionsPrompt(held), [], undefined, undefined, undefined, "session", true, {
         // An idle child admits it the way a decision's resume is admitted, following its receipts.
         ...(session.status === "idle" ? { admitAs: "queued" as const } : {}),
-        stage: (runnerId, command, at) => {
-          const record = this.promptOutbox.stageRestartNotice(occurrenceIds, sessionId, runnerId, command, at);
-          staged = true;
-          return record;
-        },
+        stage: (runnerId, command, at) => this.promptOutbox.stageRestartNotice(occurrenceIds, sessionId, runnerId, command, at),
+        // Without a durable command there is no receipt to follow, so the notice is recorded
+        // delivered before the send, not after it: a crash between the two can lose it, as the
+        // immediate lane can lose any frame, but can never send it twice.
+        claimImmediate: () => (claimed = this.db.claimHeldRestartNotices(sessionId, occurrenceIds, now)),
       },
     );
     if (!notice.ok) {
+      if (claimed) this.db.releaseRestartNoticeClaim(sessionId, occurrenceIds, Date.now());
       // Only the restart reports it: the sweep offers it again every few seconds.
       if (atRestart) this.log.warn(`restart revocation notice held for ${sessionId}: ${notice.error}`);
       return notice.error ?? "the notice was refused";
     }
-    // Without a durable command there is no receipt to follow: the accepted prompt is the delivery.
-    if (!staged) this.db.settleHeldRestartNotices(sessionId, occurrenceIds, "delivered", now);
     return null;
   }
 
@@ -8398,7 +8401,7 @@ export class SessionsService {
     this.db.abandonHeldWorkflowDecisionResumes(sessionId, Date.now());
     // A restart owes its child the notice it cannot yet deliver, and a later restart adds to that
     // notice rather than replacing it; every other end means no child is left to tell (#1861).
-    if (actorId !== "session-restarted") this.db.abandonHeldRestartNotices(sessionId, Date.now());
+    if (actorId !== "session-restarted") this.db.abandonRestartNotices(sessionId, Date.now());
   }
 
   /** A Claude Code child's armed enqueue never produces a permission receipt in auto or Full Access
