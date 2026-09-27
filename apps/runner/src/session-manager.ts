@@ -15743,8 +15743,11 @@ export class SessionManager {
           .filter((job) => job.parentTurnId === parentTurnId);
         const continuationId = barrierJobs.find((job) => job.continuationId)?.continuationId ??
           `bgcont_${randomUUID()}`;
+        // A job that already has its own id keeps it: an overflow split or a restored model stop
+        // (#1855) is queued apart from a continuation that does not name it, and delivery proof is
+        // keyed by that id.
         for (const job of barrierJobs) {
-          job.continuationId = continuationId;
+          job.continuationId ??= continuationId;
           job.continuationQueuedAt ??= queuedAt;
         }
       }
