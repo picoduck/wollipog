@@ -702,6 +702,10 @@ export function provisionClaudeHooks(
     controlPlaneUrl: string;
     controlPlaneProtocolVersion: number | null;
     enabled: boolean;
+    /** bwrap cannot expose the manager hook's writable circuit inside the masked runner state. */
+    executionIsolationMode?: "provider" | "bwrap" | "seatbelt" | "windows-job";
+    /** Report an isolation refusal on the session's launch event stream. */
+    onManagerHookUnavailable?: (reason: string) => void;
     allowInsecureTransport?: boolean;
     registerCredential?: (sessionId: string, tokenHash: string) => void;
     /**
@@ -786,6 +790,7 @@ export function provisionClaudeHooks(
   // the runner-owned file.
   const managerHooksBlocked = spec.config?.permissionMode === "orchestrator" ||
     !config.enabled ||
+    config.executionIsolationMode === "bwrap" ||
     config.controlPlaneProtocolVersion == null ||
     config.controlPlaneProtocolVersion < CLAUDE_HOOK_PROTOCOL_VERSION ||
     !native || !targetIsHost || !hookTransportSupported(spec);
@@ -887,6 +892,13 @@ export function provisionClaudeHooks(
       log(`Claude hooks ${spec.sessionId}: WSL/container hook path translation is not supported`);
     } else if (config.enabled && !targetIsHost) {
       log(`Claude hooks ${spec.sessionId}: container/cloud hook injection is not supported`);
+    } else if (config.enabled && config.executionIsolationMode === "bwrap" &&
+        spec.config?.permissionMode !== "orchestrator" && hookTransportSupported(spec)) {
+      const reason = "Manager policy hooks are unavailable under runner bwrap isolation: the hook " +
+        "cannot write its circuit in the masked runner state. Set executionIsolation.mode to " +
+        "provider to use the runner-memory policy relay.";
+      log(`Claude hooks ${spec.sessionId}: ${reason}`);
+      config.onManagerHookUnavailable?.(reason);
     } else if (config.enabled &&
         (config.controlPlaneProtocolVersion == null ||
           config.controlPlaneProtocolVersion < CLAUDE_HOOK_PROTOCOL_VERSION)) {

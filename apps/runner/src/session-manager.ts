@@ -1886,6 +1886,12 @@ export class SessionManager {
     this.onDriverStderr(sessionId, notice);
   }
 
+  /** Surface a runner provisioning decision in the session's event stream at launch. */
+  noticeSessionLaunch(sessionId: string, notice: string): void {
+    this.log(`session launch ${boundedSessionIdForLog(sessionId)}: ${notice}`);
+    this.onDriverStderr(sessionId, notice);
+  }
+
   private refreshGuardFor(meta: SessionMeta): void {
     let outcome: ManagedWorktreeGuardRefreshOutcome;
     try {

@@ -374,9 +374,10 @@ Known limits of the runner-sandboxed form:
   back (the circuit, its lock, and the circuit's atomic-write temporaries), so the hook keeps
   working, while the protection list and every other session's files stay hidden. That grants
   nothing new: before this rule the whole directory was readable and writable there. `bwrap` cannot
-  grant a write inside its read-only data root. There, the manager hook already failed closed on
-  every call before this change, because its circuit write failed, and it still does. That is a
-  pre-existing limit, not something the mask introduces.
+  grant a write inside its read-only data root, so the runner omits manager policy hooks from those
+  launches and reports the reason in the session. The socket-backed managed-worktree guard remains
+  available. Use native Linux `provider` isolation to run the manager policy hook through the
+  runner-memory relay.
 - **The mask is bound at launch.** Like every other filesystem boundary here, it covers the entries
   that exist when the provider starts. The hook state directory is created before the sandbox is
   built, so nothing written into it later becomes visible.
@@ -513,7 +514,7 @@ host launch the runner does not sandbox, **the sidecar holds nothing and the run
 | --- | --- | --- |
 | Runner `provider`, Claude, native Linux | **Runner memory, relayed over the abstract socket.** Nothing in the hook state directory is a credential, and a circuit written there is ignored | `policy-hook-relay.test.ts` (real provisioning, real socket, real sidecar entry point), and a real claude 2.1.278 run |
 | Runner `seatbelt`, native macOS | Files, granted back through the mask's `managerTransport` rules (#1447), unchanged | **macOS CI only** (`managed-worktree-guard-seatbelt.integration.test.ts`) |
-| Runner `bwrap`, native Linux | Files, unchanged. `bwrap` cannot grant the circuit write, so the hook fails closed on every call, as it did before (see the known limits above) | Unchanged |
+| Runner `bwrap`, native Linux | Manager hooks are omitted with a session launch notice; the separate managed-worktree guard remains available through its verdict socket. Switch to `provider` isolation for the manager policy relay | `hook-settings.test.ts` |
 | Runner `provider`, Claude, macOS and Windows | Files, unchanged: readable and writable by the provider | Existing `policy-hook.test.ts` and `hook-settings.test.ts` |
 | A launch whose abstract socket could not be created or proven | Files, as before, and the runner log says the guard reads its file | `policy-hook-relay.test.ts` |
 | WSL, container, and cloud launches | No manager hooks (not provisioned there) | Unchanged |

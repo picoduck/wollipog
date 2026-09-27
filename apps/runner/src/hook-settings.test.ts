@@ -757,6 +757,53 @@ test("the guard is provisioned when manager hooks are DISABLED", () => temp((dir
   assert.equal(live.env?.MANAGER_TOKEN_FILE, undefined, "and no credential reference");
 }));
 
+test("bwrap refuses manager hooks with a launch reason while keeping the socket-backed guard", () => temp((dir) => {
+  const notices: string[] = [];
+  const logs: string[] = [];
+  const launch = spec();
+  resetClaudeGuardState();
+  provisionClaudeHooks(launch, {
+    ...config,
+    executionIsolationMode: "bwrap",
+    managedWorktreeProtections: PROTECTIONS,
+    managedWorktreeGuardSocket: "/tmp/wollipog-guard-test.sock",
+    verifyGuardLaunch: guardVerifies,
+    onManagerHookUnavailable: (reason) => notices.push(reason),
+  }, (line) => logs.push(line), host(dir));
+
+  const { file, live } = settingsOf(dir);
+  assert.deepEqual(launch.args, ["--settings", file]);
+  assert.equal(guardEntries(live).length, 1);
+  assert.equal(live.hooks?.PreToolUse?.length, 1, "only the guard may match a tool call");
+  assert.equal(live.hooks?.PostToolUse, undefined);
+  assert.equal(live.hooks?.UserPromptSubmit, undefined);
+  assert.equal(live.env?.MANAGER_TOKEN_FILE, undefined);
+  assert.equal(existsSync(claudeHookTokenPath(file)), false);
+  assert.equal(existsSync(claudeHookCircuitPath(file)), false);
+  assert.equal(prepareClaudeHookArgs(launch.args).guardActive, true);
+  assert.equal(prepareClaudeHookArgs(launch.args).hookAskCapable, false);
+  assert.deepEqual(launch.capabilities?.elicitation?.acceptEdits, ["none"]);
+  assert.equal(notices.length, 1);
+  assert.match(notices[0]!, /executionIsolation\.mode to provider/u);
+  assert.ok(logs.some((line) => line.includes(notices[0]!)));
+}));
+
+test("bwrap without a guard socket launches without either managed hook", () => temp((dir) => {
+  const notices: string[] = [];
+  const launch = spec();
+  resetClaudeGuardState();
+  provisionClaudeHooks(launch, {
+    ...config,
+    executionIsolationMode: "bwrap",
+    managedWorktreeProtections: PROTECTIONS,
+    managedWorktreeGuardSocket: null,
+    onManagerHookUnavailable: (reason) => notices.push(reason),
+  }, () => {}, host(dir));
+  assert.deepEqual(launch.args, []);
+  assert.equal(notices.length, 1);
+  assert.equal(existsSync(claudeHookSettingsPath(dir, launch.sessionId)), false);
+}));
+
 test("the guard is provisioned when the mode's elicitation is unsupported for manager hooks", () => temp((dir) => {
   // `auto` advertises stdio-control, so the manager policy transport is not used for it.
   const launch = provisionGuarded(dir, { config: { permissionMode: "auto" } });
