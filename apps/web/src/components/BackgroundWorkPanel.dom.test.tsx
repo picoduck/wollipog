@@ -125,6 +125,81 @@ test("every watchdog highlights its delivery and explains completion, recovery, 
   }
 });
 
+test("only the group holding the watchdog delivery is highlighted, and none without a watchdog (#1793)", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  // Groups list newest first, so turn-3 renders first and turn-2, the watchdog's, second.
+  const completedJob = (id: string, parentTurnId: string, registeredAt: number): ManagedBackgroundJobView => ({
+    ...baseJob,
+    id,
+    parentTurnId,
+    registeredAt,
+    terminalStatus: "completed",
+    terminalObservedAt: registeredAt + 100,
+    continuationRequired: true,
+    assistantResultPersistedAt: registeredAt + 200,
+  });
+  const render = (backgroundDeliveries: SessionView["backgroundDeliveries"]) => act(async () => root.render(
+    <BackgroundWorkPanel
+      session={{
+        id: "session",
+        runnerId: "runner",
+        backgroundWorkTracking: "managed",
+        backgroundJobs: [
+          completedJob("job-1", "turn-1", 1_000),
+          completedJob("job-2", "turn-2", 2_000),
+          completedJob("job-3", "turn-3", 3_000),
+        ],
+        backgroundDeliveries,
+      } as SessionView}
+      runnerOnline
+      runnerProtocolVersion={PROTOCOL_VERSION}
+      parentTurnEventIds={new Map([["turn-1", 41], ["turn-2", 42], ["turn-3", 43]])}
+      onOpenParentTurn={() => undefined}
+    />,
+  ));
+  const groups = () => [...container.querySelectorAll<HTMLElement>(".background-work-group")];
+  // Plain values per group, so a failure reports markers instead of inspecting DOM nodes.
+  const markers = () => groups().map((group) => ({
+    watchdogClass: group.classList.contains("background-work-group-watchdog"),
+    watchdogHighlighted: group.getAttribute("data-watchdog-highlighted"),
+    ariaCurrent: group.getAttribute("aria-current"),
+    watchdogState: group.getAttribute("data-watchdog-state"),
+  }));
+  const unmarked = { watchdogClass: false, watchdogHighlighted: null, ariaCurrent: null, watchdogState: null };
+  try {
+    await render([]);
+    assert.deepEqual(markers(), [unmarked, unmarked, unmarked],
+      "healthy history without a watchdog highlights no group");
+
+    await render([{
+      parentTurnId: "turn-1",
+      jobCount: 1,
+      terminalCount: 1,
+    }, {
+      parentTurnId: "turn-2",
+      jobCount: 1,
+      terminalCount: 1,
+      watchdogState: "result_not_projected",
+    }, {
+      parentTurnId: "turn-3",
+      jobCount: 1,
+      terminalCount: 1,
+    }]);
+    assert.deepEqual(markers(), [unmarked, {
+      watchdogClass: true,
+      watchdogHighlighted: "true",
+      ariaCurrent: "true",
+      watchdogState: "result_not_projected",
+    }, unmarked], "only the group holding the watchdog delivery is highlighted");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("terminal missing continuations show age and acknowledge independently without retry", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);

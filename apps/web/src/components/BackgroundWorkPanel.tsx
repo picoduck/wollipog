@@ -365,7 +365,9 @@ export function BackgroundWorkPanel({
             const groupDeliveries = group.deliveries;
             const watchdogDelivery = groupDeliveries.find((delivery) => delivery.watchdogState);
             const watchdogState = watchdogDelivery?.watchdogState;
-            const watchdogHighlighted = watchdogDelivery === highlightedWatchdogDelivery;
+            // With no watchdog anywhere both sides are undefined; that must not highlight every group.
+            const watchdogHighlighted = watchdogDelivery !== undefined &&
+              watchdogDelivery === highlightedWatchdogDelivery;
             const recoveryDeliveries = groupDeliveries.filter((delivery) =>
               delivery.watchdogState || (delivery.missingResultAt != null &&
                 delivery.runnerResultPersistedAt == null));
