@@ -2306,6 +2306,24 @@ export function toolTargetsGuardState(
   return null;
 }
 
+/** File tools that can change a path, unlike Read, Grep, and Glob. */
+const WORKTREE_EDIT_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+
+/** Hold Claude's path-bearing edits to the same managed-worktree boundary as `apply_patch`. */
+export function editToolTargetsManagedWorktree(
+  toolName: string,
+  input: unknown,
+  cwd: string,
+  protections: readonly ManagedWorktreeProtection[],
+): string | "malformed" | null {
+  if (!WORKTREE_EDIT_TOOLS.has(toolName)) return null;
+  const spec = GUARD_STATE_FILE_TOOLS[toolName]!;
+  const fields = input && typeof input === "object" ? input as Record<string, unknown> : {};
+  const path = fields[spec.key];
+  if (typeof path !== "string" || !path || path.includes("\0")) return "malformed";
+  return pathTargetsManagedWorktree(path, cwd, protections) ? MANAGED_WORKTREE_REFUSAL : null;
+}
+
 /* ---------------------------------------------------------------------------------------------
  * Codex `apply_patch`.
  *

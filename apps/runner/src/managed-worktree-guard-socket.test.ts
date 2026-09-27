@@ -131,6 +131,28 @@ test("the socket judges a Codex apply_patch exactly as the file transport does",
   assert.ok(unparseable.stderr.includes(MANAGED_WORKTREE_REFUSAL));
 });
 
+test("the socket refuses Claude Edit and Write against protected Git state", { skip: !POSIX }, async () => {
+  const { configDir, host } = fixture();
+  writeManagedWorktreeGuardProtections(claudeHookSessionProtectionsPath(configDir, "s_one"), [
+    { worktreePath: "/trees/one", repoPath: "/repo" },
+  ]);
+  const socket = await host.ensure("s_one");
+  for (const toolName of ["Edit", "Write"]) {
+    for (const path of ["/trees/one/.git/config", "/trees/one/src/app.ts"]) {
+      const outcome = await requestManagedWorktreeGuardVerdict(socket, JSON.stringify({
+        hook_event_name: "PreToolUse", tool_name: toolName, cwd: "/trees/one",
+        tool_input: { file_path: path },
+      }));
+      if (path.includes("/.git/")) {
+        assert.equal(outcome.exitCode, 0, toolName);
+        assert.ok(outcome.stdout.includes(MANAGED_WORKTREE_REFUSAL), toolName);
+      } else {
+        assert.deepEqual(outcome, { stdout: "", stderr: "", exitCode: 0 }, toolName);
+      }
+    }
+  }
+});
+
 test("an invalidated guard (its list removed) is a refusal over the socket too", { skip: !POSIX }, async () => {
   const { configDir, host } = fixture();
   const socket = await host.ensure("s_gone");

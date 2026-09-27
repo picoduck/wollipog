@@ -40,6 +40,7 @@ import {
   applyPatchTargetsProtected,
   commandTargetsGuardState,
   commandTargetsManagedWorktree,
+  editToolTargetsManagedWorktree,
   toolTargetsGuardState,
   type ManagedWorktreeProtection,
   type ProviderEnvironment,
@@ -209,7 +210,10 @@ export function managedWorktreeGuardDecision(
   }
   try {
     if (isFileTool) {
-      const verdict = toolTargetsGuardState(toolName, payload.tool_input, cwd, guardStateDirectory);
+      const stateVerdict = toolTargetsGuardState(toolName, payload.tool_input, cwd, guardStateDirectory);
+      const worktreeVerdict = stateVerdict ? null
+        : editToolTargetsManagedWorktree(toolName, payload.tool_input, cwd, protections);
+      const verdict = stateVerdict ?? worktreeVerdict;
       if (verdict === "malformed") {
         return { kind: "block", reason: `managed worktree guard received a ${toolName} call with no usable path` };
       }

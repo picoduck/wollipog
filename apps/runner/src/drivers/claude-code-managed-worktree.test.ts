@@ -319,6 +319,36 @@ test("the mediated fallback still emulates the fixed-rule modes", async (t) => {
   assert.deepEqual(responses.map((frame) => frame.response?.response?.behavior), ["allow"]);
 });
 
+test("the mediated fallback refuses Claude file edits of protected Git state", async (t) => {
+  const run = launch([], "bypassPermissions", PROTECTIONS);
+  t.after(() => run.driver.dispose());
+  for (const toolName of ["Edit", "Write"] as const) {
+    for (const [suffix, path] of [
+      ["protected", `${WORKTREE}/.git/config`],
+      ["ordinary", `${WORKTREE}/src/app.ts`],
+    ] as const) {
+      run.child.stdout.write(JSON.stringify({
+        type: "control_request",
+        request_id: `${toolName}-${suffix}`,
+        request: { subtype: "can_use_tool", tool_name: toolName, input: { file_path: path } },
+      }) + "\n");
+    }
+  }
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const responses = run.writes.join("").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as {
+      type?: string; response?: { request_id?: string; response?: { behavior?: string; message?: string } };
+    })
+    .filter((frame) => frame.type === "control_response");
+  assert.deepEqual(responses.map((frame) => [frame.response?.request_id, frame.response?.response?.behavior]), [
+    ["Edit-protected", "deny"], ["Edit-ordinary", "allow"],
+    ["Write-protected", "deny"], ["Write-ordinary", "allow"],
+  ]);
+  for (const frame of responses.filter((frame) => frame.response?.response?.behavior === "deny")) {
+    assert.equal(frame.response?.response?.message, MANAGED_WORKTREE_REFUSAL);
+  }
+});
+
 test("a rewritten file-form hook command falls back to mediation and reports the tamper (#1475)", (t) => {
   const dir = tempDir(t);
   const args = provision(dir, "tampered-1", "auto", { protections: PROTECTIONS });

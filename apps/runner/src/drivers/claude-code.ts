@@ -30,6 +30,7 @@ import {
   PLACELESS_CWD,
   commandTargetsGuardState,
   commandTargetsManagedWorktree,
+  editToolTargetsManagedWorktree,
   toolTargetsGuardState,
   type ManagedWorktreeProtection,
 } from "../managed-worktree-protection.js";
@@ -2594,7 +2595,17 @@ export class ClaudeCodeDriver implements Driver {
           // Defense in depth for `default`/`auto`, mirroring the guard hook exactly: the runner's
           // own hook state is off limits to every tool, and only then does the worktree veto run.
           const guardStateRefusal = this.managedWorktreeGuardStateVeto(req.tool_name, req.input);
+          // With no hook, the control channel is the only worktree veto for file edits. A
+          // control request has no cwd, so use the session directory as for mediated Bash calls.
+          // With a hook, its PreToolUse payload has the real cwd and has already judged the edit.
+          const fileVerdict = !guardStateRefusal && !this.managedWorktreeGuardActive &&
+            typeof req.tool_name === "string"
+            ? editToolTargetsManagedWorktree(req.tool_name, req.input, this.cwd, protections)
+            : null;
           const managedRefusal = guardStateRefusal ??
+            (fileVerdict === "malformed"
+              ? "Wollipog could not read the target path of this tool call, so it was refused."
+              : fileVerdict) ??
             (req.tool_name === "Bash" && typeof req.input?.command === "string"
               ? commandTargetsManagedWorktree(
                   req.input.command,

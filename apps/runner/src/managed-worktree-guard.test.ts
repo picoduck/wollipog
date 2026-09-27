@@ -187,6 +187,47 @@ test("an ordinary file-tool edit outside the guard's own state gets no opinion",
   }
 });
 
+test("Claude file edits obey the apply_patch worktree boundary while ordinary files remain editable", (t) => {
+  const f = fixture();
+  t.after(f.cleanup);
+  const other = "/repo-worktrees/session-b";
+  writeManagedWorktreeGuardProtections(f.protectionsFile, [
+    { worktreePath: WORKTREE, repoPath: REPO },
+    { worktreePath: other, repoPath: REPO },
+  ]);
+  for (const [toolName, key] of [
+    ["Edit", "file_path"], ["Write", "file_path"],
+    ["MultiEdit", "file_path"], ["NotebookEdit", "notebook_path"],
+  ] as Array<[string, string]>) {
+    for (const target of [
+      `${WORKTREE}/.git`,
+      `${other}/.git/config`,
+      `${REPO}/.git/worktrees/session-b/gitdir`,
+      other,
+    ]) {
+      const outcome = runManagedWorktreeGuardDecision(
+        hookInput({ tool_name: toolName, tool_input: { [key]: target } }), f.protectionsFile);
+      assert.equal(outcome.exitCode, 0, `${toolName} ${target}`);
+      assert.equal(JSON.parse(outcome.stdout).hookSpecificOutput.permissionDecisionReason,
+        MANAGED_WORKTREE_REFUSAL, `${toolName} ${target}`);
+    }
+    for (const target of [
+      `${WORKTREE}/src/app.ts`,
+      "src/app.ts",
+      `${other}/src/app.ts`,
+      "/unmanaged/project/src/app.ts",
+    ]) {
+      assert.deepEqual(runManagedWorktreeGuardDecision(
+        hookInput({ tool_name: toolName, tool_input: { [key]: target } }), f.protectionsFile),
+      { stdout: "", stderr: "", exitCode: 0 }, `${toolName} ${target}`);
+    }
+  }
+  // A read is not an edit; the managed-worktree veto does not prohibit inspecting Git state.
+  assert.deepEqual(runManagedWorktreeGuardDecision(
+    hookInput({ tool_name: "Read", tool_input: { file_path: `${other}/.git/config` } }), f.protectionsFile),
+  { stdout: "", stderr: "", exitCode: 0 });
+});
+
 test("a Bash call made by a subagent is evaluated exactly like any other Bash call", (t) => {
   const f = fixture();
   t.after(f.cleanup);
