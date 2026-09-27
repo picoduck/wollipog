@@ -1,24 +1,47 @@
 import { expect, test, type Locator } from "@playwright/test";
 
-/** The glyph's rendered alpha (0–255) and whether a surface is drawn behind it. */
+/**
+ * How an action icon paints: its glyph color, contrast against the transcript behind it, whether a
+ * surface is raised under it, and whether the unavailable slash is drawn across it.
+ */
 async function paint(locator: Locator) {
   return locator.evaluate((element) => {
-    const style = getComputedStyle(element);
     const canvas = document.createElement("canvas");
     canvas.width = canvas.height = 1;
-    const context = canvas.getContext("2d")!;
-    const alphaOf = (color: string) => {
+    const context = canvas.getContext("2d", { willReadFrequently: true })!;
+    const rgba = (color: string) => {
       context.clearRect(0, 0, 1, 1);
       context.fillStyle = color;
       context.fillRect(0, 0, 1, 1);
-      return context.getImageData(0, 0, 1, 1).data[3]!;
+      return [...context.getImageData(0, 0, 1, 1).data] as [number, number, number, number];
     };
-    return { glyphAlpha: alphaOf(style.color), surfaceAlpha: alphaOf(style.backgroundColor), color: style.color };
+    const luminance = ([r, g, b]: number[]) => {
+      const channel = (value: number) => {
+        const c = value / 255;
+        return c <= 0.03928 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4;
+      };
+      return 0.2126 * channel(r!) + 0.7152 * channel(g!) + 0.0722 * channel(b!);
+    };
+    let backdrop: Element | null = element.parentElement;
+    while (backdrop && rgba(getComputedStyle(backdrop).backgroundColor)[3] === 0) backdrop = backdrop.parentElement;
+    const ground = rgba(getComputedStyle(backdrop ?? document.body).backgroundColor);
+    const style = getComputedStyle(element);
+    const ink = rgba(style.color);
+    const [hi, lo] = [luminance(ink), luminance(ground)].sort((a, b) => b - a) as [number, number];
+    const slash = getComputedStyle(element, "::after");
+    return {
+      color: style.color,
+      glyphAlpha: ink[3],
+      contrast: Math.round(((hi + 0.05) / (lo + 0.05)) * 100) / 100,
+      surfaceAlpha: rgba(style.backgroundColor)[3],
+      opacity: style.opacity,
+      slashed: slash.content === '""' && slash.width === "18px",
+    };
   });
 }
 
 for (const theme of ["dark", "light"] as const) {
-  test(`unavailable message actions render muted at rest, on hover and on focus (${theme})`, async ({ page }) => {
+  test(`unavailable message actions stay slashed at rest, on hover and on focus (${theme})`, async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 900 });
     const url = "/command-inbox-projects-e2e.html?scenario=edit-in-fork";
     await page.goto(url); await page.evaluate(() => localStorage.clear()); await page.goto(url);
@@ -39,15 +62,19 @@ for (const theme of ["dark", "light"] as const) {
 
     const enabledAtRest = await paint(enabled);
     const unavailableAtRest = await paint(resend);
-    expect(enabledAtRest.glyphAlpha).toBe(255);
-    expect(unavailableAtRest.glyphAlpha).toBeLessThan(160);
+    expect(enabledAtRest.slashed).toBe(false);
+    expect(unavailableAtRest.slashed).toBe(true);
+    // Still a pressable control: an opaque glyph that clears 3:1 non-text contrast, not a faded one.
+    expect(unavailableAtRest.glyphAlpha).toBe(255);
+    expect(unavailableAtRest.opacity).toBe("1");
+    expect(unavailableAtRest.contrast).toBeGreaterThanOrEqual(3);
+    expect(unavailableAtRest.contrast).toBeLessThan(enabledAtRest.contrast);
     // One shared treatment: Edit in Fork and Edit & Resend paint the same.
-    expect((await paint(editInFork)).color).toBe(unavailableAtRest.color);
+    expect(await paint(editInFork)).toEqual(unavailableAtRest);
 
     // Hover lifts an enabled action once its short color/background transition settles.
     await enabled.hover();
     await expect.poll(async () => (await paint(enabled)).surfaceAlpha).toBeGreaterThan(0);
-    expect((await paint(enabled)).glyphAlpha).toBe(255);
 
     await resend.hover();
     expect(await paint(resend)).toEqual(unavailableAtRest);
@@ -58,12 +85,11 @@ for (const theme of ["dark", "light"] as const) {
     await page.keyboard.press("Tab");
     await expect(resend).toBeFocused();
     expect(await paint(resend)).toEqual(unavailableAtRest);
-    // The focus ring is not faded with the glyph.
     const outline = await resend.evaluate((element) => {
       const style = getComputedStyle(element);
-      return { width: style.outlineWidth, style: style.outlineStyle, opacity: style.opacity };
+      return { width: style.outlineWidth, style: style.outlineStyle };
     });
-    expect(outline).toEqual({ width: "2px", style: "solid", opacity: "1" });
+    expect(outline).toEqual({ width: "2px", style: "solid" });
 
     // Pressing still discloses the reason under the same accessible name.
     await page.keyboard.press("Enter");

@@ -5405,14 +5405,29 @@ textarea,
 }
 /* Every unavailable action (Rewind, Fork, Hand Off, Edit & Resend, Edit in Fork) stays focusable
    and pressable so it can disclose its reason, but reads as unavailable before it is pressed: a
-   muted glyph that neither brightens nor raises a surface on hover, focus or open. The glyph is
-   muted through its color, not `opacity`, so the global keyboard focus ring keeps full contrast. */
+   slashed glyph that neither brightens nor raises a surface on hover, focus or open. It is still a
+   control, so the glyph keeps the 3:1 non-text token rather than fading below it; the slash, not
+   a lower contrast, is what sets it apart. No `opacity`, so the focus ring keeps full contrast.
+   The slash's --bg halo matches the transcript it sits on and parts it from the glyph's strokes. */
 .tl-message-action-unavailable > .tl-message-icon,
 .tl-message-action-unavailable > .tl-message-icon:hover,
 .tl-message-action-unavailable > .tl-message-icon:focus-visible {
-  color: color-mix(in srgb, var(--text-faint) 45%, transparent);
+  position: relative;
+  color: var(--control-outline);
   background: transparent;
   cursor: help;
+}
+.tl-message-action-unavailable > .tl-message-icon::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 18px;
+  height: 1.5px;
+  margin: auto;
+  background: currentColor;
+  box-shadow: 0 0 0 1px var(--bg);
+  transform: rotate(45deg);
+  pointer-events: none;
 }
 .tl-message-icon.copy-status-copied { color: var(--positive-text); }
 .tl-message-icon.copy-status-failed { color: var(--danger-text); }

@@ -148,25 +148,31 @@ test("message metadata actions keep one compact target width on phones", () => {
     "Message actions must not change width independently at phone sizes");
 });
 
-test("unavailable message actions share one muted state that hover and focus cannot lift", () => {
+test("unavailable message actions share one slashed state that hover and focus cannot lift", () => {
   const shared = [
     ".tl-message-action-unavailable > .tl-message-icon",
     ".tl-message-action-unavailable > .tl-message-icon:hover",
     ".tl-message-action-unavailable > .tl-message-icon:focus-visible",
   ].join(", ");
+  const slash = ".tl-message-action-unavailable > .tl-message-icon::after";
   const unavailable = soleRuleBody(shared);
-  assert.match(unavailable, /color: color-mix\(in srgb, var\(--text-faint\) \d+%, transparent\);/);
+  // Still a pressable control, so its glyph keeps the 3:1 non-text token instead of fading below it.
+  assert.match(unavailable, /color: var\(--control-outline\);/);
   assert.match(unavailable, /background: transparent;/);
   // Opacity would also fade the global focus ring drawn on the same element.
   assert.doesNotMatch(unavailable, /opacity/);
+  const mark = soleRuleBody(slash);
+  assert.match(mark, /content: "";/);
+  assert.match(mark, /background: currentColor;/);
+  assert.match(mark, /rotate\(45deg\)/);
   // The shared rule outranks the enabled hover/focus rule only while that one stays class-only.
   assert.equal(soleRuleBody(".tl-message-icon:hover, .tl-message-icon:focus-visible"),
     "color: var(--text);\nbackground: var(--bg-elev-2);");
   const competing = allDeclarations(css).filter((declaration) =>
-    ["color", "background", "opacity", "cursor", "filter"].includes(declaration.prop) &&
+    ["color", "background", "opacity", "cursor", "filter", "content"].includes(declaration.prop) &&
     declaration.selectors.some((selector) =>
       selector.includes(".tl-message-action-unavailable") && !selector.endsWith("> span")) &&
-    declaration.selector !== shared);
+    declaration.selector !== shared && declaration.selector !== slash);
   assert.deepEqual(competing, [],
     "every unavailable message action must take its look from the one shared rule");
 });
