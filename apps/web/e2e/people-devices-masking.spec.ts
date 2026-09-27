@@ -32,17 +32,46 @@ async function expectNoEmailLeak(page: Page): Promise<void> {
  * or go, but may not be added again or multiply. Everything else is a leak the moment it appears:
  * in an added subtree's text or any of its attributes (accessible names, tooltips, data
  * attributes, synced input values), in changed text, or in a changed attribute. Old values are recorded
- * too, so a value written and then overwritten before the observer runs is still caught.
+ * too, so a value written and then overwritten before the observer runs is still caught. Only the
+ * exact text node or attribute that held a reveal when the watch started may report it as an old
+ * value, and only once: a revealed identifier written anywhere else, even briefly, is a leak.
  */
 async function watchIdentifierLeaks(page: Page): Promise<void> {
   await page.evaluate((identifiers) => {
     const count = (markup: string, value: string) => markup.split(value).length - 1;
     const baseline = new Map(identifiers.map((id) => [id, count(document.body.outerHTML, id)]));
-    const leaks: string[] = [];
-    const check = (where: string, value: string | null | undefined, onlyUnrevealed = false) => {
-      for (const id of identifiers) {
-        if (value?.includes(id) && !(onlyUnrevealed && baseline.get(id)! > 0)) leaks.push(`${where}: ${id}`);
+    const holds = (value: string | null | undefined) => identifiers.some((id) => value?.includes(id));
+    const revealedText = new Map<Node, string>();
+    const revealedAttributes = new Map<Element, Map<string, string>>();
+    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+    for (let node: Node | null = walker.currentNode; node; node = walker.nextNode()) {
+      if (node instanceof Element) {
+        for (const attribute of node.attributes) {
+          if (!holds(attribute.value)) continue;
+          const held = revealedAttributes.get(node) ?? new Map<string, string>();
+          revealedAttributes.set(node, held.set(attribute.name, attribute.value));
+        }
+      } else if (holds(node.textContent)) {
+        revealedText.set(node, node.textContent!);
       }
+    }
+    const leaks: string[] = [];
+    const check = (where: string, value: string | null | undefined, granted = "") => {
+      for (const id of identifiers) {
+        if (value?.includes(id) && !granted.includes(id)) leaks.push(`${where}: ${id}`);
+      }
+    };
+    /** The value a reveal granted this exact origin at the start, handed out once. */
+    const takeGrant = (node: Node, attribute?: string): string => {
+      if (attribute === undefined) {
+        const value = revealedText.get(node) ?? "";
+        revealedText.delete(node);
+        return value;
+      }
+      const held = node instanceof Element ? revealedAttributes.get(node) : undefined;
+      const value = held?.get(attribute) ?? "";
+      held?.delete(attribute);
+      return value;
     };
     const observer = new MutationObserver((records) => {
       for (const record of records) {
@@ -52,10 +81,10 @@ async function watchIdentifierLeaks(page: Page): Promise<void> {
           }
         } else if (record.type === "characterData") {
           check("changed text", record.target.textContent);
-          check("replaced text", record.oldValue, true);
+          check("replaced text", record.oldValue, takeGrant(record.target));
         } else if (record.type === "attributes" && record.target instanceof Element && record.attributeName) {
           check(`changed ${record.attributeName}`, record.target.getAttribute(record.attributeName));
-          check(`replaced ${record.attributeName}`, record.oldValue, true);
+          check(`replaced ${record.attributeName}`, record.oldValue, takeGrant(record.target, record.attributeName));
         }
       }
       const markup = document.body.outerHTML;
@@ -121,6 +150,37 @@ async function leaveAndReturn(page: Page, via: "pointer" | "keyboard", whileAway
   await expect(page.getByRole("heading", { name: "People & Devices" })).toBeVisible();
   await expect(page.getByRole("region", { name: "Paired Devices" }).getByText("Pat's Phone")).toBeVisible();
 }
+
+test("the identifier observer records transient disclosures that leave no trace in the final markup (#1816)", async ({ page }) => {
+  await openPeopleDevices(page);
+  const context = page.locator(".access-context");
+  await context.getByRole("button", { name: "Show Your Name" }).click();
+  await expect(context).toContainText(OWNER);
+
+  await watchIdentifierLeaks(page);
+  await page.evaluate(([owner, member]) => {
+    // Written and cleared in one task, so the observer only ever sees the final, clean values.
+    const tab = document.getElementById("connections-people-tab")!;
+    tab.setAttribute("aria-label", owner!);
+    tab.removeAttribute("aria-label");
+    const heading = document.getElementById("people-heading")!.firstChild!;
+    const original = heading.textContent!;
+    heading.textContent = member!;
+    heading.textContent = original;
+  }, [OWNER, MEMBER]);
+  await expectOnlyRevealed(page, OWNER);
+  expect(await takeIdentifierLeaks(page)).toEqual([`replaced aria-label: ${OWNER}`, `replaced text: ${MEMBER}`]);
+
+  // The node granted the reveal may drop it once; writing it back and away again is a new disclosure.
+  await watchIdentifierLeaks(page);
+  await page.evaluate((owner) => {
+    const revealed = document.querySelector(".access-context .personal-identifier-value")!.firstChild!;
+    revealed.textContent = "Hidden";
+    revealed.textContent = owner;
+    revealed.textContent = "Hidden";
+  }, OWNER);
+  expect(await takeIdentifierLeaks(page)).toEqual([`replaced text: ${OWNER}`]);
+});
 
 for (const formFactor of ["desktop", "phone"] as const) {
   test.describe(formFactor, () => {
