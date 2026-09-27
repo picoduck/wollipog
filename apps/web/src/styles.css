@@ -5398,21 +5398,22 @@ textarea,
   border-radius: var(--radius-sm);
   box-shadow: var(--shadow);
 }
-.tl-message-action-unavailable .tl-message-icon {
-  cursor: help;
-}
 .tl-message-icon:hover,
 .tl-message-icon:focus-visible {
   color: var(--text);
   background: var(--bg-elev-2);
 }
-.tl-message-icon:disabled {
-  color: var(--text-faint);
+/* Every unavailable action (Rewind, Fork, Hand Off, Edit & Resend, Edit in Fork) stays focusable
+   and pressable so it can disclose its reason, but reads as unavailable before it is pressed: a
+   muted glyph that neither brightens nor raises a surface on hover, focus or open. The glyph is
+   muted through its color, not `opacity`, so the global keyboard focus ring keeps full contrast. */
+.tl-message-action-unavailable > .tl-message-icon,
+.tl-message-action-unavailable > .tl-message-icon:hover,
+.tl-message-action-unavailable > .tl-message-icon:focus-visible {
+  color: color-mix(in srgb, var(--text-faint) 45%, transparent);
   background: transparent;
-  cursor: not-allowed;
-  opacity: 0.56;
+  cursor: help;
 }
-.tl-message-icon:disabled:hover { background: transparent; }
 .tl-message-icon.copy-status-copied { color: var(--positive-text); }
 .tl-message-icon.copy-status-failed { color: var(--danger-text); }
 .bubble {

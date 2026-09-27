@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { customProperties, declarationsOf, mediaBlocks, topLevelRule } from "./css-rules.js";
+import { allDeclarations, customProperties, declarationsOf, mediaBlocks, topLevelRule } from "./css-rules.js";
 
 const raw = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 /** Comments carry example declarations and prose; every check below reasons about real rules. */
@@ -146,6 +146,29 @@ test("message metadata actions keep one compact target width on phones", () => {
     block.maxWidths.some((width) => width <= 760) && block.containsSelector(".tl-message-icon"));
   assert.deepEqual(phoneOverrides, [],
     "Message actions must not change width independently at phone sizes");
+});
+
+test("unavailable message actions share one muted state that hover and focus cannot lift", () => {
+  const shared = [
+    ".tl-message-action-unavailable > .tl-message-icon",
+    ".tl-message-action-unavailable > .tl-message-icon:hover",
+    ".tl-message-action-unavailable > .tl-message-icon:focus-visible",
+  ].join(", ");
+  const unavailable = soleRuleBody(shared);
+  assert.match(unavailable, /color: color-mix\(in srgb, var\(--text-faint\) \d+%, transparent\);/);
+  assert.match(unavailable, /background: transparent;/);
+  // Opacity would also fade the global focus ring drawn on the same element.
+  assert.doesNotMatch(unavailable, /opacity/);
+  // The shared rule outranks the enabled hover/focus rule only while that one stays class-only.
+  assert.equal(soleRuleBody(".tl-message-icon:hover, .tl-message-icon:focus-visible"),
+    "color: var(--text);\nbackground: var(--bg-elev-2);");
+  const competing = allDeclarations(css).filter((declaration) =>
+    ["color", "background", "opacity", "cursor", "filter"].includes(declaration.prop) &&
+    declaration.selectors.some((selector) =>
+      selector.includes(".tl-message-action-unavailable") && !selector.endsWith("> span")) &&
+    declaration.selector !== shared);
+  assert.deepEqual(competing, [],
+    "every unavailable message action must take its look from the one shared rule");
 });
 
 test("mobile Session statuses stay on one measured line before fixed actions", () => {
