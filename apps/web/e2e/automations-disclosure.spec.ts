@@ -128,14 +128,18 @@ for (const { label, viewport } of [
       const unhealthy = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
       await expect(unhealthy).toContainText("Target Unavailable");
       if (label === "mobile") {
-        const layout = await unhealthy.evaluate((button) => {
-          const summary = button.querySelector(".automation-card-summary")!.getBoundingClientRect();
-          const badges = button.querySelector(".automation-card-meta")!.getBoundingClientRect();
-          return { summaryWidth: summary.width, buttonWidth: button.getBoundingClientRect().width,
-            summaryBottom: summary.bottom, badgesTop: badges.top };
-        });
-        expect(layout.summaryWidth).toBeGreaterThanOrEqual(layout.buttonWidth - 1);
-        expect(layout.badgesTop).toBeGreaterThan(layout.summaryBottom);
+        const checkRows = async (button: typeof unhealthy) => {
+          const layout = await button.evaluate((element) => {
+            const summary = element.querySelector(".automation-card-summary")!.getBoundingClientRect();
+            const badges = element.querySelector(".automation-card-meta")!.getBoundingClientRect();
+            return { summaryWidth: summary.width, buttonWidth: element.getBoundingClientRect().width,
+              summaryBottom: summary.bottom, badgesTop: badges.top };
+          });
+          expect(layout.summaryWidth).toBeGreaterThanOrEqual(layout.buttonWidth - 1);
+          expect(layout.badgesTop).toBeGreaterThan(layout.summaryBottom);
+        };
+        await checkRows(unhealthy);
+        await checkRows(page.getByRole("button", { name: /Weekly Digest/ }));
       }
       await unhealthy.click();
       await expect(page.getByRole("alert").filter({ hasText: /Waiting for target:/ })).toBeVisible();

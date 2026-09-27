@@ -13409,7 +13409,7 @@ body.shell-dock-dragging * {
 .automation-state { border-radius: 999px; padding: 3px 8px; font-size: 11px; font-weight: 700; }
 .automation-state.enabled { color: var(--green-on-tint); background: color-mix(in srgb, var(--green) 12%, transparent); }
 .automation-state.paused { color: var(--text-dim); background: var(--bg-elev-2); }
-.automation-state.unhealthy { color: var(--warning); background: color-mix(in srgb, var(--warning) 12%, transparent); }
+.automation-state.unhealthy { color: var(--warning-on-tint); background: color-mix(in srgb, var(--warning) 10%, transparent); }
 .automation-facts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 18px; margin: 14px 0; }
 .automation-facts div { min-width: 0; }
 .automation-facts dt { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: .04em; }
@@ -13764,7 +13764,7 @@ body.shell-dock-dragging * {
   .automation-editor, .automation-card { padding: 14px; }
   .automation-editor-head .icon-btn, .automation-editor-actions .btn { min-width: 44px; min-height: 44px; }
   .automation-checks label, .automation-enable { min-height: 44px; padding: 4px 0; }
-  .automation-card-toggle { display: grid; gap: 8px; min-height: 44px; }
+  .automation-card-toggle { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-height: 44px; }
   .automation-card-meta { flex-wrap: wrap; }
   .automation-card-actions .btn { min-height: 44px; flex: 1 1 90px; }
   .usage-view { padding: 14px; }
