@@ -168,6 +168,9 @@ export function ImageStrip({
             <button
               className="workspace-reference-remove"
               type="button"
+              // Keep the composer focused until the click lands, like Send: blurring it on
+              // pointerdown brings the phone rail back and moves this button out from under the finger.
+              onPointerDown={(event) => event.preventDefault()}
               onClick={() => onRemove(i)}
               aria-label={`Remove Workspace Reference ${workspaceReferenceLabel(img)}`}
             >
@@ -180,6 +183,9 @@ export function ImageStrip({
             <button
               className="image-remove"
               type="button"
+              // Keep the composer focused until the click lands, like Send: blurring it on
+              // pointerdown brings the phone rail back and moves this button out from under the finger.
+              onPointerDown={(event) => event.preventDefault()}
               onClick={() => onRemove(i)}
               aria-label="Remove Image"
             >

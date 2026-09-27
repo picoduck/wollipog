@@ -119,6 +119,53 @@ test.describe("with the composer focused, one tap", () => {
     await expect(chip).toBeFocused();
   });
 
+  test("turns Plan mode off, and keeps the composer focused", async ({ page }) => {
+    await openSession(page);
+    await page.evaluate(() => {
+      const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
+      fixture.setSlashCommands([], ["default", "acceptEdits", "plan"]);
+      fixture.updateSession("session-alpha", { permissionMode: "plan" });
+    });
+    // The idle phone composer collapses the bar; focusing it shows the pill.
+    const composer = await focusComposer(page);
+    const pill = page.getByRole("button", { name: "◒ Plan" });
+    await expect(pill).toBeVisible();
+    await tapOnce(page, pill);
+    await expect(pill).toHaveCount(0);
+    // The pill unmounts with the mode it shows, so focus must not have gone to it.
+    await expect(composer).toBeFocused();
+  });
+
+  test("removes an image, and keeps the composer focused", async ({ page }) => {
+    await openSession(page);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setSlashCommands([], ["default", "acceptEdits"], {
+      supportsImages: true,
+    }));
+    await page.locator(".composer-attach-input").setInputFiles([
+      { name: "one.png", mimeType: "image/png", buffer: Buffer.from([137, 80, 78, 71]) },
+    ]);
+    const remove = page.getByRole("button", { name: "Remove Image" });
+    await expect(remove).toHaveCount(1);
+    const composer = await focusComposer(page);
+    await tapOnce(page, remove);
+    await expect(remove).toHaveCount(0);
+    // The ✕ unmounts with its chip, so focus must not have gone to it.
+    await expect(composer).toBeFocused();
+  });
+
+  test("removes a workspace reference, and keeps the composer focused", async ({ page }) => {
+    await openSession(page);
+    const composer = await focusComposer(page);
+    await composer.pressSequentially("Review @src");
+    await page.getByRole("option", { name: /src\/session\.ts/ }).click();
+    const remove = page.getByRole("button", { name: "Remove Workspace Reference src/session.ts" });
+    await expect(remove).toBeVisible();
+    await focusComposer(page);
+    await tapOnce(page, remove);
+    await expect(remove).toHaveCount(0);
+    await expect(composer).toBeFocused();
+  });
+
   test("sends, and keeps the composer focused", async ({ page }) => {
     await openSession(page);
     const composer = await focusComposer(page);

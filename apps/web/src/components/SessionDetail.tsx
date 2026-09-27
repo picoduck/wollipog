@@ -5742,6 +5742,10 @@ function SessionDetailLoaded({
                       type="button"
                       className="mode-pill"
                       disabled={configRefusal !== null}
+                      // Keep the composer focused until the click lands, like Send: blurring it on
+                      // pointerdown brings the phone rail back and moves this pill out from under the
+                      // finger (#1903).
+                      onPointerDown={(event) => event.preventDefault()}
                       onClick={() => togglePlan(false)}
                       aria-describedby={configRefusal !== null ? configRefusalId : undefined}
                       title={configRefusal !== null
