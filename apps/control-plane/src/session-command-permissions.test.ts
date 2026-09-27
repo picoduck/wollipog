@@ -572,6 +572,20 @@ test("a person's Held Children carry queue-hold advice written for them, for a c
   };
   assert.deepEqual(upsertAdvice(clients.viewer), viewerAdvice);
   assert.deepEqual(upsertAdvice(clients.admin), adminAdvice);
+
+  // An admin stays connected across an ownership change. Owning the child changes no verdict on the
+  // Orchestrator itself, only its Held Children advice, which is resent once.
+  assert.equal(db.setResourceScope({
+    resource: "session", resourceId: "held-private", now: 5,
+    scope: { organizationId: local.organizationId, owner: { kind: "user", userId: "usr_admin" } },
+  }), true);
+  const orchUpserts = () => clients.admin.filter((message) => message.type === "session_upsert" && message.session.id === "orch").length;
+  const before = orchUpserts();
+  hub.closeScopedUiClients();
+  assert.equal(orchUpserts(), before + 1);
+  assert.deepEqual(upsertAdvice(clients.admin), serverCopy, "the admin now owns the child and may stop its job");
+  hub.closeScopedUiClients();
+  assert.equal(orchUpserts(), before + 1, "unchanged advice is not resent");
 });
 
 test("fork, rewind, review findings and worktree commands follow the role gate, the agent route allowlist and the worktree rules (#1864)", () => {

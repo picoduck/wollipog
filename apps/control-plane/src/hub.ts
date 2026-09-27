@@ -181,8 +181,8 @@ interface UiClientInfo {
   observedBackgroundDeliveryKeys?: Set<string>;
   /** Pending Someday sessions omitted from a legacy UI's compatibility projection. */
   hiddenIndefiniteReminderSessionIds?: Set<string>;
-  /** The command-permission verdict last sent for each session (#1843), so a scope change can
-   * resend only the sessions whose verdict it changed. */
+  /** The command-permission verdict and hold advice last sent for each session (#1843, #1875), so
+   * a scope change can resend only the sessions whose verdict or advice it changed. */
   sentCommandPermissions?: Map<string, string>;
   backgroundObservationWindowStartedAt?: number;
   backgroundObservationsInWindow?: number;
@@ -269,6 +269,13 @@ function holdAdviceOf(session: SessionView): string[] {
     ...(session.holds ?? []),
     ...(session.orchestratorCampaign?.heldChildren ?? []).flatMap((child) => child.holds),
   ].map((hold) => hold.recoveryAction);
+}
+
+/** What a reader was sent of a session that its principal decides: its verdict, and its hold advice,
+ * since each campaign child's advice follows the reader's verdict on that child rather than on this
+ * session (#1867), and a person's depends on whether they own it (#1875). */
+function permissionsKey(session: SessionView): string {
+  return JSON.stringify([session.commandPermissions, holdAdviceOf(session)]);
 }
 
 export class Hub {
@@ -584,8 +591,7 @@ export class Hub {
     info.visibleSessionIds = new Set(sessions.map((session) => session.id));
     const snapshotSessions = sessions.map((s) => withSessionCommandPermissions(this.db, info.principal, this.withQueue(s)));
     if (info.principal) {
-      info.sentCommandPermissions = new Map(snapshotSessions.map((session) =>
-        [session.id, JSON.stringify(session.commandPermissions)]));
+      info.sentCommandPermissions = new Map(snapshotSessions.map((session) => [session.id, permissionsKey(session)]));
     }
     info.visibleProjectIds = new Set(projects.map((project) => project.id));
     this.uiClients.set(client, info);
@@ -819,8 +825,9 @@ export class Hub {
 
   /** Scope changes invalidate the client's cached authorization snapshot. Reconnect creates a
    * fresh filtered snapshot, so a revoked team/membership grant cannot continue receiving data.
-   * Organization admins stay connected, but ownership decides their Stop Job verdict (#1843), so
-   * each is resent the sessions whose verdict the change moved. */
+   * Organization admins stay connected, but ownership decides their Stop Job verdict (#1843) and
+   * with it the queue-hold advice in an Orchestrator's Held Children (#1875), so each is resent the
+   * sessions whose verdict or advice the change moved. */
   closeScopedUiClients(): void {
     for (const [client, info] of this.uiClients) {
       if (info.principal === undefined || this.isOrganizationAdmin(info.principal)) continue;
@@ -843,9 +850,9 @@ export class Hub {
         const session = this.db.getSession(sessionId);
         if (!session) continue;
         const view = withSessionCommandPermissions(this.db, principal, this.withQueue(session));
-        const verdict = JSON.stringify(view.commandPermissions);
-        if (verdict === sent) continue;
-        info.sentCommandPermissions.set(sessionId, verdict);
+        const key = permissionsKey(view);
+        if (key === sent) continue;
+        info.sentCommandPermissions.set(sessionId, key);
         this.safeSend(client, { type: "session_upsert", session: view });
       }
     }
@@ -1216,15 +1223,11 @@ export class Hub {
         }
         if (projected.type === "session_upsert" && info.principal !== undefined) {
           const session = withSessionCommandPermissions(this.db, info.principal, projected.session);
-          const verdict = JSON.stringify(session.commandPermissions);
-          // Hold advice is written for the reader too (#1867, #1875), and each campaign child's
-          // advice follows the reader's verdict on that child, not on this session, so it joins
-          // the key.
-          const key = JSON.stringify([verdict, holdAdviceOf(session)]);
+          const key = permissionsKey(session);
           const shared = projected === msg ? sessionDataByPermissions.get(key) : undefined;
           clientData = shared ?? JSON.stringify({ ...projected, session } satisfies ControlPlaneToUi);
           if (projected === msg && shared === undefined) sessionDataByPermissions.set(key, clientData);
-          (info.sentCommandPermissions ??= new Map()).set(session.id, verdict);
+          (info.sentCommandPermissions ??= new Map()).set(session.id, key);
         }
         if (projected.type === "session_removed") info.sentCommandPermissions?.delete(projected.sessionId);
         if (projected.type === "session_upsert") info.visibleSessionIds?.add(projected.session.id);
