@@ -962,6 +962,40 @@ test("an unavailable alternate installation is visible on the automation card", 
   }
 });
 
+test("a waiting target's resolution error is visible on its automation card", async () => {
+  const stored = schedule("waiting-target", "Waiting Target");
+  stored.targetHealth = {
+    scheduledFor: 60_000, firstSeenAt: 60_001,
+    error: "No configured automation target is available. Check that its Machine is online.",
+  };
+  const fixture = await mountFixture([stored]);
+  try {
+    assert.match(cardToggle(fixture.container, "Waiting Target").textContent ?? "", /Target Unavailable/);
+    await expandCard(fixture, "Waiting Target");
+    assert.match(fixture.container.querySelector('[role="alert"]')?.textContent ?? "",
+      /Waiting for target: No configured automation target is available/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("a legacy create-session Agent with one installation is shown as available", async () => {
+  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
+    ...runners[0]!.agents[0]!, installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
+    },
+  }] };
+  const stored = schedule("legacy-installation", "Legacy Installation");
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
+  try {
+    await expandCard(fixture, "Legacy Installation");
+    assert.doesNotMatch(fixture.container.textContent ?? "",
+      /Saved Agent Harness installation unavailable or unbound/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("automation cards are collapsed by default and render only their headers", async () => {
   const fixture = await mountFixture([
     schedule("automation-a", "Alpha"),

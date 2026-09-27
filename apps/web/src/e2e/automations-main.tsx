@@ -92,6 +92,14 @@ const items: AutomationSchedule[] = [
   },
 ];
 
+if (params.has("waiting-target")) {
+  items[0]!.targetHealth = {
+    scheduledFor: Date.now() - 60_000,
+    firstSeenAt: Date.now() - 59_000,
+    error: "No configured automation target is available. Check that its Machine is online.",
+  };
+}
+
 if (params.has("saved-installation")) {
   runner.protocolVersion = 175;
   runner.agents[0]!.installation = {

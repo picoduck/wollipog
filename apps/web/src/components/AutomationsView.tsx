@@ -88,12 +88,14 @@ function AutomationCard({
   name,
   action,
   enabled,
+  unhealthy,
   children,
 }: {
   id: string;
   name: string;
   action: string;
   enabled: boolean;
+  unhealthy: boolean;
   children: ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
@@ -115,6 +117,7 @@ function AutomationCard({
             <span className="automation-card-action">{action}</span>
           </span>
           <span className="automation-card-meta">
+            {unhealthy && <span className="automation-state unhealthy">Target Unavailable</span>}
             <span className={`automation-state ${enabled ? "enabled" : "paused"}`}>{enabled ? "Enabled" : "Paused"}</span>
             <span className="automation-card-chevron" aria-hidden="true">▸</span>
           </span>
@@ -883,11 +886,18 @@ export function AutomationsView() {
           const latest = executions[0];
           const actionRunner = item.action.kind === "prompt_session" ? undefined : runners.get(item.action.request.runnerId);
           const savedBindings = item.action.kind === "prompt_session" ? undefined : item.action.installationBindings;
+          const legacyAgentAvailable = (runner: typeof actionRunner, agentId: string) => {
+            const matches = runner?.agents.filter((agent) => agent.id === agentId) ?? [];
+            const installed = matches.filter((agent) => agent.installation);
+            return installed.length === 0
+              ? matches.some((agent) => agent.available)
+              : installed.length === 1 && installed[0]!.available &&
+                runnerSupportsProtocol(runner?.protocolVersion, "harnessInstallations");
+          };
           const unavailableInstallation = savedBindings && Object.values(savedBindings)
             .some((binding) => !bindingAvailable(actionRunner, binding));
           const unboundInstallation = item.action.kind === "create_session" && !savedBindings?.agent &&
-            !actionRunner?.agents.some((agent) => agent.id ===
-              (item.action.kind === "create_session" ? item.action.request.agentId : "") && !agent.installation);
+            !legacyAgentAvailable(actionRunner, item.action.request.agentId);
           const workflowAction = item.action.kind === "workflow_run" ? item.action : null;
           const unboundWorkflow = workflowAction !== null && (() => {
             const workflow = workflows.find((definition) =>
@@ -911,8 +921,7 @@ export function AutomationsView() {
               const bindings = target.installationBindings;
               if (Object.values(bindings ?? {}).some((binding) => !bindingAvailable(runner, binding))) return true;
               if (item.action.kind === "create_session") {
-                return !bindings?.agent && !runner?.agents.some((agent) =>
-                  agent.id === target.agentId && !agent.installation);
+                return !bindings?.agent && !legacyAgentAvailable(runner, target.agentId!);
               }
               if (!workflowAction) return false;
               const workflow = workflows.find((definition) =>
@@ -930,9 +939,12 @@ export function AutomationsView() {
               return unboundRole || Boolean(orchestrator && !bindings?.orchestrator &&
                 !runner?.agents.some((agent) => agent.id === orchestrator && !agent.installation));
             });
-          return <AutomationCard key={item.automationId} id={item.automationId} name={item.name} action={actionSummary(item.action)} enabled={item.enabled}>
+          return <AutomationCard key={item.automationId} id={item.automationId} name={item.name} action={actionSummary(item.action)} enabled={item.enabled} unhealthy={Boolean(item.targetHealth)}>
             {(unavailableInstallation || unboundInstallation || unboundWorkflow || unboundOrchestrator || unavailableAlternate) && <p className="automation-execution-error" role="alert">
               Saved Agent Harness installation unavailable or unbound. Edit this automation to choose an available installation.
+            </p>}
+            {item.targetHealth && <p className="automation-execution-error" role="alert">
+              Waiting for target: {item.targetHealth.error}
             </p>}
             <dl className="automation-facts"><div><dt>Schedule</dt><dd><code>{item.cron}</code> · {item.timezone}</dd></div><div><dt>Next Fire</dt><dd>{formatTime(item.nextFireAt)}</dd></div><div><dt>Last Result</dt><dd>{latest ? `${titleCaseLabel(latest.status)} · ${formatTime(latest.completedAt ?? latest.startedAt ?? latest.createdAt)}` : "Never"}</dd></div><div><dt>Policies</dt><dd>{titleCaseLabel(item.misfirePolicy.kind)} · {titleCaseLabel(item.runnerPolicy.kind)} · {titleCaseLabel(item.concurrencyPolicy)}</dd></div><div><dt>Ceilings</dt><dd>${item.limits.maxCostUsd} · {item.limits.maxToolCalls} Tools</dd></div></dl>
             {latest?.error && <p className="automation-execution-error">{latest.error}</p>}

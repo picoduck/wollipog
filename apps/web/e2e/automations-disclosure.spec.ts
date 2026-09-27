@@ -113,6 +113,32 @@ for (const { label, viewport } of [
 for (const { label, viewport } of [
   { label: "desktop", viewport: { width: 1280, height: 900 } },
   { label: "mobile", viewport: { width: 375, height: 812 } },
+]) for (const theme of ["dark", "light"] as const) {
+  test.describe(`${label} ${theme} target health`, () => {
+    test.use({ viewport });
+    test("shows an unresolved target in the list and its error in the card", async ({ page }) => {
+      const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+      await page.goto(`/automations-e2e.html?theme=${theme}`);
+      const toggle = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
+      await expect(toggle).toBeVisible();
+      if (evidenceDir) await page.screenshot({
+        path: join(evidenceDir, `automation-target-before-${label}-${theme}.png`), fullPage: true,
+      });
+      await page.goto(`/automations-e2e.html?theme=${theme}&waiting-target`);
+      const unhealthy = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
+      await expect(unhealthy).toContainText("Target Unavailable");
+      await unhealthy.click();
+      await expect(page.getByRole("alert").filter({ hasText: /Waiting for target:/ })).toBeVisible();
+      if (evidenceDir) await page.screenshot({
+        path: join(evidenceDir, `automation-target-after-${label}-${theme}.png`), fullPage: true,
+      });
+    });
+  });
+}
+
+for (const { label, viewport } of [
+  { label: "desktop", viewport: { width: 1280, height: 900 } },
+  { label: "mobile", viewport: { width: 375, height: 812 } },
 ]) {
   for (const theme of ["dark", "light"] as const) {
     test.describe(`${label} ${theme} inherited alternate workflow pins`, () => {

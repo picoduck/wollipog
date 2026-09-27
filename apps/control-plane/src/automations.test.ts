@@ -1295,7 +1295,7 @@ test("changing a workflow's primary Machine drops an orphaned alternate Orchestr
   assert.equal(workflows[0]?.orchestratorAgentId, undefined);
 });
 
-test("an old plain-id automation requires an explicit installation migration", () => {
+test("an old plain-id create-session automation pins the sole advertised installation on save", () => {
   const { db, service, created } = harness(175);
   const actor = { kind: "human" as const, id: "device" };
   const legacy = service.create(baseSpec(), actor, 0).data!;
@@ -1307,24 +1307,117 @@ test("an old plain-id automation requires an explicit installation migration", (
   db.updateRunnerAgents("runner-1", [selected], 1_000);
   db.selectHarnessInstallation("runner-1", "agent-1", "system");
   const unchanged = service.update(legacy.automationId, baseSpec(), actor, 2_000).data!;
-  assert.equal(unchanged.action.kind === "create_session" && unchanged.action.installationBindings, undefined,
-    "an unrelated edit must not silently bind a legacy plain id");
+  assert.equal(unchanged.action.kind === "create_session" &&
+    unchanged.action.installationBindings?.agent?.installationId, "system");
   service.tick(60_000);
-  assert.equal(created.length, 0);
+  assert.equal(created[0]?.agentId, "agent-1");
+  assert.equal(db.listAutomationExecutions(legacy.automationId)[0]?.specSnapshot?.action.kind === "create_session" &&
+    db.listAutomationExecutions(legacy.automationId)[0]?.specSnapshot?.action.installationBindings?.agent?.installationId,
+  "system");
+});
 
-  const action = baseSpec().action;
-  assert.equal(action.kind, "create_session");
-  if (action.kind !== "create_session") throw new Error("expected create-session action");
-  const migrated = service.update(legacy.automationId, baseSpec({ action: {
-    kind: "create_session", request: action.request,
-    installationBindings: { agent: {
-      driver: "codex-app-server", context: { kind: "native" }, installationId: "system",
-    } },
-  } }), actor, 61_000).data!;
-  assert.equal(migrated.action.kind === "create_session" &&
-    migrated.action.installationBindings?.agent?.installationId, "system");
-  service.tick(120_000);
-  assert.equal(created.at(-1)?.agentId, "agent-1");
+test("the first due tick pins an untouched legacy action before launching it", () => {
+  const { db, service, created } = harness(175);
+  const legacy = service.create(baseSpec(), { kind: "human", id: "device" }, 0).data!;
+  const selected = { ...runner("runner-1").agents[0]!, driver: "codex-app-server" as const,
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" as const } };
+  db.updateRunnerAgents("runner-1", [selected], 1_000);
+  assert.equal(service.tick(60_000), 1);
+  assert.equal(created.length, 1);
+  const stored = db.getAutomation(legacy.automationId)!;
+  assert.equal(stored.action.kind === "create_session" &&
+    stored.action.installationBindings?.agent?.installationId, "system");
+  const execution = db.listAutomationExecutions(legacy.automationId)[0]!;
+  assert.equal(execution.specSnapshot?.action.kind === "create_session" &&
+    execution.specSnapshot.action.installationBindings?.agent?.installationId, "system");
+});
+
+test("an on-time unresolved target follows runner policy across every misfire policy", () => {
+  const misfires = [
+    { kind: "skip" as const }, { kind: "fire_once" as const },
+    { kind: "catch_up" as const, maxRuns: 2 },
+  ];
+  const runners = [
+    { kind: "wait" as const }, { kind: "expire" as const, afterMinutes: 2 },
+    { kind: "alternate" as const, targets: [{ runnerId: "runner-2", workspaceId: "ws-1", agentId: "agent-1" }],
+      expireAfterMinutes: 2 },
+  ];
+  for (const misfirePolicy of misfires) for (const runnerPolicy of runners) {
+    const { db, online, service, created } = harness();
+    const automation = service.create(baseSpec({ misfirePolicy, runnerPolicy }),
+      { kind: "human", id: "device" }, 0).data!;
+    online.clear();
+    assert.equal(service.tick(60_001), 0);
+    assert.equal(db.getAutomation(automation.automationId)?.targetHealth?.scheduledFor, 60_000);
+    assert.match(db.getAutomation(automation.automationId)?.targetHealth?.error ?? "", /target is available|Machine is online/);
+    assert.equal(db.listAutomationExecutions(automation.automationId).length, 0);
+    const unresolved = db.listAutomationEvents(automation.automationId).filter((event) => event.kind === "target_unresolved");
+    assert.equal(unresolved.length, 1);
+    assert.equal(unresolved[0]?.detail?.scheduledFor, 60_000);
+    assert.match(String(unresolved[0]?.detail?.message), /target unresolved:.*waiting/);
+    assert.equal(service.tick(121_000), 0, "an observed occurrence must not become a misfire");
+    assert.equal(db.listAutomationEvents(automation.automationId)
+      .some((event) => event.kind === "misfire_skipped"), false);
+    online.add("runner-1");
+    assert.equal(service.tick(121_001), 1);
+    assert.equal(created.length, 1);
+    assert.equal(db.listAutomationExecutions(automation.automationId)[0]?.scheduledFor, 60_000);
+    assert.equal(db.getAutomation(automation.automationId)?.targetHealth, undefined);
+  }
+});
+
+test("an on-time unresolved target expires with its resolution error instead of a misfire", () => {
+  for (const misfirePolicy of [
+    { kind: "skip" as const }, { kind: "fire_once" as const },
+    { kind: "catch_up" as const, maxRuns: 2 },
+  ]) {
+    const { db, online, service } = harness();
+    const automation = service.create(baseSpec({
+      misfirePolicy, runnerPolicy: { kind: "expire", afterMinutes: 2 },
+    }), { kind: "human", id: "device" }, 0).data!;
+    online.clear();
+    service.tick(60_001);
+    service.tick(120_001);
+    assert.equal(service.tick(180_000), 1);
+    const execution = db.listAutomationExecutions(automation.automationId)[0]!;
+    assert.equal(execution.status, "expired");
+    assert.equal(execution.scheduledFor, 60_000);
+    assert.match(execution.error ?? "", /Machine is online/);
+    assert.equal(db.getAutomation(automation.automationId)?.targetHealth, undefined);
+    assert.equal(db.listAutomationEvents(automation.automationId).some((event) =>
+      event.kind === "misfire_skipped"), false);
+  }
+});
+
+test("an occurrence first seen past grace still uses its configured misfire policy", () => {
+  const { db, service, created } = harness();
+  const actor = { kind: "human" as const, id: "device" };
+  const skipped = service.create(baseSpec({ misfirePolicy: { kind: "skip" } }), actor, 0).data!;
+  const fired = service.create(baseSpec({ misfirePolicy: { kind: "fire_once" } }), actor, 0).data!;
+  const caught = service.create(baseSpec({
+    misfirePolicy: { kind: "catch_up", maxRuns: 2 }, concurrencyPolicy: "parallel",
+  }), actor, 0).data!;
+  service.tick(5 * 60_000);
+  assert.equal(db.listAutomationExecutions(skipped.automationId)[0]?.status, "skipped");
+  assert.equal(db.listAutomationEvents(skipped.automationId).some((event) =>
+    event.kind === "target_unresolved"), false);
+  assert.equal(db.listAutomationExecutions(fired.automationId)[0]?.scheduledFor, 60_000);
+  assert.equal(db.listAutomationExecutions(caught.automationId).length, 2);
+  assert.equal(created.length, 3);
+});
+
+test("a late fire-once occurrence keeps its original misfire plan while its target is unavailable", () => {
+  const { db, online, service } = harness();
+  const automation = service.create(baseSpec({
+    misfirePolicy: { kind: "fire_once" }, runnerPolicy: { kind: "wait" },
+  }), { kind: "human", id: "device" }, 0).data!;
+  online.clear();
+  assert.equal(service.tick(5 * 60_000), 0);
+  online.add("runner-1");
+  assert.equal(service.tick(5 * 60_000 + 1), 1);
+  assert.equal(db.listAutomationExecutions(automation.automationId)[0]?.scheduledFor, 60_000);
+  assert.equal(db.getAutomation(automation.automationId)?.nextFireAt, 6 * 60_000,
+    "fire-once still skips the backlog that was missed before its first attempt");
 });
 
 test("explicitly reselecting a reused plain id clears a pinned installation", () => {

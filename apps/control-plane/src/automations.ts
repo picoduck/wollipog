@@ -413,13 +413,18 @@ function automationCapabilityError(
   return null;
 }
 
-/** Upgrade plain ids when their current exact installation is known. An unresolved old id stays
- * unchanged and the launch gate refuses it; guessing from a same-name candidate would retarget it. */
+/** Pin an exact advertised installation. Legacy create-session ids are recaptured only when their
+ * saved id has one advertised installation; unresolved and explicit unbound choices stay blocked. */
 function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: AutomationSchedule): AutomationSpec {
   if (spec.action.kind === "prompt_session") return spec;
+  const uniqueInstallation = (runnerId: string, agentId: string) => {
+    const advertised = db.getRunner(runnerId)?.agents.filter((agent) =>
+      agent.id === agentId && agent.installation) ?? [];
+    return advertised.length === 1 ? db.savedHarnessInstallation(runnerId, agentId) : null;
+  };
   const pin = (runnerId: string, ids: Record<string, string>, existing?: AutomationInstallationBindings,
     old?: { runnerId: string; ids: Record<string, string>; bindings?: AutomationInstallationBindings },
-    pruneAbsentOrchestrator = false) => {
+    pruneAbsentOrchestrator = false, recaptureLegacyAgent = false) => {
     const bindings = { ...existing };
     if (pruneAbsentOrchestrator && !Object.hasOwn(ids, "orchestrator")) delete bindings.orchestrator;
     for (const [key, agentId] of Object.entries(ids)) {
@@ -431,13 +436,18 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
         // recaptured; unrelated edits must not turn an unbound ID into a new installation.
         if (existing === undefined) {
           if (old.bindings?.[key]) bindings[key] = old.bindings[key];
+          else if (recaptureLegacyAgent && key === "agent") {
+            const saved = uniqueInstallation(runnerId, agentId);
+            if (saved) bindings[key] = saved;
+          }
         } else if (old.bindings?.[key]) {
           const selected = db.savedHarnessInstallation(runnerId, agentId);
           if (selected) bindings[key] = selected;
         }
         continue;
       }
-      const saved = db.savedHarnessInstallation(runnerId, agentId);
+      const saved = key === "agent" ? uniqueInstallation(runnerId, agentId)
+        : db.savedHarnessInstallation(runnerId, agentId);
       if (saved) bindings[key] = saved;
     }
     return Object.keys(bindings).length ? bindings : undefined;
@@ -447,7 +457,7 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
     const oldAction = previous?.action.kind === "create_session" ? previous.action : undefined;
     const primary = pin(action.request.runnerId, { agent: action.request.agentId }, action.installationBindings,
       oldAction ? { runnerId: oldAction.request.runnerId, ids: { agent: oldAction.request.agentId },
-        bindings: oldAction.installationBindings } : undefined);
+        bindings: oldAction.installationBindings } : undefined, false, true);
     // A create-session action has only an Agent selection. API clients can carry installation
     // metadata from an earlier Machine or action; never save an unrelated Orchestrator pin.
     const agentOnly = (bindings: AutomationInstallationBindings | undefined, explicit: boolean):
@@ -466,7 +476,7 @@ function pinAutomationSpec(db: ControlPlaneDb, spec: AutomationSpec, previous?: 
             ? previous.runnerPolicy.targets.find((candidate) => candidate.runnerId === target.runnerId) : undefined;
           const bindings = pin(target.runnerId, { agent: target.agentId! }, target.installationBindings,
             oldTarget ? { runnerId: oldTarget.runnerId, ids: { agent: oldTarget.agentId! },
-              bindings: oldTarget.installationBindings } : undefined);
+              bindings: oldTarget.installationBindings } : undefined, false, true);
           const { installationBindings: _oldTargetBindings, ...cleanTarget } = target;
           const cleaned = agentOnly(bindings, target.installationBindings !== undefined);
           return { ...cleanTarget, ...(cleaned !== undefined ? { installationBindings: cleaned } : {}) };
@@ -744,7 +754,7 @@ export class AutomationsService {
   }> {
     const { automationId: _automationId, revision: _revision, nextFireAt: _nextFireAt,
       lastFiredAt: _lastFiredAt, createdBy: _createdBy, createdAt: _createdAt,
-      updatedAt: _updatedAt, ...storedSpec } = schedule;
+      updatedAt: _updatedAt, targetHealth: _targetHealth, ...storedSpec } = schedule;
     const policy = trigger.deliveryPolicy;
     if (!policy) return ok({ spec: storedSpec });
     const currentPolicy = validateTriggerDeliveryPolicy(policy, storedSpec.action);
@@ -1143,6 +1153,11 @@ export class AutomationsService {
 
   private processDue(automation: AutomationSchedule, now: number): number {
     if (automation.nextFireAt === undefined) return 0;
+    const waiting = this.db.automationResolutionWait(automation.automationId, automation.nextFireAt);
+    if (waiting) {
+      return this.dispatch(automation, automation.nextFireAt, automation.nextFireAt,
+        waiting.nextFireAt, now) ? 1 : 0;
+    }
     const plan = duePlan(automation, now);
     const overdue = now - automation.nextFireAt >= MISFIRE_GRACE_MS;
     if (overdue && automation.misfirePolicy.kind === "skip") {
@@ -1185,30 +1200,42 @@ export class AutomationsService {
       return this.claimTerminal(automation, expectedNextFireAt, nextFireAt, "skipped",
         `execution '${active.executionId}' is still active`, now, "concurrency_skipped", scheduledFor);
     }
-    const target = this.resolveTarget(automation);
+    let current = automation;
+    if (automation.action.kind === "create_session") {
+      const pinned = pinAutomationSpec(this.db, automation, automation);
+      if (JSON.stringify(pinned.action) !== JSON.stringify(automation.action) ||
+          JSON.stringify(pinned.runnerPolicy) !== JSON.stringify(automation.runnerPolicy)) {
+        const updated = this.db.pinLegacyAutomationSpec(automation, pinned, now);
+        if (!updated) return false;
+        current = updated;
+      }
+    }
+    const target = this.resolveTarget(current);
     if (!target.ok) {
-      const expiry = automation.runnerPolicy.kind === "expire"
-        ? automation.runnerPolicy.afterMinutes
-        : automation.runnerPolicy.kind === "alternate" ? automation.runnerPolicy.expireAfterMinutes : undefined;
+      const expiry = current.runnerPolicy.kind === "expire"
+        ? current.runnerPolicy.afterMinutes
+        : current.runnerPolicy.kind === "alternate" ? current.runnerPolicy.expireAfterMinutes : undefined;
       if (expiry !== undefined && now - expectedNextFireAt >= expiry * 60_000) {
-        const claimed = this.claimTerminal(automation, expectedNextFireAt, nextFireAt, "expired", target.error!, now,
+        const claimed = this.claimTerminal(current, expectedNextFireAt, nextFireAt, "expired", target.error!, now,
           "execution_status_changed", scheduledFor);
         if (claimed) {
-          const execution = this.db.listAutomationExecutions(automation.automationId, 1)[0]!;
-          this.emit(automation, execution, "expired");
+          const execution = this.db.listAutomationExecutions(current.automationId, 1)[0]!;
+          this.emit(current, execution, "expired");
         }
         return claimed;
       }
+      this.db.recordAutomationResolutionWait(current.automationId, scheduledFor, nextFireAt, target.error!,
+        expiry === undefined ? "waiting for target" : `waiting up to ${expiry} minutes`, now);
       return false;
     }
     const execution = this.db.claimAutomationExecution({
-      executionId: shortId("axe_"), automationId: automation.automationId, expectedNextFireAt,
-      scheduledFor, nextFireAt, actionKind: automation.action.kind, status: "dispatching",
+      executionId: shortId("axe_"), automationId: current.automationId, expectedNextFireAt,
+      scheduledFor, nextFireAt, actionKind: current.action.kind, status: "dispatching",
       deliveryMode: "receipted_v53",
-      actor: { kind: "system", id: `automation:${automation.automationId}` }, now,
+      actor: { kind: "system", id: `automation:${current.automationId}` }, now,
     });
     if (!execution) return false;
-    this.deliverExecution(automation, execution, target.data!.target, now);
+    this.deliverExecution(current, execution, target.data!.target, now);
     return true;
   }
 

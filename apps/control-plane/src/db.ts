@@ -1681,6 +1681,16 @@ CREATE INDEX IF NOT EXISTS idx_automation_executions_history
 CREATE INDEX IF NOT EXISTS idx_automation_executions_active
   ON automation_executions(status, automation_id) WHERE status IN ('dispatching','running');
 
+CREATE TABLE IF NOT EXISTS automation_resolution_waits (
+  automation_id TEXT PRIMARY KEY,
+  scheduled_for INTEGER NOT NULL,
+  next_fire_at INTEGER NOT NULL,
+  first_seen_at INTEGER NOT NULL,
+  last_error TEXT NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY (automation_id) REFERENCES automations(automation_id)
+);
+
 CREATE TABLE IF NOT EXISTS automation_commands (
   command_id            TEXT PRIMARY KEY,
   execution_id          TEXT NOT NULL,
@@ -23138,6 +23148,7 @@ export class ControlPlaneDb {
         this.db.exec("ROLLBACK");
         return null;
       }
+      this.stmt("DELETE FROM automation_resolution_waits WHERE automation_id=?").run(input.automationId);
       const kind: AutomationAuditEventKind = current.enabled === spec.enabled
         ? "updated"
         : spec.enabled ? "enabled" : "disabled";
@@ -23172,6 +23183,7 @@ export class ControlPlaneDb {
         this.db.exec("ROLLBACK");
         return false;
       }
+      this.stmt("DELETE FROM automation_resolution_waits WHERE automation_id=?").run(automationId);
       this.stmt(
         "UPDATE automation_triggers SET secret_key='', deleted_at=?, updated_at=? WHERE automation_id=? AND deleted_at IS NULL",
       ).run(now, now, automationId);
@@ -23857,6 +23869,60 @@ export class ControlPlaneDb {
     return rows.map((row) => this.automation(row));
   }
 
+  /** Keep the original fire time while an on-time target resolution is retried. */
+  automationResolutionWait(automationId: string, scheduledFor: number):
+    { nextFireAt: number; firstSeenAt: number; lastError: string } | null {
+    const row = this.stmt(
+      "SELECT next_fire_at, first_seen_at, last_error FROM automation_resolution_waits WHERE automation_id=? AND scheduled_for=?",
+    ).get(automationId, scheduledFor) as
+      { next_fire_at: number; first_seen_at: number; last_error: string } | undefined;
+    return row ? { nextFireAt: row.next_fire_at, firstSeenAt: row.first_seen_at,
+      lastError: row.last_error } : null;
+  }
+
+  recordAutomationResolutionWait(
+    automationId: string, scheduledFor: number, nextFireAt: number,
+    error: string, waiting: string, now: number,
+  ): boolean {
+    return this.atomic(() => {
+      const current = this.stmt(
+        "SELECT next_fire_at FROM automations WHERE automation_id=? AND enabled=1 AND deleted_at IS NULL",
+      ).get(automationId) as { next_fire_at: number | null } | undefined;
+      if (current?.next_fire_at !== scheduledFor) return false;
+      const existing = this.automationResolutionWait(automationId, scheduledFor);
+      this.stmt(
+        `INSERT INTO automation_resolution_waits
+         (automation_id,scheduled_for,next_fire_at,first_seen_at,last_error,updated_at) VALUES (?,?,?,?,?,?)
+         ON CONFLICT(automation_id) DO UPDATE SET scheduled_for=excluded.scheduled_for,
+           next_fire_at=CASE WHEN scheduled_for=excluded.scheduled_for THEN next_fire_at ELSE excluded.next_fire_at END,
+           first_seen_at=CASE WHEN scheduled_for=excluded.scheduled_for THEN first_seen_at ELSE excluded.first_seen_at END,
+           last_error=excluded.last_error,updated_at=excluded.updated_at`,
+      ).run(automationId, scheduledFor, nextFireAt, now, error, now);
+      if (!existing) this.insertAutomationEvent({
+        automationId, kind: "target_unresolved", actor: { kind: "system", id: `automation:${automationId}` },
+        detail: { scheduledFor, error, message: `target unresolved: ${error}; ${waiting}` }, now,
+      });
+      return true;
+    });
+  }
+
+  pinLegacyAutomationSpec(automation: AutomationSchedule, spec: AutomationSpec, now: number): AutomationSchedule | null {
+    return this.atomic(() => {
+      const changed = this.stmt(
+        `UPDATE automations SET action_json=?,runner_policy=?,revision=revision+1,updated_at=?
+         WHERE automation_id=? AND revision=? AND next_fire_at=? AND enabled=1 AND deleted_at IS NULL`,
+      ).run(JSON.stringify(spec.action), JSON.stringify(spec.runnerPolicy), now,
+        automation.automationId, automation.revision, automation.nextFireAt ?? null);
+      if (Number(changed.changes) !== 1) return null;
+      this.insertAutomationEvent({
+        automationId: automation.automationId, kind: "updated",
+        actor: { kind: "system", id: `automation:${automation.automationId}` },
+        detail: { installationPinned: true }, now,
+      });
+      return this.getAutomation(automation.automationId);
+    });
+  }
+
   activeAutomationExecution(automationId: string): AutomationExecution | null {
     const row = this.stmt(
       `SELECT * FROM automation_executions WHERE automation_id=? AND status IN ('dispatching','running')
@@ -23903,7 +23969,7 @@ export class ControlPlaneDb {
       const schedule = this.automation(scheduleRow);
       const { automationId: _automationId, revision: _revision, nextFireAt: _nextFireAt,
         lastFiredAt: _lastFiredAt, createdBy: _createdBy, createdAt: _createdAt,
-        updatedAt: _updatedAt, ...specSnapshot } = schedule;
+        updatedAt: _updatedAt, targetHealth: _targetHealth, ...specSnapshot } = schedule;
       const terminal = input.status === "dispatching" ? null : input.now;
       this.stmt(
         `INSERT INTO automation_executions
@@ -23915,6 +23981,8 @@ export class ControlPlaneDb {
         schedule.revision, JSON.stringify(specSnapshot), input.deliveryMode ?? "legacy_at_most_once", input.actionKind,
         input.status, input.actor.kind, input.actor.id ?? null, input.error ?? null, input.now, terminal,
       );
+      this.stmt("DELETE FROM automation_resolution_waits WHERE automation_id=? AND scheduled_for=?")
+        .run(input.automationId, input.scheduledFor);
       this.insertAutomationEvent({
         automationId: input.automationId, executionId: input.executionId,
         kind: input.eventKind ?? "execution_claimed", actor: input.actor,
@@ -24612,11 +24680,15 @@ export class ControlPlaneDb {
   }
 
   private automation(row: AutomationRow): AutomationSchedule {
+    const waiting = row.next_fire_at === null ? null :
+      this.automationResolutionWait(row.automation_id, row.next_fire_at);
     return {
       automationId: row.automation_id, revision: row.revision, name: row.name, cron: row.cron_expression, timezone: row.timezone,
       enabled: row.enabled === 1,
       ...(row.next_fire_at === null ? {} : { nextFireAt: row.next_fire_at }),
       ...(row.last_fired_at === null ? {} : { lastFiredAt: row.last_fired_at }),
+      ...(waiting ? { targetHealth: { scheduledFor: row.next_fire_at!,
+        firstSeenAt: waiting.firstSeenAt, error: waiting.lastError } } : {}),
       misfirePolicy: JSON.parse(row.misfire_policy) as AutomationSchedule["misfirePolicy"],
       runnerPolicy: JSON.parse(row.runner_policy) as AutomationSchedule["runnerPolicy"],
       concurrencyPolicy: row.concurrency_policy,
