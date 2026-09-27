@@ -84,8 +84,9 @@ function clamp(value: number, min: number, max: number): number {
  * Escape is consumed by default, so one key closes only this layer (#718): a view's own Escape
  * handler — the session view's return to the Sessions list — would otherwise run on the same key
  * press and remove the layer beneath too (#1796). A caller that really wants the key to continue
- * opts out with `consumeEscape: false`. When focus was inside the popover, Escape returns it to the
- * trigger rather than letting it fall to the document as the panel unmounts.
+ * opts out with `consumeEscape: false`. A modal opened over the panel takes Escape first. When
+ * focus was inside the popover, Escape returns it to the trigger rather than letting it fall to the
+ * document as the panel unmounts.
  *
  * Placement runs in a LAYOUT effect: the panel's un-placed fallback position is absolute, and a
  * status-strip track clips overflow, so a passive effect would let one clipped frame paint.
@@ -126,6 +127,10 @@ export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTML
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      // A modal opened over the panel (the Search palette, a dialog) is the top layer and owns this
+      // key; the panel waits beneath it for the next Escape.
+      const root = rootRef.current;
+      if (Array.from(document.querySelectorAll('[aria-modal="true"]')).some((modal) => !root || !modal.contains(root))) return;
       if (consumeEscape) {
         event.preventDefault();
         event.stopPropagation();

@@ -150,6 +150,27 @@ test("Escape dismisses the popover and the control keeps its own accessible name
   await view.cleanup();
 });
 
+test("a modal opened over the popover keeps the first Escape", async () => {
+  const view = await mount(session(), { sessionId: "s1", totals: amount(), byModel: [] });
+  await view.open();
+  const modal = domWindow.document.createElement("div");
+  modal.setAttribute("role", "dialog");
+  modal.setAttribute("aria-modal", "true");
+  domWindow.document.body.append(modal);
+  const escape = new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  await act(async () => {
+    modal.dispatchEvent(escape);
+  });
+  assert.ok(view.popover(), "the popover beneath the modal stays open");
+  assert.equal(escape.defaultPrevented, false, "the modal's own Escape handling still sees the key");
+  modal.remove();
+  await act(async () => {
+    view.button()!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as never);
+  });
+  assert.equal(view.popover(), null);
+  await view.cleanup();
+});
+
 test("Escape from inside the popover returns focus to the cost chip", async () => {
   const view = await mount(session({ driver: "codex-app-server" }), { sessionId: "s1", totals: amount(), byModel: [] });
   await view.open();
