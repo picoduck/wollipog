@@ -93,14 +93,25 @@ function contextOf(rule: Rule): string {
   return parts.join("");
 }
 
-const setsOutline = (decl: Declaration) => decl.prop === "all" || decl.prop === "outline" || decl.prop.startsWith("outline-");
+/**
+ * Property names are case-insensitive, and an escaped one could spell `outline` in a way this cannot
+ * read, so an escaped name is treated as setting an outline and goes to review.
+ */
+function setsOutline(decl: Declaration): boolean {
+  const prop = decl.prop.toLowerCase();
+  return prop.includes("\\") || prop === "all" || prop === "outline" || prop.startsWith("outline-");
+}
 const normalise = (decl: Declaration) => `${decl.prop}: ${decl.value.trim().replace(/\s+/g, " ")}${decl.important ? " !important" : ""}`;
 
-/** An outline declaration that can only draw one of the known-good rings or move it. */
+/** Offsets that keep the ring on or beside its element; a larger one can move it out of sight. */
+const KNOWN_GOOD_OFFSET = /^-?[0-3](px)?$/;
+
+/** An outline declaration that can only draw one of the known-good rings or nudge it. */
 function knownGood(decl: Declaration): boolean {
   if (decl.important) return false;
-  if (decl.prop === "outline-offset") return true;
-  return decl.prop === "outline" && KNOWN_GOOD_OUTLINE.test(decl.value.trim().replace(/\s+/g, " "));
+  const value = decl.value.trim().replace(/\s+/g, " ");
+  if (decl.prop === "outline-offset") return KNOWN_GOOD_OFFSET.test(value);
+  return decl.prop === "outline" && KNOWN_GOOD_OUTLINE.test(value);
 }
 
 /** `context selector { declarations }` for every rule that sets an outline other than a known-good ring, sorted. */
@@ -142,10 +153,12 @@ test("outlineInventory records every outline that is not a known-good ring", () 
   assert.deepEqual(record(".r:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }"), []);
   assert.deepEqual(record(".r:focus-visible { background: red; outline: 2px solid transparent; }"), []);
   assert.deepEqual(record(".r { padding: 1px; }"), []);
+  assert.deepEqual(record(".r:focus-visible { outline: 2px solid var(--text); outline-offset: -3px; }"), []);
   for (const outline of [
     "outline: none", "outline: 0", "outline: 0.0px solid transparent", "outline: 2px solid Canvas",
     "outline-style: none", "outline-width: 0", "outline-color: Canvas", "outline: 2px solid transparent !important",
-    "all: unset", "outline: 3px dotted var(--accent)",
+    "all: unset", "outline: 3px dotted var(--accent)", "OUTLINE: none", "Outline-Style: none",
+    "outline-offset: 10000px", "outline-offset: -4px", "outl\\69ne: none",
   ]) assert.equal(record(`.r:focus-visible { ${outline}; }`).length, 1, outline);
 });
 
