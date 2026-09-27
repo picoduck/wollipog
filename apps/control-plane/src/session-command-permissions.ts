@@ -240,8 +240,8 @@ export function withHoldAdviceFor<T extends Pick<SessionView, "holds" | "queueHo
 export interface SessionCommandPermissionSource {
   isSessionOwner(principal: HumanPrincipal, sessionId: string): boolean;
   isSessionDescendant(ancestorId: string, targetId: string): boolean;
-  /** The records behind a projection's holds, read for an agent credential's projection, and for a
-   * person's when it lists a worktree-recovery hold. */
+  /** The records behind a projection's holds, read for every held child in an agent credential's
+   * projection, and for each worktree-held child in a person's. */
   sessionHoldRecords(ids: readonly string[]): Map<string,
     Pick<SessionView, "orchestratorPolicy" | "worktreeRecovery" | "queueHold"> & { parentSessionId: string | null }>;
 }
@@ -270,18 +270,20 @@ export function sessionHoldReaderFor(
 /** A campaign projection whose held children's advice is written for the principal reading it:
  * every hold for an agent credential (#1863), and worktree recovery for a person (#1867). The
  * projection spans every campaign descendant, and only a direct child's jobs are the Orchestrator's
- * to stop. A person's projection without a worktree-recovery hold is returned unchanged. */
+ * to stop. A person's reader rewrites nothing else, so only their worktree-held children are read,
+ * and a projection without one is returned unchanged. */
 export function withCampaignHoldAdviceFor<T extends Pick<OrchestratorCampaignProjection, "heldChildren">>(
   source: SessionCommandPermissionSource,
   principal: AuthPrincipal | null | undefined,
   projection: T,
 ): T {
   if (!principal || !projection.heldChildren?.length) return projection;
-  if (principal.kind !== "agent" &&
-      !projection.heldChildren.some((child) => child.holds.some((hold) => hold.kind === "worktree_recovery"))) {
-    return projection;
-  }
-  const records = source.sessionHoldRecords(projection.heldChildren.map((child) => child.sessionId));
+  const rewritten = principal.kind === "agent"
+    ? projection.heldChildren
+    : projection.heldChildren.filter((child) => child.holds.some((hold) => hold.kind === "worktree_recovery"));
+  if (!rewritten.length) return projection;
+  // A child left unread has no record, so it is returned as the projection listed it.
+  const records = source.sessionHoldRecords(rewritten.map((child) => child.sessionId));
   return {
     ...projection,
     heldChildren: projection.heldChildren.map((child) => {
