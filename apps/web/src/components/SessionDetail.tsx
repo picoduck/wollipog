@@ -1126,6 +1126,9 @@ function SessionDetailLoaded({
   const [activeWorkspaceResult, setActiveWorkspaceResult] = useState(0);
   const [workspaceDismissedFor, setWorkspaceDismissedFor] = useState<string | null>(null);
   const [inspectedWorkspaceReference, setInspectedWorkspaceReference] = useState<WorkspaceReference | null>(null);
+  // The chip never takes focus from a pointer (#1797), so the inspector cannot learn its opener
+  // from the focused element at open.
+  const workspaceReferenceReturnFocusRef = useRef<HTMLElement | null>(null);
   const [dragActive, setDragActive] = useState(false);
   // Up-arrow history recall (-1 = editing/not browsing). Prior prompts come from the timeline.
   const [histIdx, setHistIdx] = useState(-1);
@@ -5619,7 +5622,14 @@ function SessionDetailLoaded({
                   onSelect={selectWorkspaceCandidate}
                 />
               )}
-              <ImageStrip images={images} onRemove={remove} onInspectReference={setInspectedWorkspaceReference} />
+              <ImageStrip
+                images={images}
+                onRemove={remove}
+                onInspectReference={(reference, opener) => {
+                  workspaceReferenceReturnFocusRef.current = opener;
+                  setInspectedWorkspaceReference(reference);
+                }}
+              />
               {commandPreservesAttachedImages && (
                 <div className="composer-attachment-notice" role="status">
                   {DURABLE_COMMAND_ATTACHMENT_NOTICE}
@@ -5891,6 +5901,7 @@ function SessionDetailLoaded({
         <Modal
           title="Workspace Reference"
           onClose={() => setInspectedWorkspaceReference(null)}
+          returnFocusRef={workspaceReferenceReturnFocusRef}
           footer={<button className="btn primary" type="button" onClick={() => setInspectedWorkspaceReference(null)}>Done</button>}
         >
           <dl className="workspace-reference-details">

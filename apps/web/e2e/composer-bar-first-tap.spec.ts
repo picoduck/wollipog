@@ -51,11 +51,20 @@ async function focusComposer(page: Page) {
   return composer;
 }
 
-/** A single touch tap at the control's position as rendered with the composer focused. */
+/**
+ * A single touch tap at the control's position as rendered with the composer focused, held for as
+ * long as a finger's tap lasts. `touchscreen.tap` lifts in the same instant it lands, so anything
+ * that expires between pointerdown and click — a zero-delay timer, a frame — never gets the chance.
+ */
 async function tapOnce(page: Page, control: Locator) {
   const box = await control.boundingBox();
   expect(box, "the control must be on screen before the tap").not.toBeNull();
-  await page.touchscreen.tap(box!.x + box!.width / 2, box!.y + box!.height / 2);
+  const point = { x: box!.x + box!.width / 2, y: box!.y + box!.height / 2 };
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [point] });
+  await page.waitForTimeout(120);
+  await cdp.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+  await cdp.detach();
 }
 
 /**
@@ -102,7 +111,12 @@ test.describe("with the composer focused, one tap", () => {
     await expect(chip).toBeVisible();
     await focusComposer(page);
     await tapOnce(page, chip);
-    await expectFocusSettlesIn(page, page.getByRole("dialog", { name: "Workspace Reference" }));
+    const inspector = page.getByRole("dialog", { name: "Workspace Reference" });
+    await expectFocusSettlesIn(page, inspector);
+    // The chip opened it, so the chip gets focus back — not the composer the tap never blurred.
+    await inspector.getByRole("button", { name: "Done" }).click();
+    await expect(inspector).toHaveCount(0);
+    await expect(chip).toBeFocused();
   });
 
   test("sends, and keeps the composer focused", async ({ page }) => {
