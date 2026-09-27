@@ -11,7 +11,7 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { nextWorkflowRetryAt, workflowRetryTimerDelay } from "../workflow-retry.js";
 import { subscriptionRecoveryRevision } from "../ui-subscriptions.js";
 import { recoverSessionHistories, sessionHistoryEpochKey } from "../history-recovery.js";
-import { detailPlaceholder } from "../detail-placeholder.js";
+import { detailPlaceholder, listPlaceholder } from "../detail-placeholder.js";
 import { selectComparisonEvents, selectComparisonHistory, selectComparisonSession } from "../comparison-selectors.js";
 import { transcriptPresentation } from "../transcript-presentation.js";
 import { ArtifactPreview } from "./ArtifactPreview.js";
@@ -67,12 +67,18 @@ function MemberColumn({ sessionId }: { sessionId: string }) {
 export function RunsView({ onNewRun }: { onNewRun: () => void }) {
   const { navigate } = useStoreActions();
   const runs = useStoreSelector((s) => s.runs);
+  const conn = useStoreSelector((s) => s.conn);
+  const snapshotLoaded = useStoreSelector((s) => s.snapshotLoaded);
   const list = useMemo(
     () => [...runs.values()].sort((a, b) => b.createdAt - a.createdAt),
     [runs],
   );
 
   if (list.length === 0) {
+    if (!snapshotLoaded) {
+      const placeholder = listPlaceholder("Multi-Agent Runs", conn);
+      return <Empty icon={<RunsIcon size={28} />} title={placeholder.title} hint={placeholder.hint} />;
+    }
     return (
       <Empty
         icon={<RunsIcon size={28} />}

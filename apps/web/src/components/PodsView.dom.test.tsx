@@ -11,7 +11,7 @@ import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
-import { PodDetail } from "./PodsView.js";
+import { PodDetail, PodsView } from "./PodsView.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -193,4 +193,69 @@ test("a direct pod-to-pod route change starts from the new pod's own draft, erro
     await act(async () => root.unmount());
     container.remove();
   }
+});
+
+/** Renders the Pods list with a socket the test drives: nothing arrives until it says so. */
+async function renderPodsList(drive: (socket: FakeSocket) => void): Promise<{ text: string; createButton: boolean }> {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "pods-list", runtimeKey: "pods-list:1",
+    createSocket: (() => { let first = true; return () => { if (!first) return new FakeSocket(); first = false; return socket; }; })(),
+    close() {},
+  };
+  const navigation: ViewNavigation = { current: () => ({ name: "pods" }), push() {}, listen: () => () => {} };
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={api}>
+        <StoreProvider connection={connection} navigation={navigation}>
+          <PodsView onNewPod={() => {}} />
+        </StoreProvider>
+      </ApiProvider>,
+    ));
+    await act(async () => drive(socket));
+    return {
+      text: container.textContent ?? "",
+      createButton: [...container.querySelectorAll("button")].some((button) => button.textContent === "New Pod"),
+    };
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+}
+
+const snapshotWithPods = (pods: PodView[]): UiSnapshotMessage => ({
+  type: "snapshot",
+  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+  runners: [runner], boxes: [], projects: [], sessions: [], runs: [], pods,
+});
+
+test("before the first snapshot the Pods list is loading, not empty", async () => {
+  const list = await renderPodsList(() => {});
+  assert.match(list.text, /Loading Collaboration Pods…/u);
+  assert.doesNotMatch(list.text, /No Collaboration Pods Yet/u);
+  assert.equal(list.createButton, false);
+});
+
+test("an offline or unpaired dashboard shows the Pods list as unavailable, not empty", async () => {
+  const offline = await renderPodsList((socket) => socket.onclose?.({ code: 1006 }));
+  assert.match(offline.text, /Collaboration Pods Unavailable/u);
+  assert.doesNotMatch(offline.text, /No Collaboration Pods Yet/u);
+  assert.equal(offline.createButton, false);
+
+  const unauthorized = await renderPodsList((socket) => socket.onclose?.({ code: 1008 }));
+  assert.match(unauthorized.text, /Pair to Load Collaboration Pods/u);
+  assert.equal(unauthorized.createButton, false);
+});
+
+test("only a loaded snapshot with no pods shows the empty state and its create action", async () => {
+  const empty = await renderPodsList((socket) => socket.push(snapshotWithPods([])));
+  assert.match(empty.text, /No Collaboration Pods Yet/u);
+  assert.equal(empty.createButton, true);
+
+  const listed = await renderPodsList((socket) => socket.push(snapshotWithPods([podA])));
+  assert.match(listed.text, /Pod A/u);
+  assert.doesNotMatch(listed.text, /No Collaboration Pods Yet|Loading/u);
 });

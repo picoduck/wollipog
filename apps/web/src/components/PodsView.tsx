@@ -22,7 +22,7 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { useTimeline } from "./useTimeline.js";
 import { subscriptionRecoveryRevision } from "../ui-subscriptions.js";
 import { recoverSessionHistories, sessionHistoryEpochKey } from "../history-recovery.js";
-import { detailPlaceholder } from "../detail-placeholder.js";
+import { detailPlaceholder, listPlaceholder } from "../detail-placeholder.js";
 import { selectComparisonEvents, selectComparisonHistory } from "../comparison-selectors.js";
 import { transcriptPresentation } from "../transcript-presentation.js";
 import { matchesShortcut } from "../shortcuts.js";
@@ -202,8 +202,14 @@ function PodMemberColumn({
 export function PodsView({ onNewPod }: { onNewPod: () => void }) {
   const { navigate } = useStoreActions();
   const pods = useStoreSelector((state) => state.pods);
+  const conn = useStoreSelector((state) => state.conn);
+  const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const list = useMemo(() => [...pods.values()].sort((a, b) => b.updatedAt - a.updatedAt), [pods]);
   if (list.length === 0) {
+    if (!snapshotLoaded) {
+      const placeholder = listPlaceholder("Collaboration Pods", conn);
+      return <Empty icon={<PodsIcon size={28} />} title={placeholder.title} hint={placeholder.hint} />;
+    }
     return <Empty
         icon={<PodsIcon size={28} />}
         title="No Collaboration Pods Yet"

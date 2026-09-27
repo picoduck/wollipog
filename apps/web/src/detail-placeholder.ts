@@ -38,6 +38,14 @@ export function detailPlaceholder(
   return { title: `Loading ${resource.toLowerCase()}…`, hint: "Waiting for the control-plane snapshot." };
 }
 
+/** A resource list before the first snapshot. An empty map proves nothing until then, so the list
+ * must not claim "No … Yet" or offer to create what may already exist. */
+export function listPlaceholder(resource: "Multi-Agent Runs" | "Collaboration Pods", conn: ConnState): DetailPlaceholder {
+  if (conn === "unauthorized") return { title: `Pair to Load ${resource}`, hint: "This device needs access to the control plane." };
+  if (conn === "offline") return { title: `${resource} Unavailable`, hint: "Reconnect to the control plane to load this list." };
+  return { title: `Loading ${resource}…`, hint: "Waiting for the control-plane snapshot." };
+}
+
 /** Scope lookup completion to the route that produced it. This is defensive against stale async
  * completion if a future caller preserves lookup state while navigating between session routes. */
 export function routedSessionPlaceholder(

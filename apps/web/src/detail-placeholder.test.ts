@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   detailPlaceholder,
+  listPlaceholder,
   routedSessionPlaceholder,
   shouldHydrateRoutedSession,
   shouldLookupRoutedSession,
@@ -13,6 +14,18 @@ test("detail placeholders do not claim a resource is missing before authoritativ
   });
   assert.equal(detailPlaceholder("Run", { authoritative: false, conn: "offline" }).title, "Run Unavailable");
   assert.equal(detailPlaceholder("Pod", { authoritative: false, conn: "unauthorized" }).title, "Pair to load pod");
+});
+
+test("list placeholders name the loading, offline and unpaired states in Title Case", () => {
+  assert.deepEqual(listPlaceholder("Multi-Agent Runs", "connecting"), {
+    title: "Loading Multi-Agent Runs…", hint: "Waiting for the control-plane snapshot.",
+  });
+  assert.deepEqual(listPlaceholder("Collaboration Pods", "offline"), {
+    title: "Collaboration Pods Unavailable", hint: "Reconnect to the control plane to load this list.",
+  });
+  assert.deepEqual(listPlaceholder("Multi-Agent Runs", "unauthorized"), {
+    title: "Pair to Load Multi-Agent Runs", hint: "This device needs access to the control plane.",
+  });
 });
 
 test("only an authoritative miss renders Not Found and transport errors stay distinct", () => {

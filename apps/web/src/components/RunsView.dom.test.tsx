@@ -9,7 +9,7 @@ import { ApiProvider } from "../api-context.js";
 import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
-import { RunDetail } from "./RunsView.js";
+import { RunDetail, RunsView } from "./RunsView.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -177,4 +177,69 @@ test("a direct run-to-run route change while offline drops the previous run's wo
   } finally {
     await unmount(fixture);
   }
+});
+
+/** Renders the Runs list with a socket the test drives: nothing arrives until it says so. */
+async function renderRunsList(drive: (socket: FakeSocket) => void): Promise<{ text: string; createButton: boolean }> {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "runs-list", runtimeKey: "runs-list:1",
+    createSocket: (() => { let first = true; return () => { if (!first) return new FakeSocket(); first = false; return socket; }; })(),
+    close() {},
+  };
+  const navigation: ViewNavigation = { current: () => ({ name: "runs" }), push() {}, listen: () => () => {} };
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={api}>
+        <StoreProvider connection={connection} navigation={navigation}>
+          <RunsView onNewRun={() => {}} />
+        </StoreProvider>
+      </ApiProvider>,
+    ));
+    await act(async () => drive(socket));
+    return {
+      text: container.textContent ?? "",
+      createButton: [...container.querySelectorAll("button")].some((button) => button.textContent === "New Multi-Agent Run"),
+    };
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+}
+
+const snapshotWithRuns = (runs: RunView[]): UiSnapshotMessage => ({
+  type: "snapshot",
+  capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
+  runners: [], boxes: [], projects: [], sessions: [], runs, pods: [],
+});
+
+test("before the first snapshot the Runs list is loading, not empty", async () => {
+  const list = await renderRunsList(() => {});
+  assert.match(list.text, /Loading Multi-Agent Runs…/u);
+  assert.doesNotMatch(list.text, /No Multi-Agent Runs Yet/u);
+  assert.equal(list.createButton, false);
+});
+
+test("an offline or unpaired dashboard shows the Runs list as unavailable, not empty", async () => {
+  const offline = await renderRunsList((socket) => socket.onclose?.({ code: 1006 }));
+  assert.match(offline.text, /Multi-Agent Runs Unavailable/u);
+  assert.doesNotMatch(offline.text, /No Multi-Agent Runs Yet/u);
+  assert.equal(offline.createButton, false);
+
+  const unauthorized = await renderRunsList((socket) => socket.onclose?.({ code: 1008 }));
+  assert.match(unauthorized.text, /Pair to Load Multi-Agent Runs/u);
+  assert.equal(unauthorized.createButton, false);
+});
+
+test("only a loaded snapshot with no runs shows the empty state and its create action", async () => {
+  const empty = await renderRunsList((socket) => socket.push(snapshotWithRuns([])));
+  assert.match(empty.text, /No Multi-Agent Runs Yet/u);
+  assert.equal(empty.createButton, true);
+
+  const listed = await renderRunsList((socket) => socket.push(snapshotWithRuns([runA])));
+  assert.match(listed.text, /Run A/u);
+  assert.doesNotMatch(listed.text, /No Multi-Agent Runs Yet|Loading/u);
 });
