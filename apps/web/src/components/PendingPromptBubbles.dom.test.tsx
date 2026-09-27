@@ -240,6 +240,13 @@ test("pending prompts render as stable transcript bubbles and reconcile by comma
       "pending-prompt-details-auth-retry",
       "pending-prompt-details-auth-retry",
     ]);
+    // styles.css gives these actions their on-accent ink as `.pending-prompt-actions .btn.ghost`:
+    // an action that is not a ghost would keep `.btn`'s own surface, where that ink measures 1.12:1.
+    assert.deepEqual(
+      [...container.querySelectorAll(".pending-prompt-actions > *")].map((node) => [...node.classList].sort()),
+      buttons.map(() => ["btn", "ghost", "sm"]),
+      "every pending-prompt action must be a ghost button over the bubble",
+    );
     await act(async () => { for (const button of buttons) button.click(); });
     assert.deepEqual(actions, [
       "pending:cancel-local",

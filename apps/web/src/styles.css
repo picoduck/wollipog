@@ -1501,7 +1501,7 @@ textarea {
   color: var(--teal);
 }
 .tag-run {
-  color: var(--amber);
+  color: var(--amber-on-tint);
 }
 .card-approval {
   background: color-mix(in srgb, var(--amber) 8%, transparent);
@@ -5491,7 +5491,7 @@ textarea,
   color: var(--on-accent-deep);
 }
 .pending-prompt-actions { justify-content: flex-end; margin-top: 7px; }
-.pending-prompt-actions .btn { color: var(--on-accent-deep); border-color: currentColor; }
+.pending-prompt-actions .btn.ghost { color: var(--on-accent-deep); border-color: currentColor; }
 .steered-marker {
   display: inline-flex;
   margin-bottom: 5px;
@@ -7584,11 +7584,11 @@ button.file-head.source-path-link {
   border-color: color-mix(in srgb, var(--accent) 30%, transparent);
 }
 .atag.discovered {
-  color: var(--amber);
+  color: var(--amber-on-tint);
   border-color: color-mix(in srgb, var(--amber) 35%, transparent);
 }
 .atag.broken {
-  color: var(--red);
+  color: var(--danger-text);
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
 }
 .worktree-setup-notice {

@@ -9,6 +9,7 @@ import {
   RUNNER_TOKEN_FILE,
   suggestRunnerId,
   withHost,
+  type LocalRunnerReadiness,
   type OnboardingHealthCheck,
 } from "../onboarding.js";
 import {
@@ -73,6 +74,19 @@ export function OnboardingHealthChecklist({ health }: { health: OnboardingHealth
         </li>
       ))}
     </ul>
+  );
+}
+
+/**
+ * The local runner's status mark: one decorative glyph, or a spinner while it is still starting.
+ * The section's heading and text carry the status, which is why the contrast test holds the glyph
+ * to the 3:1 bar for graphics rather than the 4.5:1 bar for text.
+ */
+export function LocalReadinessIcon({ state }: { state: LocalRunnerReadiness["state"] }) {
+  return (
+    <div className="onboard-local-icon" aria-hidden="true">
+      {state === "ready" ? "✓" : state === "needs-attention" ? "!" : <Spinner />}
+    </div>
   );
 }
 
@@ -272,9 +286,7 @@ export function OnboardRunnerDialog({
         <div className="onboard">
           {showLocalSetup && (
             <section className={`onboard-local onboard-local-${localReadiness.state}`} aria-live="polite">
-              <div className="onboard-local-icon" aria-hidden="true">
-                {localReadiness.state === "ready" ? "✓" : localReadiness.state === "needs-attention" ? "!" : <Spinner />}
-              </div>
+              <LocalReadinessIcon state={localReadiness.state} />
               <div className="onboard-local-body">
                 <h3>{localBusy ? "Installing the Local Runner" : localTitle}</h3>
                 <p>

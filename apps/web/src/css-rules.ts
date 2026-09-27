@@ -137,6 +137,49 @@ export function rulesWith(css: string, props: readonly string[], alsoCollect: re
   return out;
 }
 
+export interface StyleRule {
+  /** Each complex selector in the rule's list, normalised, split on TOP-LEVEL commas only. */
+  selectors: string[];
+  /** Every declaration directly in the rule, last-wins as CSS applies it. */
+  declarations: Record<string, string>;
+  /** Source order, so a caller can break a specificity tie the way the cascade does. */
+  order: number;
+}
+
+/**
+ * Every unconditional rule: the direct children of the stylesheet, nothing inside `@media`,
+ * `@supports` or any other block, so each one applies whatever the viewport or feature set.
+ *
+ * The selector list is split only on commas outside parentheses and brackets. `:is(.a, .b)` is one
+ * selector, and splitting it produced two halves that each parsed as nonsense.
+ */
+export function topLevelRules(css: string): StyleRule[] {
+  const out: StyleRule[] = [];
+  parse(css).each((node) => {
+    if (node.type !== "rule") return;
+    const declarations: Record<string, string> = {};
+    for (const child of node.nodes) {
+      if (child.type === "decl") declarations[child.prop] = child.value.trim();
+    }
+    const selectors: string[] = [];
+    let depth = 0;
+    let current = "";
+    for (const char of node.selector) {
+      if (char === "(" || char === "[") depth += 1;
+      if (char === ")" || char === "]") depth -= 1;
+      if (char === "," && depth === 0) { selectors.push(current); current = ""; continue; }
+      current += char;
+    }
+    selectors.push(current);
+    out.push({
+      selectors: selectors.map((part) => part.trim().replace(/\s+/g, " ")).filter(Boolean),
+      declarations,
+      order: out.length,
+    });
+  });
+  return out;
+}
+
 export interface Declaration {
   selector: string;
   /** Every selector in the owning rule's list, normalised. A rule is exempt only if ALL of them are. */

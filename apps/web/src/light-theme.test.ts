@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { allDeclarations, customProperties, rulesWith, topLevelRule, type TintedRule } from "./css-rules.js";
+import { allDeclarations, customProperties, rulesWith, topLevelRule, topLevelRules, type TintedRule } from "./css-rules.js";
 import { COLOR_SCHEMES } from "./theme.js";
 
 /**
@@ -278,6 +278,14 @@ const ICON_ONLY = new Set([
     ".tl-message-action-unavailable > .tl-message-icon:hover",
     ".tl-message-action-unavailable > .tl-message-icon:focus-visible",
   ].join(", "),
+  // Onboarding status marks: each renders one aria-hidden glyph (✓, ! or △) beside a heading or
+  // label that states the status in text, which OnboardRunnerDialog.test.tsx pins. They are measured
+  // over their own `--bg-elev-3` disc as colour-only rules on a base fill.
+  ".onboard-local-ready .onboard-local-icon",
+  ".onboard-local-needs-attention .onboard-local-icon",
+  ".onboard-health-pass .onboard-health-icon",
+  ".onboard-health-warning .onboard-health-icon",
+  ".onboard-health-fail .onboard-health-icon",
 ]);
 
 /**
@@ -451,6 +459,159 @@ test("a legible ink on a transparent fill is measured on every base surface and 
   ]);
   assert.deepEqual([unresolved, failures], [[], []]);
   assert.equal(checked, PALETTES.length * SURFACES.length);
+});
+
+/** A selector's compounds, split on TOP-LEVEL combinators only, as `targets` below explains. */
+function compounds(selector: string): string[] {
+  const out: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const char of selector) {
+    if (char === "(" || char === "[") depth += 1;
+    if (char === ")" || char === "]") depth -= 1;
+    if (depth === 0 && /[\s>+~]/.test(char)) {
+      if (current) out.push(current);
+      current = "";
+      continue;
+    }
+    current += char;
+  }
+  if (current) out.push(current);
+  return out;
+}
+
+/** The simple selectors in one compound: its type, classes, ids, attributes and pseudo-classes. */
+function simpleSelectors(compound: string): string[] {
+  return compound.match(/\.[\w-]+|#[\w-]+|\[[^\]]*\]|::?[\w-]+(?:\((?:[^()]|\([^()]*\))*\))?|^[a-z][\w-]*/gi) ?? [];
+}
+
+/**
+ * Selector specificity as one comparable number. `:is()`, `:not()` and `:has()` count as their
+ * most specific argument and `:where()` as nothing, which is what the cascade does with them.
+ */
+function specificity(selector: string): number {
+  let score = 0;
+  for (const simple of compounds(selector).flatMap(simpleSelectors)) {
+    const functional = simple.match(/^:(is|not|has|where)\((.*)\)$/i);
+    if (functional) {
+      if (functional[1]!.toLowerCase() !== "where") {
+        score += Math.max(...args(functional[2]!).map((argument) => specificity(argument.replace(/^[>+~]\s*/, ""))));
+      }
+    } else if (simple.startsWith("#")) score += 10_000;
+    else if (/^(\.|\[|:(?!:))/.test(simple)) score += 100;
+    else score += 1;
+  }
+  return score;
+}
+
+/**
+ * Every rule that sets a colour and no fill, paired with the fill a rule its selector implies gives
+ * the SAME element.
+ *
+ * `.atag.broken { color: var(--red) }` declares no fill, and `.atag { background: var(--bg-elev-3) }`
+ * pairs that fill with a legible ink, so neither rule is a pair on its own and the "Not Signed In"
+ * chip rendered at 3.98:1 with this file green (#1892). But every element `.atag.broken` matches,
+ * `.atag` matches too: the stylesheet does state the pair, across two rules.
+ *
+ * A fill rule is implied when its subject's simple selectors are a subset of the colour rule's
+ * subject, and its context (everything before the subject) is empty or identical. Of the implied
+ * fills the most specific wins, then the latest, as in the cascade. Only unconditional rules are
+ * read, and only a fill that is opaque in every palette is a ground: a transparent or translucent
+ * fill shows whatever is behind the element, which is the ancestor this file cannot see.
+ *
+ * It does not see a fill that markup adds. A sibling class beside the base, such as `.tag-run` on a
+ * `.tag`, implies nothing, and the rendered fixture measures that chip instead. A contextual rule
+ * that markup always combines with an overriding class has to say so in its selector:
+ * `.pending-prompt-actions .btn` paired with `.btn`'s surface at 1.12:1 because its buttons are
+ * `btn ghost`, which the rule now names.
+ */
+function impliedFillPairs(source: string): TintedRule[] {
+  const split = (selector: string) => {
+    const subject = compounds(selector).at(-1) ?? "";
+    return { subject, context: selector.slice(0, selector.length - subject.length).trim() };
+  };
+  const rules = topLevelRules(source);
+  const fills = rules.flatMap((rule) => {
+    const fill = rule.declarations.background ?? rule.declarations["background-color"];
+    return fill === undefined ? [] : rule.selectors.map((selector) => ({
+      ...split(selector), selector, fill, order: rule.order, weight: specificity(selector),
+    }));
+  });
+
+  const pairs: TintedRule[] = [];
+  for (const rule of rules) {
+    const color = rule.declarations.color;
+    if (color === undefined || "background" in rule.declarations || "background-color" in rule.declarations) continue;
+    // Both name what the element already inherits, so the rule declares no ink of its own.
+    if (color === "inherit" || color === "currentColor") continue;
+    for (const selector of rule.selectors) {
+      const { subject, context } = split(selector);
+      const own = new Set(simpleSelectors(subject));
+      const implied = fills.filter((fill) => {
+        const needed = simpleSelectors(fill.subject);
+        return needed.length > 0 && needed.every((simple) => own.has(simple)) &&
+          (fill.context === "" || fill.context === context);
+      });
+      if (implied.length === 0) continue;
+      const winner = implied.reduce((best, next) =>
+        next.weight > best.weight || (next.weight === best.weight && next.order > best.order) ? next : best);
+      const see = winner.fill === "none" ? "transparent" : winner.fill;
+      // An unresolvable fill is NOT skipped here: `measure` reports it, so the test fails closed.
+      if (PALETTES.some((theme) => (resolve(see, theme)?.a ?? 1) < 1)) continue;
+      const declarations: Record<string, string> = { color, background: winner.fill };
+      for (const prop of ALTERNATE_TEXT_PAINT) {
+        if (prop in rule.declarations) declarations[prop] = rule.declarations[prop]!;
+      }
+      pairs.push({ selector, declarations });
+    }
+  }
+  return pairs;
+}
+
+test("a colour-only rule clears AA on the fill its own element's base rule paints", () => {
+  const pairs = impliedFillPairs(css);
+  assert.ok(pairs.length > 30, `expected many colour-only rules over a base fill, found ${pairs.length}`);
+  for (const chip of [".atag.broken", ".atag.discovered"]) {
+    assert.ok(pairs.some(({ selector }) => selector === chip), `${chip} must be measured over .atag's fill`);
+  }
+  const { unresolved, failures } = measure(pairs);
+  assert.deepEqual(unresolved, [], "every implied colour/fill pair must be resolvable, or the check is not running");
+  assert.deepEqual(failures, [], "a colour-only rule must clear 4.5:1 on the fill its base rule paints the same element");
+});
+
+test("a colour-only modifier is measured on the winning fill its selector implies, and nothing else", () => {
+  const pairs = impliedFillPairs(`
+    .chip { background: var(--bg-elev-3); color: var(--text-dim); }
+    .chip.warn { color: var(--amber); }
+    .panel .chip { color: var(--red); }
+    .card .chip { background: var(--bg-elev); }
+    .card .chip.warn { color: var(--amber); }
+    .chip.quiet { background: transparent; }
+    .chip.quiet.warn { color: var(--amber); }
+    .chip:hover { background: var(--bg); }
+    .other { background: var(--bg-elev-3); }
+    .chip-label { color: var(--amber); }
+    @media (max-width: 600px) { .chip.narrow { color: var(--red); } }
+  `);
+  assert.deepEqual(pairs.map(({ selector, declarations }) => [selector, declarations.background]), [
+    [".chip.warn", "var(--bg-elev-3)"],
+    [".panel .chip", "var(--bg-elev-3)"],
+    // The contextual fill outranks the base one, so the amber is measured where it renders.
+    [".card .chip.warn", "var(--bg-elev)"],
+  ], "a transparent winner, an unimplied :hover or sibling class, and a conditional rule pair with nothing");
+
+  const failing = (selector: string) => new Set(measure(pairs.filter((pair) => pair.selector === selector)).failures
+    .map((failure) => failure.slice(selector.length).match(/\((\S+)\)/)![1]));
+  assert.deepEqual([...failing(".chip.warn")], ["wollipog:light"]);
+  assert.deepEqual([...failing(".panel .chip")], ["wollipog:dark", "wollipog:light"]);
+  assert.deepEqual([...failing(".card .chip.warn")], []);
+});
+
+test("a new colour-only modifier on a production chip fails when its ink is illegible on the chip", () => {
+  const { failures } = measure(impliedFillPairs(`${css}\n.atag.example { color: var(--amber); }`)
+    .filter(({ selector }) => selector === ".atag.example"));
+  assert.deepEqual(failures.map((failure) => failure.split(":")[0]), [".atag.example (wollipog"]);
+  assert.match(failures[0]!, /\(wollipog:light\): 3\.98:1/);
 });
 
 /**
