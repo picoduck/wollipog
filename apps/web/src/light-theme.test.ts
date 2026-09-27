@@ -453,6 +453,28 @@ test("a legible ink on a transparent fill is measured on every base surface and 
   assert.equal(checked, PALETTES.length * SURFACES.length);
 });
 
+/**
+ * Whether `selector` styles an element carrying `className` itself, not a descendant of one.
+ *
+ * Only the last compound names the element a rule paints. Attribute values are blanked first so a
+ * space or combinator inside quotes cannot split a compound.
+ */
+function targets(selector: string, className: string): boolean {
+  const subject = selector.replace(/\[[^\]]*\]/g, "[]").split(/\s*[\s>+~]\s*/).pop() ?? "";
+  return new RegExp(`${className.replace(/\./g, "\\.")}(?![\\w-])`).test(subject);
+}
+
+test("the known-surface guard reads every rule whose subject is the parent", () => {
+  const row = ".diff-file-head-row";
+  for (const selector of [row, `${row}:hover`, `:root[data-theme="dark"] ${row}`, `.diff-file > ${row}`,
+    `${row}[data-state="a b"]`, `${row}.is-open`]) {
+    assert.equal(targets(selector, row), true, selector);
+  }
+  for (const selector of [`${row} .diff-discard`, `${row} > button`, `${row}-extra`, `${row}s`]) {
+    assert.equal(targets(selector, row), false, selector);
+  }
+});
+
 test("a rule pinned to a known surface is measured there, and its parent paints that surface", () => {
   for (const [selector, { surface, paintedBy }] of KNOWN_SURFACE) {
     const rules = TINTED.filter((rule) => rule.selector === selector);
@@ -462,10 +484,12 @@ test("a rule pinned to a known surface is measured there, and its parent paints 
     assert.equal(measure(rules).checked, PALETTES.length, `${selector} must be measured on ${surface} alone`);
     // What makes the pin sound: the parent's own fill is that opaque surface, so nothing further
     // out can show through to the element, wherever the parent is placed.
-    // Every rule for the parent is read, conditional blocks included, so a phone layout that
-    // repaints the row cannot slip past a check of the base rule alone.
+    // Every rule whose SUBJECT is the parent is read, conditional blocks included: a phone layout,
+    // a state such as `:hover`, or a theme-scoped `:root[data-theme="dark"] .row` can each repaint
+    // it, and an exact-selector match saw none of them.
     const painted = allDeclarations(css)
-      .filter(({ selectors, prop }) => selectors.includes(paintedBy) && (prop === "background" || prop === "background-color"))
+      .filter(({ selectors, prop }) => (prop === "background" || prop === "background-color") &&
+        selectors.some((candidate) => targets(candidate, paintedBy)))
       .map(({ value }) => value);
     assert.ok(painted.length > 0, `${paintedBy} must paint a fill for ${selector} to sit on`);
     assert.deepEqual([...new Set(painted)], [`var(${surface})`],
