@@ -346,6 +346,11 @@ function initialModel(): FixtureModel {
       serviceTier: "flex",
     });
   }
+  if (SCENARIO === "edit-in-fork") {
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
+    });
+  }
   if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handoff") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
@@ -536,6 +541,17 @@ if (SCENARIO === "conversation-handoff") {
     { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "checkpoint", turn: 1, tree: "tree-before-turn" } },
     { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
     { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "conversation_checkpoint", turn: 1 } },
+  ]);
+}
+if (SCENARIO === "edit-in-fork") {
+  // Two completed turns, so the second message has a checkpoint to edit from and the first has none.
+  sessionEvents.set("session-alpha", [
+    { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Draft the release notes.", final: true } },
+    { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "Drafted the release notes.", final: true } },
+    { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "conversation_checkpoint", turn: 1 } },
+    { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "user_message", text: "Shorten them to five bullets.", final: true } },
+    { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "agent_message", text: "Shortened the release notes.", final: true } },
+    { id: 6, sessionId: "session-alpha", seq: 6, ts: 6, payload: { kind: "conversation_checkpoint", turn: 2 } },
   ]);
 }
 const sessionEventPageRequests: Array<{ sessionId: string; after: number; direction?: "backward" }> = [];

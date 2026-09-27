@@ -40,18 +40,45 @@ test("historical edit-and-fork is Codex interactive only and every runtime gate 
   for (const driver of ["claude-code", "pi", "codex", "acp"] as const) {
     assert.equal(editInForkAvailability(2, turns, { ...base, driver }).available, false);
   }
-  const blocked: EditInForkContext[] = [
-    { ...base, hasWorktree: false },
-    { ...base, runnerOnline: false },
-    { ...base, runnerProtocolVersion: 27 },
-    { ...base, status: "running" },
-    { ...base, status: "starting" },
-    { ...base, status: "input_required" },
-    { ...base, status: "queued" },
-    { ...base, queuedPrompts: 1 },
-    { ...base, busy: true },
+  const blocked: Array<[EditInForkContext, RegExp]> = [
+    [{ ...base, hasWorktree: false }, /isolated worktree/],
+    [{ ...base, runnerOnline: false }, /Reconnect the runner/],
+    [{ ...base, runnerProtocolVersion: 27 }, /Update and restart the runner/],
+    [{ ...base, status: "running" }, /Wait for the current turn/],
+    [{ ...base, status: "starting" }, /Wait for the current turn/],
+    [{ ...base, status: "input_required" }, /Wait for the current turn/],
+    [{ ...base, status: "queued" }, /Wait for the current turn/],
+    [{ ...base, queuedPrompts: 1 }, /queued messages/],
+    [{ ...base, busy: true }, /Another session action/],
   ];
-  for (const context of blocked) assert.equal(editInForkAvailability(2, turns, context).available, false);
+  for (const [context, reason] of blocked) {
+    const availability = editInForkAvailability(2, turns, context);
+    assert.equal(availability.available, false);
+    if (availability.available) continue;
+    assert.equal(availability.offered, true, "a runtime gate keeps the control visible");
+    assert.match(availability.reason, reason);
+  }
+});
+
+test("edit-and-fork is offered only where it can ever apply, and otherwise stays hidden for everyone", () => {
+  const reason = "Your Viewer role is read-only.";
+  const never: Array<[number | undefined, Set<number>, EditInForkContext]> = [
+    [2, new Set([1, 2]), { ...base, driver: "claude-code" }],
+    [2, new Set([1, 2]), { ...base, driver: "pi" }],
+    [1, new Set([1]), base],
+    [undefined, new Set(), base],
+    [3, new Set([1, 3]), base],
+    [2, new Set([1]), { ...base, status: "running" }],
+  ];
+  for (const [turn, turns, context] of never) {
+    for (const forkRefusal of [null, reason]) {
+      for (const runnerOnline of [true, false]) {
+        const availability = editInForkAvailability(turn, turns, { ...context, forkRefusal, runnerOnline });
+        assert.equal(availability.available === false && availability.offered, false,
+          `turn ${turn} on ${context.driver} (refusal ${forkRefusal}, runner online ${runnerOnline}) is not offered`);
+      }
+    }
+  }
 });
 
 test("plain conversation forks share runtime gates and preserve Claude and Pi latest-only behavior", () => {
@@ -240,7 +267,10 @@ test("a person refused Fork sees that reason on every fork, edit-in-fork and han
   assert.deepEqual(conversationForkAvailability(2, 2, { ...context, forkRefusal: reason }), { available: false, reason });
   assert.deepEqual(conversationForkAvailability(undefined, undefined, { ...context, runnerOnline: false, forkRefusal: reason }),
     { available: false, reason }, "the refusal comes before every runtime gate");
-  assert.deepEqual(editInForkAvailability(2, new Set([1, 2]), { ...base, forkRefusal: reason }), { available: false, reason });
+  assert.deepEqual(editInForkAvailability(2, new Set([1, 2]), { ...base, forkRefusal: reason }),
+    { available: false, offered: true, reason });
+  assert.deepEqual(editInForkAvailability(2, new Set([1, 2]), { ...base, runnerOnline: false, forkRefusal: reason }),
+    { available: false, offered: true, reason }, "the refusal comes before every runtime gate");
   const handoff: CheckpointHandoffContext = {
     runnerOnline: true,
     runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.conversationHandoff,

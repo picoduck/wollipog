@@ -135,6 +135,7 @@ import {
   sessionForkInProgress,
   subscribeSessionForks,
   type ConversationForkAvailability,
+  type EditInForkAvailability,
 } from "../session-actions.js";
 import { SessionApprovalRegion, standaloneApprovalForReview } from "./SessionApproval.js";
 import {
@@ -3539,8 +3540,9 @@ function SessionDetailLoaded({
     onPreviewForkReady(previewForkControls);
     return () => onPreviewForkReady(null);
   }, [mode, onPreviewForkReady, previewForkControls]);
-  const editInForkTargets = useMemo(() => {
-    const targets = new Map<number, number>();
+  const editInForkAvailabilityByItem = useMemo(() => {
+    // Every offered message, usable or not, so an unavailable Edit in Fork says why (#1869).
+    const targets = new Map<number, EditInForkAvailability>();
     for (const item of items) {
       if (item.kind !== "user_message") continue;
       const availability = editInForkAvailability(item.turn, completedConversationTurns, {
@@ -3553,7 +3555,7 @@ function SessionDetailLoaded({
         busy,
         forkRefusal,
       });
-      if (availability.available) targets.set(item.id, availability.forkTurn);
+      if (availability.available || availability.offered) targets.set(item.id, availability);
     }
     return targets;
   }, [api, busy, completedConversationTurns, forkRefusal, items, pendingQueuedPrompts, runner?.protocolVersion, runnerOnline, session.driver, session.status, session.worktreePath]);
@@ -5038,7 +5040,7 @@ function SessionDetailLoaded({
                       handoff={mode === "expanded" ? handoffControls : undefined}
                       onEditAndResend={mode === "expanded" && canPrompt ? openResendAction : undefined}
                       onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
-                      editInForkTargets={mode === "expanded" ? editInForkTargets : undefined}
+                      editInForkAvailabilityByItem={mode === "expanded" ? editInForkAvailabilityByItem : undefined}
                       forkAvailabilityByTurn={mode === "expanded" ? forkAvailabilityByTurn : undefined}
                       revealRequest={timelineRevealRequest}
                       onRevealHandled={handleTimelineReveal}

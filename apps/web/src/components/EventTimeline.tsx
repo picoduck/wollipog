@@ -32,7 +32,7 @@ import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { SessionTimelineQuestionRegion } from "./SessionApproval.js";
 import { StructuredQuestionText, structuredQuestionSummary } from "./StructuredQuestionText.js";
-import type { ConversationForkAvailability } from "../session-actions.js";
+import type { ConversationForkAvailability, EditInForkAvailability } from "../session-actions.js";
 
 type ToolItem = Extract<TimelineItem, { kind: "tool_call" }>;
 
@@ -261,7 +261,7 @@ export const EventTimeline = memo(function EventTimeline({
   onEditAndResend,
   onEditInFork,
   onOpenSourceLocation,
-  editInForkTargets,
+  editInForkAvailabilityByItem,
   forkAvailabilityByTurn,
   scrollRef,
   historyKey,
@@ -289,7 +289,7 @@ export const EventTimeline = memo(function EventTimeline({
   /** Forks AFTER the supplied predecessor turn, then prepares a child composer draft. */
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
-  editInForkTargets?: ReadonlyMap<number, number>;
+  editInForkAvailabilityByItem?: ReadonlyMap<number, EditInForkAvailability>;
   forkAvailabilityByTurn?: ReadonlyMap<number, ConversationForkAvailability>;
   scrollRef?: RefObject<HTMLElement | null>;
   /** Session id + history epoch. A change intentionally resets disclosure and measurements. */
@@ -329,7 +329,7 @@ export const EventTimeline = memo(function EventTimeline({
       onEditAndResend={onEditAndResend}
       onEditInFork={onEditInFork}
       onOpenSourceLocation={onOpenSourceLocation}
-      editInForkTargets={editInForkTargets}
+      editInForkAvailabilityByItem={editInForkAvailabilityByItem}
       forkAvailabilityByTurn={forkAvailabilityByTurn}
       scrollRef={scrollRef}
       getInitialAnchor={getInitialAnchor}
@@ -359,7 +359,7 @@ function EventTimelineBody({
   onEditAndResend,
   onEditInFork,
   onOpenSourceLocation,
-  editInForkTargets,
+  editInForkAvailabilityByItem,
   forkAvailabilityByTurn,
   scrollRef,
   getInitialAnchor,
@@ -383,7 +383,7 @@ function EventTimelineBody({
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
-  editInForkTargets?: ReadonlyMap<number, number>;
+  editInForkAvailabilityByItem?: ReadonlyMap<number, EditInForkAvailability>;
   forkAvailabilityByTurn?: ReadonlyMap<number, ConversationForkAvailability>;
   scrollRef?: RefObject<HTMLElement | null>;
   getInitialAnchor?: () => VirtualScrollAnchor | null;
@@ -525,7 +525,7 @@ function EventTimelineBody({
           onEditAndResend={onEditAndResend}
           onEditInFork={onEditInFork}
           onOpenSourceLocation={onOpenSourceLocation}
-          editInForkTurn={item.kind === "user_message" ? editInForkTargets?.get(item.id) : undefined}
+          editInForkAvailability={item.kind === "user_message" ? editInForkAvailabilityByItem?.get(item.id) : undefined}
           onFork={onFork}
           forkTurn={assistantForkTurn}
           forkAvailability={assistantForkTurn == null ? undefined : forkAvailabilityByTurn?.get(assistantForkTurn)}
@@ -1696,7 +1696,7 @@ const TimelineRow = memo(function TimelineRow({
   onEditAndResend,
   onEditInFork,
   onOpenSourceLocation,
-  editInForkTurn,
+  editInForkAvailability,
   forkTurn,
   forkAvailability,
   highlightEligible = true,
@@ -1714,7 +1714,7 @@ const TimelineRow = memo(function TimelineRow({
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
-  editInForkTurn?: number;
+  editInForkAvailability?: EditInForkAvailability;
   forkTurn?: number;
   forkAvailability?: ConversationForkAvailability;
   highlightEligible?: boolean;
@@ -1727,6 +1727,7 @@ const TimelineRow = memo(function TimelineRow({
   const sessionActive = useContext(TimelineActivityContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
   const handoff = useContext(HandoffContext);
+  const editInForkTurn = editInForkAvailability?.available ? editInForkAvailability.forkTurn : undefined;
   switch (item.kind) {
     case "artifact_attached":
       return <TranscriptArtifact artifact={item.artifact} />;
@@ -1853,6 +1854,8 @@ const TimelineRow = memo(function TimelineRow({
               rewindUnavailableReason={rewindUnavailableReason}
               onEditAndResend={onEditAndResend ? () => onEditAndResend(item) : undefined}
               onEditInFork={onEditInFork && editInForkTurn != null ? () => onEditInFork(item, editInForkTurn) : undefined}
+              editInForkUnavailableReason={onEditInFork && editInForkAvailability?.available === false &&
+                editInForkAvailability.offered ? editInForkAvailability.reason : undefined}
             />
           </div>
         </div>
@@ -2326,6 +2329,7 @@ function MessageMeta({
   copyLabel,
   onEditAndResend,
   onEditInFork,
+  editInForkUnavailableReason,
   onFork,
   forkAvailability,
   onRewind,
@@ -2343,6 +2347,8 @@ function MessageMeta({
   copyLabel: string;
   onEditAndResend?: () => void;
   onEditInFork?: () => void;
+  /** Shown as a disabled Edit in Fork when it applies to this message but cannot be used now. */
+  editInForkUnavailableReason?: string;
   onFork?: () => void;
   forkAvailability?: ConversationForkAvailability;
   onRewind?: () => void;
@@ -2354,7 +2360,8 @@ function MessageMeta({
   const driver = useContext(TimelineDriverContext);
   const usage = turnUsage ? turnUsageLabel(turnUsage, driver) : null;
   const timestamp = Number.isFinite(createdAt);
-  if (!timestamp && !duration && !usage && !copyText && !onEditAndResend && !onEditInFork &&
+  const editInFork = Boolean(onEditInFork || editInForkUnavailableReason);
+  if (!timestamp && !duration && !usage && !copyText && !onEditAndResend && !editInFork &&
       !forkAvailability && !onRewind && !onHandoff) return null;
   return (
     <div className="tl-message-meta">
@@ -2380,7 +2387,7 @@ function MessageMeta({
           {usage.text}
         </span>
       )}
-      {(copyText || forkAvailability || onRewind || onHandoff || onEditAndResend || onEditInFork) && (
+      {(copyText || forkAvailability || onRewind || onHandoff || onEditAndResend || editInFork) && (
         <div className="tl-message-actions" role="group" aria-label="Message Actions">
           {copyText && <CopyButton text={copyText} iconOnly ariaLabel={copyLabel} className="tl-message-icon" />}
           {onRewind && (
@@ -2434,6 +2441,15 @@ function MessageMeta({
             >
               <ThreadForkIcon size={14} />
             </button>
+          )}
+          {!onEditInFork && editInForkUnavailableReason && (
+            <MessageAction
+              label="Edit User Message in a New Conversation Fork"
+              description="Edit this message in a new fork from the checkpoint before it."
+              reason={editInForkUnavailableReason}
+            >
+              <ThreadForkIcon size={14} />
+            </MessageAction>
           )}
         </div>
       )}

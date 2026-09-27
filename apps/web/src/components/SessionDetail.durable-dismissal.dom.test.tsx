@@ -720,3 +720,55 @@ test("a refusal that arrives while Edit in Fork is open disables Create Fork and
     await unmountFixture(fixture);
   }
 });
+
+test("an Edit in Fork that applies but is blocked stays visible and says why, and never applies elsewhere (#1869)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const edit = "Edit User Message in a New Conversation Fork";
+  const fixture = await mountFixture({
+    sessionPatch: {
+      status: "idle",
+      useWorktree: true,
+      worktreePath: "/tmp/durable-dismissal-worktree",
+      commandPermissions: {
+        stop: { allowed: false, reason }, restart: { allowed: false, reason }, stopBackgroundJob: { allowed: false, reason },
+        fork: { allowed: false, reason },
+      },
+    },
+    eventPayloads: [
+      { kind: "user_message", text: "first", images: [] },
+      { kind: "agent_message", text: "one", final: true },
+      { kind: "conversation_checkpoint", turn: 1 },
+      { kind: "user_message", text: "second", images: [] },
+      { kind: "agent_message", text: "two", final: true },
+      { kind: "conversation_checkpoint", turn: 2 },
+    ],
+  });
+  const unavailable = () => [...fixture.container.querySelectorAll(`summary[aria-label="${edit} Unavailable"]`)];
+  const describedBy = (summary: Element) =>
+    fixture.container.querySelector(`[id="${summary.getAttribute("aria-describedby")}"]`)?.textContent ?? "";
+  try {
+    assert.equal(button(fixture, edit), null, "a Viewer gets no Edit in Fork button");
+    assert.equal(unavailable().length, 1, "only the message with an earlier checkpoint shows it");
+    assert.match(describedBy(unavailable()[0]!), /Your Viewer role is read-only\./u);
+
+    await fixture.pushSession({ commandPermissions: {
+      stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true }, fork: { allowed: true },
+    } });
+    assert.equal(unavailable().length, 0);
+    assert.ok(button(fixture, edit), "an allowed person gets the working button back");
+
+    await fixture.pushSession({ status: "running" });
+    assert.equal(button(fixture, edit), null);
+    assert.equal(unavailable().length, 1);
+    assert.match(describedBy(unavailable()[0]!), /Wait for the current turn or approval before creating a fork\./u);
+
+    await fixture.pushSession({ status: "idle", driver: "claude-code", commandPermissions: {
+      stop: { allowed: false, reason }, restart: { allowed: false, reason }, stopBackgroundJob: { allowed: false, reason },
+      fork: { allowed: false, reason },
+    } });
+    assert.equal(button(fixture, edit), null);
+    assert.equal(unavailable().length, 0, "a provider that cannot edit history never offers it, even to a Viewer");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});

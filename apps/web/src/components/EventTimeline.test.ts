@@ -19,6 +19,7 @@ import {
   userRewindTurns,
 } from "./EventTimeline.js";
 import { reanchorAtLogicalIndex } from "./MeasuredVirtualList.js";
+import type { EditInForkAvailability } from "../session-actions.js";
 
 // Vite supplies the JSX runtime in production; direct Node rendering needs the classic global
 // expected by the repository's tsx test transform.
@@ -1179,7 +1180,7 @@ test("user rows prepare deliberate resend and expose edit-in-fork only for an el
     ],
     onEditAndResend: () => {},
     onEditInFork: () => {},
-    editInForkTargets: new Map([[3, 1]]),
+    editInForkAvailabilityByItem: new Map([[3, { available: true, forkTurn: 1 }]]),
   }));
 
   assert.equal((html.match(/aria-label="Edit User Message as a New Turn"/g) ?? []).length, 2);
@@ -1188,6 +1189,33 @@ test("user rows prepare deliberate resend and expose edit-in-fork only for an el
     "Edit in Fork uses the same fork glyph language as plain Fork");
   assert.match(html, /Edit &amp; Resend/);
   assert.match(html, /Edit in Fork/);
+});
+
+test("an offered but unusable Edit in Fork stays visible, disabled and says why (#1869)", () => {
+  const reason = "Reconnect the runner before creating a fork.";
+  const render = (availability: EditInForkAvailability) => renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [
+      { kind: "user_message", id: 1, text: "first", turn: 1 },
+      { kind: "conversation_checkpoint", id: 2, turn: 1 },
+      { kind: "user_message", id: 3, text: "second", turn: 2 },
+      { kind: "conversation_checkpoint", id: 4, turn: 2 },
+    ],
+    onEditInFork: () => { throw new Error("an unavailable Edit in Fork must not open"); },
+    editInForkAvailabilityByItem: new Map([[3, availability]]),
+  }));
+
+  const offered = render({ available: false, offered: true, reason });
+  assert.doesNotMatch(offered, /aria-label="Edit User Message in a New Conversation Fork"/, "no enabled button");
+  const summary = /<summary class="tl-message-icon" aria-label="Edit User Message in a New Conversation Fork Unavailable" aria-describedby="([^"]+)" title="([^"]+)">/
+    .exec(offered);
+  assert.ok(summary, "the control is shown as unavailable");
+  assert.match(summary[2], /Reconnect the runner before creating a fork\./);
+  assert.match(offered, new RegExp(`<span id="${summary[1]}" role="status"><strong>Edit User Message in a New Conversation Fork:</strong>[^<]*${reason.replace(/\./g, "\\.")}</span>`));
+  assert.equal((offered.match(/lucide-git-fork/g) ?? []).length, 1, "only the second message offers it");
+
+  const hidden = render({ available: false, offered: false, reason: "Historical edit-and-fork is available only for Codex App Server sessions." });
+  assert.doesNotMatch(hidden, /Edit User Message in a New Conversation Fork/);
+  assert.doesNotMatch(hidden, /lucide-git-fork/);
 });
 
 test("only never-offered runner authentication outcomes get readable resolution labels", () => {
