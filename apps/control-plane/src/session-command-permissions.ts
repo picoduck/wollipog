@@ -65,6 +65,8 @@ const WORKTREE_SETUP_ROUTES = [
   "/api/sessions/:id/worktrees/retry-setup",
   "/api/sessions/:id/worktrees/generate-setup",
 ] as const;
+/** Every Git action, read or write, is a `POST` to this one route. */
+const GIT_ROUTE = "/api/sessions/:id/git";
 
 const VIEWER_REASON = "Your Viewer role is read-only.";
 const STOP_JOB_OWNER_REASON = "Only the session owner or its controlling Orchestrator can stop its background jobs.";
@@ -100,7 +102,7 @@ function routeRefusal(
 /** A `POST` route by its path, or a route with another method. */
 type CommandRoute = string | { method: string; path: string };
 
-/** `routeRefusal` for the commands #1857 and #1864 added, which also apply the agent credential's
+/** `routeRefusal` for the commands #1857 and later issues added, which also apply the agent credential's
  * route allowlist: a credential outside it is never authenticated for the route. Commands served by
  * several routes take the first refusal, since a surface offers the command only if all admit it. */
 function allowlistedRouteRefusal(
@@ -176,6 +178,7 @@ export function sessionCommandPermissions(
         target.orchestratorPolicy?.execution.strictProjectIsolation !== false,
       ))),
     worktreeSetup: permission(allowlistedRouteRefusal(WORKTREE_SETUP_ROUTES, principal, target, facts)),
+    gitActions: permission(allowlistedRouteRefusal([GIT_ROUTE], principal, target, facts)),
   };
 }
 

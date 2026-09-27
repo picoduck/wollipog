@@ -48,6 +48,9 @@ export interface StagingControls {
   fineGrained: boolean;
   /** `${filePath}#${hunkIndex}` of the in-flight mutation, or null. One at a time. */
   busyKey: string | null;
+  /** Why the signed-in person may not run Git actions (#1870), and the id of the element that
+   * states it; every stage, unstage and discard control is then disabled and described by it. */
+  refusal?: { reason: string; id: string } | null;
 }
 
 export interface DiffReviewControls {
@@ -349,8 +352,9 @@ function DiffFileCard({
           <button
             type="button"
             className="diff-discard"
-            disabled={staging.busyKey != null}
-            title="Discard all staged and unstaged changes to this tracked file"
+            disabled={staging.busyKey != null || Boolean(staging.refusal)}
+            title={staging.refusal?.reason ?? "Discard all staged and unstaged changes to this tracked file"}
+            aria-describedby={staging.refusal?.id}
             onClick={() => staging.onDiscard(file.path)}
           >
             Discard
@@ -579,7 +583,8 @@ function HunkView({
   const key = `${filePath}#${index}`;
   const inFlight = staging?.busyKey === key || staging?.busyKey === `${key}:lines`;
   // One mutation at a time — every hunk button disables while any one is in flight.
-  const disabled = staging?.busyKey != null;
+  const refusal = staging?.refusal ?? null;
+  const disabled = staging?.busyKey != null || refusal !== null;
   const [selectedLines, setSelectedLines] = useState<Set<number>>(new Set());
   const [selectedReferenceLines, setSelectedReferenceLines] = useState<{ side: "left" | "right"; lines: Set<number> } | null>(null);
   const [attachBusy, setAttachBusy] = useState(false);
@@ -762,7 +767,8 @@ function HunkView({
                   type="button"
                   className="hunk-act"
                   disabled={disabled}
-                  title={hunk.staged && fileStatus === "added" ? "Unstage (the file becomes untracked)" : undefined}
+                  title={refusal?.reason ?? (hunk.staged && fileStatus === "added" ? "Unstage (the file becomes untracked)" : undefined)}
+                  aria-describedby={refusal?.id}
                   onClick={() => staging.onHunk(hunk.staged ? "unstage" : "stage", filePath, index)}
                 >
                   {inFlight ? <Spinner /> : hunk.staged ? "Unstage" : "Stage"}
@@ -770,10 +776,12 @@ function HunkView({
               </>
             ) : lineDirection && (
               <>
-                <button className="hunk-act" type="button" disabled={disabled} onClick={() => mutateLines(changeIndices)}>
+                <button className="hunk-act" type="button" disabled={disabled} title={refusal?.reason}
+                  aria-describedby={refusal?.id} onClick={() => mutateLines(changeIndices)}>
                   {inFlight ? <Spinner /> : `${lineDirection === "stage" ? "Stage" : "Unstage"} hunk`}
                 </button>
-                <button className="hunk-act" type="button" disabled={disabled || selectedLines.size === 0} onClick={() => mutateLines([...selectedLines].sort((a, b) => a - b))}>
+                <button className="hunk-act" type="button" disabled={disabled || selectedLines.size === 0} title={refusal?.reason}
+                  aria-describedby={refusal?.id} onClick={() => mutateLines([...selectedLines].sort((a, b) => a - b))}>
                   {lineDirection === "stage" ? "Stage" : "Unstage"} Selected ({selectedLines.size})
                 </button>
               </>
@@ -788,7 +796,7 @@ function HunkView({
               <span className="diff-line-select">
                 {referenceCheckbox(row)}
                 {lineDirection && row.status !== " " && (
-                  <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
+                  <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} aria-describedby={refusal?.id} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
                 )}
               </span>
               <span className="diff-gutter diff-gutter-old">{row.oldNo}</span>
@@ -810,7 +818,7 @@ function HunkView({
                   <span className="diff-line-select">
                     {referenceCheckbox(row)}
                     {lineDirection && row.status !== " " && (
-                      <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
+                      <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} aria-describedby={refusal?.id} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
                     )}
                   </span>
                   {sourceGutter(row, sideIndex === 0 ? row.oldNo : row.newNo, "diff-gutter")}

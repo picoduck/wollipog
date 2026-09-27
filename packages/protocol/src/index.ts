@@ -6030,6 +6030,10 @@ export interface SessionCommandPermissions {
   manageWorktrees?: SessionCommandPermission;
   /** Retry a failed worktree setup, or generate the project's setup file (#1864). */
   worktreeSetup?: SessionCommandPermission;
+  /** Run a Git action in the session's working directory: commit, push and open a pull or merge
+   * request, stage, unstage or discard changes, and import forge review threads. One route serves
+   * every Git action, including the status and diff reads, so this verdict covers them too (#1870). */
+  gitActions?: SessionCommandPermission;
 }
 
 /** Denormalised session record for the UI (board cards + lists). */

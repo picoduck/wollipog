@@ -56,6 +56,7 @@ const ALL_ALLOWED: SessionCommandPermissions = {
   manageReviewFindings: { allowed: true },
   manageWorktrees: { allowed: true },
   worktreeSetup: { allowed: true },
+  gitActions: { allowed: true },
 };
 /** The commands #1864 added. An agent credential's allowlist names only the worktree routes. */
 const ISSUE_COMMANDS = ["fork", "rewind", "manageReviewFindings", "manageWorktrees", "worktreeSetup"] as const;
@@ -91,6 +92,7 @@ test("a person's command permissions follow the role gate and Stop Job's owner r
       archive: readOnly, unarchive: readOnly, prompt: readOnly, delete: readOnly,
       cancelTurn: readOnly, manageQueue: readOnly, rename: readOnly, configure: readOnly, respond: readOnly,
       fork: readOnly, rewind: readOnly, manageReviewFindings: readOnly, manageWorktrees: readOnly, worktreeSetup: readOnly,
+      gitActions: readOnly,
     }, "a Viewer is read-only even for a session its scope names");
   }
 });
@@ -115,6 +117,7 @@ test("an agent credential's command permissions follow descendant confinement an
     rewind: { allowed: false, reason: AGENT_ROUTE },
     manageReviewFindings: { allowed: false, reason: AGENT_ROUTE },
     worktreeSetup: { allowed: false, reason: AGENT_ROUTE },
+    gitActions: { allowed: false, reason: AGENT_ROUTE },
   }, "the controlling Orchestrator may stop, restart, stop one job of, archive, prompt and configure its child, but never unarchive or delete it or use a route outside its allowlist");
 
   const grandchild = sessionCommandPermissions(orchestrator, { id: "s_grandchild", parentSessionId: "s_child" }, descendant);
@@ -470,6 +473,35 @@ test("fork, rewind, review findings and worktree commands follow the role gate, 
   assert.deepEqual(worktrees(worker, child, descendant), {
     allowed: false, reason: "The session credential may manage only its own session.",
   }, "a worker may not manage its descendant's worktrees");
+});
+
+test("Git actions follow the role gate and the agent route allowlist (#1870)", () => {
+  const child = { id: "s_child", parentSessionId: "s_parent" };
+  for (const role of ["owner", "admin", "operator"] as const) {
+    for (const ownsSession of [true, false]) {
+      assert.deepEqual(sessionCommandPermissions(human(role), child, { ownsSession, isDescendant: false }).gitActions,
+        { allowed: true }, `${ownsSession ? "an owning" : "a non-owning"} ${role} may run Git actions`);
+    }
+  }
+  assert.deepEqual(sessionCommandPermissions(human("viewer"), child, { ownsSession: true, isDescendant: false }).gitActions,
+    { allowed: false, reason: VIEWER }, "a Viewer may not, even on a session its scope names");
+
+  const scope = { organizationId: "org_1", owner: { kind: "user" as const, userId: "usr_1" } };
+  const orchestrator: AgentPrincipal = {
+    kind: "agent", actorId: "s_parent", credentialSessionId: "s_parent", orchestrator: true,
+    organizationId: "org_1", delegatedScope: scope,
+  };
+  const worker: AgentPrincipal = { ...orchestrator, orchestrator: undefined };
+  const targets = [
+    [child, { ownsSession: false, isDescendant: true }],
+    [{ id: "s_parent", parentSessionId: null }, { ownsSession: false, isDescendant: false }],
+  ] as const;
+  for (const principal of [orchestrator, worker]) {
+    for (const [target, facts] of targets) {
+      assert.deepEqual(sessionCommandPermissions(principal, target, facts).gitActions, { allowed: false, reason: AGENT_ROUTE },
+        "no agent credential's allowlist reaches the Git route, for its own session or a descendant");
+    }
+  }
 });
 
 test("reads carry the requester's command permissions; a trusted local read is unchanged (#1843)", async (t) => {

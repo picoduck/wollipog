@@ -226,6 +226,12 @@ export function ReviewPanel({
   const stagingHint = runnerCapabilityRequirement(runnerProtocolVersion, "hunkStaging", "Hunk staging");
   const fineDiffHint = runnerCapabilityRequirement(runnerProtocolVersion, "fineGrainedDiff", "Staged panes, line staging, and discard");
   const diffEnabled = runnerOnline && !!session.worktreePath && diffSupported;
+  // Every Git action below is refused to a person the server would refuse (#1870). The ref is read
+  // after Discard's confirmation closes, so a refusal that arrives while it is open sends nothing.
+  const gitRefusal = sessionCommandRefusal(session, "gitActions");
+  const gitRefusalId = `${uid}-git-refusal`;
+  const gitRefusalRef = useRef(gitRefusal);
+  gitRefusalRef.current = gitRefusal;
 
   /**
    * Read the diff for the scope selected *right now* (see `scopeRef`).
@@ -410,6 +416,7 @@ export function ReviewPanel({
   };
 
   const syncForgeFindings = async () => {
+    if (gitRefusal !== null) return;
     setSyncingGitHub(true);
     setFindingError(null);
     setFindingNotice(null);
@@ -503,6 +510,7 @@ export function ReviewPanel({
 
   /** `all` forces commit-everything even with staged hunks — the escape hatch out of a partial stage. */
   const doCommit = async (all = false) => {
+    if (gitRefusal !== null) return;
     setBusy("commit");
     // Clear prior success so a failed retry can't show a stale "✓ committed"/"PR opened".
     setError(null);
@@ -538,7 +546,7 @@ export function ReviewPanel({
 
   /** Stage/unstage one hunk against the exact diff on screen; the reply carries a fresh read. */
   const doStageHunk = async (direction: "stage" | "unstage", filePath: string, hunkIndex: number) => {
-    if (!diff || diff.scope !== "uncommitted") return;
+    if (!diff || diff.scope !== "uncommitted" || gitRefusal !== null) return;
     setHunkBusy(`${filePath}#${hunkIndex}`);
     setStageNotice(null);
     try {
@@ -569,7 +577,7 @@ export function ReviewPanel({
     hunkIndex: number,
     lineIndices: number[],
   ) => {
-    if (!diff?.fineDiffHash || diff.scope !== "uncommitted") return;
+    if (!diff?.fineDiffHash || diff.scope !== "uncommitted" || gitRefusal !== null) return;
     setHunkBusy(`${filePath}#${hunkIndex}:lines`);
     setStageNotice(null);
     try {
@@ -590,13 +598,14 @@ export function ReviewPanel({
 
   /** Restore a reviewed tracked file to HEAD. Confirmation is intentionally file-specific. */
   const doDiscardFile = async (filePath: string) => {
-    if (!diff?.fineDiffHash || diff.scope !== "uncommitted") return;
+    if (!diff?.fineDiffHash || diff.scope !== "uncommitted" || gitRefusal !== null) return;
     if (!await confirm({
       title: "Discard file changes?",
       message: `All staged and unstaged changes to ${filePath} will be restored to HEAD. This cannot be undone.`,
       confirmLabel: "Discard Changes",
       tone: "danger",
     })) return;
+    if (gitRefusalRef.current !== null) return;
     setHunkBusy(`${filePath}:discard`);
     setStageNotice(null);
     try {
@@ -614,6 +623,7 @@ export function ReviewPanel({
   };
 
   const doPr = async () => {
+    if (gitRefusal !== null) return;
     setBusy("pr");
     setError(null);
     setPr(null);
@@ -706,9 +716,13 @@ export function ReviewPanel({
           pane: fineDiffSupported ? pane : "combined",
           fineGrained: fineDiffSupported,
           busyKey: hunkBusy,
+          refusal: gitRefusal === null ? null : { reason: gitRefusal, id: gitRefusalId },
         }
       : undefined;
   const stagedCount = status?.stagedCount ?? 0;
+  // Commit and Push & Open also wait on the reads and mutations `disabled` covers.
+  const gitActionDisabled = disabled || gitRefusal !== null;
+  const gitRefusalProps = gitRefusal === null ? {} : { title: gitRefusal, "aria-describedby": gitRefusalId };
 
   // Review is meaningless without a working directory to diff — non-worktree chats get a hint.
   if (!session.worktreePath) {
@@ -718,6 +732,7 @@ export function ReviewPanel({
   return (
     <div className="review-panel">
       {!runnerOnline && <div className="hint warn">Runner is offline — git actions are unavailable.</div>}
+      {gitRefusal !== null && <p id={gitRefusalId} className="hint">{gitRefusal}</p>}
       {!diffSupported && (
         <div className="hint warn" role="status">
           {diffHint}
@@ -896,10 +911,12 @@ export function ReviewPanel({
             <button className="btn ghost sm" disabled={bundlingFindings} onClick={() => void loadFindings()}>↻ Refresh</button>
             <button
               className="btn ghost sm"
-              disabled={bundlingFindings || syncingGitHub || !runnerOnline || !session.worktreePath || !reviewSyncSupported}
-              title={reviewSyncSupported
+              disabled={bundlingFindings || syncingGitHub || !runnerOnline || !session.worktreePath || !reviewSyncSupported ||
+                gitRefusal !== null}
+              title={gitRefusal ?? (reviewSyncSupported
                 ? `Import the current ${requestName}'s ${mergeRequest ? "GitLab" : "GitHub"} review threads (read-only)`
-                : runnerCapabilityRequirement(runnerProtocolVersion, mergeRequest ? "forgeIntegration" : "githubReviewReconciliation", `${mergeRequest ? "GitLab" : "GitHub"} review reconciliation`)}
+                : runnerCapabilityRequirement(runnerProtocolVersion, mergeRequest ? "forgeIntegration" : "githubReviewReconciliation", `${mergeRequest ? "GitLab" : "GitHub"} review reconciliation`))}
+              aria-describedby={gitRefusal !== null ? gitRefusalId : undefined}
               onClick={() => void syncForgeFindings()}
             >
               {syncingGitHub ? `Syncing ${mergeRequest ? "GitLab" : "GitHub"}…` : `Sync ${mergeRequest ? "GitLab" : "GitHub"}`}
@@ -1006,15 +1023,16 @@ export function ReviewPanel({
             onChange={(e) => setCommitMsg(e.target.value)}
             placeholder="Describe the change"
           />
-          <button className="btn sm" onClick={() => doCommit(false)} disabled={disabled}>
+          <button className="btn sm" onClick={() => doCommit(false)} disabled={gitActionDisabled} {...gitRefusalProps}>
             {busy === "commit" ? "Committing…" : stagedCount > 0 ? "Commit staged" : "Commit"}
           </button>
           {stagedCount > 0 && (
             <button
               className="btn ghost sm"
               onClick={() => doCommit(true)}
-              disabled={disabled}
+              disabled={gitActionDisabled}
               title="Ignore the staged selection and commit every change in the worktree"
+              {...gitRefusalProps}
             >
               Commit All
             </button>
@@ -1051,7 +1069,7 @@ export function ReviewPanel({
             placeholder="branch name (optional — defaults to the agent branch)"
             aria-label="Branch Name"
           />
-          <button className="btn primary sm" onClick={doPr} disabled={disabled}>
+          <button className="btn primary sm" onClick={doPr} disabled={gitActionDisabled} {...gitRefusalProps}>
             {busy === "pr" ? "Opening…" : `Push & Open ${requestName}`}
           </button>
         </div>
