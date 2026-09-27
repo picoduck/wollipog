@@ -3,6 +3,7 @@ import {
   worktreeRecoveryAction,
   type SessionCommandPermission,
   type SessionCommandPermissions,
+  type OrchestratorCampaignProjection,
   type SessionHoldReader,
   type SessionView,
 } from "@wollipog/protocol";
@@ -197,6 +198,10 @@ export function withHoldAdviceFor<T extends Pick<SessionView, "holds" | "queueHo
 export interface SessionCommandPermissionSource {
   isSessionOwner(principal: HumanPrincipal, sessionId: string): boolean;
   isSessionDescendant(ancestorId: string, targetId: string): boolean;
+  /** The records behind a projection's holds, read only for an agent credential's projection. */
+  sessionHoldRecords(ids: readonly string[]): Map<string, Pick<SessionView, "worktreeRecovery" | "queueHold"> & {
+    parentSessionId: string | null;
+  }>;
 }
 
 function permissionFacts(
@@ -222,9 +227,31 @@ export function sessionHoldReaderFor(
     : undefined;
 }
 
+/** A campaign projection whose held children's advice is written for the agent credential reading
+ * it (#1863). The projection spans every campaign descendant, and only a direct child's jobs are
+ * the Orchestrator's to stop. A person's projection is returned unchanged. */
+export function withCampaignHoldAdviceFor<T extends Pick<OrchestratorCampaignProjection, "heldChildren">>(
+  source: SessionCommandPermissionSource,
+  principal: AuthPrincipal | null | undefined,
+  projection: T,
+): T {
+  if (principal?.kind !== "agent" || !projection.heldChildren?.length) return projection;
+  const records = source.sessionHoldRecords(projection.heldChildren.map((child) => child.sessionId));
+  return {
+    ...projection,
+    heldChildren: projection.heldChildren.map((child) => {
+      const record = records.get(child.sessionId);
+      if (!record) return child;
+      const reader = sessionHoldReader(principal, { id: child.sessionId, parentSessionId: record.parentSessionId },
+        permissionFacts(source, principal, child.sessionId));
+      return { ...child, holds: withHoldAdviceFor({ ...record, holds: child.holds }, reader).holds ?? child.holds };
+    }),
+  };
+}
+
 /** A copy of `session` carrying the requester's command permissions, and for an agent credential,
- * hold advice written for it (#1863). Without a principal (a trusted local connection) the view is
- * returned unchanged, so every command stays offered. */
+ * hold advice written for it, including its campaign's held children (#1863). Without a principal
+ * (a trusted local connection) the view is returned unchanged, so every command stays offered. */
 export function withSessionCommandPermissions<T extends SessionView>(
   source: SessionCommandPermissionSource,
   principal: AuthPrincipal | null | undefined,
@@ -232,8 +259,11 @@ export function withSessionCommandPermissions<T extends SessionView>(
 ): T {
   if (!principal) return session;
   const facts = permissionFacts(source, principal, session.id);
-  return withHoldAdviceFor({
+  const view = withHoldAdviceFor({
     ...session,
     commandPermissions: sessionCommandPermissions(principal, session, facts),
-  }, sessionHoldReader(principal, session, facts));
+  }, session.holds?.length ? sessionHoldReader(principal, session, facts) : undefined);
+  return view.orchestratorCampaign
+    ? { ...view, orchestratorCampaign: withCampaignHoldAdviceFor(source, principal, view.orchestratorCampaign) }
+    : view;
 }

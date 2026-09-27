@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import {
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   queueHoldRecoveryAction,
@@ -19,6 +20,7 @@ import {
 } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
 /** Each tool hold advice can name, with the route that serves it and a request that reaches the
  * route's authorization. A route admits a credential when it answers anything but 401, 403 or 404:
@@ -55,11 +57,11 @@ test("hold advice an agent credential reads names exactly the tools its routes a
   const port = address.port;
   await new Promise<void>((done) => listener.close(() => done()));
 
-  // worker ─┬─ worker-queue  (stoppable queue hold)
+  // worker ─┬─ worker-queue  (restart-only queue hold)
   //         └─ worker-wt     (worktree recovery)
   // orch ───┬─ orch-queue    (stoppable queue hold)
   //         ├─ orch-wt       (worktree recovery)
-  //         └─ orch-mid ── orch-grand (restart-only queue hold)
+  //         └─ orch-mid ── orch-grand (stoppable queue hold)
   const sessions: Array<[id: string, parent: string | undefined, orchestrator: boolean]> = [
     ["worker", undefined, false], ["worker-queue", "worker", false], ["worker-wt", "worker", false],
     ["orch", undefined, true], ["orch-queue", "orch", false], ["orch-wt", "orch", false],
@@ -72,6 +74,10 @@ test("hold advice an agent credential reads names exactly the tools its routes a
     for (const [id, parentSessionId, orchestrator] of sessions) {
       seed.createSession({ id, parentSessionId, runnerId: "r", workspaceId: null, agentId: null, title: id,
         useWorktree: false, driver: "codex", config: orchestrator ? { permissionMode: "orchestrator" } : {},
+        ...(orchestrator ? {
+          orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default",
+            { execution: { strictProjectIsolation: false } }),
+        } : {}),
         scope: { organizationId: local.organizationId, owner: { kind: "user", userId: local.userId } }, now: 2 });
     }
   } finally { seed.close(); }
@@ -79,8 +85,8 @@ test("hold advice an agent credential reads names exactly the tools its routes a
   const raw = new DatabaseSync(database);
   try {
     const holds: Array<[string, "queue_hold" | "worktree_recovery", unknown]> = [
-      ["worker-queue", "queue_hold", QUEUE_HOLD_STOPPABLE], ["orch-queue", "queue_hold", QUEUE_HOLD_STOPPABLE],
-      ["orch-grand", "queue_hold", QUEUE_HOLD_RESTART_ONLY],
+      ["worker-queue", "queue_hold", QUEUE_HOLD_RESTART_ONLY], ["orch-queue", "queue_hold", QUEUE_HOLD_STOPPABLE],
+      ["orch-grand", "queue_hold", QUEUE_HOLD_STOPPABLE],
       ["worker-wt", "worktree_recovery", WORKTREE_RECOVERY], ["orch-wt", "worktree_recovery", WORKTREE_RECOVERY],
     ];
     for (const [id, column, hold] of holds) {
@@ -135,9 +141,9 @@ test("hold advice an agent credential reads names exactly the tools its routes a
       ["worker", "worker-queue", ["stop_background_job", "restart_session"]],
       ["worker-queue", "worker-queue", ["stop_background_job", "restart_session"]],
       ["orch", "orch-queue", ["stop_background_job", "restart_session"]],
-      ["orch", "orch-grand", ["restart_session"]],
-      ["orch-mid", "orch-grand", ["restart_session"]],
-      ["orch-grand", "orch-grand", ["restart_session"]],
+      ["orch", "orch-grand", ["stop_background_job", "restart_session"]],
+      ["orch-mid", "orch-grand", ["stop_background_job", "restart_session"]],
+      ["orch-grand", "orch-grand", ["stop_background_job", "restart_session"]],
       ["worker", "worker-wt", ["select_worktree", "create_worktree"]],
       ["worker-wt", "worker-wt", ["select_worktree", "create_worktree"]],
       ["orch", "orch-wt", ["select_worktree", "create_worktree"]],
@@ -159,6 +165,21 @@ test("hold advice an agent credential reads names exactly the tools its routes a
     assert.equal(blockedAdvice("orch-queue"), advice.get("orch>orch-queue"));
     assert.equal(blockedAdvice("orch-wt"), advice.get("orch>orch-wt"));
 
+    // The campaign projection spans every descendant, so a grandchild's advice is written for the
+    // Orchestrator there too: through its own route and inside its own session view.
+    const campaign = await call("orch", "GET", "/api/sessions/orch/orchestrator-campaign");
+    assert.equal(campaign.status, 200, JSON.stringify(campaign.json));
+    const ownView = await call("orch", "GET", "/api/sessions/orch");
+    const embedded = (ownView.json.session as { orchestratorCampaign?: typeof campaign.json }).orchestratorCampaign;
+    for (const projection of [campaign.json, embedded]) {
+      const held = (projection?.heldChildren ?? []) as Array<{ sessionId: string; holds: SessionHoldView[] }>;
+      assert.deepEqual(held.map((item) => item.sessionId).sort(), ["orch-grand", "orch-queue", "orch-wt"]);
+      for (const item of held) {
+        assert.equal(item.holds[0]?.recoveryAction, advice.get(`orch>${item.sessionId}`),
+          `the campaign's advice for ${item.sessionId} is written for the Orchestrator`);
+      }
+    }
+
     const workerRefusal = await call("worker", "POST", "/api/sessions/worker-wt/prompt", { text: "are you there?" });
     assert.equal(workerRefusal.status, 409);
     assert.match(String(workerRefusal.json.error), /switch fix\/child/u, "the branch to restore is still named");
@@ -172,7 +193,8 @@ test("hold advice an agent credential reads names exactly the tools its routes a
     // exactly what the server writes for everyone.
     assert.equal(advice.get("orch>orch-queue"), queueHoldRecoveryAction(QUEUE_HOLD_STOPPABLE));
     assert.equal(advice.get("orch>orch-wt"), worktreeRecoveryAction(WORKTREE_RECOVERY));
-    assert.notEqual(advice.get("worker>worker-queue"), queueHoldRecoveryAction(QUEUE_HOLD_STOPPABLE));
+    assert.notEqual(advice.get("orch>orch-grand"), queueHoldRecoveryAction(QUEUE_HOLD_STOPPABLE),
+      "a grandchild's jobs are not the Orchestrator's to stop");
 
     const restarts: Array<[string, string]> = [];
     for (const [reader, target, tools] of cases) {
@@ -197,8 +219,9 @@ test("hold advice an agent credential reads names exactly the tools its routes a
     }
     // The cases above cover both outcomes for every tool.
     assert.match(advice.get("orch>orch-queue")!, /stop_background_job/u);
-    assert.doesNotMatch(advice.get("worker>worker-queue")!, /stop_background_job/u);
-    assert.match(advice.get("orch-mid>orch-grand")!, /restart_session/u);
+    assert.doesNotMatch(advice.get("orch>orch-grand")!, /stop_background_job/u);
+    assert.match(advice.get("worker>worker-queue")!, /restart_session/u);
+    assert.doesNotMatch(advice.get("worker-queue>worker-queue")!, /restart/iu);
     assert.doesNotMatch(advice.get("orch-grand>orch-grand")!, /restart/iu);
     assert.match(advice.get("worker-wt>worker-wt")!, /select_worktree/u);
     assert.doesNotMatch(advice.get("worker>worker-wt")!, /select_worktree/u);

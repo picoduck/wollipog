@@ -169,6 +169,7 @@ import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
 import {
   sessionHoldReaderFor,
+  withCampaignHoldAdviceFor,
   withHoldAdviceFor,
   withSessionCommandPermissions,
 } from "./session-command-permissions.js";
@@ -3657,7 +3658,10 @@ app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
   if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
     return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
   }
-  return respond(reply, svc.campaignProjection(id));
+  const projection = svc.campaignProjection(id);
+  return respond(reply, projection.ok && projection.data
+    ? { ...projection, data: withCampaignHoldAdviceFor(db, principal, projection.data) }
+    : projection);
 });
 
 app.post("/api/sessions/:id/orchestrator-campaign/follow-ups", async (req, reply) => {

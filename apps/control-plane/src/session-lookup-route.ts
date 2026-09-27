@@ -6,7 +6,8 @@ import { withSessionCommandPermissions } from "./session-command-permissions.js"
 export function registerSessionLookupRoute(
   app: FastifyInstance,
   deps: {
-    db: Pick<ControlPlaneDb, "canAccessSession" | "getSession" | "isSessionOwner" | "isSessionDescendant">;
+    db: Pick<ControlPlaneDb, "canAccessSession" | "getSession" | "isSessionOwner" | "isSessionDescendant" |
+      "sessionHoldRecords">;
     requestPrincipal: (req: FastifyRequest) => AuthPrincipal | null;
   },
 ): void {

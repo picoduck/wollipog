@@ -961,10 +961,11 @@ queued behind a turn that had never started.
   own session; an Orchestrator its descendants, and itself unless Strict Project Isolation is on).
   Otherwise the advice says to wait, or to ask the session owner or its controlling Orchestrator,
   and a worktree hold still names the branch and path to restore. This applies to `get_session`,
-  `list_sessions`, `list_descendant_requests`'s `blockedChildren`, and `prompt_session`'s delivery
-  report and worktree-recovery refusal. The controlling Orchestrator reading its direct child, and
-  therefore the campaign projection, reads the server's copy unchanged. A person reads the
-  server's copy too; the dashboard rewrites queue-hold advice for them from their command
+  `list_sessions`, `list_descendant_requests`'s `blockedChildren`, the campaign projection's
+  `heldChildren` (which spans every campaign descendant, so a grandchild's jobs are not offered to
+  the Orchestrator), and `prompt_session`'s delivery report and worktree-recovery refusal. The
+  controlling Orchestrator reading its direct child reads the server's copy unchanged. A person
+  reads the server's copy too; the dashboard rewrites queue-hold advice for them from their command
   permissions.
 
 The control plane owns this lifecycle. A generic question answer or provider permission response
