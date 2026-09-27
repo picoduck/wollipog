@@ -13,16 +13,17 @@ import postcss, { type Declaration } from "postcss";
  * shows focus with a fill or a shadow instead therefore shows nothing at all in a contrast theme: the
  * Resize Panel separator did exactly that, and its focused and unfocused pixels were identical.
  *
- * What forced colors keeps is the SHAPE of an outline, a border or an SVG stroke, repainted in a
- * system colour. A transparent outline is the idiomatic answer: it paints nothing normally, and
- * forced colors repaints its colour. A border-colour change alone does not count, because forced
- * colors paints every border the same system colour.
+ * What forced colors keeps is the SHAPE of an outline or a border, repainted in a system colour. A
+ * transparent outline is the idiomatic answer: it paints nothing normally, and forced colors
+ * repaints its colour. A border-colour change alone does not count, because forced colors paints
+ * every border the same system colour.
  *
  * The check is deliberately narrow. A rule that removes its own focused element's outline must paint
- * one of those shapes in the SAME declaration block, resolved in source order. Anything else — a ring
- * on a child, a pseudo-element or an ancestor's `:has()` — has to be listed below with the reason it
- * holds, because proving that from selectors alone (scope, media conditions, source order,
- * specificity) is a cascade engine, and a partial one passes the cases it gets wrong.
+ * one of those shapes in the SAME declaration block, resolved by importance and then source order.
+ * Anything else — an SVG stroke, a ring on a child, a pseudo-element or an ancestor's `:has()` — has
+ * to be listed below with the reason it holds, because proving that from selectors alone (scope,
+ * media conditions, source order, specificity, which element a stroke applies to) is a cascade
+ * engine, and a partial one passes the cases it gets wrong.
  */
 
 const WEB = fileURLToPath(new URL("..", import.meta.url));
@@ -40,7 +41,8 @@ const EXEMPT: ReadonlyMap<string, string> = new Map([
   [".agent-session-results-step:focus", "a tabIndex={-1} programmatic focus target, not a keyboard stop"],
   [".inbox-thread-toggle:focus-visible", "the same phone @media block outlines its inner span instead"],
   [".inbox-list:focus-visible", ".inbox-list-pane:has(> .inbox-list:focus-visible)::after borders the pane; InboxView renders the list as its direct child"],
-  [".detail-scroll:focus-visible", ".inbox-preview-pane:has(.detail-scroll:focus-visible)::after borders the pane; SessionDetail, its only renderer, sits inside that pane"],
+  [".detail-scroll:focus-visible", ".inbox-preview-pane:has(.detail-scroll:focus-visible)::after borders the pane; in the app, SessionDetail renders only inside it (InboxView), though e2e harnesses may mount it alone"],
+  [".usage-chart-hit:focus-visible", "an SVG <rect>: the same block paints a 2px stroke, which forced colors keeps"],
 ]);
 
 /** Split on top-level `separator` characters, leaving parentheses, attributes and strings whole. */
@@ -127,13 +129,16 @@ const SIDES = ["top", "right", "bottom", "left"] as const;
 
 const paints = (line: Line) => line.style !== "none" && line.style !== "hidden" && !line.zero;
 
-/** Resolve a declaration block in source order: its outline, and whether any border side or stroke paints. */
-export function resolveFocusPaint(decls: readonly Pick<Declaration, "prop" | "value">[]) {
+/**
+ * Resolve a declaration block the way the cascade does inside one rule — `!important` declarations
+ * over normal ones, then source order — into its outline and whether any border side paints.
+ */
+export function resolveFocusPaint(decls: readonly Pick<Declaration, "prop" | "value" | "important">[]) {
   let outline: Line = { style: "none", zero: false };
   let touchesOutline = false;
   const sides: Record<string, Line> = Object.fromEntries(SIDES.map((side) => [side, { style: "none", zero: false }]));
-  let stroke = "none";
-  for (const { prop, value } of decls) {
+  const ordered = [...decls.filter((decl) => !decl.important), ...decls.filter((decl) => decl.important)];
+  for (const { prop, value } of ordered) {
     const v = value.trim().toLowerCase();
     if (prop === "outline") { outline = shorthand(v); touchesOutline = true; }
     else if (prop === "outline-style") { outline = { ...outline, style: v }; touchesOutline = true; }
@@ -151,11 +156,10 @@ export function resolveFocusPaint(decls: readonly Pick<Declaration, "prop" | "va
       const current = sides[side!]!;
       sides[side!] = part === "style" ? { ...current, style: v } : { ...current, zero: ZERO.test(v) };
     }
-    else if (prop === "stroke") stroke = v;
   }
   return {
     removesOutline: touchesOutline && !paints(outline),
-    paintsShape: paints(outline) || Object.values(sides).some(paints) || !/^(none|transparent)$/.test(stroke),
+    paintsShape: paints(outline) || Object.values(sides).some(paints),
   };
 }
 
@@ -174,7 +178,7 @@ export function focusLostInForcedColors(source: string): string[] {
 test("every focus rule that removes the outline repaints a shape forced colors keeps", () => {
   const unexplained = focusLostInForcedColors(css).filter((member) => !EXEMPT.has(member));
   assert.deepEqual(unexplained, [],
-    "these rules remove the focus outline without painting an outline, border or stroke in the same block; " +
+    "these rules remove the focus outline without painting an outline or border in the same block; " +
     "forced colors discards backgrounds, shadows and border colours, so use `outline: 2px solid transparent` " +
     "instead of `outline: none`, or list the rule in EXEMPT with the reason focus stays visible");
 });
@@ -206,19 +210,21 @@ test("focusLostInForcedColors flags fills and shadows and accepts shapes", () =>
   assert.deepEqual(check(".r:focus-visible { outline-width: 0; }"), [".r:focus-visible"]);
   assert.deepEqual(check(".r:focus-visible { background: red; outline: 2px solid transparent; }"), []);
   assert.deepEqual(check(".r:focus-visible { outline: none; outline: 2px solid transparent; }"), []);
-  assert.deepEqual(check(".r:focus-visible { outline: none; stroke: red; }"), []);
+  assert.deepEqual(check(".r:focus-visible { outline: none; stroke: red; }"), [".r:focus-visible"]);
   assert.deepEqual(check(".r:focus-visible { outline: none; border: 2px solid red; }"), []);
   assert.deepEqual(check(".r:focus-visible { outline: none; border-left: 2px solid red; }"), []);
   assert.deepEqual(check(".r:focus-visible { outline: none; border-style: none solid; }"), []);
 });
 
-test("focusLostInForcedColors resolves each block in source order", () => {
+test("focusLostInForcedColors resolves each block by importance, then source order", () => {
   const check = (source: string) => focusLostInForcedColors(source);
   assert.deepEqual(check(".r:focus-visible { outline: 2px solid transparent; outline: none; }"), [".r:focus-visible"]);
   assert.deepEqual(check(".r:focus-visible { outline: none; outline-offset: 2px; }"), [".r:focus-visible"]);
   assert.deepEqual(check(".r:focus-visible { outline: none; border: 2px solid red; border: none; }"), [".r:focus-visible"]);
   assert.deepEqual(check(".r:focus-visible { outline: none; border: 2px solid red; border-width: 0; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus-visible { outline: none; stroke: transparent; }"), [".r:focus-visible"]);
+  assert.deepEqual(check(".r:focus-visible { outline: none !important; outline: 2px solid transparent; background: red; }"), [".r:focus-visible"]);
+  assert.deepEqual(check(".r:focus-visible { outline: 2px solid transparent !important; outline: none; }"), []);
+  assert.deepEqual(check(".r:focus-visible { outline: none; border: 2px solid red; border-style: none !important; }"), [".r:focus-visible"]);
   assert.deepEqual(check(".r:focus-visible { outline: 2px solid; outline-style: none; }"), [".r:focus-visible"]);
 });
 
