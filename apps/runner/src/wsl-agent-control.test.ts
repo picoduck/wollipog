@@ -106,6 +106,26 @@ function fixture(): { config: WslAgentControlLaunch; fromHelper: PassThrough; to
 
 async function tick(): Promise<void> { await new Promise((resolve) => setImmediate(resolve)); }
 
+test("broker dispatches a CLI command through the Node argv boundary", async () => {
+  const f = fixture();
+  const routes: string[] = [];
+  const dispose = attachWslAgentControlBroker(f.fromHelper, f.toHelper, f.config, async (url) => {
+    routes.push(url);
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: 1000 }
+      : { sessions: [] }) };
+  });
+  f.fromHelper.write(`${JSON.stringify({ type: "open", id: "cli", v: 1, kind: "cli",
+    sessionId: f.config.sessionId, token: f.config.token, args: ["session", "list", "--json"] })}\n`);
+  for (let attempt = 0; attempt < 50 && !f.lines.some((line) => JSON.parse(line).exit === 0); attempt++) await tick();
+  const messages = f.lines.map((line) => JSON.parse(line));
+  assert.equal(messages.some((message) => message.exit === 0), true);
+  assert.deepEqual(messages.filter((message) => message.data)
+    .map((message) => Buffer.from(message.data, "base64").toString()).join(""), `${JSON.stringify({ sessions: [] })}\n`);
+  assert.deepEqual(routes, ["http://127.0.0.1:4317/api/compatibility", "http://127.0.0.1:4317/api/sessions"]);
+  dispose();
+});
+
 test("broker rejects wrong-session, wrong-token, and stale credentials before opening a route", async () => {
   const f = fixture();
   const dispose = attachWslAgentControlBroker(f.fromHelper, f.toHelper, f.config);

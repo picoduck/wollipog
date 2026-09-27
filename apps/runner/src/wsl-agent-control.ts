@@ -152,7 +152,8 @@ export function attachWslAgentControlBroker(
     let args: string[];
     try { args = validateWslAgentControlCliArgs(frame.args); }
     catch (error) { close(id, 2, (error as Error).message); return; }
-    void runWollipogCli(["wollipog", ...args], {
+    // Match Node's argv shape, including the script/executable slot at index 1.
+    void runWollipogCli(["wollipog", "wollipog", ...args], {
       WOLLIPOG_CONTROL_PLANE_URL: config.cpUrl,
       WOLLIPOG_SESSION_ID: config.sessionId,
       WOLLIPOG_SESSION_TOKEN_FILE: config.tokenFile,
