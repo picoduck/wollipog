@@ -209,11 +209,14 @@ test("an agent credential's hold reader follows the routes its advice names (#18
     "an Orchestrator's own worktrees are refused under Strict Project Isolation, which is the default");
   assert.deepEqual(sessionHoldReader(orchestrator, { ...own, orchestratorPolicy: policy(false) }, self),
     reader(false, false, true));
-  assert.deepEqual(sessionHoldReader(human("viewer"), child, descendant), { canManageWorktrees: false },
-    "a person's reader covers worktree recovery only; the dashboard rewrites their queue-hold advice itself (#1867)");
+  // A person's reader covers every hold too (#1867, #1875).
+  assert.deepEqual(sessionHoldReader(human("viewer"), child, { ownsSession: true, isDescendant: false }),
+    reader(false, false, false), "a Viewer may take no action the advice names, even on a session its scope names");
   for (const role of ["owner", "admin", "operator"] as const) {
     assert.deepEqual(sessionHoldReader(human(role), child, { ownsSession: false, isDescendant: false }),
-      { canManageWorktrees: true }, `a non-owning ${role} may manage its worktrees`);
+      reader(false, true, true), `a non-owning ${role} may restart it and manage its worktrees, but not stop its jobs`);
+    assert.deepEqual(sessionHoldReader(human(role), child, { ownsSession: true, isDescendant: false }),
+      reader(true, true, true), `an owning ${role} may take every action`);
   }
 
   const recovery = { recoveryId: "wr_1", detectedAt: 1, selectedPath: "/w/c", expectedBranch: "fix/c", detail: "switched" };
@@ -276,8 +279,8 @@ test("a campaign's held children are written for the agent credential reading it
   records.set("s_nested", { ...records.get("s_nested")!, orchestratorPolicy: policy(true) });
   assert.doesNotMatch(advice(withCampaignHoldAdviceFor(source, nested, projection))[0]!, /select_worktree/u,
     "under Strict Project Isolation it may not");
-  assert.deepEqual(withCampaignHoldAdviceFor(source, human("owner"), projection), projection,
-    "a person who may take every action reads the server's copy");
+  assert.deepEqual(withCampaignHoldAdviceFor({ ...source, isSessionOwner: () => true }, human("owner"), projection),
+    projection, "a person who may take every action reads the server's copy");
 
   // The same rewrite reaches a campaign embedded in a session view, which prompt_session returns
   // for a nested Orchestrator as get_session does.
@@ -287,74 +290,95 @@ test("a campaign's held children are written for the agent credential reading it
   assert.doesNotMatch(advice(embedded)[1]!, /stop_background_job/u);
 });
 
-test("a person's worktree-recovery advice is written for them, and their queue-hold advice stays the server's copy (#1867)", () => {
+test("a person's Held Children advice is written for them, looking up only the ownership it reads (#1867, #1875)", () => {
   const recovery = { recoveryId: "wr_1", detectedAt: 1, selectedPath: "/w/c", expectedBranch: "fix/c", detail: "switched" };
   const queueHold = {
     kind: "worktree_rebind" as const, holdId: "qh_1", since: 1, target: "/w/next", queuedPrompts: 1,
     unfinishedBackgroundJobs: 1, canStopJobs: true as const,
   };
+  // A runner that cannot stop one job: its advice reads only whether the person may restart.
+  const { canStopJobs: _canStopJobs, ...unstoppable } = { ...queueHold, holdId: "qh_3" };
   const view = { worktreeRecovery: recovery, queueHold, holds: sessionHolds({ worktreeRecovery: recovery, queueHold }) };
   const refused = withHoldAdviceFor(view, { canManageWorktrees: false }).holds!;
   assert.equal(refused[0]!.recoveryAction, worktreeRecoveryAction(recovery, { canManageWorktrees: false }));
   assert.doesNotMatch(refused[0]!.recoveryAction, /select_worktree|create_worktree/u);
   assert.match(refused[0]!.recoveryAction, /switch fix\/c/u, "the branch to restore is still named");
-  assert.equal(refused[1], view.holds[1], "the dashboard rewrites a person's queue-hold advice itself (#1857)");
-  assert.deepEqual(refused, sessionHolds({ worktreeRecovery: recovery, queueHold }, [], { canManageWorktrees: false }),
-    "the descendant view derives the same advice from the stored record");
-  assert.deepEqual(withHoldAdviceFor(view, { canManageWorktrees: true }).holds, view.holds,
-    "a person who may manage the worktrees reads the server's copy");
+  assert.equal(refused[1], view.holds[1], "a reader without canStopJobs leaves queue-hold advice as written");
 
   const both = { recoveryId: "wr_2", detectedAt: 1, selectedPath: "/w/b", expectedBranch: "fix/b", detail: "switched" };
   const bothQueue = { ...queueHold, holdId: "qh_2" };
   const records: ReturnType<SessionCommandPermissionSource["sessionHoldRecords"]> = new Map([
-    ["s_wt", { parentSessionId: "s_orch", worktreeRecovery: recovery }],
     ["s_queue", { parentSessionId: "s_orch", queueHold }],
+    ["s_wt", { parentSessionId: "s_orch", worktreeRecovery: recovery }],
     ["s_both", { parentSessionId: "s_orch", worktreeRecovery: both, queueHold: bothQueue }],
+    ["s_unstoppable", { parentSessionId: "s_orch", queueHold: unstoppable }],
   ]);
   let recordReads: string[][] = [];
   let ownerLookups: string[] = [];
+  let owned = new Set<string>();
   const source: SessionCommandPermissionSource = {
-    isSessionOwner: (_principal, id) => { ownerLookups.push(id); return false; },
+    isSessionOwner: (_principal, id) => { ownerLookups.push(id); return owned.has(id); },
     isSessionDescendant: () => false,
     sessionHoldRecords: (ids) => {
       recordReads.push([...ids]);
       return new Map(ids.flatMap((id) => records.has(id) ? [[id, records.get(id)!] as const] : []));
     },
   };
-  const queueOnly = { heldChildren: [{ sessionId: "s_queue", holds: sessionHolds({ queueHold }) }] };
-  assert.equal(withCampaignHoldAdviceFor(source, human("viewer"), queueOnly), queueOnly,
-    "a person's projection without a worktree-recovery hold is returned as it is");
-  assert.deepEqual(recordReads, [], "and reads no records");
-  assert.deepEqual(ownerLookups, []);
+  // The projection lists every held child, whether or not the reader's dashboard has loaded it.
   const projection = {
     heldChildren: [
-      ...queueOnly.heldChildren,
+      { sessionId: "s_queue", holds: sessionHolds({ queueHold }) },
       { sessionId: "s_wt", holds: sessionHolds({ worktreeRecovery: recovery }) },
       { sessionId: "s_both", holds: sessionHolds({ worktreeRecovery: both, queueHold: bothQueue }) },
+      { sessionId: "s_unstoppable", holds: sessionHolds({ queueHold: unstoppable }) },
     ],
   };
-  const written = withCampaignHoldAdviceFor(source, human("viewer"), projection).heldChildren;
-  assert.equal(written[0], projection.heldChildren[0], "a queue-held child is returned as the projection listed it");
-  assert.equal(written[1]!.holds[0]!.recoveryAction, worktreeRecoveryAction(recovery, { canManageWorktrees: false }));
-  assert.deepEqual(written[2]!.holds, sessionHolds({ worktreeRecovery: both, queueHold: bothQueue }, [], { canManageWorktrees: false }));
-  assert.equal(written[2]!.holds[1], projection.heldChildren[2]!.holds[1],
-    "a child held both ways keeps the server's queue-hold advice");
-  assert.deepEqual(recordReads, [["s_wt", "s_both"]], "only the worktree-held children are read");
-  assert.deepEqual(ownerLookups, ["s_wt", "s_both"], "and only their ownership is looked up");
+  const writtenFor = (principal: HumanPrincipal) => {
+    recordReads = [];
+    ownerLookups = [];
+    return withCampaignHoldAdviceFor(source, principal, projection).heldChildren.map((child) => child.holds);
+  };
+  const reader = (canStopJobs: boolean, canRestart: boolean, canManageWorktrees: boolean) =>
+    ({ canStopJobs, canRestart, canManageWorktrees });
+
+  const none = reader(false, false, false);
+  const forViewer = writtenFor(human("viewer"));
+  assert.deepEqual(forViewer, [
+    sessionHolds({ queueHold }, [], none),
+    sessionHolds({ worktreeRecovery: recovery }, [], none),
+    sessionHolds({ worktreeRecovery: both, queueHold: bothQueue }, [], none),
+    sessionHolds({ queueHold: unstoppable }, [], none),
+  ], "a Viewer's advice is written for them, for every hold kind");
+  assert.doesNotMatch(forViewer.flat().map((hold) => hold.recoveryAction).join(" "),
+    /stop_background_job|Stop Job|restart|select_worktree|create_worktree/u, "and names no action they could take");
+  assert.deepEqual(recordReads, [["s_queue", "s_wt", "s_both", "s_unstoppable"]], "every held child is read");
+  assert.deepEqual(ownerLookups, [], "but the role gate refuses a Viewer before ownership is read");
+
+  const nonOwner = reader(false, true, true);
+  assert.doesNotMatch(sessionHolds({ queueHold }, [], nonOwner)[0]!.recoveryAction, /stop_background_job|Stop Job/u);
   for (const role of ["owner", "admin", "operator"] as const) {
-    assert.deepEqual(withCampaignHoldAdviceFor(source, human(role), projection), projection,
-      `a non-owning ${role} may manage the worktrees and reads the server's copy`);
+    assert.deepEqual(writtenFor(human(role)), [
+      sessionHolds({ queueHold }, [], nonOwner),
+      projection.heldChildren[1]!.holds,
+      sessionHolds({ worktreeRecovery: both, queueHold: bothQueue }, [], nonOwner),
+      projection.heldChildren[3]!.holds,
+    ], `a non-owning ${role} may restart and manage the worktrees, but not stop a job`);
+    assert.deepEqual(ownerLookups, ["s_queue", "s_both"],
+      "only the children whose runner can stop a job have their ownership looked up");
+    owned = new Set(["s_queue", "s_both"]);
+    assert.deepEqual(writtenFor(human(role)), projection.heldChildren.map((child) => child.holds),
+      `an owning ${role} reads the server's copy`);
+    owned = new Set();
   }
 
-  // An agent credential's advice covers queue holds too, so it still reads every held child (#1863).
+  // An agent credential's advice covers every hold, and it reads every held child (#1863).
   recordReads = [];
-  ownerLookups = [];
   const worker: AgentPrincipal = {
     kind: "agent", actorId: "s_orch", credentialSessionId: "s_orch", organizationId: "org_1",
     delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } },
   };
   const forAgent = withCampaignHoldAdviceFor(source, worker, projection).heldChildren;
-  assert.deepEqual(recordReads, [["s_queue", "s_wt", "s_both"]]);
+  assert.deepEqual(recordReads, [["s_queue", "s_wt", "s_both", "s_unstoppable"]]);
   assert.notEqual(forAgent[0]!.holds[0]!.recoveryAction, projection.heldChildren[0]!.holds[0]!.recoveryAction,
     "its queue-hold advice is written for it");
 });
@@ -407,6 +431,8 @@ test("a person's session reads and live updates carry worktree-recovery advice w
   const serverCopy = worktreeRecoveryAction(recovery);
   const viewerCopy = worktreeRecoveryAction(recovery, { canManageWorktrees: false });
   const queueCopy = queueHoldRecoveryAction(queueHold);
+  // The queue-hold advice is written for a Viewer too (#1875).
+  const viewerQueueCopy = queueHoldRecoveryAction(queueHold, { canStopJobs: false, canRestart: false });
   const read = async (who: string, id: string) => {
     const response = await app.inject({ method: "GET", url: `/api/sessions/lookup/by-id?id=${id}`, headers: { authorization: who } });
     assert.equal(response.statusCode, 200);
@@ -415,7 +441,7 @@ test("a person's session reads and live updates carry worktree-recovery advice w
   const heldAdvice = (session: SessionView | undefined) => Object.fromEntries((session?.orchestratorCampaign?.heldChildren ?? [])
     .map((child) => [child.sessionId, child.holds.map((hold: SessionHoldView) => hold.recoveryAction)]));
 
-  assert.deepEqual(heldAdvice(await read("viewer", "orch")), { "orch-wt": [viewerCopy], "orch-queue": [queueCopy] },
+  assert.deepEqual(heldAdvice(await read("viewer", "orch")), { "orch-wt": [viewerCopy], "orch-queue": [viewerQueueCopy] },
     "a Viewer's Held Children do not name select_worktree or create_worktree");
   assert.deepEqual(heldAdvice(await read("admin", "orch")), { "orch-wt": [serverCopy], "orch-queue": [queueCopy] });
   assert.deepEqual((await read("viewer", "orch-wt")).holds?.map((hold) => hold.recoveryAction), [viewerCopy],
@@ -446,6 +472,106 @@ test("a person's session reads and live updates carry worktree-recovery advice w
   assert.deepEqual(upsertAdvice(clients.viewer)["orch-wt"], [viewerCopy]);
   assert.deepEqual(upsertAdvice(clients.otherViewer)["orch-wt"], [viewerCopy], "Viewers sharing a verdict share the advice");
   assert.deepEqual(upsertAdvice(clients.admin)["orch-wt"], [serverCopy]);
+});
+
+test("a person's Held Children carry queue-hold advice written for them, for a child their dashboard has not loaded (#1875)", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "person-queue-advice-"));
+  const database = join(root, "control-plane.db");
+  // A runner that can stop one of the child's jobs, and one that cannot, with no deadline either way.
+  const stoppable: SessionQueueHoldView = {
+    kind: "worktree_rebind", holdId: "qh-private", since: 10, target: "/w/next", queuedPrompts: 1,
+    unfinishedBackgroundJobs: 1, canStopJobs: true,
+  };
+  const unstoppable: SessionQueueHoldView = {
+    kind: "provider_account_switch", holdId: "qh-shared", since: 10, target: "account-2", queuedPrompts: 2,
+    unfinishedBackgroundJobs: 1,
+  };
+  const seed = ControlPlaneDb.open(database);
+  const local = seed.localIdentityContext();
+  try {
+    seed.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "test", agents: [], workspaces: [] }, 1, 55);
+    for (const [userId, role] of [["usr_admin", "admin"], ["usr_viewer", "viewer"], ["usr_owner", "operator"]] as const) {
+      seed.createIdentityMember({ userId, displayName: userId, organizationId: local.organizationId, role, now: 2 });
+    }
+    const shared = { organizationId: local.organizationId, owner: { kind: "organization" as const, organizationId: local.organizationId } };
+    seed.createSession({ id: "orch", runnerId: "r", workspaceId: null, agentId: null, title: "Orchestrator",
+      useWorktree: false, driver: "codex", config: { permissionMode: "orchestrator" },
+      orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default", {}),
+      scope: shared, now: 3 });
+    // A child only its owner and admins can see, so a Viewer's dashboard never loads it.
+    seed.createSession({ id: "held-private", parentSessionId: "orch", runnerId: "r", workspaceId: null, agentId: null,
+      title: "held-private", useWorktree: false, driver: "codex", config: {},
+      scope: { organizationId: local.organizationId, owner: { kind: "user", userId: "usr_owner" } }, now: 4 });
+    seed.createSession({ id: "held-shared", parentSessionId: "orch", runnerId: "r", workspaceId: null, agentId: null,
+      title: "held-shared", useWorktree: false, driver: "codex", config: {}, scope: shared, now: 4 });
+  } finally { seed.close(); }
+  const raw = new DatabaseSync(database);
+  try {
+    raw.prepare("UPDATE sessions SET queue_hold=? WHERE id=?").run(JSON.stringify(stoppable), "held-private");
+    raw.prepare("UPDATE sessions SET queue_hold=? WHERE id=?").run(JSON.stringify(unstoppable), "held-shared");
+  } finally { raw.close(); }
+  const db = ControlPlaneDb.open(database);
+  const member = (userId: string, role: HumanPrincipal["role"]): HumanPrincipal => ({
+    ...human(role, userId), organizationId: local.organizationId, organizationName: local.organizationName,
+  });
+  const principals: Record<string, HumanPrincipal> = {
+    admin: member("usr_admin", "admin"), viewer: member("usr_viewer", "viewer"), owner: member("usr_owner", "operator"),
+  };
+  const app = Fastify();
+  registerSessionLookupRoute(app, { db, requestPrincipal: (req) => principals[String(req.headers.authorization)] ?? null });
+  await app.ready();
+  t.after(async () => { await app.close(); db.close(); rmSync(root, { recursive: true, force: true }); });
+
+  const heldAdvice = (session: SessionView | undefined) => Object.fromEntries((session?.orchestratorCampaign?.heldChildren ?? [])
+    .map((child) => [child.sessionId, child.holds.map((hold: SessionHoldView) => hold.recoveryAction)]));
+  const read = async (who: string) => {
+    const response = await app.inject({ method: "GET", url: "/api/sessions/lookup/by-id?id=orch", headers: { authorization: who } });
+    assert.equal(response.statusCode, 200);
+    return heldAdvice((response.json() as { session: SessionView }).session);
+  };
+  const viewerAdvice = {
+    "held-private": [queueHoldRecoveryAction(stoppable, { canStopJobs: false, canRestart: false })],
+    "held-shared": [queueHoldRecoveryAction(unstoppable, { canStopJobs: false, canRestart: false })],
+  };
+  const adminAdvice = {
+    "held-private": [queueHoldRecoveryAction(stoppable, { canStopJobs: false, canRestart: true })],
+    "held-shared": [queueHoldRecoveryAction(unstoppable)],
+  };
+  const serverCopy = {
+    "held-private": [queueHoldRecoveryAction(stoppable)],
+    "held-shared": [queueHoldRecoveryAction(unstoppable)],
+  };
+
+  assert.deepEqual(await read("viewer"), viewerAdvice, "a Viewer's advice is written for them");
+  assert.doesNotMatch(Object.values(viewerAdvice).flat().join(" "), /stop_background_job|Stop Job|restart/u,
+    "and names neither stopping a job nor restarting");
+  assert.deepEqual(await read("admin"), adminAdvice, "an admin who does not own a child may restart it but not stop its job");
+  assert.doesNotMatch(adminAdvice["held-private"][0]!, /stop_background_job|Stop Job/u);
+  assert.match(adminAdvice["held-private"][0]!, /restart/u);
+  assert.deepEqual(await read("owner"), serverCopy, "the child's owner may take every action it names");
+
+  const hub = new Hub(db);
+  const connect = (principal: HumanPrincipal) => {
+    const messages: ControlPlaneToUi[] = [];
+    hub.addUiClient({ send: (data: string) => messages.push(JSON.parse(data) as ControlPlaneToUi) },
+      { deviceId: principal.deviceId, principal, close: () => {} });
+    return messages;
+  };
+  const clients = { viewer: connect(principals.viewer!), admin: connect(principals.admin!) };
+  const snapshot = clients.viewer[0];
+  assert.equal(snapshot?.type, "snapshot");
+  const sessions = snapshot?.type === "snapshot" ? snapshot.sessions : [];
+  assert.equal(sessions.some((session) => session.id === "held-private"), false,
+    "the Viewer's dashboard never loads the child it cannot see");
+  assert.deepEqual(heldAdvice(sessions.find((session) => session.id === "orch")), viewerAdvice,
+    "but Held Children lists it with advice written for them");
+  hub.sessionChangedById("orch");
+  const upsertAdvice = (messages: ControlPlaneToUi[]) => {
+    const upsert = [...messages].reverse().find((message) => message.type === "session_upsert" && message.session.id === "orch");
+    return heldAdvice(upsert?.type === "session_upsert" ? upsert.session : undefined);
+  };
+  assert.deepEqual(upsertAdvice(clients.viewer), viewerAdvice);
+  assert.deepEqual(upsertAdvice(clients.admin), adminAdvice);
 });
 
 test("fork, rewind, review findings and worktree commands follow the role gate, the agent route allowlist and the worktree rules (#1864)", () => {

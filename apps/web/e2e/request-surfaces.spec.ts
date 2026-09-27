@@ -418,4 +418,42 @@ for (const viewport of [
     await expect(entry).not.toContainText("discards");
     await assertNoHorizontalOverflow(page, ".campaign-held-children");
   });
+
+  // The harness renders each held child's advice as the projection carries it, as Held Children does
+  // for a child the dashboard has not loaded (#1875).
+  test(`a queue-held child's advice names only what the person reading it may do, at ${viewport.name} (#1875)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    const entry = page.getByRole("region", { name: "Held Children" }).locator(".campaign-held-child");
+    const recovery = entry.locator("dd").nth(2);
+
+    await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=legacy&stoppable=1");
+    await expect(entry).toHaveCount(1);
+    await expect(recovery).toContainText("stop it by its job id with stop_background_job");
+    await expect(recovery).toContainText("or with Stop Job in the Background Work panel");
+    await expect(recovery).toContainText("Do not restart the session to get past this hold");
+
+    await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=legacy&stoppable=1&reader=viewer");
+    await expect(entry).toHaveCount(1);
+    await expect(recovery).toContainText(
+      "Only the session owner or its controlling Orchestrator can end it sooner; ask them if it must end now.");
+    await expect(recovery).not.toContainText("stop_background_job");
+    await expect(recovery).not.toContainText("Stop Job");
+    await expect(recovery).not.toContainText("restart");
+    await assertNoHorizontalOverflow(page, ".campaign-held-children");
+
+    await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=legacy&stoppable=1&reader=admin");
+    await expect(entry).toHaveCount(1);
+    await expect(recovery).toContainText(
+      "Only the session owner or its controlling Orchestrator can end it sooner; ask them if it must end now.");
+    await expect(recovery).toContainText("Do not restart the session to get past this hold: a restart discards the queued messages.");
+    await expect(recovery).not.toContainText("stop_background_job");
+    await expect(recovery).not.toContainText("Stop Job");
+
+    await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=legacy&reader=viewer");
+    await expect(entry).toHaveCount(1);
+    await expect(recovery).toContainText(
+      "the hold clears only when someone who can act on this session steps in; ask its owner.");
+    await expect(recovery).not.toContainText("restart_session");
+    await assertNoHorizontalOverflow(page, ".campaign-held-children");
+  });
 }

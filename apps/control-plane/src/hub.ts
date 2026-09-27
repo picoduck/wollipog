@@ -1217,8 +1217,9 @@ export class Hub {
         if (projected.type === "session_upsert" && info.principal !== undefined) {
           const session = withSessionCommandPermissions(this.db, info.principal, projected.session);
           const verdict = JSON.stringify(session.commandPermissions);
-          // Hold advice is written for the reader too (#1867), and each campaign child's advice
-          // follows the reader's verdict on that child, not on this session, so it joins the key.
+          // Hold advice is written for the reader too (#1867, #1875), and each campaign child's
+          // advice follows the reader's verdict on that child, not on this session, so it joins
+          // the key.
           const key = JSON.stringify([verdict, holdAdviceOf(session)]);
           const shared = projected === msg ? sessionDataByPermissions.get(key) : undefined;
           clientData = shared ?? JSON.stringify({ ...projected, session } satisfies ControlPlaneToUi);

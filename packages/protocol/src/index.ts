@@ -5846,8 +5846,8 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
  * `reader` is what the person reading the advice may do to the held session (#1857). Advice written
  * for them names Stop Job only if they may stop its background jobs, and restarting only if they
  * may restart it; otherwise it tells them to wait or to ask someone who can act. The control plane
- * writes the same for the agent credential calling its tools (#1863). Without a reader (the
- * server's own copy) every action is named. */
+ * writes it for them (#1875), and the same for the agent credential calling its tools (#1863).
+ * Without a reader (the server's own copy) every action is named. */
 export function queueHoldRecoveryAction(hold: SessionQueueHoldView, reader?: QueueHoldReader): string {
   const canStopJobs = reader?.canStopJobs ?? true;
   const canRestart = reader?.canRestart ?? true;
@@ -5908,10 +5908,9 @@ export interface QueueHoldReader {
 /** What the principal reading a session's hold advice may do to it (#1863). */
 export type SessionHoldReader = QueueHoldReader & WorktreeRecoveryReader;
 
-/** Whom the control plane writes a session's hold advice for. An agent credential's reader covers
- * every hold (#1863). A person's covers worktree recovery only (#1867): the dashboard rewrites a
- * person's queue-hold advice from their command permissions (#1857), so that stays the server's
- * copy. */
+/** Whom the control plane writes a session's hold advice for: an agent credential (#1863) or a
+ * person (#1867, #1875), whose readers cover every hold. A reader without `canStopJobs` covers
+ * worktree recovery only, and leaves queue-hold advice as the server's copy. */
 export type HoldAdviceReader = SessionHoldReader | WorktreeRecoveryReader;
 
 /** The part of `reader` that queue-hold advice is written for, if it covers queue holds. */

@@ -38,9 +38,17 @@ const boundedParam = new URLSearchParams(window.location.search).get("bounded");
 const boundedHold = boundedParam === "1" || boundedParam === "legacy";
 // `restart=keeps` reports that hold as a v191 runner does, whose restart keeps the queue (#1779).
 const restartKeepsQueue = new URLSearchParams(window.location.search).get("restart") === "keeps";
-// `reader=viewer` writes the worktree hold's advice as the control plane writes it for a person who
-// may not manage the held child's worktrees (#1867).
-const viewerReader = new URLSearchParams(window.location.search).get("reader") === "viewer";
+// `reader=viewer` writes the held children's advice as the control plane writes it for a Viewer, who
+// may take none of its actions (#1867, #1875); `reader=admin`, for an admin who does not own them
+// and so may restart them but not stop their jobs (#1875).
+const readerParam = new URLSearchParams(window.location.search).get("reader");
+const heldChildReader = readerParam === "viewer"
+  ? { canStopJobs: false, canRestart: false, canManageWorktrees: false }
+  : readerParam === "admin"
+  ? { canStopJobs: false, canRestart: true, canManageWorktrees: true }
+  : undefined;
+// `stoppable=1` reports the bounded hold as a v190 runner does, which can stop one of its jobs (#1780).
+const stoppableJobs = new URLSearchParams(window.location.search).get("stoppable") === "1";
 const includeDescendants = scenario === "descendants" || scenario === "held" ||
   new URLSearchParams(window.location.search).get("children") === "1";
 const requestedPollStatus = new URLSearchParams(window.location.search).get("pollStatus");
@@ -360,8 +368,10 @@ function boundedHandoffHeldChild() {
       oldestUnfinishedJob: { launchType: "monitor", startedAt: since - 36 * 60_000 },
       ...(boundedParam === "1" ? { endsAt: since + 60 * 60_000 } : {}),
       ...(restartKeepsQueue ? { restartKeepsQueue: true as const } : {}),
+      ...(stoppableJobs ? { canStopJobs: true as const } : {}),
     },
-  }, [{ kind: "workflow_decision_resolution", occurrenceId: "wd_occ_merge_1778", since: since + 60_000 }]);
+  }, [{ kind: "workflow_decision_resolution", occurrenceId: "wd_occ_merge_1778", since: since + 60_000 }],
+  heldChildReader);
   return { sessionId: "held-child-3", holds: [hold!] };
 }
 
@@ -396,7 +406,7 @@ function heldCampaignSession(): SessionView {
             kind: "workflow_decision_resolution",
             occurrenceId: "wd_occ_merge_1752",
             since: Date.now() - 3 * 60_000,
-          }], viewerReader ? { canManageWorktrees: false } : undefined),
+          }], heldChildReader),
         },
         {
           sessionId: "held-child-2",
