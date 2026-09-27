@@ -5908,6 +5908,17 @@ export interface QueueHoldReader {
 /** What the principal reading a session's hold advice may do to it (#1863). */
 export type SessionHoldReader = QueueHoldReader & WorktreeRecoveryReader;
 
+/** Whom the control plane writes a session's hold advice for. An agent credential's reader covers
+ * every hold (#1863). A person's covers worktree recovery only (#1867): the dashboard rewrites a
+ * person's queue-hold advice from their command permissions (#1857), so that stays the server's
+ * copy. */
+export type HoldAdviceReader = SessionHoldReader | WorktreeRecoveryReader;
+
+/** The part of `reader` that queue-hold advice is written for, if it covers queue holds. */
+export function queueHoldAdviceReader(reader: HoldAdviceReader | undefined): QueueHoldReader | undefined {
+  return reader && "canStopJobs" in reader ? reader : undefined;
+}
+
 /**
  * Why a session cannot start its next turn although nothing is asking a question (#1650). A hold
  * is not a request: there is nothing to answer, only a condition to clear, so it is reported
@@ -5944,7 +5955,7 @@ export interface SessionHoldView {
 export function sessionHolds(
   session: { worktreeRecovery?: WorktreeRecoveryView | null; queueHold?: SessionQueueHoldView | null },
   heldResumes: HeldSessionResumeView[] = [],
-  reader?: SessionHoldReader,
+  reader?: HoldAdviceReader,
 ): SessionHoldView[] {
   const holds: SessionHoldView[] = [];
   const recovery = session.worktreeRecovery;
@@ -5966,7 +5977,7 @@ export function sessionHolds(
       holdId: queueHold.holdId,
       since: queueHold.since,
       reason: queueHoldReason(queueHold),
-      recoveryAction: queueHoldRecoveryAction(queueHold, reader),
+      recoveryAction: queueHoldRecoveryAction(queueHold, queueHoldAdviceReader(reader)),
       ...(heldResumes.length ? { heldResumes } : {}),
     });
   }

@@ -1,16 +1,27 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import Fastify from "fastify";
 import {
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
+  queueHoldRecoveryAction,
   sessionHolds,
+  worktreeRecoveryAction,
   type ControlPlaneToUi,
   type RunnerMetadata,
   type SessionCommandPermissions,
+  type SessionHoldView,
+  type SessionQueueHoldView,
   type SessionView,
+  type WorktreeRecoveryView,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
+import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
 import {
   sessionCommandPermissions,
@@ -195,8 +206,12 @@ test("an agent credential's hold reader follows the routes its advice names (#18
     "an Orchestrator's own worktrees are refused under Strict Project Isolation, which is the default");
   assert.deepEqual(sessionHoldReader(orchestrator, { ...own, orchestratorPolicy: policy(false) }, self),
     reader(false, false, true));
-  assert.equal(sessionHoldReader(human("viewer"), child, descendant), undefined,
-    "a person reads the server's copy, which the dashboard rewrites itself");
+  assert.deepEqual(sessionHoldReader(human("viewer"), child, descendant), { canManageWorktrees: false },
+    "a person's reader covers worktree recovery only; the dashboard rewrites their queue-hold advice itself (#1867)");
+  for (const role of ["owner", "admin", "operator"] as const) {
+    assert.deepEqual(sessionHoldReader(human(role), child, { ownsSession: false, isDescendant: false }),
+      { canManageWorktrees: true }, `a non-owning ${role} may manage its worktrees`);
+  }
 
   const recovery = { recoveryId: "wr_1", detectedAt: 1, selectedPath: "/w/c", expectedBranch: "fix/c", detail: "switched" };
   const queueHold = {
@@ -258,7 +273,8 @@ test("a campaign's held children are written for the agent credential reading it
   records.set("s_nested", { ...records.get("s_nested")!, orchestratorPolicy: policy(true) });
   assert.doesNotMatch(advice(withCampaignHoldAdviceFor(source, nested, projection))[0]!, /select_worktree/u,
     "under Strict Project Isolation it may not");
-  assert.equal(withCampaignHoldAdviceFor(source, human("owner"), projection), projection, "a person's projection is unchanged");
+  assert.deepEqual(withCampaignHoldAdviceFor(source, human("owner"), projection), projection,
+    "a person who may take every action reads the server's copy");
 
   // The same rewrite reaches a campaign embedded in a session view, which prompt_session returns
   // for a nested Orchestrator as get_session does.
@@ -266,6 +282,141 @@ test("a campaign's held children are written for the agent credential reading it
   const embedded = withSessionHoldAdviceFor(source, nested, view, undefined).orchestratorCampaign as typeof projection;
   assert.deepEqual(advice(embedded), advice(withCampaignHoldAdviceFor(source, nested, projection)));
   assert.doesNotMatch(advice(embedded)[1]!, /stop_background_job/u);
+});
+
+test("a person's worktree-recovery advice is written for them, and their queue-hold advice stays the server's copy (#1867)", () => {
+  const recovery = { recoveryId: "wr_1", detectedAt: 1, selectedPath: "/w/c", expectedBranch: "fix/c", detail: "switched" };
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "qh_1", since: 1, target: "/w/next", queuedPrompts: 1,
+    unfinishedBackgroundJobs: 1, canStopJobs: true as const,
+  };
+  const view = { worktreeRecovery: recovery, queueHold, holds: sessionHolds({ worktreeRecovery: recovery, queueHold }) };
+  const refused = withHoldAdviceFor(view, { canManageWorktrees: false }).holds!;
+  assert.equal(refused[0]!.recoveryAction, worktreeRecoveryAction(recovery, { canManageWorktrees: false }));
+  assert.doesNotMatch(refused[0]!.recoveryAction, /select_worktree|create_worktree/u);
+  assert.match(refused[0]!.recoveryAction, /switch fix\/c/u, "the branch to restore is still named");
+  assert.equal(refused[1], view.holds[1], "the dashboard rewrites a person's queue-hold advice itself (#1857)");
+  assert.deepEqual(refused, sessionHolds({ worktreeRecovery: recovery, queueHold }, [], { canManageWorktrees: false }),
+    "the descendant view derives the same advice from the stored record");
+  assert.deepEqual(withHoldAdviceFor(view, { canManageWorktrees: true }).holds, view.holds,
+    "a person who may manage the worktrees reads the server's copy");
+
+  const records: ReturnType<SessionCommandPermissionSource["sessionHoldRecords"]> = new Map([
+    ["s_wt", { parentSessionId: "s_orch", worktreeRecovery: recovery }],
+    ["s_queue", { parentSessionId: "s_orch", queueHold }],
+  ]);
+  let recordReads = 0;
+  const source: SessionCommandPermissionSource = {
+    isSessionOwner: () => false,
+    isSessionDescendant: () => false,
+    sessionHoldRecords: (ids) => {
+      recordReads += 1;
+      return new Map(ids.flatMap((id) => records.has(id) ? [[id, records.get(id)!] as const] : []));
+    },
+  };
+  const queueOnly = { heldChildren: [{ sessionId: "s_queue", holds: sessionHolds({ queueHold }) }] };
+  assert.equal(withCampaignHoldAdviceFor(source, human("viewer"), queueOnly), queueOnly,
+    "a person's projection without a worktree-recovery hold is returned as it is");
+  assert.equal(recordReads, 0, "and reads no records");
+  const projection = {
+    heldChildren: [...queueOnly.heldChildren, { sessionId: "s_wt", holds: sessionHolds({ worktreeRecovery: recovery }) }],
+  };
+  const written = withCampaignHoldAdviceFor(source, human("viewer"), projection).heldChildren;
+  assert.equal(written[0]!.holds[0], projection.heldChildren[0]!.holds[0]);
+  assert.equal(written[1]!.holds[0]!.recoveryAction, worktreeRecoveryAction(recovery, { canManageWorktrees: false }));
+  for (const role of ["owner", "admin", "operator"] as const) {
+    assert.deepEqual(withCampaignHoldAdviceFor(source, human(role), projection), projection,
+      `a non-owning ${role} may manage the worktrees and reads the server's copy`);
+  }
+});
+
+test("a person's session reads and live updates carry worktree-recovery advice written for them (#1867)", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "person-hold-advice-"));
+  const database = join(root, "control-plane.db");
+  const recovery: WorktreeRecoveryView = {
+    recoveryId: "wr-1", detectedAt: 10, selectedPath: "/w/child", expectedBranch: "fix/child", detail: "branch switched",
+  };
+  const queueHold: SessionQueueHoldView = {
+    kind: "worktree_rebind", holdId: "qh-1", since: 10, target: "/w/next", queuedPrompts: 1,
+    unfinishedBackgroundJobs: 1, canStopJobs: true, restartKeepsQueue: true,
+  };
+  const seed = ControlPlaneDb.open(database);
+  const local = seed.localIdentityContext();
+  try {
+    seed.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "test", agents: [], workspaces: [] }, 1, 55);
+    for (const [userId, role] of [["usr_admin", "admin"], ["usr_viewer", "viewer"], ["usr_viewer_2", "viewer"]] as const) {
+      seed.createIdentityMember({ userId, displayName: userId, organizationId: local.organizationId, role, now: 2 });
+    }
+    const scope = { organizationId: local.organizationId, owner: { kind: "organization" as const, organizationId: local.organizationId } };
+    seed.createSession({ id: "orch", runnerId: "r", workspaceId: null, agentId: null, title: "Orchestrator",
+      useWorktree: false, driver: "codex", config: { permissionMode: "orchestrator" },
+      orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default", {}),
+      scope, now: 3 });
+    for (const id of ["orch-wt", "orch-queue"]) {
+      seed.createSession({ id, parentSessionId: "orch", runnerId: "r", workspaceId: null, agentId: null, title: id,
+        useWorktree: false, driver: "codex", config: {}, scope, now: 4 });
+    }
+  } finally { seed.close(); }
+  // The holds as the runner reports them, stored the way a session snapshot stores them.
+  const raw = new DatabaseSync(database);
+  try {
+    raw.prepare("UPDATE sessions SET worktree_recovery=? WHERE id=?").run(JSON.stringify(recovery), "orch-wt");
+    raw.prepare("UPDATE sessions SET queue_hold=? WHERE id=?").run(JSON.stringify(queueHold), "orch-queue");
+  } finally { raw.close(); }
+  const db = ControlPlaneDb.open(database);
+  const member = (userId: string, role: HumanPrincipal["role"]): HumanPrincipal => ({
+    ...human(role, userId), organizationId: local.organizationId, organizationName: local.organizationName,
+  });
+  const admin = member("usr_admin", "admin");
+  const viewer = member("usr_viewer", "viewer");
+  const app = Fastify();
+  const principals: Record<string, AuthPrincipal> = { admin, viewer };
+  registerSessionLookupRoute(app, { db, requestPrincipal: (req) => principals[String(req.headers.authorization)] ?? null });
+  await app.ready();
+  t.after(async () => { await app.close(); db.close(); rmSync(root, { recursive: true, force: true }); });
+
+  const serverCopy = worktreeRecoveryAction(recovery);
+  const viewerCopy = worktreeRecoveryAction(recovery, { canManageWorktrees: false });
+  const queueCopy = queueHoldRecoveryAction(queueHold);
+  const read = async (who: string, id: string) => {
+    const response = await app.inject({ method: "GET", url: `/api/sessions/lookup/by-id?id=${id}`, headers: { authorization: who } });
+    assert.equal(response.statusCode, 200);
+    return (response.json() as { session: SessionView }).session;
+  };
+  const heldAdvice = (session: SessionView | undefined) => Object.fromEntries((session?.orchestratorCampaign?.heldChildren ?? [])
+    .map((child) => [child.sessionId, child.holds.map((hold: SessionHoldView) => hold.recoveryAction)]));
+
+  assert.deepEqual(heldAdvice(await read("viewer", "orch")), { "orch-wt": [viewerCopy], "orch-queue": [queueCopy] },
+    "a Viewer's Held Children do not name select_worktree or create_worktree");
+  assert.deepEqual(heldAdvice(await read("admin", "orch")), { "orch-wt": [serverCopy], "orch-queue": [queueCopy] });
+  assert.deepEqual((await read("viewer", "orch-wt")).holds?.map((hold) => hold.recoveryAction), [viewerCopy],
+    "the held session's own view is written for the Viewer too");
+  assert.deepEqual((await read("admin", "orch-wt")).holds?.map((hold) => hold.recoveryAction), [serverCopy]);
+
+  const hub = new Hub(db);
+  const connect = (principal: HumanPrincipal) => {
+    const messages: ControlPlaneToUi[] = [];
+    hub.addUiClient({ send: (data: string) => messages.push(JSON.parse(data) as ControlPlaneToUi) },
+      { deviceId: principal.deviceId, principal, close: () => {} });
+    return messages;
+  };
+  const clients = {
+    admin: connect(admin), viewer: connect(viewer), otherViewer: connect(member("usr_viewer_2", "viewer")),
+  };
+  const snapshotAdvice = (messages: ControlPlaneToUi[]) => {
+    const snapshot = messages[0];
+    return heldAdvice(snapshot?.type === "snapshot" ? snapshot.sessions.find((s) => s.id === "orch") : undefined);
+  };
+  assert.deepEqual(snapshotAdvice(clients.viewer)["orch-wt"], [viewerCopy]);
+  assert.deepEqual(snapshotAdvice(clients.admin)["orch-wt"], [serverCopy]);
+  hub.sessionChangedById("orch");
+  const upsertAdvice = (messages: ControlPlaneToUi[]) => {
+    const upsert = [...messages].reverse().find((message) => message.type === "session_upsert" && message.session.id === "orch");
+    return heldAdvice(upsert?.type === "session_upsert" ? upsert.session : undefined);
+  };
+  assert.deepEqual(upsertAdvice(clients.viewer)["orch-wt"], [viewerCopy]);
+  assert.deepEqual(upsertAdvice(clients.otherViewer)["orch-wt"], [viewerCopy], "Viewers sharing a verdict share the advice");
+  assert.deepEqual(upsertAdvice(clients.admin)["orch-wt"], [serverCopy]);
 });
 
 test("fork, rewind, review findings and worktree commands follow the role gate, the agent route allowlist and the worktree rules (#1864)", () => {

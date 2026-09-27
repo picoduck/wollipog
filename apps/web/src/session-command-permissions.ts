@@ -29,10 +29,11 @@ export function sessionArchiveActionRefusal(
 }
 
 /** A hold's recovery advice written for the signed-in person (#1857). The server writes one copy
- * for every reader, naming Stop Job and restarting; when this client holds the session's queue hold
- * and the person's permissions, it rewrites the advice to name only what they may do. Otherwise
- * (a worktree hold, an unknown session, or a control plane that predates #1857's verdicts, marked by
- * their absence) the server's copy is shown as written. */
+ * of queue-hold advice for every reader, naming Stop Job and restarting; when this client holds the
+ * session's queue hold and the person's permissions, it rewrites the advice to name only what they
+ * may do. Otherwise (an unknown session, or a control plane that predates #1857's verdicts, marked
+ * by their absence) the server's copy is shown as written. A worktree hold's advice is always shown
+ * as written: the server already writes it for the person (#1867). */
 export function holdRecoveryActionFor(
   hold: SessionHoldView,
   session: Pick<SessionView, "queueHold" | "commandPermissions"> | undefined,

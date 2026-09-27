@@ -81,7 +81,7 @@ import {
   type ProviderHistoryQuarantineView,
   type WorktreeRecoveryView,
   type HeldSessionResumeView,
-  type SessionHoldReader,
+  type HoldAdviceReader,
   type SessionHoldView,
   type SessionQueueHoldView,
   type ChildSessionAttentionOwner,
@@ -15725,7 +15725,7 @@ export class ControlPlaneDb {
    * session's hold advice for the principal reading it (#1863). */
   listSessionDescendantHolds(
     ancestorId: string,
-    readerFor?: (target: { id: string; parentSessionId: string | null }) => SessionHoldReader | undefined,
+    readerFor?: (target: { id: string; parentSessionId: string | null }) => HoldAdviceReader | undefined,
   ): Array<{
     id: string;
     title: string;
@@ -15796,7 +15796,7 @@ export class ControlPlaneDb {
     sessionId: string,
     worktreeRecoveryJson: string | null,
     queueHoldJson: string | null,
-    reader?: SessionHoldReader,
+    reader?: HoldAdviceReader,
   ): SessionHoldView[] {
     const worktreeRecovery = parseWorktreeRecovery(worktreeRecoveryJson);
     const queueHold = parseQueueHold(queueHoldJson);

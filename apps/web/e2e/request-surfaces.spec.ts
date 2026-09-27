@@ -329,6 +329,7 @@ for (const viewport of [
     await expect(recovery).toContainText("is on branch main, not fix/issue-1650-decision-resume.");
     await expect(recovery.locator("dd code").first())
       .toHaveText("git -C /home/dev/worktrees/issue-1650 switch fix/issue-1650-decision-resume");
+    await expect(recovery).toContainText("select or create another worktree for this session with select_worktree or create_worktree.");
     await expect(recovery.locator("dt")).toHaveText(["Hold", "Reason", "Recovery Action", "Held Decision Resumes"]);
     await expect(recovery).toContainText("wd_occ_merge_1752");
     await expect(entries.nth(1)).toContainText("Handoff Barrier");
@@ -353,6 +354,22 @@ for (const viewport of [
     await expect(held).toContainText("1 other blocked child is not listed here");
     await page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.clearHold("held-child-2"));
     await expect(held).toHaveCount(0);
+  });
+
+  test(`a Viewer's worktree-recovery advice names who can recover it, not the worktree tools, at ${viewport.name} (#1867)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=held&reader=viewer");
+    const recovery = page.getByRole("region", { name: "Held Children" }).locator(".campaign-held-child").nth(0);
+    await expect(recovery.getByRole("link", { name: "Fix #1650: Keep a Decision Resume Across Worktree Recovery" }))
+      .toBeVisible();
+    await expect(recovery).toContainText(
+      "Only the session owner or its controlling Orchestrator can recover this session's worktree: ask them to restore " +
+      "branch fix/issue-1650-decision-resume in /home/dev/worktrees/issue-1650");
+    await expect(recovery.locator("dd code").first())
+      .toHaveText("git -C /home/dev/worktrees/issue-1650 switch fix/issue-1650-decision-resume");
+    await expect(recovery).not.toContainText("select_worktree");
+    await expect(recovery).not.toContainText("create_worktree");
+    await assertNoHorizontalOverflow(page, ".campaign-held-children");
   });
 }
 

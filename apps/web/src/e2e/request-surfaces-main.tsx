@@ -38,6 +38,9 @@ const boundedParam = new URLSearchParams(window.location.search).get("bounded");
 const boundedHold = boundedParam === "1" || boundedParam === "legacy";
 // `restart=keeps` reports that hold as a v191 runner does, whose restart keeps the queue (#1779).
 const restartKeepsQueue = new URLSearchParams(window.location.search).get("restart") === "keeps";
+// `reader=viewer` writes the worktree hold's advice as the control plane writes it for a person who
+// may not manage the held child's worktrees (#1867).
+const viewerReader = new URLSearchParams(window.location.search).get("reader") === "viewer";
 const includeDescendants = scenario === "descendants" || scenario === "held" ||
   new URLSearchParams(window.location.search).get("children") === "1";
 const requestedPollStatus = new URLSearchParams(window.location.search).get("pollStatus");
@@ -379,22 +382,21 @@ function heldCampaignSession(): SessionView {
       heldChildren: boundedHold ? [boundedHandoffHeldChild()] : [
         {
           sessionId: "held-child-1",
-          holds: [{
-            kind: "worktree_recovery",
-            holdId: "recovery-held-child-1",
-            since: Date.now() - 7 * 60_000,
-            reason: "The selected worktree /home/dev/worktrees/issue-1650 is on branch main, not " +
-              "fix/issue-1650-decision-resume.",
-            recoveryAction: "Restore branch fix/issue-1650-decision-resume in /home/dev/worktrees/issue-1650 " +
-              "(for example `git -C /home/dev/worktrees/issue-1650 switch fix/issue-1650-decision-resume`) and " +
-              "select that worktree again with select_worktree, or select or create another worktree for this " +
-              "session with select_worktree or create_worktree.",
-            heldResumes: [{
-              kind: "workflow_decision_resolution",
-              occurrenceId: "wd_occ_merge_1752",
-              since: Date.now() - 3 * 60_000,
-            }],
-          }],
+          // The reason and recovery action come from the protocol, as the control plane derives them.
+          holds: sessionHolds({
+            worktreeRecovery: {
+              recoveryId: "recovery-held-child-1",
+              detectedAt: Date.now() - 7 * 60_000,
+              selectedPath: "/home/dev/worktrees/issue-1650",
+              expectedBranch: "fix/issue-1650-decision-resume",
+              detail: "The selected worktree /home/dev/worktrees/issue-1650 is on branch main, not " +
+                "fix/issue-1650-decision-resume.",
+            },
+          }, [{
+            kind: "workflow_decision_resolution",
+            occurrenceId: "wd_occ_merge_1752",
+            since: Date.now() - 3 * 60_000,
+          }], viewerReader ? { canManageWorktrees: false } : undefined),
         },
         {
           sessionId: "held-child-2",

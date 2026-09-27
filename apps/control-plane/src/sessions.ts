@@ -124,7 +124,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type RunnerCapacityBlocker,
   type SessionConfig,
   type SessionEventPayload,
-  type SessionHoldReader,
+  type HoldAdviceReader,
   type SessionHoldView,
   type SessionLaunchSpec,
   type SessionSnapshot,
@@ -4334,7 +4334,7 @@ export class SessionsService {
     images: PromptImageInput[] = [],
     slashCommand?: string,
     config?: SessionConfig,
-    holdReader?: SessionHoldReader,
+    holdReader?: HoldAdviceReader,
   ): Promise<ServiceResult<PromptAdmissionView>> {
     const steered = await this.steerMidTurnPrompt(sessionId, text, images, slashCommand, config);
     return steered ??
@@ -4441,7 +4441,7 @@ export class SessionsService {
     },
     // What the agent credential sending the prompt may do to this session, so the hold advice in
     // its refusal or delivery report names only tools it can call (#1863).
-    holdReader?: SessionHoldReader,
+    holdReader?: HoldAdviceReader,
   ): ServiceResult<PromptAdmissionView> {
     const snapshotCommand = delivery?.commandSnapshots?.[0];
     if (delivery?.commandSnapshots &&
@@ -8613,7 +8613,7 @@ export class SessionsService {
   blockedDescendants(
     parentSessionId: string,
     canAccess: (sessionId: string) => boolean,
-    holdReaderFor?: (target: { id: string; parentSessionId: string | null }) => SessionHoldReader | undefined,
+    holdReaderFor?: (target: { id: string; parentSessionId: string | null }) => HoldAdviceReader | undefined,
   ): DescendantBlockedChildView[] {
     return this.db.listSessionDescendantHolds(parentSessionId, holdReaderFor).flatMap((session) => canAccess(session.id)
       ? [{
@@ -8635,7 +8635,7 @@ export class SessionsService {
     // Attention bookkeeping reads only the requests, and scans held children once on its own.
     includeBlockedChildren = true,
     // Writes each held child's recovery advice for the calling Orchestrator (#1863).
-    holdReaderFor?: (target: { id: string; parentSessionId: string | null }) => SessionHoldReader | undefined,
+    holdReaderFor?: (target: { id: string; parentSessionId: string | null }) => HoldAdviceReader | undefined,
   ): ServiceResult<DescendantRequestsView> {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);

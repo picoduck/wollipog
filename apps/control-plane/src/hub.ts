@@ -263,6 +263,14 @@ interface PendingRequest {
   timer: ReturnType<typeof setTimeout> | undefined;
 }
 
+/** Every recovery action a session view carries: its own holds' and its campaign's held children's. */
+function holdAdviceOf(session: SessionView): string[] {
+  return [
+    ...(session.holds ?? []),
+    ...(session.orchestratorCampaign?.heldChildren ?? []).flatMap((child) => child.holds),
+  ].map((hold) => hold.recoveryAction);
+}
+
 export class Hub {
   private readonly uiClients = new Map<Socket, UiClientInfo>();
   /** Process-lifetime admission state. Keeping it outside UiClientInfo prevents reconnects or
@@ -1208,11 +1216,14 @@ export class Hub {
         }
         if (projected.type === "session_upsert" && info.principal !== undefined) {
           const session = withSessionCommandPermissions(this.db, info.principal, projected.session);
-          const key = JSON.stringify(session.commandPermissions);
+          const verdict = JSON.stringify(session.commandPermissions);
+          // Hold advice is written for the reader too (#1867), and each campaign child's advice
+          // follows the reader's verdict on that child, not on this session, so it joins the key.
+          const key = JSON.stringify([verdict, holdAdviceOf(session)]);
           const shared = projected === msg ? sessionDataByPermissions.get(key) : undefined;
           clientData = shared ?? JSON.stringify({ ...projected, session } satisfies ControlPlaneToUi);
           if (projected === msg && shared === undefined) sessionDataByPermissions.set(key, clientData);
-          (info.sentCommandPermissions ??= new Map()).set(session.id, key);
+          (info.sentCommandPermissions ??= new Map()).set(session.id, verdict);
         }
         if (projected.type === "session_removed") info.sentCommandPermissions?.delete(projected.sessionId);
         if (projected.type === "session_upsert") info.visibleSessionIds?.add(projected.session.id);
