@@ -3,252 +3,164 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import postcss, { type Declaration } from "postcss";
+import postcss, { type AtRule, type Declaration, type Node, type Rule } from "postcss";
 
 /**
  * Keyboard focus that survives forced colors (#1890).
  *
  * Forced colors (Windows contrast themes) repaints author colours with system colours, forces every
- * background to Canvas and drops `box-shadow` outright. A rule that removes an element's outline and
- * shows focus with a fill or a shadow instead therefore shows nothing at all in a contrast theme: the
- * Resize Panel separator did exactly that, and its focused and unfocused pixels were identical.
+ * background to Canvas and drops `box-shadow` outright. A rule that takes an element's outline away
+ * and shows focus with a fill or a shadow instead therefore shows nothing at all in a contrast theme:
+ * the Resize Panel separator did exactly that, and its focused and unfocused pixels were identical.
  *
- * What forced colors keeps is the SHAPE of an outline or a border, repainted in a system colour. A
- * transparent outline is the idiomatic answer: it paints nothing normally, and forced colors
- * repaints its colour. A border-colour change alone does not count, because forced colors paints
- * every border the same system colour.
+ * This is an INVENTORY, not a proof. Deciding from the stylesheet alone whether some other rule puts
+ * a visible ring back — under the same media conditions, winning on specificity, importance and
+ * source order, in a colour that is not Canvas, at a width that is not zero — is a cascade engine,
+ * and review showed a partial one passes exactly the cases it gets wrong. So every rule that sets an
+ * outline in any form other than the few known-good rings below is listed here verbatim with the
+ * reason focus stays visible, and ANY new, changed or removed one fails until a person checks it.
  *
- * The check is deliberately narrow. A rule that removes its own focused element's outline must paint
- * one of those shapes in the SAME declaration block, resolved by importance and then source order.
- * Anything else — an SVG stroke, a ring on a child, a pseudo-element or an ancestor's `:has()` — has
- * to be listed below with the reason it holds, because proving that from selectors alone (scope,
- * media conditions, source order, specificity, which element a stroke applies to) is a cascade
- * engine, and a partial one passes the cases it gets wrong.
+ * A rule whose selector mentions `:focus` is recorded with its whole block, because its other
+ * declarations are the focus cue being judged. Any other rule is recorded with its outline
+ * declarations only: its padding is not a focus cue, and churn there would train people to update
+ * the list without looking.
  */
 
 const WEB = fileURLToPath(new URL("..", import.meta.url));
 const css = readFileSync(join(WEB, "src/styles.css"), "utf8");
 
 /**
- * Focus rules that remove the outline and do not repaint a shape in the same block, on purpose. Each
- * entry says why focus stays visible in forced colors; a stale entry fails the inventory test below.
+ * The known-good rings. A transparent outline is the idiomatic forced-colors answer: it paints
+ * nothing normally, and forced colors repaints it in a system colour.
  */
-const EXEMPT: ReadonlyMap<string, string> = new Map([
-  [".ws-create-name:focus", "a text input: the caret marks focus, and forced colors keeps it"],
-  [".shell-search:focus", "a text input: the caret marks focus, and forced colors keeps it"],
-  [".shell-input:focus", "a text input: the caret marks focus, and forced colors keeps it"],
-  [".agent-session-agent-step:focus", "a tabIndex={-1} programmatic focus target, not a keyboard stop"],
-  [".agent-session-results-step:focus", "a tabIndex={-1} programmatic focus target, not a keyboard stop"],
-  [".inbox-thread-toggle:focus-visible", "the same phone @media block outlines its inner span instead"],
-  [".inbox-list:focus-visible", ".inbox-list-pane:has(> .inbox-list:focus-visible)::after borders the pane; InboxView renders the list as its direct child"],
-  [".detail-scroll:focus-visible", ".inbox-preview-pane:has(.detail-scroll:focus-visible)::after borders the pane; in the app, SessionDetail renders only inside it (InboxView), though e2e harnesses may mount it alone"],
-  [".usage-chart-hit:focus-visible", "an SVG <rect>: the same block paints a 2px stroke, which forced colors keeps"],
+const KNOWN_GOOD_OUTLINE = /^2px solid (var\(--accent\)|var\(--text\)|transparent)$/;
+
+/** Every rule that sets an outline some other way, with the reason focus stays visible in forced colors. */
+const REVIEWED: ReadonlyMap<string, string> = new Map([
+  // Text entry: forced colors keeps the caret, which marks focus in a field.
+  ["select, input, textarea { outline: none }", "element selectors (0,0,1) lose to the later global :focus-visible ring, so these fields keep it"],
+  [".composer-input { outline: none }", "declared before the global :focus-visible ring at equal specificity, so the ring still wins"],
+  [".composer-answer-input { outline: none }", "declared before the global :focus-visible ring at equal specificity, so the ring still wins"],
+  [".palette-input { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
+  [".project-manager-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
+  [".inbox-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
+  [".archive-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
+  [".ws-create-name:focus { outline: none; border-color: var(--accent) }", "a text input: forced colors keeps the caret, which marks focus"],
+  [".shell-search:focus { outline: none; border-color: var(--accent) }", "a text input: forced colors keeps the caret, which marks focus"],
+  [".shell-input:focus { outline: none; border-color: var(--accent) }", "a text input: forced colors keeps the caret, which marks focus"],
+  // Programmatic targets and rings drawn elsewhere.
+  [".agent-session-agent-step:focus, .agent-session-results-step:focus { outline: none }", "tabIndex={-1} programmatic focus targets, never a keyboard stop"],
+  [".session-status-popover-content { outline: none }", "declared before the global :focus-visible ring at equal specificity, so the ring still wins"],
+  [".inbox-list { outline: none }", "the list pane's :has(> .inbox-list:focus-visible)::after border marks focus, and forced colors keeps borders"],
+  [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", "the list and preview panes' :has()::after borders mark focus; in the app SessionDetail renders only inside the preview pane"],
+  ["@media (pointer: coarse) .inbox-thread-toggle:focus-visible { outline: none }", "the same block outlines the toggle's inner span with the known-good ring instead"],
+  [".usage-chart-hit:focus-visible { outline: none; stroke: var(--accent); stroke-width: 2 }", "an SVG <rect>: the 2px stroke marks focus, and forced colors repaints strokes rather than dropping them"],
+  // Not focus indicators.
+  [".column.drag-over { outline: 1px dashed var(--accent); outline-offset: -1px }", "a drop-target cue while dragging, not a focus indicator"],
+  [".composer-box.drag-over { outline: 2px dashed var(--accent); outline-offset: 2px }", "a drop-target cue while dragging, not a focus indicator"],
+  ["@media (forced-colors: active) .tl-message-action-unavailable > .tl-message-icon::after { outline: 1px solid Canvas }", "the unavailable slash's Canvas halo (#1887), on a pseudo-element, not a focus indicator"],
+  [".agents-list button[aria-current=\"true\"] { outline: 1px solid var(--border) }", "KNOWN GAP, not verified safe: this beats the global ring, so the focused current Agents item looks as it does at rest; reported as a follow-up to #1890"],
 ]);
 
-/** Split on top-level `separator` characters, leaving parentheses, attributes and strings whole. */
-function splitTopLevel(text: string, isSeparator: (ch: string) => boolean): string[] {
-  const parts: string[] = [];
+/** Split a selector list without treating commas inside :is(), :has(), attributes or strings as members. */
+export function selectorMembers(selectorList: string): string[] {
+  const members: string[] = [];
   let depth = 0;
   let quote: string | null = null;
   let current = "";
-  for (const ch of text) {
+  for (const ch of selectorList) {
     if (quote) {
       if (ch === quote) quote = null;
     } else if (ch === "\"" || ch === "'") quote = ch;
     else if (ch === "(" || ch === "[") depth += 1;
     else if (ch === ")" || ch === "]") depth -= 1;
-    else if (depth === 0 && isSeparator(ch)) {
-      parts.push(current);
+    else if (ch === "," && depth === 0) {
+      members.push(current);
       current = "";
       continue;
     }
     current += ch;
   }
-  parts.push(current);
-  return parts;
+  members.push(current);
+  return members.map((member) => member.trim().replace(/\s+/g, " ")).filter(Boolean);
 }
 
-/** Split a selector list without treating commas inside :is(), :has(), attributes or strings as members. */
-export function selectorMembers(selectorList: string): string[] {
-  return splitTopLevel(selectorList, (ch) => ch === ",").map((member) => member.trim().replace(/\s+/g, " ")).filter(Boolean);
-}
-
-/**
- * Does this selector match an element because THAT element has focus? Reads the subject (last)
- * compound, including through `:is()`, `:where()` and `:matches()`, but not through `:not()` or
- * `:has()`, which match an unfocused element or a relative of the focused one. `:focus-within` is an
- * ancestor of focus, and a pseudo-element subject is not the focused element's own outline.
- */
-export function matchesOwnFocus(member: string): boolean {
-  const compounds = splitTopLevel(member, (ch) => ch === " " || ch === ">" || ch === "+" || ch === "~").filter((part) => part.trim());
-  const subject = compounds.at(-1)?.trim() ?? "";
-  if (subject.includes("::")) return false;
-  let depth = 0;
-  let blocked = 0;
-  const stack: boolean[] = [];
-  for (let index = 0; index < subject.length; index += 1) {
-    const rest = subject.slice(index);
-    const open = /^:(not|has)\(/i.exec(rest);
-    if (open) {
-      stack.push(true);
-      blocked += 1;
-      depth += 1;
-      index += open[0].length - 1;
-      continue;
-    }
-    const ch = subject[index]!;
-    if (ch === "(") { stack.push(false); depth += 1; continue; }
-    if (ch === ")") { if (stack.pop()) blocked -= 1; depth -= 1; continue; }
-    if (blocked === 0 && /^:focus(-visible)?(?![\w-])/i.test(rest)) return true;
+function contextOf(rule: Rule): string {
+  const parts: string[] = [];
+  for (let node: Node | undefined = rule.parent; node; node = node.parent) {
+    if (node.type === "atrule") parts.unshift(`@${(node as AtRule).name} ${(node as AtRule).params.replace(/\s+/g, " ")} `);
   }
-  return false;
+  return parts.join("");
 }
 
-const LINE_STYLES = /^(auto|solid|dashed|dotted|double|groove|ridge|inset|outset|none|hidden)$/;
-const ZERO = /^0([a-z%]*)$/;
+const setsOutline = (decl: Declaration) => decl.prop === "all" || decl.prop === "outline" || decl.prop.startsWith("outline-");
+const normalise = (decl: Declaration) => `${decl.prop}: ${decl.value.trim().replace(/\s+/g, " ")}${decl.important ? " !important" : ""}`;
 
-/** Style and width of one outline or border side, after a shorthand or longhand. */
-interface Line { style: string; zero: boolean }
-
-/** `outline` and `border*` shorthands reset the style they omit to `none`. */
-function shorthand(value: string): Line {
-  const tokens = value.trim().toLowerCase().split(/\s+/);
-  return {
-    style: tokens.find((token) => LINE_STYLES.test(token)) ?? "none",
-    zero: tokens.some((token) => ZERO.test(token)),
-  };
+/** An outline declaration that can only draw one of the known-good rings or move it. */
+function knownGood(decl: Declaration): boolean {
+  if (decl.important) return false;
+  if (decl.prop === "outline-offset") return true;
+  return decl.prop === "outline" && KNOWN_GOOD_OUTLINE.test(decl.value.trim().replace(/\s+/g, " "));
 }
 
-/** One to four box values as top, right, bottom, left. */
-function boxSides(value: string): [string, string, string, string] {
-  const [top, right = top, bottom = top, left = right] = value.split(/\s+/) as [string, ...string[]];
-  return [top, right!, bottom!, left!];
-}
-
-const SIDES = ["top", "right", "bottom", "left"] as const;
-
-const paints = (line: Line) => line.style !== "none" && line.style !== "hidden" && !line.zero;
-
-/**
- * Resolve a declaration block the way the cascade does inside one rule — `!important` declarations
- * over normal ones, then source order — into its outline and whether any border side paints.
- */
-export function resolveFocusPaint(decls: readonly Pick<Declaration, "prop" | "value" | "important">[]) {
-  let outline: Line = { style: "none", zero: false };
-  let touchesOutline = false;
-  const sides: Record<string, Line> = Object.fromEntries(SIDES.map((side) => [side, { style: "none", zero: false }]));
-  const ordered = [...decls.filter((decl) => !decl.important), ...decls.filter((decl) => decl.important)];
-  for (const { prop, value } of ordered) {
-    const v = value.trim().toLowerCase();
-    if (prop === "outline") { outline = shorthand(v); touchesOutline = true; }
-    else if (prop === "outline-style") { outline = { ...outline, style: v }; touchesOutline = true; }
-    else if (prop === "outline-width") { outline = { ...outline, zero: ZERO.test(v) }; touchesOutline = true; }
-    else if (prop === "border") for (const side of SIDES) sides[side] = shorthand(v);
-    else if (/^border-(top|right|bottom|left)$/.test(prop)) sides[prop.slice(7)] = shorthand(v);
-    else if (prop === "border-style" || prop === "border-width") {
-      boxSides(v).forEach((part, i) => {
-        const current = sides[SIDES[i]!]!;
-        sides[SIDES[i]!] = prop === "border-style" ? { ...current, style: part } : { ...current, zero: ZERO.test(part) };
-      });
-    }
-    else if (/^border-(top|right|bottom|left)-(style|width)$/.test(prop)) {
-      const [, side, part] = /^border-(\w+)-(\w+)$/.exec(prop)!;
-      const current = sides[side!]!;
-      sides[side!] = part === "style" ? { ...current, style: v } : { ...current, zero: ZERO.test(v) };
-    }
-  }
-  return {
-    removesOutline: touchesOutline && !paints(outline),
-    paintsShape: paints(outline) || Object.values(sides).some(paints),
-  };
-}
-
-/** Every focus selector whose block removes the outline and repaints no shape forced colors keeps. */
-export function focusLostInForcedColors(source: string): string[] {
-  const lost = new Set<string>();
+/** `context selector { declarations }` for every rule that sets an outline other than a known-good ring, sorted. */
+export function outlineInventory(source: string): string[] {
+  const entries: string[] = [];
   postcss.parse(source).walkRules((rule) => {
     const decls = rule.nodes.filter((node): node is Declaration => node.type === "decl");
-    const paint = resolveFocusPaint(decls);
-    if (!paint.removesOutline || paint.paintsShape) return;
-    for (const member of selectorMembers(rule.selector)) if (matchesOwnFocus(member)) lost.add(member);
+    const outline = decls.filter(setsOutline);
+    if (outline.every(knownGood)) return;
+    const recorded = /:focus/i.test(rule.selector) ? decls : outline;
+    entries.push(`${contextOf(rule)}${selectorMembers(rule.selector).join(", ")} { ${recorded.map(normalise).join("; ")} }`);
   });
-  return [...lost].sort();
+  return entries.sort();
 }
 
-test("every focus rule that removes the outline repaints a shape forced colors keeps", () => {
-  const unexplained = focusLostInForcedColors(css).filter((member) => !EXEMPT.has(member));
-  assert.deepEqual(unexplained, [],
-    "these rules remove the focus outline without painting an outline or border in the same block; " +
-    "forced colors discards backgrounds, shadows and border colours, so use `outline: 2px solid transparent` " +
-    "instead of `outline: none`, or list the rule in EXEMPT with the reason focus stays visible");
+test("every rule that sets an outline outside the known-good rings has been reviewed for forced colors", () => {
+  assert.deepEqual(outlineInventory(css), [...REVIEWED.keys()].sort(),
+    "a rule that sets an outline other than `2px solid` in --accent, --text or transparent was added, changed or " +
+    "removed. Forced colors discards backgrounds and shadows, so check keyboard focus still shows a ring in a " +
+    "contrast theme (prefer `outline: 2px solid transparent` to `outline: none`), then update REVIEWED with the reason");
 });
 
-test("every exemption still names a rule that removes the outline", () => {
-  const lost = new Set(focusLostInForcedColors(css));
-  assert.deepEqual([...EXEMPT.keys()].filter((member) => !lost.has(member)), []);
+test("every reviewed entry says why focus stays visible", () => {
+  for (const [key, reason] of REVIEWED) assert.ok(reason.trim().length > 20, key);
 });
 
 test("the Resize Panel separator's focus rule keeps a transparent outline", () => {
-  const rules: { selector: string; outline: string | undefined }[] = [];
+  const rules: string[] = [];
   postcss.parse(css).walkRules((rule) => {
     if (!selectorMembers(rule.selector).some((member) => member.startsWith(".right-panel-resizer"))) return;
-    let outline: string | undefined;
-    rule.walkDecls("outline", (decl) => { outline = decl.value; });
-    rules.push({ selector: selectorMembers(rule.selector).join(", "), outline });
+    const outline = rule.nodes.filter((node): node is Declaration => node.type === "decl" && setsOutline(node));
+    if (outline.length) rules.push(`${contextOf(rule)}${selectorMembers(rule.selector).join(", ")} { ${outline.map(normalise).join("; ")} }`);
   });
-  const focus = rules.filter((rule) => selectorMembers(rule.selector).includes(".right-panel-resizer:focus-visible"));
-  assert.deepEqual(focus, [{ selector: ".right-panel-resizer:hover, .right-panel-resizer:focus-visible", outline: "2px solid transparent" }]);
-  assert.ok(!EXEMPT.has(".right-panel-resizer:focus-visible"));
+  assert.deepEqual(rules, [".right-panel-resizer:hover, .right-panel-resizer:focus-visible { outline: 2px solid transparent; outline-offset: -2px }"]);
 });
 
-test("focusLostInForcedColors flags fills and shadows and accepts shapes", () => {
-  const check = (source: string) => focusLostInForcedColors(source);
-  assert.deepEqual(check(".r:focus-visible { background: red; outline: none; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:hover, .r:focus-visible { background: red; outline: none; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus-visible { outline: 0; box-shadow: 0 0 0 2px red; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus { outline-style: none; border-color: red; }"), [".r:focus"]);
-  assert.deepEqual(check(".r:focus-visible { outline-width: 0; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus-visible { background: red; outline: 2px solid transparent; }"), []);
-  assert.deepEqual(check(".r:focus-visible { outline: none; outline: 2px solid transparent; }"), []);
-  assert.deepEqual(check(".r:focus-visible { outline: none; stroke: red; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus-visible { outline: none; border: 2px solid red; }"), []);
-  assert.deepEqual(check(".r:focus-visible { outline: none; border-left: 2px solid red; }"), []);
-  assert.deepEqual(check(".r:focus-visible { outline: none; border-style: none solid; }"), []);
+test("outlineInventory records every outline that is not a known-good ring", () => {
+  const record = (source: string) => outlineInventory(source);
+  assert.deepEqual(record(".r:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }"), []);
+  assert.deepEqual(record(".r:focus-visible { background: red; outline: 2px solid transparent; }"), []);
+  assert.deepEqual(record(".r { padding: 1px; }"), []);
+  for (const outline of [
+    "outline: none", "outline: 0", "outline: 0.0px solid transparent", "outline: 2px solid Canvas",
+    "outline-style: none", "outline-width: 0", "outline-color: Canvas", "outline: 2px solid transparent !important",
+    "all: unset", "outline: 3px dotted var(--accent)",
+  ]) assert.equal(record(`.r:focus-visible { ${outline}; }`).length, 1, outline);
 });
 
-test("focusLostInForcedColors resolves each block by importance, then source order", () => {
-  const check = (source: string) => focusLostInForcedColors(source);
-  assert.deepEqual(check(".r:focus-visible { outline: 2px solid transparent; outline: none; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus-visible { outline: none; outline-offset: 2px; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus-visible { outline: none; border: 2px solid red; border: none; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus-visible { outline: none; border: 2px solid red; border-width: 0; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus-visible { outline: none !important; outline: 2px solid transparent; background: red; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus-visible { outline: 2px solid transparent !important; outline: none; }"), []);
-  assert.deepEqual(check(".r:focus-visible { outline: none; border: 2px solid red; border-style: none !important; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus-visible { outline: 2px solid; outline-style: none; }"), [".r:focus-visible"]);
-});
-
-test("focusLostInForcedColors credits no other rule, whatever its scope or conditions", () => {
-  const check = (source: string) => focusLostInForcedColors(source);
-  assert.deepEqual(check(".r:focus-visible { outline: none; } .r:focus-visible > span { outline: 2px solid; }"), [".r:focus-visible"]);
-  assert.deepEqual(check(".r:focus-visible { outline: none; } .other .r:focus-visible > span { outline: 2px solid; }"), [".r:focus-visible"]);
-  assert.deepEqual(check("@media (max-width: 1px) { .r:focus-visible { outline: none; } } @media (forced-colors: active) and (min-width: 2px) { .r:focus-visible { outline: 2px solid; } }"), [".r:focus-visible"]);
-  assert.deepEqual(check("@media (forced-colors: active) { .r:focus-visible { outline: 2px solid; } } .r:focus-visible { outline: none; }"), [".r:focus-visible"]);
-  assert.deepEqual(check("@media (max-width: 1px) { @supports (color: red) { .r:focus-visible { outline: none; } } }"), [".r:focus-visible"]);
-});
-
-test("matchesOwnFocus reads the focused element, not its ancestors, relatives or children", () => {
-  assert.equal(matchesOwnFocus(".b .a:focus-visible"), true);
-  assert.equal(matchesOwnFocus(".a:focus"), true);
-  assert.equal(matchesOwnFocus(".a:is(:focus-visible)"), true);
-  assert.equal(matchesOwnFocus(".a:where(.b, :focus)"), true);
-  assert.equal(matchesOwnFocus(".a:is(.b:not(:focus))"), false);
-  assert.equal(matchesOwnFocus(".a:focus-visible > span"), false);
-  assert.equal(matchesOwnFocus(".a:focus-visible::after"), false);
-  assert.equal(matchesOwnFocus(".a:focus-within"), false);
-  assert.equal(matchesOwnFocus(".a:not(:focus-visible)"), false);
-  assert.equal(matchesOwnFocus(".p:has(> .a:focus-visible)"), false);
-  assert.equal(matchesOwnFocus(".a:is(.b > .c:focus)"), true);
+test("outlineInventory tells apart what a changed or added rule could hide", () => {
+  const base = ".c:focus-visible { outline: none; stroke: var(--accent); }";
+  const [original] = outlineInventory(base);
+  assert.equal(original, ".c:focus-visible { outline: none; stroke: var(--accent) }");
+  assert.deepEqual(outlineInventory(".c:focus-visible { outline: none; stroke: none; background: red; }"),
+    [".c:focus-visible { outline: none; stroke: none; background: red }"]);
+  assert.deepEqual(outlineInventory(`${base} .c:focus-visible { outline: none; stroke: var(--accent); }`), [original, original]);
+  assert.deepEqual(outlineInventory(`@media (max-width: 1px) { ${base} }`), [`@media (max-width: 1px) ${original}`]);
+  assert.deepEqual(outlineInventory(".r:not(:not(:focus-visible)) { outline: none; background: red; }"),
+    [".r:not(:not(:focus-visible)) { outline: none; background: red }"]);
+  // Outside a focus rule only the outline is recorded, so unrelated edits there do not churn the list.
+  assert.deepEqual(outlineInventory(".r { padding: 1px; outline: none; }"), [".r { outline: none }"]);
 });
 
 test("selectorMembers splits only top-level commas", () => {
