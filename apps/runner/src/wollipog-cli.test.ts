@@ -194,7 +194,7 @@ test("unknown session and worktree verbs retain contextual command help", async 
 
 test("CLI alias never reparses a later internal marker as its entry mode", async () => {
   for (const argv of [
-    ["wollipog", "session", "prompt", "s_child", "--wollipog-cli"],
+    ["wollipog", "wollipog", "session", "prompt", "s_child", "--wollipog-cli"],
     ["node", "cli.js", "session", "prompt", "s_child", "--wollipog-cli"],
   ]) {
     let stderr = "";
@@ -212,7 +212,7 @@ test("CLI alias never reparses a later internal marker as its entry mode", async
 test("CLI consumes an internal marker only at the SEA application boundary", async () => {
   let stdout = "";
   assert.equal(await runWollipogCli(
-    ["wollipog-runner.exe", "--wollipog-cli", "--version"],
+    ["wollipog-runner.exe", "wollipog-runner.exe", "--wollipog-cli", "--version"],
     {},
     { stdout: (text) => { stdout += text; }, stderr: () => assert.fail("unexpected CLI error") },
   ), 0);
@@ -682,7 +682,7 @@ test("CLI recognizes installed POSIX and Windows alias invocation names", async 
     };
     let output = "";
     assert.equal(await runWollipogCli(
-      [executable, "session", "list", "--json"],
+      [executable, executable, "session", "list", "--json"],
       { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "paired-device" },
       { stdout: (text) => { output += text; }, stderr: () => {} },
       fetch,

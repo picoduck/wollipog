@@ -20,6 +20,7 @@ import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo }
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
 import { artifactHelp, decisionHelp, expandCommandAlias, initHelp, pairHelp, resolveHelp, rootHelp, sessionHelp, worktreeHelp } from "./wollipog-help.js";
 import { resolveWorktreeSetupRepositoryRoot, writeStarterWorktreeSetupConfig } from "./worktree-setup-generator.js";
+import { RUNNER_APP_ARGUMENT_INDEX } from "./runner-entry.js";
 import {
   AGENT_CONTROL_RELAY_ENDPOINT_ENV,
   AGENT_CONTROL_RELAY_KEY_ENV,
@@ -142,11 +143,10 @@ export async function runWollipogInit(
 }
 
 function invocationArgs(argv: string[]): string[] {
-  const invokedAsAlias = /(?:^|[\\/])wollipog(?:\.exe)?$/iu.test(argv[0] ?? "");
   // The dispatcher recognizes an internal marker only in the first application-argument
   // position. Mirror that boundary here: a marker later in user data must never cause this
-  // parser to discard the real command that preceded it. SEA starts at index 1; Node/tsx at 2.
-  const appIndex = invokedAsAlias || argv[1] === "--wollipog-cli" ? 1 : 2;
+  // parser to discard the real command that preceded it. Node and SEA both start at index 2.
+  const appIndex = RUNNER_APP_ARGUMENT_INDEX;
   return argv.slice(argv[appIndex] === "--wollipog-cli" ? appIndex + 1 : appIndex);
 }
 

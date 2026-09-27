@@ -136,6 +136,16 @@ jobs:
         if: startsWith(matrix.os, 'windows-')
         run: node --import tsx --test apps/runner/src/windows-cmd.test.ts apps/runner/src/context-command.test.ts apps/runner/src/discovery/resolve.test.ts apps/runner/src/discovery/claude-code.test.ts apps/runner/src/discovery/discover.test.ts apps/runner/src/discovery/harness-updates.test.ts apps/runner/src/orchestrator-preset.test.ts apps/runner/src/agent-control.test.ts apps/runner/src/agent-tui.test.ts
 
+      - name: Verify Windows Release CLI Dispatch
+        if: matrix.os == 'windows-latest'
+        shell: pwsh
+        run: |
+          $env:TARGET_TRIPLE = 'x86_64-pc-windows-msvc'
+          pnpm --filter @wollipog/runner build:binary
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          node apps/runner/scripts/verify-cli-binary.mjs apps/runner/dist-bin/wollipog-runner-x86_64-pc-windows-msvc.exe
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
       - name: Verify Native Windows Skill Filesystem Adapters
         if: matrix.os == 'windows-latest'
         run: node --import tsx --test apps/runner/src/windows-skill-junction.test.ts apps/runner/src/windows-skill-snapshots.test.ts apps/runner/src/wsl-skill-snapshots.test.ts apps/runner/src/wsl-skills.test.ts apps/runner/src/skill-snapshots.test.ts

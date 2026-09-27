@@ -8,10 +8,9 @@
  * where TLA is a build error.
  */
 
-import { detectRunnerSea } from "./runner-reentry.js";
 import { resolveRunnerEntry } from "./runner-entry.js";
 
-const entry = resolveRunnerEntry(process.argv, detectRunnerSea());
+const entry = resolveRunnerEntry(process.argv);
 
 if (entry.mode === "--state-doctor") {
   void import("./state-doctor.js").then((m) => m.runStateDoctor(process.argv)).catch((error) => {

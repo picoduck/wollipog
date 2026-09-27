@@ -374,7 +374,7 @@ test("wollipog admin dispatches from the main CLI without session credentials an
   const { fetch } = server();
   const { io, stdout, stderr } = makeIo();
   const code = await runWollipogCli(
-    ["/usr/local/bin/wollipog", "admin", "status", "--json", "--token-file", tokenFile],
+    ["/usr/local/bin/wollipog", "/usr/local/bin/wollipog", "admin", "status", "--json", "--token-file", tokenFile],
     {},
     { stdout: io.stdout, stderr: io.stderr },
     fetch,
