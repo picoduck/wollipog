@@ -5738,15 +5738,33 @@ export interface WorktreeRecoveryView {
 
 /** The step that clears a worktree-recovery hold, naming the exact tools. Shared by the 409 that
  * refuses a prompt, the hold a parent sees, and anything else that must tell someone how to
- * unblock the session (#1650). */
-export function worktreeRecoveryAction(recovery: Pick<WorktreeRecoveryView, "selectedPath" | "expectedBranch">): string {
+ * unblock the session (#1650).
+ *
+ * `reader` is what the principal reading the advice may do to the held session (#1863). One that
+ * may not manage its worktrees is told who can, rather than handed tools its route refuses.
+ * Without a reader every tool is named. */
+export function worktreeRecoveryAction(
+  recovery: Pick<WorktreeRecoveryView, "selectedPath" | "expectedBranch">,
+  reader?: WorktreeRecoveryReader,
+): string {
   // The example is meant to be pasted, so a path with spaces or shell syntax is quoted.
   const shellWord = (value: string) =>
     /^[\w@%+=:,./-]+$/u.test(value) ? value : `'${value.replaceAll("'", "'\\''")}'`;
-  return `Restore branch ${recovery.expectedBranch} in ${recovery.selectedPath} ` +
-    `(for example \`git -C ${shellWord(recovery.selectedPath)} switch ${shellWord(recovery.expectedBranch)}\`) and select that ` +
+  const restore = `branch ${recovery.expectedBranch} in ${recovery.selectedPath} ` +
+    `(for example \`git -C ${shellWord(recovery.selectedPath)} switch ${shellWord(recovery.expectedBranch)}\`)`;
+  if (reader && !reader.canManageWorktrees) {
+    return "Only the session owner or its controlling Orchestrator can recover this session's worktree: ask them " +
+      `to restore ${restore} and select that worktree again, or to select or create another worktree for this session.`;
+  }
+  return `Restore ${restore} and select that ` +
     "worktree again with select_worktree, or select or create another worktree for this session with " +
     "select_worktree or create_worktree.";
+}
+
+/** What the principal reading worktree-recovery advice may do to the held session (#1863): select
+ * or create one of its worktrees. */
+export interface WorktreeRecoveryReader {
+  canManageWorktrees: boolean;
 }
 
 /**
@@ -5827,8 +5845,9 @@ export function queueHoldReason(hold: SessionQueueHoldView): string {
  *
  * `reader` is what the person reading the advice may do to the held session (#1857). Advice written
  * for them names Stop Job only if they may stop its background jobs, and restarting only if they
- * may restart it; otherwise it tells them to wait or to ask someone who can act. Without a reader
- * (the server's own copy, which agents read through their tools) every action is named. */
+ * may restart it; otherwise it tells them to wait or to ask someone who can act. The control plane
+ * writes the same for the agent credential calling its tools (#1863). Without a reader (the
+ * server's own copy) every action is named. */
 export function queueHoldRecoveryAction(hold: SessionQueueHoldView, reader?: QueueHoldReader): string {
   const canStopJobs = reader?.canStopJobs ?? true;
   const canRestart = reader?.canRestart ?? true;
@@ -5886,6 +5905,9 @@ export interface QueueHoldReader {
   canRestart: boolean;
 }
 
+/** What the principal reading a session's hold advice may do to it (#1863). */
+export type SessionHoldReader = QueueHoldReader & WorktreeRecoveryReader;
+
 /**
  * Why a session cannot start its next turn although nothing is asking a question (#1650). A hold
  * is not a request: there is nothing to answer, only a condition to clear, so it is reported
@@ -5916,10 +5938,13 @@ export interface SessionHoldView {
   heldResumes?: HeldSessionResumeView[];
 }
 
-/** The holds a session's own state implies. Pure, so every surface derives them identically. */
+/** The holds a session's own state implies. Pure, so every surface derives them identically.
+ * With a `reader`, each recovery action names only what that reader may do (#1863); without one
+ * it is the server's copy, which names every action. */
 export function sessionHolds(
   session: { worktreeRecovery?: WorktreeRecoveryView | null; queueHold?: SessionQueueHoldView | null },
   heldResumes: HeldSessionResumeView[] = [],
+  reader?: SessionHoldReader,
 ): SessionHoldView[] {
   const holds: SessionHoldView[] = [];
   const recovery = session.worktreeRecovery;
@@ -5930,7 +5955,7 @@ export function sessionHolds(
       since: recovery.detectedAt,
       // The runner's own bounded account of what failed: a switched branch, a missing path, and so on.
       reason: recovery.detail,
-      recoveryAction: worktreeRecoveryAction(recovery),
+      recoveryAction: worktreeRecoveryAction(recovery, reader),
       ...(heldResumes.length ? { heldResumes } : {}),
     });
   }
@@ -5941,7 +5966,7 @@ export function sessionHolds(
       holdId: queueHold.holdId,
       since: queueHold.since,
       reason: queueHoldReason(queueHold),
-      recoveryAction: queueHoldRecoveryAction(queueHold),
+      recoveryAction: queueHoldRecoveryAction(queueHold, reader),
       ...(heldResumes.length ? { heldResumes } : {}),
     });
   }

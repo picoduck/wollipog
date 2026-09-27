@@ -953,6 +953,19 @@ queued behind a turn that had never started.
   that actor's stop, with a timeline notice saying it was confirmed late; a stop in flight for
   another job at that moment does not take it over. A job that ended on its own carries no
   `endedBy`, and a v191 or older runner sends none, so its killed row names no actor.
+- **The advice is written for its reader (#1857, #1863).** The server's copy of a hold's recovery
+  action names every way out. An agent credential reads a copy that names only the tools its
+  routes admit: `stop_background_job` only for the controlling Orchestrator (the direct parent),
+  restarting only for an ancestor (a session cannot restart itself), and `select_worktree` and
+  `create_worktree` only for a credential that may manage that session's worktrees (a worker its
+  own session; an Orchestrator its descendants, and itself unless Strict Project Isolation is on).
+  Otherwise the advice says to wait, or to ask the session owner or its controlling Orchestrator,
+  and a worktree hold still names the branch and path to restore. This applies to `get_session`,
+  `list_sessions`, `list_descendant_requests`'s `blockedChildren`, and `prompt_session`'s delivery
+  report and worktree-recovery refusal. The controlling Orchestrator reading its direct child, and
+  therefore the campaign projection, reads the server's copy unchanged. A person reads the
+  server's copy too; the dashboard rewrites queue-hold advice for them from their command
+  permissions.
 
 The control plane owns this lifecycle. A generic question answer or provider permission response
 cannot satisfy a typed workflow decision. Authentication, identity, governance-policy changes,

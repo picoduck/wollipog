@@ -21541,6 +21541,23 @@ test("an approved decision for a child whose worktree branch was switched is del
     assert.match(refused.error ?? "", /worktree recovery is required before sending another prompt/u);
     assert.match(refused.error ?? "", new RegExp(`switch agent/${child.id}`, "u"));
     assert.match(refused.error ?? "", /select_worktree/u);
+    // A caller whose credential may not manage the child's worktrees is told who can, with the same
+    // branch and path, instead of being handed tools its route refuses (#1863).
+    const cannotManageWorktrees = { canStopJobs: false, canRestart: true, canManageWorktrees: false };
+    const refusedForReader = svc.prompt(child.id, "are you there?", [], undefined, undefined, undefined, "session",
+      false, undefined, cannotManageWorktrees);
+    assert.equal(refusedForReader.status, 409);
+    assert.match(refusedForReader.error ?? "", new RegExp(`switch agent/${child.id}`, "u"));
+    assert.doesNotMatch(refusedForReader.error ?? "", /select_worktree|create_worktree/u);
+    assert.match(refusedForReader.error ?? "", /Only the session owner or its controlling Orchestrator can recover/u);
+    const readerDescendants = svc.descendantRequests(root.id, () => true, "orchestrator", true, () => cannotManageWorktrees);
+    const readerAdvice = readerDescendants.data?.blockedChildren?.[0]?.holds[0]?.recoveryAction ?? "";
+    assert.match(readerAdvice, new RegExp(`switch agent/${child.id}`, "u"));
+    assert.doesNotMatch(readerAdvice, /select_worktree|create_worktree/u);
+    assert.equal(svc.descendantRequests(root.id, () => true, "orchestrator", true, () => ({
+      ...cannotManageWorktrees, canManageWorktrees: true,
+    })).data?.blockedChildren?.[0]?.holds[0]?.recoveryAction, holds?.[0]?.recoveryAction,
+    "a reader that may manage the worktrees reads the server's copy");
 
     // Nothing is re-sent while the hold lasts, however often the runner reports it.
     f.runnerReports(recovery, "input_required");
@@ -21957,6 +21974,14 @@ test("approving a decision while a sibling background job is unterminated and a 
     assert.match(followUp.data.promptDelivery?.detail ?? "", /a monitor started at/u);
     assert.doesNotMatch(followUp.data.promptDelivery?.detail ?? "", /turn already running/u);
     assert.equal(db.getSession(child.id)?.status, "queued", "a prompt into a held session does not invent running");
+    assert.match(followUp.data.promptDelivery?.detail ?? "", /restart_session/u);
+    // A sender whose credential may neither stop the job nor restart the child is not told to (#1863).
+    const readerFollowUp = svc.prompt(child.id, "still there?", [], undefined, undefined, undefined, "session", false,
+      undefined, { canStopJobs: false, canRestart: false, canManageWorktrees: true });
+    assert.ok(readerFollowUp.ok && readerFollowUp.data, readerFollowUp.error);
+    assert.match(readerFollowUp.data.promptDelivery?.detail ?? "", /Queued behind a hold on this session/u);
+    assert.doesNotMatch(readerFollowUp.data.promptDelivery?.detail ?? "", /restart_session|stop_background_job/u);
+    assert.match(readerFollowUp.data.promptDelivery?.detail ?? "", /ask its owner/u);
 
     // The runner reports the same incident with a changed count: the same hold, no new wake-up.
     svc.applySessionRuntimeUpdate(RUNNER_ID, runnerSnapshot({ ...queueHold, queuedPrompts: 2 }, "queued"));

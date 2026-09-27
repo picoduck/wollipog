@@ -124,6 +124,7 @@ import { type PolicyRule, type PolicyRuleKind, type RunnerGuardrailKind,
   type RunnerCapacityBlocker,
   type SessionConfig,
   type SessionEventPayload,
+  type SessionHoldReader,
   type SessionHoldView,
   type SessionLaunchSpec,
   type SessionSnapshot,
@@ -200,6 +201,7 @@ import {
 } from "./claude-model-aliases.js";
 import { isRunnerRequestNotSentError, isRunnerRequestTimeoutError, type Hub } from "./hub.js";
 import { SessionPromptOutbox } from "./session-prompt-outbox.js";
+import { withHoldAdviceFor } from "./session-command-permissions.js";
 import { childRestartAllowanceError, childSessionGuardrails, DEFAULT_CHILD_SPAWN_CAP } from "./child-session-guardrails.js";
 import { NATIVE_TUI_DAILY_BUDGET_ERROR, NATIVE_TUI_TRACKED_GUARDRAILS_ERROR } from "./native-tui-launch.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
@@ -4332,9 +4334,11 @@ export class SessionsService {
     images: PromptImageInput[] = [],
     slashCommand?: string,
     config?: SessionConfig,
+    holdReader?: SessionHoldReader,
   ): Promise<ServiceResult<PromptAdmissionView>> {
     const steered = await this.steerMidTurnPrompt(sessionId, text, images, slashCommand, config);
-    return steered ?? this.prompt(sessionId, text, images, slashCommand, config);
+    return steered ??
+      this.prompt(sessionId, text, images, slashCommand, config, undefined, "session", false, undefined, holdReader);
   }
 
   /** Try the steering lane for a mid-turn message. Returns null to mean "not steered — use the
@@ -4435,6 +4439,9 @@ export class SessionsService {
       claimImmediate: () => boolean;
       admitAs?: "queued";
     },
+    // What the agent credential sending the prompt may do to this session, so the hold advice in
+    // its refusal or delivery report names only tools it can call (#1863).
+    holdReader?: SessionHoldReader,
   ): ServiceResult<PromptAdmissionView> {
     const snapshotCommand = delivery?.commandSnapshots?.[0];
     if (delivery?.commandSnapshots &&
@@ -4464,7 +4471,8 @@ export class SessionsService {
     if (session.historyQuarantine) return fail(QUARANTINED_CONVERSATION_ERROR, 409);
     if (session.worktreeRecovery) {
       return fail(
-        `worktree recovery is required before sending another prompt: ${worktreeRecoveryAction(session.worktreeRecovery)}`,
+        "worktree recovery is required before sending another prompt: " +
+          worktreeRecoveryAction(session.worktreeRecovery, holdReader),
         409,
       );
     }
@@ -4717,7 +4725,7 @@ export class SessionsService {
     return ok({
       ...this.db.getSession(sessionId)!,
       promptDelivery: promptDeliveryReport(session.status, pendingInputBarrier, {
-        holds: session.holds,
+        holds: withHoldAdviceFor(session, holdReader).holds,
         capacityWait: session.capacityWait,
         // Only a runner that assigns turn coordinates can be read as reporting none.
         activeTurn: runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "turnInterruptionAck")
@@ -8605,8 +8613,9 @@ export class SessionsService {
   blockedDescendants(
     parentSessionId: string,
     canAccess: (sessionId: string) => boolean,
+    holdReaderFor?: (target: { id: string; parentSessionId: string | null }) => SessionHoldReader | undefined,
   ): DescendantBlockedChildView[] {
-    return this.db.listSessionDescendantHolds(parentSessionId).flatMap((session) => canAccess(session.id)
+    return this.db.listSessionDescendantHolds(parentSessionId, holdReaderFor).flatMap((session) => canAccess(session.id)
       ? [{
           sessionId: session.id,
           sessionTitle: session.title,
@@ -8625,6 +8634,8 @@ export class SessionsService {
     viewer: WorkflowDecisionAuthority = "orchestrator",
     // Attention bookkeeping reads only the requests, and scans held children once on its own.
     includeBlockedChildren = true,
+    // Writes each held child's recovery advice for the calling Orchestrator (#1863).
+    holdReaderFor?: (target: { id: string; parentSessionId: string | null }) => SessionHoldReader | undefined,
   ): ServiceResult<DescendantRequestsView> {
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("session not found", 404);
@@ -8644,7 +8655,7 @@ export class SessionsService {
       // is still reported, but only to the campaign Orchestrator its campaign event wakes (#1650);
       // any other parent with Parent Control off is refused as before.
       const blockedChildren = includeBlockedChildren && rootCampaign?.id === parent.id
-        ? this.blockedDescendants(parentSessionId, canAccess)
+        ? this.blockedDescendants(parentSessionId, canAccess, holdReaderFor)
         : [];
       return blockedChildren.length ? ok({ requests: [], blockedChildren }) : fail("Parent Control is off", 403);
     }
@@ -8696,7 +8707,9 @@ export class SessionsService {
         }];
       });
     });
-    const blockedChildren = includeBlockedChildren ? this.blockedDescendants(parentSessionId, canAccess) : [];
+    const blockedChildren = includeBlockedChildren
+      ? this.blockedDescendants(parentSessionId, canAccess, holdReaderFor)
+      : [];
     return ok({
       requests: [...durableTyped, ...generic],
       ...(blockedChildren.length ? { blockedChildren } : {}),

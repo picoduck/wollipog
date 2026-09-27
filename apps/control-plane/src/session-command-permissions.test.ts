@@ -1,12 +1,23 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
-import type { ControlPlaneToUi, RunnerMetadata, SessionCommandPermissions } from "@wollipog/protocol";
+import {
+  sessionHolds,
+  type ControlPlaneToUi,
+  type RunnerMetadata,
+  type SessionCommandPermissions,
+  type SessionView,
+} from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
-import { sessionCommandPermissions, withSessionCommandPermissions } from "./session-command-permissions.js";
+import {
+  sessionCommandPermissions,
+  sessionHoldReader,
+  withHoldAdviceFor,
+  withSessionCommandPermissions,
+} from "./session-command-permissions.js";
 
 const VIEWER = "Your Viewer role is read-only.";
 const STOP_JOB_OWNER = "Only the session owner or its controlling Orchestrator can stop its background jobs.";
@@ -138,6 +149,57 @@ test("the commands #1857 added follow the role gate, the agent route allowlist a
     { ownsSession: false, isDescendant: false });
   assert.deepEqual(own.configure, { allowed: false, reason: "An agent may change only its own maxChildSessions." },
     "the config route admits a credential's own session, but its service refuses every setting this verdict describes");
+});
+
+test("an agent credential's hold reader follows the routes its advice names (#1863)", () => {
+  const scope = { organizationId: "org_1", owner: { kind: "user" as const, userId: "usr_1" } };
+  const orchestrator: AgentPrincipal = {
+    kind: "agent", actorId: "s_parent", credentialSessionId: "s_parent", orchestrator: true,
+    organizationId: "org_1", delegatedScope: scope,
+  };
+  const worker: AgentPrincipal = { ...orchestrator, orchestrator: undefined };
+  const child = { id: "s_child", parentSessionId: "s_parent" };
+  const grandchild = { id: "s_grandchild", parentSessionId: "s_child" };
+  const descendant = { ownsSession: false, isDescendant: true };
+  const self = { ownsSession: false, isDescendant: false };
+  const reader = (canStopJobs: boolean, canRestart: boolean, canManageWorktrees: boolean) =>
+    ({ canStopJobs, canRestart, canManageWorktrees });
+
+  assert.deepEqual(sessionHoldReader(orchestrator, child, descendant), reader(true, true, true),
+    "the controlling Orchestrator may take every action the advice names");
+  assert.deepEqual(sessionHoldReader(orchestrator, grandchild, descendant), reader(false, true, true),
+    "a grandchild's jobs belong to its own parent");
+  assert.deepEqual(sessionHoldReader(worker, child, descendant), reader(false, true, false),
+    "a worker parent may restart its child but neither stop its jobs nor manage its worktrees");
+  assert.deepEqual(sessionHoldReader(worker, { id: "s_parent", parentSessionId: null }, self), reader(false, false, true),
+    "a worker manages its own worktrees, but cannot restart itself or stop its own jobs");
+  const own = { id: "s_parent", parentSessionId: null };
+  const policy = (strictProjectIsolation: boolean) =>
+    ({ execution: { strictProjectIsolation } }) as unknown as SessionView["orchestratorPolicy"];
+  assert.deepEqual(sessionHoldReader(orchestrator, own, self), reader(false, false, false),
+    "an Orchestrator's own worktrees are refused under Strict Project Isolation, which is the default");
+  assert.deepEqual(sessionHoldReader(orchestrator, { ...own, orchestratorPolicy: policy(false) }, self),
+    reader(false, false, true));
+  assert.equal(sessionHoldReader(human("viewer"), child, descendant), undefined,
+    "a person reads the server's copy, which the dashboard rewrites itself");
+
+  const recovery = { recoveryId: "wr_1", detectedAt: 1, selectedPath: "/w/c", expectedBranch: "fix/c", detail: "switched" };
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "qh_1", since: 1, target: "/w/next", queuedPrompts: 1,
+    unfinishedBackgroundJobs: 1, canStopJobs: true as const,
+  };
+  const view = { worktreeRecovery: recovery, queueHold, holds: sessionHolds({ worktreeRecovery: recovery, queueHold }) };
+  assert.equal(withHoldAdviceFor(view, undefined), view, "no reader leaves the view as it is");
+  const tailored = withHoldAdviceFor(view, reader(false, true, false));
+  assert.deepEqual(tailored.holds, sessionHolds({ worktreeRecovery: recovery, queueHold }, [], reader(false, true, false)));
+  assert.deepEqual(tailored.holds?.map((hold) => hold.holdId), ["wr_1", "qh_1"]);
+  assert.doesNotMatch(tailored.holds?.map((hold) => hold.recoveryAction).join(" ") ?? "",
+    /stop_background_job|select_worktree|create_worktree/u);
+  assert.deepEqual(withHoldAdviceFor(view, reader(true, true, true)).holds, view.holds,
+    "a reader allowed everything reads the server's copy");
+  const stale = { ...view, queueHold: { ...queueHold, holdId: "qh_2" } };
+  assert.equal(withHoldAdviceFor(stale, reader(false, false, false)).holds?.[1], view.holds[1],
+    "a hold with no matching record is left as written");
 });
 
 test("reads carry the requester's command permissions; a trusted local read is unchanged (#1843)", async (t) => {

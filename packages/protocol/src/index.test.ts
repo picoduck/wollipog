@@ -1543,6 +1543,32 @@ test("a worktree-recovery hold names its recovery step with a pasteable command 
   assert.equal(Object.hasOwn(sessionHolds({ worktreeRecovery: recovery })[0]!, "heldResumes"), false);
 });
 
+test("worktree-recovery advice names select_worktree and create_worktree only to a reader that may manage the worktrees (#1863)", () => {
+  const recovery = { selectedPath: "/w/s_1", expectedBranch: "agent/s_1" };
+  assert.equal(worktreeRecoveryAction(recovery, { canManageWorktrees: true }), worktreeRecoveryAction(recovery),
+    "a reader that may act reads the server's copy");
+  const refused = worktreeRecoveryAction(recovery, { canManageWorktrees: false });
+  assert.equal(refused,
+    "Only the session owner or its controlling Orchestrator can recover this session's worktree: ask them to restore " +
+    "branch agent/s_1 in /w/s_1 (for example `git -C /w/s_1 switch agent/s_1`) and select that worktree again, or to " +
+    "select or create another worktree for this session.");
+  assert.doesNotMatch(refused, /select_worktree|create_worktree/u);
+
+  // sessionHolds writes every hold for its reader, and a reader allowed everything changes nothing.
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:1", since: 1, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 1, canStopJobs: true as const,
+  };
+  const worktreeRecovery = { ...recovery, recoveryId: "worktree-recovery:1", detectedAt: 1, detail: "switched" };
+  const everything = { canStopJobs: true, canRestart: true, canManageWorktrees: true };
+  assert.deepEqual(sessionHolds({ worktreeRecovery, queueHold }, [], everything), sessionHolds({ worktreeRecovery, queueHold }));
+  const nothing = { canStopJobs: false, canRestart: false, canManageWorktrees: false };
+  const [worktreeHold, queued] = sessionHolds({ worktreeRecovery, queueHold }, [], nothing);
+  assert.equal(worktreeHold?.recoveryAction, worktreeRecoveryAction(recovery, nothing));
+  assert.equal(queued?.recoveryAction, queueHoldRecoveryAction(queueHold, nothing));
+  assert.doesNotMatch(queued?.recoveryAction ?? "", /stop_background_job|restart_session/u);
+});
+
 test("a queued prompt held behind a handoff waiting on background work is a hold that names its way out (#1651)", () => {
   const queueHold = {
     kind: "worktree_rebind" as const,
