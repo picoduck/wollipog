@@ -177,6 +177,30 @@ test("unavailable message actions share one slashed state that hover and focus c
     "every unavailable message action must take its look from the one shared rule");
 });
 
+test("unavailable message actions keep their slash in forced colors", () => {
+  const states = [
+    ".tl-message-action-unavailable > .tl-message-icon",
+    ".tl-message-action-unavailable > .tl-message-icon:hover",
+    ".tl-message-action-unavailable > .tl-message-icon:focus-visible",
+  ];
+  const slash = ".tl-message-action-unavailable > .tl-message-icon::after";
+  const blocks = mediaBlocks(css).filter((block) =>
+    [...states, slash].some((selector) => block.containsSelector(selector)));
+  assert.deepEqual(blocks.map((block) => block.params), ["(forced-colors: active)"],
+    "the forced-colors block must be the only conditional restyle of an unavailable action");
+  const [forced] = blocks;
+  // Forced colors would otherwise give the <summary> glyph LinkText; hover and focus must not lift it.
+  for (const selector of states) {
+    assert.deepEqual(forced!.declarationsForSelector(selector), new Map([["color", ["GrayText"]]]), selector);
+  }
+  // A currentColor fill would be forced to Canvas and the box-shadow halo dropped; a system-color
+  // fill and an outline halo both survive forcing.
+  assert.deepEqual(forced!.declarationsForSelector(slash), new Map([
+    ["background", ["GrayText"]],
+    ["outline", ["1px solid Canvas"]],
+  ]));
+});
+
 test("mobile Session statuses stay on one measured line before fixed actions", () => {
   const group = soleRuleBody(".change-status-indicators");
   assert.match(group, /display: inline-flex;/);

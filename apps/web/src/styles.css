@@ -5429,6 +5429,22 @@ textarea,
   transform: rotate(45deg);
   pointer-events: none;
 }
+/* Forced colors repaints the slash's currentColor background as Canvas and drops its box-shadow
+   halo, so it would cut a gap through the glyph instead of crossing it, and the <summary> glyph
+   would take LinkText. Author system colors survive forcing, so glyph and slash name the system's
+   own "unavailable" ink, and an outline (kept, unlike box-shadow) redraws the Canvas halo. Hover,
+   focus and open stay unchanged, as outside forced colors. */
+@media (forced-colors: active) {
+  .tl-message-action-unavailable > .tl-message-icon,
+  .tl-message-action-unavailable > .tl-message-icon:hover,
+  .tl-message-action-unavailable > .tl-message-icon:focus-visible {
+    color: GrayText;
+  }
+  .tl-message-action-unavailable > .tl-message-icon::after {
+    background: GrayText;
+    outline: 1px solid Canvas;
+  }
+}
 .tl-message-icon.copy-status-copied { color: var(--positive-text); }
 .tl-message-icon.copy-status-failed { color: var(--danger-text); }
 .bubble {
