@@ -13,9 +13,9 @@ function occurrences(markup: string, value: string): number {
   return markup.split(value).length - 1;
 }
 
-/** Every identifier absent from the page's markup — text and attributes alike — except `revealed`, once each. */
+/** Every identifier absent from the whole document — head, text and attributes — except `revealed`, once each. */
 async function expectOnlyRevealed(page: Page, ...revealed: string[]): Promise<void> {
-  const markup = await page.locator("body").evaluate((body) => body.outerHTML);
+  const markup = await page.evaluate(() => document.documentElement.outerHTML);
   for (const email of EMAILS) {
     expect(occurrences(markup, email), email).toBe(revealed.includes(email) ? 1 : 0);
   }
@@ -32,29 +32,35 @@ async function expectNoEmailLeak(page: Page): Promise<void> {
  * or go, but may not be added again or multiply. Everything else is a leak the moment it appears:
  * in an added subtree's text or any of its attributes (accessible names, tooltips, data
  * attributes, synced input values), in changed text, or in a changed attribute. Old values are recorded
- * too, so a value written and then overwritten before the observer runs is still caught. Only the
- * exact text node or attribute that held a reveal when the watch started may report it as an old
- * value, and only once: a revealed identifier written anywhere else, even briefly, is a leak.
+ * too, so a value written and then overwritten before the observer runs is still caught, and so are
+ * removed subtrees, which is where a value inserted and then detached in the same task survives.
+ * Together those cover every value the DOM held: the observer keeps recording changes to a detached
+ * subtree until its callback runs, so anything no longer in an added node was either overwritten
+ * (an old value) or removed (a removed node). Only the exact text node or attribute that held a
+ * reveal when the watch started may report it: removed with its original value, or as an old
+ * value once. A revealed identifier written anywhere else, even briefly, is a leak.
  */
 async function watchIdentifierLeaks(page: Page): Promise<void> {
   await page.evaluate((identifiers) => {
     const count = (markup: string, value: string) => markup.split(value).length - 1;
-    const baseline = new Map(identifiers.map((id) => [id, count(document.body.outerHTML, id)]));
+    const baseline = new Map(identifiers.map((id) => [id, count(document.documentElement.outerHTML, id)]));
     const holds = (value: string | null | undefined) => identifiers.some((id) => value?.includes(id));
-    const revealedText = new Map<Node, string>();
-    const revealedAttributes = new Map<Element, Map<string, string>>();
-    const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
-    for (let node: Node | null = walker.currentNode; node; node = walker.nextNode()) {
-      if (node instanceof Element) {
-        for (const attribute of node.attributes) {
-          if (!holds(attribute.value)) continue;
-          const held = revealedAttributes.get(node) ?? new Map<string, string>();
-          revealedAttributes.set(node, held.set(attribute.name, attribute.value));
-        }
-      } else if (holds(node.textContent)) {
-        revealedText.set(node, node.textContent!);
+    const TEXT = "#text";
+    const origins = new Map<Node, Map<string, string>>();
+    const eachNode = (root: Node, visit: (node: Node) => void) => {
+      const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT);
+      for (let node: Node | null = walker.currentNode; node; node = walker.nextNode()) visit(node);
+    };
+    /** Each text value (`#text`) or attribute value on `node`. */
+    const valuesOf = (node: Node): Array<[string, string]> => node instanceof Element
+      ? [...node.attributes].map((attribute) => [attribute.name, attribute.value])
+      : node.nodeType === Node.TEXT_NODE ? [[TEXT, node.textContent ?? ""]] : [];
+    eachNode(document.documentElement, (node) => {
+      for (const [slot, value] of valuesOf(node)) {
+        if (holds(value)) origins.set(node, (origins.get(node) ?? new Map<string, string>()).set(slot, value));
       }
-    }
+    });
+    const spentGrants = new Map<Node, Set<string>>();
     const leaks: string[] = [];
     const check = (where: string, value: string | null | undefined, granted = "") => {
       for (const id of identifiers) {
@@ -62,37 +68,38 @@ async function watchIdentifierLeaks(page: Page): Promise<void> {
       }
     };
     /** The value a reveal granted this exact origin at the start, handed out once. */
-    const takeGrant = (node: Node, attribute?: string): string => {
-      if (attribute === undefined) {
-        const value = revealedText.get(node) ?? "";
-        revealedText.delete(node);
-        return value;
-      }
-      const held = node instanceof Element ? revealedAttributes.get(node) : undefined;
-      const value = held?.get(attribute) ?? "";
-      held?.delete(attribute);
-      return value;
+    const takeGrant = (node: Node, slot: string): string => {
+      const spent = spentGrants.get(node) ?? new Set<string>();
+      if (spent.has(slot)) return "";
+      spentGrants.set(node, spent.add(slot));
+      return origins.get(node)?.get(slot) ?? "";
     };
+    const checkRemoved = (root: Node) => eachNode(root, (node) => {
+      for (const [slot, value] of valuesOf(node)) {
+        if (origins.get(node)?.get(slot) !== value) check(`removed ${node.nodeName} ${slot}`, value);
+      }
+    });
     const observer = new MutationObserver((records) => {
       for (const record of records) {
         if (record.type === "childList") {
           for (const node of record.addedNodes) {
             check(`added ${node.nodeName}`, node instanceof Element ? node.outerHTML : node.textContent);
           }
+          for (const node of record.removedNodes) checkRemoved(node);
         } else if (record.type === "characterData") {
           check("changed text", record.target.textContent);
-          check("replaced text", record.oldValue, takeGrant(record.target));
+          check("replaced text", record.oldValue, takeGrant(record.target, TEXT));
         } else if (record.type === "attributes" && record.target instanceof Element && record.attributeName) {
           check(`changed ${record.attributeName}`, record.target.getAttribute(record.attributeName));
           check(`replaced ${record.attributeName}`, record.oldValue, takeGrant(record.target, record.attributeName));
         }
       }
-      const markup = document.body.outerHTML;
+      const markup = document.documentElement.outerHTML;
       for (const id of identifiers) {
         if (count(markup, id) > baseline.get(id)!) leaks.push(`rendered: ${id}`);
       }
     });
-    observer.observe(document.body, {
+    observer.observe(document.documentElement, {
       subtree: true,
       childList: true,
       characterData: true,
@@ -167,9 +174,19 @@ test("the identifier observer records transient disclosures that leave no trace 
     const original = heading.textContent!;
     heading.textContent = member!;
     heading.textContent = original;
+    // Inserted, detached, then emptied: the value survives only in the later record's removed nodes.
+    const inserted = document.createElement("span");
+    inserted.textContent = member!;
+    document.getElementById("people-heading")!.append(inserted);
+    inserted.remove();
+    inserted.textContent = "";
   }, [OWNER, MEMBER]);
   await expectOnlyRevealed(page, OWNER);
-  expect(await takeIdentifierLeaks(page)).toEqual([`replaced aria-label: ${OWNER}`, `replaced text: ${MEMBER}`]);
+  expect(await takeIdentifierLeaks(page)).toEqual([
+    `replaced aria-label: ${OWNER}`,
+    `replaced text: ${MEMBER}`,
+    `removed #text #text: ${MEMBER}`,
+  ]);
 
   // The node granted the reveal may drop it once; writing it back and away again is a new disclosure.
   await watchIdentifierLeaks(page);
@@ -180,6 +197,15 @@ test("the identifier observer records transient disclosures that leave no trace 
     revealed.textContent = "Hidden";
   }, OWNER);
   expect(await takeIdentifierLeaks(page)).toEqual([`replaced text: ${OWNER}`]);
+
+  // The document head is watched too: a window title is as visible as the page.
+  await watchIdentifierLeaks(page);
+  await page.evaluate((identifier) => {
+    const original = document.title;
+    document.title = identifier;
+    document.title = original;
+  }, NEXT_OWNER);
+  expect(await takeIdentifierLeaks(page)).toEqual([`added #text: ${NEXT_OWNER}`, `removed #text #text: ${NEXT_OWNER}`]);
 });
 
 for (const formFactor of ["desktop", "phone"] as const) {
