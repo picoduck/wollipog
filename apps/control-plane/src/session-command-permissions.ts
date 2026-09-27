@@ -178,15 +178,14 @@ export function sessionCommandPermissions(
   };
 }
 
-/** The routes behind select_worktree and create_worktree, the tools worktree-recovery advice names. */
-const HOLD_ADVICE_WORKTREE_ROUTES = ["/api/sessions/:id/worktrees/select", "/api/sessions/:id/worktrees"] as const;
-
 /**
  * What an agent credential may do to a held session, for the hold advice it reads through its tools
- * (#1863): its Stop Job and Restart verdicts, and whether both worktree routes the advice names
- * admit it. `target.orchestratorPolicy` carries Strict Project Isolation, which only an
- * Orchestrator's own session can be refused by. A person gets no reader: they read the server's
- * copy, which the dashboard rewrites for them from their command permissions (#1857).
+ * (#1863): its Stop Job, Restart and Manage Worktrees verdicts. The worktree advice names
+ * select_worktree and create_worktree, whose routes share `manageWorktrees`' gates (#1864), so the
+ * advice and the verdict cannot disagree. `target.orchestratorPolicy` carries Strict Project
+ * Isolation, which only an Orchestrator's own session can be refused by. A person gets no reader:
+ * they read the server's copy, which the dashboard rewrites for them from their command
+ * permissions (#1857).
  */
 export function sessionHoldReader(
   principal: AuthPrincipal,
@@ -195,19 +194,10 @@ export function sessionHoldReader(
 ): SessionHoldReader | undefined {
   if (principal.kind !== "agent") return undefined;
   const permissions = sessionCommandPermissions(principal, target, facts);
-  const role = principal.orchestrator ? "orchestrator" : null;
-  const canManageWorktrees = HOLD_ADVICE_WORKTREE_ROUTES.every((routePath) =>
-    isAgentControlApiRouteAllowed("POST", routePath, role) &&
-    agentCredentialSessionTargetError(routePath, principal, target.id, facts.isDescendant) === null) &&
-    orchestratorSelfWorktreeAuthorizationError(
-      principal,
-      target.id,
-      target.orchestratorPolicy?.execution.strictProjectIsolation !== false,
-    ) === null;
   return {
     canStopJobs: permissions.stopBackgroundJob.allowed,
     canRestart: permissions.restart.allowed,
-    canManageWorktrees,
+    canManageWorktrees: permissions.manageWorktrees?.allowed === true,
   };
 }
 
