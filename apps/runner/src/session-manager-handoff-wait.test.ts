@@ -4,7 +4,7 @@ import type { RunnerToControlPlane, SessionLaunchSpec, SessionQueueHoldView } fr
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import type {
   DriverBackgroundJob,
   DriverBackgroundTerminalJob,
@@ -26,6 +26,30 @@ async function waitFor(predicate: () => boolean, message: string, attempts = 800
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   }
   assert.fail(message);
+}
+
+/**
+ * A clock the test advances (#1907). The bound is armed with `setTimeout` and rechecked against
+ * `Date.now()`, so with both mocked its deadline passes only when the test says so, however slowly
+ * a loaded machine runs the test. Polling yields through `setImmediate`, which stays real, and runs
+ * zero-delay timers without moving the clock. Enable it after any real Git work the test needs, and
+ * restore real timers before stopping or deleting the session, which waits on them.
+ */
+function controlledClock(context: TestContext) {
+  context.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  return {
+    advance: (ms: number) => context.mock.timers.tick(ms),
+    restore: () => context.mock.timers.reset(),
+    waitFor: async (predicate: () => boolean, message: string): Promise<void> => {
+      const started = performance.now();
+      while (performance.now() - started < 8_000) {
+        if (predicate()) return;
+        context.mock.timers.tick(0);
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+      assert.fail(message);
+    },
+  };
 }
 
 function initRepo(root: string): string {
@@ -159,7 +183,7 @@ function claudeSpec(sessionId: string, repo: string, extra: Partial<SessionLaunc
   };
 }
 
-test("a monitor that never ends is killed after the bound, the sibling result is delivered once, the rebind applies, and queued prompts run in order (#1778)", { skip: !haveGit() }, async () => {
+test("a monitor that never ends is killed after the bound, the sibling result is delivered once, the rebind applies, and queued prompts run in order (#1778)", { skip: !haveGit() }, async (context) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-wait-rebind-"));
   let manager: SessionManager | undefined;
   try {
@@ -191,21 +215,23 @@ test("a monitor that never ends is killed after the bound, the sibling result is
     assert.deepEqual(fake.providers.map((provider) => provider.cwd), [repo]);
 
     // Three prompts queue behind it, the second a durable workflow-decision resume.
+    const clock = controlledClock(context);
     const lifecycle: string[] = [];
     manager.prompt(spec.sessionId, "first queued");
     assert.equal(manager.prompt(spec.sessionId, "decision resume", [], undefined, undefined,
       recordingLifecycle("decision-resume", lifecycle), false, undefined, false, undefined, undefined, undefined, true), true);
     manager.prompt(spec.sessionId, "third queued");
-    await waitFor(() => publishedHolds(sent).some((hold) => hold?.queuedPrompts === 3),
+    await clock.waitFor(() => publishedHolds(sent).some((hold) => hold?.queuedPrompts === 3),
       "the queued prompts were not reported as held");
     const hold = publishedHolds(sent).find((candidate) => candidate?.queuedPrompts === 3)!;
     assert.equal(hold.kind, "worktree_rebind");
     assert.equal(hold.endsAt, hold.since + bound, "the hold says when Wollipog ends the work");
+    clock.advance(bound - 1);
     assert.equal(fake.endCalls.length, 0, "nothing is ended before the bound");
 
-    await waitFor(() => fake.prompts.length === 5, "the handoff and the queued prompts did not proceed after the bound");
-    assert.equal(fake.endCalls.length, 1, "the work is ended once");
-    assert.ok(fake.endCalls[0]! >= hold.endsAt!, "the work is not ended before the bound");
+    clock.advance(1);
+    await clock.waitFor(() => fake.prompts.length === 5, "the handoff and the queued prompts did not proceed after the bound");
+    assert.deepEqual(fake.endCalls, [hold.endsAt], "the work is ended once, at the bound");
 
     // The sibling's continuation runs once, in the old worktree, before the handoff; it names the
     // killed monitor so the provider does not wait for it. Then the queue runs in FIFO order in
@@ -222,7 +248,7 @@ test("a monitor that never ends is killed after the bound, the sibling result is
       { cwd: requested.worktree.path, home: undefined, text: "third queued" },
     ]);
     assert.deepEqual(fake.providers.map((provider) => provider.cwd), [repo, requested.worktree.path]);
-    await waitFor(() => lifecycle.includes("decision-resume:completed"), "the decision resume did not complete");
+    await clock.waitFor(() => lifecycle.includes("decision-resume:completed"), "the decision resume did not complete");
     assert.deepEqual(lifecycle, ["decision-resume:queued", "decision-resume:started", "decision-resume:completed"]);
     assert.equal(fake.prompts.filter((prompt) => prompt.text.startsWith(ORPHAN_RECOVERY_PREFIX)).length, 0,
       "an ended job is not handed to orphan recovery");
@@ -269,6 +295,7 @@ test("a monitor that never ends is killed after the bound, the sibling result is
     assert.deepEqual(store.readMeta(spec.sessionId)?.pendingBackgroundTaskIds, []);
     assert.equal(store.readMeta(spec.sessionId)?.backgroundJobs?.find((job) => job.id === "monitor-1")?.terminalStatus,
       "killed");
+    clock.restore();
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);
   } finally {
@@ -350,7 +377,7 @@ test("a provider-account switch held by a never-ending monitor is bounded the sa
   }
 });
 
-test("a job that ends on its own before the bound is left alone, and the handoff proceeds (#1778)", { skip: !haveGit() }, async () => {
+test("a job that ends on its own before the bound is left alone, and the handoff proceeds (#1778)", { skip: !haveGit() }, async (context) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-wait-natural-"));
   let manager: SessionManager | undefined;
   try {
@@ -374,17 +401,21 @@ test("a job that ends on its own before the bound is left alone, and the handoff
     manager.prompt(spec.sessionId, "watch CI");
     await waitFor(() => store.readMeta(spec.sessionId)?.status === "idle", "the launching turn did not finish");
     const requested = await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/handoff-natural" });
+    const clock = controlledClock(context);
     manager.prompt(spec.sessionId, "queued");
-    await waitFor(() => publishedHolds(sent).some((hold) => hold?.endsAt !== undefined), "the hold was not bounded");
+    await clock.waitFor(() => publishedHolds(sent).some((hold) => hold?.endsAt !== undefined), "the hold was not bounded");
 
     // The monitor's condition fires well inside the bound.
+    clock.advance(bound / 3);
     const monitor = fake.live.get("monitor-1")!;
     fake.live.delete("monitor-1");
     fake.report(fake.providers[0]!, [{ ...monitor, status: "completed", terminalAt: Date.now(), continuationRequired: false }]);
-    await waitFor(() => fake.prompts.length === 2, "the queued prompt did not run once the monitor ended");
+    await clock.waitFor(() => fake.prompts.length === 2, "the queued prompt did not run once the monitor ended");
     assert.deepEqual(fake.prompts[1], { cwd: requested.worktree.path, home: undefined, text: "queued" });
 
-    await new Promise<void>((resolve) => setTimeout(resolve, bound + 100));
+    // Past the deadline, with no turn running that would refuse an end.
+    await clock.waitFor(() => store.readMeta(spec.sessionId)?.status === "idle", "the queued turn did not finish");
+    clock.advance(bound + 100);
     assert.deepEqual(fake.endCalls, [], "nothing is ended once the wait is over");
     const job = store.readMeta(spec.sessionId)?.backgroundJobs?.find((candidate) => candidate.id === "monitor-1");
     assert.equal(job?.terminalStatus, "completed");
@@ -393,6 +424,7 @@ test("a job that ends on its own before the bound is left alone, and the handoff
       event.payload.text.startsWith("Wollipog ended")), false);
     assert.equal((manager as unknown as { handoffWaitTimers: Map<string, unknown> }).handoffWaitTimers.size, 0,
       "the bound's timer is cleared with the hold");
+    clock.restore();
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);
   } finally {
@@ -505,7 +537,7 @@ test("ending the work keeps orphan recovery at most once: a recovered monitor th
   }
 });
 
-test("a turn in the middle of the wait does not restart the bound (#1778)", { skip: !haveGit() }, async () => {
+test("a turn in the middle of the wait does not restart the bound (#1778)", { skip: !haveGit() }, async (context) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-wait-interrupted-"));
   let manager: SessionManager | undefined;
   try {
@@ -529,26 +561,27 @@ test("a turn in the middle of the wait does not restart the bound (#1778)", { sk
     manager.prompt(spec.sessionId, "watch CI");
     await waitFor(() => store.readMeta(spec.sessionId)?.status === "idle", "the launching turn did not finish");
     await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/handoff-interrupted" });
+    const clock = controlledClock(context);
     manager.prompt(spec.sessionId, "queued");
-    await waitFor(() => publishedHolds(sent).some((hold) => hold?.endsAt !== undefined), "the hold was not bounded");
+    await clock.waitFor(() => publishedHolds(sent).some((hold) => hold?.endsAt !== undefined), "the hold was not bounded");
     const first = publishedHolds(sent).find((hold) => hold?.endsAt !== undefined)!;
 
     // Shortly before the deadline the provider starts a turn on its own (a monitor event, say),
     // which interrupts the published hold; it settles after the deadline has passed.
-    await waitFor(() => Date.now() >= first.endsAt! - 150, "the deadline did not approach");
+    clock.advance(first.endsAt! - 150 - Date.now());
     fake.providers[0]!.cb.onProviderInitiatedTurn?.("started", "provider-turn-1");
-    await waitFor(() => Date.now() >= first.endsAt! + 100, "the deadline did not pass");
+    clock.advance(250);
     assert.deepEqual(fake.endCalls, [], "nothing is ended while a turn is running");
     fake.providers[0]!.cb.onProviderInitiatedTurn?.("settled", "provider-turn-1");
 
-    await waitFor(() => fake.prompts.some((prompt) => prompt.text === "queued"), "the queued prompt did not run");
-    assert.equal(fake.endCalls.length, 1);
-    assert.ok(fake.endCalls[0]! < first.endsAt! + bound,
+    await clock.waitFor(() => fake.prompts.some((prompt) => prompt.text === "queued"), "the queued prompt did not run");
+    assert.deepEqual(fake.endCalls, [first.endsAt! + 100],
       "the work is ended at the original deadline once the turn settles, not a full bound later");
     const bounded = publishedHolds(sent).filter((hold) => hold?.endsAt !== undefined);
     assert.ok(bounded.length >= 2, "the hold is published again after the turn");
     assert.ok(bounded.every((hold) => hold!.holdId === first.holdId && hold!.endsAt === first.endsAt),
       "the interrupted wait is the same incident with the same deadline");
+    clock.restore();
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);
   } finally {
@@ -557,7 +590,7 @@ test("a turn in the middle of the wait does not restart the bound (#1778)", { sk
   }
 });
 
-test("a job launched late in a long turn gets the whole bound, not the time prompts waited for the turn (#1778)", { skip: !haveGit() }, async () => {
+test("a job launched late in a long turn gets the whole bound, not the time prompts waited for the turn (#1778)", { skip: !haveGit() }, async (context) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-handoff-wait-late-job-"));
   let manager: SessionManager | undefined;
   let releaseTurn = () => {};
@@ -593,19 +626,22 @@ test("a job launched late in a long turn gets the whole bound, not the time prom
     manager.prompt(spec.sessionId, "long turn");
     await waitFor(() => store.readMeta(spec.sessionId)?.status === "running", "the long turn did not start");
     await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/handoff-late-job" });
+    const clock = controlledClock(context);
     manager.prompt(spec.sessionId, "queued");
     // The prompt waits for the turn itself for longer than the bound; no background work yet.
-    await new Promise<void>((resolve) => setTimeout(resolve, bound + 150));
+    clock.advance(bound + 150);
     releaseTurn();
 
-    await waitFor(() => publishedHolds(sent).some((hold) => hold?.endsAt !== undefined), "the hold was not bounded");
+    await clock.waitFor(() => publishedHolds(sent).some((hold) => hold?.endsAt !== undefined), "the hold was not bounded");
     const hold = publishedHolds(sent).find((candidate) => candidate?.endsAt !== undefined)!;
     assert.ok(hold.since >= launchedAt, "the wait starts when the job holds the handoff, not before");
     assert.equal(hold.endsAt, hold.since + bound);
-    await new Promise<void>((resolve) => setTimeout(resolve, bound / 3));
+    clock.advance(bound - 1);
     assert.deepEqual(fake.endCalls, [], "the new job is not ended on an already-expired deadline");
-    await waitFor(() => fake.prompts.some((prompt) => prompt.text === "queued"), "the queued prompt did not run");
-    assert.ok(fake.endCalls[0]! >= hold.endsAt!);
+    clock.advance(1);
+    await clock.waitFor(() => fake.prompts.some((prompt) => prompt.text === "queued"), "the queued prompt did not run");
+    assert.deepEqual(fake.endCalls, [hold.endsAt], "the new job is ended once, at its own deadline");
+    clock.restore();
     manager.stop(spec.sessionId);
     await manager.delete(spec.sessionId);
   } finally {
