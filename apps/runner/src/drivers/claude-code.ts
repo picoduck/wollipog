@@ -657,6 +657,9 @@ export class ClaudeCodeDriver implements Driver {
    * emulating a fixed-rule mode the moment a mediated child's last worktree went away, or start
    * emulating one for a child that was launched in that mode natively. */
   private launchedManagedEmulationMode: string | null = null;
+  /** Whether the RUNNING child has the worktree hook; unlike prepared hook state, this stays
+   * fixed when a worktree joins mid-turn or a later launch is prepared. */
+  private launchedManagedWorktreeGuardActive = false;
   /** A fresh UUID is only a proposed coordinate until Claude confirms it in system/init. */
   private sessionEstablished: boolean;
 
@@ -1121,6 +1124,7 @@ export class ClaudeCodeDriver implements Driver {
       // A one-shot turn always spawns, so these bindings are always the running child's own.
       this.launchedRoutineControlChannelMode = routineChannelMode;
       this.launchedManagedEmulationMode = mediatesManagedPermissions ? configuredPermissionMode : null;
+      this.launchedManagedWorktreeGuardActive = this.managedWorktreeGuardActive;
       args.push(...perm.args);
 
       // Auth precedence (DRIVERS.md §2.1 + README): an EXPLICITLY-configured ANTHROPIC_API_KEY
@@ -1387,6 +1391,7 @@ export class ClaudeCodeDriver implements Driver {
       // the running child's argv, so its supplement (or absence of one) must survive this turn.
       this.launchedRoutineControlChannelMode = routineChannelMode;
       this.launchedManagedEmulationMode = mediatesManagedPermissions ? configuredPermissionMode : null;
+      this.launchedManagedWorktreeGuardActive = this.managedWorktreeGuardActive;
       const args = [
         ...preparedArgs,
         "-p",
@@ -2597,9 +2602,9 @@ export class ClaudeCodeDriver implements Driver {
           const guardStateRefusal = this.managedWorktreeGuardStateVeto(req.tool_name, req.input);
           // With no hook, the control channel is the only worktree veto for file edits. A
           // control request has no cwd, so a relative path cannot be placed safely. The
-          // launch-bound mediation mode identifies the running child's transport even if a later
+          // launch-bound hook flag identifies the running child's transport even if a later
           // preparedBaseArgs() recomputed the hook state for its NEXT launch.
-          const fileVerdict = !guardStateRefusal && this.launchedManagedEmulationMode !== null &&
+          const fileVerdict = !guardStateRefusal && !this.launchedManagedWorktreeGuardActive &&
             protections.length > 0 && typeof req.tool_name === "string"
             ? editToolTargetsManagedWorktree(req.tool_name, req.input, null, protections)
             : null;

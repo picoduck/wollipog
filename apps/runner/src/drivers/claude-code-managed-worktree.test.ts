@@ -390,9 +390,30 @@ test("the running mediated child keeps its edit veto after hook preparation chan
   assert.equal(response?.response?.response?.message, MANAGED_WORKTREE_REFUSAL);
 });
 
-test("a session without protected worktrees leaves malformed edits to Claude", async (t) => {
-  const run = launch([], "default", []);
+test("a hookless child protects a worktree added after launch", async (t) => {
+  const protections: typeof PROTECTIONS = [];
+  const run = launch([], "default", protections);
   t.after(() => run.driver.dispose());
+  protections.push(...PROTECTIONS);
+  run.child.stdout.write(JSON.stringify({
+    type: "control_request", request_id: "added",
+    request: { subtype: "can_use_tool", tool_name: "Edit", input: { file_path: `${WORKTREE}/.git` } },
+  }) + "\n");
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  const response = run.writes.join("").split("\n").filter(Boolean)
+    .map((line) => JSON.parse(line) as {
+      type?: string; response?: { response?: { behavior?: string; message?: string } };
+    })
+    .find((frame) => frame.type === "control_response");
+  assert.equal(response?.response?.response?.behavior, "deny");
+  assert.equal(response?.response?.response?.message, MANAGED_WORKTREE_REFUSAL);
+});
+
+test("a mediated child leaves malformed edits to Claude after its protections disappear", async (t) => {
+  const protections = [...PROTECTIONS];
+  const run = launch([], "default", protections);
+  t.after(() => run.driver.dispose());
+  protections.length = 0;
   run.child.stdout.write(JSON.stringify({
     type: "control_request", request_id: "empty",
     request: { subtype: "can_use_tool", tool_name: "Write", input: {} },
