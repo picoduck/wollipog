@@ -40,7 +40,14 @@ const ALL_ALLOWED: SessionCommandPermissions = {
   rename: { allowed: true },
   configure: { allowed: true },
   respond: { allowed: true },
+  fork: { allowed: true },
+  rewind: { allowed: true },
+  manageReviewFindings: { allowed: true },
+  manageWorktrees: { allowed: true },
+  worktreeSetup: { allowed: true },
 };
+/** The commands #1864 added. An agent credential's allowlist names only the worktree routes. */
+const ISSUE_COMMANDS = ["fork", "rewind", "manageReviewFindings", "manageWorktrees", "worktreeSetup"] as const;
 /** The commands #1857 added, none of which an agent credential's allowlist names except configure. */
 const LATER_COMMANDS = ["cancelTurn", "manageQueue", "rename", "configure", "respond"] as const;
 const NON_OWNER: SessionCommandPermissions = {
@@ -72,6 +79,7 @@ test("a person's command permissions follow the role gate and Stop Job's owner r
       stop: readOnly, restart: readOnly, stopBackgroundJob: readOnly,
       archive: readOnly, unarchive: readOnly, prompt: readOnly, delete: readOnly,
       cancelTurn: readOnly, manageQueue: readOnly, rename: readOnly, configure: readOnly, respond: readOnly,
+      fork: readOnly, rewind: readOnly, manageReviewFindings: readOnly, manageWorktrees: readOnly, worktreeSetup: readOnly,
     }, "a Viewer is read-only even for a session its scope names");
   }
 });
@@ -92,6 +100,10 @@ test("an agent credential's command permissions follow descendant confinement an
     manageQueue: { allowed: false, reason: AGENT_ROUTE },
     rename: { allowed: false, reason: AGENT_ROUTE },
     respond: { allowed: false, reason: AGENT_ROUTE },
+    fork: { allowed: false, reason: AGENT_ROUTE },
+    rewind: { allowed: false, reason: AGENT_ROUTE },
+    manageReviewFindings: { allowed: false, reason: AGENT_ROUTE },
+    worktreeSetup: { allowed: false, reason: AGENT_ROUTE },
   }, "the controlling Orchestrator may stop, restart, stop one job of, archive, prompt and configure its child, but never unarchive or delete it or use a route outside its allowlist");
 
   const grandchild = sessionCommandPermissions(orchestrator, { id: "s_grandchild", parentSessionId: "s_child" }, descendant);
@@ -256,6 +268,59 @@ test("a campaign's held children are written for the agent credential reading it
   assert.doesNotMatch(advice(embedded)[1]!, /stop_background_job/u);
 });
 
+test("fork, rewind, review findings and worktree commands follow the role gate, the agent route allowlist and the worktree rules (#1864)", () => {
+  const child = { id: "s_child", parentSessionId: "s_parent" };
+  for (const role of ["owner", "admin", "operator"] as const) {
+    const permissions = sessionCommandPermissions(human(role), child, { ownsSession: false, isDescendant: false });
+    for (const command of ISSUE_COMMANDS) {
+      assert.deepEqual(permissions[command], { allowed: true }, `a non-owning ${role} may ${command}`);
+    }
+  }
+  const viewer = sessionCommandPermissions(human("viewer"), child, { ownsSession: true, isDescendant: false });
+  for (const command of ISSUE_COMMANDS) {
+    assert.deepEqual(viewer[command], { allowed: false, reason: VIEWER }, `a Viewer may not ${command}`);
+  }
+
+  const scope = { organizationId: "org_1", owner: { kind: "user" as const, userId: "usr_1" } };
+  const orchestrator: AgentPrincipal = {
+    kind: "agent", actorId: "s_parent", credentialSessionId: "s_parent", orchestrator: true,
+    organizationId: "org_1", delegatedScope: scope,
+  };
+  const worker: AgentPrincipal = { ...orchestrator, orchestrator: undefined };
+  const descendant = { ownsSession: false, isDescendant: true };
+  const unrelated = { ownsSession: false, isDescendant: false };
+  for (const principal of [orchestrator, worker]) {
+    const permissions = sessionCommandPermissions(principal, { id: "s_parent", parentSessionId: null }, unrelated);
+    for (const command of ["fork", "rewind", "manageReviewFindings", "worktreeSetup"] as const) {
+      assert.deepEqual(permissions[command], { allowed: false, reason: AGENT_ROUTE },
+        `no agent credential's allowlist reaches ${command}`);
+    }
+  }
+
+  const worktrees = (principal: AgentPrincipal, target: Parameters<typeof sessionCommandPermissions>[1],
+    facts: typeof descendant) => sessionCommandPermissions(principal, target, facts).manageWorktrees;
+  assert.deepEqual(worktrees(orchestrator, child, descendant), { allowed: true },
+    "the controlling Orchestrator may manage its child's worktrees");
+  assert.deepEqual(worktrees(orchestrator, { id: "s_other", parentSessionId: null }, unrelated), {
+    allowed: false, reason: "The session credential may manage only its descendants.",
+  }, "an Orchestrator is confined to its descendants");
+  const strict = { id: "s_parent", parentSessionId: null };
+  assert.deepEqual(worktrees(orchestrator, strict, unrelated), {
+    allowed: false,
+    reason: "Strict Project Isolation prevents this Orchestrator from managing its own worktrees; select a child session.",
+  }, "Strict Project Isolation, the default, refuses an Orchestrator its own worktrees");
+  const relaxed = {
+    ...strict,
+    orchestratorPolicy: { execution: { strictProjectIsolation: false } } as Parameters<typeof sessionCommandPermissions>[1]["orchestratorPolicy"],
+  };
+  assert.deepEqual(worktrees(orchestrator, relaxed, unrelated), { allowed: true },
+    "an Orchestrator launched without Strict Project Isolation may manage its own worktrees");
+  assert.deepEqual(worktrees(worker, strict, unrelated), { allowed: true }, "a worker may manage its own worktrees");
+  assert.deepEqual(worktrees(worker, child, descendant), {
+    allowed: false, reason: "The session credential may manage only its own session.",
+  }, "a worker may not manage its descendant's worktrees");
+});
+
 test("reads carry the requester's command permissions; a trusted local read is unchanged (#1843)", async (t) => {
   const db = ControlPlaneDb.open(":memory:");
   const local = db.localIdentityContext();
@@ -309,7 +374,7 @@ test("reads carry the requester's command permissions; a trusted local read is u
   assert.deepEqual(await read("admin", "s_shared"), ALL_ALLOWED, "an organization-scoped session is the admin's own");
   assert.deepEqual((await read("viewer", "s_shared"))?.restart, { allowed: false, reason: VIEWER });
   const viewerRead = await read("viewer", "s_shared");
-  for (const command of ["archive", "unarchive", "prompt", "delete", ...LATER_COMMANDS] as const) {
+  for (const command of ["archive", "unarchive", "prompt", "delete", ...LATER_COMMANDS, ...ISSUE_COMMANDS] as const) {
     assert.deepEqual(viewerRead?.[command], { allowed: false, reason: VIEWER }, `a Viewer's read refuses ${command}`);
     assert.deepEqual((await read("admin", "s_owned"))?.[command], { allowed: true },
       `a non-owning admin's read still allows ${command}`);

@@ -38,6 +38,7 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
 import { sourceKind } from "../pinned-summary.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
 import {
   clearPanelScratchIf,
   panelScratchRevision,
@@ -338,7 +339,10 @@ export function ReviewPanel({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [api, session.id]);
 
+  const findingRefusal = sessionCommandRefusal(session, "manageReviewFindings");
+  const findingRefusalId = "review-findings-refusal";
   const createFinding = async (input: CreateReviewFindingRequest): Promise<boolean> => {
+    if (findingRefusal !== null) return false;
     setCreatingFinding(true);
     setFindingError(null);
     setFindingNotice(null);
@@ -361,6 +365,7 @@ export function ReviewPanel({
   };
 
   const updateFinding = async (finding: ReviewFinding, status: "open" | "resolved" | "dismissed") => {
+    if (findingRefusal !== null) return;
     setFindingBusyId(finding.findingId);
     setFindingError(null);
     setFindingNotice(null);
@@ -381,7 +386,7 @@ export function ReviewPanel({
 
   const bundleFindings = async () => {
     const selected = findings.filter((finding) => selectedFindings.has(finding.findingId) && (finding.status === "open" || finding.status === "sent"));
-    if (!selected.length) return;
+    if (!selected.length || findingRefusal !== null) return;
     setBundlingFindings(true);
     setFindingError(null);
     setFindingNotice(null);
@@ -867,6 +872,7 @@ export function ReviewPanel({
               busyFindingId: findingBusyId,
               onCreate: createFinding,
               onStatus: updateFinding,
+              refusal: findingRefusal === null ? null : { reason: findingRefusal, id: findingRefusalId },
             }}
           />
         )}
@@ -900,13 +906,17 @@ export function ReviewPanel({
             </button>
             <button
               className="btn sm"
-              disabled={bundlingFindings || selectedFindings.size === 0 || !runnerOnline || isTerminal(session.status)}
+              disabled={bundlingFindings || selectedFindings.size === 0 || !runnerOnline || isTerminal(session.status) ||
+                findingRefusal !== null}
+              title={findingRefusal ?? undefined}
+              aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
               onClick={() => void bundleFindings()}
             >
               {bundlingFindings ? "Sending…" : `Send Selected (${selectedFindings.size})`}
             </button>
           </div>
         </div>
+        {findingRefusal !== null && <p id={findingRefusalId} className="muted review-findings-refusal">{findingRefusal}</p>}
         {findingError && <div className="composer-error">Review findings: {findingError}</div>}
         {findingNotice && <div className="git-ok">✓ {findingNotice}</div>}
         {findings.filter((finding) => finding.status === "open" || finding.status === "sent").length === 0 ? (
@@ -971,8 +981,12 @@ export function ReviewPanel({
                       <span className="muted">Remote-Owned</span>
                     ) : (
                       <>
-                        <button className="btn ghost sm" disabled={findingBusyId === finding.findingId} onClick={() => void updateFinding(finding, "resolved")}>Resolve</button>
-                        <button className="btn ghost sm" disabled={findingBusyId === finding.findingId} onClick={() => void updateFinding(finding, "dismissed")}>Dismiss</button>
+                        <button className="btn ghost sm" disabled={findingBusyId === finding.findingId || findingRefusal !== null}
+                          title={findingRefusal ?? undefined} aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
+                          onClick={() => void updateFinding(finding, "resolved")}>Resolve</button>
+                        <button className="btn ghost sm" disabled={findingBusyId === finding.findingId || findingRefusal !== null}
+                          title={findingRefusal ?? undefined} aria-describedby={findingRefusal !== null ? findingRefusalId : undefined}
+                          onClick={() => void updateFinding(finding, "dismissed")}>Dismiss</button>
                       </>
                     )}
                   </div>

@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useState } from "react";
 import type { SessionView } from "@wollipog/protocol";
 import { Select } from "./ui/ChoiceControls.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
 import {
   WORKTREE_CREATION_STEPS,
   worktreeCreationPhase,
@@ -52,6 +53,9 @@ export function WorktreeRecoveryCard({
   const retainedId = `worktree-recovery-retained-${uid}`;
   const offlineId = `worktree-recovery-offline-${uid}`;
   const creationFailedId = `worktree-recovery-create-failed-${uid}`;
+  const refusalId = `worktree-recovery-refusal-${uid}`;
+  // Creating and selecting a worktree are refused together for a person the server refuses (#1864).
+  const refusal = sessionCommandRefusal(session, "manageWorktrees");
 
   useEffect(() => {
     if (!recovery) return;
@@ -71,10 +75,10 @@ export function WorktreeRecoveryCard({
   const creationFailure = !creating && action === null && creation?.status === "failed" ? creation : null;
   const phase = creation?.status === "creating" && creation.phase ? worktreeCreationPhase(creation.phase) : null;
   const failedPhase = creationFailure?.phase ? worktreeCreationPhase(creationFailure.phase) : null;
-  const disabled = action !== null || creating || checking || !runnerOnline;
+  const disabled = action !== null || creating || checking || !runnerOnline || refusal !== null;
   // Both actions carry the incident detail and the reason ordinary submission is unavailable, so a
   // screen reader announces why the card exists rather than just the action's own name.
-  const describedBy = [detailId, retainedId, ...(runnerOnline ? [] : [offlineId]),
+  const describedBy = [detailId, retainedId, ...(refusal === null ? [] : [refusalId]), ...(runnerOnline ? [] : [offlineId]),
     ...(creationFailure ? [creationFailedId] : [])].join(" ");
   const run = async (next: "create" | "select", operation: () => Promise<void>) => {
     if (disabled) return;
@@ -99,6 +103,7 @@ export function WorktreeRecoveryCard({
           This worktree cannot start another turn. Messages marked <strong>Not Sent</strong>
           {" "}can be retried after this session has a verified worktree.
         </p>
+        {refusal !== null && <p id={refusalId}>{refusal}</p>}
         {!runnerOnline && <p id={offlineId} className="worktree-recovery-error">The runner is offline.</p>}
         {error && <p className="worktree-recovery-error" role="alert">{error}</p>}
         {creationFailure && (
@@ -134,6 +139,7 @@ export function WorktreeRecoveryCard({
             type="button"
             className="btn primary sm"
             aria-describedby={describedBy}
+            title={refusal ?? undefined}
             disabled={disabled || !branch.trim()}
             onClick={() => void run("create", () => onCreate({
               branch: branch.trim(),
@@ -165,6 +171,7 @@ export function WorktreeRecoveryCard({
             type="button"
             className="btn ghost sm"
             aria-describedby={describedBy}
+            title={refusal ?? undefined}
             disabled={disabled || !selectedPath}
             onClick={() => void run("select", () => onSelect(selectedPath))}
           >

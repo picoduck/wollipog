@@ -51,7 +51,12 @@ function description(element: Element): string {
     .map((id) => domWindow.document.getElementById(id)?.textContent ?? "").join(" ");
 }
 
-async function renderHeader(session: SessionView, calls: string[], unarchiveAndRestartSupported = false) {
+async function renderHeader(
+  session: SessionView,
+  calls: string[],
+  unarchiveAndRestartSupported = false,
+  extra: Partial<React.ComponentProps<typeof SessionHeader>> = {},
+) {
   const client = {
     ...api,
     stop: async (id: string) => { calls.push(`stop:${id}`); return session; },
@@ -81,6 +86,7 @@ async function renderHeader(session: SessionView, calls: string[], unarchiveAndR
             stopBeforeArchiveSupported
             unarchiveAndRestartSupported={unarchiveAndRestartSupported}
             exportReady={false}
+            {...extra}
           />
         </FeedbackContext.Provider>
       </ApiProvider>,
@@ -273,6 +279,50 @@ test("a Viewer sees Rename Session disabled with the reason, and the rename dial
       assert.equal(dialog !== null, !refused, refused ? "no rename dialog opens" : "the rename dialog opens");
     } finally {
       await header.unmount();
+    }
+  }
+});
+
+test("a Viewer's Fork Conversation is disabled and describes the refusal; an allowed person's is unchanged (#1864)", async () => {
+  const calls: string[] = [];
+  const refused = await renderHeader({
+    id: "session-fork", runnerId: "runner-1", title: "Fork", status: "idle", archived: false,
+    commandPermissions: { ...readOnly, fork: { allowed: false, reason: VIEWER } },
+  } as SessionView, calls, false, {
+    // SessionDetail folds the fork verdict into the availability it passes down.
+    forkAvailability: { available: false, reason: VIEWER },
+    onFork: () => { calls.push("fork"); },
+  });
+  try {
+    const fork = refused.container.querySelector<HTMLButtonElement>('button[aria-label="Fork Conversation"]');
+    assert.ok(fork, "missing Fork Conversation");
+    assert.equal(fork.disabled, true);
+    assert.equal(fork.title, VIEWER);
+    assert.equal(description(fork), VIEWER, "the reason is announced, not only shown on hover");
+    await act(async () => { fork.click(); await tick(); });
+    assert.deepEqual(calls, []);
+  } finally {
+    await refused.unmount();
+  }
+
+  for (const commandPermissions of [{ ...readOnly, fork: { allowed: true } }, undefined]) {
+    const allowedCalls: string[] = [];
+    const allowed = await renderHeader({
+      id: "session-fork", runnerId: "runner-1", title: "Fork", status: "idle", archived: false,
+      ...(commandPermissions ? { commandPermissions } : {}),
+    } as SessionView, allowedCalls, false, {
+      forkAvailability: { available: true, forkTurn: 3 },
+      onFork: () => { allowedCalls.push("fork"); },
+    });
+    try {
+      const fork = allowed.container.querySelector<HTMLButtonElement>('button[aria-label="Fork Conversation"]');
+      assert.ok(fork, "missing Fork Conversation");
+      assert.equal(fork.disabled, false);
+      assert.equal(fork.title, "Fork Conversation");
+      assert.equal(fork.getAttribute("aria-describedby"), null);
+      assert.equal(allowed.container.querySelector("#session-fork-refusal"), null);
+    } finally {
+      await allowed.unmount();
     }
   }
 });

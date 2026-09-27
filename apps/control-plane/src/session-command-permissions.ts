@@ -45,6 +45,25 @@ const QUEUE_ROUTES = [
 const RENAME_ROUTES = ["/api/sessions/:id/title", "/api/sessions/:id/retitle"] as const;
 const CONFIG_ROUTE = "/api/sessions/:id/config";
 const RESPOND_ROUTES = ["/api/sessions/:id/answer", "/api/sessions/:id/approve"] as const;
+/** Fork, Edit in Fork, handoff and quarantine recovery all create the new session through one route. */
+const FORK_ROUTE = "/api/sessions/:id/fork";
+const REWIND_ROUTE = "/api/sessions/:id/rewind";
+const REVIEW_FINDING_ROUTES = [
+  "/api/sessions/:id/review-findings",
+  { method: "PATCH", path: "/api/sessions/:id/review-findings/:findingId" },
+  "/api/sessions/:id/review-findings/bundle",
+] as const;
+/** The worktree routes an agent credential's allowlist names; each applies its worktree rules. */
+const WORKTREE_ROUTES = [
+  "/api/sessions/:id/worktrees",
+  "/api/sessions/:id/worktrees/attach",
+  "/api/sessions/:id/worktrees/select",
+  "/api/sessions/:id/worktrees/discard",
+] as const;
+const WORKTREE_SETUP_ROUTES = [
+  "/api/sessions/:id/worktrees/retry-setup",
+  "/api/sessions/:id/worktrees/generate-setup",
+] as const;
 
 const VIEWER_REASON = "Your Viewer role is read-only.";
 const STOP_JOB_OWNER_REASON = "Only the session owner or its controlling Orchestrator can stop its background jobs.";
@@ -77,24 +96,32 @@ function routeRefusal(
   return targetError ? sentence(targetError) : null;
 }
 
-/** `routeRefusal` for the commands #1857 added, which also apply the agent credential's route
- * allowlist: a credential outside it is never authenticated for the route. Commands served by
+/** A `POST` route by its path, or a route with another method. */
+type CommandRoute = string | { method: string; path: string };
+
+/** `routeRefusal` for the commands #1857 and #1864 added, which also apply the agent credential's
+ * route allowlist: a credential outside it is never authenticated for the route. Commands served by
  * several routes take the first refusal, since a surface offers the command only if all admit it. */
 function allowlistedRouteRefusal(
-  routePaths: readonly string[],
+  routes: readonly CommandRoute[],
   principal: AuthPrincipal,
   target: { id: string },
   facts: SessionCommandPermissionFacts,
 ): string | null {
-  for (const routePath of routePaths) {
+  for (const route of routes) {
+    const { method, path } = typeof route === "string" ? { method: "POST", path: route } : route;
     if (principal.kind === "agent" &&
-        !isAgentControlApiRouteAllowed("POST", routePath, principal.orchestrator ? "orchestrator" : null)) {
+        !isAgentControlApiRouteAllowed(method, path, principal.orchestrator ? "orchestrator" : null)) {
       return AGENT_ROUTE_REASON;
     }
-    const refusal = routeRefusal(routePath, principal, target, facts);
+    const refusal = routeRefusal(path, principal, target, facts, method);
     if (refusal) return refusal;
   }
   return null;
+}
+
+function nullableSentence(error: string | null): string | null {
+  return error === null ? null : sentence(error);
 }
 
 function permission(reason: string | null): SessionCommandPermission {
@@ -109,7 +136,7 @@ function permission(reason: string | null): SessionCommandPermission {
  */
 export function sessionCommandPermissions(
   principal: AuthPrincipal,
-  target: { id: string; parentSessionId?: string | null },
+  target: { id: string; parentSessionId?: string | null; orchestratorPolicy?: SessionView["orchestratorPolicy"] },
   facts: SessionCommandPermissionFacts,
 ): SessionCommandPermissions {
   const stopJobRefusal = routeRefusal(STOP_JOB_ROUTE, principal, target, facts) ??
@@ -136,6 +163,18 @@ export function sessionCommandPermissions(
     configure: permission(allowlistedRouteRefusal([CONFIG_ROUTE], principal, target, facts) ??
       (principal.kind === "agent" && principal.credentialSessionId === target.id ? AGENT_SELF_CONFIG_REASON : null)),
     respond: permission(allowlistedRouteRefusal(RESPOND_ROUTES, principal, target, facts)),
+    fork: permission(allowlistedRouteRefusal([FORK_ROUTE], principal, target, facts)),
+    rewind: permission(allowlistedRouteRefusal([REWIND_ROUTE], principal, target, facts)),
+    manageReviewFindings: permission(allowlistedRouteRefusal(REVIEW_FINDING_ROUTES, principal, target, facts)),
+    // The worktree service then refuses an Orchestrator its own worktrees under Strict Project
+    // Isolation, which the session's immutable policy decides.
+    manageWorktrees: permission(allowlistedRouteRefusal(WORKTREE_ROUTES, principal, target, facts) ??
+      nullableSentence(orchestratorSelfWorktreeAuthorizationError(
+        principal,
+        target.id,
+        target.orchestratorPolicy?.execution.strictProjectIsolation !== false,
+      ))),
+    worktreeSetup: permission(allowlistedRouteRefusal(WORKTREE_SETUP_ROUTES, principal, target, facts)),
   };
 }
 

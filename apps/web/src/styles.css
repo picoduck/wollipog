@@ -11426,6 +11426,8 @@ body.shell-dock-dragging * {
 .review-finding-meta code { overflow-wrap: anywhere; }
 .review-finding-provenance { margin-top: 5px; color: var(--text-faint); font-size: 11px; }
 .review-findings-empty { padding: 6px 0; }
+/* Why a refused person cannot add, change or send findings (#1864). */
+.review-findings-refusal { margin: 0 0 6px; font-size: var(--text-sm); }
 .diff-line-add {
   background: color-mix(in srgb, var(--green) 16%, transparent);
 }

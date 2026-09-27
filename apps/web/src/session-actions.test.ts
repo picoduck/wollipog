@@ -233,3 +233,29 @@ test("the fixed composer control stops only when the active turn has no draft co
   assert.equal(composerPrimaryAction({ canStopTurn: true, hasContent: true, stopping: true }), "stopping");
   assert.equal(composerPrimaryAction({ canStopTurn: false, hasContent: false, stopping: false }), "send");
 });
+
+test("a person refused Fork sees that reason on every fork, edit-in-fork and handoff entry point (#1864)", () => {
+  const reason = "Your Viewer role is read-only.";
+  const context = { ...base, providerSupported: true, forkInProgress: false };
+  assert.deepEqual(conversationForkAvailability(2, 2, { ...context, forkRefusal: reason }), { available: false, reason });
+  assert.deepEqual(conversationForkAvailability(undefined, undefined, { ...context, runnerOnline: false, forkRefusal: reason }),
+    { available: false, reason }, "the refusal comes before every runtime gate");
+  assert.deepEqual(editInForkAvailability(2, new Set([1, 2]), { ...base, forkRefusal: reason }), { available: false, reason });
+  const handoff: CheckpointHandoffContext = {
+    runnerOnline: true,
+    runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.conversationHandoff,
+    hasWorktree: true,
+    status: "idle",
+    queuedPrompts: 0,
+    busy: false,
+    forkInProgress: false,
+  };
+  assert.equal(checkpointHandoffUnavailableReason({ ...handoff, forkRefusal: reason }), reason);
+
+  for (const forkRefusal of [null, undefined]) {
+    assert.deepEqual(conversationForkAvailability(2, 2, { ...context, forkRefusal }), { available: true, forkTurn: 2 },
+      "an allowed person, or a control plane that sends no verdict, keeps today's availability");
+    assert.deepEqual(editInForkAvailability(2, new Set([1, 2]), { ...base, forkRefusal }), { available: true, forkTurn: 1 });
+    assert.equal(checkpointHandoffUnavailableReason({ ...handoff, forkRefusal }), undefined);
+  }
+});

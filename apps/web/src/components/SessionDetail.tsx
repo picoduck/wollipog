@@ -3215,11 +3215,16 @@ function SessionDetailLoaded({
     actions: readingActions,
   });
   const followLabel = followTailSurfaceLabel(followTail.state, mode, isMobile);
+  // Fork also covers Edit in Fork, handoff and quarantine recovery, which share its route (#1864).
+  const forkRefusal = sessionCommandRefusal(session, "fork");
+  const rewindRefusal = sessionCommandRefusal(session, "rewind");
+  const worktreeSetupRefusal = sessionCommandRefusal(session, "worktreeSetup");
   // Rewind FILES to a per-turn checkpoint (T3-style). Stable identity (useCallback) — it rides
   // into the memoized timeline rows. The confirm copy is explicit that the conversation is not
   // rewound: the agent may still reference later changes in its context.
   const onRewind = useCallback(
     async (turn: number) => {
+      if (rewindRefusal !== null) return;
       if (!await confirm({
         title: `Restore files before turn ${turn}?`,
         message: "Files revert to the checkpoint, but the conversation does not. The agent keeps its memory of later turns.",
@@ -3228,12 +3233,12 @@ function SessionDetailLoaded({
       })) return;
       await api.rewind(sessionId, turn).catch((e) => setError((e as Error).message));
     },
-    [api, confirm, sessionId],
+    [api, confirm, rewindRefusal, sessionId],
   );
 
   const onFork = useCallback(
     async (turn: number) => {
-      if (busy || forkInFlightRef.current) return;
+      if (busy || forkInFlightRef.current || forkRefusal !== null) return;
       const provider = session?.driver === "claude-code"
         ? "Claude session"
         : session?.driver === "pi"
@@ -3277,7 +3282,7 @@ function SessionDetailLoaded({
         }
       })();
     },
-    [api, busy, confirm, mode, navigate, session?.driver, sessionId, showToast],
+    [api, busy, confirm, forkRefusal, mode, navigate, session?.driver, sessionId, showToast],
   );
 
   /**
@@ -3289,7 +3294,8 @@ function SessionDetailLoaded({
    */
   const onRecoverQuarantinedConversation = useCallback(async () => {
     const quarantine = session.historyQuarantine;
-    if (!quarantine || quarantine.recoveryTurn === undefined || busy || forkInFlightRef.current) return;
+    if (!quarantine || quarantine.recoveryTurn === undefined || busy || forkInFlightRef.current ||
+      forkRefusal !== null) return;
     const handoff = quarantine.recovery === "handoff";
     if (handoff && !session.agentId) {
       setError("This session has no agent on its runner, so a fresh conversation cannot be started for it.");
@@ -3377,7 +3383,7 @@ function SessionDetailLoaded({
       forkInFlightRef.current = false;
       setBusy(false);
     }
-  }, [api, busy, confirm, instanceScope, mode, navigate, session.agentId, session.effort,
+  }, [api, busy, confirm, forkRefusal, instanceScope, mode, navigate, session.agentId, session.effort,
     session.historyQuarantine, session.model, session.permissionMode, sessionId, showToast]);
 
   const queuedEditReconciliation = queuedEdit && queuedEditRecovered
@@ -3425,7 +3431,7 @@ function SessionDetailLoaded({
     if (viewGenerationRef.current === generation) loadSession(result.session);
   }, [api, loadSession, session.id]);
   const retryWorktreeSetup = useCallback(async () => {
-    if (!failedSetupWorktree || setupRetryPending || !runnerOnline) return;
+    if (!failedSetupWorktree || setupRetryPending || !runnerOnline || worktreeSetupRefusal !== null) return;
     const generation = viewGenerationRef.current;
     setSetupRetryPending(true);
     setError(null);
@@ -3440,7 +3446,8 @@ function SessionDetailLoaded({
     } finally {
       if (viewGenerationRef.current === generation) setSetupRetryPending(false);
     }
-  }, [api, failedSetupWorktree, loadSession, runnerOnline, session.id, session.status, setupRetryPending]);
+  }, [api, failedSetupWorktree, loadSession, runnerOnline, session.id, session.status, setupRetryPending,
+    worktreeSetupRefusal]);
   const primaryComposerAction = composerPrimaryAction({
     canStopTurn,
     hasContent: text.length > 0 || images.length > 0,
@@ -3476,9 +3483,11 @@ function SessionDetailLoaded({
     queuedPrompts: pendingQueuedPrompts,
     busy,
     forkInProgress,
+    forkRefusal,
   }), [
     busy,
     forkInProgress,
+    forkRefusal,
     pendingQueuedPrompts,
     runner?.protocolVersion,
     runnerOnline,
@@ -3501,13 +3510,15 @@ function SessionDetailLoaded({
       queuedPrompts: pendingQueuedPrompts,
       busy,
       forkInProgress,
+      forkRefusal,
     }),
-  }), [runnerOnline, runner?.protocolVersion, session.worktreePath, pendingQueuedPrompts, session.status, busy, forkInProgress]);
-  const rewindUnavailableReason = session.worktreePath == null
+  }), [runnerOnline, runner?.protocolVersion, session.worktreePath, pendingQueuedPrompts, session.status, busy, forkInProgress,
+    forkRefusal]);
+  const rewindUnavailableReason = rewindRefusal ?? (session.worktreePath == null
     ? "A worktree is required."
     : !runnerSupportsProtocol(runner?.protocolVersion, "checkpointRewind")
       ? runnerCapabilityRequirement(runner?.protocolVersion, "checkpointRewind", "Checkpoint rewind")
-      : undefined;
+      : undefined);
   const latestForkAvailability = useMemo(
     () => conversationForkAvailability(latestConversationForkTurn, latestKnownTurn, forkContext),
     [forkContext, latestConversationForkTurn, latestKnownTurn],
@@ -3535,11 +3546,12 @@ function SessionDetailLoaded({
         status: session.status,
         queuedPrompts: pendingQueuedPrompts,
         busy,
+        forkRefusal,
       });
       if (availability.available) targets.set(item.id, availability.forkTurn);
     }
     return targets;
-  }, [api, busy, completedConversationTurns, items, pendingQueuedPrompts, runner?.protocolVersion, runnerOnline, session.driver, session.status, session.worktreePath]);
+  }, [api, busy, completedConversationTurns, forkRefusal, items, pendingQueuedPrompts, runner?.protocolVersion, runnerOnline, session.driver, session.status, session.worktreePath]);
 
   const openMessageAction = useCallback((next: MessageActionState) => {
     messageActionReturnFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
@@ -3585,6 +3597,7 @@ function SessionDetailLoaded({
     draft: { text: string; images: PromptImageInput[] },
   ) => {
     if (forkInFlightRef.current) return;
+    if (forkRefusal !== null) throw new Error(forkRefusal);
     const releaseFork = acquireSessionFork(sessionId);
     if (!releaseFork) throw new Error("A conversation fork is already in progress for this session.");
     const generation = viewGenerationRef.current;
@@ -3609,7 +3622,7 @@ function SessionDetailLoaded({
       forkInFlightRef.current = false;
       setBusy(false);
     }
-  }, [api, closeMessageAction, instanceScope, navigate, sessionId]);
+  }, [api, closeMessageAction, forkRefusal, instanceScope, navigate, sessionId]);
 
   // Friendly machine label (hostname + local/SSH) instead of the raw random box runner id.
   const runnerDisp = runnerDisplay(runner, box, session.runnerId);
@@ -4727,13 +4740,15 @@ function SessionDetailLoaded({
           titleId={!isMobile ? "page-title" : undefined}
         />
         {showWorktreeSetupNotice && session.projectId && (
-          <WorktreeSetupNotice busy={setupGeneratePending} error={setupGenerateError} onDismiss={() => {
+          <WorktreeSetupNotice busy={setupGeneratePending} error={setupGenerateError}
+            generateRefusal={worktreeSetupRefusal} onDismiss={() => {
             setSetupGeneratePending(true);
             setSetupGenerateError(null);
             void api.dismissWorktreeSetupNotice(session.projectId!).catch((error) => {
               setSetupGenerateError((error as Error).message);
             }).finally(() => setSetupGeneratePending(false));
           }} onGenerate={() => {
+            if (worktreeSetupRefusal !== null) return;
             setSetupGeneratePending(true);
             setSetupGenerateError(null);
             void api.generateWorktreeSetup(session.id)
@@ -5182,13 +5197,15 @@ function SessionDetailLoaded({
                     {failedSetupWorktree.setup?.error ?? "A required setup step failed."}
                     {" "}The worktree was retained. Retry resumes at the failed required step.
                   </p>
+                  {worktreeSetupRefusal !== null && <p id="worktree-setup-retry-refusal">{worktreeSetupRefusal}</p>}
                 </div>
                 <div className="quarantine-actions">
                   <button
                     type="button"
                     className="btn primary sm"
-                    disabled={setupRetryPending || !runnerOnline}
-                    title={runnerOnline ? undefined : "Runner is offline."}
+                    disabled={setupRetryPending || !runnerOnline || worktreeSetupRefusal !== null}
+                    title={worktreeSetupRefusal ?? (runnerOnline ? undefined : "Runner is offline.")}
+                    aria-describedby={worktreeSetupRefusal !== null ? "worktree-setup-retry-refusal" : undefined}
                     onClick={() => void retryWorktreeSetup()}
                   >
                     {setupRetryPending ? "Retrying Setup…" : "Retry Setup"}
@@ -5211,14 +5228,18 @@ function SessionDetailLoaded({
                       : `Recovering continues from the checkpoint after turn ${historyQuarantine.recoveryTurn} in a new session with the same files. This session stays here, unchanged, for inspection.`}
                     {historyQuarantine.retainedPrompt ? " Your last message was kept unsent and moves to the recovered session's composer." : ""}
                   </p>
+                  {historyQuarantine.recoveryTurn !== undefined && forkRefusal !== null && (
+                    <p id="history-quarantine-recovery-refusal">{forkRefusal}</p>
+                  )}
                 </div>
                 {historyQuarantine.recoveryTurn !== undefined && (
                   <div className="quarantine-actions">
                     <button
                       type="button"
                       className="btn primary sm"
-                      disabled={busy || !runnerOnline}
-                      title={runnerOnline ? undefined : "Runner is offline."}
+                      disabled={busy || !runnerOnline || forkRefusal !== null}
+                      title={forkRefusal ?? (runnerOnline ? undefined : "Runner is offline.")}
+                      aria-describedby={forkRefusal !== null ? "history-quarantine-recovery-refusal" : undefined}
                       onClick={() => void onRecoverQuarantinedConversation()}
                     >
                       Recover Session
@@ -5896,6 +5917,7 @@ function SessionDetailLoaded({
       {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver}
         sourceServiceTier={session.serviceTier ?? undefined} turn={handoffTurn}
         onClose={() => setHandoffTurn(null)} onCreate={async (agentId, config) => {
+          if (forkRefusal !== null) throw new Error(forkRefusal);
           const release = acquireSessionFork(sessionId);
           if (!release) throw new Error("A conversation fork or handoff is already in progress.");
           let releaseOnFinish = true;

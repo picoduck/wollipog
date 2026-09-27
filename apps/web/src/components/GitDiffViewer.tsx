@@ -68,6 +68,9 @@ export interface DiffReviewControls {
   busyFindingId: string | null;
   onCreate: (finding: CreateReviewFindingRequest) => Promise<boolean>;
   onStatus: (finding: ReviewFinding, status: Exclude<ReviewFindingStatus, "sent">) => Promise<void>;
+  /** Why the signed-in person may not add or change findings (#1864), and the id of the element
+   * that states it; every finding control is then disabled and described by it. */
+  refusal?: { reason: string; id: string } | null;
 }
 
 /** The fields of one unsent inline finding. */
@@ -533,7 +536,8 @@ function DiffCommentEditor({
           <input type="checkbox" checked={draft.required} onChange={(event) => update({ required: event.target.checked })} />
           Must Resolve Before Publish
         </label>
-        <button className="btn sm" disabled={review.creating || !draft.body.trim()} onClick={() => void submit()}>
+        <button className="btn sm" disabled={review.creating || !draft.body.trim() || Boolean(review.refusal)}
+          title={review.refusal?.reason} aria-describedby={review.refusal?.id} onClick={() => void submit()}>
           {review.creating ? "Adding…" : "Add Finding"}
         </button>
         <button className="btn ghost sm" disabled={review.creating} onClick={() => drafts.dismiss(anchorKey)}>Cancel</button>
@@ -666,11 +670,17 @@ function HunkView({
             <div className="diff-inline-finding-actions">
               {(finding.status === "open" || finding.status === "sent") ? (
                 <>
-                  <button className="btn ghost sm" disabled={review?.busyFindingId === finding.findingId} onClick={() => void review?.onStatus(finding, "resolved")}>Resolve</button>
-                  <button className="btn ghost sm" disabled={review?.busyFindingId === finding.findingId} onClick={() => void review?.onStatus(finding, "dismissed")}>Dismiss</button>
+                  <button className="btn ghost sm" disabled={review?.busyFindingId === finding.findingId || Boolean(review?.refusal)}
+                    title={review?.refusal?.reason} aria-describedby={review?.refusal?.id}
+                    onClick={() => void review?.onStatus(finding, "resolved")}>Resolve</button>
+                  <button className="btn ghost sm" disabled={review?.busyFindingId === finding.findingId || Boolean(review?.refusal)}
+                    title={review?.refusal?.reason} aria-describedby={review?.refusal?.id}
+                    onClick={() => void review?.onStatus(finding, "dismissed")}>Dismiss</button>
                 </>
               ) : (
-                <button className="btn ghost sm" disabled={review?.busyFindingId === finding.findingId} onClick={() => void review?.onStatus(finding, "open")}>Reopen</button>
+                <button className="btn ghost sm" disabled={review?.busyFindingId === finding.findingId || Boolean(review?.refusal)}
+                    title={review?.refusal?.reason} aria-describedby={review?.refusal?.id}
+                    onClick={() => void review?.onStatus(finding, "open")}>Reopen</button>
               )}
             </div>
           </div>
@@ -692,7 +702,18 @@ function HunkView({
     );
   };
 
-  const commentButton = (row: DiffHunkRow) => review ? (
+  const commentButton = (row: DiffHunkRow) => !review ? null : review.refusal ? (
+    <button
+      type="button"
+      className="diff-comment-add"
+      aria-label={`Comment on ${filePath} ${row.anchor.side} line ${row.anchor.line}`}
+      title={review.refusal.reason}
+      aria-describedby={review.refusal.id}
+      disabled
+    >
+      +
+    </button>
+  ) : (
     <button
       type="button"
       className="diff-comment-add"
@@ -702,7 +723,7 @@ function HunkView({
     >
       +
     </button>
-  ) : null;
+  );
   const sourcePath = normalizeSourcePath(filePath);
   const sourceGutter = (row: DiffHunkRow, value: string, className: string) =>
     onOpenSourceLocation && sourcePath && fileStatus !== "deleted" && row.anchor.side === "right" && value ? (

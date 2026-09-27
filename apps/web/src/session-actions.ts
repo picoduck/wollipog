@@ -27,6 +27,8 @@ export interface EditInForkContext {
   status: SessionStatus;
   queuedPrompts: number;
   busy: boolean;
+  /** Why the signed-in person may not fork this session (#1864), or null when they may. */
+  forkRefusal?: string | null;
 }
 
 export interface ConversationForkContext extends EditInForkContext {
@@ -111,11 +113,14 @@ export interface CheckpointHandoffContext {
   queuedPrompts: number;
   busy: boolean;
   forkInProgress: boolean;
+  /** A handoff creates its session through the fork route, so it shares Fork's refusal (#1864). */
+  forkRefusal?: string | null;
 }
 
 /** Why a checkpoint handoff cannot start, or `undefined` when it can. `queuedPrompts` counts pending
  * work only (see `pendingQueuedPromptCount`), so a settled receipt never reports the Session busy. */
 export function checkpointHandoffUnavailableReason(context: CheckpointHandoffContext): string | undefined {
+  if (context.forkRefusal) return context.forkRefusal;
   if (!context.runnerOnline) return "The runner is offline.";
   if (!runnerSupportsProtocol(context.runnerProtocolVersion, "conversationHandoff")) {
     return "Update the runner to support checkpoint handoffs.";
@@ -134,6 +139,7 @@ export function conversationForkAvailability(
   latestKnownTurn: number | undefined,
   context: ConversationForkContext,
 ): ConversationForkAvailability {
+  if (context.forkRefusal) return { available: false, reason: context.forkRefusal };
   if (!Number.isInteger(forkTurn) || forkTurn! <= 0) {
     return { available: false, reason: "Complete a conversation turn before creating a fork." };
   }
@@ -185,6 +191,7 @@ export function editInForkAvailability(
   completedConversationTurns: ReadonlySet<number>,
   context: EditInForkContext,
 ): EditInForkAvailability {
+  if (context.forkRefusal) return { available: false, reason: context.forkRefusal };
   if (context.driver !== "codex-app-server") {
     return { available: false, reason: "Historical edit-and-fork is available only for Codex App Server sessions." };
   }

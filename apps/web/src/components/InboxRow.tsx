@@ -16,6 +16,7 @@ import { sessionAgentLabel } from "./agent-options.js";
 import { inboxThreadChildrenLabel, type InboxThreadChildren } from "../inbox.js";
 import { useApi } from "../api-context.js";
 import { WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
 
 export interface InboxRowProps {
   optionId: string;
@@ -75,13 +76,15 @@ function ConnectedWorktreeSetupNotice({ session, onGenerated }: {
   const api = useApi();
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  return <WorktreeSetupNotice compact busy={busy} error={error} onDismiss={() => {
+  const generateRefusal = sessionCommandRefusal(session, "worktreeSetup");
+  return <WorktreeSetupNotice compact busy={busy} error={error} generateRefusal={generateRefusal} onDismiss={() => {
     setBusy(true);
     setError(null);
     void api.dismissWorktreeSetupNotice(session.projectId).catch((cause) => {
       setError((cause as Error).message);
     }).finally(() => setBusy(false));
   }} onGenerate={() => {
+    if (generateRefusal !== null) return;
     setBusy(true);
     setError(null);
     void api.generateWorktreeSetup(session.id)

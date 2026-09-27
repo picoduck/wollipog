@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionReminderView, SessionView } from "@wollipog/protocol";
+import type { SessionCommandPermission, SessionReminderView, SessionView } from "@wollipog/protocol";
 import { InboxRow } from "./InboxRow.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { ApiProvider } from "../api-context.js";
@@ -143,6 +143,88 @@ test("a setup notice remains inside its own grid cell", async () => {
   } finally {
     await act(async () => root.unmount());
     container.remove();
+  }
+});
+
+const VIEWER = "Your Viewer role is read-only.";
+
+async function withSetupNotice(
+  worktreeSetup: SessionCommandPermission | undefined,
+  run: (notice: HTMLElement, calls: string[]) => Promise<void>,
+) {
+  const session = {
+    id: "session-setup", runnerId: "runner", title: "Setup Session", status: "idle",
+    driver: "codex-app-server", pendingApproval: null, projectId: "project",
+    ...(worktreeSetup ? {
+      commandPermissions: {
+        stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true },
+        worktreeSetup,
+      },
+    } : {}),
+  } as unknown as SessionView;
+  const calls: string[] = [];
+  const client = {
+    generateWorktreeSetup: async (id: string) => { calls.push(`generate:${id}`); },
+    dismissWorktreeSetupNotice: async (projectId: string) => { calls.push(`dismiss:${projectId}`); },
+  };
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(
+      <ApiProvider client={client as never}>
+        <InboxRow optionId="row" session={session} projectName="Project"
+          selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+          threeRow={false} showWorktreeSetupNotice onSelect={() => {}} onExpand={() => {}}
+          onWorktreeSetupGenerated={(id) => { calls.push(`generated:${id}`); }}
+          onSessionMenu={() => {}} />
+      </ApiProvider>,
+    ));
+    const notice = container.querySelector<HTMLElement>('aside[aria-label="Set up This Project"]');
+    assert.ok(notice, "the setup notice is rendered");
+    await run(notice, calls);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+}
+
+const noticeButton = (notice: HTMLElement, label: string) => {
+  const match = [...notice.querySelectorAll<HTMLButtonElement>("button")]
+    .find((candidate) => (candidate.getAttribute("aria-label") ?? candidate.textContent) === label);
+  assert.ok(match, `missing ${label}`);
+  return match;
+};
+
+test("a row's setup notice refuses Generate for a Viewer and never asks the API to generate (#1864)", async () => {
+  await withSetupNotice({ allowed: false, reason: VIEWER }, async (notice, calls) => {
+    const generate = noticeButton(notice, "Generate");
+    assert.equal(generate.disabled, true);
+    assert.equal(generate.getAttribute("title"), VIEWER);
+    const describedBy = generate.getAttribute("aria-describedby");
+    assert.ok(describedBy, "Generate is described by its refusal");
+    const reason = domWindow.document.getElementById(describedBy);
+    assert.equal(reason?.textContent, VIEWER);
+    assert.ok(notice.contains(reason as never), "the reason is visible in the notice");
+    await act(async () => { generate.click(); await Promise.resolve(); });
+    assert.deepEqual(calls, [], "neither generate nor its follow-up dismiss is sent");
+
+    const dismiss = noticeButton(notice, "Dismiss Setup Notice");
+    assert.equal(dismiss.disabled, false);
+    await act(async () => { dismiss.click(); await Promise.resolve(); });
+    assert.deepEqual(calls, ["dismiss:project"], "dismissing the notice for oneself is still allowed");
+  });
+});
+
+test("a row's setup notice generates as before when the verdict allows it or is absent (#1864)", async () => {
+  for (const verdict of [{ allowed: true } as const, undefined]) {
+    await withSetupNotice(verdict, async (notice, calls) => {
+      const generate = noticeButton(notice, "Generate");
+      assert.equal(generate.disabled, false);
+      assert.equal(generate.getAttribute("aria-describedby"), null);
+      await act(async () => { generate.click(); await new Promise((resolve) => domWindow.setTimeout(resolve, 0)); });
+      assert.deepEqual(calls, ["generate:session-setup", "dismiss:project", "generated:session-setup"]);
+    });
   }
 });
 

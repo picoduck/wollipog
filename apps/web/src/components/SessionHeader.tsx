@@ -216,6 +216,9 @@ export function SessionHeader({
   const restartRefusal = sessionCommandRefusal(session, "restart");
   const archiveRefusal = sessionArchiveActionRefusal(session);
   const renameRefusal = sessionCommandRefusal(session, "rename");
+  // `forkAvailability` already carries this reason; a disabled button's title is announced by
+  // nothing, so a refused person also gets it as the button's description (#1864).
+  const forkRefusal = sessionCommandRefusal(session, "fork");
   const runtimeCaution = [...new Set([
     showRetryStop || !terminal ? stopRefusal : null,
     showRestart ? restartRefusal : null,
@@ -631,10 +634,14 @@ export function SessionHeader({
               ? "Another session action is already in progress."
               : forkAvailability.available ? "Fork Conversation" : forkAvailability.reason}
             aria-label="Fork Conversation"
+            aria-describedby={forkRefusal !== null ? "session-fork-refusal" : undefined}
             onClick={forkAvailability.available ? onFork : undefined}
           >
             <ThreadForkIcon size={16} />
           </button>
+        )}
+        {forkAvailability && forkRefusal !== null && (
+          <span id="session-fork-refusal" className="sr-only">{forkRefusal}</span>
         )}
         <div className="overflow-menu">
           <button

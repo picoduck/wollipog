@@ -68,8 +68,12 @@ class FakeSocket implements UiSocket {
   push(message: ControlPlaneToUi) { this.onmessage?.({ data: JSON.stringify(message) }); }
 }
 
-async function clickSetupRetry(resultStatus: "failed" | "idle"): Promise<string[]> {
-  const current = failedSession();
+async function clickSetupRetry(
+  resultStatus: "failed" | "idle",
+  overrides: Partial<SessionView> = {},
+  inspect?: (button: HTMLButtonElement, container: HTMLElement) => void,
+): Promise<string[]> {
+  const current = { ...failedSession(), ...overrides };
   const socket = new FakeSocket();
   const calls: string[] = [];
   const client = {
@@ -123,6 +127,7 @@ async function clickSetupRetry(resultStatus: "failed" | "idle"): Promise<string[
     assert.match(banner.textContent ?? "", /Install Dependencies exited with 1/u);
     const button = banner.querySelector("button") as HTMLButtonElement;
     assert.equal(button.textContent, "Retry Setup");
+    inspect?.(button, container);
     await act(async () => { button.click(); await new Promise((resolve) => setTimeout(resolve, 5)); });
     return calls;
   } finally {
@@ -142,4 +147,32 @@ test("Retry Setup does not restart a restored fork or handoff continuation", asy
   assert.deepEqual(await clickSetupRetry("idle"), [
     "retry:setup-failed:/repos/demo/worktree",
   ]);
+});
+
+test("a Viewer cannot retry a failed worktree setup; the banner says why and nothing is sent (#1864)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const calls = await clickSetupRetry("failed", {
+    commandPermissions: {
+      stop: { allowed: false, reason }, restart: { allowed: false, reason }, stopBackgroundJob: { allowed: false, reason },
+      worktreeSetup: { allowed: false, reason },
+    },
+  }, (button, container) => {
+    assert.equal(button.disabled, true);
+    assert.equal(button.title, reason);
+    assert.equal(container.querySelector(`#${button.getAttribute("aria-describedby")}`)?.textContent, reason);
+  });
+  assert.deepEqual(calls, []);
+});
+
+test("a person allowed worktree setup keeps Retry Setup as before (#1864)", async () => {
+  const calls = await clickSetupRetry("idle", {
+    commandPermissions: {
+      stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true },
+      worktreeSetup: { allowed: true },
+    },
+  }, (button) => {
+    assert.equal(button.disabled, false);
+    assert.equal(button.getAttribute("aria-describedby"), null);
+  });
+  assert.deepEqual(calls, ["retry:setup-failed:/repos/demo/worktree"]);
 });

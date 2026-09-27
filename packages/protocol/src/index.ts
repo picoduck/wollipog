@@ -6008,6 +6008,17 @@ export interface SessionCommandPermissions {
   configure?: SessionCommandPermission;
   /** Answer a pending question, or approve or deny a pending permission request (#1857). */
   respond?: SessionCommandPermission;
+  /** Fork the conversation, including Edit in Fork, a checkpoint handoff and quarantine recovery,
+   * which all use the fork route (#1864). */
+  fork?: SessionCommandPermission;
+  /** Rewind the worktree's files to a turn's checkpoint (#1864). */
+  rewind?: SessionCommandPermission;
+  /** Add a review finding, change its status, or send findings to the agent (#1864). */
+  manageReviewFindings?: SessionCommandPermission;
+  /** Create, attach, select or discard one of the session's worktrees (#1864). */
+  manageWorktrees?: SessionCommandPermission;
+  /** Retry a failed worktree setup, or generate the project's setup file (#1864). */
+  worktreeSetup?: SessionCommandPermission;
 }
 
 /** Denormalised session record for the UI (board cards + lists). */

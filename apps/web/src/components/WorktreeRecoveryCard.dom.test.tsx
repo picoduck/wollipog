@@ -3,7 +3,7 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SessionView } from "@wollipog/protocol";
+import type { SessionCommandPermission, SessionView } from "@wollipog/protocol";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { WorktreeRecoveryCard } from "./WorktreeRecoveryCard.js";
 
@@ -198,5 +198,73 @@ test("recovery actions are described by the incident and the disabled-submission
   } finally {
     await act(async () => offline.root.unmount());
     offline.container.remove();
+  }
+});
+
+const VIEWER = "Your Viewer role is read-only.";
+
+function withManageWorktrees(verdict: SessionCommandPermission | undefined): SessionView {
+  const session = recoverySession();
+  if (verdict) {
+    session.commandPermissions = {
+      stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true },
+      manageWorktrees: verdict,
+    };
+  }
+  return session;
+}
+
+const recoveryAction = (container: HTMLElement, label: string) => {
+  const button = [...container.querySelectorAll("button")].find((item) => item.textContent === label);
+  assert.ok(button, `${label} is rendered`);
+  return button;
+};
+
+test("a refused person sees both recovery actions disabled with the reason, and nothing is sent (#1864)", async () => {
+  const calls: string[] = [];
+  const { container, root } = await renderCard({
+    session: withManageWorktrees({ allowed: false, reason: VIEWER }),
+    onCreate: async (input) => { calls.push(`create:${input.branch}`); },
+    onSelect: async (path) => { calls.push(`select:${path}`); },
+  });
+  try {
+    assert.match(container.textContent, /Your Viewer role is read-only\./u, "the reason is visible on the card");
+    for (const label of ["Create Replacement", "Select Worktree"]) {
+      const button = recoveryAction(container, label);
+      assert.equal(button.disabled, true, `${label} is disabled`);
+      assert.ok(describedText(container, button).includes(VIEWER), `${label} is described by the refusal`);
+      await act(async () => { button.click(); await Promise.resolve(); });
+    }
+    assert.equal(container.querySelector('button[aria-label="Worktree: fix/existing"]')?.getAttribute("aria-disabled"), "true",
+      "the worktree picker is disabled with its action");
+    assert.deepEqual(calls, []);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("an allowed or absent worktree verdict leaves the recovery actions as they were (#1864)", async () => {
+  for (const verdict of [{ allowed: true } as const, undefined]) {
+    const calls: string[] = [];
+    const { container, root } = await renderCard({
+      session: withManageWorktrees(verdict),
+      onCreate: async (input) => { calls.push(`create:${input.branch}`); },
+      onSelect: async (path) => { calls.push(`select:${path}`); },
+    });
+    try {
+      assert.doesNotMatch(container.textContent, /Viewer role/u);
+      for (const label of ["Create Replacement", "Select Worktree"]) {
+        const button = recoveryAction(container, label);
+        assert.equal(button.disabled, false, `${label} is enabled`);
+        assert.ok(!describedText(container, button).includes(VIEWER));
+      }
+      await act(async () => { recoveryAction(container, "Create Replacement").click(); await Promise.resolve(); });
+      await act(async () => { recoveryAction(container, "Select Worktree").click(); await Promise.resolve(); });
+      assert.deepEqual(calls, ["create:fix/missing-recovery", "select:/repo/existing"]);
+    } finally {
+      await act(async () => root.unmount());
+      container.remove();
+    }
   }
 });
