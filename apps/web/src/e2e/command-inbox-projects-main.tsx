@@ -368,6 +368,12 @@ function initialModel(): FixtureModel {
       activeTurnId: null,
     });
   }
+  if (SCENARIO === "session-usage-escape") {
+    // Recorded usage and a served window, so the status strip shows the cost chip and context ring.
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      tokensIn: 40_000, tokensOut: 900, costUsd: 0.42, contextTokensUsed: 40_000, contextWindow: 258_000,
+    });
+  }
   if (SCENARIO === "git-visibility") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       useWorktree: true,
@@ -876,6 +882,16 @@ function descendantRequestFixture(): DescendantRequestView {
 
 const client = {
   ...api,
+  sessionUsage: async (sessionId: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === sessionId)!;
+    const totals = {
+      inputTokens: value.tokensIn, outputTokens: value.tokensOut, costUsd: value.costUsd,
+      uncachedInputTokens: value.tokensIn, cachedInputTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0,
+      processedTokens: value.tokensIn + value.tokensOut, cacheSavingsUsd: 0,
+      costSource: "providerReported" as const, unpricedRecords: 0,
+    };
+    return { sessionId, totals, byModel: [] };
+  },
   descendantRequests: async (_sessionId: string, signal?: AbortSignal) => {
     descendantRequestCallCount += 1;
     if (failNextDescendantRequest) {

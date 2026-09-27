@@ -133,11 +133,34 @@ test("Escape dismisses the popover and the control keeps its own accessible name
   const view = await mount(session(), { sessionId: "s1", totals: amount(), byModel: [] });
   await view.open();
   assert.ok(view.popover());
+  // The session view's own Escape handler skips a prevented key, so consuming it keeps one Escape
+  // from also leaving the session (#1796).
+  const escape = new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  let reachedView = false;
+  const onViewKey = () => { reachedView = true; };
+  domWindow.addEventListener("keydown", onViewKey);
   await act(async () => {
-    domWindow.document.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never);
+    view.button()!.dispatchEvent(escape as never);
   });
+  domWindow.removeEventListener("keydown", onViewKey);
   assert.equal(view.popover(), null);
   assert.equal(view.button()!.getAttribute("aria-expanded"), "false");
+  assert.equal(escape.defaultPrevented, true);
+  assert.equal(reachedView, false, "a view-level Escape handler never sees the key that closed the popover");
+  await view.cleanup();
+});
+
+test("Escape from inside the popover returns focus to the cost chip", async () => {
+  const view = await mount(session({ driver: "codex-app-server" }), { sessionId: "s1", totals: amount(), byModel: [] });
+  await view.open();
+  const info = view.popover()!.querySelector<HTMLButtonElement>('[aria-label="About Codex App Server Usage"]')!;
+  info.focus();
+  assert.equal(domWindow.document.activeElement, info as never);
+  await act(async () => {
+    info.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }) as never);
+  });
+  assert.equal(view.popover(), null);
+  assert.equal(domWindow.document.activeElement, view.button() as never);
   await view.cleanup();
 });
 

@@ -79,8 +79,13 @@ function clamp(value: number, min: number, max: number): number {
  * VIEWPORT from the trigger's rectangle rather than flowing inside an ancestor that would cut it
  * off. Placed below when there is room, else above. Escape and an outside pointer close it, both
  * on the capture phase so a view-level Escape handler that stops propagation (the composer's, the
- * menus') cannot swallow the key while this panel is the thing the user is trying to close. A
- * nested popover can consume Escape so one key closes only the innermost layer.
+ * menus') cannot swallow the key while this panel is the thing the user is trying to close.
+ *
+ * Escape is consumed by default, so one key closes only this layer (#718): a view's own Escape
+ * handler — the session view's return to the Sessions list — would otherwise run on the same key
+ * press and remove the layer beneath too (#1796). A caller that really wants the key to continue
+ * opts out with `consumeEscape: false`. When focus was inside the popover, Escape returns it to the
+ * trigger rather than letting it fall to the document as the panel unmounts.
  *
  * Placement runs in a LAYOUT effect: the panel's un-placed fallback position is absolute, and a
  * status-strip track clips overflow, so a passive effect would let one clipped frame paint.
@@ -91,7 +96,7 @@ function clamp(value: number, min: number, max: number): number {
 export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTMLElement>(
   size: { width: number; height: number; consumeEscape?: boolean },
 ): AnchoredPopover<Root, Anchor> {
-  const { width, height, consumeEscape = false } = size;
+  const { width, height, consumeEscape = true } = size;
   const [open, setOpen] = useState(false);
   const [placement, setPlacement] = useState<Placement | null>(null);
   const rootRef = useRef<Root | null>(null);
@@ -125,6 +130,8 @@ export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTML
         event.preventDefault();
         event.stopPropagation();
       }
+      const active = document.activeElement;
+      if (active && active !== anchorRef.current && rootRef.current?.contains(active)) anchorRef.current?.focus();
       setOpen(false);
     };
     const onPointer = (event: PointerEvent) => {
