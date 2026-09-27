@@ -1982,10 +1982,13 @@ textarea {
   border-radius: 4px;
   touch-action: none; /* keep touch/pen drags from being claimed by browser panning */
 }
+/* A transparent outline, not `none`: it paints nothing here, but forced colors drops the fill and
+   repaints the outline in a system colour, so keyboard focus stays visible in a contrast theme. */
 .right-panel-resizer:hover,
 .right-panel-resizer:focus-visible {
   background: var(--bg-elev-2);
-  outline: none;
+  outline: 2px solid transparent;
+  outline-offset: -2px;
 }
 .rp-head {
   display: flex;
