@@ -247,9 +247,11 @@ export function AutomationsView() {
       ? { driver: agent.driver ?? "acp", context: agent.context ?? { kind: "native" as const },
           installationId: agent.installation.id } : null;
   };
-  const legacyInstallationUnavailable = (runner: typeof selectedRunner, agentId: string) => {
+  const unboundInstallationUnavailable = (
+    runner: typeof selectedRunner, agentId: string, mayAutoPin: boolean,
+  ) => {
     const installed = runner?.agents.filter((agent) => agent.id === agentId && agent.installation) ?? [];
-    return installed.length > 0 && !(installed.length === 1 &&
+    return installed.length > 0 && !(mayAutoPin && installed.length === 1 &&
       runnerSupportsProtocol(runner?.protocolVersion, "harnessInstallations") &&
       installed[0]!.available);
   };
@@ -268,7 +270,8 @@ export function AutomationsView() {
     editingSpec.action.request.runnerId === form.runnerId && !rebindPrimary
     ? editingSpec.action.installationBindings?.agent
       ? !bindingAvailable(selectedRunner, editingSpec.action.installationBindings.agent)
-      : legacyInstallationUnavailable(selectedRunner, form.agentId)
+      : unboundInstallationUnavailable(selectedRunner, form.agentId,
+        editingSpec.action.installationBindings === undefined)
     : false;
   const carriedAlternateRunnerIds = new Set(editingSpec?.runnerPolicy.kind === "alternate" &&
       editingSpec.action.kind === form.actionKind &&
@@ -895,7 +898,7 @@ export function AutomationsView() {
           const unavailableInstallation = savedBindings && Object.values(savedBindings)
             .some((binding) => !bindingAvailable(actionRunner, binding));
           const unboundInstallation = item.action.kind === "create_session" && !savedBindings?.agent &&
-            legacyInstallationUnavailable(actionRunner, item.action.request.agentId);
+            unboundInstallationUnavailable(actionRunner, item.action.request.agentId, savedBindings === undefined);
           const workflowAction = item.action.kind === "workflow_run" ? item.action : null;
           const unboundWorkflow = workflowAction !== null && (() => {
             const workflow = workflows.find((definition) =>
@@ -919,7 +922,8 @@ export function AutomationsView() {
               const bindings = target.installationBindings;
               if (Object.values(bindings ?? {}).some((binding) => !bindingAvailable(runner, binding))) return true;
               if (item.action.kind === "create_session") {
-                return !bindings?.agent && legacyInstallationUnavailable(runner, target.agentId!);
+                return !bindings?.agent &&
+                  unboundInstallationUnavailable(runner, target.agentId!, bindings === undefined);
               }
               if (!workflowAction) return false;
               const workflow = workflows.find((definition) =>

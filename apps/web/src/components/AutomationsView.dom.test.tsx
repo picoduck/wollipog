@@ -999,6 +999,28 @@ test("a legacy create-session Agent with one installation is shown as available"
   }
 });
 
+test("an explicit empty installation binding remains visibly blocked", async () => {
+  const machine = { ...runners[0]!, protocolVersion: 175, agents: [{
+    ...runners[0]!.agents[0]!, installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
+    },
+  }] };
+  const stored = schedule("explicit-unbound", "Explicit Unbound");
+  if (stored.action.kind !== "create_session") throw new Error("expected create-session action");
+  stored.action.installationBindings = {};
+  const fixture = await mountFixture([stored], {}, {}, [], {}, [machine]);
+  try {
+    await expandCard(fixture, "Explicit Unbound");
+    assert.match(fixture.container.textContent ?? "",
+      /Saved Agent Harness installation unavailable or unbound/);
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    assert.match(fixture.container.textContent ?? "",
+      /The saved Agent Harness installation is unavailable or unbound/);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("automation cards are collapsed by default and render only their headers", async () => {
   const fixture = await mountFixture([
     schedule("automation-a", "Alpha"),
