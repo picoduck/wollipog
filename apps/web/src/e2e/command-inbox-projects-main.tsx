@@ -4,8 +4,10 @@ import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   buildConversationHandoff,
+  type AgentCapabilities,
   type AgentSlashCommand,
   type CreateSessionRequest,
+  type CreateWorkspaceReferenceRequest,
   type ControlPlaneToUi,
   type DescendantRequestView,
   type GitStatusInfo,
@@ -26,6 +28,7 @@ import {
   type SteerResultReason,
   type SteeringAttemptView,
   type UiSnapshotMessage,
+  type WorkspaceReference,
 } from "@wollipog/protocol";
 import type { ProviderComposerCommand } from "../composer-commands.js";
 import { loadComposerDraft, type ComposerDraft } from "../composer-drafts.js";
@@ -1582,6 +1585,24 @@ const client = {
     return { deleted: true as const };
   },
   revealWorkspace: async () => ({ ok: true as const }),
+  searchWorkspaceReferences: async (_sessionId: string, query: string) => ({
+    results: [{ path: "src/session.ts", isDirectory: false }].filter((candidate) => candidate.path.includes(query)),
+    truncated: false,
+  }),
+  createWorkspaceReference: async (_sessionId: string, target: CreateWorkspaceReferenceRequest) => {
+    const reference: WorkspaceReference = {
+      artifactId: `workspace:${target.path}`,
+      mimeType: "application/vnd.wollipog.workspace-reference+json",
+      sizeBytes: 0,
+      sha256: "a".repeat(64),
+      referenceVersion: 1,
+      kind: target.kind,
+      path: target.path,
+      rootFingerprint: "b".repeat(64),
+      targetFingerprint: "a".repeat(64),
+    };
+    return { reference };
+  },
 } as ApiClient;
 
 let nextProjectUpdateError: string | null = null;
@@ -1662,6 +1683,7 @@ declare global {
         options?: {
           supportsImages?: boolean;
           attachmentPolicy?: ProviderComposerCommand["attachmentPolicy"];
+          models?: AgentCapabilities["models"];
         },
       ): void;
       setSupportsSteering(id: string, supported: boolean | undefined): void;
@@ -1948,7 +1970,7 @@ window.__WOLLIPOG_PROJECT_INBOX_E2E__ = {
     updateFixtureProviderCommandAttachmentPolicy?.(fixtureProviderCommandAttachmentPolicy);
     runner.agents[0]!.capabilities = {
       ...capabilities,
-      models: capabilities?.models ?? [],
+      models: options.models ?? capabilities?.models ?? [],
       effortLevels: capabilities?.effortLevels ?? [],
       supportsImages: options.supportsImages ?? capabilities?.supportsImages ?? false,
       supportsApprovals: capabilities?.supportsApprovals ?? true,

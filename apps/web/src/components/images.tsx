@@ -155,6 +155,9 @@ export function ImageStrip({
             <button
               className="workspace-reference-open"
               type="button"
+              // Keep the composer focused until the click lands, like Send: blurring it on
+              // pointerdown brings the phone rail back and moves this chip out from under the finger.
+              onPointerDown={(event) => event.preventDefault()}
               onClick={() => onInspectReference?.(img)}
               aria-label={`Inspect Workspace Reference ${workspaceReferenceLabel(img)}`}
               title="Inspect Workspace Reference"

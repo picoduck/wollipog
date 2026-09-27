@@ -144,6 +144,9 @@ export function BarMenu({
         aria-controls={menu.menuId}
         aria-describedby={disabled ? disabledReasonId : undefined}
         disabled={disabled}
+        // Keep the composer focused until the click lands, like Send: blurring it on pointerdown
+        // brings the phone rail back and moves this trigger out from under the finger (#1797).
+        onPointerDown={(event) => event.preventDefault()}
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
       >

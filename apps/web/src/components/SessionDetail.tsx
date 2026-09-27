@@ -6841,6 +6841,9 @@ export function ComposerPlusMenu({
         aria-expanded={open}
         aria-controls={popover.panelId}
         title="Attach, Modes & Budget"
+        // Keep the composer focused until the click lands, like Send: blurring it on pointerdown
+        // brings the phone rail back and moves this button out from under the finger (#1797).
+        onPointerDown={(event) => event.preventDefault()}
         onClick={popover.toggle}
         onKeyDown={popover.onTriggerKeyDown}
       >
