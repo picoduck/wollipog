@@ -627,10 +627,19 @@ test("a model stop whose turn fails outright keeps the job's continuation (#1855
       "the launching turn did not finish");
     manager.prompt(spec.sessionId, "stop the monitor");
     const monitor = () => store.readMeta(spec.sessionId)?.backgroundJobs?.find((job) => job.id === "monitor-1");
-    await waitFor(() => monitor()?.continuationQueuedAt !== undefined,
-      "the stopped job's continuation was not restored after the prompt failed");
+    // The restored continuation runs at once, so wait for its delivery rather than catching the job
+    // between restore and delivery.
+    await waitFor(() => monitor()?.assistantResultPersistedAt !== undefined,
+      "the stopped job's continuation was not delivered after the prompt failed");
     assert.equal(monitor()?.continuationRequired, true);
-    assert.equal(monitor()?.assistantResultPersistedAt, undefined);
+    assert.ok(monitor()?.continuationId);
+    const continuations = fake.prompts.filter((prompt) => prompt.text.startsWith(CONTINUATION_PREFIX));
+    assert.equal(continuations.length, 1, "exactly one continuation turn reports the stop");
+    assert.match(continuations[0]!.text, /monitor-1/);
+    const delivered = store.readEvents(spec.sessionId).filter((event) =>
+      event.payload.kind === "background_continuation_delivered");
+    assert.deepEqual(delivered.map((event) => event.payload.kind === "background_continuation_delivered" &&
+      event.payload.continuationId), [monitor()?.continuationId]);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
