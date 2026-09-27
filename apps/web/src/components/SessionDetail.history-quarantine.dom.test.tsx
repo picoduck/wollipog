@@ -102,6 +102,7 @@ async function mount(
   recover: ApiClient["recoverQuarantinedConversation"] =
     (async () => { throw new Error("recovery was not expected"); }) as never,
   overrides: Partial<SessionView> = {},
+  confirmImpl?: (options: ConfirmationOptions) => Promise<boolean>,
 ) {
   fixtureSequence += 1;
   const current = { ...session(`quarantined-${fixtureSequence}`, quarantine), ...overrides };
@@ -137,7 +138,10 @@ async function mount(
   await act(async () => root.render(
     <ApiProvider client={client}>
       <FeedbackContext.Provider value={{
-        confirm: async (options: ConfirmationOptions) => { confirmations.push(options.title); return true; },
+        confirm: async (options: ConfirmationOptions) => {
+          confirmations.push(options.title);
+          return confirmImpl ? confirmImpl(options) : true;
+        },
         showToast: () => 0,
         dismissToast: () => {},
       } as never}>
@@ -163,7 +167,7 @@ async function mount(
   });
   await flushAsyncWork();
   return {
-    container, navigated, confirmations,
+    container, navigated, confirmations, socket, current,
     banner: () => container.querySelector(".quarantine-banner") as HTMLElement | null,
     composer: () => container.querySelector(".composer-input") as HTMLTextAreaElement | null,
     unmount: async () => {
@@ -356,6 +360,42 @@ test("a Viewer reads the quarantine but cannot recover it: nothing is confirmed 
     await flushAsyncWork(5);
     assert.deepEqual(calls, []);
     assert.deepEqual(fixture.confirmations, []);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a refusal that arrives while Recover Session is being confirmed still sends nothing (#1864)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const calls: number[] = [];
+  let answer: ((confirmed: boolean) => void) | undefined;
+  const fixture = await mount(
+    { reason: "oversized_tool_call", detectedAt: 5, recoveryTurn: 2, recovery: "fork" },
+    (async (_id: string, turn: number) => { calls.push(turn); return session("s_recovered", undefined); }) as never,
+    {},
+    () => new Promise<boolean>((resolve) => { answer = resolve; }),
+  );
+  try {
+    const action = fixture.banner()!.querySelector("button") as HTMLButtonElement;
+    assert.equal(action.disabled, false, "an allowed person may start recovery");
+    await act(async () => { action.click(); });
+    await flushAsyncWork();
+    assert.ok(answer, "the confirmation is open");
+    await act(async () => {
+      fixture.socket.push({ type: "session_upsert", session: {
+        ...fixture.current,
+        updatedAt: 2,
+        commandPermissions: {
+          stop: { allowed: false, reason }, restart: { allowed: false, reason }, stopBackgroundJob: { allowed: false, reason },
+          fork: { allowed: false, reason },
+        },
+      } });
+    });
+    await flushAsyncWork();
+    await act(async () => { answer!(true); });
+    await flushAsyncWork(5);
+    assert.deepEqual(calls, [], "the verdict is re-read once the confirmation closes");
+    assert.deepEqual(fixture.navigated, []);
   } finally {
     await fixture.unmount();
   }

@@ -687,3 +687,36 @@ test("a Viewer's per-turn Rewind, Fork and Hand Off are unavailable and say why 
     await unmountFixture(fixture);
   }
 });
+
+test("a refusal that arrives while Edit in Fork is open disables Create Fork and says why (#1864)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const fixture = await mountFixture({
+    sessionPatch: { status: "idle", useWorktree: true, worktreePath: "/tmp/durable-dismissal-worktree" },
+    eventPayloads: [
+      { kind: "user_message", text: "first", images: [] },
+      { kind: "agent_message", text: "one", final: true },
+      { kind: "conversation_checkpoint", turn: 1 },
+      { kind: "user_message", text: "second", images: [] },
+      { kind: "agent_message", text: "two", final: true },
+      { kind: "conversation_checkpoint", turn: 2 },
+    ],
+  });
+  try {
+    const edit = button(fixture, "Edit User Message in a New Conversation Fork");
+    assert.ok(edit, "Edit in Fork is offered while forking is allowed");
+    await act(async () => { edit.click(); });
+    const createFork = () => [...document.querySelectorAll<HTMLButtonElement>("button")]
+      .find((candidate) => candidate.textContent === "Create Fork");
+    assert.equal(createFork()?.disabled, false);
+    await fixture.pushSession({ commandPermissions: {
+      stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true },
+      fork: { allowed: false, reason },
+    } });
+    const refused = createFork();
+    assert.ok(refused, "the open dialog stays open");
+    assert.equal(refused.disabled, true);
+    assert.equal(document.getElementById(refused.getAttribute("aria-describedby") ?? "")?.textContent, reason);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});

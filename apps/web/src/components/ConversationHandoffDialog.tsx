@@ -14,8 +14,11 @@ function seedConfig(agent: AgentDefinition | undefined, sourceServiceTier: strin
   };
 }
 
-export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceTier, turn, onClose, onCreate }: {
-  agents: AgentDefinition[]; sourceDriver: string; sourceServiceTier?: string; turn: number; onClose: () => void;
+export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceTier, turn, refusal = null, onClose, onCreate }: {
+  agents: AgentDefinition[]; sourceDriver: string; sourceServiceTier?: string; turn: number;
+  /** Why the signed-in person may not hand off, when that changes while the dialog is open (#1864). */
+  refusal?: string | null;
+  onClose: () => void;
   onCreate: (agentId: string, config: SessionConfig) => Promise<void>;
 }) {
   const choices = agents.filter((agent) => agent.driver !== sourceDriver &&
@@ -27,7 +30,7 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceT
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
-  const reason = handoffDestinationError(agent, sourceDriver, config);
+  const reason = refusal ?? handoffDestinationError(agent, sourceDriver, config);
   const model = agent?.capabilities?.models.find((item) => item.id === config.model);
   // `default` is the provider-standard tier: it is always selectable and never needs advertising,
   // so it is excluded from the catalog list to avoid a duplicate entry.
@@ -46,7 +49,8 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceT
   };
   return <Modal title="Hand Off to Another Agent" onClose={busy ? () => {} : onClose} footer={<>
     <button className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
-    <button className="btn primary" onClick={() => void submit()} disabled={busy || !!reason}>{busy ? "Creating…" : "Create Handoff"}</button>
+    <button className="btn primary" onClick={() => void submit()} disabled={busy || !!reason}
+      aria-describedby={refusal !== null ? "handoff-refusal" : undefined}>{busy ? "Creating…" : "Create Handoff"}</button>
   </>}>
     <div className="message-action-form">
     <p>Files come from the exact checkpoint after turn {turn}. The destination starts a fresh provider conversation. Its private state and credentials are independent.</p>
@@ -76,7 +80,7 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceT
     <div className="field"><span>Permissions</span><Select label="Permissions" value={config.permissionMode ?? ""} disabled={busy}
       options={[{ value: "", label: "Default" }, ...(agent?.capabilities?.permissionModes ?? []).map((item) => ({ value: item, label: permissionModeLabel(item, agent?.driver) }))]}
       onChange={(value) => setConfig({ ...config, permissionMode: value || undefined })} /></div>
-    {(reason || error) && <p role="alert">{error ?? reason}</p>}
+    {(reason || error) && <p id={refusal !== null && !error ? "handoff-refusal" : undefined} role="alert">{error ?? reason}</p>}
     </div>
   </Modal>;
 }

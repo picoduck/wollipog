@@ -3219,6 +3219,11 @@ function SessionDetailLoaded({
   const forkRefusal = sessionCommandRefusal(session, "fork");
   const rewindRefusal = sessionCommandRefusal(session, "rewind");
   const worktreeSetupRefusal = sessionCommandRefusal(session, "worktreeSetup");
+  // A refusal can arrive while a confirmation is open; the handlers re-read these after it closes.
+  const forkRefusalRef = useRef(forkRefusal);
+  forkRefusalRef.current = forkRefusal;
+  const rewindRefusalRef = useRef(rewindRefusal);
+  rewindRefusalRef.current = rewindRefusal;
   // Rewind FILES to a per-turn checkpoint (T3-style). Stable identity (useCallback) — it rides
   // into the memoized timeline rows. The confirm copy is explicit that the conversation is not
   // rewound: the agent may still reference later changes in its context.
@@ -3230,7 +3235,7 @@ function SessionDetailLoaded({
         message: "Files revert to the checkpoint, but the conversation does not. The agent keeps its memory of later turns.",
         confirmLabel: "Restore Files",
         tone: "danger",
-      })) return;
+      }) || rewindRefusalRef.current !== null) return;
       await api.rewind(sessionId, turn).catch((e) => setError((e as Error).message));
     },
     [api, confirm, rewindRefusal, sessionId],
@@ -3251,7 +3256,7 @@ function SessionDetailLoaded({
         title: `Fork after turn ${turn}?`,
         message: `A new ${provider} and isolated worktree will be created; this session stays unchanged.${providerNote}`,
         confirmLabel: "Create Fork",
-      })) return;
+      }) || forkRefusalRef.current !== null) return;
       const releaseFork = acquireSessionFork(sessionId);
       if (!releaseFork) {
         const message = "A conversation fork is already in progress for this session. Wait for it to appear on the Board.";
@@ -3307,7 +3312,7 @@ function SessionDetailLoaded({
         ? `A new session starts a fresh provider conversation seeded with a bounded, redacted summary of the visible dialogue through turn ${quarantine.recoveryTurn}, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`
         : `A new session forks the provider conversation at turn ${quarantine.recoveryTurn}, which excludes the rejected item, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`,
       confirmLabel: "Recover Session",
-    })) return;
+    }) || forkRefusalRef.current !== null) return;
     const releaseFork = acquireSessionFork(sessionId);
     if (!releaseFork) {
       const message = "A conversation fork is already in progress for this session. Wait for it to appear on the Board.";
@@ -5915,7 +5920,7 @@ function SessionDetailLoaded({
         </Modal>
       )}
       {handoffTurn !== null && <ConversationHandoffDialog agents={runner?.agents ?? []} sourceDriver={session.driver}
-        sourceServiceTier={session.serviceTier ?? undefined} turn={handoffTurn}
+        sourceServiceTier={session.serviceTier ?? undefined} turn={handoffTurn} refusal={forkRefusal}
         onClose={() => setHandoffTurn(null)} onCreate={async (agentId, config) => {
           if (forkRefusal !== null) throw new Error(forkRefusal);
           const release = acquireSessionFork(sessionId);
@@ -5939,6 +5944,7 @@ function SessionDetailLoaded({
           action={messageAction}
           existingDraftPresent={Boolean(text || images.length)}
           canPrepareResend={canPrompt}
+          forkRefusal={forkRefusal}
           busy={busy}
           returnFocusRef={messageActionReturnFocusRef}
           onClose={() => closeMessageAction(true)}
@@ -5954,6 +5960,7 @@ function MessageActionDialog({
   action,
   existingDraftPresent,
   canPrepareResend,
+  forkRefusal,
   busy,
   returnFocusRef,
   onClose,
@@ -5963,6 +5970,8 @@ function MessageActionDialog({
   action: MessageActionState;
   existingDraftPresent: boolean;
   canPrepareResend: boolean;
+  /** Why the signed-in person may not fork, when that changes while the dialog is open (#1864). */
+  forkRefusal: string | null;
   busy: boolean;
   returnFocusRef: { current: HTMLElement | null };
   onClose: () => void;
@@ -5976,9 +5985,10 @@ function MessageActionDialog({
   const submitLock = useRef(false);
   const retainedImages = action.item.images ?? [];
   const formId = `message-action-${action.item.id}`;
+  const refusal = action.mode === "fork" ? forkRefusal : null;
 
   const submit = async () => {
-    if (submitLock.current) return;
+    if (submitLock.current || refusal !== null) return;
     if (!draftText.trim() && retainedImages.length === 0) {
       setDialogError("Enter a message or retain at least one attachment.");
       return;
@@ -6011,7 +6021,10 @@ function MessageActionDialog({
             className="btn primary"
             type="submit"
             form={formId}
-            disabled={submitting || retryBlocked || (action.mode === "fork" && busy) || (action.mode === "resend" && !canPrepareResend)}
+            disabled={submitting || retryBlocked || (action.mode === "fork" && busy) || (action.mode === "resend" && !canPrepareResend) ||
+              refusal !== null}
+            title={refusal ?? undefined}
+            aria-describedby={refusal !== null ? `${formId}-refusal` : undefined}
           >
             {submitting ? "Preparing…" : action.mode === "resend" ? "Load into Composer" : "Create Fork"}
           </button>
@@ -6033,6 +6046,9 @@ function MessageActionDialog({
         </p>
         {existingDraftPresent && action.mode === "resend" && (
           <p className="message-action-warning" role="note">Loading this message replaces the current composer draft.</p>
+        )}
+        {refusal !== null && (
+          <p id={`${formId}-refusal`} className="message-action-warning" role="status">{refusal}</p>
         )}
         {action.mode === "resend" && !canPrepareResend && (
           <p className="message-action-warning" role="status">This session cannot accept a new turn right now.</p>
