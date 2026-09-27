@@ -127,6 +127,16 @@ for (const { label, viewport } of [
       await page.goto(`/automations-e2e.html?theme=${theme}&waiting-target`);
       const unhealthy = page.getByRole("button", { name: /Nightly Dependency Sweep/ });
       await expect(unhealthy).toContainText("Target Unavailable");
+      if (label === "mobile") {
+        const layout = await unhealthy.evaluate((button) => {
+          const summary = button.querySelector(".automation-card-summary")!.getBoundingClientRect();
+          const badges = button.querySelector(".automation-card-meta")!.getBoundingClientRect();
+          return { summaryWidth: summary.width, buttonWidth: button.getBoundingClientRect().width,
+            summaryBottom: summary.bottom, badgesTop: badges.top };
+        });
+        expect(layout.summaryWidth).toBeGreaterThanOrEqual(layout.buttonWidth - 1);
+        expect(layout.badgesTop).toBeGreaterThan(layout.summaryBottom);
+      }
       await unhealthy.click();
       await expect(page.getByRole("alert").filter({ hasText: /Waiting for target:/ })).toBeVisible();
       if (evidenceDir) await page.screenshot({

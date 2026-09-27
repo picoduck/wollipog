@@ -251,9 +251,8 @@ export function AutomationsView() {
     runner: typeof selectedRunner, agentId: string, mayAutoPin: boolean,
   ) => {
     const installed = runner?.agents.filter((agent) => agent.id === agentId && agent.installation) ?? [];
-    return installed.length > 0 && !(mayAutoPin && installed.length === 1 &&
-      runnerSupportsProtocol(runner?.protocolVersion, "harnessInstallations") &&
-      installed[0]!.available);
+    return !runner?.agents.some((agent) => agent.id === agentId && !agent.installation) &&
+      !(mayAutoPin && installed.length === 1 && installationFor(runner, agentId));
   };
   const resolvedInstallationAgentId = (runner: typeof selectedRunner, saved: {
     driver: string; context: { kind: string; distro?: string }; installationId: string;
@@ -845,7 +844,8 @@ export function AutomationsView() {
                   if (!oldTarget || oldTarget.runnerId !== form.fallbackRunnerId) return null;
                   const reference = oldTarget.installationBindings?.agent;
                   const unavailable = reference ? !bindingAvailable(selectedFallback, reference)
-                    : !selectedFallback?.agents.some((agent) => agent.id === form.fallbackAgentId && !agent.installation);
+                    : unboundInstallationUnavailable(selectedFallback, form.fallbackAgentId,
+                      oldTarget.installationBindings === undefined);
                   return unavailable ? <div className="automation-error automation-span" role="alert">
                     The alternate Agent Harness installation is unavailable or unbound.
                     <button type="button" className="btn ghost sm"

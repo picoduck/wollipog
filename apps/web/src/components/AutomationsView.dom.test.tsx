@@ -1021,6 +1021,32 @@ test("an explicit empty installation binding remains visibly blocked", async () 
   }
 });
 
+test("legacy alternate targets auto-pin while explicitly unbound alternates warn in both views", async () => {
+  const alternate = { ...runners[1]!, protocolVersion: 175, agents: [{
+    ...runners[1]!.agents[0]!, installation: {
+      id: "system", path: "/usr/bin/claude", via: "path" as const, selection: "selected" as const,
+    },
+  }] };
+  for (const explicit of [false, true]) {
+    const stored = schedule(`alternate-${explicit}`, `Alternate ${explicit}`);
+    stored.runnerPolicy = { kind: "alternate", targets: [{
+      runnerId: "runner-2", workspaceId: "runner-2-workspace", agentId: "alternate-agent",
+      ...(explicit ? { installationBindings: {} } : {}),
+    }] };
+    const fixture = await mountFixture([stored], {}, {}, [], {}, [runners[0]!, alternate]);
+    try {
+      await expandCard(fixture, stored.name);
+      assert.equal(/Saved Agent Harness installation unavailable or unbound/.test(
+        fixture.container.textContent ?? ""), explicit);
+      await act(async () => { button(fixture.container, "Edit").click(); });
+      assert.equal(/The alternate Agent Harness installation is unavailable or unbound/.test(
+        fixture.container.textContent ?? ""), explicit);
+    } finally {
+      await unmountFixture(fixture);
+    }
+  }
+});
+
 test("automation cards are collapsed by default and render only their headers", async () => {
   const fixture = await mountFixture([
     schedule("automation-a", "Alpha"),

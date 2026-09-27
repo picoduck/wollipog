@@ -13764,7 +13764,8 @@ body.shell-dock-dragging * {
   .automation-editor, .automation-card { padding: 14px; }
   .automation-editor-head .icon-btn, .automation-editor-actions .btn { min-width: 44px; min-height: 44px; }
   .automation-checks label, .automation-enable { min-height: 44px; padding: 4px 0; }
-  .automation-card-toggle { gap: 8px; min-height: 44px; }
+  .automation-card-toggle { display: grid; gap: 8px; min-height: 44px; }
+  .automation-card-meta { flex-wrap: wrap; }
   .automation-card-actions .btn { min-height: 44px; flex: 1 1 90px; }
   .usage-view { padding: 14px; }
   .usage-toolbar { flex-direction: column; align-items: stretch; }
