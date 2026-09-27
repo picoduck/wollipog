@@ -6370,16 +6370,10 @@ export class SessionsService {
       if (restartLaunchId) this.db.clearSessionStopRestartLaunchId(sessionId);
       return fail("runner is offline", 409);
     }
-    // Revocation stays; the restarted child is told which grants it lost (#1779). The notice is owed
-    // before anything is revoked, and counts once its decision reads revoked, so neither a crash nor
-    // a guardrail that refuses it now can lose it; the guardrail only delays it (#1861).
+    // Revocation stays; the restarted child is told which grants it lost (#1779). Each revocation
+    // records the notice it owes in its own transaction, so neither a crash nor a guardrail that
+    // refuses the notice now can lose it; the guardrail only delays it (#1861).
     const revokedByRestart = this.db.unconsumedWorkflowDecisionsForSession(sessionId);
-    this.db.oweRestartNotices(sessionId, revokedByRestart.map((decision) => ({
-      occurrenceId: decision.occurrenceId,
-      category: decision.category,
-      resourceKey: decision.resourceKey,
-      priorStatus: decision.status === "approved" ? "approved" as const : "pending" as const,
-    })), now);
     this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "session-restarted");
     this.abortPolicyHookApprovals(session, now, "session-restarted");
     this.db.setPendingApproval(sessionId, null);
@@ -7999,10 +7993,10 @@ export class SessionsService {
     return ok(resolution);
   }
 
-  private revokeWorkflowDecision(decision: WorkflowDecisionView, actor: GovernanceActor): void {
+  private revokeWorkflowDecision(decision: WorkflowDecisionView, actor: GovernanceActor, oweRestartNotice = false): void {
     const now = Date.now();
     const controllerBefore = this.db.getSession(decision.controllingSessionId);
-    this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now);
+    this.db.markWorkflowDecisionRevoked(decision.occurrenceId, now, oweRestartNotice);
     this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
     this.recordWorkflowDecisionAudit(decision, "revoked", actor, now);
     this.hub.sessionChangedById(decision.sessionId);
@@ -8388,14 +8382,16 @@ export class SessionsService {
     const child = this.db.getSession(sessionId);
     for (const decision of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
       const settle = child ? this.forgeSettlesArmedMerge(child, decision) : false;
-      this.revokeWorkflowDecision(decision, { kind: "system", id: actorId });
+      this.revokeWorkflowDecision(decision, { kind: "system", id: actorId }, actorId === "session-restarted");
       if (settle) void this.settleArmedMergeFromForge(child!, decision);
     }
     // A child that already reads terminal was stopped provisionally, which kept any in-flight
     // resume for the runner's return (#1827). This end is final, so that resume ends too; a live
     // child's commands are fenced by the stop its caller writes.
+    // A restart relaunches the child, which is still owed the notice an earlier restart queued.
     if (child && isTerminal(child.status) &&
-        this.db.cancelSessionPromptCommands(sessionId, "session ended before durable prompt delivery completed", Date.now())) {
+        this.db.cancelSessionPromptCommands(sessionId, "session ended before durable prompt delivery completed", Date.now(),
+          false, actorId === "session-restarted")) {
       this.hub.sessionChangedById(sessionId);
     }
     this.db.abandonHeldWorkflowDecisionResumes(sessionId, Date.now());
@@ -12304,7 +12300,7 @@ export class SessionsService {
       if (!existing || existing.runnerId !== runnerId || !isTerminal(existing.status) ||
           this.db.unconsumedWorkflowDecisionsForSession(snap.id).length > 0 ||
           this.db.heldWorkflowDecisionResumes(snap.id).length > 0 ||
-          this.db.heldRestartNotices(snap.id).length > 0 ||
+          this.db.hasOpenRestartNotices(snap.id) ||
           this.db.listOpenPolicyHookApprovals(snap.id).length > 0 ||
           this.db.policyResumeStatus(snap.id) !== null) return [];
       return [{ snap, snapshotIndex, campaignBefore: this.campaignAttentionController(existing) }];
