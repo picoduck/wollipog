@@ -991,6 +991,9 @@ test("a legacy create-session Agent with one installation is shown as available"
     await expandCard(fixture, "Legacy Installation");
     assert.doesNotMatch(fixture.container.textContent ?? "",
       /Saved Agent Harness installation unavailable or unbound/);
+    await act(async () => { button(fixture.container, "Edit").click(); });
+    assert.doesNotMatch(fixture.container.textContent ?? "",
+      /The saved Agent Harness installation is unavailable or unbound/);
   } finally {
     await unmountFixture(fixture);
   }

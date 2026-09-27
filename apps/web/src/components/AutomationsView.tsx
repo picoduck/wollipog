@@ -247,6 +247,12 @@ export function AutomationsView() {
       ? { driver: agent.driver ?? "acp", context: agent.context ?? { kind: "native" as const },
           installationId: agent.installation.id } : null;
   };
+  const legacyInstallationUnavailable = (runner: typeof selectedRunner, agentId: string) => {
+    const installed = runner?.agents.filter((agent) => agent.id === agentId && agent.installation) ?? [];
+    return installed.length > 0 && !(installed.length === 1 &&
+      runnerSupportsProtocol(runner?.protocolVersion, "harnessInstallations") &&
+      installed[0]!.available);
+  };
   const resolvedInstallationAgentId = (runner: typeof selectedRunner, saved: {
     driver: string; context: { kind: string; distro?: string }; installationId: string;
   }) => runner?.agents.find((agent) => {
@@ -262,7 +268,7 @@ export function AutomationsView() {
     editingSpec.action.request.runnerId === form.runnerId && !rebindPrimary
     ? editingSpec.action.installationBindings?.agent
       ? !bindingAvailable(selectedRunner, editingSpec.action.installationBindings.agent)
-      : !selectedRunner?.agents.some((agent) => agent.id === form.agentId && !agent.installation)
+      : legacyInstallationUnavailable(selectedRunner, form.agentId)
     : false;
   const carriedAlternateRunnerIds = new Set(editingSpec?.runnerPolicy.kind === "alternate" &&
       editingSpec.action.kind === form.actionKind &&
@@ -886,18 +892,10 @@ export function AutomationsView() {
           const latest = executions[0];
           const actionRunner = item.action.kind === "prompt_session" ? undefined : runners.get(item.action.request.runnerId);
           const savedBindings = item.action.kind === "prompt_session" ? undefined : item.action.installationBindings;
-          const legacyAgentAvailable = (runner: typeof actionRunner, agentId: string) => {
-            const matches = runner?.agents.filter((agent) => agent.id === agentId) ?? [];
-            const installed = matches.filter((agent) => agent.installation);
-            return installed.length === 0
-              ? matches.some((agent) => agent.available)
-              : installed.length === 1 && installed[0]!.available &&
-                runnerSupportsProtocol(runner?.protocolVersion, "harnessInstallations");
-          };
           const unavailableInstallation = savedBindings && Object.values(savedBindings)
             .some((binding) => !bindingAvailable(actionRunner, binding));
           const unboundInstallation = item.action.kind === "create_session" && !savedBindings?.agent &&
-            !legacyAgentAvailable(actionRunner, item.action.request.agentId);
+            legacyInstallationUnavailable(actionRunner, item.action.request.agentId);
           const workflowAction = item.action.kind === "workflow_run" ? item.action : null;
           const unboundWorkflow = workflowAction !== null && (() => {
             const workflow = workflows.find((definition) =>
@@ -921,7 +919,7 @@ export function AutomationsView() {
               const bindings = target.installationBindings;
               if (Object.values(bindings ?? {}).some((binding) => !bindingAvailable(runner, binding))) return true;
               if (item.action.kind === "create_session") {
-                return !bindings?.agent && !legacyAgentAvailable(runner, target.agentId!);
+                return !bindings?.agent && legacyInstallationUnavailable(runner, target.agentId!);
               }
               if (!workflowAction) return false;
               const workflow = workflows.find((definition) =>

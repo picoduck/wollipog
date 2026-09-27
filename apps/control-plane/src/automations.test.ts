@@ -196,7 +196,10 @@ function harness(
   const notifications: string[] = [];
   const service = new AutomationsService(db, hub, sessions, { info() {}, warn() {} },
     (_automation, execution, event) => notifications.push(`${execution.executionId}:${event}`));
-  return { db, online, service, created, prompted, workflows, notifications, failures, delivered, recoveredSnapshots };
+  const restartService = () => new AutomationsService(db, hub, sessions, { info() {}, warn() {} },
+    (_automation, execution, event) => notifications.push(`${execution.executionId}:${event}`));
+  return { db, online, service, restartService, created, prompted, workflows, notifications, failures,
+    delivered, recoveredSnapshots };
 }
 
 function receiveSignedTrigger(
@@ -1389,6 +1392,30 @@ test("an on-time unresolved target expires with its resolution error instead of 
   }
 });
 
+test("a resolution wait survives scheduler restart and an edit clears its health", () => {
+  const { db, online, service, restartService, created } = harness();
+  const actor = { kind: "human" as const, id: "device" };
+  const automation = service.create(baseSpec({ misfirePolicy: { kind: "skip" } }), actor, 0).data!;
+  online.clear();
+  service.tick(60_001);
+  const restarted = restartService();
+  restarted.tick(121_000);
+  assert.equal(db.listAutomationEvents(automation.automationId).filter((event) =>
+    event.kind === "target_unresolved").length, 1);
+  online.add("runner-1");
+  assert.equal(restarted.tick(121_001), 1);
+  assert.equal(created.length, 1);
+  assert.equal(db.listAutomationExecutions(automation.automationId)[0]?.scheduledFor, 60_000);
+
+  const editable = restarted.create(baseSpec({ misfirePolicy: { kind: "skip" } }), actor, 121_001).data!;
+  online.clear();
+  restarted.tick(180_001);
+  assert.ok(db.getAutomation(editable.automationId)?.targetHealth);
+  const changed = restarted.update(editable.automationId, baseSpec({ name: "Edited" }), actor, 181_000);
+  assert.equal(changed.ok, true);
+  assert.equal(db.getAutomation(editable.automationId)?.targetHealth, undefined);
+});
+
 test("an occurrence first seen past grace still uses its configured misfire policy", () => {
   const { db, service, created } = harness();
   const actor = { kind: "human" as const, id: "device" };
@@ -1414,10 +1441,35 @@ test("a late fire-once occurrence keeps its original misfire plan while its targ
   online.clear();
   assert.equal(service.tick(5 * 60_000), 0);
   online.add("runner-1");
-  assert.equal(service.tick(5 * 60_000 + 1), 1);
+  assert.equal(service.tick(20 * 60_000), 1);
   assert.equal(db.listAutomationExecutions(automation.automationId)[0]?.scheduledFor, 60_000);
-  assert.equal(db.getAutomation(automation.automationId)?.nextFireAt, 6 * 60_000,
+  assert.equal(db.getAutomation(automation.automationId)?.nextFireAt, 21 * 60_000,
     "fire-once still skips the backlog that was missed before its first attempt");
+  assert.equal(service.tick(20 * 60_000 + 1), 0, "recovery must not immediately fire a second time");
+});
+
+test("late catch-up uses its per-tick cap after a wait and after a legacy pin", () => {
+  const catchUp = { misfirePolicy: { kind: "catch_up" as const, maxRuns: 2 },
+    concurrencyPolicy: "parallel" as const };
+  const waiting = harness();
+  const automation = waiting.service.create(baseSpec(catchUp),
+    { kind: "human", id: "device" }, 0).data!;
+  waiting.online.clear();
+  assert.equal(waiting.service.tick(5 * 60_000), 0);
+  waiting.online.add("runner-1");
+  assert.equal(waiting.service.tick(5 * 60_000 + 1), 2);
+  assert.deepEqual(waiting.db.listAutomationExecutions(automation.automationId).map((row) => row.scheduledFor),
+    [120_000, 60_000]);
+
+  const legacy = harness(175);
+  const old = legacy.service.create(baseSpec(catchUp), { kind: "human", id: "device" }, 0).data!;
+  legacy.db.updateRunnerAgents("runner-1", [{
+    ...runner("runner-1").agents[0]!, driver: "codex-app-server",
+    installation: { id: "system", path: "/usr/bin/codex", via: "path" },
+  }], 1_000);
+  assert.equal(legacy.service.tick(5 * 60_000), 2,
+    "pinning the first run must not leave the second dispatch on a stale revision");
+  assert.equal(legacy.db.listAutomationExecutions(old.automationId).length, 2);
 });
 
 test("explicitly reselecting a reused plain id clears a pinned installation", () => {
@@ -1449,6 +1501,10 @@ test("explicitly reselecting a reused plain id clears a pinned installation", ()
   }), actor, 62_000).data!;
   assert.deepEqual(unrelated.action.kind === "create_session" && unrelated.action.installationBindings, {},
     "a later unrelated edit must not bind the newly discovered installation");
+  assert.equal(service.tick(120_000), 0);
+  assert.equal(created.length, 1, "dispatch must not replace an explicit empty binding");
+  assert.deepEqual(db.getAutomation(automation.automationId)?.action.kind === "create_session" &&
+    db.getAutomation(automation.automationId)?.action.installationBindings, {});
 });
 
 test("a partially pinned workflow does not adopt a rediscovered unbound role on pause", () => {

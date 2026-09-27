@@ -1155,8 +1155,24 @@ export class AutomationsService {
     if (automation.nextFireAt === undefined) return 0;
     const waiting = this.db.automationResolutionWait(automation.automationId, automation.nextFireAt);
     if (waiting) {
-      return this.dispatch(automation, automation.nextFireAt, automation.nextFireAt,
-        waiting.nextFireAt, now) ? 1 : 0;
+      const next = automation.misfirePolicy.kind === "fire_once" &&
+        waiting.firstSeenAt - automation.nextFireAt >= MISFIRE_GRACE_MS
+        ? duePlan(automation, now).future : waiting.nextFireAt;
+      if (!this.dispatch(automation, automation.nextFireAt, automation.nextFireAt, next, now)) return 0;
+      let count = 1;
+      // A waiting catch-up occurrence is the first slot of this tick's cap. Continue with the
+      // remaining slots so restoring a Machine does not arbitrarily reduce that cap to one.
+      if (automation.misfirePolicy.kind === "catch_up" && automation.concurrencyPolicy === "parallel") {
+        while (count < automation.misfirePolicy.maxRuns) {
+          const current = this.db.getAutomation(automation.automationId);
+          if (current?.nextFireAt === undefined || current.nextFireAt > now) break;
+          const plan = duePlan(current, now);
+          const nextFireAt = plan.occurrences[1] ?? plan.future;
+          if (!this.dispatch(current, current.nextFireAt, current.nextFireAt, nextFireAt, now)) break;
+          count += 1;
+        }
+      }
+      return count;
     }
     const plan = duePlan(automation, now);
     const overdue = now - automation.nextFireAt >= MISFIRE_GRACE_MS;
@@ -1179,7 +1195,8 @@ export class AutomationsService {
         : selected.length < plan.occurrences.length
           ? plan.occurrences[selected.length]!
           : (overdue ? plan.future : nextCronFire(automation.cron, automation.timezone, scheduledFor));
-      if (!this.dispatch(automation, expected, scheduledFor, next, now)) break;
+      const current = index === 0 ? automation : this.db.getAutomation(automation.automationId);
+      if (!current || !this.dispatch(current, expected, scheduledFor, next, now)) break;
       expected = next;
       count += 1;
       if (automation.concurrencyPolicy !== "parallel") break;
