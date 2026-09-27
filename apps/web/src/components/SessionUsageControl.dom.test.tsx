@@ -13,6 +13,7 @@ for (const [name, value] of Object.entries({
   window: domWindow,
   document: domWindow.document,
   navigator: domWindow.navigator,
+  Element: domWindow.Element,
   HTMLElement: domWindow.HTMLElement,
   Node: domWindow.Node,
   React,
@@ -189,6 +190,41 @@ test("a menu opened over the popover from the keyboard keeps the first Escape", 
   assert.ok(view.popover(), "the popover beneath the menu stays open");
   assert.equal(escape.defaultPrevented, false);
   menu.remove();
+  await view.cleanup();
+});
+
+test("a non-modal popup dialog opened over the popover keeps the first Escape", async () => {
+  // The session header's hidden-status list is a `role="dialog"` popup without aria-modal.
+  const view = await mount(session(), { sessionId: "s1", totals: amount(), byModel: [] });
+  await view.open();
+  const popup = domWindow.document.createElement("div");
+  popup.setAttribute("role", "dialog");
+  popup.setAttribute("aria-label", "Session Statuses");
+  domWindow.document.body.append(popup);
+  const escape = new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  await act(async () => {
+    popup.dispatchEvent(escape);
+  });
+  assert.ok(view.popover());
+  assert.equal(escape.defaultPrevented, false);
+  popup.remove();
+  await view.cleanup();
+});
+
+test("a field that focus has moved on to keeps its own Escape while the popover closes", async () => {
+  const view = await mount(session(), { sessionId: "s1", totals: amount(), byModel: [] });
+  await view.open();
+  const field = domWindow.document.createElement("textarea");
+  domWindow.document.body.append(field);
+  field.focus();
+  const escape = new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true });
+  await act(async () => {
+    field.dispatchEvent(escape);
+  });
+  assert.equal(view.popover(), null);
+  assert.equal(escape.defaultPrevented, false, "the composer's own Escape (closing its suggestions, blurring) still runs");
+  assert.equal(domWindow.document.activeElement, field as never, "focus is not pulled back to the chip");
+  field.remove();
   await view.cleanup();
 });
 

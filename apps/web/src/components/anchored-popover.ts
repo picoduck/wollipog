@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
-import { SHORTCUT_LAYER_SELECTOR } from "../shortcuts.js";
+import { isEditableShortcutTarget } from "../shortcuts.js";
 
 export interface AnchoredPopover<Root extends HTMLElement, Anchor extends HTMLElement> {
   open: boolean;
@@ -18,6 +18,8 @@ const GAP = 6;
 const MARGIN = 8;
 /** Below this, a side is too cramped to host the panel at all and anchoring is abandoned. */
 const MIN_HEIGHT = 120;
+/** Layers that can open over a panel and own Escape. Each renders only while open. */
+const OVERLYING_LAYERS = '[aria-modal="true"], [role="dialog"], [role="menu"]';
 
 export interface Placement {
   left: number;
@@ -85,9 +87,10 @@ function clamp(value: number, min: number, max: number): number {
  * Escape is consumed by default, so one key closes only this layer (#718): a view's own Escape
  * handler — the session view's return to the Sessions list — would otherwise run on the same key
  * press and remove the layer beneath too (#1796). A caller that really wants the key to continue
- * opts out with `consumeEscape: false`. A modal or menu opened over the panel takes Escape first,
- * and an IME's composition Escape is left alone. When focus was inside the popover, Escape returns
- * it to the trigger rather than letting it fall to the document as the panel unmounts.
+ * opts out with `consumeEscape: false`. A dialog or menu opened over the panel takes Escape first,
+ * a field that focus has moved on to keeps its own Escape, and an IME's composition Escape is left
+ * alone. When focus was inside the popover, Escape returns it to the trigger rather than letting it
+ * fall to the document as the panel unmounts.
  *
  * Placement runs in a LAYOUT effect: the panel's un-placed fallback position is absolute, and a
  * status-strip track clips overflow, so a passive effect would let one clipped frame paint.
@@ -138,8 +141,12 @@ export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTML
       }
       // A layer opened over the panel from the keyboard (the Search palette, a dialog, a menu) is
       // the top layer and owns this key; the panel waits beneath it for the next Escape.
-      if (Array.from(document.querySelectorAll(SHORTCUT_LAYER_SELECTOR)).some((layer) => !layer.contains(root))) return;
-      if (consumeEscape) {
+      if (Array.from(document.querySelectorAll(OVERLYING_LAYERS)).some((layer) => !layer.contains(root))) return;
+      // A key bound for a field focus has moved on to (the composer and its suggestions, a terminal)
+      // keeps that field's own Escape; the panel still closes with it, as it always has.
+      const target = event.target instanceof Node ? event.target : null;
+      const fieldOwnsKey = target !== null && !root.contains(target) && isEditableShortcutTarget(target);
+      if (consumeEscape && !fieldOwnsKey) {
         event.preventDefault();
         event.stopPropagation();
       }

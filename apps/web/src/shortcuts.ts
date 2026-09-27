@@ -809,11 +809,9 @@ export function shortcutUnavailableReason(
   return null;
 }
 
-/** Every open layer that owns the keyboard: a modal, a menu, or the composer's Add and Modes panel. */
-export const SHORTCUT_LAYER_SELECTOR = '[aria-modal="true"], [role="menu"], .plus-pop[role="dialog"]';
-
 export function shortcutLayerActive(document: Document, exceptPalette = false): boolean {
-  return Boolean(document.querySelector(exceptPalette ? '[aria-modal="true"]:not(.palette)' : SHORTCUT_LAYER_SELECTOR));
+  const modal = exceptPalette ? '[aria-modal="true"]:not(.palette)' : '[aria-modal="true"]';
+  return Boolean(document.querySelector(exceptPalette ? modal : `${modal}, [role="menu"], .plus-pop[role="dialog"]`));
 }
 
 export function isEditableShortcutTarget(target: EventTarget | null): boolean {
