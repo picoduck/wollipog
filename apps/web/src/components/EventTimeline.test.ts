@@ -1218,6 +1218,29 @@ test("an offered but unusable Edit in Fork stays visible, disabled and says why 
   assert.doesNotMatch(hidden, /lucide-git-fork/);
 });
 
+test("an unusable Edit & Resend stays visible on every user message, disabled and says why (#1876)", () => {
+  const reason = "Runner is offline.";
+  const render = (editAndResendUnavailableReason?: string) => renderToStaticMarkup(React.createElement(EventTimeline, {
+    items: [
+      { kind: "user_message", id: 1, text: "first", turn: 1 },
+      { kind: "user_message", id: 2, text: "second", turn: 2 },
+    ],
+    onEditAndResend: () => { throw new Error("an unavailable Edit & Resend must not open"); },
+    editAndResendUnavailableReason,
+  }));
+
+  const blocked = render(reason);
+  assert.doesNotMatch(blocked, /aria-label="Edit User Message as a New Turn"/, "no enabled button");
+  const summaries = [...blocked.matchAll(/<summary class="tl-message-icon" aria-label="Edit User Message as a New Turn Unavailable" aria-describedby="([^"]+)" title="([^"]+)">/g)];
+  assert.equal(summaries.length, 2, "every user message keeps the control");
+  assert.match(summaries[0]![2]!, /Runner is offline\./);
+  assert.match(blocked, new RegExp(`<span id="${summaries[0]![1]}" role="status"><strong>Edit User Message as a New Turn:</strong>[^<]*Runner is offline\\.</span>`));
+
+  const usable = render();
+  assert.equal((usable.match(/aria-label="Edit User Message as a New Turn"/g) ?? []).length, 2);
+  assert.doesNotMatch(usable, /Edit User Message as a New Turn Unavailable/);
+});
+
 test("only never-offered runner authentication outcomes get readable resolution labels", () => {
   assert.equal(permissionResolutionLabel([], "auth:select-account"), "Another Account Selected");
   assert.equal(permissionResolutionLabel([], "auth:automatic-retry"), "Rechecked Automatically");

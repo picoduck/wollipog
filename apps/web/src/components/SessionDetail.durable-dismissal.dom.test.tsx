@@ -772,3 +772,56 @@ test("an Edit in Fork that applies but is blocked stays visible and says why, an
     await unmountFixture(fixture);
   }
 });
+
+test("Edit & Resend stays visible and says why while the composer cannot send, and its open dialog names the reason (#1876)", async () => {
+  const reason = "Your Viewer role is read-only.";
+  const edit = "Edit User Message as a New Turn";
+  const fixture = await mountFixture({
+    sessionPatch: {
+      status: "idle",
+      commandPermissions: {
+        stop: { allowed: false, reason }, restart: { allowed: false, reason }, stopBackgroundJob: { allowed: false, reason },
+        prompt: { allowed: false, reason },
+      },
+    },
+    eventPayloads: [
+      { kind: "user_message", text: "first", images: [] },
+      { kind: "agent_message", text: "one", final: true },
+      { kind: "user_message", text: "second", images: [] },
+      { kind: "agent_message", text: "two", final: true },
+    ],
+  });
+  const unavailable = () => [...fixture.container.querySelectorAll<HTMLElement>(`summary[aria-label="${edit} Unavailable"]`)];
+  const describedBy = (summary: Element) =>
+    fixture.container.querySelector(`[id="${summary.getAttribute("aria-describedby")}"]`)?.textContent ?? "";
+  const dialog = () => document.querySelector('[role="dialog"]');
+  const loadIntoComposer = () => [...document.querySelectorAll<HTMLButtonElement>("button")]
+    .find((candidate) => candidate.textContent === "Load into Composer");
+  try {
+    assert.equal(button(fixture, edit), null, "a Viewer gets no working Edit & Resend");
+    assert.equal(unavailable().length, 2, "every user message keeps the control");
+    assert.match(describedBy(unavailable()[0]!), /Your Viewer role is read-only\./u);
+    await act(async () => { unavailable()[0]!.click(); });
+    assert.equal(dialog(), null, "the unavailable control opens no dialog");
+
+    await fixture.pushSession({ commandPermissions: {
+      stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true }, prompt: { allowed: true },
+    } });
+    assert.equal(unavailable().length, 0);
+    const working = button(fixture, edit);
+    assert.ok(working, "an allowed person gets the working button back");
+    await act(async () => { working.click(); });
+    assert.ok(dialog(), "the working control opens its dialog");
+    assert.equal(loadIntoComposer()?.disabled, false);
+
+    await fixture.pushSession({ status: "stopped" });
+    assert.ok(dialog(), "the open dialog stays open");
+    assert.equal(loadIntoComposer()?.disabled, true);
+    assert.match(dialog()?.textContent ?? "", /Session is stopped\./u, "the dialog names the specific reason");
+    assert.doesNotMatch(dialog()?.textContent ?? "", /cannot accept a new turn right now/u);
+    assert.equal(button(fixture, edit), null);
+    assert.match(describedBy(unavailable()[0]!), /Session is stopped\./u);
+  } finally {
+    await unmountFixture(fixture);
+  }
+});

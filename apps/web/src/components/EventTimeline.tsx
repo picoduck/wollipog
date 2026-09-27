@@ -259,6 +259,7 @@ export const EventTimeline = memo(function EventTimeline({
   rewindUnavailableReason,
   onFork,
   onEditAndResend,
+  editAndResendUnavailableReason,
   onEditInFork,
   onOpenSourceLocation,
   editInForkAvailabilityByItem,
@@ -286,6 +287,8 @@ export const EventTimeline = memo(function EventTimeline({
   onFork?: (turn: number) => void;
   /** Composer preparation only; callers must never submit the prompt from this callback. */
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
+  /** Why Edit & Resend cannot be used now; it then stays visible, disabled with this reason. */
+  editAndResendUnavailableReason?: string;
   /** Forks AFTER the supplied predecessor turn, then prepares a child composer draft. */
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
@@ -327,6 +330,7 @@ export const EventTimeline = memo(function EventTimeline({
       rewindUnavailableReason={rewindUnavailableReason}
       onFork={onFork}
       onEditAndResend={onEditAndResend}
+      editAndResendUnavailableReason={editAndResendUnavailableReason}
       onEditInFork={onEditInFork}
       onOpenSourceLocation={onOpenSourceLocation}
       editInForkAvailabilityByItem={editInForkAvailabilityByItem}
@@ -357,6 +361,7 @@ function EventTimelineBody({
   rewindUnavailableReason,
   onFork,
   onEditAndResend,
+  editAndResendUnavailableReason,
   onEditInFork,
   onOpenSourceLocation,
   editInForkAvailabilityByItem,
@@ -381,6 +386,8 @@ function EventTimelineBody({
   rewindUnavailableReason?: string;
   onFork?: (turn: number) => void;
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
+  /** Why Edit & Resend cannot be used now; it then stays visible, disabled with this reason. */
+  editAndResendUnavailableReason?: string;
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   editInForkAvailabilityByItem?: ReadonlyMap<number, EditInForkAvailability>;
@@ -523,6 +530,7 @@ function EventTimelineBody({
           rewindTurn={userRewindTurn}
           rewindUnavailableReason={rewindUnavailableReason}
           onEditAndResend={onEditAndResend}
+          editAndResendUnavailableReason={editAndResendUnavailableReason}
           onEditInFork={onEditInFork}
           onOpenSourceLocation={onOpenSourceLocation}
           editInForkAvailability={item.kind === "user_message" ? editInForkAvailabilityByItem?.get(item.id) : undefined}
@@ -1694,6 +1702,7 @@ const TimelineRow = memo(function TimelineRow({
   rewindUnavailableReason,
   onFork,
   onEditAndResend,
+  editAndResendUnavailableReason,
   onEditInFork,
   onOpenSourceLocation,
   editInForkAvailability,
@@ -1712,6 +1721,8 @@ const TimelineRow = memo(function TimelineRow({
   rewindUnavailableReason?: string;
   onFork?: (turn: number) => void;
   onEditAndResend?: (item: Extract<TimelineItem, { kind: "user_message" }>) => void;
+  /** Why Edit & Resend cannot be used now; it then stays visible, disabled with this reason. */
+  editAndResendUnavailableReason?: string;
   onEditInFork?: (item: Extract<TimelineItem, { kind: "user_message" }>, forkTurn: number) => void;
   onOpenSourceLocation?: (location: SourceLocation) => void;
   editInForkAvailability?: EditInForkAvailability;
@@ -1853,6 +1864,7 @@ const TimelineRow = memo(function TimelineRow({
               onRewind={onRewind && rewindTurn != null ? () => onRewind(rewindTurn) : undefined}
               rewindUnavailableReason={rewindUnavailableReason}
               onEditAndResend={onEditAndResend ? () => onEditAndResend(item) : undefined}
+              editAndResendUnavailableReason={editAndResendUnavailableReason}
               onEditInFork={onEditInFork && editInForkTurn != null ? () => onEditInFork(item, editInForkTurn) : undefined}
               editInForkUnavailableReason={onEditInFork && editInForkAvailability?.available === false &&
                 editInForkAvailability.offered ? editInForkAvailability.reason : undefined}
@@ -2328,6 +2340,7 @@ function MessageMeta({
   copyText,
   copyLabel,
   onEditAndResend,
+  editAndResendUnavailableReason,
   onEditInFork,
   editInForkUnavailableReason,
   onFork,
@@ -2346,6 +2359,7 @@ function MessageMeta({
   copyText: string;
   copyLabel: string;
   onEditAndResend?: () => void;
+  editAndResendUnavailableReason?: string;
   onEditInFork?: () => void;
   /** Shown as a disabled Edit in Fork when it applies to this message but cannot be used now. */
   editInForkUnavailableReason?: string;
@@ -2420,7 +2434,16 @@ function MessageMeta({
               <ShareIcon size={14} />
             </MessageAction>
           )}
-          {onEditAndResend && (
+          {onEditAndResend && editAndResendUnavailableReason !== undefined && (
+            <MessageAction
+              label="Edit User Message as a New Turn"
+              description="Edit this message and load it into the composer as a new turn."
+              reason={editAndResendUnavailableReason}
+            >
+              <EditIcon size={14} />
+            </MessageAction>
+          )}
+          {onEditAndResend && editAndResendUnavailableReason === undefined && (
             <button
               type="button"
               className="tl-message-icon"

@@ -2738,16 +2738,17 @@ function SessionDetailLoaded({
     ? session.providerAccountSwitchFailure : undefined;
   // A person the server refuses a prompt (a Viewer) gets a read-only composer that says why.
   const promptRefusal = sessionCommandRefusal(session, "prompt");
-  const canPrompt = runnerOnline && !terminal && !policyPaused && !historyQuarantine &&
-    !worktreeRecovery && !accountSwitchFailure && promptRefusal === null;
-  const composerPlaceholder = promptRefusal !== null ? promptRefusal
+  // Why the composer cannot send a new message now. Edit & Resend states the same reason.
+  const promptUnavailableReason = promptRefusal !== null ? promptRefusal
     : terminal ? `Session is ${session.status}.`
     : !runnerOnline ? "Runner is offline."
     : accountSwitchFailure ? "Choose another account before sending another message."
     : worktreeRecovery ? "Worktree recovery is required before sending another message."
     : historyQuarantine ? "Conversation quarantined. Recover this session to continue."
     : policyPaused ? "Session is paused by guardrails. Review the pending decision to continue."
-    : "Do anything";
+    : null;
+  const canPrompt = promptUnavailableReason === null;
+  const composerPlaceholder = promptUnavailableReason ?? "Do anything";
   const pendingQuestion = session.pendingApproval?.kind === "question" ? session.pendingApproval : null;
   const composerQuestions = (() => {
     const approvalQuestions = pendingQuestion?.questions ?? [];
@@ -5038,7 +5039,8 @@ function SessionDetailLoaded({
                       rewindUnavailableReason={rewindUnavailableReason}
                       onFork={mode === "expanded" ? onFork : undefined}
                       handoff={mode === "expanded" ? handoffControls : undefined}
-                      onEditAndResend={mode === "expanded" && canPrompt ? openResendAction : undefined}
+                      onEditAndResend={mode === "expanded" ? openResendAction : undefined}
+                      editAndResendUnavailableReason={promptUnavailableReason ?? undefined}
                       onEditInFork={mode === "expanded" ? openForkEditAction : undefined}
                       editInForkAvailabilityByItem={mode === "expanded" ? editInForkAvailabilityByItem : undefined}
                       forkAvailabilityByTurn={mode === "expanded" ? forkAvailabilityByTurn : undefined}
@@ -5945,7 +5947,7 @@ function SessionDetailLoaded({
           key={`${messageAction.mode}-${messageAction.item.id}`}
           action={messageAction}
           existingDraftPresent={Boolean(text || images.length)}
-          canPrepareResend={canPrompt}
+          resendUnavailableReason={promptUnavailableReason}
           forkRefusal={forkRefusal}
           busy={busy}
           returnFocusRef={messageActionReturnFocusRef}
@@ -5961,7 +5963,7 @@ function SessionDetailLoaded({
 function MessageActionDialog({
   action,
   existingDraftPresent,
-  canPrepareResend,
+  resendUnavailableReason,
   forkRefusal,
   busy,
   returnFocusRef,
@@ -5971,7 +5973,8 @@ function MessageActionDialog({
 }: {
   action: MessageActionState;
   existingDraftPresent: boolean;
-  canPrepareResend: boolean;
+  /** Why the session cannot accept a new turn, when that changes while the dialog is open. */
+  resendUnavailableReason: string | null;
   /** Why the signed-in person may not fork, when that changes while the dialog is open (#1864). */
   forkRefusal: string | null;
   busy: boolean;
@@ -6023,7 +6026,7 @@ function MessageActionDialog({
             className="btn primary"
             type="submit"
             form={formId}
-            disabled={submitting || retryBlocked || (action.mode === "fork" && busy) || (action.mode === "resend" && !canPrepareResend) ||
+            disabled={submitting || retryBlocked || (action.mode === "fork" && busy) || (action.mode === "resend" && resendUnavailableReason !== null) ||
               refusal !== null}
             title={refusal ?? undefined}
             aria-describedby={refusal !== null ? `${formId}-refusal` : undefined}
@@ -6052,8 +6055,8 @@ function MessageActionDialog({
         {refusal !== null && (
           <p id={`${formId}-refusal`} className="message-action-warning" role="status">{refusal}</p>
         )}
-        {action.mode === "resend" && !canPrepareResend && (
-          <p className="message-action-warning" role="status">This session cannot accept a new turn right now.</p>
+        {action.mode === "resend" && resendUnavailableReason !== null && (
+          <p className="message-action-warning" role="status">{resendUnavailableReason}</p>
         )}
         <label className="field-label" htmlFor={`${formId}-text`}>Message</label>
         <textarea
