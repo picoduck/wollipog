@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import { SHORTCUT_LAYER_SELECTOR } from "../shortcuts.js";
 
 export interface AnchoredPopover<Root extends HTMLElement, Anchor extends HTMLElement> {
   open: boolean;
@@ -84,9 +85,9 @@ function clamp(value: number, min: number, max: number): number {
  * Escape is consumed by default, so one key closes only this layer (#718): a view's own Escape
  * handler — the session view's return to the Sessions list — would otherwise run on the same key
  * press and remove the layer beneath too (#1796). A caller that really wants the key to continue
- * opts out with `consumeEscape: false`. A modal opened over the panel takes Escape first. When
- * focus was inside the popover, Escape returns it to the trigger rather than letting it fall to the
- * document as the panel unmounts.
+ * opts out with `consumeEscape: false`. A modal or menu opened over the panel takes Escape first,
+ * and an IME's composition Escape is left alone. When focus was inside the popover, Escape returns
+ * it to the trigger rather than letting it fall to the document as the panel unmounts.
  *
  * Placement runs in a LAYOUT effect: the panel's un-placed fallback position is absolute, and a
  * status-strip track clips overflow, so a passive effect would let one clipped frame paint.
@@ -126,17 +127,24 @@ export function useAnchoredPopover<Root extends HTMLElement, Anchor extends HTML
   useEffect(() => {
     if (!open) return;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      // A modal opened over the panel (the Search palette, a dialog) is the top layer and owns this
-      // key; the panel waits beneath it for the next Escape.
+      // An IME's Escape cancels its composition, not this panel.
+      if (event.key !== "Escape" || event.isComposing || event.keyCode === 229) return;
       const root = rootRef.current;
-      if (Array.from(document.querySelectorAll('[aria-modal="true"]')).some((modal) => !root || !modal.contains(root))) return;
+      // The control stopped rendering while open (its session no longer qualifies for it): nothing
+      // is left on screen to close, so the key belongs to whatever handles it next.
+      if (!root?.isConnected) {
+        setOpen(false);
+        return;
+      }
+      // A layer opened over the panel from the keyboard (the Search palette, a dialog, a menu) is
+      // the top layer and owns this key; the panel waits beneath it for the next Escape.
+      if (Array.from(document.querySelectorAll(SHORTCUT_LAYER_SELECTOR)).some((layer) => !layer.contains(root))) return;
       if (consumeEscape) {
         event.preventDefault();
         event.stopPropagation();
       }
       const active = document.activeElement;
-      if (active && active !== anchorRef.current && rootRef.current?.contains(active)) anchorRef.current?.focus();
+      if (active && active !== anchorRef.current && root.contains(active)) anchorRef.current?.focus();
       setOpen(false);
     };
     const onPointer = (event: PointerEvent) => {
