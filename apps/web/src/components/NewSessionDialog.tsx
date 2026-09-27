@@ -1170,7 +1170,7 @@ export function NewSessionDialog({
       const session = await api.createSession({
         ...placement,
         agentId,
-        ...(hostExecutionTarget && providerAccountId ? { providerAccountId } : {}),
+        ...(hostExecutionTarget && providerAccountId && accountChosenByUser.current ? { providerAccountId } : {}),
         ...(orchestratorRoleSupported && roleOverride !== undefined ? { role: roleOverride } : {}),
         useWorktree,
         executionTargetId: executionTarget?.id,

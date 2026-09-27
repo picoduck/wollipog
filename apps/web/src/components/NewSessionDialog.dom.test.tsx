@@ -1307,7 +1307,7 @@ test("multiple provider accounts expose a picker and submit the selected account
   }
 });
 
-test("New Session uses the saved provider default and still accepts a one-session override", async () => {
+test("New Session shows the saved default but leaves the server to resolve it when untouched", async () => {
   const accountRunner: RunnerView = {
     ...runner,
     protocolVersion: PROTOCOL_VERSION,
@@ -1322,6 +1322,26 @@ test("New Session uses the saved provider default and still accepts a one-sessio
   try {
     assert.match(fixture.container.querySelector<HTMLButtonElement>('[aria-label^="Account:"]')?.getAttribute("aria-label") ?? "",
       /Account: Personal/u);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.providerAccountId, undefined,
+      "an untouched picker must not turn a displayed default into an explicit override");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
+test("New Session sends a deliberately selected account as a one-session override", async () => {
+  const accountRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+    ],
+    providerAccountDefaults: [{ provider: "claude", accountId: "personal", revision: 1 }],
+  };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+  try {
     await chooseSelectOption(fixture.container, "Account", "Work");
     await act(async () => { createButton(fixture.container).click(); });
     assert.equal(fixture.requests[0]?.providerAccountId, "work");
