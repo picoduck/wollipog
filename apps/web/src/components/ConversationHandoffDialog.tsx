@@ -30,7 +30,8 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceT
   const [error, setError] = useState<string>();
   const [busy, setBusy] = useState(false);
   const lock = useRef(false);
-  const reason = refusal ?? handoffDestinationError(agent, sourceDriver, config);
+  const destinationReason = handoffDestinationError(agent, sourceDriver, config);
+  const reason = refusal ?? destinationReason;
   const model = agent?.capabilities?.models.find((item) => item.id === config.model);
   // `default` is the provider-standard tier: it is always selectable and never needs advertising,
   // so it is excluded from the catalog list to avoid a duplicate entry.
@@ -80,7 +81,8 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceT
     <div className="field"><span>Permissions</span><Select label="Permissions" value={config.permissionMode ?? ""} disabled={busy}
       options={[{ value: "", label: "Default" }, ...(agent?.capabilities?.permissionModes ?? []).map((item) => ({ value: item, label: permissionModeLabel(item, agent?.driver) }))]}
       onChange={(value) => setConfig({ ...config, permissionMode: value || undefined })} /></div>
-    {(reason || error) && <p id={refusal !== null && !error ? "handoff-refusal" : undefined} role="alert">{error ?? reason}</p>}
+    {refusal !== null && <p id="handoff-refusal" role="status">{refusal}</p>}
+    {(error || (refusal === null && destinationReason)) && <p role="alert">{error ?? destinationReason}</p>}
     </div>
   </Modal>;
 }
