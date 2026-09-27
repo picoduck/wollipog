@@ -284,7 +284,7 @@ function refusalId(container: HTMLElement): string {
 
 function assertRefused(container: HTMLElement, name: string, control: HTMLButtonElement | HTMLInputElement) {
   assert.equal(control.disabled, true, `${name} is disabled`);
-  if (control instanceof domWindow.HTMLButtonElement) {
+  if (control.tagName === "BUTTON") {
     assert.equal(control.getAttribute("title"), VIEWER, `${name} carries the reason as its title`);
   }
   const ids = (control.getAttribute("aria-describedby") ?? "").split(/\s+/u).filter(Boolean);
