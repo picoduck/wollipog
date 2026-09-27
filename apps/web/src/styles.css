@@ -11196,7 +11196,12 @@ body.shell-dock-dragging * {
   background: var(--bg-elev-2);
   color: var(--accent);
 }
-.diff-discard:hover:not(:disabled) { background: color-mix(in srgb, var(--red) 10%, transparent); }
+/* The red tint costs the bare --red label its AA margin (4.09:1 in one-dark:dark), so the hover
+   names the on-tint ink calibrated for it (#1889). */
+.diff-discard:hover:not(:disabled) {
+  color: var(--red-on-tint);
+  background: color-mix(in srgb, var(--red) 10%, transparent);
+}
 .diff-discard:disabled { opacity: 0.45; cursor: default; }
 .diff-file-head:hover {
   background: var(--bg-elev-2);

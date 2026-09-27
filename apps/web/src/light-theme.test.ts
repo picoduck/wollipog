@@ -512,3 +512,22 @@ test("a rule pinned to a known surface is measured there, and its parent paints 
       `${paintedBy} must paint ${surface} and nothing else, the surface ${selector} is measured against`);
   }
 });
+
+test("a state that tints a pinned rule's fill names its own ink, so the pair is measured", () => {
+  // Discard's hover laid a 10% --red tint under its inherited --red label: 4.10:1 in one-dark:dark.
+  // A rule that declares only a fill is not a colour/fill pair, so the check above never saw it.
+  for (const pinned of KNOWN_SURFACE.keys()) {
+    const states = new Map<string, Record<string, string>>();
+    for (const { selector, selectors, prop, value } of allDeclarations(css)) {
+      if (selector === pinned || !selectors.some((candidate) => targets(candidate, pinned))) continue;
+      states.set(selector, { ...states.get(selector), [prop]: value });
+    }
+    const tinted = [...states].filter(([, declarations]) => "background" in declarations || "background-color" in declarations);
+    assert.ok(tinted.length > 0, `expected ${pinned} to have a state that repaints its fill`);
+    for (const [selector, declarations] of tinted) {
+      assert.ok("color" in declarations, `${selector} repaints the fill under an inherited ink, which nothing measures`);
+      const { unresolved, failures } = measure([{ selector, declarations }]);
+      assert.deepEqual([unresolved, failures], [[], []]);
+    }
+  }
+});
