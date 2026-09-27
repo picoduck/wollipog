@@ -284,9 +284,7 @@ function refusalId(container: HTMLElement): string {
 
 function assertRefused(container: HTMLElement, name: string, control: HTMLButtonElement | HTMLInputElement) {
   assert.equal(control.disabled, true, `${name} is disabled`);
-  if (control.tagName === "BUTTON") {
-    assert.equal(control.getAttribute("title"), VIEWER, `${name} carries the reason as its title`);
-  }
+  assert.equal(control.getAttribute("title"), VIEWER, `${name} carries the reason as its title`);
   const ids = (control.getAttribute("aria-describedby") ?? "").split(/\s+/u).filter(Boolean);
   assert.ok(ids.includes(refusalId(container)), `${name} is described by the refusal`);
 }
@@ -312,6 +310,13 @@ test("a refused person sees every Git action disabled with the reason, and nothi
       await act(async () => { fireDomEvent.click(control); await Promise.resolve(); });
     }
     assert.equal(onlyButton(harness.container, "Stage Selected (0)").disabled, true, "no line could be selected");
+
+    // The side-by-side layout renders its own line selection boxes.
+    const layout = harness.container.querySelector('[role="radiogroup"][aria-label="Diff Layout"]');
+    assert.ok(layout, "the diff layout choice is rendered");
+    await act(async () => { fireDomEvent.click(onlyButton(layout, "Side by Side")); });
+    assert.ok(harness.container.querySelector(".diff-split-row"), "the diff is side by side");
+    for (const [name, control] of lineControls(harness.container)) assertRefused(harness.container, `split ${name}`, control);
 
     assert.deepEqual(harness.calls, []);
     assert.equal(onlyButton(harness.container, "Refresh Git Status").disabled, false,

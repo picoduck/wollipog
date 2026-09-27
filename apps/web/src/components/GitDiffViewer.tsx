@@ -796,7 +796,7 @@ function HunkView({
               <span className="diff-line-select">
                 {referenceCheckbox(row)}
                 {lineDirection && row.status !== " " && (
-                  <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} aria-describedby={refusal?.id} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
+                  <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} title={refusal?.reason} aria-describedby={refusal?.id} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
                 )}
               </span>
               <span className="diff-gutter diff-gutter-old">{row.oldNo}</span>
@@ -818,7 +818,7 @@ function HunkView({
                   <span className="diff-line-select">
                     {referenceCheckbox(row)}
                     {lineDirection && row.status !== " " && (
-                      <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} aria-describedby={refusal?.id} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
+                      <input type="checkbox" checked={selectedLines.has(row.sourceIndex)} disabled={disabled} title={refusal?.reason} aria-describedby={refusal?.id} aria-label={`Select ${row.status === "+" ? "added" : "removed"} line ${row.anchor.line}`} onChange={() => toggleLine(row.sourceIndex)} />
                     )}
                   </span>
                   {sourceGutter(row, sideIndex === 0 ? row.oldNo : row.newNo, "diff-gutter")}
