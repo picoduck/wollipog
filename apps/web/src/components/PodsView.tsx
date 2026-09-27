@@ -231,7 +231,13 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
   );
 }
 
+/** Keyed by pod: the route renders this in place, so a direct pod-to-pod change would otherwise
+ * reuse one instance and carry the previous pod's draft, errors, receipts and unsaved policy. */
 export function PodDetail({ podId }: { podId: string }) {
+  return <PodDetailContent key={podId} podId={podId} />;
+}
+
+function PodDetailContent({ podId }: { podId: string }) {
   const api = useApi();
   const { confirm } = useFeedback();
   const { eventEpoch, loadEvents, loadPodContext, navigate, recoveryAfter, beginEventHistoryLoad, failEventHistoryLoad } = useStoreActions();

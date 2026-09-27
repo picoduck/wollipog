@@ -103,7 +103,13 @@ export function RunsView({ onNewRun }: { onNewRun: () => void }) {
   );
 }
 
+/** Keyed by run: the route renders this in place, so a direct run-to-run change would otherwise
+ * reuse one instance and show the previous run's workflow, artifacts and errors. */
 export function RunDetail({ runId }: { runId: string }) {
+  return <RunDetailContent key={runId} runId={runId} />;
+}
+
+function RunDetailContent({ runId }: { runId: string }) {
   const api = useApi();
   const { eventEpoch, loadEvents, navigate, recoveryAfter, beginEventHistoryLoad, failEventHistoryLoad } = useStoreActions();
   const run = useStoreSelector((s) => s.runs.get(runId));
