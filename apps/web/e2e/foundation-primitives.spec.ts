@@ -113,6 +113,29 @@ test.describe("at 390px", () => {
     expect(hits).toMatchObject({ inlineRight: true, moreLeft: true, inlineAbove: true, moreBelow: true });
   });
 
+  test("the Usage breakdown keeps every driver's value on a phone, each named", async ({ page }) => {
+    // No detail view holds the per-driver split, so the two-line row shows it on line 2 rather
+    // than hiding it with the other extra columns.
+    await page.goto("/usage-view-e2e.html");
+    const table = page.locator(".usage-breakdown-section table").first();
+    await expect(table).toBeVisible();
+    const drivers = await table.evaluate((element) => {
+      const headers = [...element.querySelectorAll("thead th")].map((th) => th.textContent?.trim() ?? "");
+      const cells = [...element.querySelectorAll<HTMLElement>("tbody tr:first-child td[data-driver]")];
+      return {
+        count: cells.length,
+        visible: cells.every((cell) => cell.getBoundingClientRect().height > 0 && getComputedStyle(cell).display !== "none"),
+        named: cells.every((cell) => {
+          const label = cell.querySelector(".cell-label");
+          return !!label && getComputedStyle(label).display !== "none"
+            && headers.some((header) => header && label.textContent?.startsWith(header));
+        }),
+      };
+    });
+    expect(drivers.count, "the fixture has a per-driver split").toBeGreaterThan(0);
+    expect(drivers).toMatchObject({ visible: true, named: true });
+  });
+
   test("a long trailing value gives way to the row's title", async ({ page }) => {
     await page.goto("/colour-schemes-e2e.html");
     const row = page.locator(".surface > .row.row-2");
@@ -127,8 +150,10 @@ test.describe("at 390px", () => {
   });
 
   // The Archive in the real shell; the Usage breakdowns in their own fixture, which serves usage.
-  for (const [url, title] of [[shell("/archived"), "Archived Sessions"], ["/usage-view-e2e.html", "Usage & Cost"]] as const) {
-    test(`${title} tables become two-line rows without sideways scroll`, async ({ page }) => {
+  // Archive rows are exactly two lines. A Usage row keeps every driver's value on its meta line,
+  // which may wrap, because no detail view holds the per-driver split.
+  for (const [url, title, exact] of [[shell("/archived"), "Archived Sessions", true], ["/usage-view-e2e.html", "Usage & Cost", false]] as const) {
+    test(`${title} tables become stacked rows without sideways scroll`, async ({ page }) => {
       await page.goto(url);
       const row = page.locator(".table tbody tr").first();
       await expect(row).toBeVisible();
@@ -151,19 +176,30 @@ test.describe("at 390px", () => {
           }
           return count;
         });
+        // Line 1 holds only the row's name and its status or key figure.
+        const firstLine = rows.every((element) => {
+          const cells = [...element.children].filter((cell) => getComputedStyle(cell).display !== "none"
+            && cell.getBoundingClientRect().height > 0);
+          const nameBox = cells[0]!.getBoundingClientRect();
+          return cells.slice(1).every((cell) => cell.classList.contains("cell-status")
+            || cell.getBoundingClientRect().top >= nameBox.bottom - 0.5);
+        });
         const head = document.querySelector(".table thead")!.getBoundingClientRect();
         const widest = Math.max(...[...document.querySelectorAll<HTMLElement>(".table-wrap")]
           .map((wrap) => wrap.scrollWidth - wrap.clientWidth));
         return {
           rows: rows.length,
           lines: [...new Set(lines)],
+          firstLine,
           headHidden: head.width <= 1 && head.height <= 1,
           pageScroll: document.scrollingElement!.scrollWidth - innerWidth,
           tableScroll: widest,
         };
       });
       expect(layout.rows).toBeGreaterThan(0);
-      expect(layout.lines).toEqual([2]);
+      if (exact) expect(layout.lines).toEqual([2]);
+      else expect(Math.min(...layout.lines)).toBeGreaterThanOrEqual(2);
+      expect(layout.firstLine, "line 1 is the name and its status or key figure").toBe(true);
       expect(layout.headHidden).toBe(true);
       expect(layout.pageScroll).toBeLessThanOrEqual(0);
       expect(layout.tableScroll).toBeLessThanOrEqual(0);

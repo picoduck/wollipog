@@ -763,14 +763,18 @@ export function UsageView() {
                           const cell = split?.get(driver);
                           // No split for the bucket at all means the plane never sent one; a
                           // missing driver inside a split means that driver had nothing.
+                          // In the narrow two-line layout the drivers join line 2, each named,
+                          // since there is no detail view to find them in.
                           return (
-                            <td className="num cell-extra cell-dim" key={driver}>
+                            <td className="num cell-meta cell-dim" data-driver={driver} key={driver}>
+                              <span className="cell-label" aria-hidden="true">{driverLabel(driver)}: </span>
                               {!split ? "—" : formatMetric(cell ? metricValue(cell, metric) : 0, metric)}
                             </td>
                           );
                         })}
                         <td className="num cell-status">{formatMetric(metricValue(bucket, metric), metric)}</td>
                         <td className="num cell-meta cell-dim">
+                          <span className="cell-label" aria-hidden="true">{metric === "cost" ? "Tokens" : "Cost"}: </span>
                           {metric === "cost" ? formatCompactTokens(processedTokens(bucket)) : formatMoney(bucket.costUsd)}
                         </td>
                       </tr>

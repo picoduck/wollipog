@@ -832,9 +832,11 @@ test("an unsplit response from an older plane is shown honestly and the window c
   assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /not split by driver/);
   assert.equal(container.querySelector(".usage-legend"), null, "no legend claims a split that does not exist");
   const dayTable = container.querySelector(".usage-breakdown-section table")!;
-  const driverCells = [...dayTable.querySelectorAll("tbody tr")].flatMap((row) => [...row.querySelectorAll("td.cell-extra")].slice(0, 2));
+  const driverCells = [...dayTable.querySelectorAll("tbody tr")].flatMap((row) => [...row.querySelectorAll("td[data-driver]")].slice(0, 2));
   assert.ok(driverCells.length >= 4);
-  assert.ok(driverCells.every((cell) => cell.textContent === "—"), "unknown per-driver values read as dashes, not $0.00");
+  // The value, without the cell's own label (shown only in the narrow two-line layout).
+  const value = (cell: Element) => (cell.textContent ?? "").slice(cell.querySelector(".cell-label")?.textContent?.length ?? 0);
+  assert.ok(driverCells.every((cell) => value(cell) === "—"), "unknown per-driver values read as dashes, not $0.00");
 
   const hit = container.querySelector(".usage-chart-hit") as SVGRectElement;
   await act(async () => {
