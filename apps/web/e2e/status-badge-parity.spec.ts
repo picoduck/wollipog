@@ -19,8 +19,8 @@ import { expect, test, type Page } from "@playwright/test";
  * measure 0 and pass.
  *
  * A `running` session never carries a change status (`sessionMayShowChangeStatus`), so the
- * four-dimension scenario runs on an idle session and Running is measured in its own pass. Both
- * wear the same `.status-badge` class, which is the thing being sized.
+ * four-dimension scenario runs on an idle session and Running is measured in its own pass. Every
+ * one is the same `.status` recipe (docs/design-system.md §11.1), which is the thing being sized.
  */
 
 const MOBILE_WIDTHS = [320, 360, 390] as const;
@@ -79,9 +79,10 @@ async function readHeader(page: Page) {
     const header = document.querySelector<HTMLElement>(".session-detail > .detail-head")!;
     const statuses = header.querySelector<HTMLElement>(".session-header-statuses")!;
     const measured = [...statuses.querySelectorAll<HTMLElement>(
-      ".session-status-indicators > .status-badge, " +
-      ".change-status-indicators > .status-badge, " +
-      ":scope > .background-work-badge",
+      ".session-status-indicators > .status, " +
+      ".change-status-indicators > .status, " +
+      ":scope > .status[data-group='background-work'], " +
+      ":scope > .active-subagents-badge",
     )];
     const label = (element: HTMLElement) => element.getAttribute("aria-label") ?? "";
     const box = (element: HTMLElement) => element.getBoundingClientRect();
@@ -94,7 +95,9 @@ async function readHeader(page: Page) {
     for (const element of measured) element.hidden = false;
     const read = (element: HTMLElement) => {
       const style = getComputedStyle(element);
-      const dot = box(element.querySelector<HTMLElement>(".status-dot2, .background-work-dot")!);
+      // The dot is the recipe's `::before`, so it is read from the pseudo-element's computed box.
+      const dotStyle = getComputedStyle(element, "::before");
+      const dot = { width: parseFloat(dotStyle.width), height: parseFloat(dotStyle.height) };
       return {
         height: box(element).height,
         width: box(element).width,
@@ -106,7 +109,7 @@ async function readHeader(page: Page) {
         dotHeight: dot.height,
       };
     };
-    const backgroundBadge = statuses.querySelector<HTMLElement>(":scope > .background-work-badge");
+    const backgroundBadge = statuses.querySelector<HTMLElement>(":scope > .status[data-group='background-work']");
     const geometry = {
       lifecycle: read(statuses.querySelector<HTMLElement>('[aria-label^="Activity:"]')!),
       background: backgroundBadge ? read(backgroundBadge) : null,
@@ -129,7 +132,7 @@ async function readHeader(page: Page) {
       pageOverflows: document.documentElement.scrollWidth > window.innerWidth,
       // A line of its own for background work is exactly what this used to be.
       dedicatedBackgroundLine: header.querySelectorAll(
-        ":scope > .background-work-badge, :scope > .session-header-background-work",
+        ":scope > .status[data-group='background-work'], :scope > .session-header-background-work",
       ).length,
     };
   });
@@ -149,10 +152,10 @@ for (const width of WIDTHS) {
   test(`the Session header keeps background work inline beside its lifecycle badge at ${width}px`, async ({ page }) => {
     await loadInbox(page, width);
     await openSession(page);
-    const badge = page.locator(".session-header-statuses > .background-work-badge");
+    const badge = page.locator(".session-header-statuses > .status[data-group='background-work']");
     await expect(badge).toHaveCount(1);
-    const wideLabel = badge.locator(".background-work-label-wide");
-    const narrowLabel = badge.locator(".background-work-label-narrow");
+    const wideLabel = badge.locator(".status-label-wide");
+    const narrowLabel = badge.locator(".status-label-narrow");
     if (width <= 390) {
       await expect(narrowLabel).toBeVisible();
       await expect(narrowLabel).toHaveText("Job");
@@ -186,6 +189,8 @@ for (const width of WIDTHS) {
     expect(header.pageOverflows).toBe(false);
 
     expectMatchingBadges(header.geometry.background!, header.geometry.lifecycle);
+    // The retired 10px `--text-2xs` is gone: every header badge is the recipe's 11px (§2.3, §11.1).
+    expect(header.geometry.lifecycle.fontSize).toBe("11px");
 
     // The same parity against Running itself, which an idle session cannot show at the same time as
     // a change status.
@@ -225,7 +230,7 @@ for (const width of MOBILE_WIDTHS) {
     // The disclosure carries the whole status set, displaced or not.
     await trigger.click();
     const dialog = page.getByRole("dialog", { name: "Session Statuses" });
-    await expect(dialog.locator(".background-work-badge")).toHaveAccessibleName(BACKGROUND_LABEL);
+    await expect(dialog.locator(".status[data-group='background-work']")).toHaveAccessibleName(BACKGROUND_LABEL);
     for (const displaced of header.hidden) {
       await expect(dialog.locator(`[aria-label="${displaced}"]`)).toBeVisible();
     }
@@ -239,8 +244,8 @@ for (const width of [390, 1280] as const) {
     await loadInbox(page, width);
     await applyStatuses(page, { status: "running", backgroundWorkState: "running" });
     const row = page.locator(".inbox-row").filter({ hasText: "Alpha Session" });
-    await expect(row.locator(".inbox-status-pill.running")).toBeVisible();
-    await expect(row.locator(".background-work-badge")).toBeVisible();
+    await expect(row.locator('[aria-label="Activity: Running"]')).toBeVisible();
+    await expect(row.locator(".status[data-group='background-work']")).toBeVisible();
 
     const card = await row.evaluate((element) => {
       const read = (node: HTMLElement) => {
@@ -252,8 +257,8 @@ for (const width of [390, 1280] as const) {
         };
       };
       return {
-        pill: read(element.querySelector<HTMLElement>(".inbox-status-pill.running")!),
-        badge: read(element.querySelector<HTMLElement>(".background-work-badge")!),
+        pill: read(element.querySelector<HTMLElement>('[aria-label="Activity: Running"]')!),
+        badge: read(element.querySelector<HTMLElement>(".status[data-group='background-work']")!),
         cardHeight: element.getBoundingClientRect().height,
       };
     });
@@ -264,7 +269,7 @@ for (const width of [390, 1280] as const) {
 
     // #782's contract still holds: sizing the badge did not grow the card.
     await applyStatuses(page, { status: "running", backgroundWorkState: "resumed" });
-    await expect(row.locator(".background-work-badge")).toHaveCount(0);
+    await expect(row.locator(".status[data-group='background-work']")).toHaveCount(0);
     const withoutBackgroundWork = await row.evaluate((element) =>
       element.getBoundingClientRect().height);
     expect(Math.abs(card.cardHeight - withoutBackgroundWork)).toBeLessThanOrEqual(0.5);
@@ -280,7 +285,7 @@ for (const width of [390, 1280] as const) {
 test("remeasuring the row keeps focus on the badge it keeps", async ({ page }) => {
   await loadInbox(page, 390);
   await openSession(page);
-  const badge = page.locator(".session-header-statuses > .background-work-badge");
+  const badge = page.locator(".session-header-statuses > .status[data-group='background-work']");
   await expect(badge).toBeVisible();
   await badge.focus();
   await expect(badge).toBeFocused();

@@ -8,7 +8,7 @@ import {
   type SessionStatus,
   type SessionView,
 } from "@wollipog/protocol";
-import { statusMeta } from "./format.js";
+import { statusMeta } from "./status-meta.js";
 import { isOpenReviewRequestState, sessionChangeStatus, sessionMayShowChangeStatus } from "./session-status.js";
 
 const lifecycleCases: Array<[SessionStatus, string]> = [
@@ -23,12 +23,12 @@ const lifecycleCases: Array<[SessionStatus, string]> = [
 ];
 
 test("canonical lifecycle labels cover every state and use a neutral unknown fallback", () => {
-  assert.deepEqual(lifecycleCases.map(([status]) => statusMeta(status).label), lifecycleCases.map(([, label]) => label));
-  assert.equal(statusMeta("future_state" as SessionStatus).label, "Status Unavailable");
-  assert.equal(statusMeta("constructor" as SessionStatus).label, "Status Unavailable");
-  assert.equal(statusMeta("queued").busy, false);
-  assert.equal(statusMeta("starting").busy, true);
-  assert.equal(statusMeta("running").busy, true);
+  assert.deepEqual(lifecycleCases.map(([status]) => statusMeta("session", status).label), lifecycleCases.map(([, label]) => label));
+  assert.equal(statusMeta("session", "future_state" as SessionStatus).label, "Status Unavailable");
+  assert.equal(statusMeta("session", "constructor" as SessionStatus).label, "Status Unavailable");
+  assert.equal(statusMeta("session", "queued").pulse, false);
+  assert.equal(statusMeta("session", "starting").pulse, true);
+  assert.equal(statusMeta("session", "running").pulse, true);
 });
 
 function session(
@@ -359,6 +359,6 @@ test("running and attention remain independent dimensions", () => {
     options: [],
     kind: "question",
   });
-  assert.equal(statusMeta(runningQuestion.status).label, "Running");
+  assert.equal(statusMeta("session", runningQuestion.status).label, "Running");
   assert.equal(sessionAttentionStatus(runningQuestion)?.label, "Answer Required");
 });

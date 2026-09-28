@@ -58,7 +58,7 @@ test("pending reminders make Active and Snoozed mutually exclusive across every 
     }), "Answer Required"],
     ["orphaned background work", session("orphaned", "idle", {
       backgroundWorkState: "orphaned",
-    }), "Background Work Orphaned"],
+    }), "Background Work Lost"],
     ["pending result", session("pending-result", "idle", {
       backgroundDeliveries: [{
         parentTurnId: "parent",

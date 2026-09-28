@@ -1,4 +1,6 @@
 import { RunsIcon } from "./Icons.js";
+import { StatusBadge } from "./StatusBadge.js";
+import { statusMeta } from "../status-meta.js";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { RunView, WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
 import { useStoreActions, useStoreSelector } from "../store.js";
@@ -311,7 +313,7 @@ function RunDetailContent({ runId }: { runId: string }) {
               <strong>{workflow?.definition.name ?? "Workflow"}</strong>
               {workflow && <span> v{workflow.workflowVersion} · {workflow.transitionCount}/{workflow.definition.maxTransitions} Transitions</span>}
             </div>
-            {workflow && <span className={`workflow-status workflow-${workflow.status}`}>{titleCaseLabel(workflow.status.replace("_", " "))}</span>}
+            {workflow && <StatusBadge meta={statusMeta("workflow", workflow.status)} />}
           </div>
           {workflowError && <div className="tl-error">{workflowError}</div>}
           {workflow && (

@@ -179,7 +179,7 @@ export const CSS_SURFACE = {
   "border-radius", "border-right", "border-style", "border-top", "border-top-color",
   "border-top-left-radius", "border-top-right-radius", "bottom", "box-shadow", "box-sizing",
   "clip", "clip-path", "color", "color-scheme", "column-gap", "contain", "container", "content",
-  "counter-increment", "counter-reset", "cursor", "display", "fill", "filter", "flex",
+  "counter-increment", "counter-reset", "cursor", "display", "fill", "flex",
   "flex-basis", "flex-direction", "flex-shrink", "flex-wrap", "font", "font-display",
   "font-family", "font-size", "font-style", "font-variant-numeric", "font-weight", "gap",
   "grid-area", "grid-column", "grid-row",
@@ -207,7 +207,7 @@ export const CSS_SURFACE = {
   ],
   /** Function names appearing in declaration values. */
   functions: [
-  "attr", "brightness", "calc", "clamp", "color-mix", "conic-gradient", "counter",
+  "attr", "calc", "clamp", "color-mix", "conic-gradient", "counter",
   "cubic-bezier", "env", "format", "inset", "linear-gradient", "max", "min", "minmax", "rect",
   "repeat", "rgb", "rgba", "rotate", "scale", "scaley", "translatex", "translatey", "url", "var",
   ],

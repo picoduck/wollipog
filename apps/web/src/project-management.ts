@@ -1,4 +1,5 @@
 import type { ProjectLocationAvailability, ProjectLocationView, ProjectView, ResourceScope, RunnerView } from "@wollipog/protocol";
+import { statusMeta, type StatusMeta } from "./status-meta.js";
 import { workspaceLocationKey } from "./projects.js";
 
 export type ProjectVisibilityFilter = "all" | "visible" | "hidden";
@@ -38,13 +39,12 @@ export function projectLocationMembershipState(
   };
 }
 
+export function projectAvailabilityMeta(availability: ProjectLocationAvailability): StatusMeta {
+  return statusMeta("project_location", availability);
+}
+
 export function projectAvailabilityLabel(availability: ProjectLocationAvailability): string {
-  switch (availability) {
-    case "available": return "Available";
-    case "runner_offline": return "Runner Offline";
-    case "workspace_missing": return "Workspace Missing";
-    case "runner_removed": return "Runner Removed";
-  }
+  return projectAvailabilityMeta(availability).label;
 }
 
 export function filterManagedProjects(

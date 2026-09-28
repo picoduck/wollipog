@@ -260,7 +260,7 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   const back = header.locator(".back");
   await expect(back).toHaveAccessibleName("Back to Inbox");
   await expect(back).toHaveAttribute("title", "Back to inbox");
-  await expect(header.locator(".status-badge").first()).toBeVisible();
+  await expect(header.locator(".status").first()).toBeVisible();
 
   const geometry = await header.evaluate((element) => {
     const rect = (node: Element) => {
@@ -844,8 +844,8 @@ for (const viewport of [
         };
         const clippingPane = element.closest(".inbox-preview-pane");
         const allBadges = [...element.querySelectorAll<HTMLElement>(
-          ".session-header-statuses .status-badge, " +
-          ".session-header-statuses > .background-work-badge",
+          ".session-header-statuses .status, " +
+          ".session-header-statuses > .status[data-group='background-work']",
         )];
         const badges = allBadges.filter((node) => !node.hidden).map((node) => ({
           ...rect(node),
@@ -1154,7 +1154,7 @@ test("a fitting phone status row does not render an overflow control", async ({ 
   await openSession(page, "preview-follow", { sessionShell: "1" });
   const header = page.locator(".session-detail > .detail-head");
   await expect(header.locator('.session-status-overflow-trigger')).toHaveCount(0);
-  await expect(header.locator(".session-header-statuses .status-badge")).toBeVisible();
+  await expect(header.locator(".session-header-statuses .status")).toBeVisible();
 });
 
 test("measured background work leaves phone actions hittable when no change status is available", async ({ page }) => {
@@ -1170,7 +1170,7 @@ test("measured background work leaves phone actions hittable when no change stat
   await expect(header.locator(".change-status-indicators")).toHaveCount(0);
   await expect(header.getByRole("status", { name: "Background Work: Waiting on External Job" })).toBeVisible();
   const metrics = await header.evaluate((element) => {
-    const badge = element.querySelector(".background-work-badge")!.getBoundingClientRect();
+    const badge = element.querySelector(".status[data-group='background-work']")!.getBoundingClientRect();
     const statuses = element.querySelector(".session-header-statuses")!.getBoundingClientRect();
     const actions = element.querySelector(".detail-actions")!.getBoundingClientRect();
     const isTopmostAtCenter = (target: Element) => {
@@ -1462,7 +1462,7 @@ test("shared Pod headers keep their trailing controls out of the back-button tra
     const rect = (selector: string) => element.querySelector(selector)!.getBoundingClientRect();
     const back = rect(".detail-bar-back");
     const title = rect(".detail-bar-title");
-    const status = rect(".pod-status");
+    const status = rect(".status");
     const more = rect('[aria-label="More Actions"]');
     return {
       display: getComputedStyle(element).display,
@@ -1474,7 +1474,7 @@ test("shared Pod headers keep their trailing controls out of the back-button tra
       moreCenter: more.y + more.height / 2,
       moreRight: more.right,
       barRight: element.getBoundingClientRect().right,
-      badges: element.querySelectorAll(".pod-status").length,
+      badges: element.querySelectorAll(".status").length,
     };
   });
   const desktop = await geometry();

@@ -12,7 +12,8 @@ import {
   type ArchiveBrowserFilters,
 } from "../archive-browser.js";
 import { discardComposerDraft } from "../composer-drafts.js";
-import { formatRecordedRelativeTime, formatRecordedTimestamp, statusMeta } from "../format.js";
+import { formatRecordedRelativeTime, formatRecordedTimestamp } from "../format.js";
+import { statusMeta } from "../status-meta.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { viewPath } from "../navigation.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
@@ -21,6 +22,7 @@ import { useFeedback } from "./FeedbackProvider.js";
 import { InboxIcon, SearchIcon } from "./Icons.js";
 import { Empty, Spinner } from "./common.js";
 import { PageHeader } from "./PageHeader.js";
+import { StatusBadge } from "./StatusBadge.js";
 import { Select } from "./ui/ChoiceControls.js";
 
 const DEFAULT_FILTERS: ArchiveBrowserFilters = {
@@ -42,13 +44,7 @@ function facetName(value: string): string {
 }
 
 function LifecycleBadge({ status }: { status: SessionStatus }) {
-  const metadata = statusMeta(status);
-  return (
-    <span className={`status-badge ${metadata.className}`}>
-      <span className={`status-dot2 ${metadata.busy ? "pulse" : ""}`} aria-hidden="true" />
-      {canonicalLifecycleLabel(status)}
-    </span>
-  );
+  return <StatusBadge meta={statusMeta("session", status)} />;
 }
 
 function plainSnippet(snippet: string | undefined): string | null {
@@ -120,6 +116,7 @@ export function ArchivedSessionsView() {
   const liveSessions = useStoreSelector((state) => state.sessions);
   const projects = useStoreSelector((state) => state.projects);
   const conn = useStoreSelector((state) => state.conn);
+  const runners = useStoreSelector((state) => state.runners);
   const refreshCatalogRef = useRef<() => Promise<void>>(async () => {});
   const liveRevalidationTimerRef = useRef<number | null>(null);
   const revalidatedLiveVersionsRef = useRef(new Map<string, string>());
@@ -565,12 +562,15 @@ export function ArchivedSessionsView() {
                       {snippet && filters.query.trim().length >= 3 && <small>{snippet}</small>}
                     </td>
                     <td><div className="archive-state-badges">
-                      <span className={`archive-badge${session.archived ? " is-archived" : ""}`}>{session.archived ? "Archived" : "Not Archived"}</span>
+                      {session.archived
+                        ? <StatusBadge meta={statusMeta("session", "archived")} />
+                        : <StatusBadge tone="neutral" noDot label="Not Archived" />}
                       <LifecycleBadge status={session.status} />
-                      {stopFailed && <span className="archive-badge" title={session.archiveOperation?.failure?.message}>
-                        Stop Failed
-                      </span>}
-                      {stopPending && <span className="archive-badge">Stopping</span>}
+                      {stopFailed && <StatusBadge meta={statusMeta("session", "stop_failed")}
+                        title={session.archiveOperation?.failure?.message} />}
+                      {stopPending && <StatusBadge meta={statusMeta("session", runners.get(session.runnerId)?.status === "offline"
+                        ? "stop_waiting_for_runner"
+                        : "stop_pending")} />}
                     </div></td>
                     <td>{rowMetadata.project}</td>
                     <td>{rowMetadata.location}</td>

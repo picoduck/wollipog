@@ -184,7 +184,8 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   assert.match(pageText(), /All Machines/);
   assert.match(pageText(), /All Agents/);
   assert.match(pageText(), /Build Machine/);
-  assert.match(pageText(), /Deployed/);
+  // A deployed copy is Linked in the shared skill-deployment vocabulary (docs/design-system.md §11.2).
+  assert.match(pageText(), /Linked/);
   assert.match(pageText(), /Unmanaged Skills/);
   assert.match(pageText(), /local-notes/);
   assert.match(pageText(), /Work/, "account-scoped inventory names the credential home without exposing its path");
@@ -260,7 +261,7 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   mountPoint.remove();
 });
 
-test("SkillsView shows Drift for an edited deployed copy and resolves it by import or confirmed restore", async () => {
+test("SkillsView shows Edited for an edited deployed copy and resolves it by import or confirmed restore", async () => {
   const digest = "d".repeat(64);
   const observedDigest = "e".repeat(64);
   const drifted: RunnerSkillsResponse = {
@@ -351,11 +352,11 @@ test("SkillsView shows Drift for an edited deployed copy and resolves it by impo
   });
   await act(settle);
   const item = container.querySelector<HTMLButtonElement>(".skills-item");
-  assert.match(item?.textContent ?? "", /Drift/, "the skill list marks a skill with an edited copy");
+  assert.match(item?.textContent ?? "", /Edited/, "the skill list marks a skill with an edited copy");
   await act(async () => { item!.click(); });
   await act(settle);
   const machine = container.querySelector(".skills-machine");
-  assert.match(machine?.querySelector(".status-badge")?.textContent ?? "", /^Drift$/);
+  assert.match(machine?.querySelector(".status")?.textContent ?? "", /^Edited$/);
   assert.match(machine?.textContent ?? "", /Edited Copies/);
   assert.match(machine?.textContent ?? "", /Agent Invocable Copy/);
   const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>("button")]
@@ -570,7 +571,7 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
   const entry = [...container.querySelectorAll<HTMLButtonElement>(".skills-item")]
     .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
   assert.ok(entry, "an older runner's unreported copies are not hidden behind an empty list");
-  assert.equal(entry!.querySelector(".status-badge"), null, "no count is claimed");
+  assert.equal(entry!.querySelector(".status"), null, "no count is claimed");
   await act(async () => { entry!.click(); });
   await act(settle);
   assert.match(container.querySelector('[aria-label="Orphaned Copies"]')?.textContent ?? "",
@@ -666,7 +667,7 @@ test("SkillsView marks built-in skills recommended, assigns one in a step, and d
     },
   } as unknown as ApiClient;
   const view = await mountSkills(client, "skills-built-in");
-  const badges = () => [...view.listItem("using-wollipog")!.querySelectorAll(".status-badge")].map((badge) => badge.textContent);
+  const badges = () => [...view.listItem("using-wollipog")!.querySelectorAll(".status")].map((badge) => badge.textContent);
   assert.deepEqual(badges(), ["Built-In", "Recommended"]);
 
   await view.click(view.listItem("using-wollipog"));
@@ -762,7 +763,7 @@ test("a recommendation dismissed in the Skills view or the Inbox notice is dismi
   assert.deepEqual(notice.names(), []);
   await notice.unmount();
   const reopened = await mountSkills(client, "skills-recommendation-surfaces-2");
-  const badges = (name: string) => [...reopened.listItem(name)!.querySelectorAll(".status-badge")].map((badge) => badge.textContent);
+  const badges = (name: string) => [...reopened.listItem(name)!.querySelectorAll(".status")].map((badge) => badge.textContent);
   assert.deepEqual(badges("orchestrate-issues"), ["Built-In"]);
   await reopened.click(reopened.listItem("orchestrate-issues"));
   assert.match(reopened.container.querySelector('[aria-label="Built-In Skill"]')?.textContent ?? "", /You dismissed this recommendation\./);

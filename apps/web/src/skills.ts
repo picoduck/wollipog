@@ -2,6 +2,7 @@
  * skills REST surface, assignment presentation, per-machine deploy-status derivation, folder-upload
  * → SkillFile[] conversion, and client-side draft validation mirroring the protocol validators. */
 
+import { statusMeta, type StatusMeta } from "./status-meta.js";
 import {
   SKILL_MAX_FILE_BYTES,
   SKILL_MAX_FILES,
@@ -424,25 +425,16 @@ export function skillEligibleAgents(agents: ReadonlyArray<AgentDefinition>, incl
 
 export type SkillDeployStatus = "deployed" | "pending" | "drift" | "conflict" | "error" | "offline";
 
-export interface SkillDeployBadge {
+/** The chip's words and tone come from the shared skill-deployment vocabulary (§11.2): a deployed
+ * copy is Linked, and a hand-edited one is Edited. */
+export interface SkillDeployBadge extends StatusMeta {
   status: SkillDeployStatus;
-  label: string;
-  /** Existing status-badge tone class, so the chips reuse the app's one badge vocabulary. */
-  className: string;
   detail?: string;
 }
 
-const DEPLOY_BADGES: Record<SkillDeployStatus, { label: string; className: string }> = {
-  deployed: { label: "Deployed", className: "st-done" },
-  pending: { label: "Pending", className: "st-running" },
-  drift: { label: "Drift", className: "st-input" },
-  conflict: { label: "Conflict", className: "st-input" },
-  error: { label: "Error", className: "st-failed" },
-  offline: { label: "Offline", className: "st-stopped" },
-};
-
 function badge(status: SkillDeployStatus, detail?: string): SkillDeployBadge {
-  return { status, ...DEPLOY_BADGES[status], ...(detail ? { detail } : {}) };
+  const meta = statusMeta("skill", status === "deployed" ? "linked" : status === "drift" ? "edited" : status);
+  return { status, ...meta, ...(detail ? { detail } : {}) };
 }
 
 /** One skill × one machine → the chip the detail pane shows.

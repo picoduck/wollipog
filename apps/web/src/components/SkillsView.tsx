@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { StatusBadge } from "./StatusBadge.js";
+import { statusMeta } from "../status-meta.js";
 import { SKILL_DESCRIPTION_MAX_CHARS, runnerSupportsProtocol, type RunnerView, type SkillDriftState, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
@@ -499,7 +501,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
             >
               <span className="skills-item-name">
                 Orphaned Copies
-                {orphanCount > 0 && <span className="status-badge st-input skills-item-drift">{orphanCount}</span>}
+                {orphanCount > 0 && <StatusBadge tone="warning" noDot label={orphanCount} className="skills-item-drift" />}
               </span>
               <span className="skills-item-description">Edited copies on machines that no library skill shows</span>
             </button>
@@ -531,9 +533,9 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
                 >
                   <span className="skills-item-name">
                     {skill.name}
-                    {driftedSkillNames.has(skill.name) && <span className="status-badge st-input skills-item-drift">Drift</span>}
-                    {skill.builtIn && <span className="status-badge st-queued skills-item-drift">Built-In</span>}
-                    {skillRecommended(skill) && <span className="status-badge st-running skills-item-drift">Recommended</span>}
+                    {driftedSkillNames.has(skill.name) && <StatusBadge meta={statusMeta("skill", "edited")} className="skills-item-drift" />}
+                    {skill.builtIn && <StatusBadge tone="neutral" noDot label="Built-In" className="skills-item-drift" />}
+                    {skillRecommended(skill) && <StatusBadge tone="neutral" noDot label="Recommended" className="skills-item-drift" />}
                   </span>
                   {skill.description && <span className="skills-item-description">{skill.description}</span>}
                 </button>
@@ -740,10 +742,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
                     <article className="skills-machine" key={runner.runnerId}>
                       <div className="skills-machine-head">
                         <strong>{machineLabels.get(runner.runnerId) ?? runner.runnerId}</strong>
-                        <span className={`status-badge ${badge.className}`} title={badge.detail}>
-                          <span className="status-dot2" aria-hidden="true" />
-                          {badge.label}
-                        </span>
+                        <StatusBadge meta={badge} title={badge.detail} />
                         <button
                           type="button"
                           className="btn sm"

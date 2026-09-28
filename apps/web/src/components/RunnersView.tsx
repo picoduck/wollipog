@@ -31,6 +31,8 @@ import {
 } from "../runners.js";
 
 import { CopyButton, Empty, Modal, Spinner } from "./common.js";
+import { StatusBadge } from "./StatusBadge.js";
+import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { OnboardRunnerDialog } from "./OnboardRunnerDialog.js";
 import { AddBoxDialog } from "./AddBoxDialog.js";
 import { useFeedback } from "./FeedbackProvider.js";
@@ -578,19 +580,8 @@ function NativeRunnerHealth({
   );
 }
 
-function boxStatusLabel(s: BoxStatus): string {
-  switch (s) {
-    case "bootstrapping":
-      return "Bootstrapping…";
-    case "deploying":
-      return "Deploying Runner…";
-    case "online":
-      return "Online";
-    case "offline":
-      return "Offline";
-    case "failed":
-      return "Failed";
-  }
+function boxStatusMeta(status: BoxStatus): StatusMeta {
+  return statusMeta("machine", status);
 }
 
 export interface LifecycleConflictPresentation {
@@ -1433,7 +1424,7 @@ export function BoxCard({
         <div className="runner-id">
           <span className={`status-dot ${dot}`} />
           <h2>{display.name}</h2>
-          <span className={`connection-status status-${dot}`}>{boxStatusLabel(box.status)}</span>
+          <StatusBadge meta={boxStatusMeta(box.status)} />
         </div>
       </div>
       <div className="runner-head-right runner-card-actions">
@@ -1491,7 +1482,7 @@ export function BoxCard({
         </div>
         <div>
           <dt>Status</dt>
-          <dd>{boxStatusLabel(box.status)}</dd>
+          <dd>{boxStatusMeta(box.status).label}</dd>
         </div>
       </dl>
       {box.status === "failed" && box.lastError && <div className="empty-sub box-error">{box.lastError}</div>}
@@ -1552,9 +1543,7 @@ export function NativeRunnerCard({
           {/* Full literals so the stylesheet guardrails see these classes rendered. */}
           <span className={runner.status === "online" ? "status-dot online" : "status-dot offline"} />
           <h2>{runnerDisplay(runner, undefined, runner.runnerId).name}</h2>
-          <span className={`connection-status status-${runner.status}`}>
-            {runner.status === "online" ? "Online" : "Offline"}
-          </span>
+          <StatusBadge meta={statusMeta("machine", runner.status === "online" ? "online" : "offline")} />
         </div>
       </div>
       <div className="runner-head-right runner-card-actions">

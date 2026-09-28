@@ -12,6 +12,8 @@ import type {
 import { CODEX_COMPLETE_TURN_USAGE_MIN_PROTOCOL } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import { statusMeta, type StatusMeta } from "../status-meta.js";
+import { StatusBadge } from "./StatusBadge.js";
 import { redactPersonalIdentifiers } from "../personal-identifiers.js";
 import { useHasStore, useStoreSelector } from "../store.js";
 import {
@@ -62,15 +64,13 @@ export function subscriptionResetLabel(timestamp: number, now = Date.now()): str
   return `Resets in ${days} days`;
 }
 
-function sourceStateLabel(source: SubscriptionUsageSourceView): string {
-  if (source.freshness === "stale" && source.state === "available") return "Last Known — Stale";
-  return {
-    available: "Available",
-    unavailable: "Temporarily Unavailable",
-    unsupported: "Unsupported",
-    unauthenticated: "Sign-In Required",
-    not_applicable: "Not Applicable",
-  }[source.state];
+/** A provider's availability in the shared usage vocabulary. A stale reading is still the last known
+ * value, so it says so instead of claiming the provider is available now. */
+function usageSourceMeta(source: SubscriptionUsageSourceView): StatusMeta {
+  if (source.freshness === "stale" && source.state === "available") return statusMeta("usage", "stale");
+  return statusMeta("usage", source.state === "unavailable"
+    ? "temporarily_unavailable"
+    : source.state === "unauthenticated" ? "sign_in_required" : source.state);
 }
 
 function remainingFor(bucket: SubscriptionUsageBucket): number | undefined {
@@ -455,13 +455,7 @@ export function UsageView() {
                       </p>
                     )}
                   </div>
-                  <span
-                    className="subscription-state"
-                    data-state={source.state}
-                    data-freshness={source.freshness}
-                  >
-                    {source.freshness === "stale" ? "⚠ " : ""}{sourceStateLabel(source)}
-                  </span>
+                  <StatusBadge meta={usageSourceMeta(source)} />
                   {source.provider === "codex" && source.providerAccountId && (
                     <button
                       type="button"
@@ -509,8 +503,8 @@ export function UsageView() {
                                 <span className="sr-only">Utilization Not Reported</span>
                               </span>
                             )}
-                            {exhausted && <span className="subscription-warning">⛔ Exhausted</span>}
-                            {!exhausted && warning && <span className="subscription-warning">⚠ Approaching Limit</span>}
+                            {exhausted && <StatusBadge meta={statusMeta("usage", "exhausted")} />}
+                            {!exhausted && warning && <StatusBadge meta={statusMeta("usage", "approaching_limit")} />}
                             {bucket.resetsAt && (
                               measured
                                 ? <span title={resetTitle}>{resetText}</span>
@@ -529,7 +523,7 @@ export function UsageView() {
                 )}
                 {source.spendControls?.map((control) => (
                   <p className="subscription-detail" key={control.id}>
-                    {control.reached ? "⛔ " : ""}{control.label}: {control.used ?? "Usage Reported"}{control.limit ? ` of ${control.limit}` : ""}
+                    {control.reached && <><StatusBadge meta={statusMeta("usage", "limit_reached")} />{" "}</>}{control.label}: {control.used ?? "Usage Reported"}{control.limit ? ` of ${control.limit}` : ""}
                     {control.resetsAt ? ` · ${subscriptionResetLabel(control.resetsAt, subscriptionNow)}` : ""}
                   </p>
                 ))}

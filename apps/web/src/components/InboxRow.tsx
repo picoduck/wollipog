@@ -1,17 +1,25 @@
-import type { SessionReminderView, SessionView } from "@wollipog/protocol";
+import { sessionAttentionStatus, type SessionReminderView, type SessionView } from "@wollipog/protocol";
 import { memo, useState } from "react";
 import { useLongPress } from "./interactions.js";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
-import { relativeTime, statusMeta } from "../format.js";
-import {
-  reminderBadgeDescription,
-  reminderBadgeLabel,
-  snoozedSessionAttentionReason,
-} from "../session-reminders.js";
+import { relativeTime } from "../format.js";
+import { snoozedSessionAttentionReason } from "../session-reminders.js";
+import { statusMeta } from "../status-meta.js";
+import { useOptionalStoreSelector } from "../store.js";
 import { branchStateLabel, displayBaseRef, pullRequestStateLabel, sessionBranchState } from "../worktree-identity.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { ActivityStrip } from "./ActivityStrip.js";
-import { AttentionPills, BackgroundWorkBadge, SessionPinIndicator, ThreadDot, quarantinedStatusMeta } from "./common.js";
+import {
+  AttentionPills,
+  BackgroundWorkBadge,
+  ReminderBadge,
+  SessionPinIndicator,
+  SnoozedAttentionBadge,
+  ThreadDot,
+  lifecycleRepeatsAttention,
+  sessionLifecycleMeta,
+} from "./common.js";
+import { StatusBadge } from "./StatusBadge.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { inboxThreadChildrenLabel, type InboxThreadChildren } from "../inbox.js";
 import { useApi } from "../api-context.js";
@@ -121,13 +129,15 @@ function InboxRowInner({
   onWorktreeSetupGenerated,
 }: InboxRowProps) {
   const longPress = useLongPress(({ x, y }) => onSessionMenu(session.id, { x, y }));
-  const stopStatus = session.stopOperation?.status ?? session.archiveStatus;
-  const stopFailed = stopStatus === "stop_failed";
-  const status = stopStatus === "stop_pending"
-    ? { label: "Stopping", className: "st-running", busy: true }
-    : stopFailed
-      ? { label: "Stop Failed", className: "st-failed", busy: false }
-      : quarantinedStatusMeta(session.status, session.historyQuarantine) ?? statusMeta(session.status);
+  // A surface without a store (a harness page) cannot see the runner, so it keeps the conservative
+  // delivery wording rather than claiming the runner is offline.
+  const runnerOnline = useOptionalStoreSelector((state) => state.runners.get(session.runnerId)?.status !== "offline") ?? true;
+  const status = sessionLifecycleMeta(session.status, {
+    archiveStatus: session.archiveStatus,
+    stopOperation: session.stopOperation,
+    historyQuarantine: session.historyQuarantine,
+    runnerOnline,
+  });
   const snoozedAttention = reminder?.state === "pending" ? snoozedSessionAttentionReason(session) : null;
   const extraSnoozedAttention = snoozedAttention?.kind === "orphaned_background_work" ||
       snoozedAttention?.kind === "background_delivery_watchdog"
@@ -327,41 +337,14 @@ function InboxRowInner({
           </span>
           {threeRow && gitLine}
           <span className="inbox-row-signals">
-            <span
-              className={"inbox-status-pill " + (stopFailed ? "failed" : status.busy ? "running" : "activity")}
-              title={"Activity: " + status.label}
-              aria-label={"Activity: " + status.label}
-            >
-              {status.label}
-            </span>
+            {!lifecycleRepeatsAttention(status, sessionAttentionStatus(session)) && (
+              <StatusBadge meta={status} title={"Activity: " + status.label} ariaLabel={"Activity: " + status.label} />
+            )}
             <AttentionPills session={session} compact={threeRow} />
-            {extraSnoozedAttention && (
-              <span
-                className={`inbox-status-pill ${extraSnoozedAttention.kind === "background_delivery_watchdog" &&
-                  extraSnoozedAttention.severity === "pending" ? "background-delivery-pending" : "blocked"}`}
-                title={extraSnoozedAttention.description}
-                aria-label={extraSnoozedAttention.kind === "background_delivery_watchdog"
-                  ? extraSnoozedAttention.accessibleName
-                  : `Attention: ${extraSnoozedAttention.label}`}
-              >
-                {extraSnoozedAttention.label}
-              </span>
-            )}
-            {reminder && (
-              <span
-                className="inbox-status-pill reminder"
-                title={reminderBadgeDescription(reminder)}
-                aria-label={`Reminder: ${reminder.state === "fired"
-                  ? reminderBadgeDescription(reminder)
-                  : reminderBadgeLabel(reminder)}`}
-              >
-                {reminderBadgeLabel(reminder)}
-              </span>
-            )}
+            {extraSnoozedAttention && <SnoozedAttentionBadge reason={extraSnoozedAttention} />}
+            {reminder && <ReminderBadge reminder={reminder} />}
             {stalled && (
-              <span className="inbox-status-pill stalled" aria-label="Stalled: No Activity for at Least 10 Minutes">
-                Stalled
-              </span>
+              <StatusBadge meta={statusMeta("session", "stalled")} ariaLabel="Stalled: No Activity for at Least 10 Minutes" />
             )}
             {pinned ? <SessionPinIndicator /> : containsPinned ? <SessionPinIndicator contains /> : null}
             {unread && <span className="inbox-unread-badge" aria-label="Unread Activity">1</span>}

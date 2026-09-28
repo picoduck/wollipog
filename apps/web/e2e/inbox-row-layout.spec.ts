@@ -381,9 +381,9 @@ for (const width of [390, 1400]) {
       [7, "Waiting on External Job"],
       [8, "Waiting on External Job"],
       [9, "Continuation Pending"],
-      [10, "Orphaned"],
+      [10, "Lost"],
     ] as const) {
-      const badge = page.locator(".inbox-row").nth(index).locator(".background-work-badge");
+      const badge = page.locator(".inbox-row").nth(index).locator(".status[data-group='background-work']");
       await expect(badge).toHaveCount(1);
       await expect(badge).toHaveAttribute("aria-label", `Background Work: ${label}`);
     }
@@ -400,7 +400,7 @@ for (const width of [390, 770, 1000, 1400]) {
       const style = getComputedStyle(row);
       const rightEdge = row.getBoundingClientRect().right - parseFloat(style.paddingRight);
       const pill = row.querySelector<HTMLElement>(".inbox-row-pr-pill")!;
-      const badge = row.querySelector<HTMLElement>(".background-work-badge")!;
+      const badge = row.querySelector<HTMLElement>(".status[data-group='background-work']")!;
       const branch = row.querySelector<HTMLElement>(".inbox-row-branch")!;
       const sender = row.querySelector<HTMLElement>(".inbox-row-sender")!;
       return {
@@ -457,7 +457,7 @@ const measureUnderSignalPressure = (page: import("@playwright/test").Page, count
     const signals = row.querySelector<HTMLElement>(".inbox-row-signals")!;
     for (let index = 0; index < pills; index += 1) {
       const pill = document.createElement("span");
-      pill.className = "inbox-status-pill blocked injected-pressure";
+      pill.className = "status sm t-warning injected-pressure";
       pill.textContent = "Approval Required";
       signals.prepend(pill);
     }
@@ -866,7 +866,7 @@ test("a sender squeezed to nothing takes its icon with it instead of painting ov
     // 770px, and the premise of this test is that the sender really has been spent.
     for (let index = 0; index < 4; index += 1) {
       const pill = document.createElement("span");
-      pill.className = "inbox-status-pill blocked";
+      pill.className = "status sm t-warning";
       pill.textContent = "Approval Required";
       signals.prepend(pill);
     }

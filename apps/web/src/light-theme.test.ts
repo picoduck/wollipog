@@ -416,12 +416,37 @@ function measure(rules: readonly TintedRule[]): { checked: number; unresolved: s
 }
 
 /** Every rule that declares a text colour and a fill, token blocks aside. */
-const TINTED = rulesWith(css, ["color", "background"], ALTERNATE_TEXT_PAINT)
+const TINTED = expandTones(rulesWith(css, ["color", "background"], ALTERNATE_TEXT_PAINT)
   .concat(rulesWith(css, ["color", "background-color"], ALTERNATE_TEXT_PAINT))
   // Only the token blocks themselves. Filtering every selector STARTING WITH `:root` also
   // discarded theme-scoped component rules — `:root[data-theme="dark"] .btn.primary` carries the
   // exact pair this check exists to measure, and was silently dropped.
-  .filter(({ selector }) => !TOKEN_BLOCK_SELECTORS.has(selector));
+  .filter(({ selector }) => !TOKEN_BLOCK_SELECTORS.has(selector)));
+
+/**
+ * A tinted component reads `--tone` and `--tone-text`, which each tone class (`.t-info` and the
+ * rest, docs/design-system.md §2.2) sets locally. Measured once with the root defaults, the status
+ * badge would prove only its neutral tone, so a rule that reads them becomes one pair per tone
+ * class, and the wash strength is the token block's `--tint`.
+ */
+function expandTones(rules: TintedRule[]): TintedRule[] {
+  const tones = rulesWith(css, ["--tone", "--tone-text"])
+    .filter(({ selector }) => /^\.t-[a-z]+$/.test(selector));
+  assert.ok(tones.length >= 5, `expected the five tone classes, found ${tones.length}`);
+  const tint = TOKENS["wollipog:dark"].get("--tint");
+  assert.ok(tint, "--tint must be a token");
+  return rules.flatMap((rule) => {
+    const reads = Object.values(rule.declarations).some((value) => /var\(--(tone|tint)\b/.test(value));
+    if (!reads) return [rule];
+    return tones.map((tone) => ({
+      selector: `${rule.selector}${tone.selector}`,
+      declarations: Object.fromEntries(Object.entries(rule.declarations).map(([prop, value]) => [prop, value
+        .replaceAll("var(--tone-text)", tone.declarations["--tone-text"]!)
+        .replaceAll("var(--tone)", tone.declarations["--tone"]!)
+        .replaceAll("var(--tint)", tint!)])),
+    }));
+  });
+}
 
 test("every declared colour/fill pair clears WCAG AA in both themes", () => {
   assert.ok(TINTED.length > 40,
@@ -578,7 +603,9 @@ function impliedFillPairs(source: string): TintedRule[] {
 
 test("a colour-only rule clears AA on the fill its own element's base rule paints", () => {
   const pairs = impliedFillPairs(css);
-  assert.ok(pairs.length > 30, `expected many colour-only rules over a base fill, found ${pairs.length}`);
+  // Thirty-odd since #1802 folded the per-surface badge tone classes (`.st-running` and the rest)
+  // into the status recipe, whose tones the paired check above measures one by one.
+  assert.ok(pairs.length >= 25, `expected many colour-only rules over a base fill, found ${pairs.length}`);
   for (const chip of [".atag.broken", ".atag.discovered"]) {
     assert.ok(pairs.some(({ selector }) => selector === chip), `${chip} must be measured over .atag's fill`);
   }

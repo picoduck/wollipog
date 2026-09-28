@@ -1070,8 +1070,8 @@ test("automation cards are collapsed by default and render only their headers", 
       alpha.querySelector(".automation-card-action")?.textContent,
       "Create rich-agent session on runner-1",
     );
-    assert.equal(alpha.querySelector(".automation-state")?.textContent, "Enabled");
-    assert.equal(beta.querySelector(".automation-state")?.textContent, "Paused");
+    assert.equal(alpha.querySelector(".status.t-success")?.textContent, "Enabled");
+    assert.equal(beta.querySelector(".status.t-neutral")?.textContent, "Paused");
     assert.equal(fixture.container.querySelectorAll(".automation-card-body").length, 0);
     assert.equal(fixture.container.querySelectorAll(".automation-facts").length, 0);
     assert.equal(fixture.container.querySelectorAll(".automation-card-actions").length, 0);

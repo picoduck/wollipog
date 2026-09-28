@@ -353,7 +353,9 @@ test("busy rows show activity while stalled approval remains distinct and access
   assert.equal(container.querySelectorAll(".activity-strip").length, 3, "idle sessions have no activity strip");
   assert.equal(rows[1]!.classList.contains("stalled"), true);
   assert.match(rows[0]!.textContent ?? "", /Running/);
-  assert.match(rows[1]!.textContent ?? "", /Awaiting Input/);
+  // One status per entity, and attention outranks lifecycle (docs/design-system.md §11.1): the
+  // approval pill already says the session needs the user, so "Awaiting Input" is not said again.
+  assert.doesNotMatch(rows[1]!.textContent ?? "", /Awaiting Input/);
   assert.match(rows[1]!.textContent ?? "", /Approval Required/);
   assert.match(rows[2]!.textContent ?? "", /Awaiting Prompt/);
   assert.doesNotMatch(rows[2]!.textContent ?? "", /Diff Ready|Ready for Review/);

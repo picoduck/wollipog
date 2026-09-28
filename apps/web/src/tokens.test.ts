@@ -75,7 +75,7 @@ test("--shadow is themed in the palette and light blocks, and nowhere else", () 
 test("the type scale is the intended rem ladder", () => {
   const tokens = scope(TOKENS);
   const expected: ReadonlyArray<[string, string, number]> = [
-    ["--text-2xs", "0.625rem", 10], ["--text-xs", "0.6875rem", 11],
+    ["--text-xs", "0.6875rem", 11],
     ["--text-sm", "0.75rem", 12], ["--text-base", "0.8125rem", 13],
     ["--text-md", "0.875rem", 14], ["--text-lg", "1rem", 16],
     ["--text-xl", "1.25rem", 20], ["--text-2xl", "1.5rem", 24],
@@ -83,6 +83,15 @@ test("the type scale is the intended rem ladder", () => {
   for (const [name, value, px] of expected) {
     assert.equal(only(tokens, name, "the token block"), value, `${name} should be ${value} (${px}px)`);
     assert.equal(Number.parseFloat(value) * 16, px, `${name} must equal ${px}px at a 16px root`);
+  }
+});
+
+test("the retired type sizes are neither declared nor read", () => {
+  // docs/design-system.md §2.3 and §19.1: --text-2xs (10px) and --text-status (11.5px) collapse into
+  // --text-xs (11px). A declaration left behind invites the next badge to read it again.
+  for (const name of ["--text-2xs", "--text-status"]) {
+    assert.equal(new RegExp(`${name}\\s*:`).test(css), false, `${name} must not be declared`);
+    assert.equal(css.includes(`var(${name})`), false, `${name} must not be read`);
   }
 });
 
@@ -153,7 +162,7 @@ test("the token block declares every promised member of every scale", () => {
   // it is no longer global at all. Enumerate the whole contract.
   const tokens = new Set(scope(TOKENS).keys());
   const promised = [
-    "--text-2xs", "--text-xs", "--text-sm", "--text-base", "--text-md", "--text-lg", "--text-xl", "--text-2xl",
+    "--text-xs", "--text-sm", "--text-base", "--text-md", "--text-lg", "--text-xl", "--text-2xl",
     "--leading-tight", "--leading-normal", "--leading-relaxed",
     "--weight-normal", "--weight-medium", "--weight-semibold", "--weight-bold",
     "--type-page-title", "--type-title", "--type-section", "--type-body", "--type-body-strong",

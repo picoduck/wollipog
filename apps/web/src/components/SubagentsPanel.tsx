@@ -11,17 +11,12 @@ import {
 import type { TimelineItem } from "../timeline.js";
 import { isTimelineSessionActive, useTimelineClock } from "../timeline-clock.js";
 import { EventTimeline } from "./EventTimeline.js";
+import { statusMeta } from "../status-meta.js";
 
-const LIFECYCLE_LABELS: Record<SubagentLifecycle, string> = {
-  starting: "Starting",
-  running: "Running",
-  waiting: "Waiting",
-  completed: "Completed",
-  failed: "Failed",
-  interrupted: "Interrupted",
-  unreachable: "No Longer Reachable",
-  unknown: "Unknown",
-};
+/** A subagent's lifecycle in the shared job vocabulary. An unreachable subagent is Lost (§11.2). */
+export function subagentLifecycleLabel(lifecycle: SubagentLifecycle): string {
+  return statusMeta("job", lifecycle === "unreachable" ? "lost" : lifecycle).label;
+}
 
 function elapsed(descriptor: SubagentDescriptor, now: number): string {
   if (descriptor.directUsage?.durationMs != null) return formatDuration(descriptor.directUsage.durationMs);
@@ -173,7 +168,7 @@ export function SubagentsPanel({
                 <span className="subagent-list-copy">
                   <span className="subagent-list-title">{descriptor.title}</span>
                   <span className="subagent-list-meta">
-                    <span>{LIFECYCLE_LABELS[descriptor.lifecycle]}</span>
+                    <span>{subagentLifecycleLabel(descriptor.lifecycle)}</span>
                     {descriptor.availability === "recorded" && <span>Recorded</span>}
                     {duration && <span>{duration}</span>}
                     {tokens != null && <span>{tokens.toLocaleString()} Tokens</span>}
@@ -211,7 +206,7 @@ export function SubagentsPanel({
             <div>
               <div id={labelId} className="subagent-detail-title">{selected.title}</div>
               <div id={metaId} className="subagent-detail-meta">
-                {LIFECYCLE_LABELS[selected.lifecycle]}
+                {subagentLifecycleLabel(selected.lifecycle)}
                 {` · ${subagentOutputLabel(selected, runnerOnline)}`}
                 {selected.childIds.length > 0 ? ` · ${selected.childIds.length} Nested` : ""}
               </div>

@@ -1,4 +1,6 @@
 import { PodsIcon } from "./Icons.js";
+import { StatusBadge } from "./StatusBadge.js";
+import { statusMeta } from "../status-meta.js";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   isTerminal,
@@ -237,7 +239,7 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
         <button key={pod.id} type="button" className="run-card" onClick={() => navigate({ name: "pod", id: pod.id })}>
           <div className="run-card-head">
             <span className="run-title">{pod.title}</span>
-            <span className={`pod-status pod-status-${pod.status}`}>{titleCaseLabel(pod.status)}</span>
+            <StatusBadge meta={statusMeta("pod", pod.status)} />
           </div>
           <div className="run-prompt">{pod.objective || "Manual collaboration pod"}</div>
           <div className="muted sm">
@@ -640,7 +642,7 @@ function PodDetailContent({ podId }: { podId: string }) {
         title={pod.title}
         backLabel="Back to Collaboration Pods"
         onBack={() => navigate({ name: "pods" })}
-        status={<span className={`pod-status pod-status-${pod.status}`}>{titleCaseLabel(pod.status)}</span>}
+        status={<StatusBadge meta={statusMeta("pod", pod.status)} />}
         // Closing is destructive, so it lives only in ⋯ (§3.3).
         menu={active ? [{
           label: "Close Pod",
@@ -657,9 +659,7 @@ function PodDetailContent({ podId }: { podId: string }) {
             <strong>Orchestration Controls</strong>
             <p className="muted sm">Durable role arbitration with per-member context cursors, bounded summaries, loop detection, and hard turn caps.</p>
           </div>
-          <span className={`pod-orchestration-status pod-orchestration-status-${orchestrationState?.status ?? "idle"}`}>
-            {titleCaseLabel(orchestrationState?.status ?? "idle")}
-          </span>
+          <StatusBadge meta={statusMeta("pod", orchestrationState?.status ?? "idle")} />
         </div>
         <div className="pod-orchestration-grid">
           <label className="field compact">
@@ -756,9 +756,7 @@ function PodDetailContent({ podId }: { podId: string }) {
             <strong>Reconcile Committed Work</strong>
             <p className="muted sm">Merge one clean, idle member worktree into another on the same runner and workspace. Conflicts roll the target back unchanged.</p>
           </div>
-          <span className={`pod-orchestration-status pod-orchestration-status-${reconciliationRunning ? "running" : "idle"}`}>
-            {titleCaseLabel(reconciliationRunning ? "running" : "ready")}
-          </span>
+          <StatusBadge meta={statusMeta("pod", reconciliationRunning ? "running" : "ready")} />
         </div>
         <div className="pod-reconcile-grid">
           <label className="field compact">

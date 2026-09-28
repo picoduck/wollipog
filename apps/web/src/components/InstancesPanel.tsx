@@ -1,7 +1,8 @@
 import React, { useRef, useState } from "react";
 import type { InstanceProfile } from "../desktop-instances.js";
 import { relativeTime } from "../format.js";
-import { useInstances, type InstanceAvailability } from "../instances-context.js";
+import { instanceAvailabilityMeta, useInstances } from "../instances-context.js";
+import { StatusBadge } from "./StatusBadge.js";
 import { CloseIcon, EditIcon, PlusIcon, RefreshIcon, UpdateIcon } from "./Icons.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { RemoteInstanceDialog } from "./RemoteInstanceDialog.js";
@@ -11,15 +12,6 @@ type DialogState =
   | { mode: "edit"; profile: InstanceProfile }
   | { mode: "repair"; profile: InstanceProfile };
 
-const STATUS_LABELS: Record<InstanceAvailability, string> = {
-  saved: "Saved",
-  connecting: "Connecting",
-  online: "Online",
-  offline: "Offline",
-  "authentication-required": "Authentication Required",
-  incompatible: "Incompatible",
-  "missing-credential": "Authentication Required",
-};
 
 function lastConnected(value: string | undefined): string {
   if (!value) return "Never";
@@ -98,8 +90,8 @@ export function InstancesPanel() {
                 <div className="instance-card-title">
                   <span className={`instance-status-dot status-${status}`} aria-hidden="true" />
                   <h2>{profile.label}</h2>
-                  {active && <span className="connection-status status-current">Current</span>}
-                  <span className={`connection-status status-${status}`}>{STATUS_LABELS[status]}</span>
+                  {active && <StatusBadge tone="neutral" noDot label="Current" />}
+                  <StatusBadge meta={instanceAvailabilityMeta(status)} />
                 </div>
               </div>
               <dl className="instance-meta">

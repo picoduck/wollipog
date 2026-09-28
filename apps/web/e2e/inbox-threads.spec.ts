@@ -62,10 +62,10 @@ test("a family sorts as one unit with the parent first, children indent under it
   await expect(page.locator(".inbox-row-shell.thread-child.thread-last")).toHaveCount(1);
   // The three-request session: one pill per kind, the question first, the permissions counted.
   const approval = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
-  await expect(approval.locator(".inbox-status-pill.blocked")).toHaveText(["Answer Required", "Approval Required2"]);
-  await expect(approval.locator(".inbox-status-pill.blocked").nth(1))
+  await expect(approval.locator(".status.t-warning")).toHaveText(["Answer Required", "Approval Required2"]);
+  await expect(approval.locator(".status.t-warning").nth(1))
     .toHaveAttribute("aria-label", "Attention: Approval Required, 2 Requests");
-  await expect(approval.locator(".inbox-status-pill.blocked").nth(1))
+  await expect(approval.locator(".status.t-warning").nth(1))
     .toHaveAttribute("title", "Main Agent: Run npm test\nVerifier · Tester: Run pnpm test");
   await expect(page.locator(".attention-requests")).toHaveCount(0);
 
@@ -178,7 +178,7 @@ const measureLineOne = (shells: Element[]) => shells.map((shell) => {
       left: Math.round(box.left),
       height: Math.round(box.height),
       child: shell.classList.contains("thread-child"),
-      pills: row.querySelectorAll(".inbox-status-pill").length,
+      pills: row.querySelectorAll(".inbox-row-signals .status").length,
       timeCount: row.querySelectorAll("time").length,
       timeOnLineThree: time.parentElement!.classList.contains("inbox-row-meta"),
       timeText: time.textContent,
@@ -203,9 +203,9 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   await expect(parentRow(page).locator(".inbox-thread-family-text")).toBeHidden();
   // One compact attention pill on a phone: the top-priority kind and how many more requests.
   const approval = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
-  await expect(approval.locator(".inbox-status-pill.blocked")).toHaveCount(1);
-  await expect(approval.locator(".inbox-status-pill.blocked")).toHaveAttribute("aria-label", "Attention: Answer Required, 3 Requests");
-  await expect(approval.locator(".inbox-status-pill-count")).toHaveText("+2");
+  await expect(approval.locator(".status.t-warning")).toHaveCount(1);
+  await expect(approval.locator(".status.t-warning")).toHaveAttribute("aria-label", "Attention: Answer Required, 3 Requests");
+  await expect(approval.locator(".status-count")).toHaveText("+2");
   const geometry = await page.locator(".inbox-row-shell").evaluateAll(measureLineOne);
   // Every phone card measures the same, whatever its pills (#917), and indenting changes nothing.
   expect(new Set(geometry.map((row) => row.height)).size, JSON.stringify(geometry)).toBe(1);
@@ -218,12 +218,13 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
     expect(row.timeHeight, "the time is on one line").toBeLessThanOrEqual(20);
     expect(row.timeOverflowRight).toBeLessThanOrEqual(0.5);
   }
-  // With line one carrying only the sender and its pills, the three-pill card (#603: Awaiting
-  // Input, Approval Required, Stalled) shows the agent's whole first word beside the icon — the
-  // criterion #916 could not meet while the time sat on that line. Asserted against the word's
-  // own rendered width, so CI's wider fallback face cannot make it a pixel argument.
+  // With line one carrying only the sender and its pills, the crowded card (#603: Approval
+  // Required and Stalled; its Awaiting Input is not repeated beside the attention pill, §11.1)
+  // shows the agent's whole first word beside the icon — the criterion #916 could not meet while the
+  // time sat on that line. Asserted against the word's own rendered width, so CI's wider fallback
+  // face cannot make it a pixel argument.
   const three = geometry.find((row) => row.title?.startsWith("#603"))!;
-  expect(three.pills).toBe(3);
+  expect(three.pills).toBe(2);
   expect(three.firstWord).toBe("Claude");
   expect(three.firstWordWidth).toBeGreaterThan(0);
   expect(three.firstWordClipped, `"${three.firstWord}" is clipped by ${three.firstWordClipped}px`)
@@ -301,7 +302,7 @@ test("Board cards carry the per-kind pills and the family chip without nesting",
   await expect(card.locator(".inbox-thread-family-text")).toHaveText("4 Children · 2 Awaiting Input");
   await expect(card.locator(".inbox-thread-dot")).toHaveCount(4);
   const approval = page.locator(".card", { hasText: "Approval Session" });
-  await expect(approval.locator(".inbox-status-pill.blocked")).toHaveText(["Answer Required", "Approval Required2"]);
+  await expect(approval.locator(".status.t-warning")).toHaveText(["Answer Required", "Approval Required2"]);
   await expect(page.locator(".attention-requests")).toHaveCount(0);
   await expect(page.locator(".card.thread-child")).toHaveCount(0);
   await page.screenshot({ path: `${EVIDENCE}/board.png`, fullPage: true });

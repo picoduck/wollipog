@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { StatusBadge } from "./StatusBadge.js";
 import type { RunnerView } from "@wollipog/protocol";
 import { skillRecommended, type SkillSummary } from "../skills.js";
 import { Select } from "./ui/ChoiceControls.js";
@@ -46,7 +47,7 @@ export function SkillBuiltInSection({ skill, runners, machineLabels, busy, onAss
     <section className="skills-section skills-built-in" aria-label="Built-In Skill">
       <div className="skills-section-heading">
         <h4>Built-In Skill</h4>
-        {recommended && <span className="status-badge st-running">Recommended</span>}
+        {recommended && <StatusBadge tone="neutral" noDot label="Recommended" />}
       </div>
       <p className="skills-hint">
         Ships with Wollipog {skill.builtIn.release}. Each release updates it on machines that track the latest version;

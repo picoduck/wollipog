@@ -25,7 +25,7 @@ test("Inbox rows name their pending request and F2 opens the session on it witho
   const row = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
   // No disclosure under the card (#896): the pill says what is pending, and F2 goes to it.
   await expect(row.locator(".attention-requests")).toHaveCount(0);
-  await expect(row.locator(".inbox-status-pill.blocked")).toHaveAttribute("aria-label", "Attention: Approval Required");
+  await expect(row.locator(".status.t-warning")).toHaveAttribute("aria-label", "Attention: Approval Required");
   await row.locator(".inbox-row").click();
   const grid = page.getByRole("grid", { name: "Sessions", exact: true });
   await grid.focus();
@@ -196,7 +196,7 @@ test("the Inbox footer centers readable counts on phones and keeps shortcuts tra
 test("a returned session explains its snooze and offers state-aware actions", async ({ page }) => {
   await openHarness(page);
   const row = page.locator(".inbox-row-shell", { hasText: "Review Session" });
-  const reminder = row.locator(".inbox-status-pill.reminder");
+  const reminder = row.locator(".status[aria-label^=\"Reminder:\"]");
   await expect(reminder).toHaveText("Returned from Snooze");
   await expect(reminder).toHaveAttribute("aria-label", /Snooze ended/);
   await expect(reminder).not.toContainText("Overdue");

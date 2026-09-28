@@ -679,7 +679,9 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   const pageText = () => container.textContent ?? "";
   assert.match(pageText(), /Subscription Usage/);
   assert.match(pageText(), /15% Remaining/);
-  assert.match(pageText(), /⚠ Approaching Limit/);
+  // State words carry no glyph prefix; the badge's tone and dot carry the severity.
+  assert.match(pageText(), /Approaching Limit/);
+  assert.doesNotMatch(pageText(), /[⚠⛔]/);
   assert.match(pageText(), /Last Known — Stale/);
   assert.match(pageText(), /Resets in 2 hours/);
   assert.ok(pageText().includes(new Date(now + 90 * 60_000).toLocaleString()), "the exact reset uses the viewer's local time");
@@ -696,7 +698,8 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   assert.equal(refreshes, 1);
   assert.equal(refreshTargets[0], undefined);
   assert.match(pageText(), /0% Remaining/);
-  assert.match(pageText(), /⛔ Exhausted/);
+  assert.match(pageText(), /Exhausted/);
+  assert.doesNotMatch(pageText(), /[⚠⛔]/);
   assert.match(pageText(), /Subscription usage refreshed/);
   const refreshAccount = [...container.querySelectorAll("button")]
     .find((button) => button.textContent?.trim() === "Refresh Account") as HTMLButtonElement;

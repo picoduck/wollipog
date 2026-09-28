@@ -10,12 +10,15 @@ import {
   type SessionStatus,
   type SessionView,
   type SessionAttentionGroup,
+  type SessionReminderView,
   sessionAttentionBreakdown,
 } from "@wollipog/protocol";
 import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
-import { statusMeta, type StatusMeta } from "../format.js";
+import { statusMeta, type StatusMeta } from "../status-meta.js";
 import type { SessionChangeStatus } from "../session-status.js";
+import { reminderBadgeDescription, reminderBadgeLabel, type SnoozedAttentionReason } from "../session-reminders.js";
 import { CheckIcon, CopyIcon, PinIcon, WarningIcon } from "./Icons.js";
+import { StatusBadge, StatusCount } from "./StatusBadge.js";
 
 export { Modal, type ModalSize } from "./Modal.js";
 
@@ -165,38 +168,53 @@ export function CopyButton({
   );
 }
 
-export function StatusBadge({ status, archiveStatus, archiveOperation, stopOperation, historyQuarantine, ariaLabel }: {
+/**
+ * The lifecycle a session's badge shows. A Stop operation outranks the provider lifecycle it is
+ * stopping; a quarantined conversation outranks "Awaiting Prompt".
+ *
+ * A pending Stop whose runner is offline is not being delivered: the operation stays pending (so
+ * runtime capacity may still be held) but nothing is progressing until the runner reconnects, so it
+ * reads "Stop Waiting for Runner" without a pulse rather than the pulsing "Stop Pending" (#208).
+ * `runnerOnline` defaults to true so a surface that cannot see the runner keeps the conservative
+ * delivery wording.
+ */
+export function sessionLifecycleMeta(
+  status: SessionStatus,
+  options: {
+    archiveStatus?: ArchiveStatus;
+    archiveOperation?: ArchiveOperationView;
+    stopOperation?: StopOperationView;
+    historyQuarantine?: SessionView["historyQuarantine"];
+    runnerOnline?: boolean;
+  } = {},
+): StatusMeta {
+  const operation = options.stopOperation ?? options.archiveOperation;
+  const operationStatus = operation?.status ?? options.archiveStatus;
+  if (operationStatus === "stop_pending") {
+    return statusMeta("session", options.runnerOnline === false ? "stop_waiting_for_runner" : "stop_pending");
+  }
+  if (operationStatus === "stop_failed") return statusMeta("session", "stop_failed");
+  return quarantinedStatusMeta(status, options.historyQuarantine) ?? statusMeta("session", status);
+}
+
+export function SessionStatusBadge({ status, archiveStatus, archiveOperation, stopOperation, historyQuarantine, runnerOnline, ariaLabel }: {
   status: SessionStatus;
   archiveStatus?: ArchiveStatus;
   archiveOperation?: ArchiveOperationView;
   stopOperation?: StopOperationView;
   historyQuarantine?: SessionView["historyQuarantine"];
+  runnerOnline?: boolean;
   ariaLabel?: string;
 }) {
-  const m = sessionStatusBadgeMeta(status, archiveStatus, archiveOperation, stopOperation, historyQuarantine);
+  const meta = sessionLifecycleMeta(status, { archiveStatus, archiveOperation, stopOperation, historyQuarantine, runnerOnline });
   const operation = stopOperation ?? archiveOperation;
-  return (
-    <span className={"status-badge " + m.className} title={operation?.failure?.message} aria-label={ariaLabel}>
-      <span className={"status-dot2 " + (m.busy ? "pulse" : "")} />
-      {m.label}
-    </span>
-  );
+  return <StatusBadge meta={meta} title={operation?.failure?.message} ariaLabel={ariaLabel} />;
 }
 
-function sessionStatusBadgeMeta(
-  status: SessionStatus,
-  archiveStatus?: ArchiveStatus,
-  archiveOperation?: ArchiveOperationView,
-  stopOperation?: StopOperationView,
-  historyQuarantine?: SessionView["historyQuarantine"],
-) {
-  const operation = stopOperation ?? archiveOperation;
-  const operationStatus = operation?.status ?? archiveStatus;
-  return operationStatus === "stop_pending"
-    ? { label: "Stopping", className: "st-running", busy: true }
-    : operationStatus === "stop_failed"
-      ? { label: "Stop Failed", className: "st-failed", busy: false }
-      : quarantinedStatusMeta(status, historyQuarantine) ?? statusMeta(status);
+/** One status badge per entity (docs/design-system.md §11.1): attention outranks lifecycle, so when
+ * an attention badge already says the session needs the user, "Awaiting Input" is not said again. */
+export function lifecycleRepeatsAttention(lifecycle: StatusMeta, attention: unknown): boolean {
+  return Boolean(attention) && lifecycle.label === statusMeta("session", "input_required").label;
 }
 
 /** A quarantined conversation is idle only in the sense that nothing is running. It can never
@@ -206,7 +224,7 @@ export function quarantinedStatusMeta(
   historyQuarantine: SessionView["historyQuarantine"],
 ): StatusMeta | null {
   if (!historyQuarantine || status === "completed" || status === "failed" || status === "stopped") return null;
-  return { label: "Quarantined", className: "st-failed", busy: false };
+  return statusMeta("session", "quarantined");
 }
 
 export function AttentionBadge({ session, ariaLabel, onOpen }: {
@@ -220,20 +238,11 @@ export function AttentionBadge({ session, ariaLabel, onOpen }: {
   const campaignCount = !session.pendingApproval && attention.label === "Needs Your Input"
     ? session.orchestratorCampaign?.pendingRequests?.human ?? 0
     : 0;
-  const count = campaignCount > 0
-    ? <span className="inbox-status-pill-count" aria-hidden="true">{campaignCount}</span>
-    : null;
-  if (onOpen) return <button type="button" className="status-badge st-input" title={attention.description}
-    aria-label={ariaLabel ?? attention.label} onClick={onOpen}>
-    <span className="status-dot2" aria-hidden="true" />{attention.label}
-    {count}
-  </button>;
   return (
-    <span className="status-badge st-input" title={attention.description} aria-label={ariaLabel ?? attention.label}>
-      <span className="status-dot2" aria-hidden="true" />
-      {attention.label}
-      {count}
-    </span>
+    <StatusBadge meta={statusMeta("attention", attention.kind)} label={attention.label}
+      title={attention.description} ariaLabel={ariaLabel ?? attention.label} onClick={onOpen}>
+      {campaignCount > 0 && <StatusCount>{campaignCount}</StatusCount>}
+    </StatusBadge>
   );
 }
 
@@ -270,9 +279,8 @@ export function AttentionPills({ session, compact = false }: {
   if (groups.length === 1 && groups[0]!.count <= 1) {
     const attention = sessionAttentionStatus(session);
     return attention
-      ? <span className="inbox-status-pill blocked" title={attention.description} aria-label={"Attention: " + attention.label}>
-        {attention.label}
-      </span>
+      ? <StatusBadge meta={statusMeta("attention", attention.kind)} label={attention.label}
+        title={attention.description} ariaLabel={"Attention: " + attention.label} />
       : null;
   }
   const describe = (group: SessionAttentionGroup) =>
@@ -282,23 +290,39 @@ export function AttentionPills({ session, compact = false }: {
     const total = groups.reduce((sum, group) => sum + group.count, 0);
     const listed = groups.flatMap(describe).slice(0, 10);
     const more = total - listed.length;
-    return <span className="inbox-status-pill blocked"
+    return <StatusBadge meta={statusMeta("attention", top.kind)} label={top.label}
       title={[...listed, ...(more > 0 ? [`${more} more`] : [])].join("\n")}
-      aria-label={`Attention: ${top.label}, ${total} Requests`}>
-      {top.label}
-      <span className="inbox-status-pill-count" aria-hidden="true">+{total - 1}</span>
-    </span>;
+      ariaLabel={`Attention: ${top.label}, ${total} Requests`}>
+      <StatusCount>+{total - 1}</StatusCount>
+    </StatusBadge>;
   }
   return <>{groups.map((group) => {
     const listed = describe(group);
     const more = group.count - listed.length;
     const title = [...listed, ...(more > 0 ? [`${more} more`] : [])].join("\n");
-    return <span key={group.label} className="inbox-status-pill blocked" title={title}
-      aria-label={`Attention: ${group.label}${group.count > 1 ? `, ${group.count} Requests` : ""}`}>
-      {group.label}
-      {group.count > 1 && <span className="inbox-status-pill-count" aria-hidden="true">{group.count}</span>}
-    </span>;
+    return <StatusBadge key={group.label} meta={statusMeta("attention", group.kind)} label={group.label} title={title}
+      ariaLabel={`Attention: ${group.label}${group.count > 1 ? `, ${group.count} Requests` : ""}`}>
+      {group.count > 1 && <StatusCount>{group.count}</StatusCount>}
+    </StatusBadge>;
   })}</>;
+}
+
+function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>["kind"]): string {
+  return kind === "runner_capacity"
+    ? "Runner Capacity"
+    : kind === "agent_quota"
+      ? "Agent Quota"
+      : kind === "target_quota"
+        ? "Target Quota"
+        : kind === "exclusive_group"
+          ? "Provider Slot"
+          : kind === "request_weight"
+            ? "Agent Weight"
+            : kind === "active_turn_capacity"
+              ? "Active Turn Capacity"
+              : kind === "capacity_lock"
+                ? "Capacity Sync"
+                : "Queue Order";
 }
 
 export function SessionStatusIndicators({
@@ -311,70 +335,49 @@ export function SessionStatusIndicators({
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
     "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait" | "queueHold" | "holds" |
     "orchestratorCampaign" | "pendingRequestOwners">;
+  /** The session's runner is offline. */
   disconnected?: boolean;
   onOpenAttention?: () => void;
   onOpenCampaignRequests?: () => void;
   /** Board cards show the per-kind pills; headers keep the single badge that opens the panel. */
   attention?: "badge" | "pills";
 }) {
-  const lifecycle = sessionStatusBadgeMeta(
-    session.status,
-    session.archiveStatus,
-    session.archiveOperation,
-    session.stopOperation,
-    session.historyQuarantine,
-  );
+  const lifecycle = sessionLifecycleMeta(session.status, {
+    archiveStatus: session.archiveStatus,
+    archiveOperation: session.archiveOperation,
+    stopOperation: session.stopOperation,
+    historyQuarantine: session.historyQuarantine,
+    runnerOnline: !disconnected,
+  });
   const attentionStatus = sessionAttentionStatus(session);
   const humanCampaignRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
   const orchestratorActions = session.orchestratorCampaign?.pendingRequests?.orchestrator ?? 0;
   const openCampaignRequests = onOpenCampaignRequests ?? onOpenAttention;
+  const queueHoldReason = session.status === "queued" && !session.capacityWait && session.queueHold
+    ? session.holds?.find((hold) => hold.holdId === session.queueHold?.holdId)?.reason
+    : undefined;
   return (
     <span className="session-status-indicators" role="group" aria-label="Session Status">
-      <StatusBadge
+      {!lifecycleRepeatsAttention(lifecycle, attentionStatus) && <SessionStatusBadge
         status={session.status}
         archiveStatus={session.archiveStatus}
         archiveOperation={session.archiveOperation}
         stopOperation={session.stopOperation}
         historyQuarantine={session.historyQuarantine}
+        runnerOnline={!disconnected}
         ariaLabel={`Activity: ${lifecycle.label}`}
-      />
+      />}
       {session.status === "queued" && session.capacityWait && (
-        <span
-          className="status-badge st-idle"
+        <StatusBadge tone="neutral" label={queueReasonLabel(session.capacityWait.kind)}
           title={session.capacityWait.description}
-          aria-label={`Queue Reason: ${session.capacityWait.description}`}
-        >
-          <span className="status-dot2" aria-hidden="true" />
-          {session.capacityWait.kind === "runner_capacity"
-            ? "Runner Capacity"
-            : session.capacityWait.kind === "agent_quota"
-              ? "Agent Quota"
-              : session.capacityWait.kind === "target_quota"
-                ? "Target Quota"
-                : session.capacityWait.kind === "exclusive_group"
-                  ? "Provider Slot"
-                  : session.capacityWait.kind === "request_weight"
-                    ? "Agent Weight"
-                    : session.capacityWait.kind === "active_turn_capacity"
-                      ? "Active Turn Capacity"
-                      : session.capacityWait.kind === "capacity_lock"
-                        ? "Capacity Sync"
-                        : "Queue Order"}
-        </span>
+          ariaLabel={`Queue Reason: ${session.capacityWait.description}`} />
       )}
-      {session.status === "queued" && !session.capacityWait && session.queueHold && (() => {
-        const reason = session.holds?.find((hold) => hold.holdId === session.queueHold?.holdId)?.reason;
-        return (
-          <span
-            className="status-badge st-idle"
-            title={reason}
-            aria-label={`Queue Reason: ${reason ?? "A handoff is waiting on background work."}`}
-          >
-            <span className="status-dot2" aria-hidden="true" />
-            {session.queueHold.kind === "worktree_rebind" ? "Worktree Handoff" : "Account Handoff"}
-          </span>
-        );
-      })()}
+      {session.status === "queued" && !session.capacityWait && session.queueHold && (
+        <StatusBadge tone="neutral"
+          label={session.queueHold.kind === "worktree_rebind" ? "Worktree Handoff" : "Account Handoff"}
+          title={queueHoldReason}
+          ariaLabel={`Queue Reason: ${queueHoldReason ?? "A handoff is waiting on background work."}`} />
+      )}
       {attention === "pills"
         ? <AttentionPills session={session} />
         : <AttentionBadge session={session} ariaLabel={attentionStatus
@@ -382,40 +385,25 @@ export function SessionStatusIndicators({
             ? `Needs Your Input: ${humanCampaignRequests} Requests`
             : `Attention: ${attentionStatus.label}`
           : undefined} onOpen={onOpenAttention} />}
-      {humanCampaignRequests > 0 && session.pendingApproval && (openCampaignRequests ? (
-        <button type="button" className="status-badge st-input" onClick={openCampaignRequests}
+      {humanCampaignRequests > 0 && session.pendingApproval && (
+        <StatusBadge meta={statusMeta("attention", "input_required")}
           title={`${humanCampaignRequests} human-owned campaign requests need your input.`}
-          aria-label={`Needs Your Input: ${humanCampaignRequests} Requests`}>
-          <span className="status-dot2" aria-hidden="true" />Needs Your Input
-          <span className="inbox-status-pill-count" aria-hidden="true">{humanCampaignRequests}</span>
-        </button>
-      ) : (
-        <span className="inbox-status-pill blocked"
-          title={`${humanCampaignRequests} human-owned campaign requests need your input.`}
-          aria-label={`Needs Your Input: ${humanCampaignRequests} Requests`}>
-          Needs Your Input
-          <span className="inbox-status-pill-count" aria-hidden="true">{humanCampaignRequests}</span>
-        </span>
-      ))}
-      {orchestratorActions > 0 && (openCampaignRequests ? (
-        <button type="button" className="status-badge st-idle" onClick={openCampaignRequests}
+          ariaLabel={`Needs Your Input: ${humanCampaignRequests} Requests`}
+          onClick={openCampaignRequests}>
+          <StatusCount>{humanCampaignRequests}</StatusCount>
+        </StatusBadge>
+      )}
+      {orchestratorActions > 0 && (
+        <StatusBadge tone="neutral" label="Orchestrator Action"
           title="The Orchestrator has descendant requests assigned to it."
-          aria-label={`Orchestrator Action: ${orchestratorActions} Requests`}>
-          <span className="status-dot2" aria-hidden="true" />Orchestrator Action
-          <span className="inbox-status-pill-count" aria-hidden="true">{orchestratorActions}</span>
-        </button>
-      ) : (
-        <span className="inbox-status-pill" title="The Orchestrator has descendant requests assigned to it."
-          aria-label={`Orchestrator Action: ${orchestratorActions} Requests`}>
-          Orchestrator Action
-          <span className="inbox-status-pill-count" aria-hidden="true">{orchestratorActions}</span>
-        </span>
-      ))}
+          ariaLabel={`Orchestrator Action: ${orchestratorActions} Requests`}
+          onClick={openCampaignRequests}>
+          <StatusCount>{orchestratorActions}</StatusCount>
+        </StatusBadge>
+      )}
       {disconnected && (
-        <span className="status-badge st-failed" title="The session runner is disconnected." aria-label="Health: Disconnected">
-          <span className="status-dot2" aria-hidden="true" />
-          Disconnected
-        </span>
+        <StatusBadge tone="danger" label="Disconnected" title="The session runner is disconnected."
+          ariaLabel="Health: Disconnected" />
       )}
     </span>
   );
@@ -428,42 +416,22 @@ export function ChangeStatusBadge({ change }: { change: SessionChangeStatus | nu
     : [change];
   return (
     <span className="change-status-indicators" role="group" aria-label="Change Status">
-      {indicators.map((indicator) => {
-        const className = indicator.kind === "ready_for_review"
-          ? "st-done"
-          : indicator.kind === "no_changes" ? "st-stopped" : "st-idle";
-        return (
-          <span key={indicator.kind} className={"status-badge " + className}
-            title={indicator.description} aria-label={`Changes: ${indicator.label}`}>
-            <span className="status-dot2" aria-hidden="true" />
-            {indicator.label}
-          </span>
-        );
-      })}
+      {indicators.map((indicator) => (
+        // Ready for Review is a completed state; the others are facts about the worktree (§11.2).
+        <StatusBadge key={indicator.kind} tone={indicator.kind === "ready_for_review" ? "success" : "neutral"}
+          label={indicator.label} title={indicator.description} ariaLabel={`Changes: ${indicator.label}`} />
+      ))}
     </span>
   );
 }
 
-const BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
-  running: "Waiting on External Job",
-  continuation_pending: "Continuation Pending",
-  orphaned: "Orphaned",
-  resumed: "Resumed",
-};
-
-const COMPACT_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
-  running: "Waiting on External Job",
-  continuation_pending: "Continuation Pending",
-  orphaned: "Background Work Orphaned",
-  resumed: "Background Work Resumed",
-};
-
-const NARROW_BACKGROUND_WORK_LABELS: Record<BackgroundWorkState, string> = {
-  running: "Job",
-  continuation_pending: "Pending",
-  orphaned: "Orphaned",
-  resumed: "Resumed",
-};
+/** The accessible name of a background-work badge: "Background Work:" and the state, as every other
+ * background-work status is announced, so lost work is "Background Work: Lost". It always names
+ * background work, because the short visible forms ("Job", "Lost") do not. */
+export function backgroundWorkAccessibleName(state: Exclude<BackgroundWorkState, "resumed">): string {
+  const label = state === "orphaned" ? statusMeta("job", "lost").label : statusMeta("background_work", state).label;
+  return `Background Work: ${label}`;
+}
 
 export function BackgroundWorkBadge({ state, compact = false, responsiveCompact = false, announce = true, onOpen }: {
   state: BackgroundWorkState;
@@ -476,80 +444,67 @@ export function BackgroundWorkBadge({ state, compact = false, responsiveCompact 
   // Rolling deployments may briefly receive the retired terminal sentinel from an older control
   // plane. Completion remains available in the durable Background Work inventory, never here.
   if (state === "resumed") return null;
-  const label = `Background Work: ${BACKGROUND_WORK_LABELS[state]}`;
-  const className = state === "running" || state === "continuation_pending"
-    ? "background-work-badge background-work-running"
-    : "background-work-badge background-work-orphaned";
-  const content = <>
-    <span className="background-work-dot" aria-hidden="true" />
-    {compact ? (
-      <>
-        <span className="sr-only">{label}</span>
-        {responsiveCompact ? (
-          <>
-            <span className="background-work-label-wide" aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>
-            <span className="background-work-label-narrow" aria-hidden="true">{NARROW_BACKGROUND_WORK_LABELS[state]}</span>
-          </>
-        ) : <span aria-hidden="true">{COMPACT_BACKGROUND_WORK_LABELS[state]}</span>}
-      </>
-    ) : label}
-  </>;
+  const meta = statusMeta("background_work", state);
+  const label = backgroundWorkAccessibleName(state);
+  const visible = compact ? (
+    <>
+      <span className="sr-only">{label}</span>
+      {responsiveCompact && meta.shortLabel ? (
+        <>
+          <span className="status-label-wide" aria-hidden="true">{meta.label}</span>
+          <span className="status-label-narrow" aria-hidden="true">{meta.shortLabel}</span>
+        </>
+      ) : <span aria-hidden="true">{meta.label}</span>}
+    </>
+  ) : label;
   if (onOpen) {
     return (
       <>
-        <button
-          type="button"
-          className={className}
-          onClick={onOpen}
-          aria-label={label}
-          aria-controls="right-panel"
-          title={`Open ${label}`}
-        >
-          {content}
-        </button>
+        <StatusBadge meta={meta} label={visible} dataGroup="background-work" ariaLabel={label}
+          ariaControls="right-panel" title={`Open ${label}`} onClick={onOpen} />
         {announce && <span className="sr-only" role="status" aria-label={label}>{label}</span>}
       </>
     );
   }
   return (
-    <span
-      className={className}
-      role={announce ? "status" : undefined}
-      aria-label={label}
-      title={compact ? label : undefined}
-    >
-      {content}
-    </span>
+    <StatusBadge meta={meta} label={visible} dataGroup="background-work" role={announce ? "status" : undefined}
+      ariaLabel={label} title={compact ? label : undefined} />
   );
 }
 
-export function UntrackedBackgroundWorkBadge({ onOpen }: { onOpen?: () => void } = {}) {
-  const content = <>
-    <span className="background-work-dot" aria-hidden="true" />
-    Detached Work: Untracked
-  </>;
-  if (onOpen) {
-    return (
-      <button
-        type="button"
-        className="background-work-badge background-work-untracked"
-        onClick={onOpen}
-        aria-label="Detached Work: Untracked"
-        aria-controls="right-panel"
-        title="Open Background Work details"
-      >
-        {content}
-      </button>
-    );
-  }
+/** The attention a snoozed session keeps showing beside its reminder: lost background work, or a
+ * background result that has not come back. */
+export function SnoozedAttentionBadge({ reason }: {
+  reason: Extract<SnoozedAttentionReason, { kind: "orphaned_background_work" | "background_delivery_watchdog" }>;
+}) {
   return (
-    <span
-      className="background-work-badge background-work-untracked"
-      aria-label="Detached Work: Untracked"
-      title="This provider does not expose a durable detached-work lifecycle. Wollipog cannot promise automatic completion, cancellation, or recovery."
-    >
-      {content}
-    </span>
+    <StatusBadge
+      tone={reason.kind === "orphaned_background_work" ? "danger" : reason.severity === "pending" ? "info" : "warning"}
+      label={reason.label}
+      title={reason.description}
+      ariaLabel={reason.kind === "background_delivery_watchdog" ? reason.accessibleName : `Attention: ${reason.label}`}
+    />
+  );
+}
+
+export function ReminderBadge({ reminder }: { reminder: SessionReminderView }) {
+  return (
+    <StatusBadge meta={statusMeta("session", "snoozed")} label={reminderBadgeLabel(reminder)}
+      title={reminderBadgeDescription(reminder)}
+      ariaLabel={`Reminder: ${reminder.state === "fired" ? reminderBadgeDescription(reminder) : reminderBadgeLabel(reminder)}`} />
+  );
+}
+
+/** Untracked detached work is a fact about the provider, not a state (§11.2), so it is a flag. */
+export function UntrackedBackgroundWorkBadge({ onOpen }: { onOpen?: () => void } = {}) {
+  return (
+    <StatusBadge tone="neutral" noDot label="Detached Work: Untracked" dataGroup="background-work"
+      ariaLabel="Detached Work: Untracked"
+      ariaControls={onOpen ? "right-panel" : undefined}
+      title={onOpen
+        ? "Open Background Work details"
+        : "This provider does not expose a durable detached-work lifecycle. Wollipog cannot promise automatic completion, cancellation, or recovery."}
+      onClick={onOpen} />
   );
 }
 
@@ -559,78 +514,31 @@ export function ActiveSubagentsBadge({ count, onOpen, workers = false }: { count
   const visibleLabel = `${count} ${noun}${count === 1 ? "" : "s"}`;
   const label = `${visibleLabel} Active`;
   return (
-    <button
-      type="button"
-      className="background-work-badge background-work-running active-subagents-badge"
-      onClick={onOpen}
-      aria-label={label}
-      title={label}
-    >
-      <span className="background-work-dot" aria-hidden="true" />
-      <span className="sr-only">{label}</span>
-      <span aria-hidden="true">{visibleLabel}</span>
-    </button>
+    <StatusBadge tone="info" pulse className="active-subagents-badge" ariaLabel={label} title={label} onClick={onOpen}
+      label={<><span className="sr-only">{label}</span><span aria-hidden="true">{visibleLabel}</span></>} />
   );
 }
 
 export function BackgroundDeliveryBadge({ state, onOpen }: { state: BackgroundDeliveryWatchdogState; onOpen?: () => void }) {
   const status = BACKGROUND_DELIVERY_STATUS[state];
-  const accessibleName = backgroundDeliveryAccessibleName(state);
-  // Only a state that progresses on its own reads as pending; a blocked or missing result asks
-  // for a step, so it wears the attention treatment.
-  if (onOpen) return (
-    <button type="button" className={status.severity === "pending"
-      ? "background-work-badge background-delivery-pending"
-      : "background-work-badge background-work-orphaned"}
-      aria-label={accessibleName} aria-controls="right-panel" title={status.description} onClick={onOpen}>
-      <span className="background-work-dot" aria-hidden="true" />
-      {status.label}
-    </button>
-  );
+  // Only a state that progresses on its own reads as working; a blocked or missing result asks
+  // for a step, so it takes the needs-you tone.
   return (
-    <span className={status.severity === "pending"
-      ? "background-work-badge background-delivery-pending"
-      : "background-work-badge background-work-orphaned"}
-      aria-label={accessibleName} title={status.description}>
-      <span className="background-work-dot" aria-hidden="true" />
-      {status.label}
-    </span>
+    <StatusBadge tone={status.severity === "pending" ? "info" : "warning"} label={status.label}
+      dataGroup="background-work" ariaLabel={backgroundDeliveryAccessibleName(state)}
+      ariaControls={onOpen ? "right-panel" : undefined} title={status.description} onClick={onOpen} />
   );
 }
-
-const BACKGROUND_NOTIFICATION_LABELS: Record<BackgroundNotificationReceiptState, string> = {
-  pending: "Push Pending",
-  retry: "Push Retry Pending",
-  service_accepted: "Push Service Accepted",
-  shown: "Notification Displayed",
-  clicked: "Notification Clicked",
-  permanent_failure: "Push Failed",
-  expired: "Push Expired",
-};
 
 export function BackgroundNotificationBadge({ state, onOpen }: {
   state: BackgroundNotificationReceiptState;
   onOpen?: () => void;
 }) {
-  const label = BACKGROUND_NOTIFICATION_LABELS[state];
-  const attention = state === "pending" || state === "retry" || state === "permanent_failure" || state === "expired";
-  const className = attention ? "background-work-badge background-work-orphaned" : "background-work-badge";
-  if (onOpen) return (
-    <button type="button" className={className} data-attention={attention} aria-label={label} aria-controls="right-panel"
-      title={`Open Background Work: ${label}`} onClick={onOpen}>
-      <span className="background-work-dot" aria-hidden="true" />
-      {label}
-    </button>
-  );
+  const meta = statusMeta("notification", state);
   return (
-    <span
-      className={className}
-      data-attention={attention}
-      aria-label={label}
-    >
-      <span className="background-work-dot" aria-hidden="true" />
-      {label}
-    </span>
+    <StatusBadge meta={meta} dataGroup="background-work" ariaLabel={meta.label}
+      ariaControls={onOpen ? "right-panel" : undefined}
+      title={onOpen ? `Open Background Work: ${meta.label}` : undefined} onClick={onOpen} />
   );
 }
 

@@ -51,7 +51,7 @@ async function openDrift(page: Page, width: number, theme: string) {
   });
   await page.goto("/skills-removals-e2e.html?drift=1");
   await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-  await expect(page.locator(".skills-item").getByText("Drift", { exact: true })).toBeVisible();
+  await expect(page.locator(".skills-item").getByText("Edited", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: /code-review/i }).click();
   return { requests };
 }
@@ -60,10 +60,10 @@ const noHorizontalOverflow = (page: Page) =>
   page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth);
 
 for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
-  test(`an edited deployed copy shows Drift and imports as a new version at ${width} in ${theme}`, async ({ page }, info) => {
+  test(`an edited deployed copy shows Edited and imports as a new version at ${width} in ${theme}`, async ({ page }, info) => {
     const { requests } = await openDrift(page, width, theme);
     const machine = page.locator(".skills-machine");
-    await expect(machine.locator(".status-badge")).toHaveText("Drift");
+    await expect(machine.locator(".status")).toHaveText("Edited");
     await expect(machine.getByRole("heading", { name: "Edited Copies" })).toBeVisible();
     await expect(machine).toContainText("Agent Invocable Copy · Version 4f1c00000000");
     await expect(machine).toContainText("Updates and removals are held");
@@ -83,8 +83,8 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await dialog.getByRole("checkbox", { name: "Accept Version Diff and Update Existing Assignments" }).check();
     await importButton.click();
     await expect(dialog).toBeHidden();
-    await expect(machine.locator(".status-badge")).toHaveText("Deployed");
-    await expect(page.locator(".skills-item").getByText("Drift", { exact: true })).toHaveCount(0);
+    await expect(machine.locator(".status")).toHaveText("Linked");
+    await expect(page.locator(".skills-item").getByText("Edited", { exact: true })).toHaveCount(0);
     expect(requests).toEqual([
       { url: "preview", body: { name: "code-review", digest, variant: "agent" } },
       { url: "import", body: { acceptUpdate: true } },
@@ -103,7 +103,7 @@ for (const width of [1280, 320]) {
     await page.screenshot({ path: info.outputPath(`drift-restore-confirm-${width}.png`), fullPage: true });
     expect(await noHorizontalOverflow(page)).toBe(true);
     await confirmation.getByRole("button", { name: "Restore Library Version" }).click();
-    await expect(machine.locator(".status-badge")).toHaveText("Deployed");
+    await expect(machine.locator(".status")).toHaveText("Linked");
     expect(requests).toEqual([{ url: "restore", body: {
       name: "code-review", digest, variant: "agent", observedDigest, confirmation: "explicit",
     } }]);

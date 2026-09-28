@@ -14,15 +14,18 @@ import { useTimelineClock } from "../timeline-clock.js";
 import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAction } from "../background-delivery-status.js";
 import { backgroundJobStopAvailability, type BackgroundJobStopAvailability } from "../background-job-stop.js";
 import { useApi } from "../api-context.js";
+import { statusMeta } from "../status-meta.js";
+import { StatusBadge } from "./StatusBadge.js";
 
+/** A job's current state, as a key of the shared job vocabulary (`statusMeta("job", …)`). */
 export type BackgroundJobCurrentState =
-  | "Running"
-  | "Stalled"
-  | "Completed"
-  | "Failed"
-  | "Killed"
-  | "Orphaned"
-  | "Status Unverified";
+  | "running"
+  | "stalled"
+  | "completed"
+  | "failed"
+  | "killed"
+  | "lost"
+  | "unverified";
 
 export function backgroundJobCurrentState(
   job: ManagedBackgroundJobView,
@@ -31,19 +34,19 @@ export function backgroundJobCurrentState(
   inventorySupported: boolean,
   now?: number,
 ): BackgroundJobCurrentState {
-  if (job.terminalStatus === "completed") return "Completed";
-  if (job.terminalStatus === "failed") return "Failed";
-  if (job.terminalStatus === "killed") return "Killed";
-  if (backgroundWorkState === "orphaned" && job.sourcePresent) return "Orphaned";
+  if (job.terminalStatus === "completed") return "completed";
+  if (job.terminalStatus === "failed") return "failed";
+  if (job.terminalStatus === "killed") return "killed";
+  if (backgroundWorkState === "orphaned" && job.sourcePresent) return "lost";
   const aggregateCurrent = backgroundWorkState === "running" ||
     backgroundWorkState === "continuation_pending";
-  if (!(aggregateCurrent && inventorySupported && runnerOnline && job.sourcePresent)) return "Status Unverified";
+  if (!(aggregateCurrent && inventorySupported && runnerOnline && job.sourcePresent)) return "unverified";
   // A job the runner still lists with no terminal status past the bound is reported, not declared
   // ended (#1651). The control plane marks it on read; the clock keeps the label current between
   // broadcasts.
   const stalled = job.stalledSince != null ||
     (now != null && now - job.registeredAt >= BACKGROUND_JOB_STALL_MS);
-  return stalled ? "Stalled" : "Running";
+  return stalled ? "stalled" : "running";
 }
 
 export function backgroundJobDeliveryStage(job: ManagedBackgroundJobView): string {
@@ -103,9 +106,21 @@ type AcknowledgementFeedback = {
   message: string;
 };
 
+/** A retained delivery receipt's stage. Its words are the delivery pipeline's own; the tone says
+ * whether it finished, needs you, or cannot be verified while the runner is offline. */
+function DeliveryStageBadge({ stage }: { stage: string }) {
+  return stage === "Result Delivered"
+    ? <StatusBadge tone="success" label={stage} />
+    : stage === "Result Missing"
+      ? <StatusBadge meta={statusMeta("job", "result_missing")} />
+      : stage === "Unverified"
+        ? <StatusBadge meta={statusMeta("job", "unverified")} />
+        : <StatusBadge tone="neutral" label={stage} />;
+}
+
 /** Only a job the runner still lists as running can be stopped; any other state has nothing to end. */
 function stoppableJobState(state: BackgroundJobCurrentState): boolean {
-  return state === "Running" || state === "Stalled";
+  return state === "running" || state === "stalled";
 }
 
 type JobStopFeedback =
@@ -216,7 +231,7 @@ function deliveryStage(
   if (deliveries.some((delivery) => delivery.acceptedAt != null)) return "Continuation In Flight";
   if (deliveries.some((delivery) => delivery.submittedAt != null)) return "Continuation Submitted";
   if (deliveries.some((delivery) => delivery.queuedAt != null)) return "Continuation Pending";
-  return "Status Unverified";
+  return "Unverified";
 }
 
 function groupBackgroundHistory(
@@ -336,9 +351,9 @@ export function BackgroundWorkPanel({
           <strong>{inventoryPending
             ? inventoryError ? "Background Work Unavailable" : "Loading Background Work"
             : inventoryProjectionUnknown
-              ? "Background Work Status Unverified"
+              ? "Background Work Unverified"
             : aggregateState
-            ? aggregateState === "orphaned" ? "Background Work Orphaned" : "Background Work Status Available"
+            ? aggregateState === "orphaned" ? "Background Work Lost" : "Background Work Status Available"
             : "No Background Work Recorded"}</strong>
           <p>{inventoryPending
             ? inventoryError
@@ -539,11 +554,11 @@ export function BackgroundWorkPanel({
                   <strong>{deliveryOnly
                     ? deliveryStage(groupDeliveries, locallyAcknowledgedDelivery)
                     : !group.parentTurnKnown
-                      ? "Status Unverified"
+                      ? "Unverified"
                       : terminalCount < jobCount
                         ? "Waiting for Jobs"
                         : groupTruncated && !deliveryComplete
-                        ? "Status Unverified"
+                        ? "Unverified"
                         : deliveryComplete ? "Delivered" : incompleteDeliveryStage}</strong>
                   {notificationStage(groupDeliveries) && <span> · {notificationStage(groupDeliveries)}</span>}
                 </div>
@@ -553,9 +568,7 @@ export function BackgroundWorkPanel({
                       <li className="background-work-delivery" key={delivery.continuationId ?? `${group.key}:${deliveryIndex}`}>
                         <div className="background-work-job-title">
                           <strong>Delivery Receipt {deliveryIndex + 1}</strong>
-                          <span className="background-work-state">
-                            {deliveryStage([delivery], locallyAcknowledgedDelivery)}
-                          </span>
+                          <DeliveryStageBadge stage={deliveryStage([delivery], locallyAcknowledgedDelivery)} />
                         </div>
                         <dl className="background-work-job-meta">
                           <div><dt>Recorded Job Count</dt><dd>{delivery.jobCount}</dd></div>
@@ -575,16 +588,14 @@ export function BackgroundWorkPanel({
                       inventorySupported,
                       now,
                     );
-                    const end = job.terminalObservedAt ?? (state === "Running" || state === "Stalled" ? now : job.lastObservedAt);
+                    const end = job.terminalObservedAt ?? (state === "running" || state === "stalled" ? now : job.lastObservedAt);
                     const duration = formatDuration(Math.max(0, end - job.registeredAt));
                     const jobLabel = `${titleCaseLabel(job.launchType === "unknown" ? "Background Job" : `${job.launchType} Job`)} ${jobIndex + 1}`;
                     return (
                       <li className="background-work-job" key={job.id}>
                         <div className="background-work-job-title">
                           <strong>{jobLabel}</strong>
-                          <span className="background-work-state" data-state={state.toLowerCase().replace(/\s+/g, "-")}>
-                            {state}
-                          </span>
+                          <StatusBadge meta={statusMeta("job", state)} />
                         </div>
                         <dl className="background-work-job-meta">
                           <div><dt>Started</dt><dd>{recordedTime(job.registeredAt, now)}</dd></div>

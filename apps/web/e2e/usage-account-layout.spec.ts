@@ -19,7 +19,7 @@ test("account labels and controls remain readable on narrow usage cards", async 
     const value = account.locator(".personal-identifier-value");
     await expect(value).toHaveText("codex@example.com");
     await expect(account.getByRole("button", { name: "Hide Account Email" })).toBeVisible();
-    await expect(card.locator(".subscription-state")).toBeVisible();
+    await expect(card.locator("header > .status")).toBeVisible();
     await expect(refresh).toBeVisible();
 
     const emailLines = await value.evaluate((element) => {
@@ -43,7 +43,7 @@ test("account labels and controls remain readable on narrow usage cards", async 
     expect(refreshSize.textLines).toBe(1);
 
     if (width === 875) {
-      await card.locator(".subscription-state").evaluate((element) => {
+      await card.locator("header > .status").evaluate((element) => {
         element.textContent = "Temporarily Unavailable";
       });
       const linesWithLongStatus = await value.evaluate((element) => {
@@ -59,7 +59,7 @@ test("account labels and controls remain readable on narrow usage cards", async 
     }, longLabel);
     await expect(value).toHaveText(longLabel);
     await expect(refresh).toBeVisible();
-    await expect(card.locator(".subscription-state")).toBeVisible();
+    await expect(card.locator("header > .status")).toBeVisible();
     const geometry = await value.evaluate((element) => {
       const card = element.closest(".subscription-source")!.getBoundingClientRect();
       const range = document.createRange();
@@ -68,7 +68,7 @@ test("account labels and controls remain readable on narrow usage cards", async 
         linesInsideCard: [...range.getClientRects()].every((line) =>
           line.left >= card.left && line.right <= card.right),
         controlsInsideCard: [...element.closest(".subscription-source")!.querySelectorAll(
-          ".subscription-state, header > .btn, .personal-identifier-toggle",
+          "header > .status, header > .btn, .personal-identifier-toggle",
         )]
           .every((control) => {
             const bounds = control.getBoundingClientRect();

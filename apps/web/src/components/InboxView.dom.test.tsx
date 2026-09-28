@@ -534,19 +534,20 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
   assert.deepEqual(rowTitles(container), ["Session unsnoozed"]);
   assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 1 Session");
   assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 6 Sessions");
-  assert.doesNotMatch(container.textContent ?? "", /Background Work Orphaned|Result Pending/);
+  assert.doesNotMatch(container.textContent ?? "", /Background Work Lost|Result Pending/);
 
   await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
   assert.deepEqual(rowTitles(container), [
     "Session input", "Session watchdog", "Session orphaned", "Session omitted", "Session ordinary", "Session failed",
   ]);
-  assert.match(container.textContent ?? "", /Background Work Orphaned/);
+  assert.match(container.textContent ?? "", /Background Work Lost/);
   assert.match(container.textContent ?? "", /Result Pending/);
-  assert.ok(container.querySelector('[aria-label="Attention: Background Work Orphaned"]'));
+  assert.ok(container.querySelector('[aria-label="Attention: Background Work Lost"]'));
   const watchdogPill = container.querySelector('[aria-label^="Background Work: Result Pending."]');
   assert.ok(watchdogPill);
-  assert.ok(watchdogPill.classList.contains("background-delivery-pending"));
-  assert.equal(watchdogPill.classList.contains("blocked"), false);
+  // A result on its way back reads as working, not as something that needs the user.
+  assert.ok(watchdogPill.classList.contains("t-info"));
+  assert.equal(watchdogPill.classList.contains("t-warning"), false);
 
   await act(async () => { (container.querySelector('[title="Active"]') as HTMLButtonElement).click(); });
   await renderView("board");
@@ -555,11 +556,11 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
 
   await act(async () => { (container.querySelector('[title="Snoozed"]') as HTMLButtonElement).click(); });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")));
-  assert.ok(container.querySelector('.card [aria-label="Attention: Background Work Orphaned"]'));
+  assert.ok(container.querySelector('.card [aria-label="Attention: Background Work Lost"]'));
   const boardWatchdogPill = container.querySelector('.card [aria-label^="Background Work: Result Pending."]');
   assert.ok(boardWatchdogPill);
-  assert.ok(boardWatchdogPill.classList.contains("background-delivery-pending"));
-  assert.equal(boardWatchdogPill.classList.contains("blocked"), false);
+  assert.ok(boardWatchdogPill.classList.contains("t-info"));
+  assert.equal(boardWatchdogPill.classList.contains("t-warning"), false);
   assert.ok(container.querySelector('.card [aria-label="Reminder: Snoozed"]'));
 
   await act(async () => {
@@ -567,7 +568,7 @@ test("reminder membership stays exclusive while scoped attention reconciles in S
   });
   assert.ok([...container.querySelectorAll(".card")].some((card) => card.textContent?.includes("Session orphaned")),
     "clearing attention must leave the pending reminder in Snoozed");
-  assert.equal(container.querySelector('.card [aria-label="Attention: Background Work Orphaned"]'), null);
+  assert.equal(container.querySelector('.card [aria-label="Attention: Background Work Lost"]'), null);
   assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 1 Session");
 
   await act(async () => {
@@ -636,7 +637,7 @@ test("InboxView keeps mobile browsing order stable before and through a touch", 
   assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"]);
   // The upsert's own status carries the proof that it landed. #664 removed the preview from the
   // row, so the preview text below is store state the row deliberately no longer prints.
-  assert.match(container.textContent ?? "", /Awaiting Input/);
+  // Attention outranks lifecycle (§11.1), so the question's pill is the whole proof.
   assert.match(container.textContent ?? "", /Answer Required/);
   assert.equal(container.querySelector(".inbox-order-update"), null,
     "the desktop manual-order affordance does not crowd the mobile Inbox toolbar");
@@ -715,8 +716,9 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   });
   assert.deepEqual(rowTitles(container), ["Session A", "Session B", "Session C"]);
   // Same substitution as the mobile case: the row stopped printing the preview in #664, so the
-  // status the same upsert carried is what shows it was applied while the order was held.
-  assert.match(container.textContent ?? "", /Awaiting Input/);
+  // status the same upsert carried is what shows it was applied while the order was held. Attention
+  // outranks lifecycle (§11.1), so it shows as the attention pill rather than "Awaiting Input".
+  assert.match(container.textContent ?? "", /Input Required/);
 
   // Sustained concurrent activity, well past the interaction settle window.
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 550)); });

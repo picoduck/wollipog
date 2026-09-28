@@ -487,7 +487,8 @@ test("Stopping sessions fall back to the legacy idempotent archive mutation", as
     },
   });
 
-  assert.match(fixture.container.textContent ?? "", /Stopping/);
+  // The Stop is still being delivered to a connected runner, so it reads Stop Pending (#208).
+  assert.match(fixture.container.textContent ?? "", /Stop Pending/);
   const retry = button(fixture.container, "Retry Stop");
   assert.equal([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"), false,
     "pending recovery replaces the ordinary Stop action even for a terminal lifecycle");
@@ -526,7 +527,7 @@ test("Stop Failed sessions disclose bounded failure detail and expose Retry Stop
     },
   });
 
-  const badge = [...fixture.container.querySelectorAll<HTMLElement>(".archive-badge")]
+  const badge = [...fixture.container.querySelectorAll<HTMLElement>(".archive-state-badges .status")]
     .find((candidate) => candidate.textContent?.trim() === "Stop Failed");
   assert.equal(badge?.title, "Automatic retries were exhausted.");
   await act(async () => { fireDomEvent.click(button(fixture.container, "Retry Stop")); await Promise.resolve(); });

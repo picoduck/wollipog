@@ -151,7 +151,7 @@ test("deploy badges rank offline, conflict, error, digest and link gaps, then de
   const drift = [{ name: "code-review", digest: "a".repeat(64), variant: "agent" as const, held: true }];
   const driftBadge = skillDeployBadge({ runnerOnline: true, desired, reported: { ...conflicted, drift }, skillName: "code-review" });
   assert.equal(driftBadge.status, "drift", "an edited copy outranks the held links it causes");
-  assert.equal(driftBadge.label, "Drift");
+  assert.equal(driftBadge.label, "Edited");
   assert.match(driftBadge.detail ?? "", /held until you import the edit or restore the library version/);
   assert.equal(skillDeployBadge({ runnerOnline: true, desired: undefined, skillName: "code-review",
     reported: { drift: [{ ...drift[0]!, held: false }] } }).status, "drift", "a retained edit is shown without an assignment");
@@ -187,8 +187,9 @@ test("deploy badges rank offline, conflict, error, digest and link gaps, then de
 
   const done = skillDeployBadge({ runnerOnline: true, desired, reported: linked, skillName: "code-review" });
   assert.equal(done.status, "deployed");
-  assert.equal(done.label, "Deployed");
-  assert.equal(done.className, "st-done");
+  // The chip speaks the shared skill-deployment vocabulary (docs/design-system.md §11.2).
+  assert.equal(done.label, "Linked");
+  assert.equal(done.tone, "success");
 
   assert.deepEqual(reportedUnmanagedSkills({ unmanaged: [{ agentId: "claude", name: "local-notes" }] }),
     [{ agentId: "claude", name: "local-notes" }]);

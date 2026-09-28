@@ -3,6 +3,7 @@ import type { InstanceProfile, InstanceRegistrySnapshot } from "./desktop-instan
 import type { InstanceRuntime } from "./instance-runtime.js";
 import type { ViewNavigation } from "./navigation.js";
 import { CONTROL_PLANE_HTTP, DASHBOARD_ORIGIN } from "./config.js";
+import { statusMeta, type StatusMeta } from "./status-meta.js";
 
 export type InstanceAvailability =
   | "saved"
@@ -12,6 +13,14 @@ export type InstanceAvailability =
   | "authentication-required"
   | "incompatible"
   | "missing-credential";
+
+/** An instance's availability in the shared machine vocabulary (§11.2): a missing or rejected
+ * credential needs the user to sign in again, and an incompatible instance needs an update. */
+export function instanceAvailabilityMeta(status: InstanceAvailability): StatusMeta {
+  return statusMeta("machine", status === "authentication-required" || status === "missing-credential"
+    ? "sign_in_required"
+    : status === "incompatible" ? "update_required" : status);
+}
 
 export type InstanceShellPhase = "loading" | "opening" | "ready" | "failed" | "missing";
 

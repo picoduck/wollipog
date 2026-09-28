@@ -1,4 +1,5 @@
 import { runnerSupportsProtocol, type RunnerView } from "@wollipog/protocol";
+import { StatusBadge } from "./StatusBadge.js";
 import {
   invocationLabel,
   omittedKeptAsideCopies,
@@ -86,7 +87,7 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
                     <li key={orphanedCopyKey(copy)}>
                       <div className="skills-orphan-head">
                         <strong>{copy.name ?? "Unidentified Copy"}</strong>
-                        <span className="status-badge st-input">{copy.kind === "kept_aside" ? "Kept Aside" : "Deleted Skill"}</span>
+                        <StatusBadge tone="neutral" noDot label={copy.kind === "kept_aside" ? "Kept Aside" : "Deleted Skill"} />
                       </div>
                       <dl className="skills-orphan-facts">
                         <div><dt>Invocation</dt><dd>{copy.variant ? invocationLabel(copy.variant) : "Unknown"}</dd></div>

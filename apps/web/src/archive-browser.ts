@@ -1,5 +1,6 @@
 import type { SessionStatus, SessionView } from "@wollipog/protocol";
 import { sessionAgentLabel } from "./components/agent-options.js";
+import { statusMeta } from "./status-meta.js";
 
 export const ARCHIVE_PAGE_SIZE = 50;
 
@@ -20,42 +21,21 @@ export interface ArchiveSessionMetadata {
   agent: string;
 }
 
-export const CANONICAL_LIFECYCLE_LABELS: Readonly<Record<SessionStatus, string>> = {
-  queued: "Queued",
-  starting: "Starting",
-  running: "Running",
-  input_required: "Awaiting Input",
-  idle: "Awaiting Prompt",
-  completed: "Completed",
-  failed: "Failed",
-  stopped: "Stopped",
-};
-
-/** Labels used by the archive endpoint's server-side search. Keep these in the client search
- * corpus so a live upsert cannot invalidate a row solely because the visible UI label differs. */
-export const SERVER_LIFECYCLE_LABELS: Readonly<Record<SessionStatus, string>> = {
-  queued: "Queued",
-  starting: "Starting",
-  running: "Running",
-  input_required: "Input Required",
-  idle: "Idle",
-  completed: "Completed",
-  failed: "Failed",
-  stopped: "Stopped",
-};
-
-export const SESSION_LIFECYCLE_STATES = Object.keys(CANONICAL_LIFECYCLE_LABELS) as SessionStatus[];
+/** The provider lifecycles a session can be filtered by, in the order the filter lists them. */
+export const SESSION_LIFECYCLE_STATES: readonly SessionStatus[] = [
+  "queued", "starting", "running", "input_required", "idle", "completed", "failed", "stopped",
+];
 
 export function canonicalLifecycleLabel(status: SessionStatus): string {
-  return Object.hasOwn(CANONICAL_LIFECYCLE_LABELS, status)
-    ? CANONICAL_LIFECYCLE_LABELS[status]
-    : "Status Unavailable";
+  return statusMeta("session", status).label;
 }
 
-export function serverLifecycleLabel(status: SessionStatus): string {
-  return Object.hasOwn(SERVER_LIFECYCLE_LABELS, status)
-    ? SERVER_LIFECYCLE_LABELS[status]
-    : "Status Unavailable";
+/** Every word a search should match for a lifecycle: the visible label, plus the labels the archive
+ * endpoint's server-side search uses, so a live upsert cannot invalidate a row solely because the
+ * visible UI label differs. */
+export function lifecycleSearchLabels(status: SessionStatus): string[] {
+  const meta = statusMeta("session", status);
+  return [meta.label, ...(meta.aliases ?? [])];
 }
 
 export function sessionArchiveSearchDetail(
@@ -116,8 +96,7 @@ export function filterArchiveSessions(input: {
       metadata.project,
       metadata.location,
       metadata.agent,
-      canonicalLifecycleLabel(session.status),
-      serverLifecycleLabel(session.status),
+      ...lifecycleSearchLabels(session.status),
       session.archived ? "Archived" : "Not Archived",
     ].join("\n").toLocaleLowerCase();
     return localText.includes(query) || Boolean(input.transcriptSessionIds?.has(session.id));

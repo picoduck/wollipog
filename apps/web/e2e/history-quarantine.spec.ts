@@ -20,7 +20,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await expect(banner).toContainText("turn 1");
     await expect(page.locator(".composer-input")).toBeDisabled();
     await expect(page.locator(".composer-input")).toHaveAttribute("placeholder", /quarantined/i);
-    await expect(page.locator(".status-badge", { hasText: "Quarantined" })).toBeVisible();
+    await expect(page.locator(".status", { hasText: "Quarantined" })).toBeVisible();
     // The provider's own rejection marks the point in the transcript; it names sizes, never content.
     await expect(page.locator(".tl-error")).toContainText("rejected this conversation's stored history");
     await page.screenshot({ path: test.info().outputPath("quarantined-session.png"), fullPage: true });

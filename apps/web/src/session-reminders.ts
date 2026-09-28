@@ -18,7 +18,7 @@ export type ReminderInboxMode = "ordinary" | "snoozed";
 export type SnoozedAttentionReason =
   | { kind: "session_attention"; label: string; description: string; attention: SessionAttentionStatus }
   | { kind: "failed"; label: "Failed"; description: string }
-  | { kind: "orphaned_background_work"; label: "Background Work Orphaned"; description: string }
+  | { kind: "orphaned_background_work"; label: "Background Work Lost"; description: string }
   | {
     kind: "background_delivery_watchdog";
     label: string;
@@ -56,8 +56,8 @@ export function snoozedSessionAttentionReason(session: SessionView): SnoozedAtte
   if (session.backgroundWorkState === "orphaned") {
     return {
       kind: "orphaned_background_work",
-      label: "Background Work Orphaned",
-      description: "Managed background work became orphaned and requires attention.",
+      label: "Background Work Lost",
+      description: "Managed background work was lost and requires attention.",
     };
   }
   const watchdogState = session.backgroundDeliveries?.find((delivery) => delivery.watchdogState)?.watchdogState;

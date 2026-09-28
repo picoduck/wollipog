@@ -1,17 +1,8 @@
 import React, { useEffect, useRef, useState } from "react";
-import { useInstances, type InstanceAvailability } from "../instances-context.js";
+import { instanceAvailabilityMeta, useInstances } from "../instances-context.js";
 import { CheckIcon, ChevronDownIcon, ConnectionsIcon } from "./Icons.js";
 import { useAccessibleMenu, useAnchoredMenuStyle } from "./interactions.js";
 
-const STATUS_LABELS: Record<InstanceAvailability, string> = {
-  saved: "Saved",
-  connecting: "Connecting",
-  online: "Online",
-  offline: "Offline",
-  "authentication-required": "Authentication Required",
-  incompatible: "Incompatible",
-  "missing-credential": "Authentication Required",
-};
 
 function desiredInstanceMenuHeight(profileCount: number): number {
   const profiles = Math.max(1, profileCount);
@@ -112,7 +103,7 @@ export function InstanceSelector({ compact = false }: { compact?: boolean }) {
                   <span className="instance-selector-check" aria-hidden="true">
                     {active && <CheckIcon />}
                   </span>
-                  <span className="sr-only">{STATUS_LABELS[status]}</span>
+                  <span className="sr-only">{instanceAvailabilityMeta(status).label}</span>
                 </button>
               </div>
             );

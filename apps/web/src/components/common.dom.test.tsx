@@ -90,22 +90,23 @@ test("background-work badges expose current states and suppress the legacy settl
       );
     });
 
-    const badges = [...container.querySelectorAll(".background-work-badge")];
+    const badges = [...container.querySelectorAll('.status[data-group="background-work"]')];
+    // "Orphaned" is retired everywhere (docs/design-system.md §11.2): lost work reads Lost.
     assert.deepEqual(
       badges.map((badge) => badge.textContent),
-      ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Orphaned"],
+      ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Lost"],
     );
     assert.deepEqual(
       badges.map((badge) => badge.getAttribute("aria-label")),
-      ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Orphaned"],
+      ["Background Work: Waiting on External Job", "Background Work: Continuation Pending", "Background Work: Lost"],
     );
     assert.ok(badges.every((badge) => badge.getAttribute("role") === "status"));
     assert.ok(badges.every((badge) => !badge.hasAttribute("title")));
+    // Running work pulses in the info tone; lost work is danger and does not pulse.
     assert.deepEqual(
-      badges.map((badge) => [...badge.classList].at(-1)),
-      ["background-work-running", "background-work-running", "background-work-orphaned"],
+      badges.map((badge) => [badge.classList.contains("t-info"), badge.classList.contains("pulse"), badge.classList.contains("t-danger")]),
+      [[true, true, false], [true, true, false], [false, false, true]],
     );
-    assert.equal(container.querySelectorAll(".background-work-dot[aria-hidden='true']").length, 3);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -130,7 +131,7 @@ test("compact background-work badges show specific states and expose every full 
     const fullLabels = [
       "Background Work: Waiting on External Job",
       "Background Work: Continuation Pending",
-      "Background Work: Orphaned",
+      "Background Work: Lost",
     ];
     assert.deepEqual(badges.map((badge) => badge.getAttribute("aria-label")), fullLabels);
     assert.deepEqual(badges.map((badge) => badge.getAttribute("title")), fullLabels);
@@ -140,7 +141,7 @@ test("compact background-work badges show specific states and expose every full 
     );
     assert.deepEqual(
       badges.map((badge) => badge.querySelector('[aria-hidden="true"]:last-child')?.textContent),
-      ["Waiting on External Job", "Continuation Pending", "Background Work Orphaned"],
+      ["Waiting on External Job", "Continuation Pending", "Background Work Lost"],
     );
   } finally {
     await act(async () => { root.unmount(); });
@@ -157,7 +158,7 @@ test("presentational background-work badges do not create a duplicate live regio
     await act(async () => {
       root.render(<BackgroundWorkBadge state="running" compact announce={false} />);
     });
-    const badge = container.querySelector(".background-work-badge");
+    const badge = container.querySelector('.status[data-group="background-work"]');
     assert.ok(badge);
     assert.equal(badge.getAttribute("role"), null);
     assert.equal(badge.textContent, "Background Work: Waiting on External JobWaiting on External Job");
@@ -176,17 +177,17 @@ test("responsive compact background-work badges carry wide and narrow visible la
     for (const [state, full, wide, narrow] of [
       ["running", "Waiting on External Job", "Waiting on External Job", "Job"],
       ["continuation_pending", "Continuation Pending", "Continuation Pending", "Pending"],
-      ["orphaned", "Orphaned", "Background Work Orphaned", "Orphaned"],
+      ["orphaned", "Lost", "Background Work Lost", "Lost"],
     ] as const) {
       await act(async () => {
         root.render(<BackgroundWorkBadge state={state} compact responsiveCompact announce={false} />);
       });
-      const badge = container.querySelector(".background-work-badge")!;
+      const badge = container.querySelector('.status[data-group="background-work"]')!;
       assert.equal(badge.getAttribute("aria-label"), `Background Work: ${full}`);
-      assert.equal(badge.querySelector(".background-work-label-wide")?.textContent, wide);
-      assert.equal(badge.querySelector(".background-work-label-narrow")?.textContent, narrow);
-      assert.equal(badge.querySelector(".background-work-label-wide")?.getAttribute("aria-hidden"), "true");
-      assert.equal(badge.querySelector(".background-work-label-narrow")?.getAttribute("aria-hidden"), "true");
+      assert.equal(badge.querySelector(".status-label-wide")?.textContent, wide);
+      assert.equal(badge.querySelector(".status-label-narrow")?.textContent, narrow);
+      assert.equal(badge.querySelector(".status-label-wide")?.getAttribute("aria-hidden"), "true");
+      assert.equal(badge.querySelector(".status-label-narrow")?.getAttribute("aria-hidden"), "true");
     }
   } finally {
     await act(async () => { root.unmount(); });
@@ -268,7 +269,7 @@ test("attention badges retain their own accessible name without an override", as
         },
       }} />);
     });
-    assert.equal(container.querySelector(".status-badge")?.getAttribute("aria-label"), "Answer Required");
+    assert.equal(container.querySelector(".status")?.getAttribute("aria-label"), "Answer Required");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -293,7 +294,7 @@ test("background-delivery watchdog badges use compact visible labels and explana
       );
     });
     assert.deepEqual(
-      [...container.querySelectorAll(".background-work-badge")].map((badge) => badge.textContent),
+      [...container.querySelectorAll('.status[data-group="background-work"]')].map((badge) => badge.textContent),
       [
         "Result Pending",
         "Result Missing",
@@ -302,14 +303,15 @@ test("background-delivery watchdog badges use compact visible labels and explana
         "Result Blocked",
       ],
     );
-    const badges = [...container.querySelectorAll<HTMLElement>(".background-work-badge")];
+    const badges = [...container.querySelectorAll<HTMLElement>('.status[data-group="background-work"]')];
     assert.match(badges[0]!.getAttribute("aria-label") ?? "", /^Background Work: Result Pending\. A background job finished/);
     assert.match(badges[0]!.title, /result has not yet been returned to this conversation\.$/);
-    assert.ok(badges[0]!.classList.contains("background-delivery-pending"));
-    assert.ok(badges[1]!.classList.contains("background-work-orphaned"));
-    assert.ok(badges.slice(2, 4).every((badge) => badge.classList.contains("background-delivery-pending")));
-    // A blocked result asks for a step, so it wears the attention treatment, not the pending one.
-    assert.ok(badges[4]!.classList.contains("background-work-orphaned"));
+    // Work that progresses on its own reads as working (info); a missing or blocked result asks for
+    // a step, so it takes the needs-you tone (warning), as §11.2 gives Result Missing.
+    assert.ok(badges[0]!.classList.contains("t-info"));
+    assert.ok(badges[1]!.classList.contains("t-warning"));
+    assert.ok(badges.slice(2, 4).every((badge) => badge.classList.contains("t-info")));
+    assert.ok(badges[4]!.classList.contains("t-warning"));
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -331,16 +333,18 @@ test("Untracked capability and push receipt badges expose honest Title Case boun
       </>);
     });
     assert.deepEqual(
-      [...container.querySelectorAll(".background-work-badge")].map((badge) => badge.textContent),
+      [...container.querySelectorAll('.status[data-group="background-work"]')].map((badge) => badge.textContent),
       ["Detached Work: Untracked", "Push Service Accepted", "Notification Displayed", "Notification Clicked"],
     );
     assert.deepEqual(
-      [...container.querySelectorAll(".background-work-badge[data-attention]")]
-        .map((badge) => badge.getAttribute("data-attention")),
-      ["false", "false", "false"],
-      "settled notification history retains its non-attention styling hook",
+      [...container.querySelectorAll('.status[data-group="background-work"]')].slice(1)
+        .map((badge) => badge.classList.contains("t-success")),
+      [true, true, true],
+      "settled notification history reads as done, not as attention",
     );
-    assert.match(container.querySelector(".background-work-untracked")?.getAttribute("title") ?? "", /cannot promise/i);
+    const untracked = container.querySelector('.status[data-group="background-work"]');
+    assert.ok(untracked?.classList.contains("no-dot"), "untracked detached work is a fact, so it is a flag with no dot");
+    assert.match(untracked?.getAttribute("title") ?? "", /cannot promise/i);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -430,13 +434,13 @@ test("session indicators preserve simultaneous lifecycle, attention, and change 
     assert.ok(container.querySelector('[role="group"][aria-label="Change Status"]'));
     assert.equal(container.querySelector('[aria-label="Changes: Ready for Review"]')?.textContent?.trim(), "Ready for Review");
     assert.equal(container.querySelector('[aria-label="Changes: Uncommitted Changes"]')?.textContent?.trim(), "Uncommitted Changes");
-    assert.equal(container.querySelectorAll(".change-status-indicators > .status-badge").length, 2,
+    assert.equal(container.querySelectorAll(".change-status-indicators > .status").length, 2,
       "compact surfaces preserve both facts as separate badges");
-    const changeBadges = [...container.querySelectorAll(".change-status-indicators > .status-badge")];
-    assert.equal(changeBadges[0]?.classList.contains("st-done"), true,
+    const changeBadges = [...container.querySelectorAll(".change-status-indicators > .status")];
+    assert.equal(changeBadges[0]?.classList.contains("t-success"), true,
       "review readiness keeps its successful status tone and primary position");
-    assert.equal(changeBadges[1]?.classList.contains("st-idle"), true,
-      "uncommitted work keeps its neutral attention tone and supplemental position");
+    assert.equal(changeBadges[1]?.classList.contains("t-neutral"), true,
+      "uncommitted work is a neutral fact in the supplemental position");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

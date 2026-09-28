@@ -5,18 +5,14 @@ import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime } from "../format.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
-import { SessionStatusIndicators, Empty, SessionPinIndicator, ThreadDot } from "./common.js";
+import { SessionStatusIndicators, Empty, ReminderBadge, SessionPinIndicator, SnoozedAttentionBadge, ThreadDot } from "./common.js";
 import { inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
 import { useLongPress } from "./interactions.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useExperiments } from "../use-experiments.js";
-import {
-  reminderBadgeDescription,
-  reminderBadgeLabel,
-  snoozedSessionAttentionReason,
-} from "../session-reminders.js";
+import { snoozedSessionAttentionReason } from "../session-reminders.js";
 
 const sessionCardKey = (session: SessionView) => session.id;
 const estimateSessionCard = (session: SessionView) => session.pendingApproval ? 230 : session.preview ? 155 : 120;
@@ -468,29 +464,8 @@ function SessionCard({
             <span className="inbox-thread-family-text">{inboxThreadChildrenLabel(threadChildren)}</span>
           </span>
         )}
-        {extraSnoozedAttention && (
-          <span
-            className={`inbox-status-pill ${extraSnoozedAttention.kind === "background_delivery_watchdog" &&
-              extraSnoozedAttention.severity === "pending" ? "background-delivery-pending" : "blocked"}`}
-            title={extraSnoozedAttention.description}
-            aria-label={extraSnoozedAttention.kind === "background_delivery_watchdog"
-              ? extraSnoozedAttention.accessibleName
-              : `Attention: ${extraSnoozedAttention.label}`}
-          >
-            {extraSnoozedAttention.label}
-          </span>
-        )}
-        {reminder && (
-          <span
-            className="inbox-status-pill reminder"
-            title={reminderBadgeDescription(reminder)}
-            aria-label={`Reminder: ${reminder.state === "fired"
-              ? reminderBadgeDescription(reminder)
-              : reminderBadgeLabel(reminder)}`}
-          >
-            {reminderBadgeLabel(reminder)}
-          </span>
-        )}
+        {extraSnoozedAttention && <SnoozedAttentionBadge reason={extraSnoozedAttention} />}
+        {reminder && <ReminderBadge reminder={reminder} />}
         <span className="tag tag-machine" title="Runner / machine">
           {machineName}
         </span>

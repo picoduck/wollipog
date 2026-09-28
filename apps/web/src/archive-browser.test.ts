@@ -1,15 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SessionStatus, SessionView } from "@wollipog/protocol";
-import { statusMeta } from "./format.js";
+import { statusMeta } from "./status-meta.js";
 import {
   ARCHIVE_PAGE_SIZE,
-  CANONICAL_LIFECYCLE_LABELS,
   canonicalLifecycleLabel,
+  lifecycleSearchLabels,
   filterArchiveSessions,
   mergeArchiveSessionCatalog,
   pageArchiveSessions,
-  SERVER_LIFECYCLE_LABELS,
+  SESSION_LIFECYCLE_STATES,
   sessionArchiveSearchDetail,
   type ArchiveBrowserFilters,
 } from "./archive-browser.js";
@@ -72,12 +72,15 @@ test("archive search surfaces archive and every canonical lifecycle label indepe
     failed: "Failed",
     stopped: "Stopped",
   };
-  assert.deepEqual(CANONICAL_LIFECYCLE_LABELS, expected);
+  assert.deepEqual(
+    Object.fromEntries(SESSION_LIFECYCLE_STATES.map((status) => [status, canonicalLifecycleLabel(status)])),
+    expected,
+  );
   assert.equal(canonicalLifecycleLabel("toString" as SessionStatus), "Status Unavailable");
   assert.deepEqual(
-    Object.fromEntries(Object.keys(expected).map((status) => [status, statusMeta(status as SessionStatus).label])),
-    CANONICAL_LIFECYCLE_LABELS,
-    "archive and primary lifecycle labels must stay identical",
+    Object.fromEntries(Object.keys(expected).map((status) => [status, statusMeta("session", status as SessionStatus).label])),
+    expected,
+    "archive and primary lifecycle labels come from the one vocabulary",
   );
   for (const [status, label] of Object.entries(expected) as [SessionStatus, string][]) {
     assert.equal(sessionArchiveSearchDetail(session({ status })), `Archived · ${label} · Wollipog · Codex App Server`);
@@ -103,8 +106,8 @@ test("archive search surfaces archive and every canonical lifecycle label indepe
 });
 
 test("archive search accepts the server lifecycle labels used for live reconciliation", () => {
-  assert.equal(SERVER_LIFECYCLE_LABELS.idle, "Idle");
-  assert.equal(SERVER_LIFECYCLE_LABELS.input_required, "Input Required");
+  assert.deepEqual(lifecycleSearchLabels("idle"), ["Awaiting Prompt", "Idle"]);
+  assert.deepEqual(lifecycleSearchLabels("input_required"), ["Awaiting Input", "Input Required"]);
   assert.deepEqual(filterArchiveSessions({
     sessions: [session({ status: "idle" })],
     filters: { ...defaults, query: "idle" },

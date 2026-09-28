@@ -18,7 +18,7 @@ const common = readFileSync(fileURLToPath(new URL("./components/common.tsx", imp
 
 /** The type scale, in px, so a rule can be compared against the ramp rather than against a number. */
 const SCALE: Record<string, number> = {
-  "--text-2xs": 10, "--text-xs": 11, "--text-sm": 12, "--text-base": 13,
+  "--text-xs": 11, "--text-sm": 12, "--text-base": 13,
   "--text-md": 14, "--text-lg": 17, "--text-xl": 20, "--text-2xl": 24,
 };
 

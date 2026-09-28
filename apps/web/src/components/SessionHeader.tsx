@@ -1,4 +1,5 @@
 import React, { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type RefObject } from "react";
+import { StatusBadge, StatusCount } from "./StatusBadge.js";
 import {
   isTerminal,
   runnerCapabilityRequirement,
@@ -65,12 +66,19 @@ import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-c
  * while this fitter still keeps any status that fits and moves the rest into `+N`. Clipping is
  * never an option, and the badge's accessible name remains complete in both locations.
  */
+/** The badges the measured status row may hide into "+N": the lifecycle and change groups, and the
+ * background-work and active-worker badges that sit directly in the row. */
+export const MEASURED_STATUS_SELECTOR =
+  ".session-status-indicators > .status, " +
+  ".change-status-indicators > .status, " +
+  ":scope > .status[data-group='background-work'], " +
+  ":scope > .active-subagents-badge";
+
 export function statusKeepOrder(items: HTMLElement[]): HTMLElement[] {
-  // The active-subagents badge shares the background-work badge's CLASS but not its rank: workers
-  // are foreground work, and they rank with the lifecycle group they run inside.
+  // Workers are foreground work, so the active-subagents badge ranks with the lifecycle group they
+  // run inside, not with background work.
   const tier = (item: HTMLElement) =>
-    item.classList.contains("background-work-badge") &&
-      !item.classList.contains("active-subagents-badge")
+    item.dataset["group"] === "background-work"
       ? 0
       : item.parentElement?.classList.contains("change-status-indicators") ? 2 : 1;
   return items
@@ -265,20 +273,19 @@ export function SessionHeader({
         } : undefined}
       />
       {descendantRequests && descendantRequests.count > 0 && !session.orchestratorCampaign?.pendingRequests && (
-        <button
-          type="button"
-          className="status-badge st-input descendant-request-badge"
-          aria-label={`Descendant Requests: ${descendantRequests.count} Unresolved`}
-          aria-controls="right-panel"
+        <StatusBadge
+          tone="warning"
+          label="Descendant Requests"
+          ariaLabel={`Descendant Requests: ${descendantRequests.count} Unresolved`}
+          ariaControls="right-panel"
           title="Open Descendant Requests"
           onClick={() => {
             closeStatusPopover(false);
             descendantRequests.onOpen();
           }}
         >
-          Descendant Requests
-          <span className="inbox-status-pill-count" aria-hidden="true">{descendantRequests.count}</span>
-        </button>
+          <StatusCount>{descendantRequests.count}</StatusCount>
+        </StatusBadge>
       )}
       {renderBackgroundWork()}
       {backgroundDeliveryState && (
@@ -312,11 +319,7 @@ export function SessionHeader({
     const container = statusesRef.current;
     if (!container) return;
 
-    const statusItems = () => Array.from(container.querySelectorAll<HTMLElement>(
-      ".session-status-indicators > .status-badge, " +
-      ".change-status-indicators > .status-badge, " +
-      ":scope > .background-work-badge",
-    ));
+    const statusItems = () => Array.from(container.querySelectorAll<HTMLElement>(MEASURED_STATUS_SELECTOR));
     const measure = () => {
       const items = statusItems();
       // Measuring applies candidate sets, so every badge is briefly `display: none` — including the

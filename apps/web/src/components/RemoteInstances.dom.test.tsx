@@ -185,7 +185,9 @@ test("instances panel keeps This Machine immutable and makes credential recovery
   await mounted.render();
   try {
     assert.match(mounted.container.textContent ?? "", /2 Instances/);
-    assert.match(mounted.container.textContent ?? "", /Authentication Required/);
+    // Instances share the machine vocabulary (docs/design-system.md §11.2): a missing credential
+    // needs the user to sign in again.
+    assert.match(mounted.container.textContent ?? "", /Sign-In Required/);
     assert.equal(
       Array.from(mounted.container.querySelectorAll("button")).filter((button) => button.textContent === "Remove").length,
       1,

@@ -75,8 +75,8 @@ test("real shell preserves global shortcuts from the grid and F2 opens the selec
   // Every row carries its attention as pills with counts, and none carries a disclosure (#896).
   await expect(grid.locator(".attention-requests")).toHaveCount(0);
   await expect(grid.locator(".inbox-row-shell", { hasText: "Snoozed Session" })).toHaveCount(0);
-  await expect(grid.locator(".inbox-status-pill-count")).toHaveCount(3);
-  await expect(grid.locator(".inbox-status-pill-count").first()).toHaveText("2");
+  await expect(grid.locator(".status-count")).toHaveCount(3);
+  await expect(grid.locator(".status-count").first()).toHaveText("2");
   await expect(page.locator(".rail-badge.blocked")).toHaveText("4");
   await expect(page.locator(".rail-badge.stalled")).toHaveText("4");
   await grid.focus();

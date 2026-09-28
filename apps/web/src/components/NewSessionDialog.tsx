@@ -72,7 +72,8 @@ import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
 import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
-import { projectAvailabilityLabel, type ProjectLocationCandidate } from "../project-management.js";
+import { projectAvailabilityLabel, projectAvailabilityMeta, type ProjectLocationCandidate } from "../project-management.js";
+import { StatusBadge } from "./StatusBadge.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
 import { supportsAgentTui } from "../shells-panel.js";
 import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
@@ -1312,10 +1313,8 @@ export function NewSessionDialog({
                       // basis for choosing between two of them.
                       status: (
                         <>
-                          <span className={`loc-kind loc-${display.kind}`}>{display.kind === "ssh" ? "SSH" : "Local"}</span>
-                          <span className={`project-availability availability-${location.availability}`}>
-                            {projectAvailabilityLabel(location.availability)}
-                          </span>
+                          <StatusBadge tone="neutral" noDot label={display.kind === "ssh" ? "SSH" : "Local"} />
+                          <StatusBadge meta={projectAvailabilityMeta(location.availability)} />
                         </>
                       ),
                       description: <span title={location.path}>{shortenPath(location.path)}</span>,
@@ -1382,7 +1381,7 @@ export function NewSessionDialog({
                     value: workspaceLocationKey(loc.runnerId, loc.workspaceId),
                     title: disp.name,
                     status: (
-                      <span className={`loc-kind loc-${disp.kind}`}>{disp.kind === "ssh" ? "SSH" : "Local"}</span>
+                      <StatusBadge tone="neutral" noDot label={disp.kind === "ssh" ? "SSH" : "Local"} />
                     ),
                     description: (
                       <span title={ws?.path}>{ws?.path ? shortenPath(ws.path) : loc.workspaceId}</span>

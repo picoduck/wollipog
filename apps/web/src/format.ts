@@ -1,4 +1,4 @@
-import type { AgentDriverKind, OS, SessionStatus } from "@wollipog/protocol";
+import type { AgentDriverKind, OS } from "@wollipog/protocol";
 
 export function relativeTime(ts: number | null): string {
   if (!ts) return "—";
@@ -126,32 +126,6 @@ export function formatRecordedTimestamp(
     dateTime: date.toISOString(),
     label: new Intl.DateTimeFormat(locale, timeOptions).format(date),
     title: `Recorded ${new Intl.DateTimeFormat(locale, dateOptions).format(date)}`,
-  };
-}
-
-export interface StatusMeta {
-  label: string;
-  className: string;
-  busy: boolean;
-}
-
-const STATUS_META: Record<SessionStatus, StatusMeta> = {
-  queued: { label: "Queued", className: "st-queued", busy: false },
-  starting: { label: "Starting", className: "st-running", busy: true },
-  running: { label: "Running", className: "st-running", busy: true },
-  input_required: { label: "Awaiting Input", className: "st-input", busy: false },
-  idle: { label: "Awaiting Prompt", className: "st-idle", busy: false },
-  completed: { label: "Completed", className: "st-done", busy: false },
-  failed: { label: "Failed", className: "st-failed", busy: false },
-  stopped: { label: "Stopped", className: "st-stopped", busy: false },
-};
-
-export function statusMeta(status: SessionStatus): StatusMeta {
-  if (Object.hasOwn(STATUS_META, status)) return STATUS_META[status];
-  return {
-    label: "Status Unavailable",
-    className: "st-stopped",
-    busy: false,
   };
 }
 

@@ -8,16 +8,13 @@ import { formatDuration, formatRecordedRelativeTime, titleCaseLabel } from "../f
 import { deriveSubagentLifecycle, IncrementalSubagentProjector, type SubagentDescriptor } from "../subagents.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useTimelineClock } from "../timeline-clock.js";
-import { isCurrentWorker, workerRoster, type WorkerState, type WorkerMemberMetadata } from "../worker-roster.js";
+import { isCurrentWorker, workerRoster, type WorkerMemberMetadata } from "../worker-roster.js";
+import { statusMeta } from "../status-meta.js";
 import { SubagentsPanel } from "./SubagentsPanel.js";
 import { BackgroundWorkPanel } from "./BackgroundWorkPanel.js";
 import { SessionApprovalBanner } from "./SessionApproval.js";
 import { SegmentedControl } from "./ui/ChoiceControls.js";
 
-const STATE_LABELS: Record<WorkerState, string> = {
-  working: "Working", waiting: "Waiting", input_required: "Input Required",
-  completed: "Completed", failed: "Failed", stopped: "Stopped", unverified: "Status Unverified",
-};
 const PAGE_SIZE = 50;
 const REGISTRY_AUTO_RETRY_LIMIT = 2;
 /**
@@ -741,7 +738,7 @@ export function AgentsPanel(props: Props) {
               <span className="subagent-list-copy">
                 <span className="subagent-list-title">{row.name}</span>
                 <span className="subagent-list-meta">
-                  <span>{row.type}</span><span>{STATE_LABELS[row.state]}</span>
+                  <span>{row.type}</span><span>{statusMeta("job", row.state).label}</span>
                   {row.startedAt != null && end != null && <span>{formatDuration(Math.max(0, end - row.startedAt))}</span>}
                   {row.lastActivityAt != null && <span>Last Activity {formatRecordedRelativeTime(row.lastActivityAt, now)}</span>}
                   {row.model && <span>{row.model}</span>}{row.effort && <span>{row.effort}</span>}

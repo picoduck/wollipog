@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { StatusBadge } from "./StatusBadge.js";
+import { statusMeta } from "../status-meta.js";
 import type {
   AutomationSchedule,
   OutboundEventDeliveryView,
@@ -182,9 +184,7 @@ export function OutboundEventSubscriptions({
           return <article className="outbound-event-subscription" key={subscription.subscriptionId}>
             <div className="outbound-event-subscription-head"><div><strong>{scopeName}</strong>
               <span>{titleCaseLabel(subscription.scope.kind)} · Key Generation {subscription.generation}</span></div>
-              <span className={`automation-state ${subscription.state === "active" ? "enabled" : "paused"}`}>
-                {titleCaseLabel(subscription.state)}
-              </span></div>
+              <StatusBadge meta={statusMeta("automation", subscription.state === "active" ? "enabled" : "paused")} /></div>
             <code>{subscription.callbackUrl}</code>
             <p>{subscription.eventKinds.map(eventLabel).join(" · ")}</p>
             <div className="outbound-event-badges">

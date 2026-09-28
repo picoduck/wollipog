@@ -38,11 +38,11 @@ test("a multi-request row shows one attention pill per kind with its count and n
       threeRow={false} onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
     assert.equal(container.querySelector(".attention-requests"), null, "the request disclosure is gone (#896)");
     assert.equal(container.querySelector("button button"), null);
-    const pills = [...container.querySelectorAll<HTMLElement>(".inbox-status-pill.blocked")];
+    const pills = [...container.querySelectorAll<HTMLElement>(".inbox-row-signals .status.t-warning")];
     assert.deepEqual(pills.map((pill) => pill.getAttribute("aria-label")),
       ["Attention: Answer Required", "Attention: Approval Required, 2 Requests"],
       "priority order: the question outranks the permissions, and the count rides the pill");
-    assert.equal(pills[1]!.querySelector(".inbox-status-pill-count")?.textContent, "2");
+    assert.equal(pills[1]!.querySelector(".status-count")?.textContent, "2");
     assert.equal(pills[1]!.getAttribute("title"), "Main Agent: First\nAudit Child · Reviewer: Second");
     assert.doesNotMatch(container.textContent ?? "", /Actions Required|View All Requests|Request 1/);
 
@@ -50,10 +50,10 @@ test("a multi-request row shows one attention pill per kind with its count and n
     await act(async () => root.render(<InboxRow optionId="row" session={session} projectName="Project"
       selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
       threeRow onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
-    const compact = [...container.querySelectorAll<HTMLElement>(".inbox-status-pill.blocked")];
+    const compact = [...container.querySelectorAll<HTMLElement>(".inbox-row-signals .status.t-warning")];
     assert.equal(compact.length, 1);
     assert.equal(compact[0]!.getAttribute("aria-label"), "Attention: Answer Required, 3 Requests");
-    assert.equal(compact[0]!.querySelector(".inbox-status-pill-count")?.textContent, "+2");
+    assert.equal(compact[0]!.querySelector(".status-count")?.textContent, "+2");
     assert.equal(compact[0]!.getAttribute("title"), "Main Agent: Which one?\nMain Agent: First\nAudit Child · Reviewer: Second");
   } finally {
     await act(async () => root.unmount());
@@ -283,7 +283,7 @@ test("returned-from-snooze rows expose the ended instant without overdue copy", 
     stalled={false} activityNow={Date.now()} reminder={reminder} threeRow
     onSelect={() => undefined} onExpand={() => undefined} onSessionMenu={() => undefined}
   />));
-  const pill = container.querySelector<HTMLElement>(".inbox-status-pill.reminder")!;
+  const pill = container.querySelector<HTMLElement>('.status[aria-label^="Reminder:"]')!;
   assert.equal(pill.textContent, "Returned from Snooze");
   assert.match(pill.getAttribute("aria-label") ?? "", /Snooze ended/);
   assert.doesNotMatch(pill.textContent, /Overdue/);
@@ -327,7 +327,7 @@ test("idle Inbox rows retain authoritative background work alongside attention",
   for (const [state, visible, accessible] of [
     ["running", "Waiting on External Job", "Waiting on External Job"],
     ["continuation_pending", "Continuation Pending", "Continuation Pending"],
-    ["orphaned", "Background Work Orphaned", "Orphaned"],
+    ["orphaned", "Background Work Lost", "Lost"],
     ["resumed", null, null],
     [undefined, null, null],
   ] as const) {
@@ -337,7 +337,7 @@ test("idle Inbox rows retain authoritative background work alongside attention",
     }, (container) => {
       assert.ok(container.querySelector('[aria-label="Activity: Awaiting Prompt"]'));
       assert.ok(container.querySelector('[aria-label="Attention: Approval Required"]'));
-      const badge = container.querySelector(".inbox-row-background-work .background-work-badge");
+      const badge = container.querySelector('.inbox-row-background-work .status[data-group="background-work"]');
       if (visible) {
         assert.equal(badge?.getAttribute("aria-label"), `Background Work: ${accessible}`);
         assert.equal(badge?.querySelector('span[aria-hidden="true"]:last-child')?.textContent, visible);
@@ -445,7 +445,7 @@ test("background work sits on the Git line of a phone card, whatever the session
     await withRow({ ...worktreeSession(null), ...extra, backgroundWorkState: "running" } as SessionView, (container) => {
       const meta = container.querySelector<HTMLElement>(".inbox-row-meta")!;
       assert.notEqual(meta.querySelector(".inbox-row-git"), null);
-      const badge = meta.querySelector(".inbox-row-background-work .background-work-badge");
+      const badge = meta.querySelector('.inbox-row-background-work .status[data-group="background-work"]');
       assert.equal(badge?.getAttribute("aria-label"), "Background Work: Waiting on External Job");
       // Nothing outside line three carries it, which is what a fourth row would look like.
       assert.equal(container.querySelectorAll(".inbox-row-background-work").length, 1);
@@ -480,7 +480,7 @@ test("a desktop card carries background work on the title line, left of the acti
         const badge = copy.querySelector<HTMLElement>(".inbox-row-background-work")!;
         assert.notEqual(badge, null, "the badge rides the title line on a desktop card");
         assert.equal(
-          badge.querySelector(".background-work-badge")?.getAttribute("aria-label"),
+          badge.querySelector('.status[data-group="background-work"]')?.getAttribute("aria-label"),
           "Background Work: Waiting on External Job",
         );
         // Document ORDER is the layout here: title, badge, strip. `flex-direction` never reverses,
@@ -507,7 +507,7 @@ test("a desktop card with background work but no activity strip keeps the badge 
       assert.equal(copy.querySelector(".inbox-row-activity"), null, "an idle session draws no strip");
       assert.deepEqual(titleLineOrder(copy), ["title", "background-work"]);
       assert.equal(
-        copy.querySelector(".background-work-badge")?.getAttribute("aria-label"),
+        copy.querySelector('.status[data-group="background-work"]')?.getAttribute("aria-label"),
         "Background Work: Continuation Pending",
       );
     },

@@ -1,4 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { StatusBadge } from "./StatusBadge.js";
+import { statusMeta } from "../status-meta.js";
 import type {
   AgentDefinition,
   AutomationAction,
@@ -118,8 +120,8 @@ function AutomationCard({
             <span className="automation-card-action">{action}</span>
           </span>
           <span className="automation-card-meta">
-            {unhealthy && <span className="automation-state unhealthy">Target Unavailable</span>}
-            <span className={`automation-state ${enabled ? "enabled" : "paused"}`}>{enabled ? "Enabled" : "Paused"}</span>
+            {unhealthy && <StatusBadge meta={statusMeta("automation", "target_unavailable")} />}
+            <StatusBadge meta={statusMeta("automation", enabled ? "enabled" : "paused")} />
             <span className="automation-card-chevron" aria-hidden="true">▸</span>
           </span>
         </button>

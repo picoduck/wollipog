@@ -76,7 +76,7 @@ test("heartbeat activity feeds cards, preview, split/footer counts, and independ
 test("live-follow status owns a reserved transcript strip with a compact centered control cluster", () => {
   // Dogfooding IDEA-007/BUG-009 (2026-08-10): the pager hints flank the follow-state control
   // inside ONE centered cluster, and the resume keycap lives INSIDE the control.
-  assert.match(detail, /className="transcript-status-strip"[\s\S]*className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>[\s\S]*className="follow-tail-control"[\s\S]*label="Page Up"[\s\S]*className=\{`follow-tail-chip[\s\S]*className="follow-tail-kbd"[\s\S]*label="Page Down"/,
+  assert.match(detail, /className="transcript-status-strip"[\s\S]*className="transcript-status-cluster"[\s\S]*className="transcript-status-context"[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>[\s\S]*className="follow-tail-control"[\s\S]*label="Page Up"[\s\S]*"follow-tail-chip following"[\s\S]*className="follow-tail-kbd"[\s\S]*label="Page Down"/,
     "Page Up, the follow-state control with its resume keycap, and Page Down form one cluster");
   assert.match(detail, /className="follow-tail-kbd"\s*aria-hidden="true"\s*data-shortcut-hint=\{shortcutDisplay\(mode === "preview" \? "inbox-follow-latest" : "session-reading-latest"\)\}/,
     "the in-control keycap is decorative; the control's tooltip carries the chord for assistive tech");

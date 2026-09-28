@@ -381,16 +381,21 @@ test("mobile Session statuses stay on one measured line before fixed actions", (
     "the single status line must align with the compact Session actions");
   assert.equal(lifecycle.has("padding-right"), false,
     "the action grid track, not lifecycle padding, must reserve action space");
-  for (const selector of [
-    ".session-detail > .detail-head > .session-header-statuses .status-badge",
-    ".session-detail > .detail-head > .session-header-statuses .background-work-badge",
-  ]) {
-    const badge = phoneRule.declarationsForSelector(selector);
-    assert.deepEqual(badge.get("padding-inline"), ["4px"],
-      `${selector} needs enough width headroom for wider system fonts`);
-    assert.deepEqual(badge.get("font-size"), ["var(--text-2xs)"],
-      `${selector} needs enough width headroom for wider system fonts`);
-  }
+  // Every header badge is the one `.status` recipe (docs/design-system.md §11.1), so the phone keeps
+  // its 11px type rather than dropping to the retired 10px `--text-2xs`; the width headroom for
+  // wider system fonts now comes from the inset alone, and the line truncates to "+N" (§21).
+  const headerBadge = phoneRule.declarationsForSelector(
+    ".session-detail > .detail-head > .session-header-statuses .status",
+  );
+  assert.deepEqual(headerBadge.get("padding-inline"), ["var(--space-1)"],
+    "header badges need enough width headroom for wider system fonts");
+  assert.equal(headerBadge.has("font-size"), false,
+    "header badges keep the shared recipe's size instead of shrinking below --text-xs");
+  assert.match(soleRuleBody(".status"), /^font: var\(--type-micro\);$/m,
+    "the status recipe sets 11px/500 through --type-micro");
+  // `.sm` is also a 12px text utility later in the sheet; the badge's own size class has to win.
+  assert.match(soleRuleBody(".status.sm"), /^font-size: var\(--text-xs\);$/m,
+    "the small badge keeps 11px against the older `.sm` utility");
   assert.deepEqual(
     phoneRule.declarationsForSelector(".session-detail > .detail-head").get("min-height"),
     ["44px"],

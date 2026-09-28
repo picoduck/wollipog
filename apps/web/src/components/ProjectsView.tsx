@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { StatusBadge } from "./StatusBadge.js";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -16,6 +17,7 @@ import {
   locationSessionCount,
   projectAfterRemoval,
   projectAvailabilityLabel,
+  projectAvailabilityMeta,
   type ProjectLocationCandidate,
   type ProjectVisibilityFilter,
 } from "../project-management.js";
@@ -543,7 +545,7 @@ export function ProjectsView({
                             <div className="project-location-heading">
                               <strong>{location.name}</strong>
                               {location.isDefault && <span className="project-default-badge">Default</span>}
-                              <span className={`project-availability availability-${location.availability}`}>{projectAvailabilityLabel(location.availability)}</span>
+                              <StatusBadge meta={projectAvailabilityMeta(location.availability)} />
                             </div>
                             <code title={location.path}>{location.path}</code>
                             <span className="muted">{display.name} · {display.kind === "ssh" ? "SSH" : "Native Runner"}{count === null ? "" : ` · ${count} Session${count === 1 ? "" : "s"}`}</span>

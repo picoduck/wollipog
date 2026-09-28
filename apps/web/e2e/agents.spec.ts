@@ -20,11 +20,11 @@ for (const viewport of [
     const origin = surface === "inbox" ? page.getByRole("grid", { name: "Fixture Inbox" }) : page.locator(".board");
     // The list and the board say WHAT is pending on the card itself (#896): one pill per kind with
     // its count, and no disclosure to open. The exact request is reached through the session.
-    const pill = origin.locator(".inbox-status-pill.blocked").first();
+    const pill = origin.locator(".status.t-warning").first();
     await pill.scrollIntoViewIfNeeded();
     await expect(pill).toHaveAttribute("aria-label", "Attention: Approval Required, 2 Requests");
     // A phone list card has one line for sender and signals, so it shows the top kind and "+N".
-    await expect(pill.locator(".inbox-status-pill-count")).toHaveText(surface === "inbox" && viewport.name === "mobile" ? "+1" : "2");
+    await expect(pill.locator(".status-count")).toHaveText(surface === "inbox" && viewport.name === "mobile" ? "+1" : "2");
     await expect(origin.getByText("2 Requests", { exact: true })).toHaveCount(0);
     await expect(origin.locator(".attention-requests")).toHaveCount(0);
     await page.screenshot({ path: `.agents/tmp/attention-navigation/${surface}-${viewport.name}-${theme}-pills.png`, fullPage: true });

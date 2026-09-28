@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { statusMeta } from "../status-meta.js";
 import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
@@ -48,19 +49,22 @@ const baseJob: ManagedBackgroundJobView = {
 };
 
 test("job and delivery presentation keep current lifecycle separate from delivery", () => {
-  assert.equal(backgroundJobCurrentState(baseJob, "running", true, true), "Running");
-  assert.equal(backgroundJobCurrentState(baseJob, "running", false, true), "Status Unverified");
-  assert.equal(backgroundJobCurrentState({ ...baseJob, sourcePresent: false }, "running", true, true), "Status Unverified");
-  assert.equal(backgroundJobCurrentState({ ...baseJob, terminalStatus: "failed" }, undefined, false, true), "Failed");
-  assert.equal(backgroundJobCurrentState(baseJob, "orphaned", true, true), "Orphaned");
-  assert.equal(backgroundJobCurrentState(baseJob, undefined, true, true), "Status Unverified",
+  // States are keys of the shared job vocabulary; `statusMeta("job", …)` owns their words.
+  assert.equal(backgroundJobCurrentState(baseJob, "running", true, true), "running");
+  assert.equal(backgroundJobCurrentState(baseJob, "running", false, true), "unverified");
+  assert.equal(backgroundJobCurrentState({ ...baseJob, sourcePresent: false }, "running", true, true), "unverified");
+  assert.equal(backgroundJobCurrentState({ ...baseJob, terminalStatus: "failed" }, undefined, false, true), "failed");
+  assert.equal(backgroundJobCurrentState(baseJob, "orphaned", true, true), "lost");
+  assert.equal(statusMeta("job", "lost").label, "Lost");
+  assert.equal(statusMeta("job", "unverified").label, "Unverified");
+  assert.equal(backgroundJobCurrentState(baseJob, undefined, true, true), "unverified",
     "a source-present row cannot claim Running without a current aggregate lifecycle");
   // A listed job past the stall bound is reported as stalled, from the control plane's mark or
   // from the clock, and never declared ended (#1651).
-  assert.equal(backgroundJobCurrentState({ ...baseJob, stalledSince: 3_601_000 }, "running", true, true), "Stalled");
-  assert.equal(backgroundJobCurrentState(baseJob, "running", true, true, 1_000 + 3_600_000), "Stalled");
-  assert.equal(backgroundJobCurrentState(baseJob, "running", true, true, 1_000 + 3_599_000), "Running");
-  assert.equal(backgroundJobCurrentState({ ...baseJob, stalledSince: 3_601_000 }, "running", false, true), "Status Unverified",
+  assert.equal(backgroundJobCurrentState({ ...baseJob, stalledSince: 3_601_000 }, "running", true, true), "stalled");
+  assert.equal(backgroundJobCurrentState(baseJob, "running", true, true, 1_000 + 3_600_000), "stalled");
+  assert.equal(backgroundJobCurrentState(baseJob, "running", true, true, 1_000 + 3_599_000), "running");
+  assert.equal(backgroundJobCurrentState({ ...baseJob, stalledSince: 3_601_000 }, "running", false, true), "unverified",
     "an offline runner cannot confirm a stalled job any more than a running one");
   assert.equal(backgroundJobDeliveryStage(baseJob), "Not Started");
   assert.equal(backgroundJobDeliveryStage({ ...baseJob, terminalObservedAt: 3_000, continuationRequired: true }), "Continuation Pending");
@@ -529,7 +533,8 @@ test("a killed job says who ended it and why, and a job that ended on its own sa
       ["Wollipog", "Session Restarted"],
       [undefined, undefined],
     ]);
-    assert.equal(container.querySelectorAll(".background-work-state[data-state='killed']").length, 5,
+    assert.equal([...container.querySelectorAll(".background-work-job-title .status")]
+      .filter((badge) => badge.textContent === "Killed").length, 5,
       "every job still reads Killed");
   } finally {
     await act(async () => root.unmount());
@@ -628,7 +633,7 @@ test("delivery-only history remains inspectable without inventing job lifecycle 
     assert.match(container.textContent ?? "", /Delivery ReceiptResult Delivered · Notification Opened/);
     assert.match(container.textContent ?? "", /Delivery Receipt 1Result Delivered/);
     assert.match(container.textContent ?? "", /Recorded Job Count3Recorded Terminal Count3/);
-    assert.doesNotMatch(container.textContent ?? "", /Running|Completed|Failed|Killed|Orphaned/);
+    assert.doesNotMatch(container.textContent ?? "", /Running|Completed|Failed|Killed|Orphaned|Lost/);
     assert.doesNotMatch(container.textContent ?? "", /private-continuation|private-delivery|private-endpoint|retained-parent/);
     const receipt = container.querySelector('[role="group"][aria-label="Delivery Receipt Status"]');
     assert.ok(receipt, "screen readers receive a delivery-specific status group");
@@ -728,7 +733,7 @@ test("unknown parent sentinels stay separate and aggregate-only states explain m
     assert.equal(container.querySelectorAll(".background-work-link-unavailable")[0]?.textContent,
       "Parent Turn Unknown");
     assert.equal(container.querySelectorAll(".background-work-barrier strong")[0]?.textContent,
-      "Status Unverified");
+      "Unverified");
 
     await act(async () => root.render(
       <BackgroundWorkPanel
@@ -781,7 +786,7 @@ test("unknown parent sentinels stay separate and aggregate-only states explain m
         onOpenParentTurn={() => undefined}
       />,
     ));
-    assert.match(container.textContent ?? "", /Background Work Status Unverified/);
+    assert.match(container.textContent ?? "", /Background Work Unverified/);
     assert.match(container.textContent ?? "", /control plane does not expose/);
     assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
 
@@ -799,7 +804,7 @@ test("unknown parent sentinels stay separate and aggregate-only states explain m
         onOpenParentTurn={() => undefined}
       />,
     ));
-    assert.match(container.textContent ?? "", /Background Work Orphaned/);
+    assert.match(container.textContent ?? "", /Background Work Lost/);
     assert.match(container.textContent ?? "", /per-job lifecycle evidence is unavailable/);
     assert.doesNotMatch(container.textContent ?? "", /No Background Work Recorded/);
   } finally {
@@ -831,7 +836,8 @@ test("offline current work and older untracked providers receive truthful capabi
     ));
     assert.match(container.textContent ?? "", /predates inspectable background work/);
     assert.match(container.textContent ?? "", /does not expose a durable detached-work lifecycle/);
-    assert.match(container.textContent ?? "", /Status Unverified/);
+    assert.match(container.textContent ?? "", /Unverified/);
+    assert.doesNotMatch(container.textContent ?? "", /Status Unverified/);
     assert.match(container.textContent ?? "", /Parent Turn Not Loaded/);
   } finally {
     await act(async () => root.unmount());

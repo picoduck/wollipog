@@ -72,6 +72,8 @@ import {
   Spinner,
   SessionStatusIndicators,
 } from "./common.js";
+import { StatusBadge } from "./StatusBadge.js";
+import { statusMeta } from "../status-meta.js";
 import { EventTimeline, TranscriptErrorAlert, type TimelineRevealRequest } from "./EventTimeline.js";
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
@@ -4854,9 +4856,7 @@ function SessionDetailLoaded({
                 <ActivityStrip activity={activity} now={activityNow} />
               )}
               {stalled && (
-                <span className="inbox-status-pill stalled" aria-label="Stalled: No Activity for at Least 10 Minutes">
-                  Stalled
-                </span>
+                <StatusBadge meta={statusMeta("session", "stalled")} ariaLabel="Stalled: No Activity for at Least 10 Minutes" />
               )}
               <span className="muted">Updated {relativeTime(lastActivityAt)}</span>
             </div>
@@ -5139,7 +5139,11 @@ function SessionDetailLoaded({
                     <ShortcutHint label="Page Up" shortcut={shortcutDisplay("inbox-page-up")} />
                   )}
                   <button
-                    className={`follow-tail-chip ${followTail.state}`}
+                    // Literal arms, so the stylesheet guard can see each state class rendered; previewing is
+                    // styled through data-follow-tail-state.
+                    className={followTail.state === "following"
+                      ? "follow-tail-chip following"
+                      : followTail.state === "paused" ? "follow-tail-chip paused" : "follow-tail-chip"}
                     data-follow-tail-state={followTail.state}
                     onClick={followTail.follow}
                     aria-label={followTailControlLabel(followTail.state, followLabel)}

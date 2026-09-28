@@ -38,25 +38,25 @@ for (const width of [320, 390, 700, 1280]) {
     const row = page.locator(".inbox-row").filter({ hasText: "Alpha Session" });
     await expect(row.getByLabel("Activity: Awaiting Prompt")).toBeVisible();
     await expect(row.getByLabel("Attention: Approval Required")).toBeVisible();
-    await expectUnclipped(row.locator(".background-work-badge"));
+    await expectUnclipped(row.locator(".status[data-group='background-work']"));
     await expect(row).toHaveAccessibleName(/Waiting on External Job/);
     for (const state of ["continuation_pending", "orphaned", "resumed", "running"] as const) {
       await page.evaluate((backgroundWorkState) => {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { backgroundWorkState });
       }, state);
-      if (state === "resumed") await expect(row.locator(".background-work-badge")).toHaveCount(0);
-      else await expectUnclipped(row.locator(".background-work-badge"));
+      if (state === "resumed") await expect(row.locator(".status[data-group='background-work']")).toHaveCount(0);
+      else await expectUnclipped(row.locator(".status[data-group='background-work']"));
     }
     await row.click();
     const expand = page.getByRole("button", { name: "Expand Session" });
     if (await expand.isVisible()) await expand.click();
     const header = page.locator(".session-detail > .detail-head");
     // #784: one home at every width — the ordinary status row.
-    const badge = header.locator(".session-header-statuses > .background-work-badge");
+    const badge = header.locator(".session-header-statuses > .status[data-group='background-work']");
     for (const [state, label] of [
       ["running", "Waiting on External Job"],
       ["continuation_pending", "Continuation Pending"],
-      ["orphaned", "Orphaned"],
+      ["orphaned", "Lost"],
     ] as const) {
       await page.evaluate((backgroundWorkState) => {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { backgroundWorkState });
@@ -103,7 +103,7 @@ for (const width of [320, 390, 700, 1280]) {
         await page.keyboard.press("Escape");
         await expect(overflow).toBeFocused();
         await overflow.click();
-        await dialog.locator(".background-work-badge").press("Enter");
+        await dialog.locator(".status[data-group='background-work']").press("Enter");
         await expect(dialog).toHaveCount(0);
         // The activated popover copy unmounts; restore to its surviving trigger.
         await expect(overflow).toBeFocused();
@@ -117,7 +117,7 @@ for (const width of [320, 390, 700, 1280]) {
       });
     });
     await expect(badge).toHaveCount(0);
-    await expect(header.locator(".background-work-badge")).toHaveCount(0);
+    await expect(header.locator(".status[data-group='background-work']")).toHaveCount(0);
   });
 }
 
@@ -157,10 +157,10 @@ for (const width of [320, 1280]) {
           }],
         });
       }, { watchdogState });
-      let badge = header.locator(":scope > .session-header-statuses > .background-work-badge");
+      let badge = header.locator(":scope > .session-header-statuses > .status[data-group='background-work']");
       if (!await badge.isVisible()) {
         await header.locator(".session-status-overflow-trigger").click();
-        badge = page.getByRole("dialog", { name: "Session Statuses" }).locator(".background-work-badge");
+        badge = page.getByRole("dialog", { name: "Session Statuses" }).locator(".status[data-group='background-work']");
       }
       await expect(badge).toBeVisible();
       await expect(badge).toHaveText(label);
@@ -177,7 +177,7 @@ for (const width of [320, 1280]) {
       if (width === 1280 && watchdogState === "terminal_without_continuation") {
         const pinned = page.getByRole("complementary", { name: "Pinned Summary" });
         if (!await pinned.isVisible()) await page.getByRole("button", { name: "Toggle Pinned Summary" }).click();
-        const pinnedBadge = pinned.locator(".background-work-badge");
+        const pinnedBadge = pinned.locator(".status[data-group='background-work']");
         await expect(pinnedBadge).toHaveText(label);
         await expect(pinnedBadge).toHaveAccessibleName(`Background Work: ${label}. ${description}`);
         await pinnedBadge.click();

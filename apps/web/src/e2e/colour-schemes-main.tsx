@@ -1,4 +1,5 @@
 import React from "react";
+import { StatusBadge } from "../components/StatusBadge.js";
 import { PROTOCOL_VERSION, type BoxView, type RunnerView } from "@wollipog/protocol";
 import { createRoot } from "react-dom/client";
 import { ApiProvider } from "../api-context.js";
@@ -101,9 +102,9 @@ const contrastSelectors = [
   ".slash-detail-disabled",
   ".diff-line-add .diff-sign",
   ".diff-line-del .diff-sign",
-  ".st-running",
-  ".st-input",
-  ".st-done",
+  ".status.t-info",
+  ".status.t-warning",
+  ".status.t-success",
   ".btn.danger",
 ];
 
@@ -230,11 +231,9 @@ function Sample() {
 
           {/* Status pills, badges and the button states — every tinted fill the app paints text on. */}
           <div className="sample-row">
-            {["st-queued", "st-running", "st-input", "st-stopped", "st-done"].map((status) => (
-              // Just the status class. There is no bare `.st` rule — `statusMeta` returns
-              // `st-queued`, `st-running` and so on, and the harness had invented a wrapper class
-              // that styled nothing.
-              <span key={status} className={status}>{status.replace("st-", "")}</span>
+            {(["neutral", "info", "warning", "success", "danger"] as const).map((tone) => (
+              // The one status recipe in each tone, as `StatusBadge` renders it.
+              <StatusBadge key={tone} tone={tone} label={tone} />
             ))}
           </div>
           <div className="sample-row">

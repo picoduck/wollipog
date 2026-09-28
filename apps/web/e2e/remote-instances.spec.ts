@@ -164,6 +164,7 @@ test("shows deterministic validation and authentication recovery", async ({ page
   ));
   await page.getByRole("article").filter({ hasText: "Studio" }).getByRole("button", { name: "Switch" }).click();
   const studio = page.getByRole("article").filter({ hasText: "Studio" });
-  await expect(studio.getByText("Authentication Required", { exact: true })).toBeVisible();
+  // Instances share the machine vocabulary (docs/design-system.md §11.2).
+  await expect(studio.getByText("Sign-In Required", { exact: true })).toBeVisible();
   await expect(studio.getByRole("button", { name: "Re-Pair" })).toBeVisible();
 });

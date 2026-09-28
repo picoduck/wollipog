@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { StatusBadge } from "./StatusBadge.js";
 import {
   runnerSupportsProtocol,
   type BoxView,
@@ -17,7 +18,7 @@ import {
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
 import {
   buildProjectLocationCandidates,
-  projectAvailabilityLabel,
+  projectAvailabilityMeta,
   projectLocationMembershipState,
   type ProjectLocationCandidate,
 } from "../project-management.js";
@@ -403,9 +404,7 @@ export function ProjectLocationDialog({
                 <div className="project-location-main">
                   <div className="project-location-heading">
                     <strong>{candidate.name}</strong>
-                    <span className={`project-availability availability-${candidate.availability}`}>
-                      {projectAvailabilityLabel(candidate.availability)}
-                    </span>
+                    <StatusBadge meta={projectAvailabilityMeta(candidate.availability)} />
                   </div>
                   <code title={candidate.path}>{candidate.path}</code>
                   <span className="muted">{display.name} · {display.kind === "ssh" ? "SSH" : "Native Runner"}</span>
