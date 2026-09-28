@@ -3878,6 +3878,11 @@ function SessionDetailLoaded({
     if (!planSupported) return; // never set an unsupported "plan" mode (would map to a writable sandbox)
     applyConfig({ permissionMode: on ? "plan" : "" });
   };
+  // The Plan pill and each attachment ✕ unmount when they act. A pointer never focuses them, but a
+  // keyboard user's focus would fall to the page with them, so it moves to the composer (#1913).
+  const keepFocusInComposer = (control: HTMLElement) => {
+    if (control.ownerDocument.activeElement === control) inputRef.current?.focus({ preventScroll: true });
+  };
 
   const clearAppCommandText = () => {
     draftDirty.current = true;
@@ -5624,7 +5629,10 @@ function SessionDetailLoaded({
               )}
               <ImageStrip
                 images={images}
-                onRemove={remove}
+                onRemove={(i, control) => {
+                  remove(i);
+                  keepFocusInComposer(control);
+                }}
                 onInspectReference={(reference, opener) => {
                   workspaceReferenceReturnFocusRef.current = opener;
                   setInspectedWorkspaceReference(reference);
@@ -5746,7 +5754,10 @@ function SessionDetailLoaded({
                       // pointerdown brings the phone rail back and moves this pill out from under the
                       // finger (#1903).
                       onPointerDown={(event) => event.preventDefault()}
-                      onClick={() => togglePlan(false)}
+                      onClick={(event) => {
+                        togglePlan(false);
+                        if (planSupported) keepFocusInComposer(event.currentTarget);
+                      }}
                       aria-describedby={configRefusal !== null ? configRefusalId : undefined}
                       title={configRefusal !== null
                         ? `Plan mode is on. ${configRefusal}`

@@ -143,7 +143,8 @@ export function ImageStrip({
   onInspectReference,
 }: {
   images: PromptImageInput[];
-  onRemove: (i: number) => void;
+  /** `control` is the ✕, which unmounts with its chip: a keyboard user's focus needs a new home. */
+  onRemove: (i: number, control: HTMLElement) => void;
   /** `opener` is the chip, for returning focus on close: a pointer never focuses it. */
   onInspectReference?: (reference: WorkspaceReference, opener: HTMLElement) => void;
 }) {
@@ -171,7 +172,7 @@ export function ImageStrip({
               // Keep the composer focused until the click lands, like Send: blurring it on
               // pointerdown brings the phone rail back and moves this button out from under the finger.
               onPointerDown={(event) => event.preventDefault()}
-              onClick={() => onRemove(i)}
+              onClick={(event) => onRemove(i, event.currentTarget)}
               aria-label={`Remove Workspace Reference ${workspaceReferenceLabel(img)}`}
             >
               ✕
@@ -186,7 +187,7 @@ export function ImageStrip({
               // Keep the composer focused until the click lands, like Send: blurring it on
               // pointerdown brings the phone rail back and moves this button out from under the finger.
               onPointerDown={(event) => event.preventDefault()}
-              onClick={() => onRemove(i)}
+              onClick={(event) => onRemove(i, event.currentTarget)}
               aria-label="Remove Image"
             >
               ✕
