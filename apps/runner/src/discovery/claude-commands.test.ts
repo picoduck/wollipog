@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, test } from "node:test";
+import { afterEach, test, type TestContext } from "node:test";
 import type { ExecResult } from "./resolve.js";
 import type { SessionMeta } from "../session-store.js";
 import {
@@ -576,36 +576,88 @@ test("a command root removed after lstat is a failed refresh, not an authoritati
   assert.equal(result.commands, previous);
 });
 
-test("late native resource acquisition cannot delay the hard deadline and is closed when it arrives", async () => {
+/** A promise the test settles itself, so an event happens exactly when the test says so. */
+function signal<T = void>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((settle) => { resolve = settle; });
+  return { promise, resolve };
+}
+
+/**
+ * Await `promise` while real I/O runs (#1935). With `setTimeout` mocked, a real-time guard cannot
+ * be a timer, so this yields through `setImmediate`, which stays real, and fails after 8s of real
+ * time rather than hanging.
+ */
+async function settledWithin<T>(promise: Promise<T>, message: string): Promise<T> {
+  let outcome: { value: T } | { error: unknown } | undefined;
+  promise.then((value) => { outcome = { value }; }, (error: unknown) => { outcome = { error }; });
+  const started = performance.now();
+  while (!outcome) {
+    if (performance.now() - started > 8_000) assert.fail(message);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  if ("error" in outcome) throw outcome.error;
+  return outcome.value;
+}
+
+/** Let pending callbacks and real I/O completions run without moving the controlled clock. */
+async function drain(context: TestContext): Promise<void> {
+  for (let turn = 0; turn < 20; turn += 1) {
+    context.mock.timers.tick(0);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+// #1935: on a real clock, slow directory enumeration on a loaded CI machine could spend the whole
+// 200ms budget before the late open was even attempted. Nothing was ever acquired, so nothing was
+// ever closed, and the final assertion failed. The budget is armed with `setTimeout` and rechecked
+// against `Date.now()`; with both mocked it passes only when the test advances the clock, and the
+// test advances it only once the open has been reached. The late resource arrives on a signal.
+test("late native resource acquisition cannot delay the hard deadline and is closed when it arrives", async (context) => {
   const repo = tempRoot("late-resource-repo");
   command(repo, "safe.md", "Safe command");
-  for (const resource of ["directory", "file"] as const) {
-    let closes = 0;
-    const started = performance.now();
-    const result = await discoverClaudeSlashCommands(
-      { context: { kind: "native" }, repoPath: repo, includeUserCommands: false },
-      {
-        nativeDiscoveryTimeoutMs: 200,
-        ...(resource === "directory"
-          ? {
-              openNativeDirectory: async () => {
-                await new Promise((resolve) => setTimeout(resolve, 400));
-                return { close: async () => { closes += 1; } } as never;
-              },
-            }
-          : {
-              openNativeFile: async () => {
-                await new Promise((resolve) => setTimeout(resolve, 400));
-                return { close: async () => { closes += 1; } } as never;
-              },
-            }),
-      },
-    );
-    assert.equal(result.ok, false, resource);
-    assert.ok(performance.now() - started < 750, `${resource} exceeded the hard launch budget`);
-    assert.equal(closes, 0, `${resource} had not arrived at timeout`);
-    await new Promise((resolve) => setTimeout(resolve, 500));
-    assert.equal(closes, 1, `${resource} ownership was released`);
+  const budgetMs = 200;
+  context.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+  try {
+    for (const resource of ["directory", "file"] as const) {
+      const opened = signal();
+      const arrive = signal();
+      const released = signal();
+      let closes = 0;
+      const late = async () => {
+        opened.resolve();
+        await arrive.promise;
+        return { close: async () => { closes += 1; released.resolve(); } } as never;
+      };
+      let settled = false;
+      const discovery = discoverClaudeSlashCommands(
+        { context: { kind: "native" }, repoPath: repo, includeUserCommands: false },
+        {
+          nativeDiscoveryTimeoutMs: budgetMs,
+          ...(resource === "directory" ? { openNativeDirectory: late } : { openNativeFile: late }),
+        },
+      ).finally(() => { settled = true; });
+
+      // Discovery reaches the slow acquisition, then waits for it only until the deadline.
+      await settledWithin(opened.promise, `${resource} was never opened`);
+      context.mock.timers.tick(budgetMs - 1);
+      await drain(context);
+      assert.equal(settled, false, `${resource} discovery gave up before its deadline`);
+
+      // At the deadline it fails without the resource ever having arrived.
+      context.mock.timers.tick(1);
+      const result = await settledWithin(discovery, `${resource} discovery waited past its deadline`);
+      assert.equal(result.ok, false, resource);
+      assert.equal(closes, 0, `${resource} had not arrived at timeout`);
+
+      // When the resource finally arrives, its ownership is released, exactly once.
+      arrive.resolve();
+      await settledWithin(released.promise, `${resource} ownership was not released after it arrived`);
+      await drain(context);
+      assert.equal(closes, 1, `${resource} ownership was released`);
+    }
+  } finally {
+    context.mock.timers.reset();
   }
 });
 
