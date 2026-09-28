@@ -106,6 +106,7 @@ const VOCABULARY = {
     target_unavailable: warning("Target Unavailable"),
   },
   tool: {
+    pending: neutral("Pending"),
     running: info("Running", { pulse: true }),
     completed: success("Completed"),
     failed: danger("Failed"),
@@ -219,6 +220,12 @@ export function statusMeta(domain: StatusDomain, value: string): StatusMeta {
   if (!Object.hasOwn(table, value)) return UNAVAILABLE;
   const entry = table[value]!;
   return { ...entry, pulse: entry.pulse ?? false };
+}
+
+/** A tool call's wire status on the tool vocabulary: providers report a running call as
+ * `in_progress`. */
+export function toolStatusMeta(status: string): StatusMeta {
+  return statusMeta("tool", status === "in_progress" ? "running" : status);
 }
 
 /** Every value of a domain, in vocabulary order. */

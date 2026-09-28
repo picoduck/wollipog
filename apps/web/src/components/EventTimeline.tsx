@@ -25,6 +25,8 @@ import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
 import { EditIcon, FolderUpIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
+import { toolStatusMeta } from "../status-meta.js";
+import { StatusBadge } from "./StatusBadge.js";
 import { PromptImageView } from "./PromptImageView.js";
 import { ArtifactPreview } from "./ArtifactPreview.js";
 import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
@@ -1643,14 +1645,14 @@ function SubagentSummary({ tool, depth, open, onToggle, onOpen }: {
           type="button"
           className="subagent-toggle tl-disclosure"
           aria-expanded={open}
-          aria-label={`Agent · ${items.length} Step${items.length === 1 ? "" : "s"} · ${titleCaseLabel(tool.status)}${metrics.length > 0 ? ` · ${metrics.join(" · ")}` : ""}`}
+          aria-label={`Agent · ${items.length} Step${items.length === 1 ? "" : "s"} · ${toolStatusMeta(tool.status).label}${metrics.length > 0 ? ` · ${metrics.join(" · ")}` : ""}`}
           aria-describedby={hasTimingDescription ? timingDescriptionId : undefined}
           onClick={onToggle}
         >
           <span className="subagent-caret">▸</span>
           <span className="subagent-icon">⑃</span>
           <span>Agent · {items.length} Step{items.length === 1 ? "" : "s"}</span>
-          <span className={`subagent-status tool-${tool.status}`}>{titleCaseLabel(tool.status)}</span>
+          <StatusBadge meta={toolStatusMeta(tool.status)} inline={tool.status === "completed"} className="subagent-status" />
           {metrics.length > 0 && <span className="subagent-metrics">· {metrics.join(" · ")}</span>}
           <ActivityTimestampMeta
             id={hasTimingDescription ? timingDescriptionId : undefined}
@@ -1945,7 +1947,8 @@ const TimelineRow = memo(function TimelineRow({
             {disclosure && <span className="tool-caret">▸</span>}
             <span className="tool-kind">{toolIcon(item.toolKind)}</span>
             <span className="tool-title">{item.title}</span>
-            <span className={`tool-status tool-${item.status}`}>{titleCaseLabel(item.status)}</span>
+            {/* §11.2: a completed call reads inline, with no pill; running and failed stay badges. */}
+            <StatusBadge meta={toolStatusMeta(item.status)} inline={item.status === "completed"} />
           </span>
           <ActivityTimestampMeta
             id={disclosure && hasTimingDescription ? timingDescriptionId : undefined}
@@ -1976,7 +1979,7 @@ const TimelineRow = memo(function TimelineRow({
         >
           <summary
             className="tool-head"
-            aria-label={`${item.title} · ${titleCaseLabel(item.status)}`}
+            aria-label={`${item.title} · ${toolStatusMeta(item.status).label}`}
             aria-describedby={hasTimingDescription ? timingDescriptionId : undefined}
           >
             {head(true)}

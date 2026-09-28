@@ -6114,7 +6114,6 @@ textarea,
 }
 .subagent-status {
   margin-left: auto;
-  font-size: 10px;
 }
 .subagent-metrics {
   color: var(--text-faint);
@@ -6190,29 +6189,6 @@ textarea,
   overflow-wrap: anywhere;
   font-size: 13px;
   font-weight: 500;
-}
-.tool-status {
-  font-size: 11px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  text-transform: uppercase;
-  letter-spacing: 0.4px;
-}
-.tool-completed {
-  color: var(--green-on-tint);
-  background: color-mix(in srgb, var(--green) 12%, transparent);
-}
-.tool-in_progress {
-  color: var(--blue-on-tint);
-  background: color-mix(in srgb, var(--blue) 12%, transparent);
-}
-.tool-pending {
-  color: var(--text-dim);
-  background: var(--bg-elev-3);
-}
-.tool-failed {
-  color: var(--red-on-tint);
-  background: color-mix(in srgb, var(--red) 12%, transparent);
 }
 .tool-body {
   width: 100%;
