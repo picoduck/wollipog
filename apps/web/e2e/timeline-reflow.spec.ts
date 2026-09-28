@@ -1,4 +1,20 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test as base, type Page } from "@playwright/test";
+
+// React refuses a flushSync requested from inside a lifecycle and logs a console error. Whether
+// that update still lands before paint then depends on where it was requested, which the geometry
+// assertions here cannot show, so they keep passing. Treat every browser console error or uncaught
+// page error in these scenarios as a failure.
+const test = base.extend<{ consoleErrorGuard: void }>({
+  consoleErrorGuard: [async ({ page }, use) => {
+    const errors: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error") errors.push(message.text());
+    });
+    page.on("pageerror", (error) => errors.push(String(error)));
+    await use();
+    expect(errors, "the timeline logged unexpected browser console errors").toEqual([]);
+  }, { auto: true }],
+});
 
 async function rowGeometry(page: Page) {
   return page.locator("[data-virtual-row]").evaluateAll((rows) => rows.map((row) => {

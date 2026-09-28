@@ -415,7 +415,7 @@ function VirtualList<T>({
   const widthAnchorFrameRef = useRef<number | null>(null);
   const widthAnchorRef = useRef<VirtualScrollAnchor | null>(null);
   const anchoredResizeCommitRef = useRef(false);
-  const measuringRowInCommitRef = useRef(false);
+  const measuringInCommitRef = useRef(false);
   const anchorCorrectionScrollTopRef = useRef<number | null>(null);
   const anchorCorrectionIntentVersionRef = useRef<number | null>(null);
   const viewportIntentVersionRef = useRef(0);
@@ -555,14 +555,13 @@ function VirtualList<T>({
   // adjustment before the next row is measured.
   // A session-return or structural anchor's fully preceding row instead requests a synchronous
   // render above, so its growth that lands at the end of the bounded window is restored before
-  // paint. A row measured from its ref during a commit needs none: React commits that update
-  // before paint. TanStack's row observer can report rewrapped rows before the viewport observer
-  // below records the new width, so a width reflow is also pending while the live width differs
-  // from that record.
+  // paint. A row measured during a commit needs none: React commits that update before paint.
+  // TanStack's row observer can report rewrapped rows before the viewport observer below records
+  // the new width, so a width reflow is also pending while the live width differs from that record.
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
     const scrollOffset = instance.scrollOffset ?? 0;
     const anchorPending = pendingAnchorRef.current != null;
-    anchoredResizeCommitRef.current = !measuringRowInCommitRef.current &&
+    anchoredResizeCommitRef.current = !measuringInCommitRef.current &&
       shouldCommitAnchoredResizeSynchronously({
         itemEnd: item.end,
         scrollOffset,
@@ -580,14 +579,26 @@ function VirtualList<T>({
       anchorPending,
     });
   };
-  const measureRow = useCallback((node: HTMLDivElement | null) => {
-    measuringRowInCommitRef.current = true;
+  // Ref callbacks and layout effects run inside React's commit, which flushes every update they
+  // schedule before paint. A flushSync requested there adds nothing: React refuses it with a
+  // lifecycle warning. TanStack still requests one when a measurement writes scrollTop, and skips
+  // it only for its own ref measurements, so report those notifications as asynchronous.
+  const measureInCommit = useCallback((measure: () => void) => {
+    const options = virtualizer.options;
+    const { onChange } = options;
+    const measuringInCommit = measuringInCommitRef.current;
+    measuringInCommitRef.current = true;
+    options.onChange = (instance, _sync) => onChange?.(instance, false);
     try {
-      virtualizer.measureElement(node);
+      measure();
     } finally {
-      measuringRowInCommitRef.current = false;
+      options.onChange = onChange;
+      measuringInCommitRef.current = measuringInCommit;
     }
   }, [virtualizer]);
+  const measureRow = useCallback((node: HTMLDivElement | null) => {
+    measureInCommit(() => virtualizer.measureElement(node));
+  }, [measureInCommit, virtualizer]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -966,8 +977,8 @@ function VirtualList<T>({
     // positions every row from estimates and wrapped messages overlap. Re-seeding through
     // `resizeItem` after the synchronous rebuild preserves the measured rows before paint while
     // leaving offscreen rows invalidated for measurement at their new width.
-    reseedMountedVirtualRows(rootRef.current, virtualizer);
-  }, [measurementEpoch, virtualizer]);
+    measureInCommit(() => reseedMountedVirtualRows(rootRef.current, virtualizer));
+  }, [measureInCommit, measurementEpoch, virtualizer]);
 
   useEffect(() => {
     if (!draggedKey) return;

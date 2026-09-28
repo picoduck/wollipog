@@ -276,9 +276,11 @@ const GROWTH = 80;
 
 function TimelineReader({
   timelineItems,
+  preserveAnchor,
   onVisibleAnchorChange,
 }: {
   timelineItems: TimelineItem[];
+  preserveAnchor: boolean;
   onVisibleAnchorChange: (anchor: VirtualScrollAnchor) => void;
 }) {
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -289,15 +291,18 @@ function TimelineReader({
         scrollRef={scrollRef}
         historyKey="session:anchor-race"
         getInitialAnchor={() => savedAnchor}
-        preserveAnchor
+        preserveAnchor={preserveAnchor}
         onVisibleAnchorChange={onVisibleAnchorChange}
       />
     </div>
   );
 }
 
-/** Mounts the session timeline as a phone reader returning to a saved row. */
-async function returnToSavedRow() {
+/**
+ * Mounts the session timeline as a phone reader returning to a saved row. A reader following live
+ * output does not preserve anchors, so it ignores the saved row.
+ */
+async function returnToSavedRow({ preserveAnchor = true }: { preserveAnchor?: boolean } = {}) {
   frameCallbacks = [];
   idleTimers = new Map();
   ControlledResizeObserver.instances = [];
@@ -311,7 +316,11 @@ async function returnToSavedRow() {
   const reports: VirtualScrollAnchor[] = [];
   let timelineItems = items;
   const render = () => root.render(
-    <TimelineReader timelineItems={timelineItems} onVisibleAnchorChange={(anchor) => reports.push(anchor)} />,
+    <TimelineReader
+      timelineItems={timelineItems}
+      preserveAnchor={preserveAnchor}
+      onVisibleAnchorChange={(anchor) => reports.push(anchor)}
+    />,
   );
   let mounted = true;
   const unmount = async () => {
@@ -469,6 +478,25 @@ test("width reflow during restoration keeps the saved row without a second compe
 
   assert.equal(layout.scrollTop, SAVED_INDEX * 200 - SAVED_OFFSET);
   assert.equal((await reader.durableAnchor())?.key, SAVED_KEY);
+});
+
+test("width reflow without anchor preservation compensates preceding rows without a synchronous render in the reseed", async () => {
+  await returnToSavedRow({ preserveAnchor: false });
+  const scrollTop = SAVED_INDEX * ROW_HEIGHT - SAVED_OFFSET;
+  layout.scrollTop = scrollTop;
+  await settle((painted) => assertNoVisibleOverlap(painted, "scroll"));
+
+  // No anchor owns the reflow, so TanStack compensates the fully preceding rows as the width reseed
+  // restores their wrapped heights. That reseed runs in a layout effect, where React already commits
+  // the compensated render before paint and refuses a synchronous one.
+  await withoutConsoleErrors(async () => {
+    layout.width = 400;
+    for (const row of paint()) layout.heights.set(row.key, 200);
+    assertNoVisibleOverlap(await frame(), "width frame");
+    await settle((painted) => assertNoVisibleOverlap(painted, "after width change"));
+  });
+
+  assert.ok(layout.scrollTop > scrollTop, "TanStack compensated the preceding rows' growth");
 });
 
 test("an older history page keeps the saved row as the structural anchor", async () => {
