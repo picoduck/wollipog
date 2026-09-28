@@ -135,6 +135,59 @@ function staticBranches(node: ts.Expression): string[] | null {
   return null;
 }
 
+const MAX_BODY_BRANCHES = 256;
+
+/**
+ * Every text a confirmation body can produce: conditions, template holes and `+` concatenation are
+ * followed, and a local constant is read through (`fenced` in the skill copy discard). A value this
+ * cannot read — a message the server sends — is `null`: it is not static copy.
+ */
+function bodyBranches(node: ts.Expression, sourceFile: ts.SourceFile): string[] | null {
+  const combine = (left: string[], right: string[]) =>
+    left.flatMap((head) => right.map((tail) => head + tail)).slice(0, MAX_BODY_BRANCHES);
+  const orPlaceholder = (branches: string[] | null) => branches ?? ["Name"];
+  if (ts.isParenthesizedExpression(node)) return bodyBranches(node.expression, sourceFile);
+  if (ts.isStringLiteralLike(node)) return [node.text];
+  if (ts.isTemplateExpression(node)) {
+    let branches = [node.head.text];
+    for (const span of node.templateSpans) {
+      branches = combine(combine(branches, orPlaceholder(bodyBranches(span.expression, sourceFile))), [span.literal.text]);
+    }
+    return branches;
+  }
+  if (ts.isConditionalExpression(node)) {
+    const whenTrue = bodyBranches(node.whenTrue, sourceFile);
+    const whenFalse = bodyBranches(node.whenFalse, sourceFile);
+    if (!whenTrue && !whenFalse) return null;
+    return [...(whenTrue ?? []), ...(whenFalse ?? [])];
+  }
+  if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
+    const left = bodyBranches(node.left, sourceFile);
+    const right = bodyBranches(node.right, sourceFile);
+    if (!left && !right) return null;
+    return combine(orPlaceholder(left), orPlaceholder(right));
+  }
+  if (ts.isIdentifier(node)) {
+    let found: ts.Expression | undefined;
+    const find = (candidate: ts.Node) => {
+      if (!found && ts.isVariableDeclaration(candidate) && ts.isIdentifier(candidate.name) &&
+          candidate.name.text === node.text && candidate.initializer &&
+          (candidate.parent.flags & ts.NodeFlags.Const) !== 0) {
+        found = candidate.initializer;
+      }
+      ts.forEachChild(candidate, find);
+    };
+    find(sourceFile);
+    return found ? bodyBranches(found, sourceFile) : null;
+  }
+  return null;
+}
+
+/** Sentences end at `.`, `!` or `?` before a capital or the end, so "v0.1" and "e.g. a" do not split. */
+function sentenceCount(text: string): number {
+  return (text.trim().match(/[.!?](?=\s+[A-Z“"(]|\s*$)/g) ?? []).length;
+}
+
 function optionLiterals(node: ts.Expression): ts.ObjectLiteralExpression[] {
   if (ts.isParenthesizedExpression(node)) return optionLiterals(node.expression);
   if (ts.isObjectLiteralExpression(node)) return [node];
@@ -174,6 +227,13 @@ test("every confirmation names its action in the title and its outcome on the bu
               failures.push(`${where(literal)} confirmation has no confirmLabel`);
               continue;
             }
+            const message = property("message");
+            const bodies = message ? bodyBranches(message.initializer, sourceFile) : null;
+            for (const body of bodies ?? []) {
+              if (sentenceCount(body) > 2) {
+                failures.push(`${where(message!)} body is longer than two sentences (§7.4): ${JSON.stringify(body)}`);
+              }
+            }
             const titles = staticBranches(title.initializer);
             const labels = staticBranches(label.initializer);
             if (!titles || !labels) {
@@ -201,4 +261,11 @@ test("every confirmation names its action in the title and its outcome on the bu
   }
   assert.ok(checked >= 38, `expected to read every confirmation caller, read ${checked}`);
   assert.deepEqual(failures, [], failures.join("\n"));
+});
+
+test("the confirmation sentence count reads sentences, not every dot", () => {
+  assert.equal(sentenceCount("“Fix rounding” stops now. You can restore it."), 2);
+  assert.equal(sentenceCount("Version v0.1.2 of the skill, e.g. from Git, is kept."), 1);
+  assert.equal(sentenceCount("It is deleted only if it still matches; if it changed, nothing is deleted."), 1);
+  assert.equal(sentenceCount("One. Two! Three? "), 3);
 });

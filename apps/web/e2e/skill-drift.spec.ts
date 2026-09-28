@@ -99,7 +99,7 @@ for (const width of [1280, 320]) {
     await machine.getByRole("button", { name: "Restore Library Version" }).click();
     const confirmation = page.getByRole("alertdialog").or(page.getByRole("dialog"));
     await expect(confirmation).toContainText("The edited copy of “code-review”");
-    await expect(confirmation).toContainText("The edit cannot be recovered.");
+    await expect(confirmation).toContainText("is discarded and cannot be recovered.");
     await page.screenshot({ path: info.outputPath(`drift-restore-confirm-${width}.png`), fullPage: true });
     expect(await noHorizontalOverflow(page)).toBe(true);
     await confirmation.getByRole("button", { name: "Restore Library Version" }).click();

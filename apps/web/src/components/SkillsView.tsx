@@ -423,19 +423,18 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
 
   const discardOrphan = async (runner: RunnerView, copy: OrphanedSkillCopy) => {
     const machine = machineLabels.get(runner.runnerId) ?? runner.runnerId;
-    const fenced = "It is deleted only if it still matches what this page shows. If it changed, nothing is deleted.";
+    const fenced = "It is deleted only if it still matches what this page shows; if it changed, nothing is deleted.";
     const copyName = `${copy.kind === "kept_aside" ? "kept-aside" : "edited"} copy${copy.name ? ` of “${copy.name}”` : ""}`;
     const confirmed = await confirm({
       title: "Discard Copy",
       message: copy.kind === "kept_aside"
-        ? `The ${copyName} on ${machine} is discarded from the skill store. ${fenced}` +
-          (copy.observedDigest ? "" : " It cannot be previewed because it is not valid skill content.") +
-          " The edit cannot be recovered."
+        ? `The ${copyName} on ${machine} is discarded from the skill store and cannot be recovered` +
+          `${copy.observedDigest ? "" : " (it is not valid skill content, so it cannot be previewed)"}. ${fenced}`
         : copy.observedDigest
-          ? `The ${copyName} on ${machine} is discarded, and its links are removed like those of any skill that is no longer assigned. ` +
-            `${fenced} The edit cannot be recovered.`
-          : `The ${copyName} on ${machine} cannot be read, so there is nothing to check it against. The machine moves it aside ` +
-            "instead of deleting it and removes its links. It then appears here as a kept-aside copy, which you can discard.",
+          ? `The ${copyName} on ${machine} is discarded and cannot be recovered, and its links are removed like those of ` +
+            `any skill that is no longer assigned. ${fenced}`
+          : `The ${copyName} on ${machine} cannot be read, so the machine moves it aside instead of deleting it and ` +
+            "removes its links. It then appears here as a kept-aside copy, which you can discard.",
       confirmLabel: "Discard Copy",
       tone: "danger",
     });
@@ -454,9 +453,9 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
     const machine = machineLabels.get(runner.runnerId) ?? runner.runnerId;
     const confirmed = await confirm({
       title: "Restore Library Version",
-      message: `The edited copy of “${entry.name}” on ${machine} is discarded. If the library still has version ${entry.digest.slice(0, 12)}, ` +
-        "which it was deployed from, the machine rebuilds that version in its place. The machine then syncs to its " +
-        "assigned version. The edit cannot be recovered.",
+      message: `The edited copy of “${entry.name}” on ${machine} is discarded and cannot be recovered. If the library still ` +
+        `has version ${entry.digest.slice(0, 12)}, which it was deployed from, the machine rebuilds it in its place, then ` +
+        "syncs to its assigned version.",
       confirmLabel: "Restore Library Version",
       tone: "danger",
     });
