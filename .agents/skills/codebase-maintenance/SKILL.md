@@ -53,14 +53,17 @@ Hard rules:
    the verified fact (never speculation or planning notes), and only with a one-line disclosure in
    the report naming the memory and the correction. A stale memory left standing is how a
    reconciled issue gets filed a third time; an undisclosed edit is how a shared memory drifts.
+6. Keep every Bash call a single, inspectable command line. Anything multi-line or looping — a
+   heredoc, a multi-line `python3 -c`, a `for … do … done` over shell-variable paths — goes into
+   a script file in the run's scratch directory (write it with the file tool) and runs from
+   there. The managed-worktree guard cannot inspect those shapes and refuses them with a message
+   that blames runner-owned guard state (#1632); sweeps on 2026-09-23 and 2026-09-28 each lost a
+   retry to it. The rule applies to the sweep itself, not only to follow-up work.
 
-6. Follow-up work in this session. A human may reply to the report with "publish", then "claim
+7. Follow-up work in this session. A human may reply to the report with "publish", then "claim
    and fix" — that is their call, and it converts this session into a fixing session for the
    rest of its life. Three things must happen before any fix work starts:
-   - Do not put a shell-variable path inside a shell loop in one Bash call (a `do … done`
-     block reading `$S/$d/file`). The managed-worktree guard cannot inspect that shape and
-     refuses it with a message that wrongly blames runner-owned guard state (#1632). Write the loop to a
-     script file and run that, or use Python.
+   - Rule 6 applies here too: loops and multi-line scripts go in scratch-directory files.
    - Never print the process environment to find anything — no `env`, `printenv`, `set`, or
      `cat /proc/self/environ`, filtered or not. Agent sessions inherit the runner's environment,
      and on 2026-09-17 an `env | grep -i token` wrote the live runner credential into a session
@@ -82,8 +85,12 @@ make on its own. See "Promotion Criteria" below.
 
 ## Anchor Every Finding in Ground Truth
 
-Start with `git fetch origin main` (it touches only `.git` refs, never the working tree) and
-`git rev-list --left-right --count HEAD...origin/main`. If HEAD is behind, say so at the top of
+Start with `timeout 60 git fetch origin main` (it touches only `.git` refs, never the working
+tree). The `origin` remote is SSH, and port 22 to GitHub intermittently hangs on this machine
+rather than failing, even in batch mode. If the fetch times out, fetch the same ref over HTTPS
+with the GitHub CLI's credentials and say so in Tree State:
+`git -c credential.helper='!gh auth git-credential' fetch https://github.com/picoduck/wollipog.git +refs/heads/main:refs/remotes/origin/main`.
+Then run `git rev-list --left-right --count HEAD...origin/main`. If HEAD is behind, say so at the top of
 the report and evaluate every candidate against `origin/main` — `git show origin/main:<path>`,
 `git diff --stat HEAD origin/main` — so a file deleted or rewritten upstream is dropped, not
 reported. One sweep ran two commits behind and produced three findings in a file the tip of
