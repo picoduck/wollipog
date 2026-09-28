@@ -1468,7 +1468,7 @@ test("personal sessions require explicit confirmation before joining a team Proj
 
   const confirmation = page.getByRole("dialog", { name: "Share and Move Session" });
   await expect(confirmation).toContainText("lets that team read its transcript");
-  await expect(confirmation).toContainText("Files and the execution Location stay unchanged.");
+  await expect(confirmation).toContainText("Files and the execution Location stay unchanged, and you can move it again later.");
   await confirmation.getByRole("button", { name: "Share and Move" }).click();
 
   await expect.poll(() => page.evaluate(() => {

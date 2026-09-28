@@ -3,6 +3,9 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import ts from "typescript";
+import { ApiError } from "./api.js";
+import { archiveAndStopMessage } from "./archive-actions.js";
+import { lifecycleConflictPresentation } from "./components/RunnersView.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
 const MINOR_WORDS = new Set([
@@ -138,6 +141,12 @@ function staticBranches(node: ts.Expression): string[] | null {
 const MAX_BODY_BRANCHES = 256;
 
 /**
+ * Confirmation bodies built by a helper the static reader cannot follow. Each one has its own
+ * sentence check below; a new unreadable body fails until it is listed here and tested.
+ */
+const COMPUTED_BODIES = [/^archiveAndStopMessage\(/, /^conflict\.message$/];
+
+/**
  * Every text a confirmation body can produce: conditions, template holes and `+` concatenation are
  * followed, and a local constant is read through (`fenced` in the skill copy discard). A value this
  * cannot read — a message the server sends — is `null`: it is not static copy.
@@ -183,9 +192,15 @@ function bodyBranches(node: ts.Expression, sourceFile: ts.SourceFile): string[] 
   return null;
 }
 
-/** Sentences end at `.`, `!` or `?` before a capital or the end, so "v0.1" and "e.g. a" do not split. */
+/**
+ * A sentence ends at `.`, `!` or `?` followed by space and anything but a lowercase letter, or by the end:
+ * "v0.1" and "e.g. a" do not split, "One. 2 files…" does. Trailing text with no final stop is a sentence too.
+ */
 function sentenceCount(text: string): number {
-  return (text.trim().match(/[.!?](?=\s+[A-Z“"(]|\s*$)/g) ?? []).length;
+  const trimmed = text.trim();
+  if (!trimmed) return 0;
+  const ends = trimmed.match(/[.!?](?=\s+[^\sa-z]|\s*$)/g)?.length ?? 0;
+  return /[.!?]$/.test(trimmed) ? ends : ends + 1;
 }
 
 function optionLiterals(node: ts.Expression): ts.ObjectLiteralExpression[] {
@@ -229,6 +244,9 @@ test("every confirmation names its action in the title and its outcome on the bu
             }
             const message = property("message");
             const bodies = message ? bodyBranches(message.initializer, sourceFile) : null;
+            if (message && !bodies && !COMPUTED_BODIES.some((pattern) => pattern.test(message.initializer.getText(sourceFile)))) {
+              failures.push(`${where(message)} body is not readable copy; add its helper to COMPUTED_BODIES and test it there`);
+            }
             for (const body of bodies ?? []) {
               if (sentenceCount(body) > 2) {
                 failures.push(`${where(message!)} body is longer than two sentences (§7.4): ${JSON.stringify(body)}`);
@@ -268,4 +286,17 @@ test("the confirmation sentence count reads sentences, not every dot", () => {
   assert.equal(sentenceCount("Version v0.1.2 of the skill, e.g. from Git, is kept."), 1);
   assert.equal(sentenceCount("It is deleted only if it still matches; if it changed, nothing is deleted."), 1);
   assert.equal(sentenceCount("One. Two! Three? "), 3);
+  assert.equal(sentenceCount("One. 2 files are removed. This cannot be undone."), 3);
+  assert.equal(sentenceCount("A fragment with no final stop"), 1);
+  assert.equal(sentenceCount("Done. And a trailing fragment"), 2);
+});
+
+test("confirmation bodies built by a helper are one or two sentences too", () => {
+  const bodies = [
+    ...[null, "Fix the half-cent rounding bug"].flatMap((title) => [true, false].map((retrying) => archiveAndStopMessage(title, retrying))),
+    ...(["update", "reconnect", "adopt"] as const).flatMap((action) => [undefined, 1, 3].map((count) =>
+      lifecycleConflictPresentation(new ApiError("conflict", 409, "conflict", count === undefined ? {} : { activeSessionCount: count }), action).message)),
+  ];
+  assert.equal(bodies.length, 13);
+  for (const body of bodies) assert.ok(sentenceCount(body) <= 2, JSON.stringify(body));
 });

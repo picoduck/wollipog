@@ -454,8 +454,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
     const confirmed = await confirm({
       title: "Restore Library Version",
       message: `The edited copy of “${entry.name}” on ${machine} is discarded and cannot be recovered. If the library still ` +
-        `has version ${entry.digest.slice(0, 12)}, which it was deployed from, the machine rebuilds it in its place, then ` +
-        "syncs to its assigned version.",
+        "has the version it was deployed from, the machine rebuilds that version in its place, then syncs to its assigned version.",
       confirmLabel: "Restore Library Version",
       tone: "danger",
     });
