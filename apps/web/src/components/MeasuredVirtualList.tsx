@@ -538,12 +538,13 @@ function VirtualList<T>({
   // The public tracked offset includes each adjustment before the next row is measured.
   // TanStack's row observer can report rewrapped rows before the viewport observer below records
   // the new width, so a width reflow is also pending while the live width differs from that record.
-  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
-    shouldAdjustVirtualScrollForResize({
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
+    const anchorPending = pendingAnchorRef.current != null;
+    const adjust = shouldAdjustVirtualScrollForResize({
       itemStart: item.start,
       itemEnd: item.end,
       scrollOffset: instance.scrollOffset ?? 0,
-      anchorPending: pendingAnchorRef.current != null,
+      anchorPending,
       mountRestorePending: anchorCorrectionRequiresIntentRef.current,
       widthReflowPending: () => {
         if (widthAnchorRef.current != null) return true;
@@ -552,6 +553,14 @@ function VirtualList<T>({
           Math.round(scroll.getBoundingClientRect().width) !== viewportWidthRef.current;
       },
     });
+    // TanStack writes this adjustment before our next correction can record it, whether its render
+    // flushes now or is queued from a commit-time ref measurement. Record it as the pending anchor's
+    // own correction so a structural anchor does not relinquish the row as if the reader scrolled.
+    if (adjust && anchorPending && anchorCorrectionScrollTopRef.current != null) {
+      anchorCorrectionScrollTopRef.current += delta;
+    }
+    return adjust;
+  };
 
   useEffect(() => {
     const root = rootRef.current;

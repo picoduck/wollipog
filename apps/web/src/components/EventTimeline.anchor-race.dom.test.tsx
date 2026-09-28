@@ -502,6 +502,51 @@ test("a preceding row measured as a streamed row's structural anchor releases ke
     "the preceding row must never be adopted as the reading anchor");
 });
 
+test("the saved row growing with its predecessor under a structural anchor keeps its offset", async () => {
+  const reader = await returnToSavedRow();
+  await settle((painted) => assertSavedRowHeld(painted, "restore"));
+  await reader.setItems([...items, { kind: "user_message", id: 13, text: "Streamed follow-up" }]);
+  assertSavedRowHeld(paint(), "structural commit");
+  assertSavedRowHeld(await frame(), "structural frame");
+
+  // TanStack compensates the preceding row. That must not read as reader intent: if the anchor
+  // released, the spanning saved row's own growth would be compensated too and move its top.
+  const measured = await frame({
+    beforeResizeObservations: () => {
+      layout.heights.set(PRECEDING_KEY, ROW_HEIGHT + GROWTH);
+      layout.heights.set(SAVED_KEY, ROW_HEIGHT + 50);
+    },
+  });
+  assert.equal(paintedTop(measured, SAVED_KEY, "measurement frame"), SAVED_OFFSET,
+    "measurement frame: the saved row must keep its offset");
+  await settle((rows) => assertSavedRowHeld(rows, "after growth"));
+
+  assert.equal(layout.scrollTop, SAVED_INDEX * ROW_HEIGHT + GROWTH - SAVED_OFFSET);
+  assert.equal((await reader.durableAnchor())?.key, SAVED_KEY);
+});
+
+test("an older history page mounted under a pending structural anchor keeps the saved row", async () => {
+  const reader = await returnToSavedRow();
+  await settle((painted) => assertSavedRowHeld(painted, "restore"));
+  const streamed: TimelineItem = { kind: "user_message", id: 13, text: "Streamed follow-up" };
+  await reader.setItems([...items, streamed]);
+  assertSavedRowHeld(paint(), "structural commit");
+  assertSavedRowHeld(await frame(), "structural frame");
+
+  // The prepended rows mount in overscan and are measured from their ref during the commit, where
+  // TanStack's compensation render is queued rather than flushed.
+  const older: TimelineItem[] = [
+    { kind: "user_message", id: -2, text: "Older question" },
+    { kind: "agent_message", id: -1, text: "Older answer" },
+  ];
+  await reader.setItems([...older, ...items, streamed]);
+  assertSavedRowHeld(paint(), "prepend commit");
+  await settle((painted) => assertSavedRowHeld(painted, "after older page"));
+
+  assert.equal(layout.scrollTop, (SAVED_INDEX + older.length) * ROW_HEIGHT - SAVED_OFFSET);
+  assert.equal((await reader.durableAnchor())?.key, SAVED_KEY);
+});
+
 test("width reflow under a streamed row's structural anchor keeps the saved row without a second compensation", async () => {
   const reader = await returnToSavedRow();
   await settle((painted) => assertSavedRowHeld(painted, "restore"));
