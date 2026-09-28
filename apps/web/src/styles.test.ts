@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import postcss from "postcss";
 import { allDeclarations, customProperties, declarationsOf, mediaBlocks, topLevelRule } from "./css-rules.js";
 
 const raw = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
@@ -207,6 +208,38 @@ test("form controls and buttons inherit the app's type, and bare buttons reset",
   // The Automation form's fields inherited 600 from their label through a local `font: inherit`.
   assert.doesNotMatch(soleRuleBody(".automation-form-grid input, .automation-form-grid select, .automation-form-grid textarea"),
     /font:/, "a local font shorthand would re-inherit the label's weight");
+});
+
+/**
+ * At phone width the iOS focus-zoom guard lifts fields to 16px. That rule may change a control's SIZE
+ * only: a family (or a `font` shorthand, which resets the family) inside a phone-width block would put
+ * phone fields back on a face other than the app's, which is the defect the base reset exists to fix.
+ */
+test("phone-width rules resize controls but never change their font family", () => {
+  const offenders: string[] = [];
+  let phoneBlocks = 0;
+  let guard: string[] | null = null;
+  postcss.parse(css).walkAtRules("media", (block) => {
+    const widths = [...block.params.matchAll(/max-width:\s*(\d+)px/g)].map((match) => Number(match[1]));
+    if (!widths.some((width) => width <= 760)) return;
+    phoneBlocks += 1;
+    block.walkRules((rule) => {
+      const controls = /\b(input|select|textarea|button)\b|composer-input/.test(rule.selector);
+      const declarations = rule.nodes.flatMap((node) => (node.type === "decl" ? [node] : []));
+      if (rule.selector.includes(":root .composer-input")) {
+        guard = declarations.map((declaration) => `${declaration.prop}: ${declaration.value}`);
+      }
+      if (!controls) return;
+      for (const declaration of declarations) {
+        if (declaration.prop === "font-family" || (declaration.prop === "font" && declaration.value !== "inherit")) {
+          offenders.push(`${rule.selector.replace(/\s+/g, " ")} { ${declaration.prop}: ${declaration.value} }`);
+        }
+      }
+    });
+  });
+  assert.ok(phoneBlocks > 0, "the phone-width media blocks must be found");
+  assert.deepEqual(offenders, [], "a phone rule must not change a control's font family");
+  assert.deepEqual(guard, ["font-size: 16px"], "the focus-zoom guard sets the size and nothing else");
 });
 
 test("links, native controls and code use the base recipes", () => {
