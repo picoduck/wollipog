@@ -28,6 +28,9 @@ const supportsLoad = sessionLifecycle.startsWith("load") || supportsResume;
 const supportsList = process.env.WOLLIPOG_MOCK_SESSION_LIST === "1";
 const supportsControls = process.env.WOLLIPOG_MOCK_SESSION_CONTROLS === "1";
 const supportsMcpContext = process.env.WOLLIPOG_MOCK_MCP_CONTEXT === "1";
+// Holds the session/new reply, so a test can reach the window where the provider has started but
+// the runner does not yet know its conversation id (#2001).
+const sessionNewDelayMs = Number(process.env.WOLLIPOG_MOCK_SESSION_NEW_DELAY_MS) || 0;
 let currentModeId = "default";
 let currentModel = "mock-fast";
 let currentEffort = "medium";
@@ -70,6 +73,9 @@ function handleLine(line) {
     msg = JSON.parse(line);
   } catch {
     return;
+  }
+  if (sessionNewDelayMs > 0 && msg.id !== undefined && msg.method === "session/new") {
+    return void setTimeout(() => onRequest(msg), sessionNewDelayMs);
   }
   if (msg.id !== undefined && msg.method) return void onRequest(msg);
   if (msg.method) return onNotification(msg);

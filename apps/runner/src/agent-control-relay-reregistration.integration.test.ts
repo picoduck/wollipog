@@ -205,6 +205,10 @@ test("a relaunch whose credential registration is lost recovers after the runner
       context: { kind: "native" },
       env: {
         WOLLIPOG_MOCK_SESSION_LIFECYCLE: "resume",
+        // Open the window a loaded CI runner opened by chance (#2001): the first launch starts, but
+        // its conversation id is not persisted until well after its launch record and credential
+        // are visible, so a restart that does not wait for the id would lose the relaunch.
+        WOLLIPOG_MOCK_SESSION_NEW_DELAY_MS: "1500",
         RELAY_LAUNCH_DIR: launchDir,
         RELAY_NODE: process.execPath,
         RELAY_MOCK_AGENT: MOCK_AGENT,
@@ -231,6 +235,21 @@ test("a relaunch whose credential registration is lost recovers after the runner
   const baseline = await relayRequest(relayCoordinates(launchDir, firstLaunch));
   assert.notEqual(baseline.status, 503, baseline.body);
   assert.ok(baseline.ms < 5_000, `baseline relay round-trip took ${baseline.ms}ms`);
+  // The relaunch resumes the conversation the first launch established. A restarted runner refuses
+  // to continue an ACP history that has events but no persisted provider session id, rather than
+  // risk a replacement conversation, and it reports that only to the control plane this test is
+  // about to freeze. Under load the first launch can still be waiting on `session/new` here, so
+  // restart the runner only once that id is durable in its session store (#2001).
+  const firstLaunchMeta = join(temp, "runner-data", "sessions", sessionId, "meta.json");
+  const providerSessionPersisted = () => {
+    try {
+      return (JSON.parse(readFileSync(firstLaunchMeta, "utf8")) as { agentSessionId?: string | null }).agentSessionId != null;
+    } catch {
+      return false;
+    }
+  };
+  for (let attempt = 0; attempt < 300 && !providerSessionPersisted(); attempt++) await delay(100);
+  assert.ok(providerSessionPersisted(), `the first launch never persisted its provider session id\n${output}`);
 
   // A runner restart loses the in-memory credential; the next prompt relaunches the provider with a
   // freshly minted one whose registration the control plane must acknowledge.
