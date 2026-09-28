@@ -400,14 +400,13 @@ export function NewSessionDialog({
     const selectionChanged = previousAccountSelectionKey.current !== accountSelectionKey;
     previousAccountSelectionKey.current = accountSelectionKey;
     if (selectionChanged) accountChosenByUser.current = false;
+    if (accountChosenByUser.current && providerAccounts.some((account) => account.id === providerAccountId)) return;
+    accountChosenByUser.current = false;
     const preferred = savedProviderAccount?.accountId ?? agent?.defaultProviderAccountId;
-    setProviderAccountId((current) => {
-      if (accountChosenByUser.current && providerAccounts.some((account) => account.id === current)) return current;
-      if (savedProviderAccountMissing) return "";
-      return providerAccounts.find((account) => account.id === preferred)?.id ?? providerAccounts[0]?.id ?? "";
-    });
+    setProviderAccountId(savedProviderAccountMissing ? "" :
+      providerAccounts.find((account) => account.id === preferred)?.id ?? providerAccounts[0]?.id ?? "");
   }, [accountSelectionKey, agent?.defaultProviderAccountId, savedProviderAccount?.accountId,
-    savedProviderAccountMissing, providerAccounts.map((account) => account.id).join("\0")]);
+    savedProviderAccountMissing, providerAccountId, providerAccounts.map((account) => account.id).join("\0")]);
   const nativeTuiAccountingExplanation = nativeTuiAccountingDetail(agent);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
   const savedPiModeUnavailableForTarget = agent?.driver === "pi" && executionTarget !== undefined &&

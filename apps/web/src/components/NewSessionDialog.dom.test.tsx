@@ -1350,6 +1350,34 @@ test("New Session sends a deliberately selected account as a one-session overrid
   }
 });
 
+test("New Session drops an override when its account disappears", async () => {
+  const accountRunner: RunnerView = {
+    ...runner,
+    protocolVersion: PROTOCOL_VERSION,
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      { id: "personal", label: "Personal", provider: "claude", authStatus: "authenticated" },
+    ],
+    providerAccountDefaults: [{ provider: "claude", accountId: "personal", revision: 1 }],
+  };
+  const fixture = await mountFixture({ runners: [accountRunner] }, { projectId: null });
+  try {
+    await chooseSelectOption(fixture.container, "Account", "Work");
+    await act(async () => {
+      fixture.socket.push(snapshot({ runners: [{
+        ...accountRunner,
+        providerAccounts: accountRunner.providerAccounts?.filter((account) => account.id !== "work"),
+      }] }));
+    });
+    assert.equal(fixture.container.querySelector('[aria-label^="Account:"]'), null);
+    await act(async () => { createButton(fixture.container).click(); });
+    assert.equal(fixture.requests[0]?.providerAccountId, undefined,
+      "an automatic replacement must not become an explicit override");
+  } finally {
+    await unmountFixture(fixture);
+  }
+});
+
 test("a missing saved default requires an explicit account choice", async () => {
   const accountRunner: RunnerView = {
     ...runner,
