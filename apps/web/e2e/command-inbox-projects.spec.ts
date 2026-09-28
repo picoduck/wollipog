@@ -1,8 +1,25 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { dialogMotionSettled } from "./dialog-motion.js";
 
+/**
+ * A measured length in Chromium's layout unit (1/64px). A box under a transform is measured in
+ * float32, so a 44px control can read 43.99997 (44 - 2^-15): the same 44px of layout, not a shorter
+ * control. Rounding to the unit layout itself uses absorbs that and nothing larger, so a real
+ * 43.9px control still reads below 44.
+ */
+function layoutPx(value: number): number {
+  return Math.round(value * 64) / 64;
+}
+
+test("measured heights are compared in layout units, never forgiving a short control", () => {
+  expect(layoutPx(43.999969482421875), "float32 noise on a 44px box").toBe(44);
+  expect(layoutPx(44.00003), "and above it").toBe(44);
+  expect(layoutPx(43.9), "a genuinely short control").toBeLessThan(44);
+  expect(layoutPx(43.99)).toBeLessThan(44);
+});
+
 async function controlGeometry(control: Locator) {
-  return control.evaluate((element) => {
+  const geometry = await control.evaluate((element) => {
     const rect = element.getBoundingClientRect();
     const style = getComputedStyle(element);
     return {
@@ -15,6 +32,7 @@ async function controlGeometry(control: Locator) {
       paddingBottom: Number.parseFloat(style.paddingBottom),
     };
   });
+  return { ...geometry, height: layoutPx(geometry.height) };
 }
 
 async function openProjectManager(page: Page, projectName = "Alpha") {
