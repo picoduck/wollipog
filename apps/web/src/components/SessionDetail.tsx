@@ -6237,10 +6237,14 @@ function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
             ? "Share and Move Session"
             : "Move Session",
         message: linkLocation
-          ? `This registers the imported working directory as a Location in “${target.name}” without moving files, and it can also change how future imported sessions in this directory are filed. ${audienceConfirmation === "team" ? "The team will also be able to read the transcript; you" : "You"} can move the session again or remove the Location later.`
+          ? `This registers the imported working directory as a Location in “${target.name}” without moving files, and it can also change how future imported sessions in this directory are filed. ${audienceConfirmation === "team"
+            ? "The team will also be able to read the transcript, and moving the session out again does not remove that access."
+            : audienceConfirmation === "unknown"
+              ? "This Wollipog server does not report sharing details, so this may also change who can read the transcript."
+              : "You can move the session again or remove the Location later."}`
           : audienceConfirmation === "team"
-            ? `Moving this session to the team-owned Project “${target.name}” lets that team read its transcript. Files and the execution Location stay unchanged, and you can move it again later.`
-            : `This Wollipog server does not report sharing details, so moving this session to “${target.name}” may change who can read its transcript. Files and the execution Location stay unchanged, and you can move it again later.`,
+            ? `Moving this session to the team-owned Project “${target.name}” lets that team read its transcript, and moving it out again does not remove that access. Files and the execution Location stay unchanged.`
+            : `This Wollipog server does not report sharing details, so moving this session to “${target.name}” may change who can read its transcript, and moving it back may not undo that. Files and the execution Location stay unchanged.`,
         confirmLabel: linkLocation
           ? "Link Location and Move"
           : audienceConfirmation === "team" ? "Share and Move" : "Move Session",

@@ -148,10 +148,23 @@ const COMPUTED_BODIES = [/^archiveAndStopMessage\(/, /^conflict\.message$/];
 
 /**
  * Every text a confirmation body can produce: conditions, template holes and `+` concatenation are
- * followed, and a local constant is read through (`fenced` in the skill copy discard). A value this
- * cannot read — a message the server sends — is `null`: it is not static copy.
+ * followed, and a local constant is read through (`fenced` in the skill copy discard). A template
+ * hole the reader cannot follow is a name (`“${target.name}”`). A condition branch or `+` operand it
+ * cannot follow is copy it cannot see, so the whole body is unreadable (`null`) and must be a known,
+ * separately tested helper (COMPUTED_BODIES).
  */
 function bodyBranches(node: ts.Expression, sourceFile: ts.SourceFile): string[] | null {
+  const unreadable = { found: false };
+  const branches = readBody(node, sourceFile, unreadable);
+  return unreadable.found ? null : branches;
+}
+
+function readBody(node: ts.Expression, sourceFile: ts.SourceFile, unreadable: { found: boolean }): string[] | null {
+  const bodyBranches = (inner: ts.Expression, file: ts.SourceFile) => readBody(inner, file, unreadable);
+  const required = (branches: string[] | null) => {
+    if (!branches) unreadable.found = true;
+    return branches ?? ["Name"];
+  };
   const combine = (left: string[], right: string[]) =>
     left.flatMap((head) => right.map((tail) => head + tail)).slice(0, MAX_BODY_BRANCHES);
   const orPlaceholder = (branches: string[] | null) => branches ?? ["Name"];
@@ -165,16 +178,10 @@ function bodyBranches(node: ts.Expression, sourceFile: ts.SourceFile): string[] 
     return branches;
   }
   if (ts.isConditionalExpression(node)) {
-    const whenTrue = bodyBranches(node.whenTrue, sourceFile);
-    const whenFalse = bodyBranches(node.whenFalse, sourceFile);
-    if (!whenTrue && !whenFalse) return null;
-    return [...(whenTrue ?? []), ...(whenFalse ?? [])];
+    return [...required(bodyBranches(node.whenTrue, sourceFile)), ...required(bodyBranches(node.whenFalse, sourceFile))];
   }
   if (ts.isBinaryExpression(node) && node.operatorToken.kind === ts.SyntaxKind.PlusToken) {
-    const left = bodyBranches(node.left, sourceFile);
-    const right = bodyBranches(node.right, sourceFile);
-    if (!left && !right) return null;
-    return combine(orPlaceholder(left), orPlaceholder(right));
+    return combine(required(bodyBranches(node.left, sourceFile)), required(bodyBranches(node.right, sourceFile)));
   }
   if (ts.isIdentifier(node)) {
     let found: ts.Expression | undefined;
@@ -187,7 +194,11 @@ function bodyBranches(node: ts.Expression, sourceFile: ts.SourceFile): string[] 
       ts.forEachChild(candidate, find);
     };
     find(sourceFile);
-    return found ? bodyBranches(found, sourceFile) : null;
+    if (!found) return null;
+    // A constant that is not fully readable copy (`sessionCount`) is a value, like any other name.
+    const inner = { found: false };
+    const branches = readBody(found, sourceFile, inner);
+    return inner.found ? null : branches;
   }
   return null;
 }
@@ -299,4 +310,19 @@ test("confirmation bodies built by a helper are one or two sentences too", () =>
   ];
   assert.equal(bodies.length, 13);
   for (const body of bodies) assert.ok(sentenceCount(body) <= 2, JSON.stringify(body));
+});
+
+test("the confirmation body reader treats copy it cannot see as unreadable, and names as names", () => {
+  const read = (source: string) => {
+    const file = ts.createSourceFile("body.ts", source, ts.ScriptTarget.Latest, true);
+    const statement = file.statements.at(-1)!;
+    assert.ok(ts.isExpressionStatement(statement));
+    return bodyBranches(statement.expression, file);
+  };
+  assert.equal(read(`useServerCopy ? serverCopy : "Safe."`), null, "an unreadable condition branch");
+  assert.equal(read(`"Delivery stops. " + serverCopy`), null, "an unreadable concatenation operand");
+  assert.deepEqual(read(`\`“\${target.name}” is removed.\``), ["“Name” is removed."], "a name in a template hole");
+  assert.deepEqual(read(`const fenced = "It is kept."; \`Gone. \${fenced}\``), ["Gone. It is kept."], "a local constant");
+  assert.deepEqual(read(`const count = a ? b.length : c.length; \`All \${count} are removed.\``), ["All Name are removed."],
+    "a constant holding a value is a name");
 });
