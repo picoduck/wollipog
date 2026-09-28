@@ -117,9 +117,28 @@ export function shouldAdjustVirtualScrollForResize({
   scrollOffset,
   anchorPending,
   mountRestorePending,
-  widthReflowPending,
 }: {
   itemStart: number;
+  itemEnd: number;
+  scrollOffset: number;
+  anchorPending: boolean;
+  mountRestorePending: boolean;
+}): boolean {
+  // On session return, a fully preceding row must compensate immediately even while the mount
+  // anchor is pending. Its measurement can land in the frame that releases the bounded window;
+  // without compensation the next render adopts the wrong visible row. Width and structural
+  // anchors own their entire reflow, so compensating those rows here would scroll twice.
+  return itemStart < scrollOffset &&
+    (!anchorPending || (mountRestorePending && itemEnd <= scrollOffset));
+}
+
+export function shouldCommitAnchoredResizeSynchronously({
+  itemEnd,
+  scrollOffset,
+  anchorPending,
+  mountRestorePending,
+  widthReflowPending,
+}: {
   itemEnd: number;
   scrollOffset: number;
   anchorPending: boolean;
@@ -127,15 +146,13 @@ export function shouldAdjustVirtualScrollForResize({
   /** Read only when it decides the result; the caller may consult live layout. */
   widthReflowPending: () => boolean;
 }): boolean {
-  // On session return or under a streamed row's structural anchor, a fully preceding row must
-  // compensate immediately even while the anchor is pending. TanStack then renders the grown row
-  // before paint. Otherwise that frame paints it over the anchor, and when the measurement lands
-  // as the bounded window releases, the next render adopts the wrong visible row. A width anchor
-  // owns its entire reflow, so compensating those rows here would scroll twice; session return
-  // keeps its existing compensation through a width change.
-  return itemStart < scrollOffset &&
-    (!anchorPending ||
-      (itemEnd <= scrollOffset && (mountRestorePending || !widthReflowPending())));
+  // A structural anchor owns a fully preceding row's growth, but TanStack renders that growth
+  // asynchronously when it does not compensate. The frame before that render paints the grown row
+  // over the anchor, and a render landing as the bounded window releases adopts the wrong visible
+  // row. Committing it before paint lets the anchor correct in the same pass without a TanStack
+  // scroll write, which iOS may defer past the window. A width anchor restores its rewrapped rows
+  // on its own schedule, and session return already compensates through TanStack.
+  return anchorPending && !mountRestorePending && itemEnd <= scrollOffset && !widthReflowPending();
 }
 
 interface VirtualMeasurementReseeder {
@@ -405,6 +422,8 @@ function VirtualList<T>({
   const clearAnchorFrameRef = useRef<number | null>(null);
   const widthAnchorFrameRef = useRef<number | null>(null);
   const widthAnchorRef = useRef<VirtualScrollAnchor | null>(null);
+  const anchoredResizeCommitRef = useRef(false);
+  const measuringRowInCommitRef = useRef(false);
   const anchorCorrectionScrollTopRef = useRef<number | null>(null);
   const anchorCorrectionIntentVersionRef = useRef<number | null>(null);
   const viewportIntentVersionRef = useRef(0);
@@ -509,6 +528,13 @@ function VirtualList<T>({
     // that phase; the fault-injection provider enables its animation-frame deferral so the painted-
     // frame regressions retain a library-owned negative control.
     useAnimationFrameWithResizeObserver: deferMeasurements,
+    onChange: () => {
+      if (!anchoredResizeCommitRef.current) return;
+      anchoredResizeCommitRef.current = false;
+      // TanStack's own rerender is asynchronous here. This render reads the same live measurements
+      // and lets the pending anchor's layout effect correct them before paint.
+      flushSync(() => forceAnchorRetry((epoch) => epoch + 1));
+    },
   });
   const initialMeasurementVirtualizerRef = useRef(virtualizer);
   initialMeasurementVirtualizerRef.current = virtualizer;
@@ -532,35 +558,47 @@ function VirtualList<T>({
   // Every external scrollRef host carries `measured-virtual-scroll`, disabling native anchoring.
   // Logical-key corrections and TanStack's measured-row adjustments must be the only scroll
   // owners; native anchoring sees transformed rows as ordinary flow and applies a third correction.
-  // The logical-key anchor corrects structural/width changes while pending. Outside a width
-  // reflow, a fully preceding row still needs TanStack's immediate adjustment when its measured
-  // growth lands in that window. Below-viewport rows must not move paused readers.
+  // The logical-key anchor corrects structural/width changes while pending. During a session
+  // return, a fully preceding row still needs TanStack's immediate adjustment when its measured
+  // growth lands at the end of that window. Below-viewport rows must not move paused readers.
   // The public tracked offset includes each adjustment before the next row is measured.
+  // A structural anchor's fully preceding row instead requests a synchronous render above. A row
+  // measured from its ref during a commit needs none: React commits that update before paint.
   // TanStack's row observer can report rewrapped rows before the viewport observer below records
   // the new width, so a width reflow is also pending while the live width differs from that record.
-  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, delta, instance) => {
+  virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) => {
+    const scrollOffset = instance.scrollOffset ?? 0;
     const anchorPending = pendingAnchorRef.current != null;
-    const adjust = shouldAdjustVirtualScrollForResize({
+    const mountRestorePending = anchorCorrectionRequiresIntentRef.current;
+    anchoredResizeCommitRef.current = !measuringRowInCommitRef.current &&
+      shouldCommitAnchoredResizeSynchronously({
+        itemEnd: item.end,
+        scrollOffset,
+        anchorPending,
+        mountRestorePending,
+        widthReflowPending: () => {
+          if (widthAnchorRef.current != null) return true;
+          const scroll = scrollRef.current;
+          return scroll != null && viewportWidthRef.current !== 0 &&
+            Math.round(scroll.getBoundingClientRect().width) !== viewportWidthRef.current;
+        },
+      });
+    return shouldAdjustVirtualScrollForResize({
       itemStart: item.start,
       itemEnd: item.end,
-      scrollOffset: instance.scrollOffset ?? 0,
+      scrollOffset,
       anchorPending,
-      mountRestorePending: anchorCorrectionRequiresIntentRef.current,
-      widthReflowPending: () => {
-        if (widthAnchorRef.current != null) return true;
-        const scroll = scrollRef.current;
-        return scroll != null && viewportWidthRef.current !== 0 &&
-          Math.round(scroll.getBoundingClientRect().width) !== viewportWidthRef.current;
-      },
+      mountRestorePending,
     });
-    // TanStack writes this adjustment before our next correction can record it, whether its render
-    // flushes now or is queued from a commit-time ref measurement. Record it as the pending anchor's
-    // own correction so a structural anchor does not relinquish the row as if the reader scrolled.
-    if (adjust && anchorPending && anchorCorrectionScrollTopRef.current != null) {
-      anchorCorrectionScrollTopRef.current += delta;
-    }
-    return adjust;
   };
+  const measureRow = useCallback((node: HTMLDivElement | null) => {
+    measuringRowInCommitRef.current = true;
+    try {
+      virtualizer.measureElement(node);
+    } finally {
+      measuringRowInCommitRef.current = false;
+    }
+  }, [virtualizer]);
 
   useEffect(() => {
     const root = rootRef.current;
@@ -1284,7 +1322,7 @@ function VirtualList<T>({
         return (
           <div
             key={virtualRow.key}
-            ref={virtualizer.measureElement}
+            ref={measureRow}
             data-index={virtualRow.index}
             data-virtual-row=""
             data-virtual-key={getKey(item)}

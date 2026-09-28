@@ -12,6 +12,7 @@ import {
   scrollAnchorAdjustment,
   shouldRelinquishAnchorCorrection,
   shouldAdjustVirtualScrollForResize,
+  shouldCommitAnchoredResizeSynchronously,
   virtualTargetScrollAdjustment,
 } from "./MeasuredVirtualList.js";
 
@@ -68,36 +69,44 @@ test("late row measurements retain TanStack positional scroll semantics", () => 
     scrollOffset: 500,
     anchorPending: false,
     mountRestorePending: false,
-    widthReflowPending: () => false,
   };
-  const widthReflow = () => true;
   assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 450 }), true,
     "a changed row above the viewport compensates its size delta");
   assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 700, itemEnd: 750 }), false,
     "a late overscanned row below the viewport must not move the reader");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 450, anchorPending: true }), true,
-    "a fully preceding row compensates before a structural anchor can expire");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 450, anchorPending: true,
-    widthReflowPending: widthReflow }), false,
-    "a width anchor owns its entire reflow");
-  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 550, anchorPending: true }), false,
-    "a structural anchor owns a growing row that spans the viewport");
+  assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 450, anchorPending: true }), false,
+    "a width or structural anchor owns its entire reflow");
   assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 450,
-    anchorPending: true, mountRestorePending: true, widthReflowPending: widthReflow }), true,
-    "a fully preceding row compensates before a mount anchor can expire, even through a width change");
+    anchorPending: true, mountRestorePending: true }), true,
+    "a fully preceding row compensates before a mount anchor can expire");
   assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 550,
     anchorPending: true, mountRestorePending: true }), false,
     "the mount anchor owns a growing row that spans the viewport");
-  let widthReads = 0;
-  const countedWidthReflow = () => { widthReads += 1; return false; };
-  shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 450, widthReflowPending: countedWidthReflow });
-  shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 550, anchorPending: true,
-    widthReflowPending: countedWidthReflow });
-  shouldAdjustVirtualScrollForResize({ ...base, itemStart: 400, itemEnd: 450, anchorPending: true,
-    mountRestorePending: true, widthReflowPending: countedWidthReflow });
-  assert.equal(widthReads, 0, "live width is read only when it decides a pending structural anchor");
   assert.equal(shouldAdjustVirtualScrollForResize({ ...base, itemStart: 500, itemEnd: 550 }), false,
     "a row beginning at the viewport boundary does not need compensation");
+});
+
+test("a structural anchor commits a fully preceding row's resize before paint", () => {
+  let widthReads = 0;
+  const base = {
+    itemEnd: 450,
+    scrollOffset: 500,
+    anchorPending: true,
+    mountRestorePending: false,
+    widthReflowPending: () => { widthReads += 1; return false; },
+  };
+  assert.equal(shouldCommitAnchoredResizeSynchronously(base), true,
+    "a fully preceding row under a structural anchor renders before paint");
+  assert.equal(shouldCommitAnchoredResizeSynchronously({ ...base, widthReflowPending: () => true }), false,
+    "a width anchor restores its rewrapped rows on its own schedule");
+  widthReads = 0;
+  assert.equal(shouldCommitAnchoredResizeSynchronously({ ...base, itemEnd: 550 }), false,
+    "a row spanning the viewport keeps TanStack's ordinary render");
+  assert.equal(shouldCommitAnchoredResizeSynchronously({ ...base, anchorPending: false }), false,
+    "without a pending anchor TanStack compensates on its own");
+  assert.equal(shouldCommitAnchoredResizeSynchronously({ ...base, mountRestorePending: true }), false,
+    "session return already compensates through TanStack");
+  assert.equal(widthReads, 0, "live width is read only when it decides the result");
 });
 
 test("sequential TanStack measurements fold each adjustment into the public offset", () => {
@@ -126,7 +135,6 @@ test("sequential TanStack measurements fold each adjustment into the public offs
       scrollOffset,
       anchorPending: false,
       mountRestorePending: false,
-      widthReflowPending: () => false,
     });
   };
 
