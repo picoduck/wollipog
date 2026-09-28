@@ -109,7 +109,7 @@ async function assertKeyboardContract(name: string, reopen: () => Promise<HTMLEl
   const trigger = await reopen();
   const menu = doc().querySelector(`[role="menu"][aria-label="${name}"]`);
   assert.ok(menu, `${name} opens`);
-  assert.equal(menu.parentElement, doc().body, "the menu is portalled to <body>");
+  assert.ok(menu.parentElement === doc().body, "the menu is portalled to <body>");
   assert.ok(menu.classList.contains("menu"), "it renders the shared menu primitive");
   assert.ok(menu.querySelector(":scope > .sheet-grabber"), "it carries the dialog sheet's grabber");
   assert.ok(doc().querySelector(".menu-backdrop"), "its backdrop enrolls it in the shell's Escape ladder");
@@ -139,7 +139,7 @@ async function assertKeyboardContract(name: string, reopen: () => Promise<HTMLEl
 
   await press("Escape");
   assert.equal(doc().querySelector(`[role="menu"][aria-label="${name}"]`), null, "Escape closes the menu");
-  assert.equal(doc().activeElement, trigger, "Escape returns focus to the trigger");
+  assert.ok(doc().activeElement === trigger, "Escape returns focus to the trigger");
   assert.equal(trigger.getAttribute("aria-expanded"), "false");
 
   await reopen();
@@ -148,7 +148,7 @@ async function assertKeyboardContract(name: string, reopen: () => Promise<HTMLEl
   assert.equal(doc().querySelector(`[role="menu"][aria-label="${name}"]`), null, "Tab closes the menu");
   // The menu lived at the end of <body>: focus returns to the trigger before the browser's Tab
   // moves on, so Tab continues from where the menu was opened (the interaction contract).
-  assert.equal(doc().activeElement, trigger, "Tab continues from the trigger, not the end of <body>");
+  assert.ok(doc().activeElement === trigger, "Tab continues from the trigger, not the end of <body>");
   assert.equal(doc().querySelector(".menu-backdrop"), null, "and leaves no backdrop behind");
   assert.equal(trigger.getAttribute("aria-expanded"), "false");
 }

@@ -115,6 +115,17 @@ test("instance selector remains keyboard-managed and exposes switching plus mana
       .find((button) => button.textContent === "Manage Instances")!;
     await act(async () => { manage.click(); });
     assert.equal(managed, 1);
+
+    // Dismissing through the shared backdrop hands focus back to the trigger: the backdrop takes
+    // the click, so nothing underneath it would otherwise receive focus.
+    await act(async () => { trigger.click(); });
+    await act(async () => {
+      (domWindow.document.querySelector(".menu-backdrop") as unknown as HTMLElement).click();
+      await tick();
+    });
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+    // Identity, not assert.equal: a failed diff of two DOM nodes serialises the whole tree.
+    assert.ok(domWindow.document.activeElement === (trigger as never), "focus returns to the trigger, not <body>");
   } finally {
     await act(async () => { mounted.root.unmount(); });
     mounted.mountPoint.remove();

@@ -47,7 +47,7 @@ export function InstanceSelector({ compact = false }: { compact?: boolean }) {
           id={menu.menuId}
           label="Switch Instance"
           width={compact ? 260 : "trigger"}
-          onDismiss={() => menu.close(false)}
+          onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
         >
           {instances.registry.profiles.map((profile, index) => {
