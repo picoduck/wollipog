@@ -6240,7 +6240,7 @@ function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
           ? `This registers the imported working directory as a Location in “${target.name}” without moving files, and it can also change how future imported sessions in this directory are filed. ${audienceConfirmation === "team"
             ? "The team will also be able to read the transcript, and moving the session out again does not remove that access."
             : audienceConfirmation === "unknown"
-              ? "This Wollipog server does not report sharing details, so this may also change who can read the transcript."
+              ? "This Wollipog server does not report sharing details, so this may also change who can read the transcript, and moving the session back may not undo that."
               : "You can move the session again or remove the Location later."}`
           : audienceConfirmation === "team"
             ? `Moving this session to the team-owned Project “${target.name}” lets that team read its transcript, and moving it out again does not remove that access. Files and the execution Location stay unchanged.`
