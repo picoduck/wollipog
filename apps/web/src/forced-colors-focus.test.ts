@@ -56,13 +56,28 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".session-status-popover-content { outline: none }", BEFORE_RING],
   [".inbox-list { outline: none }", "the list pane's :has(> .inbox-list:focus-visible)::after border marks focus, and forced colors keeps borders"],
   [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", "the list and preview panes' :has()::after borders mark focus; in the app SessionDetail renders only inside the preview pane"],
-  ["@media (pointer: coarse) .inbox-thread-toggle:focus-visible { outline: none }", "the same block outlines the toggle's inner span with the known-good ring instead"],
+  ["@media (pointer: coarse) .inbox-thread-toggle:focus-visible { outline: none }", "the same @media block rings the toggle's inner span with the known-good ring instead"],
   [".usage-chart-hit:focus-visible { outline: none; stroke: var(--accent); stroke-width: 2 }", "an SVG <rect>: the 2px stroke marks focus, and forced colors repaints strokes rather than dropping them"],
   // Not focus indicators.
   [".column.drag-over { outline: 1px dashed var(--accent); outline-offset: -1px }", "a drop-target cue while dragging, not a focus indicator"],
   [".composer-box.drag-over { outline: 2px dashed var(--accent); outline-offset: 2px }", "a drop-target cue while dragging, not a focus indicator"],
   ["@media (forced-colors: active) .tl-message-action-unavailable > .tl-message-icon::after { outline: 1px solid Canvas }", "the unavailable slash's Canvas halo (#1887), on a pseudo-element, not a focus indicator"],
   [".agents-list button[aria-current=\"true\"] { outline: 1px solid var(--border) }", "KNOWN GAP, not verified safe: this beats the global ring, so the focused current Agents item looks as it does at rest; reported as a follow-up to #1890"],
+]);
+
+const PANE_BORDER =
+  ".inbox-list-pane:has(> .inbox-list:focus-visible)::after, .inbox-preview-pane:has(.detail-scroll:focus-visible)::after " +
+  "{ position: absolute; z-index: var(--z-sticky); inset: 0; border: 2px solid var(--accent); pointer-events: none; content: \"\" }";
+
+/**
+ * The rules some REVIEWED reasons point to instead of the entry's own block. They set no outline of
+ * their own, or a known-good one, so the inventory does not record them; each must still exist verbatim.
+ */
+const CUES: ReadonlyMap<string, string> = new Map([
+  [".inbox-list { outline: none }", PANE_BORDER],
+  [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", PANE_BORDER],
+  ["@media (pointer: coarse) .inbox-thread-toggle:focus-visible { outline: none }",
+    "@media (pointer: coarse) .inbox-thread-toggle:focus-visible > span { outline: 2px solid var(--accent); outline-offset: 0 }"],
 ]);
 
 /** Split a selector list without treating commas inside :is(), :has(), attributes or strings as members. */
@@ -139,6 +154,16 @@ export function outlineInventory(source: string): string[] {
   return outlineEntries(source).filter((entry) => entry !== GLOBAL_RING).sort();
 }
 
+/** `context selector { declarations }` for every rule, whatever it sets. */
+export function ruleSnapshots(source: string): string[] {
+  const rules: string[] = [];
+  postcss.parse(source).walkRules((rule) => {
+    const decls = rule.nodes.filter((node): node is Declaration => node.type === "decl");
+    rules.push(`${contextOf(rule)}${selectorMembers(rule.selector).join(", ")} { ${decls.map(normalise).join("; ")} }`);
+  });
+  return rules;
+}
+
 /** Entries that are declared before `ring` in `entries`, among the given keys; the rest have moved past it. */
 export function entriesAfterRing(entries: readonly string[], keys: Iterable<string>): string[] {
   const ring = entries.indexOf(GLOBAL_RING);
@@ -169,6 +194,25 @@ test("entriesAfterRing notices an entry moving past the ring", () => {
   assert.deepEqual(entriesAfterRing(outlineEntries(`${rule} ${ring} ${rule}`), [rule]), [rule]);
   assert.deepEqual(entriesAfterRing(outlineEntries(rule), [rule]), [rule]);
   assert.deepEqual(outlineInventory(`${ring} ${rule}`), [rule]);
+});
+
+test("the rules and markup that reviewed reasons point to are still there", () => {
+  const rules = ruleSnapshots(css);
+  for (const [key, cue] of CUES) {
+    assert.ok(REVIEWED.has(key), key);
+    assert.ok(rules.includes(cue), `${key} relies on ${cue}`);
+  }
+  // The programmatic focus targets are exempt because they are never a keyboard stop.
+  const dialog = readFileSync(join(WEB, "src/components/AgentSessionDiscoveryDialog.tsx"), "utf8");
+  for (const step of ["agent-session-agent-step", "agent-session-results-step"]) {
+    assert.equal(dialog.match(new RegExp(`\\b${step}\\b`, "g"))?.length, 1, step);
+    assert.match(dialog, new RegExp(`className="${step}"\\s+tabIndex=\\{-1\\}`), step);
+  }
+});
+
+test("ruleSnapshots records whole blocks with their context", () => {
+  assert.deepEqual(ruleSnapshots("@media (pointer: coarse) { .a > span { outline: 0;  color:red } } .b, .c { color: red }"),
+    ["@media (pointer: coarse) .a > span { outline: 0; color: red }", ".b, .c { color: red }"]);
 });
 
 test("every reviewed entry says why focus stays visible", () => {
