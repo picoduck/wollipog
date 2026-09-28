@@ -1222,16 +1222,14 @@ test.describe("the appearance controls", () => {
         await expectInk(page, groupBox, `the ${group} group`, APPEARANCE_INK.pills);
 
         // The GROUP's track is what makes the unselected options read as one control: their own
-        // border is transparent. §10.2 makes the track's edge decorative (`--border`) and puts the
-        // 3:1 obligation on the selected knob's `--control-outline` edge, which the next test
-        // measures; the options themselves are identified by their labels. So the track must paint
-        // a boundary and a ground distinct from what it sits on, without a 3:1 edge of its own.
+        // border is transparent. §10.2 makes the track `--bg` with a decorative `--border` edge and
+        // puts the 3:1 obligation on the selected knob's `--control-outline` edge, which the next
+        // test measures; the options themselves are identified by their labels. On a `--bg` page
+        // the edge is all that outlines the track, so it must be painted, without a 3:1 edge.
         const track = await painted(groupBox);
         const border = parseColor(track.borderColor);
         expect(border.a, `the ${group} group paints no boundary`).toBeGreaterThan(0);
-        const backdrop = await backdropOf(groupBox);
-        expect(over(parseColor(track.background), backdrop), `the ${group} track has no ground of its own`)
-          .not.toEqual(backdrop);
+        expect(track.borderWidth, `the ${group} group's boundary has a width`).toBeGreaterThan(0);
 
         // And the unselected option is a real, laid-out target rather than a label.
         expectPainted(await painted(pill(page, group, other)), `the unselected ${group} option`, 16);
