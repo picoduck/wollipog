@@ -73,3 +73,51 @@ for (const [keyName, key] of [["Enter", "Enter"], ["Space", " "]] as const) {
     });
   });
 }
+
+test.describe("Enter on a composer control that removes itself, with the composer disabled", () => {
+  /** A read-only composer refuses focus, so the nearest enabled control that stays takes it. */
+  async function refusePrompts(page: Page, composer: Locator) {
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      commandPermissions: { prompt: { allowed: false, reason: "Your Viewer role is read-only." } },
+    }));
+    await expect(composer).toBeDisabled();
+  }
+
+  async function expectFocusStaysInComposerBox(page: Page, control: Locator) {
+    await control.focus();
+    await expect(control).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(control).toHaveCount(0);
+    await page.evaluate(() => new Promise((resolve) =>
+      requestAnimationFrame(() => requestAnimationFrame(resolve))));
+    expect(await page.evaluate(() => document.querySelector(".composer-box")?.contains(document.activeElement)),
+      "focus must move to a control that stays in the composer, not the page body").toBe(true);
+  }
+
+  test("turns Plan mode off", async ({ page }) => {
+    const composer = await openSession(page);
+    await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", {
+      permissionMode: "plan",
+    }));
+    await refusePrompts(page, composer);
+    await expectFocusStaysInComposerBox(page, page.getByRole("button", { name: "◒ Plan" }));
+  });
+
+  test("removes an image", async ({ page }) => {
+    const composer = await openSession(page);
+    await page.locator(".composer-attach-input").setInputFiles([
+      { name: "one.png", mimeType: "image/png", buffer: Buffer.from([137, 80, 78, 71]) },
+    ]);
+    await refusePrompts(page, composer);
+    await expectFocusStaysInComposerBox(page, page.getByRole("button", { name: "Remove Image" }));
+  });
+
+  test("removes a workspace reference", async ({ page }) => {
+    const composer = await openSession(page);
+    await composer.pressSequentially("Review @src");
+    await page.getByRole("option", { name: /src\/session\.ts/ }).click();
+    await refusePrompts(page, composer);
+    await expectFocusStaysInComposerBox(page,
+      page.getByRole("button", { name: "Remove Workspace Reference src/session.ts" }));
+  });
+});
