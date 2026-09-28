@@ -450,6 +450,13 @@
   --switch-w: 32px;
   --switch-h: 18px;
   --switch-thumb: 12px;
+  /* --- Layout (docs/design-system.md §2.7): every bar, the page gutter (16px on phones, below)
+     and the three page-container widths. Containers are left-aligned and never centred. --- */
+  --bar-h: 48px;
+  --page-gutter: 24px;
+  --page-max: 960px;
+  --page-max-wide: 1200px;
+  --page-max-form: 760px;
 
   /* The two mobile Session-header rows share these trailing-column metrics. The inset includes the
      physical right safe area because the interface currently has a left-to-right layout. */
@@ -826,7 +833,6 @@ pre {
    aria-label ("Switch Instance, Current <name>"), so the accessible name is unaffected. */
 .topbar-mobile-controls { min-width: 0; flex: none; flex-wrap: nowrap; }
 .topbar-mobile-controls > * { flex: none; }
-.topbar-mobile-controls .topbar-create { margin-left: 0; }
 .topbar-mobile-controls .instance-selector-trigger {
   width: 44px;
   height: 44px;
@@ -900,7 +906,6 @@ pre {
   flex: 1;
   min-height: 0;
   overflow: auto;
-  padding: 20px 24px 32px;
 }
 
 /* ---------------------- Recovery and instance controls ------------------ */
@@ -1111,13 +1116,228 @@ pre {
   margin: 0;
   letter-spacing: 0.2px;
 }
-.topbar-create { margin-left: auto; }
 /* Codex-style top-right control cluster (panel toggles, editor selector). */
 .topbar-actions {
   margin-left: auto;
   display: flex;
   align-items: center;
   gap: 2px;
+}
+
+/* ---------------------------- Page anatomy ------------------------------ */
+/* docs/design-system.md §4.2 (page header), §4.3 (detail bar), §4.5 (page container) and §15.1
+   (the phone app bar). One contiguous block: the container, then the header, then the detail bar.
+
+   `.main-body` is the column's one scroll container and no longer pads. Every route root is a
+   page container or a detail page, so the title and the first content share one left edge at the
+   rail plus --page-gutter, and nothing is centred. */
+.page {
+  min-width: 0;
+  max-width: calc(var(--page-max) + 2 * var(--page-gutter));
+  margin: 0;
+  padding: 0 var(--page-gutter) var(--space-16);
+}
+.page.wide { max-width: calc(var(--page-max-wide) + 2 * var(--page-gutter)); }
+.page.form { max-width: calc(var(--page-max-form) + 2 * var(--page-gutter)); }
+.page.full { max-width: none; }
+/* A page whose content owns the column's height and its own edges (Sessions): the content fills
+   below the header, edge to edge, and scrolls inside itself. Only the header takes the gutter, so
+   the title still sits at the rail plus --page-gutter. */
+.page.fill {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  padding: 0;
+}
+.page.fill > .page-header {
+  margin-bottom: 0;
+  padding-right: var(--page-gutter);
+  padding-left: var(--page-gutter);
+}
+.page.fill > :not(.page-header) { flex: 1 1 0; min-height: 0; }
+
+/* 64px with a title alone, 88px with a description, 124px with tabs: 20 + 28 (+ 4 + 20)
+   (+ 12 + 40) + 16 without tabs. The hairline is inset so it adds nothing to those heights. */
+.page-header {
+  container: page-header / inline-size;
+  flex: none;
+  margin-bottom: var(--space-6);
+  padding: var(--space-5) 0 var(--space-4);
+  background: var(--bg);
+  box-shadow: inset 0 -1px 0 var(--border);
+}
+.page-header:has(> .page-tabs) { padding-bottom: 0; }
+.page-header-row {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.page-heading {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.page-title {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: var(--type-page-title);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.page-desc {
+  margin: 0;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: var(--type-body);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* Top-aligned with the title's 28px line box: the controls centre on it and never grow the row. */
+.page-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: calc((28px - var(--control-h)) / 2);
+  margin-bottom: calc((28px - var(--control-h)) / 2);
+}
+.page-tabs {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-6);
+  height: var(--control-h-lg);
+  margin-top: var(--space-3);
+}
+
+/* Priority+ overflow (§3.3). Slot 1 is the secondary beside the primary. The widest header shows
+   slots 1 and 2; the compact tier and a header narrower than 600px show slot 1; phones and a
+   header narrower than 440px show none. ⋯ holds a menu item for every secondary and shows exactly
+   the ones whose buttons are hidden, and the primary never moves. */
+.page-more { display: none; }
+.page-more[data-overflow="always"] { display: block; }
+.page-more .menu-item[data-slot="1"],
+.page-more .menu-item[data-slot="2"] { display: none; }
+@media (max-width: 1099px) {
+  .page-actions > .page-action[data-slot="2"] { display: none; }
+  .page-more[data-overflow="2"] { display: block; }
+  .page-more .menu-item[data-slot="2"] { display: block; }
+}
+@container page-header (max-width: 600px) {
+  .page-actions > .page-action[data-slot="2"] { display: none; }
+  .page-more[data-overflow="2"] { display: block; }
+  .page-more .menu-item[data-slot="2"] { display: block; }
+}
+@container page-header (max-width: 440px) {
+  .page-actions > .page-action { display: none; }
+  .page-more[data-overflow] { display: block; }
+  .page-more .menu-item[data-slot] { display: block; }
+}
+
+/* The Tauri instance switcher, in the phone app bar: its icon only. The trigger carries its own
+   accessible name ("Switch Instance, Current <name>"), so dropping the visible label is safe. */
+.page-actions .instance-selector-trigger {
+  width: var(--control-h);
+  height: var(--control-h);
+  flex: none;
+  justify-content: center;
+  padding: 0;
+  border-color: transparent;
+}
+.page-actions .instance-selector-label,
+.page-actions .instance-selector-chevron { display: none; }
+
+/* Entity pages: one 48px bar with Back, the entity title as the page's h1, one status badge, then
+   the actions (§4.3). The title takes the free space and truncates; the badge follows it. */
+.detail-bar {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+  height: var(--bar-h);
+  padding: 0 var(--page-gutter);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg);
+}
+.detail-bar > .detail-bar-back { color: var(--text); }
+.detail-bar-heading {
+  display: flex;
+  flex: 1;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.detail-bar-title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--text);
+  font: var(--type-title);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.detail-bar-heading > :not(.detail-bar-title) { flex: none; }
+.detail-bar-actions {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-2);
+}
+/* A detail page's content sits in the gutter under its full-width bar. */
+.run-detail > :not(.detail-bar) { margin-right: var(--page-gutter); margin-left: var(--page-gutter); }
+.run-detail { padding-bottom: var(--space-6); }
+.detail-summary {
+  margin-top: var(--space-3);
+  margin-bottom: 0;
+  color: var(--text-dim);
+  font: var(--type-body);
+}
+
+/* Phones (§15.1): the page header is the 48px app bar. Title at --type-title, truncating; no
+   description; the primary is a `+` icon button whose accessible name stays its label; every
+   secondary is in ⋯. The bar sits below the top safe area, as the phone top bar did. */
+@media (max-width: 760px) {
+  :root { --page-gutter: 16px; }
+  .page-header {
+    margin-bottom: var(--space-4);
+    padding: env(safe-area-inset-top, 0px) 0 0;
+  }
+  .page-header-row {
+    align-items: center;
+    height: var(--bar-h);
+  }
+  .page-title { font: var(--type-title); }
+  .page-desc { display: none; }
+  .page-actions { margin-top: 0; margin-bottom: 0; }
+  .page-actions > .page-action { display: none; }
+  .page-more[data-overflow] { display: block; }
+  .page-more .menu-item[data-slot] { display: block; }
+  .page-actions > .page-primary {
+    /* Square: `.btn` caps itself at max-content, which the clipped label no longer widens. */
+    width: var(--control-h);
+    max-width: none;
+    padding: 0;
+    justify-content: center;
+  }
+  .page-primary-label {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+  .detail-bar {
+    height: calc(var(--bar-h) + env(safe-area-inset-top, 0px));
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+  /* A connection banner above the page takes the safe area instead. */
+  .main:has(> .offline-banner) :is(.page-header, .detail-bar) { padding-top: 0; }
+  .main:has(> .offline-banner) .detail-bar { height: var(--bar-h); }
 }
 /* Labeled session-root destination split button. */
 .editor-select {
@@ -1819,21 +2039,10 @@ textarea {
   color: var(--text);
   border-radius: var(--radius-sm);
 }
-.detail-headinfo {
-  flex: 1;
-  min-width: 0;
-}
 .detail-title {
   font-size: 16px;
   font-weight: 650;
   margin-bottom: 6px;
-}
-.detail-sub {
-  display: flex;
-  align-items: center;
-  flex-wrap: wrap;
-  gap: 8px;
-  font-size: 12.5px;
 }
 /* Breadcrumb region of the unified session bar: interactive Project chip / truncating title. */
 .detail-crumbs {
@@ -10152,20 +10361,7 @@ body.shell-dock-dragging * {
 }
 
 /* Project management --------------------------------------------------- */
-.projects-view {
-  width: min(1240px, 100%);
-  min-height: 100%;
-  margin: 0 auto;
-}
-.projects-intro {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 24px;
-  margin-bottom: 18px;
-}
-.projects-intro h2 { margin: 0 0 5px; font-size: 20px; }
-.projects-intro p { max-width: 760px; margin: 0; color: var(--text-dim); }
+.projects-view { min-height: 100%; }
 .project-manager-grid {
   display: grid;
   min-height: min(720px, calc(100vh - 150px));
@@ -10252,7 +10448,6 @@ body.shell-dock-dragging * {
 .project-availability.availability-workspace_missing { color: var(--yellow); }
 .project-availability.availability-runner_removed { color: var(--danger-text); }
 .project-manager-detail { min-width: 0; overflow-y: auto; padding: 22px; }
-.project-manager-back { display: none; }
 .project-detail-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; margin-bottom: 18px; }
 .project-detail-heading h2 { margin: 0 0 3px; font-size: 20px; }
 .project-detail-meta { display: block; }
@@ -10437,14 +10632,11 @@ body.shell-dock-dragging * {
   .project-location-actions { max-width: none; justify-content: flex-start; }
 }
 @media (max-width: 760px) {
-  .projects-intro { align-items: stretch; flex-direction: column; gap: 12px; }
-  .projects-intro .btn { width: 100%; justify-content: center; }
   .project-manager-grid { display: block; min-height: calc(100dvh - 190px); }
   .project-manager-list { min-height: calc(100dvh - 190px); border-right: 0; }
   .project-manager-list.has-selection { display: none; }
   .project-manager-detail { display: none; padding: 14px; }
   .project-manager-detail.is-open { display: block; }
-  .project-manager-back { display: inline-flex; min-height: var(--control-h); align-items: center; margin: 0 0 14px; padding: 0; border: 0; color: var(--accent); background: transparent; cursor: pointer; }
   .project-detail-heading,
   .project-section-heading { align-items: stretch; flex-direction: column; }
   .project-name-form { align-items: stretch; flex-direction: column; }
@@ -13086,8 +13278,7 @@ body.shell-dock-dragging * {
     height: 15px;
   }
   .main-body {
-    padding: 12px calc(12px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px))
-      calc(12px + env(safe-area-inset-left, 0px));
+    padding: 0 env(safe-area-inset-right, 0px) env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
   }
   .connections-tabs {
     width: 100%;
@@ -13624,10 +13815,6 @@ body.shell-dock-dragging * {
 }
 
 /* ------------------------------ Agent skills ------------------------------ */
-.skills-view { max-width: 1100px; margin: 0 auto; padding: 24px; }
-.skills-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
-.skills-heading h2 { margin: 0; }
-.skills-heading p { color: var(--text-dim); margin: 5px 0 0; }
 .skills-layout { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 18px; align-items: start; }
 .skills-list { display: grid; gap: 14px; min-width: 0; align-content: start; }
 .skills-group { display: grid; gap: 4px; }
@@ -13658,7 +13845,6 @@ body.shell-dock-dragging * {
 .skills-built-in-held { display: grid; gap: 8px; justify-items: start; padding: 8px 10px; border: 1px solid var(--warning);
   border-radius: var(--radius-sm); color: var(--warning-on-tint); background: color-mix(in srgb, var(--warning) 10%, transparent);
   font-size: var(--text-sm); }
-.skills-heading > .skills-section-heading { flex-wrap: wrap; }
 .skill-groups-dialog .skills-section-heading { flex-wrap: wrap; }
 .skill-groups-dialog .btn { white-space: normal; overflow-wrap: anywhere; }
 .skill-assignment-matrix, .skill-assignment-matrix > article { min-width: 0; overflow-wrap: anywhere; }
@@ -13702,16 +13888,11 @@ body.shell-dock-dragging * {
 .skills-target-unavailable { border-left: 2px solid var(--warning); padding-left: 8px; overflow-wrap: anywhere; }
 
 @media (max-width: 760px) {
-  .skills-view { padding: 14px; }
   .skills-layout { grid-template-columns: minmax(0, 1fr); }
-  .skills-heading { align-items: stretch; flex-direction: column; }
 }
 
 /* --------------------------- Durable automations -------------------------- */
-.automations-view { max-width: 1100px; margin: 0 auto; padding: 24px; }
-.automation-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; margin-bottom: 18px; }
-.automation-heading h2, .automation-editor h3, .automation-card h3 { margin: 0; }
-.automation-heading p { color: var(--text-dim); margin: 5px 0 0; }
+.automation-editor h3, .automation-card h3 { margin: 0; }
 .automation-error, .automation-execution-error {
   color: var(--red-on-tint); background: color-mix(in srgb, var(--red) 10%, transparent);
   border: 1px solid color-mix(in srgb, var(--red) 35%, transparent);
@@ -13942,11 +14123,7 @@ body.shell-dock-dragging * {
 }
 
 /* Usage accounting ------------------------------------------------------- */
-.usage-view { max-width: 1180px; margin: 0 auto; padding: 24px; }
-.usage-toolbar { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-bottom: 16px; }
-.usage-toolbar h2 { margin: 0; }
-.usage-toolbar p, .usage-coverage, .usage-privacy, .usage-retention p { color: var(--text-dim); }
-.usage-toolbar p { margin: 5px 0 0; }
+.usage-coverage, .usage-privacy, .usage-retention p { color: var(--text-dim); }
 .usage-range { display: flex; flex-wrap: wrap; gap: 6px; }
 .usage-api-controls { display: grid; grid-template-columns: minmax(220px, 1fr) auto; align-items: start; gap: 12px 18px; margin: 0 0 16px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
 .usage-api-controls-heading h3 { margin: 0; }
@@ -14110,8 +14287,6 @@ body.shell-dock-dragging * {
 .usage-privacy { margin: 14px 0 0; font-size: 11px; }
 
 @media (max-width: 700px) {
-  .automations-view { padding: 14px; }
-  .automation-heading { align-items: stretch; flex-direction: column; }
   .automation-form-grid, .automation-facts { grid-template-columns: minmax(0, 1fr); }
   .automation-span { grid-column: auto; }
   .automation-editor, .automation-card { padding: 14px; }
@@ -14119,8 +14294,6 @@ body.shell-dock-dragging * {
   .automation-card-toggle { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .automation-card-meta { flex-wrap: wrap; }
   .automation-card-actions .btn { flex: 1 1 90px; }
-  .usage-view { padding: 14px; }
-  .usage-toolbar { flex-direction: column; align-items: stretch; }
   .usage-breakdowns { grid-template-columns: minmax(0, 1fr); }
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .subscription-source-grid { grid-template-columns: minmax(0, 1fr); }
@@ -14743,7 +14916,9 @@ body.shell-dock-dragging * {
 /* ------------------------------------------------------------------------------------------------
  * Settings as a route (§11.3): the master/detail shape ProjectsView already establishes.
  * ---------------------------------------------------------------------------------------------- */
-.settings-view { display: flex; gap: var(--space-6); min-height: 0; padding: var(--space-5); overflow-y: auto; }
+.settings-view { display: flex; gap: var(--space-6); min-height: 0; }
+/* Settings content is a form page (§4.5): the panel caps at the form width beside its section list. */
+.settings-view > .settings-panel { max-width: var(--page-max-form); }
 .settings-sections {
   display: flex;
   flex-direction: column;
@@ -14916,7 +15091,7 @@ body.shell-dock-dragging * {
 /* On a phone the section list stacks above the panel, the way the rest of the app's master/detail
    screens already collapse. */
 @media (max-width: 760px) {
-  .settings-view { flex-direction: column; gap: var(--space-4); padding: var(--space-4); }
+  .settings-view { flex-direction: column; gap: var(--space-4); }
   .settings-sections { width: 100%; flex-direction: row; overflow-x: auto; position: static; }
   .settings-section-link { display: flex; align-items: center; white-space: nowrap; }
 }
@@ -14940,14 +15115,11 @@ body.shell-dock-dragging * {
 
 /* Archived Sessions ------------------------------------------------------- */
 .archive-view {
-  min-width: 0;
-  min-height: 100%;
-  padding: 18px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
-  overflow: auto;
+  gap: var(--space-4);
 }
+.archive-view > .page-header { margin-bottom: var(--space-2); }
 .archive-toolbar {
   padding: 14px;
   border: 1px solid var(--border);
@@ -15089,7 +15261,6 @@ body.shell-dock-dragging * {
   .archive-filters { grid-template-columns: repeat(3, minmax(130px, 1fr)); }
 }
 @media (max-width: 760px) {
-  .archive-view { padding: 12px; }
   .archive-filters { grid-template-columns: 1fr; }
   .archive-pagination { justify-content: space-between; }
 }

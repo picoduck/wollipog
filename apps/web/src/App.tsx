@@ -70,7 +70,7 @@ import {
 } from "./instance-storage.js";
 import { FeedbackProvider } from "./components/FeedbackProvider.js";
 import { Empty, Modal } from "./components/common.js";
-import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
+import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, WarningTriangleIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { viewPath, viewTitle } from "./navigation.js";
 import { useInstanceScope } from "./instance-scope.js";
@@ -81,6 +81,7 @@ import { useSessionsViewModeMemory } from "./use-sessions-view-mode-memory.js";
 import { handleSettingsNavigationKey } from "./settings-navigation.js";
 import { ProjectsView } from "./components/ProjectsView.js";
 import { InstanceSelector } from "./components/InstanceSelector.js";
+import { PageChromeProvider, PageHeader } from "./components/PageHeader.js";
 import { Rail } from "./components/Rail.js";
 import { InstancesPanel } from "./components/InstancesPanel.js";
 import { useNewSessionShortcut } from "./useNewSessionShortcut.js";
@@ -406,6 +407,11 @@ export function Shell() {
     navigate({ name: "session", id: sessionId });
   }, [navigate]);
   const isMobile = useIsMobile();
+  // The phone rail's bar has room for five destinations and nothing else, and the switcher opens
+  // its own popup so it cannot nest inside the More sheet either. So on phones it sits in the app
+  // bar: the page header on destinations and the top bar on a Session. Settings has no such
+  // constraint: it is a route, and it lives in the More sheet (see Rail.tsx).
+  const appBarControl = isMobile ? <InstanceSelector compact /> : undefined;
   // The breakpoint-specific controls (the instance selector and gear) are unmounted by a
   // crossing, and a keyboard user standing on one is left on <body>. Accessibility zoom crosses
   // 760px too, so this is not only a window-drag case.
@@ -691,21 +697,15 @@ export function Shell() {
         })}
       />
       <main className="main">
-        {!(view.name === "session" && !isMobile) && (
+        {/* Only the phone Session route keeps the app-level bar: destinations draw their own page
+            header and entity pages their own detail bar (docs/design-system.md §4.2, §4.3), and
+            the desktop Session bar lives in SessionDetail. */}
+        {view.name === "session" && isMobile && (
           <Header
             view={view}
-            mobileInstanceControl={isMobile ? (
-              /* The phone rail's bar has room for five destinations and nothing else, and the
-                 switcher opens its own popup so it cannot nest inside the More sheet either. The
-                 topbar is fixed and uncontested — unlike the bottom band, which an open shell dock
-                 and the toast stack both occupy. Settings has no such constraint: it is a route,
-                 and it lives in the More sheet (see Rail.tsx). */
-              <InstanceSelector compact />
-            ) : null}
-            onNewRun={() => setDialog({ kind: "run" })}
-            onNewPod={() => setDialog({ kind: "pod" })}
-            sessionActions={isMobile ? sessionPanelControls : null}
-            sessionTitle={view.name === "session" ? sessions.get(view.id)?.title ?? "Session" : undefined}
+            mobileInstanceControl={appBarControl}
+            sessionActions={sessionPanelControls}
+            sessionTitle={sessions.get(view.id)?.title ?? "Session"}
             onSessionBack={() => navigate(sessionsDestination(instanceScope))}
           />
         )}
@@ -723,11 +723,19 @@ export function Shell() {
           )
         )}
         <div className={`main-body${view.name === "inbox" || view.name === "session" || view.name === "board" ? " inbox-main-body" : ""}`}>
+          <PageChromeProvider appBarControl={appBarControl}>
           <ErrorBoundary
             label="View"
             resetKey={viewPath(view)}
+            // The Session's own bar owns its title (the phone top bar sits outside this boundary).
+            pageTitle={view.name === "session" ? undefined : viewTitle(view)}
           >
           {(view.name === "inbox" || view.name === "session" || view.name === "board") && (
+            /* Sessions takes the page header's title only. Its tab row, list, preview and splitter
+               belong to the Sessions work, so the header sits above an unchanged InboxView, which
+               keeps its place in the tree when a session opens and the header goes. */
+            <div className="page full fill">
+            {view.name !== "session" && <PageHeader title={viewTitle(view)} />}
             <InboxView
               viewMode={view.name === "board" ? "board" : "list"}
               expandedSessionId={view.name === "session" ? view.id : null}
@@ -746,13 +754,17 @@ export function Shell() {
               onNewSession={(preset) => setDialog({ kind: "session", preset })}
               onShortcutNewSessionPresetChange={setInboxNewSessionPreset}
             />
+            </div>
           )}
           {view.name === "runners" && <RunnersView />}
           {disabledExperimentView && (
-            <ExperimentDisabledNotice
-              experiment={disabledExperimentView}
-              onOpenSettings={() => navigate({ name: "settings", section: "experimental" })}
-            />
+            <div className="page">
+              <PageHeader title={viewTitle(view)} />
+              <ExperimentDisabledNotice
+                experiment={disabledExperimentView}
+                onOpenSettings={() => navigate({ name: "settings", section: "experimental" })}
+              />
+            </div>
           )}
           {view.name === "runs" && !disabledExperimentView && <RunsView onNewRun={() => setDialog({ kind: "run" })} />}
           {view.name === "pods" && !disabledExperimentView && <PodsView onNewPod={() => setDialog({ kind: "pod" })} />}
@@ -826,6 +838,7 @@ export function Shell() {
           {view.name === "run" && !disabledExperimentView && <RunDetail runId={view.id} />}
           {view.name === "pod" && !disabledExperimentView && <PodDetail podId={view.id} />}
           </ErrorBoundary>
+          </PageChromeProvider>
         </div>
         {/* Bottom shell dock: session-scoped terminals in the compact desktop layout. Mounted only
             while toggled on; keyed by session so tab selection never bleeds across navigations. */}
@@ -894,8 +907,6 @@ function BannerStatusIcon({ kind }: { kind: "lock" | "warning" }) {
 export function Header({
   view,
   mobileInstanceControl,
-  onNewRun,
-  onNewPod,
   sessionActions,
   sessionTitle,
   onSessionBack,
@@ -904,15 +915,12 @@ export function Header({
   /** The instance switcher, moved out of the rail on phone widths. Settings is not here: it is a
    * row in the rail's More sheet. */
   mobileInstanceControl?: React.ReactNode;
-  onNewRun: () => void;
-  onNewPod: () => void;
   /** Session panel-control cluster rendered here only on phone widths. */
   sessionActions?: React.ReactNode;
   sessionTitle?: string;
   onSessionBack?: () => void;
 }) {
   const title = viewTitle(view);
-  const { flags } = useExperiments();
   return (
     <header className="topbar">
       {/* Focusable only programmatically: the rescue below moves focus here when a layout swap
@@ -936,39 +944,13 @@ export function Header({
       {mobileInstanceControl && (
         <div className="topbar-actions topbar-mobile-controls">
           {mobileInstanceControl}
-          {view.name === "runs" && flags.multiAgent && (
-            <button type="button" className="btn primary sm topbar-create" onClick={onNewRun}>New Multi-Agent Run</button>
-          )}
-          {view.name === "pods" && flags.pods && (
-            <NewPodHeaderButton onClick={onNewPod} />
-          )}
           {view.name === "session" && sessionActions}
         </div>
-      )}
-      {!mobileInstanceControl && view.name === "runs" && flags.multiAgent && (
-        <button type="button" className="btn primary sm topbar-create" onClick={onNewRun}>New Multi-Agent Run</button>
-      )}
-      {!mobileInstanceControl && view.name === "pods" && flags.pods && (
-        <NewPodHeaderButton onClick={onNewPod} />
       )}
       {!mobileInstanceControl && view.name === "session" && sessionActions && (
         <div className="topbar-actions">{sessionActions}</div>
       )}
     </header>
-  );
-}
-
-function NewPodHeaderButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      className="icon-btn topbar-create"
-      onClick={onClick}
-      title="New Collaboration Pod"
-      aria-label="New Collaboration Pod"
-    >
-      <PlusIcon size={16} />
-    </button>
   );
 }
 

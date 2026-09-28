@@ -26,6 +26,7 @@ import { agentDisplayName } from "../agent-presentation.js";
 import { Checkbox, Select } from "./ui/ChoiceControls.js";
 import { agentOptions } from "./agent-options.js";
 import { OutboundEventSubscriptions } from "./OutboundEventSubscriptions.js";
+import { PageHeader } from "./PageHeader.js";
 import {
   buildSpec,
   defaults,
@@ -564,14 +565,12 @@ export function AutomationsView() {
   };
 
   return (
-    <section className="automations-view">
-      <div className="view-heading automation-heading">
-        <div>
-          <h2>Durable Automations</h2>
-          <p>Schedules use durable runner receipts and stable command IDs. Keep the control plane and its SQLite database online; sleeping runners wait or expire by policy.</p>
-        </div>
-        <button className="btn primary" type="button" onClick={openNewAutomation}>New Automation</button>
-      </div>
+    <section className="page">
+      <PageHeader
+        title="Automations"
+        description="Create or prompt sessions on a schedule."
+        primary={{ label: "New Automation", onClick: openNewAutomation }}
+      />
       {error && <div className="automation-error" role="alert">{error}</div>}
 
       <OutboundEventSubscriptions projects={[...projects.values()]} automations={items} />

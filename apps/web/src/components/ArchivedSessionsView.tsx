@@ -20,6 +20,7 @@ import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { InboxIcon, SearchIcon } from "./Icons.js";
 import { Empty, Spinner } from "./common.js";
+import { PageHeader } from "./PageHeader.js";
 import { Select } from "./ui/ChoiceControls.js";
 
 const DEFAULT_FILTERS: ArchiveBrowserFilters = {
@@ -443,7 +444,8 @@ export function ArchivedSessionsView() {
   };
 
   return (
-    <section className="archive-view" aria-labelledby="page-title">
+    <section className="page wide archive-view" aria-labelledby="page-title">
+      <PageHeader title="Archived Sessions" />
       <div className="archive-toolbar">
         <label className={`archive-search${queryInput ? " has-query" : ""}`}>
           <span>Search Sessions and Transcripts</span>

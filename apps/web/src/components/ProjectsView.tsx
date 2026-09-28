@@ -25,6 +25,8 @@ import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { AccessScopeSettings, useAccessScopeIdentity } from "./AccessScopeControls.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { PlusIcon, SearchIcon } from "./Icons.js";
+import { DetailBar, PageHeader } from "./PageHeader.js";
+import { useIsMobile } from "./useIsMobile.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
 import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
@@ -128,6 +130,8 @@ function DeleteProjectDialog({ project, busy, error, onClose, onDelete }: {
   );
 }
 
+const PROJECTS_DESCRIPTION = "Group related sessions and choose the folders where they run.";
+
 export function ProjectsView({
   selectedProjectId,
   onNewSession,
@@ -138,6 +142,7 @@ export function ProjectsView({
   const api = useApi();
   const { confirm, showToast, showUndo } = useFeedback();
   const { navigate } = useStoreActions();
+  const isMobile = useIsMobile();
   const storedProjects = useStoreSelector((state) => state.projects);
   const sessions = useStoreSelector((state) => state.sessions);
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
@@ -327,19 +332,14 @@ export function ProjectsView({
     // minimum, so the load finished with a ~500px jump. `.skeleton { flex: 1 }` did not save it —
     // `.main-body` is a flex ITEM, not a flex container, so the rule never applied.
     return (
-      <div className="projects-view">
-        <div className="projects-intro">
-          <div>
-            <h2>Manage Projects</h2>
-            <p>Projects organize related sessions. Locations are folders on connected machines where sessions run.</p>
-          </div>
-          {/* Disabled rather than omitted: it holds its own width, and there is nothing to create
-              a Project against until the snapshot says which machines are connected. */}
-          <button type="button" className="btn primary" disabled>
-            <PlusIcon />
-            <span>Create Project</span>
-          </button>
-        </div>
+      <div className="page full projects-view">
+        {/* Disabled rather than omitted: it holds its own width, and there is nothing to create
+            a Project against until the snapshot says which machines are connected. */}
+        <PageHeader
+          title="Projects"
+          description={PROJECTS_DESCRIPTION}
+          primary={{ label: "Create Project", onClick: () => undefined, disabled: true }}
+        />
         <div className="project-manager-grid">
           <Skeleton rows={6} announce="Loading projects" />
         </div>
@@ -348,25 +348,33 @@ export function ProjectsView({
   }
   if (!projectsSupported) {
     return (
-      <div className="project-manager-unavailable">
-        <strong>Project Management Unavailable</strong>
-        <span>Update the connected control plane to manage durable Projects and Locations.</span>
+      <div className="page full projects-view">
+        <PageHeader title="Projects" />
+        <div className="project-manager-unavailable">
+          <strong>Project Management Unavailable</strong>
+          <span>Update the connected control plane to manage durable Projects and Locations.</span>
+        </div>
       </div>
     );
   }
 
   return (
-    <div className="projects-view">
-      <div className="projects-intro">
-        <div>
-          <h2>Manage Projects</h2>
-          <p>Projects organize related sessions. Locations are folders on connected machines where sessions run.</p>
-        </div>
-        <button ref={createButtonRef} type="button" className="btn primary" onClick={() => openDialog({ kind: "create" })}>
-          <PlusIcon />
-          <span>Create Project</span>
-        </button>
-      </div>
+    <div className="page full projects-view">
+      {/* On a phone the list and the detail are two routes, so the open Project takes the detail
+          bar and its back control (§4.3, §6.2); on wider screens both panes share the header. */}
+      {isMobile && selected ? (
+        <DetailBar
+          title={selected.name}
+          backLabel="Back to Projects"
+          onBack={() => navigate({ name: "projects" })}
+        />
+      ) : (
+        <PageHeader
+          title="Projects"
+          description={PROJECTS_DESCRIPTION}
+          primary={{ label: "Create Project", buttonRef: createButtonRef, onClick: () => openDialog({ kind: "create" }) }}
+        />
+      )}
       <div className="project-manager-grid">
         <aside className={`project-manager-list${selected ? " has-selection" : ""}`} aria-label="Projects">
           <label className="project-manager-search">
@@ -425,7 +433,6 @@ export function ProjectsView({
             </div>
           ) : (
             <>
-              <button type="button" className="project-manager-back" onClick={() => navigate({ name: "projects" })}>← Back to Projects</button>
               <div className="project-detail-heading">
                 <div>
                   <h2>{selected.name}</h2>

@@ -1,10 +1,11 @@
 import { expect, test } from "@playwright/test";
+import { choosePageAction } from "./page-actions.js";
 import { installSkillGroupsFixture } from "./skill-groups.fixture.js";
 const acceptance = "Accept Group-Wide Deployment and Ownership Impact";
 test("creating another group cannot retain the previously selected group's rules", async ({ page }) => {
   await installSkillGroupsFixture(page);
   await page.goto("/skills-removals-e2e.html?groups=1");
-  await page.getByRole("button", { name: "Manage Groups", exact: true }).click();
+  await choosePageAction(page, "Manage Groups");
   await page.getByLabel("New Group Name", { exact: true }).fill("First Group");
   await page.getByRole("button", { name: "Create Group", exact: true }).click();
   await page.getByRole("button", { name: "Add Group Assignment", exact: true }).click();
@@ -20,7 +21,7 @@ test("assignment read failure does not masquerade as an empty group", async ({ p
   await installSkillGroupsFixture(page);
   await page.route("**/api/skill-groups/created/assignments", route => route.fulfill({ status: 503, json: { error: "Assignments temporarily unavailable" } }));
   await page.goto("/skills-removals-e2e.html?groups=1");
-  await page.getByRole("button", { name: "Manage Groups", exact: true }).click();
+  await choosePageAction(page, "Manage Groups");
   await page.getByLabel("New Group Name", { exact: true }).fill("Read Failure");
   await page.getByRole("button", { name: "Create Group", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText("Assignments temporarily unavailable");
@@ -33,7 +34,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/skills-removals-e2e.html?groups=1");
     await page.evaluate(theme => { document.documentElement.dataset.theme = theme; }, theme);
-    await page.getByRole("button", { name: "Manage Groups", exact: true }).click();
+    await choosePageAction(page, "Manage Groups");
     await page.getByLabel("New Group Name", { exact: true }).fill("Review Team");
     await page.getByRole("button", { name: "Create Group", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Review Team", exact: true })).toBeVisible();
@@ -77,7 +78,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
 test("legacy conversion is explicit and discloses permanent ownership", async ({ page }) => {
   const { writes } = await installSkillGroupsFixture(page);
   await page.goto("/skills-removals-e2e.html?groups=1");
-  await page.getByRole("button", { name: "Manage Groups", exact: true }).click();
+  await choosePageAction(page, "Manage Groups");
   await page.getByRole("button", { name: /^Group:/ }).click();
   await page.getByRole("option", { name: "Legacy Tools" }).click();
   await expect(page.getByText(/Conversion permanently assigns ownership/)).toBeVisible();
@@ -93,7 +94,7 @@ test("failed conversion preserves the legacy group and surfaces the server error
   await installSkillGroupsFixture(page);
   await page.route("**/api/skill-groups/legacy/convert", route => route.fulfill({ status: 409, json: { error: "Members have different ownership. No changes saved." } }));
   await page.goto("/skills-removals-e2e.html?groups=1");
-  await page.getByRole("button", { name: "Manage Groups", exact: true }).click();
+  await choosePageAction(page, "Manage Groups");
   await page.getByRole("button", { name: /^Group:/ }).click();
   await page.getByRole("option", { name: "Legacy Tools" }).click();
   await page.getByRole("checkbox", { name: acceptance }).check();

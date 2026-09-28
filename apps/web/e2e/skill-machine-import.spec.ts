@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { choosePageAction } from "./page-actions.js";
 
 test.use({ video: "on" });
 for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
@@ -26,7 +27,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await expect(page.getByRole("heading", { name: "Machine Snapshot Source" })).toBeVisible();
     await page.screenshot({ path: info.outputPath(`machine-source-${width}-${theme}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
-    await page.getByRole("button", { name: "Import from Machine" }).click();
+    await choosePageAction(page, "Import from Machine");
     await expect(page.getByRole("button", { name: "Import Snapshot" })).toBeDisabled();
     await page.getByRole("button", { name: "Discover Skills" }).click();
     await page.getByRole("button", { name: "Preview Files for code-review from .codex/skills" }).click();
@@ -51,7 +52,7 @@ test("machine snapshot read errors block import", async ({ page }) => {
   await page.route("**/api/runners/runner-1/skill-snapshots", (route) => route.fulfill({ json: { discoveryId: "discovery", candidates: [candidate] } }));
   await page.route("**/api/skill-machine/discovery/preview", (route) => route.fulfill({ status: 502, json: { error: "Source changed. Discover it again." } }));
   await page.goto("/skills-removals-e2e.html");
-  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await choosePageAction(page, "Import from Machine");
   await page.getByRole("button", { name: "Discover Skills" }).click();
   await page.getByRole("button", { name: "Preview Files for alpha from .codex/skills" }).click();
   await expect(page.getByRole("alert")).toContainText("Source changed");
@@ -60,14 +61,14 @@ test("machine snapshot read errors block import", async ({ page }) => {
 
 test("a snapshot-capable runner explains the newer recovery protocol requirement", async ({ page }) => {
   await page.goto("/skills-removals-e2e.html?legacyRecovery=1");
-  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await choosePageAction(page, "Import from Machine");
   await expect(page.getByRole("button", { name: "Inspect Recovery" })).toBeDisabled();
   await expect(page.getByText("Recovery inspection requires protocol 116 or newer.")).toBeVisible();
 });
 
 test("an older macOS runner offers snapshots and explains the adoption protocol requirement", async ({ page }, info) => {
   await page.goto("/skills-removals-e2e.html?macos=1");
-  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await choosePageAction(page, "Import from Machine");
   await expect(page.getByRole("button", { name: "Discover Skills" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Inspect Recovery" })).toBeDisabled();
   await expect(page.getByText("Recovery inspection and source adoption on macOS require protocol 181 or newer."))
@@ -77,7 +78,7 @@ test("an older macOS runner offers snapshots and explains the adoption protocol 
 
 test("an older Windows runner offers snapshots and explains the adoption protocol requirement", async ({ page }, info) => {
   await page.goto("/skills-removals-e2e.html?windows=1");
-  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await choosePageAction(page, "Import from Machine");
   await expect(page.getByRole("button", { name: "Discover Skills" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "Inspect Recovery" })).toBeDisabled();
   await expect(page.getByText("Recovery inspection and source adoption on Windows require protocol 182 or newer."))
@@ -107,7 +108,7 @@ for (const platform of ["macos", "windows"] as const) for (const width of [1280,
       route.fulfill({ json: { operations: [], truncated: false } }));
     await page.goto(`/skills-removals-e2e.html?${platform}Adoption=1`);
     await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-    await page.getByRole("button", { name: "Import from Machine" }).click();
+    await choosePageAction(page, "Import from Machine");
     await expect(page.getByText(
       /a macOS runner on protocol 181 or newer, or a Windows runner on protocol 182 or newer \(184 for WSL locations\)/u,
     )).toBeVisible();
@@ -132,7 +133,7 @@ test("WSL snapshot candidates identify their distro without exposing transport p
   await page.route("**/api/runners/runner-1/skill-snapshots", (route) =>
     route.fulfill({ json: { discoveryId: "discovery", candidates: [candidate] } }));
   await page.goto("/skills-removals-e2e.html?wslSkills=1");
-  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await choosePageAction(page, "Import from Machine");
   await page.getByRole("button", { name: "Discover Skills" }).click();
   await expect(page.getByText("WSL: Ubuntu · .codex/skills/review")).toBeVisible();
   await expect(page.getByRole("button", {
@@ -165,7 +166,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
         detail: "The managed link is active and the original is preserved." }], truncated: false } }));
     await page.goto("/skills-removals-e2e.html?wslAdoption=1");
     await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-    await page.getByRole("button", { name: "Import from Machine" }).click();
+    await choosePageAction(page, "Import from Machine");
     await page.getByRole("button", { name: "Inspect Recovery" }).click();
     await expect(page.getByText(`WSL: Ubuntu · .codex/skills/review · managed linked · ${operationId}`)).toBeVisible();
     await page.screenshot({ path: info.outputPath(`wsl-recovery-${width}-${theme}.png`), fullPage: true });
@@ -189,7 +190,7 @@ test("a Windows runner without WSL adoption keeps WSL candidates snapshot-only",
       assignmentCount: 1, files: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: review\n---\nReview" }],
       previousFiles: [{ path: "SKILL.md", encoding: "utf8", content: "---\nname: review\n---\nReview" }] } }));
   await page.goto("/skills-removals-e2e.html?windowsAdoption=1");
-  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await choosePageAction(page, "Import from Machine");
   await page.getByRole("button", { name: "Discover Skills" }).click();
   await page.getByRole("button", { name: "Preview Files for review from WSL: Ubuntu · .codex/skills/review" }).click();
   await expect(page.getByRole("button", { name: "Check Adoption" })).toBeDisabled();
@@ -203,7 +204,7 @@ test("switching machines clears inspected adoption recovery", async ({ page }) =
       detail: "The managed link is active and the original is preserved." }], truncated: false,
   } }));
   await page.goto("/skills-removals-e2e.html?matrix=1&onlineMatrix=1");
-  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await choosePageAction(page, "Import from Machine");
   await page.getByRole("button", { name: "Inspect Recovery" }).click();
   await expect(page.getByRole("heading", { name: "Adoption Recovery" })).toBeVisible();
   await page.getByRole("button", { name: /^Machine:/ }).click();
@@ -237,7 +238,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
   });
   await page.goto("/skills-removals-e2e.html");
   await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-  await page.getByRole("button", { name: "Import from Machine" }).click();
+  await choosePageAction(page, "Import from Machine");
   await page.getByRole("button", { name: "Discover Skills" }).click();
   await page.getByRole("button", { name: "Preview Files for code-review from .codex/skills" }).click();
   const snapshotHeading = page.getByRole("heading", { name: "Snapshot Preview" });
@@ -281,7 +282,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) test(
     });
     await page.goto("/skills-removals-e2e.html");
     await page.evaluate((selected) => { document.documentElement.dataset.theme = selected; }, theme);
-    await page.getByRole("button", { name: "Import from Machine" }).click();
+    await choosePageAction(page, "Import from Machine");
     await page.getByRole("button", { name: "Inspect Recovery" }).click();
     await expect(page.getByRole("heading", { name: "Adoption Recovery" })).toBeVisible();
     const restore = page.getByRole("button", { name: "Restore Original Source" });

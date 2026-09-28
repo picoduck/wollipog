@@ -1,6 +1,6 @@
 import { RunsIcon } from "./Icons.js";
-import { useEffect, useMemo, useRef, useState } from "react";
-import type { WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import type { RunView, WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
 import { useApi } from "../api-context.js";
@@ -15,6 +15,7 @@ import { detailPlaceholder, listPlaceholder } from "../detail-placeholder.js";
 import { selectComparisonEvents, selectComparisonHistory, selectComparisonSession } from "../comparison-selectors.js";
 import { transcriptPresentation } from "../transcript-presentation.js";
 import { ArtifactPreview } from "./ArtifactPreview.js";
+import { DetailBar, PageHeader } from "./PageHeader.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 
 const EMPTY_SESSION_IDS: string[] = [];
@@ -74,12 +75,12 @@ export function RunsView({ onNewRun }: { onNewRun: () => void }) {
     [runs],
   );
 
-  if (list.length === 0) {
-    if (!snapshotLoaded) {
-      const placeholder = listPlaceholder("Multi-Agent Runs", conn);
-      return <Empty icon={<RunsIcon size={28} />} title={placeholder.title} hint={placeholder.hint} />;
-    }
-    return (
+  let body: ReactNode;
+  if (list.length === 0 && !snapshotLoaded) {
+    const placeholder = listPlaceholder("Multi-Agent Runs", conn);
+    body = <Empty icon={<RunsIcon size={28} />} title={placeholder.title} hint={placeholder.hint} />;
+  } else if (list.length === 0) {
+    body = (
       <Empty
         icon={<RunsIcon size={28} />}
         title="No Multi-Agent Runs Yet"
@@ -87,12 +88,23 @@ export function RunsView({ onNewRun }: { onNewRun: () => void }) {
         action={<button type="button" className="btn primary sm" onClick={onNewRun}>New Multi-Agent Run</button>}
       />
     );
+  } else {
+    body = <RunList runs={list} onOpen={(runId) => navigate({ name: "run", id: runId })} />;
   }
 
   return (
+    <div className="page">
+      <PageHeader title="Multi-Agent Runs" primary={{ label: "New Multi-Agent Run", onClick: onNewRun }} />
+      {body}
+    </div>
+  );
+}
+
+function RunList({ runs, onOpen }: { runs: RunView[]; onOpen: (runId: string) => void }) {
+  return (
     <div className="runs-list">
-      {list.map((run) => (
-        <button key={run.id} type="button" className="run-card" onClick={() => navigate({ name: "run", id: run.id })}>
+      {runs.map((run) => (
+        <button key={run.id} type="button" className="run-card" onClick={() => onOpen(run.id)}>
           <div className="run-card-head">
             <span className="run-title">{run.title}</span>
             <span className="run-count">
@@ -276,24 +288,21 @@ function RunDetailContent({ runId }: { runId: string }) {
     }
   };
 
+  const back = () => navigate({ name: "runs" });
   if (!run) {
     const placeholder = detailPlaceholder("Run", { authoritative: snapshotLoaded, conn });
-    return <Empty title={placeholder.title} hint={placeholder.hint} />;
+    return (
+      <div className="run-detail">
+        <DetailBar title="Multi-Agent Run" backLabel="Back to Multi-Agent Runs" onBack={back} />
+        <Empty title={placeholder.title} hint={placeholder.hint} />
+      </div>
+    );
   }
 
   return (
     <div className="run-detail">
-      <div className="detail-head">
-        <button className="icon-btn back" onClick={() => navigate({ name: "runs" })} title="Back">
-          ←
-        </button>
-        <div className="detail-headinfo">
-          <div className="detail-title">{run.title}</div>
-          <div className="detail-sub">
-            <span className="muted">{run.prompt}</span>
-          </div>
-        </div>
-      </div>
+      <DetailBar title={run.title} backLabel="Back to Multi-Agent Runs" onBack={back} />
+      <p className="detail-summary">{run.prompt}</p>
 
       {(workflow || workflowError) && (
         <section className="workflow-inspector" aria-label="Workflow Progress">

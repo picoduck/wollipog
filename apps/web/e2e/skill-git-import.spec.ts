@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { choosePageAction } from "./page-actions.js";
 
 test.use({ video: "on" });
 test("Check for Updates preserves the source and previews the recorded skill directory", async ({ page }, info) => {
@@ -40,7 +41,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     await page.route("**/api/skill-git/preview/preview-1", (route) => route.fulfill({ status: 204 }));
     await page.goto("/skills-removals-e2e.html");
     await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-    await page.getByRole("button", { name: "Import from Git" }).click();
+    await choosePageAction(page, "Import from Git");
     await page.getByLabel("Git Repository", { exact: true }).fill("example/skills");
     await page.getByRole("button", { name: "Preview Skills" }).click();
     await expect(page.getByText("New version · 2 existing assignments")).toBeVisible();

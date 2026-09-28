@@ -115,7 +115,8 @@ async function unmount(fixture: Fixture): Promise<void> {
 }
 
 const section = (container: HTMLDivElement, label: string) => container.querySelector(`[aria-label="${label}"]`);
-const title = (container: HTMLDivElement) => container.querySelector(".detail-title")?.textContent;
+// The run title is the detail bar's h1 (#1801).
+const title = (container: HTMLDivElement) => container.querySelector(".detail-bar-title")?.textContent;
 
 test("a direct run-to-run route change drops the previous run's error banners while the new run loads", async () => {
   const workflowRequests: string[] = [];
@@ -180,7 +181,9 @@ test("a direct run-to-run route change while offline drops the previous run's wo
 });
 
 /** Renders the Runs list with a socket the test drives: nothing arrives until it says so. */
-async function renderRunsList(drive: (socket: FakeSocket) => void): Promise<{ text: string; createButton: boolean }> {
+async function renderRunsList(
+  drive: (socket: FakeSocket) => void,
+): Promise<{ text: string; createButton: boolean; headerCreateButton: boolean }> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -202,7 +205,11 @@ async function renderRunsList(drive: (socket: FakeSocket) => void): Promise<{ te
     await act(async () => drive(socket));
     return {
       text: container.textContent ?? "",
-      createButton: [...container.querySelectorAll("button")].some((button) => button.textContent === "New Multi-Agent Run"),
+      // The empty state's own action. The page header's primary is a separate control (#1801): it
+      // is always offered, as the top bar's was, and only the empty state waits for a snapshot.
+      createButton: [...container.querySelectorAll(".empty button")].some((button) => button.textContent === "New Multi-Agent Run"),
+      headerCreateButton: [...container.querySelectorAll(".page-header button")]
+        .some((button) => button.textContent === "New Multi-Agent Run"),
     };
   } finally {
     await act(async () => root.unmount());
@@ -221,6 +228,7 @@ test("before the first snapshot the Runs list is loading, not empty", async () =
   assert.match(list.text, /Loading Multi-Agent Runs…/u);
   assert.doesNotMatch(list.text, /No Multi-Agent Runs Yet/u);
   assert.equal(list.createButton, false);
+  assert.equal(list.headerCreateButton, true);
 });
 
 test("an offline or unpaired dashboard shows the Runs list as unavailable, not empty", async () => {

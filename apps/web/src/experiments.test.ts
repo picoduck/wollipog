@@ -136,8 +136,12 @@ test("every surface that exposes a gated feature consults the flags", () => {
       "the numbered shortcuts must consult the flags through the visible rail order, or a hidden view stays one keypress away"],
     ["./App.tsx", /disabledExperimentView/,
       "a direct route into a hidden feature must render the notice, not the feature"],
-    ["./App.tsx", /flags\.multiAgent[\s\S]{0,200}New Multi-Agent Run/,
-      "the topbar create button is a creation surface and gates with its view"],
+    // The create action moved from the top bar into the Runs page header (#1801), so it renders
+    // exactly when the page does.
+    ["./App.tsx", /view\.name === "runs" && !disabledExperimentView && <RunsView/,
+      "the page header's create button is a creation surface and gates with its view"],
+    ["./components/RunsView.tsx", /<PageHeader title="Multi-Agent Runs" primary=\{\{ label: "New Multi-Agent Run"/,
+      "the Runs create action belongs to the gated Runs page"],
     ["./components/AutomationsView.tsx", /multiAgentEnabled \|\| form\.actionKind === "workflow_run"/,
       "Automations must not OFFER workflow runs while multi-agent is off, but an automation already using one keeps rendering truthfully"],
     ["./components/Board.tsx", /multiAgentEnabled/,

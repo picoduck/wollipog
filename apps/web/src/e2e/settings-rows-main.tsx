@@ -275,11 +275,11 @@ function Harness() {
 
   // Production's structure above the view: `.app` > `main.main` > `.main-body`. A rule scoped to
   // `.app > .main .settings-view` would break the real page while never matching a fixture rooted
-  // at #root, which is the class of miss every earlier round of this file was fixing.
+  // at #root, which is the class of miss every earlier round of this file was fixing. Settings draws
+  // its own page header (#1801), so there is no app-level top bar above it.
   return (
     <div className="app">
       <main className="main">
-        <header className="topbar"><h1 id="page-title" tabIndex={-1}>Settings</h1></header>
         <div className="main-body">
           <SettingsView
             section={section}

@@ -24,7 +24,7 @@ test("skill link removals show path, reason, and state timestamp on desktop", as
 test("skill link removal history wraps without horizontal overflow on mobile", async ({ page }) => {
   await openRemovalHistory(page, 320);
 
-  const geometry = await page.locator(".skills-view").evaluate((view) => ({
+  const geometry = await page.locator(".page").evaluate((view) => ({
     viewRight: view.getBoundingClientRect().right,
     historyRight: view.querySelector(".skills-removals")!.getBoundingClientRect().right,
     documentWidth: document.documentElement.scrollWidth,

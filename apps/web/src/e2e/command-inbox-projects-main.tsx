@@ -52,7 +52,7 @@ import { useIsMobile } from "../components/useIsMobile.js";
 import { Header, Shell } from "../App.js";
 import { ThemeProvider } from "../components/ThemeProvider.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
-import type { ViewNavigation } from "../navigation.js";
+import { viewFromPath, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { useNewSessionShortcut } from "../useNewSessionShortcut.js";
@@ -773,7 +773,9 @@ const navigation: ViewNavigation = {
     const fixtureView = new URLSearchParams(window.location.search).get("view");
     if (fixtureView === "pod") return { name: "pod", id: activePod.id };
     if (fixtureView === "run") return { name: "run", id: activeRun.id };
-    return { name: "inbox" };
+    // `?fullShell=1&path=/skills` opens any destination in the real Shell.
+    const fixturePath = new URLSearchParams(window.location.search).get("path");
+    return (fixturePath ? viewFromPath(fixturePath) : null) ?? { name: "inbox" };
   },
   push() {},
   listen: () => () => {},
@@ -2106,8 +2108,6 @@ function FixtureSurface() {
     <Header
       view={view}
       mobileInstanceControl={<button type="button" className="instance-selector-trigger" aria-label="Switch Instance">I</button>}
-      onNewRun={() => undefined}
-      onNewPod={() => undefined}
       sessionActions={(
         <>
           <button type="button" className="icon-btn" aria-label="Toggle Pinned Summary">P</button>

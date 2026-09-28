@@ -33,7 +33,21 @@ function sizeOf(selector: string): number | null {
   return null;
 }
 
+test("the page header's title is the page's one largest heading", () => {
+  // #1801: destinations draw their title in the page header, at --type-page-title (20/28, 600), and
+  // the detail bar's entity title at --type-title (16/24). §2.3's hierarchy check: on any screen the
+  // page title is the largest text.
+  const font = (selector: string) => declarationsOf(css, "font")
+    .find(({ selector: found }) => found.replace(/\s+/g, " ").trim() === selector)?.value.trim();
+  assert.equal(font(".page-title"), "var(--type-page-title)");
+  assert.equal(font(".detail-bar-title"), "var(--type-title)");
+  assert.match(css, /--type-page-title: 600 var\(--text-xl\)\/28px var\(--font-ui\);/);
+  const largestBody = Math.max(...["--text-lg", "--text-md", "--text-base"].map((token) => SCALE[token]!));
+  assert.ok(SCALE["--text-xl"]! > largestBody, "the page title sits above every body and title size");
+});
+
 test("the page title is larger than the labels inside the page", () => {
+  // The top bar's title remains on the phone Session route and the instance recovery screen.
   const title = sizeOf(".topbar h1");
   assert.ok(title, "the page title must declare a size");
   // §F8 measured it at 15px against body labels of 14px and a de-facto default of 12.5px — the

@@ -9,6 +9,7 @@ import { accountLabelText } from "../personal-identifiers.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SkillsIcon } from "./Icons.js";
 import { Markdown } from "./Markdown.js";
+import { PageHeader } from "./PageHeader.js";
 import { SkillGitImportDialog } from "./SkillGitImportDialog.js";
 import { SkillGitAutoUpdateControls } from "./SkillGitAutoUpdate.js";
 import { SkillMachineImportDialog } from "./SkillMachineImportDialog.js";
@@ -473,19 +474,18 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
   const skillMd = latest?.files?.find((file) => file.path === "SKILL.md" && file.encoding === "utf8");
 
   return (
-    <section className="skills-view">
-      <div className="view-heading skills-heading">
-        <div>
-          <h2>Agent Skills</h2>
-          <p>Author a skill once, then assign it to machines and agents. Wollipog deploys each machine's selected version and reports its state.</p>
-        </div>
-        <div className="skills-section-heading">
-          <button className="btn" type="button" onClick={() => setDialog("groups")}>Manage Groups</button>
-          <button className="btn" type="button" onClick={() => setDialog("git-import")}>Import from Git</button>
-          <button className="btn" type="button" onClick={() => setDialog("machine-import")}>Import from Machine</button>
-          <button className="btn primary" type="button" onClick={() => setDialog("new-skill")}>New Skill</button>
-        </div>
-      </div>
+    <section className="page full">
+      <PageHeader
+        title="Agent Skills"
+        description="Write a skill once, then choose which machines and agents get it."
+        // Left to right; the leftmost moves into ⋯ first, so Import from Git is the last to go.
+        secondary={[
+          { label: "Import from Machine", onClick: () => setDialog("machine-import") },
+          { label: "Manage Groups", onClick: () => setDialog("groups") },
+          { label: "Import from Git", onClick: () => setDialog("git-import") },
+        ]}
+        primary={{ label: "New Skill", onClick: () => setDialog("new-skill") }}
+      />
       {error && <div className="form-error" role="alert">{error}</div>}
 
       <div className="skills-layout">

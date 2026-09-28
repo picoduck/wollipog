@@ -220,8 +220,11 @@ const MENU_ITEM_SELECTOR = '[role="menuitem"], [role="menuitemcheckbox"], [role=
 
 function menuItems(menu: HTMLElement | null): HTMLElement[] {
   if (!menu) return [];
+  // A page header's ⋯ holds every secondary and the stylesheet shows only the ones whose buttons
+  // the header's width hid (§3.3). An undisplayed item cannot take focus, so it is not a stop.
   return Array.from(menu.querySelectorAll<HTMLElement>(MENU_ITEM_SELECTOR)).filter(
-    (item) => item.getAttribute("aria-disabled") !== "true" && !(item instanceof HTMLButtonElement && item.disabled),
+    (item) => item.getAttribute("aria-disabled") !== "true" && !(item instanceof HTMLButtonElement && item.disabled) &&
+      item.ownerDocument.defaultView?.getComputedStyle(item).display !== "none",
   );
 }
 

@@ -1609,7 +1609,7 @@ test("Project management creates, hides, reloads, and reveals durable empty Proj
   await createDialog.getByRole("button", { name: "Create Project" }).click();
   await expect(page.getByRole("tab", { name: /Durable Empty/ })).toBeVisible();
   await openProjectManager(page, "Durable Empty");
-  await expect(page.getByText("Projects organize related sessions. Locations are folders on connected machines where sessions run.")).toBeVisible();
+  await expect(page.getByText("Group related sessions and choose the folders where they run.")).toBeVisible();
   await expect(page.getByRole("heading", { name: "Durable Empty" })).toBeVisible();
   await expect(page.getByText("No Project Locations", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Hide Project" }).click();
@@ -1633,22 +1633,28 @@ test.describe("with a touch pointer", () => {
   test("Project management remains usable as a focused list and detail flow on mobile", async ({ page }) => {
     await openProjectManager(page);
     await page.setViewportSize({ width: 390, height: 844 });
-    await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
-    const back = page.getByRole("button", { name: "Back to Projects" });
+    // On a phone the open Project takes the detail bar (#1801): its name is the page's h1 and Back
+    // is the bar's ChevronLeft icon button, not a "← Back to Projects" text link.
+    const detail = page.getByRole("heading", { level: 2, name: "Alpha" });
+    await expect(detail).toBeVisible();
+    await expect(page.getByRole("heading", { level: 1, name: "Alpha" })).toBeVisible();
+    const back = page.getByRole("button", { name: "Back to Projects", exact: true });
     await expect(back).toBeVisible();
+    await expect(back).toHaveText("");
     const box = await back.boundingBox();
     expect(box).not.toBeNull();
     expect(box!.height).toBeGreaterThanOrEqual(44);
     await back.click();
     const alpha = page.getByRole("button", { name: /Alpha/ });
     await expect(alpha).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Alpha" })).toBeHidden();
+    await expect(detail).toBeHidden();
+    await expect(page.getByRole("heading", { level: 1, name: "Projects" })).toBeVisible();
     await alpha.click();
-    await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
+    await expect(detail).toBeVisible();
     await expect(back).toBeVisible();
     await back.click();
     await expect(alpha).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Alpha" })).toBeHidden();
+    await expect(detail).toBeHidden();
   });
 });
 

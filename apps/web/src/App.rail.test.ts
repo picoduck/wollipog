@@ -11,6 +11,9 @@ const inboxRow = readFileSync(new URL("./components/InboxRow.tsx", import.meta.u
 const inboxShortcutRail = readFileSync(new URL("./components/InboxShortcutRail.tsx", import.meta.url), "utf8");
 const projectSplitMenu = readFileSync(new URL("./components/ProjectSplitMenu.tsx", import.meta.url), "utf8");
 const projectsView = readFileSync(new URL("./components/ProjectsView.tsx", import.meta.url), "utf8");
+const pageHeader = readFileSync(new URL("./components/PageHeader.tsx", import.meta.url), "utf8");
+const runsView = readFileSync(new URL("./components/RunsView.tsx", import.meta.url), "utf8");
+const podsView = readFileSync(new URL("./components/PodsView.tsx", import.meta.url), "utf8");
 const createProjectDialog = readFileSync(new URL("./components/CreateProjectDialog.tsx", import.meta.url), "utf8");
 const commandPalette = readFileSync(new URL("./components/CommandPalette.tsx", import.meta.url), "utf8");
 const projectLocationDialog = readFileSync(new URL("./components/ProjectLocationDialog.tsx", import.meta.url), "utf8");
@@ -43,7 +46,11 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   assert.match(rail, /const RAIL_ICON_SIZE = 26;[\s\S]*<Icon size=\{RAIL_ICON_SIZE\}/);
   assert.doesNotMatch(rail, /onNewSession|rail-action|PlusIcon/);
   assert.doesNotMatch(app, /title="New Session"[\s\S]*aria-label="New Session"/);
-  assert.match(app, /mobileInstanceControl=\{isMobile \?/);
+  // On phones the instance switcher lives in the app bar: the page header on destinations (#1801)
+  // and the Session top bar on a Session.
+  assert.match(app, /const appBarControl = isMobile \? <InstanceSelector compact \/> : undefined;/);
+  assert.match(app, /<PageChromeProvider appBarControl=\{appBarControl\}>/);
+  assert.match(app, /mobileInstanceControl=\{appBarControl\}/);
   assert.doesNotMatch(app, /mobileSettingsControl/,
     "Settings left the phone topbar for the rail's More sheet");
   assert.match(css, /\.app-rail\s*\{\s*width:\s*66px/);
@@ -259,7 +266,8 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   assert.match(css, /\.inbox-create-control\s*\{[^}]*width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);/);
   assert.match(css, /@media \(pointer: coarse\) \{\s*:root \{[^}]*--control-h:\s*44px;/,
     "the shared creation control keeps a touch-sized target");
-  assert.match(projectsView, /Projects organize related sessions\. Locations are folders on connected machines where sessions run\./);
+  // The intro paragraph became the page header's one-line description (#1801, §4.2: 80 characters).
+  assert.match(projectsView, /const PROJECTS_DESCRIPTION = "Group related sessions and choose the folders where they run\.";/);
   assert.match(projectsView, /className="muted project-detail-meta">Project ID:/);
   assert.match(projectsView, /className="muted project-detail-meta">\{projectAudienceVisibilitySummary/);
   assert.match(css, /\.project-detail-meta\s*\{\s*display:\s*block;/,
@@ -302,8 +310,12 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "Project management uses the atomic Project-scoped Location creation API");
   assert.match(css, /\.project-location-create-toggle\s*\{[^}]*width:\s*100%;[^}]*text-align:\s*left;/,
     "the collapsed creation disclosure remains a full-width readable target");
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.project-manager-back\s*\{[^}]*min-height:\s*var\(--control-h\)/,
-    "the mobile Projects back target is one control height, which a touch screen makes 44px");
+  // The phone Projects back control is the detail bar's (#1801): an `.icon-btn` named "Back to
+  // Projects", one control height, which a touch screen makes 44px.
+  assert.match(projectsView, /isMobile && selected \? \(\s*<DetailBar[\s\S]*?backLabel="Back to Projects"/,
+    "the mobile Projects back target is the detail bar's");
+  assert.doesNotMatch(projectsView, /project-manager-back|← Back to Projects/);
+  assert.match(pageHeader, /className="icon-btn detail-bar-back"[^>]*aria-label=\{backLabel\}/);
 });
 
 test("Inbox Search is compact by default and expands for keyboard or populated use", () => {
@@ -413,7 +425,8 @@ test("the phone topbar cannot push its controls off-screen", () => {
 test("the phone Session topbar owns Back and the live Session title without Open", () => {
   assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn mobile-session-back"[\s\S]*?aria-label="Back to Inbox"[\s\S]*?<h1 id="page-title"[^>]*>\{sessionTitle \?\? title\}<\/h1>/,
     "the mobile app bar must replace its generic Session heading with Back and the live title");
-  assert.match(app, /sessionTitle=\{view\.name === "session" \? sessions\.get\(view\.id\)\?\.title \?\? "Session" : undefined\}/,
+  // Only the phone Session route mounts the app-level bar now; destinations draw a page header (#1801).
+  assert.match(app, /\{view\.name === "session" && isMobile && \(\s*<Header[\s\S]*?sessionTitle=\{sessions\.get\(view\.id\)\?\.title \?\? "Session"\}/,
     "the shell must pass the routed Session title into the app bar");
   assert.match(app, /\{!isMobile && <EditorSelect key=\{view\.id\} sessionId=\{view\.id\} \/>\}/,
     "Open destinations must not be mounted on the mobile Session route");
@@ -424,40 +437,44 @@ test("Session menu triggers clear popovers without rising to the modal backdrop 
     "sibling triggers should clear the menu backdrop but stay below every modal");
 });
 
-test("the phone topbar cluster is the instance switcher and view actions, with Settings gone", () => {
+test("the phone app bar leads with the instance switcher, with Settings gone", () => {
   // Settings used to be pinned to this cluster's trailing edge (#210, #304). It is a rail
   // destination now (#458), so the invariant that survives is the ORDER of what remains and the
-  // fact that no Settings control is mounted here at any width.
+  // fact that no Settings control is mounted here at any width. Destination create actions left the
+  // top bar for each page header (#1801), where the switcher still leads the phone app bar.
   const start = app.indexOf('<div className="topbar-actions topbar-mobile-controls">');
   const end = app.indexOf("</div>", start);
   assert.ok(start >= 0 && end > start, "the phone controls must share one ordered cluster");
 
   const mobileCluster = app.slice(start, end);
   const instanceIndex = mobileCluster.indexOf("mobileInstanceControl");
-  const createIndex = mobileCluster.indexOf("topbar-create");
   const sessionActionsIndex = mobileCluster.indexOf("sessionActions");
-  assert.ok(instanceIndex >= 0 && createIndex >= 0 && sessionActionsIndex >= 0,
+  assert.ok(instanceIndex >= 0 && sessionActionsIndex >= 0,
     "the phone cluster must include every remaining control category");
-  assert.ok(instanceIndex < createIndex,
+  assert.ok(instanceIndex < sessionActionsIndex,
     "the instance control must lead the cluster");
-  assert.ok(createIndex < sessionActionsIndex,
-    "creation actions must precede the view's own session actions");
-  assert.doesNotMatch(mobileCluster, /SettingsTrigger|mobileSettingsControl/,
-    "the phone topbar mounts no Settings control");
+  assert.doesNotMatch(mobileCluster, /SettingsTrigger|mobileSettingsControl|topbar-create/,
+    "the phone topbar mounts no Settings control and no destination action");
   assert.match(css, /\.topbar-mobile-controls \{[^}]*flex-wrap: nowrap/,
     "the unified control cluster must stay on one line");
+
+  const actions = pageHeader.slice(pageHeader.indexOf('<div className="page-actions">'));
+  assert.ok(actions.indexOf("{appBarControl}") >= 0 &&
+    actions.indexOf("{appBarControl}") < actions.indexOf("page-primary"),
+    "the page header's app bar leads with the switcher and ends with the primary");
 });
 
-test("the Collaboration Pod header action is one accessible plus-icon control across layouts", () => {
-  assert.match(app, /function NewPodHeaderButton[\s\S]*className="icon-btn topbar-create"[\s\S]*title="New Collaboration Pod"[\s\S]*aria-label="New Collaboration Pod"[\s\S]*<PlusIcon/);
-  assert.equal([...app.matchAll(/<NewPodHeaderButton onClick=\{onNewPod\} \/>/g)].length, 2,
-    "mobile and desktop paths must reuse the same pod action");
-  // An `.icon-btn` is one square control height (#1799): 32px with a mouse, and 44px on a touch
-  // screen through the coarse-pointer block, so the action carries no size of its own.
-  assert.match(css, /\n\.icon-btn \{[^}]*width: var\(--control-h\);[^}]*height: var\(--control-h\)/,
-    "the desktop action must remain compact");
-  assert.doesNotMatch(css, /\.topbar-create\.icon-btn \{[^}]*(width|height):/,
-    "the phone action must retain a full touch target, which is the token's, not a patch");
+test("the Multi-Agent Run and Collaboration Pod create actions are page header primaries", () => {
+  assert.match(runsView, /<PageHeader title="Multi-Agent Runs" primary=\{\{ label: "New Multi-Agent Run", onClick: onNewRun \}\} \/>/);
+  assert.match(podsView, /<PageHeader title="Collaboration Pods" primary=\{\{ label: "New Collaboration Pod", onClick: onNewPod \}\} \/>/);
+  assert.doesNotMatch(app, /topbar-create|NewPodHeaderButton/, "the top bar holds no create action");
+  // One `.btn.primary` with a `+` icon; on a phone it is the 44px `+` alone, and its label stays
+  // in the accessibility tree (clipped, never display: none) so the name still matches.
+  assert.match(pageHeader, /className="btn primary page-primary"[\s\S]*?<PlusIcon \/>\s*<span className="page-primary-label">\{primary\.label\}<\/span>/);
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.page-primary-label \{[^}]*clip-path: inset\(50%\)/);
+  assert.doesNotMatch(css, /\.page-primary-label \{[^}]*display: none/);
+  assert.match(css, /\.page-primary \{[^}]*width: var\(--control-h\);/,
+    "the phone primary is one square control height, 44px on touch");
 });
 
 test("keyboard reachability does not depend on optional viewport metadata alone", () => {

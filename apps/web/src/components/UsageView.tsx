@@ -38,6 +38,7 @@ import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import { SegmentedControl, Select } from "./ui/ChoiceControls.js";
 import { UsageChart } from "./UsageChart.js";
 import { useFeedback } from "./FeedbackProvider.js";
+import { PageHeader } from "./PageHeader.js";
 
 const RANGES = [7, 30, 90, 365] as const;
 const LEGACY_USAGE_GRANULARITIES: readonly UsageAggregationGranularity[] = ["hour", "day"];
@@ -409,14 +410,9 @@ export function UsageView() {
   const onOfflineNames = useCallback((names: string[]) => setOfflineMachines(names), []);
 
   return (
-    <section className="usage-view" aria-labelledby="usage-heading">
+    <section className="page wide" aria-labelledby="page-title">
       {hasStore && <OfflineMachineWatcher onNames={onOfflineNames} />}
-      <div className="view-toolbar usage-toolbar">
-        <div>
-          <h2 id="usage-heading">Usage &amp; Cost</h2>
-          <p>Scoped, content-free accounting across the sessions you can access.</p>
-        </div>
-      </div>
+      <PageHeader title="Usage & Cost" description="Scoped, content-free accounting across the sessions you can access." />
 
       <section className="subscription-usage" aria-labelledby="subscription-usage-heading">
         <div className="subscription-usage-heading">

@@ -181,7 +181,7 @@ test("a direct pod-to-pod route change starts from the new pod's own draft, erro
     await act(async () => navigation.jumpTo(podB.id));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
 
-    assert.equal(container.querySelector(".detail-title")?.textContent, "Pod B");
+    assert.equal(container.querySelector(".detail-bar-title")?.textContent, "Pod B");
     assert.equal(relayField().value, "");
     assert.doesNotMatch(relaySection().textContent ?? "", /Pod A note failed/u);
     assert.equal(Boolean(relaySection().querySelector('[aria-label="Relay Delivery Receipts"]')), false, "no receipts carry over");
@@ -218,7 +218,7 @@ async function renderPodsList(drive: (socket: FakeSocket) => void): Promise<{ te
     await act(async () => drive(socket));
     return {
       text: container.textContent ?? "",
-      createButton: [...container.querySelectorAll("button")].some((button) => button.textContent === "New Pod"),
+      createButton: [...container.querySelectorAll(".empty button")].some((button) => button.textContent === "New Pod"),
     };
   } finally {
     await act(async () => root.unmount());

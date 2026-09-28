@@ -217,8 +217,8 @@ test("the Projects placeholder reserves the layout it replaces", () => {
   const loading = projects.slice(projects.indexOf("if (!snapshotLoaded)"), projects.indexOf("if (!projectsSupported)"));
   assert.match(loading, /project-manager-grid/,
     "the placeholder must occupy the container the content will fill");
-  assert.match(loading, /projects-intro/,
-    "the intro is static copy; withholding it is a jump with no reason behind it");
+  assert.match(loading, /<PageHeader[\s\S]*?title="Projects"[\s\S]*?description=\{PROJECTS_DESCRIPTION\}/,
+    "the page header is static copy; withholding it is a jump with no reason behind it");
 
   // `.skeleton { flex: 1 }` claimed to reserve the space and could not: `.main-body` is a flex
   // ITEM, not a flex container, so the declaration never applied to anything.

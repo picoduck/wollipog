@@ -53,6 +53,7 @@ import { ProviderAccountDefaultsSettings } from "./ProviderAccountDefaultsSettin
 import { DirectoryPicker } from "./DirectoryPicker.js";
 import { formatHarnessLaunchCommand } from "../harness-command.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
+import { PageHeader, type PageAction } from "./PageHeader.js";
 import { useInstances } from "../instances-context.js";
 import type { ConnectionSection } from "../navigation.js";
 import {
@@ -1709,28 +1710,22 @@ export function RunnersView() {
   const offerLocalSetup = Boolean(
     localInstanceActive && localRunnerStatus?.available && (!localRunnerStatus.enabled || !localRunnerOnline),
   );
-  const addButtons = canManageMachines ? (
-    <>
-      {offerLocalSetup && (
-        <button className="btn primary" onClick={() => setOnboarding("local")}>
-          <PlusIcon />
-          <span>{localRunnerStatus?.enabled ? "Reconnect This Machine" : "Set Up This Machine"}</span>
-        </button>
-      )}
-      <button className={`btn${offerLocalSetup ? "" : " primary"}`} onClick={() => setAddingBox(true)}>
-        <PlusIcon />
-        <span>Connect via SSH</span>
-      </button>
-      <button className="btn" onClick={() => setOnboarding("manual")}>
-        <PlusIcon />
-        <span>
-          {localInstanceActive && bundledLocalRunner
-            ? localRunnerStatus?.enabled ? "Add Another Runner" : "Advanced Runner Setup"
-            : "Add Native Runner"}
-        </span>
-      </button>
-    </>
-  ) : null;
+  // The Machines tab's create actions are the page header's (§3.3): This Machine is the primary when
+  // it can be set up here, otherwise SSH is.
+  const connectSsh: PageAction = { label: "Connect via SSH", onClick: () => setAddingBox(true) };
+  const addRunner: PageAction = {
+    label: localInstanceActive && bundledLocalRunner
+      ? localRunnerStatus?.enabled ? "Add Another Runner" : "Advanced Runner Setup"
+      : "Add Native Runner",
+    onClick: () => setOnboarding("manual"),
+  };
+  const machineActions = canManageMachines && section === "machines" ? offerLocalSetup ? {
+    primary: {
+      label: localRunnerStatus?.enabled ? "Reconnect This Machine" : "Set Up This Machine",
+      onClick: () => setOnboarding("local"),
+    },
+    secondary: [addRunner, connectSsh],
+  } : { primary: connectSsh, secondary: [addRunner] } : {};
 
   const total = runnerList.length + boxList.length;
   const sections: Array<{ id: ConnectionSection; label: React.ReactNode }> = [
@@ -1741,7 +1736,8 @@ export function RunnersView() {
     { id: "people", label: <>People &amp; Devices</> },
   ];
   return (
-    <>
+    <div className="page">
+      <PageHeader title="Connections" {...machineActions} />
       <div
         className="connections-tabs"
         role="tablist"
@@ -1802,7 +1798,6 @@ export function RunnersView() {
           <span className="muted">
             {total} Machine{total === 1 ? "" : "s"}
           </span>
-          <div className="toolbar-actions">{addButtons}</div>
         </div>
         {identityError && (
           <div className="connection-access-error" role="alert">
@@ -1866,6 +1861,6 @@ export function RunnersView() {
       </div>
       )}
       {dialogs}
-    </>
+    </div>
   );
 }

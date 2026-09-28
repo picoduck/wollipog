@@ -16,6 +16,7 @@ import { availableUpdateMessage, updateWarning, type DesktopUpdateSetting } from
 import { type PushSetting } from "../push.js";
 import { ArrowDownIcon, ArrowUpIcon, KeyboardIcon } from "./Icons.js";
 import { VIEW_ICONS } from "./Rail.js";
+import { PageHeader } from "./PageHeader.js";
 import {
   REQUIRED_RAIL_VIEWS,
   moveRailView,
@@ -85,7 +86,11 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
   }, [section]);
   const current = SETTINGS_SECTIONS.find((entry) => entry.id === section) ?? SETTINGS_SECTIONS[0]!;
   return (
-    <div className="settings-view main-body">
+    // One scroll container per column (§4.5): the shell's `.main-body` scrolls Settings, so this root
+    // neither reuses that class nor scrolls on its own.
+    <div className="page full">
+    <PageHeader title="Settings" />
+    <div className="settings-view">
       {/* A `tablist` would be wrong: these are ROUTES, and each one is a link a person can copy,
           bookmark, or open in a new tab. A tab swaps a panel; this navigates. */}
       <nav className="settings-sections" aria-label="Settings Sections">
@@ -109,6 +114,7 @@ export function SettingsView({ section, onNavigate, panels }: SettingsViewProps)
         <h2 id="settings-panel-heading" ref={headingRef} tabIndex={-1}>{current.title}</h2>
         {panels[current.id]}
       </section>
+    </div>
     </div>
   );
 }

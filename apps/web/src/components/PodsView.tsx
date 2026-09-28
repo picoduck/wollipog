@@ -28,6 +28,7 @@ import { transcriptPresentation } from "../transcript-presentation.js";
 import { matchesShortcut } from "../shortcuts.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { confirmWhileAllowed } from "../confirmation-fence.js";
+import { DetailBar, PageHeader } from "./PageHeader.js";
 import { isTimelineSessionActive } from "../timeline-clock.js";
 
 const EMPTY_MEMBER_IDS: string[] = [];
@@ -205,19 +206,32 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
   const conn = useStoreSelector((state) => state.conn);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const list = useMemo(() => [...pods.values()].sort((a, b) => b.updatedAt - a.updatedAt), [pods]);
+  const header = <PageHeader title="Collaboration Pods" primary={{ label: "New Collaboration Pod", onClick: onNewPod }} />;
   if (list.length === 0) {
     if (!snapshotLoaded) {
       const placeholder = listPlaceholder("Collaboration Pods", conn);
-      return <Empty icon={<PodsIcon size={28} />} title={placeholder.title} hint={placeholder.hint} />;
+      return (
+        <div className="page">
+          {header}
+          <Empty icon={<PodsIcon size={28} />} title={placeholder.title} hint={placeholder.hint} />
+        </div>
+      );
     }
-    return <Empty
-        icon={<PodsIcon size={28} />}
-        title="No Collaboration Pods Yet"
-        hint="Group isolated sessions to relay context across agents and runners."
-        action={<button type="button" className="btn primary sm" onClick={onNewPod}>New Pod</button>}
-      />;
+    return (
+      <div className="page">
+        {header}
+        <Empty
+          icon={<PodsIcon size={28} />}
+          title="No Collaboration Pods Yet"
+          hint="Group isolated sessions to relay context across agents and runners."
+          action={<button type="button" className="btn primary sm" onClick={onNewPod}>New Pod</button>}
+        />
+      </div>
+    );
   }
   return (
+    <div className="page">
+    {header}
     <div className="runs-list">
       {list.map((pod) => (
         <button key={pod.id} type="button" className="run-card" onClick={() => navigate({ name: "pod", id: pod.id })}>
@@ -233,6 +247,7 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
           </div>
         </button>
       ))}
+    </div>
     </div>
   );
 }
@@ -383,7 +398,12 @@ function PodDetailContent({ podId }: { podId: string }) {
 
   if (!pod) {
     const placeholder = detailPlaceholder("Pod", { authoritative: snapshotLoaded, conn });
-    return <Empty title={placeholder.title} hint={placeholder.hint} />;
+    return (
+      <div className="run-detail pod-detail">
+        <DetailBar title="Collaboration Pod" backLabel="Back to Collaboration Pods" onBack={() => navigate({ name: "pods" })} />
+        <Empty title={placeholder.title} hint={placeholder.hint} />
+      </div>
+    );
   }
   const active = pod.status === "active";
   const policyDirty = orchestrationMode !== policy.mode || contextTokenBudget !== policy.contextTokenBudget ||
@@ -616,15 +636,20 @@ function PodDetailContent({ podId }: { podId: string }) {
 
   return (
     <div className="run-detail pod-detail">
-      <div className="detail-head">
-        <button className="icon-btn back" onClick={() => navigate({ name: "pods" })} title="Back">←</button>
-        <div className="detail-headinfo">
-          <div className="detail-title">{pod.title}</div>
-          <div className="detail-sub"><span className="muted">{pod.objective || "Manual collaboration pod"}</span></div>
-        </div>
-        <span className={`pod-status pod-status-${pod.status}`}>{titleCaseLabel(pod.status)}</span>
-        {active && <button className="btn ghost sm" disabled={Boolean(busy) || reconciliationRunning} onClick={() => void close()}>Close Pod</button>}
-      </div>
+      <DetailBar
+        title={pod.title}
+        backLabel="Back to Collaboration Pods"
+        onBack={() => navigate({ name: "pods" })}
+        status={<span className={`pod-status pod-status-${pod.status}`}>{titleCaseLabel(pod.status)}</span>}
+        // Closing is destructive, so it lives only in ⋯ (§3.3).
+        menu={active ? [{
+          label: "Close Pod",
+          danger: true,
+          disabled: Boolean(busy) || reconciliationRunning,
+          onClick: () => void close(),
+        }] : []}
+      />
+      <p className="detail-summary">{pod.objective || "Manual collaboration pod"}</p>
 
       <section className="pod-orchestration" aria-label="Pod Orchestration Policy">
         <div className="pod-relay-head">
