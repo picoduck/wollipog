@@ -17,6 +17,10 @@ async function open(page: Page) {
   await page.goto(SHELL);
   await expect(page.locator(".app-rail")).toBeVisible();
   await page.waitForFunction(() => Boolean(window.__WOLLIPOG_TOASTS_E2E__));
+  // An installed clock keeps running in real time until it is paused, so every click and assertion
+  // below would spend the toast's remaining time; on a loaded runner that alone expired it (#2003).
+  // Paused, the page's time moves only through runFor, and the remaining-time checks are exact.
+  await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 1_000);
 }
 
 async function show(page: Page, message: string) {
@@ -41,9 +45,9 @@ test("at 390px a toast raised under an open menu outlasts it and then runs out i
   await expect(page.locator(MORE_SHEET)).toHaveCount(0);
   await expect(toast).toBeVisible();
 
-  // The pause took nothing away and restarted nothing: five seconds, then gone.
-  await page.clock.runFor(4_900);
+  // The pause took nothing away and restarted nothing: exactly five seconds, then gone.
+  await page.clock.runFor(4_999);
   await expect(toast).toBeVisible();
-  await page.clock.runFor(200);
+  await page.clock.runFor(1);
   await expect(page.locator(".toast-region > .toast")).toHaveCount(0);
 });
