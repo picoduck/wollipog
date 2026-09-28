@@ -752,43 +752,64 @@ export function emojiLiterals(source: string, fileName: string): string[] {
 const NATIVE_GLOBALS = new Set(["window", "globalThis", "self"]);
 
 /**
+ * The node a declaration of `name` is visible throughout, or null when `name` declares nothing.
+ *
+ * Lexical scoping without the type checker: `let`/`const` and a function declaration live in their
+ * enclosing block, `var` in its enclosing function, a parameter in its function, an import in the
+ * file. That is what decides whether a bare `confirm(...)` reaches the global.
+ */
+function declarationScope(name: ts.Identifier): ts.Node | null {
+  let owner: ts.Node = name.parent;
+  if ((ts.isBindingElement(owner) || ts.isVariableDeclaration(owner) || ts.isParameter(owner)
+    || ts.isFunctionDeclaration(owner) || ts.isImportSpecifier(owner) || ts.isImportClause(owner)
+    || ts.isNamespaceImport(owner)) && owner.name !== name) return null;
+  if (ts.isImportSpecifier(owner) || ts.isImportClause(owner) || ts.isNamespaceImport(owner)) return name.getSourceFile();
+  if (ts.isFunctionDeclaration(owner)) return owner.parent;
+  // Climb a destructuring pattern to the declaration or parameter that owns it.
+  while (ts.isBindingElement(owner) || ts.isObjectBindingPattern(owner) || ts.isArrayBindingPattern(owner)) owner = owner.parent;
+  if (ts.isParameter(owner)) return owner.parent;
+  if (!ts.isVariableDeclaration(owner)) return null;
+  if (ts.isCatchClause(owner.parent)) return owner.parent;
+  const list = owner.parent;
+  if (list.flags & ts.NodeFlags.BlockScoped) {
+    const statement = list.parent;
+    return ts.isForStatement(statement) || ts.isForOfStatement(statement) || ts.isForInStatement(statement)
+      ? statement : statement.parent;
+  }
+  let scope: ts.Node = list;
+  while (!ts.isSourceFile(scope) && !ts.isFunctionLike(scope)) scope = scope.parent;
+  return scope;
+}
+
+/**
  * Every reference to the browser's native `confirm`, as `file:line: code`.
  *
- * `window.confirm`, `globalThis.confirm`, `window["confirm"]`, and a bare `confirm(...)` in a file
- * that binds no `confirm` of its own. STATED LIMIT: the binding check is per file, not per scope,
- * so a bare call in a file that also destructures `confirm` from `useFeedback()` elsewhere is not
- * reported. Every current caller takes it from `useFeedback()`, and a scope-accurate answer needs
- * the type checker this file deliberately does not start.
+ * `window.confirm`, `globalThis.confirm`, `window["confirm"]`, and a bare `confirm(...)` that no
+ * enclosing scope rebinds. Binding the dialog's `confirm` in one component does not vouch for a
+ * bare call in another component of the same file: that call still reaches the global.
  */
 export function nativeConfirmReferences(source: string, fileName: string): string[] {
   const file = parseSource(source, fileName);
   const found: ts.Node[] = [];
-  let bindsConfirm = false;
+  const scopes: ts.Node[] = [];
+  const calls: ts.CallExpression[] = [];
   const isGlobal = (node: ts.Node) => {
     const inner = transparent(node);
     return Boolean(inner && ts.isIdentifier(inner) && NATIVE_GLOBALS.has(inner.text));
   };
   const visit = (node: ts.Node): void => {
     if (ts.isIdentifier(node) && node.text === "confirm") {
-      const parent = node.parent;
-      if ((ts.isVariableDeclaration(parent) || ts.isParameter(parent) || ts.isBindingElement(parent)
-        || ts.isFunctionDeclaration(parent) || ts.isImportSpecifier(parent) || ts.isImportClause(parent)
-        || ts.isNamespaceImport(parent)) && parent.name === node) bindsConfirm = true;
+      const scope = declarationScope(node);
+      if (scope) scopes.push(scope);
     }
+    if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "confirm") calls.push(node);
     if (ts.isPropertyAccessExpression(node) && node.name.text === "confirm" && isGlobal(node.expression)) found.push(node);
     if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)
       && node.argumentExpression.text === "confirm" && isGlobal(node.expression)) found.push(node);
     ts.forEachChild(node, visit);
   };
   visit(file);
-  const bare: ts.Node[] = [];
-  if (!bindsConfirm) {
-    const visitCalls = (node: ts.Node): void => {
-      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "confirm") bare.push(node);
-      ts.forEachChild(node, visitCalls);
-    };
-    visitCalls(file);
-  }
+  const bare = calls.filter((call) => !scopes.some((scope) => scope.pos <= call.pos && call.end <= scope.end));
   return [...found, ...bare].map((node) =>
     `${fileName}:${file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1}: ${node.getText(file)}`);
 }
@@ -1574,9 +1595,21 @@ test("window.confirm fails in a clean component, naming the dialog to use instea
     assert.equal(found.length, 1, call);
     assert.throws(() => assertNoNativeConfirm(found), failsNaming("window.confirm", "confirmation dialog", "§7.4"));
   }
-  // A bare call reaches the global only in a file that binds no `confirm` of its own.
+  // A bare call reaches the global unless an enclosing scope rebinds `confirm`.
   assert.equal(nativeConfirmReferences("export const ok = () => confirm(\"Sure?\");", "b.ts").length, 1);
   assert.equal(nativeConfirmReferences("const { confirm: ask } = f(); ask(); confirm(\"Sure?\");", "c.ts").length, 1);
+  // A binding in one component does not vouch for a bare call in another component of the file.
+  assert.deepEqual(nativeConfirmReferences("function panel() { const { confirm } = useFeedback(); confirm({}); }\n" +
+    "export const accidental = () => confirm(\"Delete?\");", "e.tsx"), ["e.tsx:2: confirm(\"Delete?\")"]);
+  assert.deepEqual(nativeConfirmReferences("function a() { if (x) { const { confirm } = useFeedback(); } confirm(\"y\"); }", "f.ts"),
+    ["f.ts:1: confirm(\"y\")"], "a block-scoped binding ends with its block");
+  for (const shadowed of [
+    "function a() { if (x) { var { confirm } = useFeedback(); } confirm(\"y\"); }",
+    "const run = (confirm: Ask) => confirm(\"y\");",
+    "import { confirm } from \"./ask\"; confirm(\"y\");",
+    "function a() { confirm(\"y\"); function confirm(t: string) { return t; } }",
+    "try { f(); } catch (confirm) { confirm(\"y\"); }",
+  ]) assert.deepEqual(nativeConfirmReferences(shadowed, "g.ts"), [], shadowed);
   // Text that merely mentions it is not a call.
   assert.deepEqual(nativeConfirmReferences("// window.confirm(\"x\")\nconst s = \"window.confirm\";", "d.ts"), []);
 });
