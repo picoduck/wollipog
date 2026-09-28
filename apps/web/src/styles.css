@@ -8562,6 +8562,9 @@ button.file-head.source-path-link {
 
 @media (max-width: 760px) {
   .pod-relay-actions, .pod-relay-head { align-items: stretch; flex-direction: column; }
+  /* The stacked header stretches its text and controls, but a status badge keeps its own width
+     (docs/design-system.md §11.1) and sits at the start of its row. */
+  .pod-relay-head > .status { align-self: flex-start; }
   .pod-orchestration-grid, .pod-orchestration-runner, .pod-reconcile-grid { grid-template-columns: 1fr; }
   .pod-reconcile-arrow { display: none; }
   .pod-add-member { width: 100%; flex-direction: column; align-items: stretch; }
