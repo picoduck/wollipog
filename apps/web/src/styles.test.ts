@@ -158,6 +158,13 @@ test("the global focus ring is neutral, zero-specificity and absent on programma
     assert.ok(programmatic[0]!.selector.includes(control),
       `the programmatic-focus suppression must exclude ${control}`);
   }
+  // F6 lands keyboard focus on these tabIndex -1 containers; the ring is their only cue, so it is
+  // restored after the suppression (equal specificity, later wins).
+  const zoneRing = ":where(.board-wrap, .inbox-zero, .inbox-preview-empty, [data-focus-zone]):focus-visible";
+  assert.equal(baseRule(zoneRing),
+    "outline: var(--focus-width) solid var(--focus);\noutline-offset: calc(-1 * var(--focus-width));");
+  assert.ok(css.indexOf(zoneRing) > css.indexOf(':where([tabindex="-1"]:not('),
+    "the F6 landing ring must follow the programmatic-focus suppression to win the tie");
   // The palette search suppresses its outline, so its bottom edge is its only focus cue.
   assert.equal(soleRuleBody(".palette-input:focus-visible"), "border-color: var(--focus);");
   assert.equal(soleRuleBody(".clip-focus :focus-visible"), "outline-offset: calc(-1 * var(--focus-width));");

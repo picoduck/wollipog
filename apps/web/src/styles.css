@@ -598,6 +598,13 @@ pre {
 )):focus {
   outline: none;
 }
+/* F6 zone landing targets (focus-zones.ts) are tabIndex -1 containers, but keyboard focus lands on
+   them. `.inbox-list` and `.detail-scroll` draw a zone frame; these have only the ring, drawn inset
+   because they fill clipped panes. Equal specificity with the suppression above, so order wins. */
+:where(.board-wrap, .inbox-zero, .inbox-preview-empty, [data-focus-zone]):focus-visible {
+  outline: var(--focus-width) solid var(--focus);
+  outline-offset: calc(-1 * var(--focus-width));
+}
 /* Inside an `overflow: hidden` container an outset ring is clipped, so it is drawn inset. */
 .clip-focus :focus-visible {
   outline-offset: calc(-1 * var(--focus-width));
