@@ -516,7 +516,8 @@ export function ArchivedSessionsView() {
         </Notice>
       )}
       {pageSessions.length === 0 && stateVariant({
-        offline: conn !== "online" && conn !== "connecting",
+        // A cold load's first attempt is not a lost connection; a retry after one is (§12.5).
+        offline: conn === "offline" || conn === "unauthorized" || (conn === "connecting" && hasBeenOnlineRef.current),
         loading: loading,
         error: Boolean(error),
       }) === "offline" ? (

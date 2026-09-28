@@ -1172,3 +1172,20 @@ test("a person the server allows keeps every row action as before", async () => 
     }
   }
 });
+
+test("an empty archive stays offline through a reconnect retry instead of claiming to be empty", async () => {
+  const fixture = await mount([]);
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
+
+  await act(async () => {
+    fixture.socket.onclose?.({ code: 1006 });
+    await Promise.resolve();
+  });
+  assert.match(fixture.container.textContent ?? "", /Reconnecting…/);
+  // The store retries after 1.5s and stays "connecting" until the socket opens again.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_600)); });
+  assert.match(fixture.container.textContent ?? "", /Reconnecting…/, "a retry in progress is still offline");
+  assert.doesNotMatch(fixture.container.textContent ?? "", /No Archived Sessions/);
+  await fixture.unmount();
+});
