@@ -270,6 +270,16 @@ test("outbound subscription state, privacy defaults, pause reason, and journal a
   const outbound = page.locator(".outbound-event-subscription");
   await expect(page.getByRole("heading", { name: "Outbound Events" })).toBeVisible();
   await expect(outbound.getByText("Paused", { exact: true })).toBeVisible();
+  // The head's metadata rule must not reach the status badge beside it: the badge keeps its tone text.
+  const badgeColor = await outbound.locator(".status", { hasText: "Paused" }).evaluate((element) => {
+    const probe = document.createElement("span");
+    probe.style.color = "var(--text-dim-on-tint)";
+    document.body.append(probe);
+    const expected = getComputedStyle(probe).color;
+    probe.remove();
+    return { actual: getComputedStyle(element).color, expected };
+  });
+  expect(badgeColor.actual).toBe(badgeColor.expected);
   await expect(outbound.getByText("Session Name Excluded", { exact: true })).toBeVisible();
   await expect(outbound.getByText("Question Title Excluded", { exact: true })).toBeVisible();
   await expect(outbound.getByText("Paused after 6 bounded delivery attempts", { exact: true })).toBeVisible();

@@ -13805,7 +13805,8 @@ body.shell-dock-dragging * {
 .outbound-event-list { display: grid; gap: 10px; margin-top: 14px; }
 .outbound-event-subscription { display: grid; gap: 8px; min-width: 0; padding: 12px; border-radius: var(--radius-sm); background: var(--bg-elev-2); }
 .outbound-event-subscription-head > div { display: grid; gap: 2px; }
-.outbound-event-subscription-head span, .outbound-event-subscription p, .outbound-event-subscription summary {
+/* The metadata line only: the head also holds the status badge, which keeps its own tone text. */
+.outbound-event-subscription-head > div > span, .outbound-event-subscription p, .outbound-event-subscription summary {
   color: var(--text-dim); font-size: var(--text-sm);
 }
 .outbound-event-subscription > code { overflow-wrap: anywhere; white-space: normal; }
