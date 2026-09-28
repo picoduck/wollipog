@@ -207,7 +207,7 @@ async function renderRunsList(
       text: container.textContent ?? "",
       // The empty state's own action. The page header's primary is a separate control (#1801): it
       // is always offered, as the top bar's was, and only the empty state waits for a snapshot.
-      createButton: [...container.querySelectorAll(".empty button")].some((button) => button.textContent === "New Multi-Agent Run"),
+      createButton: [...container.querySelectorAll(".state .actions button")].some((button) => button.textContent === "New Multi-Agent Run"),
       headerCreateButton: [...container.querySelectorAll(".page-header button")]
         .some((button) => button.textContent === "New Multi-Agent Run"),
     };

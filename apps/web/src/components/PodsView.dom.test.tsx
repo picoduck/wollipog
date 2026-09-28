@@ -218,7 +218,7 @@ async function renderPodsList(drive: (socket: FakeSocket) => void): Promise<{ te
     await act(async () => drive(socket));
     return {
       text: container.textContent ?? "",
-      createButton: [...container.querySelectorAll(".empty button")].some((button) => button.textContent === "New Pod"),
+      createButton: [...container.querySelectorAll(".state .actions button")].some((button) => button.textContent === "New Pod"),
     };
   } finally {
     await act(async () => root.unmount());
