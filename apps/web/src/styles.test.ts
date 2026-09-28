@@ -145,7 +145,19 @@ function baseRule(selector: string): string {
 test("the global focus ring is neutral, zero-specificity and absent on programmatic targets", () => {
   assert.equal(soleRuleBody(":where(:focus-visible)"),
     "outline: var(--focus-width) solid var(--focus);\noutline-offset: var(--focus-offset);");
-  assert.equal(soleRuleBody(':where([tabindex="-1"]):focus'), "outline: none;");
+  const programmatic = allDeclarations(css).filter((declaration) =>
+    /^:where\(\[tabindex="-1"\]/.test(declaration.selector) && /\):focus$/.test(declaration.selector));
+  assert.equal(programmatic.length, 1, "exactly one programmatic-focus suppression");
+  assert.equal(`${programmatic[0]!.prop}: ${programmatic[0]!.value}`, "outline: none");
+  // A roving group focuses options that keep tabIndex -1 (an aria-disabled choice card is focused but
+  // never checked). Suppressing the ring on controls would make that keyboard focus invisible.
+  for (const control of ["button", "a[href]", "input", "select", "textarea", '[role="radio"]', '[role="option"]',
+    '[role="tab"]', '[role="menuitem"]', '[role="checkbox"]', '[role="switch"]']) {
+    assert.ok(programmatic[0]!.selector.includes(control),
+      `the programmatic-focus suppression must exclude ${control}`);
+  }
+  // The palette search suppresses its outline, so its bottom edge is its only focus cue.
+  assert.equal(soleRuleBody(".palette-input:focus-visible"), "border-color: var(--focus);");
   assert.equal(soleRuleBody(".clip-focus :focus-visible"), "outline-offset: calc(-1 * var(--focus-width));");
   // A bare `:focus-visible` is (0,1,0) and would outrank component rules that draw their own focus.
   assert.throws(() => topLevelRule(css, ":focus-visible"), /found 0/,
@@ -196,7 +208,7 @@ test("links, native controls and code use the base recipes", () => {
   assert.match(baseRule(":not(pre) > code"), /border: 1px solid var\(--border\);/);
   // The chip belongs to inline code only. A bare `code` rule would put it back inside `pre`.
   assert.throws(() => topLevelRule(css, "code"), /found 0/, "the chip must stay scoped to :not(pre) > code");
-  assert.equal(baseRule(":where(.form, .section, .surface, .modal-body, .notice, .empty) > *"), "margin: 0;");
+  assert.equal(baseRule(":where(.form, .section, .surface, .notice, .empty) > *"), "margin: 0;");
 });
 
 test("the permission-mode popover keeps rows compact while long labels can wrap", () => {

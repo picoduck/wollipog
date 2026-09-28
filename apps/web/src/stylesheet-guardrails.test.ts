@@ -357,7 +357,20 @@ export function canonicalSelector(selector: string): string {
 
 /** The members of a selector LIST, each canonicalised. */
 export function selectorMembers(selector: string): string[] {
-  return selector.split(",").map((part) => canonicalSelector(part)).filter(Boolean);
+  // Split at the TOP level only. A comma inside `:where(a, b)` or `:not(a, b)` is an argument list,
+  // not a second member: splitting there turned `:where([tabindex="-1"]:not(button, select)):focus`
+  // into a bare `select` rule and reported it as shadowing the real one.
+  const members: string[] = [];
+  let depth = 0;
+  let current = "";
+  for (const char of selector) {
+    if (char === "(" || char === "[") depth += 1;
+    if (char === ")" || char === "]") depth -= 1;
+    if (char === "," && depth === 0) { members.push(current); current = ""; continue; }
+    current += char;
+  }
+  members.push(current);
+  return members.map((part) => canonicalSelector(part)).filter(Boolean);
 }
 
 /**
@@ -1117,6 +1130,8 @@ test("canonicalSelector and selectorMembers compare on what the browser matches"
   assert.equal(canonicalSelector(".a  .b"), ".a .b");
   assert.notEqual(canonicalSelector(".a .b"), canonicalSelector(".a>.b"));
   assert.deepEqual(selectorMembers("[data-x], [data-y]"), ["[data-x]", "[data-y]"]);
+  assert.deepEqual(selectorMembers(":where(.a, .b) > *, :not(button, select):focus"),
+    [":where(.a,.b)>*", ":not(button,select):focus"]);
 });
 
 test("a shadowed declaration is counted, and grouped authoring is not", () => {

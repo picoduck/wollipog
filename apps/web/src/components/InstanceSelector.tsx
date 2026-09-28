@@ -17,9 +17,10 @@ function desiredInstanceMenuHeight(profileCount: number): number {
   const profiles = Math.max(1, profileCount);
   const separators = profiles > 1 ? 2 : 1;
   // Profile rows contain a title and description; Manage Instances is one line. This is a maximum
-  // as well as the CSS max-height, so every allowance must cover Segoe UI's normal line box.
+  // as well as the CSS max-height, so every allowance must cover the rows' line boxes: menu items
+  // are buttons, which inherit body's 20px line (16px padding + 20px title + 2px gap + 20px path).
   // Large registries still scroll without making a 1-2 profile menu pretend it is 336px tall.
-  const profileRows = profiles * 52;
+  const profileRows = profiles * 58;
   const manageRow = 36;
   const separatorRows = separators * 11;
   const menuChrome = 14; // 6px padding plus a 1px border on both edges.

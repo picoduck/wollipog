@@ -164,7 +164,8 @@ test("compact instance selector stays bottom-anchored inside the real desktop Ra
     assert.equal(menu.style.bottom, "98px");
     assert.equal(menu.style.left, "11px");
     assert.equal(menu.style.width, "260px");
-    assert.equal(menu.style.maxHeight, "176px", "two profiles right-size the menu maximum");
+    // 2 profile rows × 58 (20px line boxes) + 36 Manage + 2 × 11 separators + 14 chrome.
+    assert.equal(menu.style.maxHeight, "188px", "two profiles right-size the menu maximum");
   } finally {
     await act(async () => { mounted.root.unmount(); });
     mounted.container.remove();
