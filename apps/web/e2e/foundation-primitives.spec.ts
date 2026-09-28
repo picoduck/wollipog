@@ -232,6 +232,12 @@ test.describe("at 390px", () => {
         })
         .map((cell) => cell.textContent));
       expect(unnamed, "no unlabelled figure on a phone").toEqual([]);
+      // Each meta item, label or icon included, is one line of text.
+      const tall = await page.locator(".table tbody td.cell-meta").evaluateAll((cells) => cells
+        .filter((cell) => getComputedStyle(cell).display !== "none" && cell.getBoundingClientRect().height > 0)
+        .filter((cell) => cell.getBoundingClientRect().height > Number.parseFloat(getComputedStyle(cell).lineHeight) * 1.5)
+        .map((cell) => cell.textContent));
+      expect(tall, "no meta item wraps onto a second line").toEqual([]);
       expect(layout.headHidden).toBe(true);
       expect(layout.pageScroll).toBeLessThanOrEqual(0);
       expect(layout.tableScroll).toBeLessThanOrEqual(0);

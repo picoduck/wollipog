@@ -607,7 +607,7 @@ export function ArchivedSessionsView() {
                         ? "stop_waiting_for_runner"
                         : "stop_pending")} />}
                     </div></td>
-                    <td className="cell-meta cell-dim"><span className="cell-label" aria-hidden="true"><ProjectsIcon size={14} /> </span>{rowMetadata.project}</td>
+                    <td className="cell-meta cell-fill cell-dim" title={rowMetadata.project}><span className="cell-label" aria-hidden="true"><ProjectsIcon size={14} /> </span>{rowMetadata.project}</td>
                     <td className="cell-extra cell-dim">{rowMetadata.location}</td>
                     <td className="cell-extra cell-dim">{rowMetadata.agent}</td>
                     <td className="cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Created </span><time dateTime={timestamp?.dateTime} title={timestamp?.title}>{formatRecordedRelativeTime(session.createdAt)}</time></td>

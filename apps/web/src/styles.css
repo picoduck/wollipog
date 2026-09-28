@@ -2023,6 +2023,14 @@ button.status { cursor: pointer; }
     color: var(--text-dim);
     font: var(--type-small);
   }
+  /* A meta value that can be long (a project, an agent selector) takes whatever line 2 has left
+     and truncates, so the line never wraps and the figures beside it stay whole (§14). */
+  .table .cell-meta.cell-fill {
+    flex: 1 1 0;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
   .table .actions-cell {
     order: 5;
     margin-left: auto;
@@ -2030,7 +2038,10 @@ button.status { cursor: pointer; }
   .table .cell-extra { display: none; }
   .table .cell-label { display: inline; }
   /* A meta item can be named by its 14px icon instead of a word (§5.2), set on the text line. */
-  .table .cell-label > .app-icon { vertical-align: -2px; }
+  .table .cell-label > .app-icon {
+    display: inline-block;
+    vertical-align: -2px;
+  }
 }
 
 /* --------------------------------- Menus ---------------------------------

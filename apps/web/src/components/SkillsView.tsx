@@ -658,7 +658,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
                           return (
                             <tr key={assignment.id}>
                               <td>{describeAssignmentScope(assignment, (id) => machineLabels.get(id))}</td>
-                              <td className="cell-meta cell-dim">
+                              <td className="cell-meta cell-fill cell-dim">
                                 <span className="cell-label" aria-hidden="true">Agents: </span>
                                 {describeAgentSelector(assignment.agentSelector, runner?.agents ?? [])}
                               </td>
