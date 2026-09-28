@@ -130,7 +130,7 @@ export function SessionUsageControl({ session, className }: { session: SessionVi
             <p className="session-usage-note">
               {provenanceUrl ? (
                 <>
-                  <a href={provenanceUrl} target="_blank" rel="noreferrer">Estimated API Costs</a>
+                  <a className="link" href={provenanceUrl} target="_blank" rel="noreferrer">Estimated API Costs</a>
                   {loaded?.pricing?.status === "cached" && " (Cached Rates)"}
                 </>
               ) : provenance}

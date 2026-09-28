@@ -989,7 +989,7 @@ export function ReviewPanel({
                     {finding.remote && (
                       <div className="review-finding-provenance">
                         {finding.remote.provider === "gitlab" ? "MR" : "PR"} #{finding.remote.pullRequestNumber}{finding.remote.outdated ? " · Outdated" : ""}{" · "}
-                        <a href={finding.remote.url} target="_blank" rel="noreferrer">Open on {finding.remote.provider === "gitlab" ? "GitLab" : "GitHub"}</a>
+                        <a className="link" href={finding.remote.url} target="_blank" rel="noreferrer">Open on {finding.remote.provider === "gitlab" ? "GitLab" : "GitHub"}</a>
                       </div>
                     )}
                   </div>
@@ -1078,7 +1078,7 @@ export function ReviewPanel({
           <div className="git-ok">
             ✓ {(pr.created ?? pr.createdWithGh) ? `${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"} opened` : `Branch pushed — click to open the ${pr.kind === "merge_request" ? "Merge Request" : "Pull Request"}`}:{" "}
             {prHref ? (
-              <a href={prHref} target="_blank" rel="noreferrer">{pr.url}</a>
+              <a className="link" href={prHref} target="_blank" rel="noreferrer">{pr.url}</a>
             ) : (
               <code>{pr.url}</code>
             )}

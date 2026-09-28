@@ -803,6 +803,20 @@ test.describe("on a touch device", () => {
     }
     expect(total, "the sections together must actually contain rows").toBeGreaterThan(4);
 
+    // A switch also draws its own 44x44 hit area (::before, since the thumb is ::after), so a tap
+    // just outside the 40x24 track still lands on the switch itself (#1799).
+    await useHarness(page, "dark", { section: "notifications" });
+    const track = page.locator(".ui-switch").first();
+    const reaches = await track.evaluate((element) => {
+      element.scrollIntoView({ block: "center" });
+      const rect = element.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const y = rect.top + rect.height / 2;
+      return [[x, y - 21], [x, y + 21], [rect.left - 1.5, y], [rect.right + 1.5, y]]
+        .every(([px, py]) => document.elementFromPoint(px!, py!) === element);
+    });
+    expect(reaches, "the switch's hit area is 44x44").toBe(true);
+
     // The section list is a touch target too, and it is the only way to move between panels here.
     const links = page.locator(".settings-section-link");
     for (let index = 0; index < await links.count(); index += 1) {

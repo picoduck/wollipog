@@ -939,7 +939,8 @@ pre {
 .instance-selector-trigger {
   width: 100%;
   min-width: 0;
-  min-height: 38px;
+  /* Its own 38px on a mouse, and at least one control height (44px) on touch. */
+  min-height: max(38px, var(--control-h));
   display: flex;
   align-items: center;
   gap: 8px;
@@ -1315,9 +1316,8 @@ pre {
   background: var(--bg-elev-2);
   color: var(--text);
 }
-.btn.ghost.danger,
-.btn.ghost.danger:hover:not(:disabled, [aria-disabled="true"]),
-.btn.ghost.danger:active:not(:disabled, [aria-disabled="true"]) {
+/* Enabled only: a disabled inline destructive action reads --text-faint like every other button. */
+.btn.ghost.danger:not(:disabled, [aria-disabled="true"]) {
   color: var(--danger-text);
 }
 /* Disabled is text only: no opacity, no hover, and the box keeps its size. A primary or danger

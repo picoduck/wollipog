@@ -63,7 +63,7 @@ export function ProviderLoginCard({ runnerId, login }: { runnerId: string; login
       </div>
       {login.verificationUrl && (
         <p>
-          <a href={login.verificationUrl} target="_blank" rel="noreferrer">Open Provider Sign-In</a>
+          <a className="link" href={login.verificationUrl} target="_blank" rel="noreferrer">Open Provider Sign-In</a>
         </p>
       )}
       {login.userCode && (

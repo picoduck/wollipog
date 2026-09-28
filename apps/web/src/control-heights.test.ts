@@ -200,6 +200,10 @@ test("button variants follow §3.1: flat primary, solid danger, text-only disabl
   assert.equal(ghost.get("background"), "transparent");
   assert.equal(ghost.get("color"), "var(--text-dim)");
   assert.equal(ruleBody('.btn:disabled, .btn[aria-disabled="true"]').get("color"), "var(--text-faint)");
+  // The quiet danger's red is for the enabled button only: at (0,3,0) an unqualified
+  // `.btn.ghost.danger` outranked `.btn:disabled` and kept a disabled delete red.
+  assert.equal(ruleBody('.btn.ghost.danger:not(:disabled, [aria-disabled="true"])').get("color"), "var(--danger-text)");
+  assert.throws(() => ruleBody(".btn.ghost.danger"), /found 0/, "no unqualified quiet-danger colour rule");
   assert.equal(ruleBody('.btn[aria-pressed="true"]').get("border-color"), "var(--control-outline)",
     "a toggle that is on carries an edge, so on and hovered do not look alike");
 

@@ -744,7 +744,7 @@ export function SessionApprovalBanner({
                       <UnrenderableEvidenceArtifact item={item} />
                     </>
                 : item.uri
-                  ? <a href={item.uri} target="_blank" rel="noreferrer">Open External Evidence: {item.evidenceId}</a>
+                  ? <a className="link" href={item.uri} target="_blank" rel="noreferrer">Open External Evidence: {item.evidenceId}</a>
                   : <p className="form-error" role="alert">This evidence has no viewable artifact or external link.</p>}
               <label>
                 <Checkbox

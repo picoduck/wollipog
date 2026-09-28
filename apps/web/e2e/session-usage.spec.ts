@@ -705,6 +705,32 @@ test("mobile: context and cost sit beside Live Output, and cost opens Session Us
   await page.screenshot({ path: `${SHOT}/mobile-session-usage.png` });
 });
 
+test.describe("with a touch pointer", () => {
+  test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+  test("mobile: the pricing source link is a 44px touch target inside the popover", async ({ page }) => {
+    // #1799: an inline link gets a 44px band centred on its line from the one coarse-pointer block.
+    await page.goto("/session-usage-e2e.html?width=390&height=800");
+    await page.locator(".transcript-status-strip").first().locator(".transcript-status-usage button").click();
+    const usage = page.locator(".session-usage-popover").first();
+    const link = usage.getByRole("link", { name: "Estimated API Costs" });
+    await expect(link).toBeVisible();
+    const band = await link.evaluate((element) => {
+      element.scrollIntoView({ block: "center" });
+      const rect = element.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      const middle = rect.top + rect.height / 2;
+      return {
+        textHeight: rect.height,
+        reaches: [middle - 21, middle + 21].every((y) => element.contains(document.elementFromPoint(x, y))),
+      };
+    });
+    expect(band.textHeight).toBeLessThan(44);
+    expect(band.reaches, "the link's hit area spans 44px around its line").toBe(true);
+    expect(await usage.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(await usage.evaluate((element) => element.clientWidth));
+  });
+});
+
 test("mobile: widest status labels stay inside a 320px strip", async ({ page }) => {
   await page.setViewportSize({ width: 320, height: 844 });
   await page.goto("/session-usage-e2e.html?width=320&height=800&cost=12345.67");
