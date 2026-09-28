@@ -807,7 +807,11 @@ test("SkillsView offers a same-name skill the built-in version and adopts it aft
     },
   } as unknown as ApiClient;
   const view = await mountSkills(client, "skills-built-in-offer");
-  assert.equal(view.listItem("orchestrate-issues")!.querySelector(".status-badge"), null, "a user-managed skill is not marked built-in");
+  assert.deepEqual(
+    [...view.listItem("orchestrate-issues")!.querySelectorAll(".status")].filter((badge) => badge.textContent === "Built-In"),
+    [],
+    "a user-managed skill is not marked built-in",
+  );
   await view.click(view.listItem("orchestrate-issues"));
   const offer = view.container.querySelector('[aria-label="Built-In Version Available"]');
   assert.match(offer?.textContent ?? "", /This library skill stays exactly as it is unless you review and accept the built-in version/);
