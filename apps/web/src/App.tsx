@@ -1070,9 +1070,10 @@ function PairingBanner({ connecting }: { connecting: boolean }) {
           This device isn't paired with the control plane. Open its startup pairing URL, or print it
           again on the control-plane machine with <code>--print-pair-url</code>, then paste the link or token here:
         </>}
-      {error && <p className="notice-error" role="alert">{error}</p>}
+      {/* The banner is the live region; a nested alert would announce the error twice. */}
+      {error && <p className="notice-error">{error}</p>}
       {submitted && !error && !connecting && (
-        <p className="notice-error" role="alert">Still not accepted. Check the token or pair a fresh one.</p>
+        <p className="notice-error">Still not accepted. Check the token or pair a fresh one.</p>
       )}
     </Notice>
   );

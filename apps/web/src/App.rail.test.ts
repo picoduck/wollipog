@@ -29,6 +29,10 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   // tone icon is the scalable status icon treatment.
   assert.equal(app.match(/<Notice pageBanner /g)?.length, 3,
     "every offline and pairing banner renders the Notice page banner");
+  // The banner is the live region, so its pairing error is not a second one.
+  const pairing = app.slice(app.indexOf("function PairingBanner"), app.indexOf("\nfunction ", app.indexOf("function PairingBanner") + 1));
+  assert.match(pairing, /<Notice pageBanner tone="warning" role="status"/);
+  assert.doesNotMatch(pairing, /role="alert"/, "a pairing error inside the status banner would be announced twice");
   for (const retired of [
     ["Projects", "Sidebar"].join(""),
     ["Sidebar", "View", "Switcher"].join(""),

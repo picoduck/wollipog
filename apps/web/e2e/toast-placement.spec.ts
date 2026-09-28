@@ -140,3 +140,26 @@ test("a toast over a dialog clears the dialog's footer where they share a column
   expect(foot.right).toBeGreaterThan(toast.left);
   await expect.poll(async () => foot.top - (await box(page, ".toast-region > .toast")).bottom).toBeGreaterThanOrEqual(0);
 });
+
+test("an expanded stack above a dialog footer stays on screen and scrolls its older list", async ({ page }) => {
+  await page.setViewportSize({ width: 1000, height: 600 });
+  await page.goto(SHELL);
+  await page.waitForFunction(() => Boolean(window.__WOLLIPOG_TOASTS_E2E__));
+  await page.getByRole("tab", { name: /Alpha/ }).click();
+  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("menuitem", { name: "New Session Here" }).click();
+  await expect(page.getByRole("dialog", { name: "New Session" })).toBeVisible();
+  for (const index of [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]) {
+    await show(page, `Bulk archive ${index} partially completed. Some sessions could not be archived.`, {
+      tone: "error", actionLabel: "Restore Sessions",
+    });
+  }
+  await page.getByRole("button", { name: "+7 More" }).click();
+  const list = page.getByRole("list", { name: "Older Notifications" });
+  await expect(list).toBeVisible();
+  // Every part of the stack stays inside the viewport; the older list scrolls instead of growing.
+  await expect.poll(async () => (await box(page, ".toast-region")).top).toBeGreaterThanOrEqual(0);
+  expect((await box(page, ".toast-more-list")).top).toBeGreaterThanOrEqual(0);
+  const scroll = await list.evaluate((element) => ({ client: element.clientHeight, scroll: element.scrollHeight }));
+  expect(scroll.scroll).toBeGreaterThan(scroll.client);
+});

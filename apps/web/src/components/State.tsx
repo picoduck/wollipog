@@ -29,15 +29,17 @@ export function stateVariant(conditions: {
 /**
  * Whether the live snapshot can vouch for an empty collection. Before the first snapshot a list is
  * loading; while the socket is down it is offline, even after a snapshot has loaded, because the
- * last-known content may no longer be true. A surface rendered without a store (a harness page or a
- * unit test) has no connection to report and is treated as current.
+ * last-known content may no longer be true. The store retries a dropped socket, so a loaded
+ * snapshot with a connection that is only "connecting" is still offline: the retry has not
+ * delivered anything new yet. A surface rendered without a store (a harness page or a unit test)
+ * has no connection to report and is treated as current.
  */
 export function useSnapshotState(): { offline: boolean; loading: boolean } {
   const conn = useOptionalStoreSelector((state) => state.conn);
   const loaded = useOptionalStoreSelector((state) => state.snapshotLoaded);
   if (conn === undefined) return { offline: false, loading: false };
   return {
-    offline: conn === "offline" || conn === "unauthorized",
+    offline: conn === "offline" || conn === "unauthorized" || (loaded === true && conn === "connecting"),
     loading: !loaded,
   };
 }

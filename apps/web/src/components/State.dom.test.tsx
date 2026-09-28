@@ -98,10 +98,14 @@ test("a board whose snapshot has not loaded says Loading, and a disconnected one
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   const socket = new FakeSocket();
+  let sockets = 0;
   const connection: UiConnectionRuntime = {
     instanceId: "state-dom-test",
     runtimeKey: "state-dom-test:1",
-    createSocket: () => socket,
+    createSocket: () => {
+      sockets += 1;
+      return socket;
+    },
     close() {},
   };
   try {
@@ -120,6 +124,14 @@ test("a board whose snapshot has not loaded says Loading, and a disconnected one
     await act(async () => socket.drop());
     assert.ok(container.querySelector(".state.offline"), "a dropped connection is offline, whatever loaded before");
     assert.match(text(), /Reconnecting…/);
+    assert.doesNotMatch(text(), /No Sessions Yet/);
+
+    // The store retries after 1.5s and is "connecting" until the socket opens. Nothing new has
+    // arrived, so the list is still disconnected rather than authoritatively empty.
+    const before = sockets;
+    await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 1700)); });
+    assert.ok(sockets > before, "the store retried");
+    assert.ok(container.querySelector(".state.offline"), "a retry in progress is still offline");
     assert.doesNotMatch(text(), /No Sessions Yet/);
   } finally {
     await act(async () => root.unmount());

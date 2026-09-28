@@ -8957,6 +8957,9 @@ button.file-head.source-path-link {
   align-items: stretch;
   gap: var(--space-2);
   width: min(360px, calc(100vw - var(--space-8)));
+  /* The stack never outgrows the space above what it clears (a dialog footer can sit high); the
+     "+N More" list gives way first and scrolls. */
+  max-height: calc(100dvh - var(--toast-clear) - var(--space-8));
   pointer-events: none;
 }
 .toast {
@@ -8999,7 +9002,9 @@ button.file-head.source-path-link {
   margin: calc(var(--space-1) * -1) calc(var(--space-1) * -1) calc(var(--space-1) * -1) 0;
 }
 /* Older toasts wait behind one control above the stack; their list opens upward from it. */
+.toast-region > .toast { flex-shrink: 0; }
 .toast-more {
+  flex-shrink: 0;
   align-self: flex-end;
   pointer-events: auto;
   box-shadow: var(--elev-2);
@@ -9008,6 +9013,8 @@ button.file-head.source-path-link {
   display: flex;
   flex-direction: column;
   gap: var(--space-2);
+  flex: 0 1 auto;
+  min-height: 0;
   max-height: min(50vh, 420px);
   margin: 0;
   padding: 0;
@@ -9031,6 +9038,7 @@ button.file-head.source-path-link {
     right: max(var(--space-2), env(safe-area-inset-right, 0px));
     bottom: calc(max(var(--toast-clear), env(safe-area-inset-bottom, 0px)) + var(--keyboard-inset, 0px) + var(--space-2));
     width: auto;
+    max-height: calc(100dvh - max(var(--toast-clear), env(safe-area-inset-bottom, 0px)) - var(--keyboard-inset, 0px) - var(--space-4));
   }
 
   /* On a phone the stack and an open menu compete for the same screen, and there is no free edge
