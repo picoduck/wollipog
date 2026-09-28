@@ -183,6 +183,10 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   assert.doesNotMatch(pageText(), /name: code-review/, "frontmatter stays out of the rendered content");
   assert.match(pageText(), /All Machines/);
   assert.match(pageText(), /All Agents/);
+  // In the narrow table the headers are off screen, so each assignment cell names itself (§14).
+  const assignmentLabels = [...container.querySelectorAll(".skills-table tbody tr:first-child .cell-label")]
+    .map((label) => label.textContent?.trim());
+  assert.deepEqual(assignmentLabels, ["Agents:", "Invocation", "Enabled"]);
   assert.match(pageText(), /Build Machine/);
   // A deployed copy is Linked in the shared skill-deployment vocabulary (docs/design-system.md §11.2).
   assert.match(pageText(), /Linked/);

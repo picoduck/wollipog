@@ -2029,6 +2029,8 @@ button.status { cursor: pointer; }
   }
   .table .cell-extra { display: none; }
   .table .cell-label { display: inline; }
+  /* A meta item can be named by its 14px icon instead of a word (§5.2), set on the text line. */
+  .table .cell-label > .app-icon { vertical-align: -2px; }
 }
 
 /* --------------------------------- Menus ---------------------------------

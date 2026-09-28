@@ -19,7 +19,7 @@ import { viewPath } from "../navigation.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { InboxIcon, MoreHorizontalIcon, SearchIcon } from "./Icons.js";
+import { InboxIcon, MoreHorizontalIcon, ProjectsIcon, SearchIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Spinner } from "./common.js";
@@ -607,10 +607,10 @@ export function ArchivedSessionsView() {
                         ? "stop_waiting_for_runner"
                         : "stop_pending")} />}
                     </div></td>
-                    <td className="cell-meta cell-dim">{rowMetadata.project}</td>
+                    <td className="cell-meta cell-dim"><span className="cell-label" aria-hidden="true"><ProjectsIcon size={14} /> </span>{rowMetadata.project}</td>
                     <td className="cell-extra cell-dim">{rowMetadata.location}</td>
                     <td className="cell-extra cell-dim">{rowMetadata.agent}</td>
-                    <td className="cell-meta cell-dim"><time dateTime={timestamp?.dateTime} title={timestamp?.title}>{formatRecordedRelativeTime(session.createdAt)}</time></td>
+                    <td className="cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Created </span><time dateTime={timestamp?.dateTime} title={timestamp?.title}>{formatRecordedRelativeTime(session.createdAt)}</time></td>
                     <td className="actions-cell">
                       <ArchiveRowActions sessionId={session.id} title={session.title || session.id} actions={actions} busy={busy} />
                     </td>

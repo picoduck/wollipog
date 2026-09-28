@@ -148,7 +148,8 @@ test.describe("at 390px", () => {
       .filter((cell) => getComputedStyle(cell).display !== "none" && cell.getBoundingClientRect().height > 0)
       .filter((cell) => {
         const label = cell.querySelector(".cell-label");
-        return !label || getComputedStyle(label).display === "none" || !label.textContent?.trim();
+        // A word or a 14px icon (§5.2) names it.
+          return !label || getComputedStyle(label).display === "none" || !(label.textContent?.trim() || label.querySelector("svg"));
       })
       .map((cell) => `${cell.closest("table")?.querySelector("caption")?.textContent}: ${cell.textContent}`));
     expect(await unnamed(), "no unlabelled figure on a phone").toEqual([]);
@@ -221,6 +222,16 @@ test.describe("at 390px", () => {
       if (exact) expect(layout.lines).toEqual([2]);
       else expect(Math.min(...layout.lines)).toBeGreaterThanOrEqual(2);
       expect(layout.firstLine, "line 1 is the name and its status or key figure").toBe(true);
+      // The headers are off screen, so every figure on the meta line names itself.
+      const unnamed = await page.locator(".table tbody td.cell-meta").evaluateAll((cells) => cells
+        .filter((cell) => getComputedStyle(cell).display !== "none" && cell.getBoundingClientRect().height > 0)
+        .filter((cell) => {
+          const label = cell.querySelector(".cell-label");
+          // A word or a 14px icon (§5.2) names it.
+          return !label || getComputedStyle(label).display === "none" || !(label.textContent?.trim() || label.querySelector("svg"));
+        })
+        .map((cell) => cell.textContent));
+      expect(unnamed, "no unlabelled figure on a phone").toEqual([]);
       expect(layout.headHidden).toBe(true);
       expect(layout.pageScroll).toBeLessThanOrEqual(0);
       expect(layout.tableScroll).toBeLessThanOrEqual(0);

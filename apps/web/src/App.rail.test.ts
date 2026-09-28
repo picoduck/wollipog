@@ -588,4 +588,3 @@ test("the Inbox reminder filter and the Sessions view toggle are the shared segm
   assert.match(css, /\.seg \{[^}]*gap: var\(--space-0-5\);[^}]*padding: var\(--space-0-5\);[^}]*border: 1px solid var\(--border\)/,
     "the shared track has the §10.2 inset and a decorative edge");
 });
-

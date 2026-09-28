@@ -658,8 +658,12 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
                           return (
                             <tr key={assignment.id}>
                               <td>{describeAssignmentScope(assignment, (id) => machineLabels.get(id))}</td>
-                              <td className="cell-meta cell-dim">{describeAgentSelector(assignment.agentSelector, runner?.agents ?? [])}</td>
+                              <td className="cell-meta cell-dim">
+                                <span className="cell-label" aria-hidden="true">Agents: </span>
+                                {describeAgentSelector(assignment.agentSelector, runner?.agents ?? [])}
+                              </td>
                               <td className="cell-meta">
+                                <span className="cell-label" aria-hidden="true">Invocation</span>
                                 <Select<SkillInvocationPolicy>
                                   label="Invocation"
                                   value={assignment.invocation}
@@ -678,6 +682,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
                                 />
                               </td>
                               <td className="cell-status">
+                                <span className="cell-label" aria-hidden="true">Enabled </span>
                                 <button
                                   type="button"
                                   role="switch"
