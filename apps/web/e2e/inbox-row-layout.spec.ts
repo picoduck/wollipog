@@ -503,14 +503,17 @@ for (const width of [901, 1000, 1200, 1400]) {
 test("the crowded extreme spends the sender completely before the branch gives up anything", async ({ page }) => {
   await useViewport(page, 1400);
   const roomy = await measureUnderSignalPressure(page, 4);
-  // A full-width desktop card has room for all of it; nothing has to yield. Compared against the
-  // UNPRESSURED width rather than against 300px: the branch measures 341px here and about 329px on
-  // CI, so a bare floor near the real value spends most of its headroom on the renderer before it
-  // says anything about the layout.
+  // A full-width desktop card keeps its whole branch: whatever line one cannot hold comes out of
+  // the sender. Since the one status recipe (#1802) gives every pill a dot and 11px type, four
+  // extra pills in the widest face cost the sender some width at 1400px, but never the branch.
+  // Compared against the UNPRESSURED width rather than against 300px: the branch measures 341px
+  // here and about 329px on CI, so a bare floor near the real value spends most of its headroom on
+  // the renderer before it says anything about the layout.
   const unpressured = await measureUnderSignalPressure(page, 0);
   expectGeometry(Math.abs(roomy.branchWidth - unpressured.branchWidth), "wide cards preserve branch width under pressure")
     .toBeLessThanOrEqual(0.5);
-  expect(roomy.senderClipped).toBe(false);
+  expect(roomy.senderWidth, "only the sender pays for signal pressure").toBeLessThanOrEqual(unpressured.senderWidth);
+  expect(roomy.senderWidth, "a wide card still shows part of the sender").toBeGreaterThan(0);
 
   await useViewport(page, TABLET_BREAKPOINT_PX + 1);
   const tight = await measureUnderSignalPressure(page, 4);

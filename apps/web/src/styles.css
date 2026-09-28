@@ -11037,8 +11037,10 @@ body.shell-dock-dragging * {
 /* CLIPPED, not merely shrunk. The sender is a flex box whose label already ellipsizes, but the
    16px agent icon inside it is `flex: none`: at a crowded 770px the box resolves to 0 width and the
    icon carried on painting 6px into the branch name beside it. Overflow here is what makes "the
-   sender yields first" mean the sender disappears rather than overlaps. */
-.inbox-row-lead > .inbox-row-sender { flex-shrink: 100; overflow: hidden; }
+   sender yields first" mean the sender disappears rather than overlaps. Shrink is weighted by
+   size, so at 100 the several-hundred-pixel Git line still absorbed about 2% of any overflow; the
+   weight is large enough that the branch gives up nothing while any sender remains. */
+.inbox-row-lead > .inbox-row-sender { flex-shrink: 100000; overflow: hidden; }
 .inbox-row-lead > .inbox-row-meta { flex: 1 1 auto; }
 /* The card's LAST line on desktop, so it carries the background badge as well as the strip. The
    height floor is the badge's own box (18px line + 1px border each side): without it a card holding
@@ -11165,6 +11167,10 @@ body.shell-dock-dragging * {
 /* The time is the only soft text in the signals cluster, so it was what wrapped when three pills
    left it no room, growing the card by a line (#916). It stays whole; the sender yields instead. */
 .inbox-row-signals > time { white-space: nowrap; }
+/* A card's line one and Git line are its densest; the badges there keep the recipe's type and dot
+   and spend less inset, so the sender, not the branch, is what gives way (#664, #934). */
+.inbox-row-signals .status,
+.inbox-row-background-work .status { padding-inline: var(--space-1); }
 .inbox-unread-badge {
   display: inline-flex;
   min-width: 18px;
@@ -11374,7 +11380,6 @@ body.shell-dock-dragging * {
      and measures it, so the margin is checked rather than assumed (#934). */
   .inbox-row { column-gap: 8px; }
   .inbox-row-signals { gap: 2px; }
-  .inbox-row-signals .status { padding: 0 var(--space-1); }
   .inbox-row-sender { min-width: 0; gap: 4px; }
   .inbox-row-base { display: none; }
   .inbox-row-activity { width: 58px; gap: 0; }
