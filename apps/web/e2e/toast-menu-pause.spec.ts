@@ -12,15 +12,21 @@ const MORE_SHEET = '.menu[aria-label="More Destinations"]';
 
 test.use({ reducedMotion: "reduce", viewport: { width: 390, height: 844 } });
 
+// An installed clock keeps running in real time until it is paused, so every click and assertion
+// would spend the toast's remaining time; on a loaded runner that alone expired it (#2003). The page
+// clock therefore starts at a fixed instant and pauses at a fixed target a minute later. The target is
+// not read from the page, so no delay between commands can put it in the past: the test's own
+// 30-second timeout ends long before a minute of real time passes.
+const CLOCK_START = new Date("2026-01-01T12:00:00Z");
+const CLOCK_PAUSED_AT = new Date(CLOCK_START.getTime() + 60_000);
+
 async function open(page: Page) {
-  await page.clock.install();
+  await page.clock.install({ time: CLOCK_START });
   await page.goto(SHELL);
   await expect(page.locator(".app-rail")).toBeVisible();
   await page.waitForFunction(() => Boolean(window.__WOLLIPOG_TOASTS_E2E__));
-  // An installed clock keeps running in real time until it is paused, so every click and assertion
-  // below would spend the toast's remaining time; on a loaded runner that alone expired it (#2003).
   // Paused, the page's time moves only through runFor, and the remaining-time checks are exact.
-  await page.clock.pauseAt(await page.evaluate(() => Date.now()) + 1_000);
+  await page.clock.pauseAt(CLOCK_PAUSED_AT);
 }
 
 async function show(page: Page, message: string) {
