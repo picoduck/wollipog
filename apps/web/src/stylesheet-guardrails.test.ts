@@ -761,10 +761,12 @@ const NATIVE_GLOBALS = new Set(["window", "globalThis", "self"]);
 function declarationScope(name: ts.Identifier): ts.Node | null {
   let owner: ts.Node = name.parent;
   if ((ts.isBindingElement(owner) || ts.isVariableDeclaration(owner) || ts.isParameter(owner)
-    || ts.isFunctionDeclaration(owner) || ts.isImportSpecifier(owner) || ts.isImportClause(owner)
-    || ts.isNamespaceImport(owner)) && owner.name !== name) return null;
+    || ts.isFunctionDeclaration(owner) || ts.isFunctionExpression(owner) || ts.isImportSpecifier(owner)
+    || ts.isImportClause(owner) || ts.isNamespaceImport(owner)) && owner.name !== name) return null;
   if (ts.isImportSpecifier(owner) || ts.isImportClause(owner) || ts.isNamespaceImport(owner)) return name.getSourceFile();
   if (ts.isFunctionDeclaration(owner)) return owner.parent;
+  // A named function expression binds its name inside itself only.
+  if (ts.isFunctionExpression(owner)) return owner;
   // Climb a destructuring pattern to the declaration or parameter that owns it.
   while (ts.isBindingElement(owner) || ts.isObjectBindingPattern(owner) || ts.isArrayBindingPattern(owner)) owner = owner.parent;
   if (ts.isParameter(owner)) return owner.parent;
@@ -776,9 +778,19 @@ function declarationScope(name: ts.Identifier): ts.Node | null {
     return ts.isForStatement(statement) || ts.isForOfStatement(statement) || ts.isForInStatement(statement)
       ? statement : statement.parent;
   }
+  // `var` hoists to its function's BODY: a parameter default runs before the body and cannot see it.
   let scope: ts.Node = list;
   while (!ts.isSourceFile(scope) && !ts.isFunctionLike(scope)) scope = scope.parent;
-  return scope;
+  return ts.isSourceFile(scope) ? scope : (scope as ts.FunctionLikeDeclaration).body ?? scope;
+}
+
+/** `{ confirm }` or `{ confirm: ask }` destructured straight from `window`, `globalThis` or `self`. */
+function destructuresNativeConfirm(node: ts.Node, isGlobal: (node: ts.Node) => boolean): boolean {
+  if (!ts.isBindingElement(node) || !ts.isObjectBindingPattern(node.parent)) return false;
+  const key = node.propertyName ?? node.name;
+  if (!(ts.isIdentifier(key) || ts.isStringLiteralLike(key)) || key.text !== "confirm") return false;
+  const declaration = node.parent.parent;
+  return ts.isVariableDeclaration(declaration) && Boolean(declaration.initializer) && isGlobal(declaration.initializer!);
 }
 
 /**
@@ -798,7 +810,10 @@ export function nativeConfirmReferences(source: string, fileName: string): strin
     return Boolean(inner && ts.isIdentifier(inner) && NATIVE_GLOBALS.has(inner.text));
   };
   const visit = (node: ts.Node): void => {
-    if (ts.isIdentifier(node) && node.text === "confirm") {
+    // Destructuring the native confirm is a reference to it, reported where it happens; the local
+    // name it creates then shadows nothing that matters, because the damage is already reported.
+    if (destructuresNativeConfirm(node, isGlobal)) found.push(node);
+    else if (ts.isIdentifier(node) && node.text === "confirm") {
       const scope = declarationScope(node);
       if (scope) scopes.push(scope);
     }
@@ -1609,7 +1624,18 @@ test("window.confirm fails in a clean component, naming the dialog to use instea
     "import { confirm } from \"./ask\"; confirm(\"y\");",
     "function a() { confirm(\"y\"); function confirm(t: string) { return t; } }",
     "try { f(); } catch (confirm) { confirm(\"y\"); }",
+    "const run = function confirm(n: number): number { return n ? confirm(n - 1) : 0; };",
   ]) assert.deepEqual(nativeConfirmReferences(shadowed, "g.ts"), [], shadowed);
+  // A named function expression's name is not visible outside it.
+  assert.equal(nativeConfirmReferences("const run = function confirm() { return 1; }; confirm(\"y\");", "h.ts").length, 1);
+  // A body `var` is not visible in a parameter default, which runs first.
+  assert.equal(nativeConfirmReferences("function f(x = confirm(\"y\")) { var confirm = () => true; }", "i.ts").length, 1);
+  // Destructuring the native confirm out of a global is a reference to it, however it is renamed.
+  for (const extracted of [
+    "const { confirm } = window; confirm(\"Delete?\");",
+    "const { confirm: ask } = globalThis; ask(\"Delete?\");",
+    "const { \"confirm\": ask } = self as Window; ask(\"Delete?\");",
+  ]) assert.equal(nativeConfirmReferences(extracted, "j.ts").length, 1, extracted);
   // Text that merely mentions it is not a call.
   assert.deepEqual(nativeConfirmReferences("// window.confirm(\"x\")\nconst s = \"window.confirm\";", "d.ts"), []);
 });
