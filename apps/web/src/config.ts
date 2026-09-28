@@ -30,6 +30,14 @@ const sameOrigin = typeof window !== "undefined" && hasSameOriginMarker(window);
 // Vite transform, so keep the default deployment values available there too.
 const buildEnv = (import.meta as ImportMeta & { env?: Record<string, string | undefined> }).env ?? {};
 
+/**
+ * True only when the Vite dev server serves the app (`import.meta.env.DEV`). Every `vite build`,
+ * including the installed, desktop and control-plane-served bundles, is not a development build, so
+ * contributor hints such as `pnpm dev` stay out of them (docs/design-system.md §12.5).
+ */
+export const DEVELOPMENT_BUILD =
+  (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env?.DEV === true;
+
 export function resolveDashboardOrigin(input: {
   configured?: string;
   pageOrigin: string;

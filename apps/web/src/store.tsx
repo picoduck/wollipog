@@ -1578,6 +1578,7 @@ export class Store {
   private readonly listeners = new Set<() => void>();
   private inboxPersistenceEnabled = true;
   private attentionActivation = 0;
+  private reconnectHandler: (() => boolean) | null = null;
 
   constructor(
     initialView: View = { name: "inbox" },
@@ -1613,6 +1614,18 @@ export class Store {
     if (filtersChanged) saveSessionFilters(next.filters, this.instanceScope, this.inboxStorage);
     for (const l of [...this.listeners]) l();
   };
+
+  /** The provider's socket lifecycle owns the retry timer, so it registers how to bring it forward. */
+  setReconnectHandler = (handler: (() => boolean) | null): void => {
+    this.reconnectHandler = handler;
+  };
+
+  /**
+   * Retry Now (docs/design-system.md §12.5): cancel the pending retry and connect immediately.
+   * Returns whether an attempt started; while a connection is opening or online there is no pending
+   * retry, so this does nothing.
+   */
+  reconnectNow = (): boolean => this.reconnectHandler?.() ?? false;
 
   navigate = (view: View): void => {
     const activated = view.name === "session" && view.attention
@@ -1892,7 +1905,10 @@ export function StoreProvider({
         // fast loop can't fix a missing credential, but a re-pair elsewhere should self-heal.
         const unauthorized = ev.code === 1008;
         dispatch({ type: "conn", conn: unauthorized ? "unauthorized" : "offline", authRequired: unauthorized || undefined });
-        reconnectRef.current = window.setTimeout(open, unauthorized ? 10_000 : 1500);
+        reconnectRef.current = window.setTimeout(() => {
+          reconnectRef.current = null;
+          open();
+        }, unauthorized ? 10_000 : 1500);
       };
       ws.onerror = () => ws.close();
     };
@@ -1903,6 +1919,7 @@ export function StoreProvider({
     const onTokenChanged = () => {
       if (closed) return;
       if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
+      reconnectRef.current = null;
       cancelBackgroundObservations();
       const ws = wsRef.current;
       if (ws) {
@@ -1913,13 +1930,25 @@ export function StoreProvider({
       open();
     };
     const unsubscribeCredentialChanges = connection.onCredentialChange?.(onTokenChanged);
+    // Only a pending retry can be brought forward. While a socket is opening or online there is
+    // none, so a second Retry Now never opens a second socket; the retry cadence is unchanged.
+    store.setReconnectHandler(() => {
+      const conn = store.getState().conn;
+      if (closed || reconnectRef.current === null || conn === "connecting" || conn === "online") return false;
+      window.clearTimeout(reconnectRef.current);
+      reconnectRef.current = null;
+      open();
+      return true;
+    });
     open();
     return () => {
       closed = true;
+      store.setReconnectHandler(null);
       unsubscribeCredentialChanges?.();
       unsubscribeSubscriptions();
       cancelBackgroundObservations();
       if (reconnectRef.current) window.clearTimeout(reconnectRef.current);
+      reconnectRef.current = null;
       const ws = wsRef.current;
       if (ws) {
         ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null;
@@ -2015,7 +2044,7 @@ export function useHasStore(): boolean {
 }
 
 /** Stable action handles (never cause re-renders). */
-export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput"> {
+export function useStoreActions(): Pick<Store, "dispatch" | "navigate" | "setInboxPersistenceEnabled" | "setInboxSelection" | "setInboxSplit" | "setInboxRatio" | "setFilters" | "loadEvents" | "loadOlderEvents" | "beginOlderEventsLoad" | "failOlderEventsLoad" | "eventWindowBase" | "loadSession" | "beginEventHistoryLoad" | "failEventHistoryLoad" | "loadPodContext" | "eventHighWater" | "recoveryAfter" | "eventEpoch" | "reconcileShellOutputs" | "loadShellHistory" | "removeShellOutput" | "reconnectNow"> {
   return useStoreHandle();
 }
 

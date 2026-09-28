@@ -73,6 +73,7 @@ import {
 import { FeedbackProvider } from "./components/FeedbackProvider.js";
 import { Modal } from "./components/common.js";
 import { Notice } from "./components/Notice.js";
+import { OfflineBanner } from "./components/OfflineBanner.js";
 import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { viewPath, viewTitle } from "./navigation.js";
@@ -251,7 +252,7 @@ export function Shell() {
   const activeInstanceLabel = instances.activeProfile.label;
   const desktopMultiInstance = instances.desktopMultiInstance;
   const theme = useTheme();
-  const { navigate } = useStoreActions();
+  const { navigate, reconnectNow } = useStoreActions();
   const view = useStoreSelector((s) => s.view);
   const viewRef = useRef(view);
   viewRef.current = view;
@@ -723,7 +724,7 @@ export function Shell() {
           offlineHeld && (
             instances.activeProfile.kind === "remote"
               ? <RemoteInstanceBanner />
-              : <OfflineBanner />
+              : <OfflineBanner connecting={conn === "connecting"} onRetryNow={reconnectNow} />
           )
         )}
         <div className={`main-body${view.name === "inbox" || view.name === "session" || view.name === "board" ? " inbox-main-body" : ""}`}>
@@ -976,19 +977,6 @@ function ExperimentDisabledNotice({
     >
       This experimental feature is hidden on this device.
     </State>
-  );
-}
-
-function OfflineBanner() {
-  return (
-    <Notice pageBanner tone="warning" role="status">
-      Can't reach Wollipog on this machine. Reconnecting…
-      <details className="notice-details">
-        <summary>Show Details</summary>
-        Nothing answers at <code>{CONTROL_PLANE_HTTP}</code>. Start it (for the local stack, run{" "}
-        <code>pnpm dev</code>) and the page reconnects on its own.
-      </details>
-    </Notice>
   );
 }
 
