@@ -151,8 +151,10 @@ test("the global focus ring is neutral, zero-specificity and absent on programma
   assert.equal(`${programmatic[0]!.prop}: ${programmatic[0]!.value}`, "outline: none");
   // A roving group focuses options that keep tabIndex -1 (an aria-disabled choice card is focused but
   // never checked). Suppressing the ring on controls would make that keyboard focus invisible.
+  // A keyboard-opened Select focuses its tabIndex -1 listbox, which may have no option to highlight.
   for (const control of ["button", "a[href]", "input", "select", "textarea", '[role="radio"]', '[role="option"]',
-    '[role="tab"]', '[role="menuitem"]', '[role="checkbox"]', '[role="switch"]']) {
+    '[role="tab"]', '[role="menuitem"]', '[role="checkbox"]', '[role="switch"]', '[role="listbox"]', '[role="menu"]',
+    '[role="grid"]', '[role="tree"]', '[role="combobox"]']) {
     assert.ok(programmatic[0]!.selector.includes(control),
       `the programmatic-focus suppression must exclude ${control}`);
   }

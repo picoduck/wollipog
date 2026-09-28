@@ -585,12 +585,16 @@ pre {
 }
 /* Programmatic focus targets — the page title, a dialog card, a Settings panel heading, a
    scroller — take focus so screen readers start in the right place, and never show a ring.
-   Controls are excluded: a roving group moves keyboard focus onto an option that still has
-   tabIndex -1 (an unavailable choice card is focused but never checked), and it needs its ring. */
+   Controls and composite widgets are excluded: a roving group moves keyboard focus onto an option
+   that still has tabIndex -1 (an unavailable choice card is focused but never checked), and a
+   keyboard-opened Select focuses its tabIndex -1 listbox, which may have no option to highlight. */
 :where([tabindex="-1"]:not(
   a[href], button, input, select, textarea, summary,
   [role="button"], [role="checkbox"], [role="link"], [role="menuitem"], [role="menuitemcheckbox"],
-  [role="menuitemradio"], [role="option"], [role="radio"], [role="switch"], [role="tab"], [role="treeitem"]
+  [role="menuitemradio"], [role="option"], [role="radio"], [role="switch"], [role="tab"], [role="treeitem"],
+  [role="combobox"], [role="grid"], [role="listbox"], [role="menu"], [role="menubar"], [role="radiogroup"],
+  [role="searchbox"], [role="slider"], [role="spinbutton"], [role="tablist"], [role="textbox"], [role="tree"],
+  [role="treegrid"]
 )):focus {
   outline: none;
 }
