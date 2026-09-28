@@ -27,10 +27,52 @@ for (const [name, value] of Object.entries({
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
+// `UsageView` debounces each aggregation request by 120ms through `window.setTimeout`, and React
+// schedules that timer only when it commits the change, after a test has already started any real
+// sleep. A 150ms sleep therefore left 30ms minus the render time, and a slow render under load lost
+// the race (#1914). happy-dom binds its timers to Node's at import, so `node:test` mock timers never
+// reach them. The window's timeout pair is replaced instead: a timeout fires only when a test
+// advances this clock, and every request it starts settles before the advance returns.
+const USAGE_DEBOUNCE_MS = 120;
+const pendingTimeouts = new Map<number, { at: number; run: () => void }>();
+let clockNow = 0;
+let nextTimeoutId = 1;
+Object.assign(domWindow, {
+  setTimeout: (callback: (...args: unknown[]) => void, delay = 0, ...args: unknown[]) => {
+    const id = nextTimeoutId++;
+    pendingTimeouts.set(id, { at: clockNow + Math.max(0, Number(delay) || 0), run: () => callback(...args) });
+    return id;
+  },
+  clearTimeout: (id: number) => { pendingTimeouts.delete(id); },
+});
+
+// Node's real `setImmediate` runs only once every queued microtask has, so a mocked request, the
+// state updates it resolves into, and the commit that schedules the next debounce all land first.
+const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+const advanceTimeouts = async (ms: number) => {
+  await drain();
+  const until = clockNow + ms;
+  for (;;) {
+    const [next] = [...pendingTimeouts]
+      .filter(([, timeout]) => timeout.at <= until)
+      .sort(([leftId, left], [rightId, right]) => left.at - right.at || leftId - rightId);
+    if (!next) break;
+    const [id, timeout] = next;
+    pendingTimeouts.delete(id);
+    clockNow = timeout.at;
+    timeout.run();
+    await drain();
+  }
+  clockNow = until;
+  await drain();
+};
+
 // `UsageView` starts a 30s `setInterval` that only its effect teardown clears, so an assertion that
 // throws before this file's trailing `root.unmount()` would leave the timer rescheduling and the
-// process unable to exit — a plain failure reading as a hung suite (#690, #899).
-installDomTestCleanup(domWindow);
+// process unable to exit — a plain failure reading as a hung suite (#690, #899). The reset drops a
+// debounce such a test left pending, so it cannot fire into the next test's first advance.
+installDomTestCleanup(domWindow, { reset: () => pendingTimeouts.clear() });
 
 const response = (
   series: UsageAggregationResponse["series"],
@@ -62,7 +104,7 @@ const bucket = (bucketTs: number, inputTokens: number, costUsd: number): UsageAg
   processedTokens: inputTokens,
 });
 
-const settleLoad = () => new Promise((resolve) => setTimeout(resolve, 250));
+const settleLoad = () => advanceTimeouts(USAGE_DEBOUNCE_MS);
 
 test("UsageView keeps the control-plane newest-first order after a refresh", async () => {
   const olderDay = Date.UTC(2025, 11, 30);
@@ -480,7 +522,7 @@ test("aggregation switches ignore stale responses and show request failures with
   const option = (label: string) => [...aggregation().querySelectorAll("[role=radio]")]
     .find((node) => node.textContent?.trim() === label) as HTMLButtonElement;
 
-  await act(async () => { option("Week").click(); await new Promise((resolve) => setTimeout(resolve, 150)); });
+  await act(async () => { option("Week").click(); await settleLoad(); });
   assert.ok(releaseWeek, "the weekly request is in flight");
   await act(async () => { option("Day").click(); await settleLoad(); await Promise.resolve(); });
   assert.match(container.querySelector(".usage-chart-section h3")?.textContent ?? "", /Daily Cost/);
