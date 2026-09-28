@@ -6835,8 +6835,6 @@ button.file-head.source-path-link {
 }
 .access-task-button {
   flex: none;
-  min-height: 34px;
-  padding: 7px 11px;
   background: transparent;
 }
 .access-list {
@@ -6910,7 +6908,6 @@ button.file-head.source-path-link {
 .access-row-action {
   flex: none;
   min-width: 88px;
-  padding: 7px 10px;
   background: transparent;
 }
 .btn.subtle {
