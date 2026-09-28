@@ -244,6 +244,12 @@ test("phone-width rules resize controls but never change their font family", () 
   assert.deepEqual(guard, ["font-size: 16px"], "the focus-zoom guard sets the size and nothing else");
 });
 
+test("a crashed route's error notice lines up with its page header", () => {
+  // ErrorBoundary puts the notice in `.page` under the route's PageHeader (#1801); the page supplies
+  // the gutter, so the notice's own standalone margin would push it right of the header.
+  assert.match(topLevelRule(css, ".page > .notice.view-error").toString(), /margin: 0/);
+});
+
 test("links, native controls and code use the base recipes", () => {
   assert.equal(baseRule("html"), "accent-color: var(--accent);");
   assert.equal(baseRule("a, .link"), "color: var(--accent);");

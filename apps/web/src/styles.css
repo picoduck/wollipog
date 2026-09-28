@@ -1772,6 +1772,8 @@ button.status { cursor: pointer; }
 .notice-details[open] > summary { margin-bottom: var(--space-1); }
 /* A render failure stands in for the view it replaced, at the top left of the content area. */
 .notice.view-error { max-width: 560px; margin: var(--space-6); }
+/* Under a crashed route's page header, the page already supplies the gutter and the header's gap. */
+.page > .notice.view-error { margin: 0; }
 /* An operation inside the notice failed; it reads as the notice's own error line. */
 .notice-error { color: var(--danger-text); }
 /* A setting row's reason or failure sits under its description, clear of the words above it. */
