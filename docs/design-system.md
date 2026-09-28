@@ -1,0 +1,1657 @@
+# Wollipog Design System
+
+This document is the design system for the Wollipog web and desktop UI: the tokens, the component
+recipes, and the rules for layout, copy and interaction. Every UI change follows it. Where the
+stylesheet still differs, the migration map (§19) names the change and the rollout order (§19.3)
+says when it lands. Until a step lands, the code may not match this document.
+
+Tokens live in `apps/web/src/styles.css`; the color schemes live in `apps/web/src/palettes.ts`.
+
+The system builds on, and does not contradict, the settled designs for the composer (a capsule bar
+with a settings sheet), the sessions list (threaded session families with one pill per attention
+kind), the phone session header, and the one-bar desktop session chrome with its docked Pinned
+Summary. The one deliberate deviation is stated in §4.4 (bar height 48px, not 44px).
+
+Related documents describe behavior that this system styles:
+[`accessibility-interaction-contract.md`](accessibility-interaction-contract.md) (menus, tabs and
+keyboard focus), [`feedback-and-onboarding-contract.md`](feedback-and-onboarding-contract.md)
+(confirmations and toasts), [`icon-system.md`](icon-system.md) (the icon inventory),
+[`theme-and-shortcut-contract.md`](theme-and-shortcut-contract.md) (themes and color schemes) and
+[`session-status-taxonomy.md`](session-status-taxonomy.md) (what each session state means).
+
+Contents
+
+1. Purpose and Principles
+2. Tokens
+3. Buttons and Action Placement
+4. Page Anatomy
+5. Lists, Rows and Cards
+6. Master-Detail Layout
+7. Dialogs and Sheets
+8. Forms
+9. Menus and Popovers
+10. Tabs and Segmented Controls
+11. Badges, Status and Meta
+12. Empty, Loading, Error and Offline States
+13. Toasts and Notices
+14. Tables
+15. Mobile and Compact Adaptation
+16. Focus, Keyboard and Motion
+17. Copy Rules
+18. Icons
+19. Migration Map
+20. Problems Addressed
+21. Known Tensions
+
+---
+
+## 1. Purpose and Principles
+
+### 1.1 Subject, Audience and Job
+
+- **Subject.** A control plane for AI coding agents: many sessions running on several machines,
+  some of which need a human decision right now.
+- **Audience.** A developer who keeps Wollipog open all day on a desktop (browser or Tauri), drives
+  it from the keyboard, and checks it from a phone between meetings.
+- **Primary job.** Show what needs me, let me act in one step, then get out of the way.
+
+The vernacular is an instrument panel, not a marketing site: quiet surfaces, precise alignment,
+tabular numbers, and a small number of lit signals. That is where the identity comes from.
+
+### 1.2 Foundations
+
+- **Color.** Keep the existing Wollipog palette and all five color schemes. Slate ground
+  `#0b1118` / `#f6f8fa`, raised surface `#121a24` / `#ffffff`, text `#e6edf3` / `#17212b`, teal
+  accent `#45d6cc` / `#055d56`, and the semantic hues green, amber, red and blue.
+- **Type.** The system UI stack, one family. Six sizes on the existing `--text-*` names.
+- **Layout.** One page header, one page container, one list-and-detail grid, one dialog anatomy.
+- **Principles.** One control-height scale; radius by hierarchy; borders only where something is
+  one object; one status pill; one notice; one menu.
+
+### 1.3 Key Decisions
+
+| Decision | Instead of | Why |
+| --- | --- | --- |
+| **Teal is reserved for two meanings: "you are here" and "the primary action".** Focus becomes a neutral ring, online becomes green, segmented selection becomes a neutral raised chip, the live pill becomes neutral. | Teal for the primary, selection, focus, tabs, the online badge, the segmented fill, the live pill and the zone frame. | When teal marks everything, it means nothing. |
+| Flat fill from the existing `--primary-from` token (dark text on teal in dark, white on deep teal in light). | A teal gradient primary button. | A gradient wash is decoration; the fill alone identifies the primary. |
+| Three container tiers (§5.1): **Section** (no border), **Surface** (one bordered group), **Callout** (tinted, attention only). At most one bordered level per page region. | A card for every section (`.skills-section`). | Equal boxes everywhere read as a pile with no hierarchy. |
+| **Left-aligned page container**, same x on every destination. Width caps, but never centers. | Centered page columns (`max-width` plus `margin: auto`). | Centering produced six different content left edges (76–227px). |
+| Color is used **only** for state. One status vocabulary, one tone table, Title Case, no `text-transform`. Metadata is neutral. | Colored pills everywhere, with tracked uppercase labels. | Color stops meaning state when it varies by surface. |
+| Meta items are icon- or label-prefixed and separated by space (12px gap). A single `·` between two facts of one phrase stays (for example "4 Children · 2 Awaiting Input"). | Middle-dot meta chains (`A · B · C`). | Unlabeled values in a chain are unreadable. |
+| Toasts at the bottom, above the docked chrome: bottom right on desktop, bottom center on phones above the tab bar or composer (§13.1). Never over the app bar. | Toasts bottom right, over whatever is there. | They landed on Send and on the phone tab bar. |
+| The page header **is** the top of the page: title, one-line description, actions. The empty 54px bar is deleted on destination pages. | A 54px top bar holding only a title. | It duplicated titles and inverted the type scale. |
+
+### 1.4 Principles
+
+Use these to settle any case this document misses.
+
+1. **Quiet slate, lit signals.** The UI is neutral. Color appears only where it carries state
+   (amber: needs you; red: broken; blue: working; green: done or online) or marks the current place
+   and the primary action (teal). If something is colored and is not one of those, remove the
+   color.
+2. **One name, one place, one size.** Every destination, action and state has one name. Every
+   repeated element (button, badge, row, dialog) has one recipe and a small fixed set of sizes.
+3. **Structure by space first, lines second, boxes last.** Group with spacing; separate with
+   hairlines; draw a box only around one object.
+4. **Say it once.** A fact appears in one primary home. No title twice, no status twice, no
+   disclaimer paragraph where a state or a link would do.
+5. **The empty state is a place to act.** No lonely centered sentence. Every empty, error and
+   unselected state offers the next step.
+6. **Precision you can feel.** Everything snaps to the 4px grid and the control scale. Numbers are
+   tabular. Edges line up across the page and across pages.
+7. **Phones are first-class, not shrunk desktops.** Sheets, 44px targets, one action row within
+   thumb reach, list and detail as separate routes.
+
+---
+
+## 2. Tokens
+
+All tokens are CSS custom properties in `styles.css`. Color values keep their current names so the
+four generated color schemes (`github`, `one-dark`, `dracula`, `monokai`) keep working unchanged.
+
+**One name per color.** Components read the palette names in §2.1 directly (`--bg*`, `--border*`,
+`--control-outline`, `--text*`, the hues). A new token exists only when it names something the
+palette does not have: a derived mix (`--surface-selected`), a per-theme choice (`--field-bg`,
+`--danger-bg`), or a role whose palette name is misleading (`--primary-bg`, because the palette's
+`--primary-from` is a gradient stop). Pure renames (`--line` for `--border`, `--surface-hover` for
+`--bg-elev-2`) are not part of the system: a second name for the same color is how the
+`--text-muted` drift started, and the stylesheet already has 15,000 lines written against the palette
+names. Derived tokens are declared once in the shared `:root` block with `var()`, so they are
+correct in every scheme and theme without regeneration.
+
+### 2.1 Color: Palette (Wollipog Scheme)
+
+| Token | Dark | Light | Role |
+| --- | --- | --- | --- |
+| `--bg` | `#0b1118` | `#f6f8fa` | App ground: page, bars, list panes. Also the sunken well: segmented track, code wells, dropzones. |
+| `--bg-elev` | `#121a24` | `#ffffff` | Raised: rail, Surfaces, menus, dialogs, cards, the selected segment knob. |
+| `--bg-elev-2` | `#182430` | `#eef2f6` | Hover fill; secondary button fill; keycaps. |
+| `--bg-elev-3` | `#21313f` | `#e3e9ef` | Pressed fill; toggle "on" fill; tooltip. |
+| `--border` | `#263544` | `#d0d7de` | Hairlines and container edges (decorative only). |
+| `--border-strong` | `#374b5c` | `#afb8c1` | Floating-layer edges; secondary button edge. |
+| `--control-outline` | `#6b8299` | `#727c86` | **Every input, select, checkbox and switch boundary, the selected segment knob, and the edge of a toggle that is on** (3:1, WCAG 1.4.11). |
+| `--text` | `#e6edf3` | `#17212b` | Primary text. |
+| `--text-dim` | `#9aa9b8` | `#4f5d6a` | Secondary text: descriptions, helper, labels in tables. |
+| `--text-faint` | `#8a98a4` | `#606973` | Tertiary: counts, timestamps, keycaps, placeholders. Never for sentences. |
+| `--text-dim-on-tint` | `#aebac6` | `#495663` | Existing token: dim text on a 12–16% wash (neutral status badge text). |
+| `--accent` | `#45d6cc` | `#055d56` | Selection indicator, active nav, tab underline, checked controls, links. |
+| `--primary-from` | `#2fbcb2` | `#06736a` | Primary button fill (flat). |
+| `--primary-hover-from` | `#3fc8be` | `#055d56` | Primary hover. |
+| `--primary-active-from` | `#29aaa2` | `#04443f` | Primary pressed. |
+| `--on-accent` | `#06231f` | `#ffffff` | Text on primary and accent fills (7.06:1 / 5.72:1). |
+| `--green` / `--amber` / `--red` / `--blue` | `#3fb950` / `#e3b341` / `#f85149` / `#58a6ff` | `#1a7f37` / `#9a6700` / `#cf222e` / `#0969da` | Status hues. Fills and dots only; text uses `*-on-tint`. |
+| `--accent-2` | `#ef8f3f` | `#bc4c00` | Brand orange. **No UI role** (logo, usage chart series only). |
+| `--purple`, `--agent-claude` | | | Retired from UI chrome. Agent identity uses the agent's brand icon, not a tinted tag. |
+
+### 2.2 Color: Derived and Per-Theme Tokens
+
+```css
+:root {
+  /* Derived (shared block, correct in every scheme) */
+  --surface-selected: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));  /* selected row, active rail item */
+
+  /* Focus: neutral, never teal */
+  --focus: var(--text);
+  --focus-width: 2px;
+  --focus-offset: 2px;
+
+  /* Primary (flat). Only these read the palette's gradient-stop names. */
+  --primary-bg: var(--primary-from);
+  --primary-bg-hover: var(--primary-hover-from);
+  --primary-bg-active: var(--primary-active-from);
+  --primary-fg: var(--on-accent);
+  --danger-fg: #ffffff;
+
+  --tint: 14%;                 /* status badge wash strength; notices use a fixed 7% */
+}
+:root[data-theme="dark"] {
+  --field-bg: var(--bg);       /* inputs sit sunken on the ground */
+  --danger-bg: #c93c37;        /* white text 5.02:1 */
+  --danger-bg-hover: #b62324;  /* 6.45:1 */
+  --count-warning-fg: #1b1300; /* text on an --amber fill, 9.47:1 */
+}
+:root[data-theme="light"] {
+  --field-bg: var(--bg-elev);  /* inputs are white */
+  --danger-bg: #cf222e;        /* 5.36:1 */
+  --danger-bg-hover: #a40e26;  /* 7.87:1 */
+  --count-warning-fg: #ffffff; /* on #9a6700, 4.87:1 */
+}
+```
+
+`--danger-bg*` and `--count-warning-fg` are Wollipog-scheme values. The four generated schemes inherit
+them unless the scheme generator emits its own; if it does, it must hold white on `--danger-bg` at
+4.5:1 or better.
+
+**Tones** are not tokens. A tone class sets two local custom properties from the palette, and every
+tinted component reads those:
+
+| Class | `--tone` (fills, dots, icons) | `--tone-text` (text on a wash) |
+| --- | --- | --- |
+| `.t-neutral` | `--text-faint` | `--text-dim-on-tint` |
+| `.t-info` | `--blue` | `--blue-on-tint` |
+| `.t-success` | `--green` | `--green-on-tint` |
+| `.t-warning` | `--amber` | `--amber-on-tint` |
+| `.t-danger` | `--red` | `--red-on-tint` |
+
+Tinted surfaces are always `color-mix(in srgb, var(--tone) var(--tint), transparent)` with text in
+`--tone-text`; the existing `--*-on-tint` tokens are already calibrated for 12–16% washes in every
+scheme.
+
+`--line`, `--line-strong`, `--control-border`, `--surface-hover`, `--surface-pressed`,
+`--surface-sunken` and `--row-h-sm` are not part of the system and must not be used.
+
+**Where teal may appear** (exhaustive): primary button fill; active rail item (icon plus 3px bar);
+active tab underline; selected list row (leading 2px bar plus `--surface-selected`); checked
+checkbox, radio and switch; text links; the composer's send button (it is the primary action);
+progress bars for normal forward progress. Anything else that is teal today becomes neutral or takes
+its status tone.
+
+### 2.3 Type
+
+One family: the existing system stack (`--font-ui`). No web fonts. Monospace (`--font-mono`) is only
+for code, paths, commands, hashes and keycaps: never for labels or data.
+
+Sizes are given in px at the default 16px root. The stylesheet declares the `--text-*` tokens in rem,
+so the browser's font-size preference still scales the UI.
+
+| Token (size) | px | Line height | Weights | Role |
+| --- | --- | --- | --- | --- |
+| `--text-xs` | 11 | 16 | 500 | Badges, counts, keycaps, rail labels. |
+| `--text-sm` | 12 | 16 | 400, 500 | Helper text, meta lines, table headers, field labels. |
+| `--text-base` | 13 | 20 | 400, 500 | **UI default.** Controls, rows, dialog body, settings. |
+| `--text-md` | 14 | 22 | 400 | Reading text: transcript prose, markdown, empty-state sentences. |
+| `--text-lg` | 16 | 24 | 600 | Titles: dialog title, detail title, empty-state title. |
+| `--text-xl` | 20 | 28 | 600 | Page title (one per page). |
+| `--text-2xl` | 24 | 32 | 600 | Headline figures only (Usage total). |
+
+Named type roles (use these, not raw sizes):
+
+```css
+--type-page-title: 600 var(--text-xl)/28px var(--font-ui);
+--type-title:      600 var(--text-lg)/24px var(--font-ui);
+--type-section:    600 var(--text-md)/20px var(--font-ui);   /* page section, settings group, fieldset legend */
+--type-body:       400 var(--text-base)/20px var(--font-ui);
+--type-body-strong:500 var(--text-base)/20px var(--font-ui); /* row titles, buttons, labels */
+--type-reading:    400 var(--text-md)/22px var(--font-ui);
+--type-small:      400 var(--text-sm)/16px var(--font-ui);
+--type-label:      500 var(--text-sm)/16px var(--font-ui);   /* field labels, table headers, list-group labels */
+--type-micro:      500 var(--text-xs)/16px var(--font-ui);
+--type-figure:     600 var(--text-2xl)/32px var(--font-ui);   /* headline figures only */
+```
+
+Rules
+
+- `body { font: var(--type-body) }`. Body becomes 13px (today 14px contradicts `--text-base`).
+- `button, input, select, textarea { font: inherit; }` and `font-weight: 400` on inputs. This fixes
+  Arial inputs, the 13.333px `<button>` rows, and bold values in the automation form.
+- Weights are 400, 500 and 600 only. 700 is retired.
+- **Never `text-transform`.** No uppercase, no capitalize. Casing lives in the copy (§17).
+- **No letter-spacing** on UI text.
+- `font-variant-numeric: tabular-nums` on counts, times, costs, table cells and badges (`.num`).
+  The `font` shorthand resets it, so declare it **after** any `font: var(--type-*)` in the same rule.
+- Retired sizes: 9, 10, 10.5, 11.5, 12.5, 13.333, 13.5, 15, 16.38, 17px. `--text-2xs` and
+  `--text-status` are removed; `--text-lg` changes from 17 to 16px.
+- Hierarchy check: on any screen the page title is the largest text, and a label or meta line is
+  never larger than the content it annotates.
+- Reading measure: prose blocks cap at `68ch`.
+
+### 2.4 Spacing (4px Grid)
+
+| Token | px | Typical use |
+| --- | --- | --- |
+| `--space-0-5` | 2 | Segmented track inset; badge dot gap. Only exception to the 4 grid. |
+| `--space-1` | 4 | Icon-to-text in badges; menu padding. |
+| `--space-2` | 8 | Gap inside controls and action rows; label to field. |
+| `--space-3` | 12 | Row padding x; gap between meta items; field to helper. |
+| `--space-4` | 16 | Field to field; Surface padding; dialog footer padding y. |
+| `--space-5` | 20 | Dialog body padding. |
+| `--space-6` | 24 | Page gutter (desktop); section internal gap. |
+| `--space-8` | 32 | Between page sections. |
+| `--space-10` | 40 | Empty-state top padding. |
+| `--space-12` | 48 | Large empty-state top padding. |
+| `--space-16` | 64 | Rare: page bottom padding. |
+
+Rules: no literal px for padding, margin or gap in component CSS (values computed from tokens with
+`calc()` are fine; 1–2px optical offsets for icon baselines and 1px borders are the only literals); `p`, `h1`–`h6`, `ul`, `dl`, `figure`
+inside any component have `margin: 0` (flow-spacing reset: `:where(.form, .section, .surface,
+.modal-body, .notice, .empty) > * { margin: 0 }`); vertical rhythm comes from `gap`.
+
+Density: keep the existing `data-density="comfortable"` mechanism but restate it in terms of row
+tokens only (`--row-h*`, §2.8): comfortable adds 8px to each row height. `--space-*` never changes
+with density. The ~25 per-family `--*-row-pad-*` tokens collapse into `--row-pad-x` (12px) plus the
+row heights.
+
+### 2.5 Radius by Hierarchy
+
+| Token | px | Tier | Applies to |
+| --- | --- | --- | --- |
+| `--radius-xs` | 4 | Inline | Keycaps, inline code, meta chips, checkbox, hunk markers. |
+| `--radius-sm` | 6 | Control | Buttons, inputs, selects, segmented track, menu rows, hovered list rows. |
+| `--radius-md` | 8 | Container | Surfaces, cards, menus, popovers, notices, toasts, code blocks. |
+| `--radius-lg` | 12 | Layer | Dialogs, sheets (top corners), floating panels, the composer card. |
+| `--radius-pill` | 999 | Status | Status badges, count badges, switch track, dots, avatars. **Never actions.** |
+
+Nesting rule: a child's radius is one tier below its container's (a button inside a notice is 6
+inside 8; a menu row is 6 inside an 8 menu). A docked panel (right panel, list pane) has **no**
+radius: it is flush with the frame.
+
+Migration: `--radius-sm` changes 8→6 and `--radius-md` 10→8. `--radius` (12) is renamed
+`--radius-lg`. Pill-shaped action buttons (`.btn-rediscover`, `.connection-details-trigger`)
+become rectangular `.btn`.
+
+### 2.6 Elevation
+
+Flat by default: in-page structure uses lines, not shadows.
+
+| Token | Dark | Use |
+| --- | --- | --- |
+| `--elev-0` | none | Everything in the page flow. |
+| `--elev-1` | `0 1px 2px rgb(0 0 0 / .18)` | The selected segment chip; a sticky header once content scrolls under it. |
+| `--elev-2` | `0 4px 12px -2px rgb(0 0 0 / .28)` | Menus, popovers, toasts, the Pinned Summary when floating. |
+| `--elev-3` | `0 12px 32px -6px rgb(0 0 0 / .42)` | Dialogs and sheets. |
+
+Light values are the existing light ramp. `--shadow` is retired. Floating layers pair their
+elevation with `1px solid var(--border-strong)` in both themes. The modal backdrop keeps
+`--modal-backdrop` and drops `backdrop-filter: blur` (stacked dialogs produced a double blur).
+
+### 2.7 Layout Tokens
+
+| Token | Value | Notes |
+| --- | --- | --- |
+| `--rail-w` | 64px | Today 66px (off-grid). |
+| `--bar-h` | 48px | Every bar: desktop session bar, detail bar, phone app bar, compact page header. §4.4. |
+| `--page-gutter` | 24px (16px phone) | Left and right padding of the page container. |
+| `--page-max` | 960px | List pages: Automations, Connections, Multi-Agent Runs, Pods. Left-aligned. |
+| `--page-max-wide` | 1200px | Tables, charts and card grids: Usage and Cost, Archived Sessions. Left-aligned. |
+| `--page-max-form` | 760px | Settings content, single-form pages. |
+| `--measure` | 68ch | Prose. |
+| `--list-pane-w` | 320px (280–440 resizable) | Master list in side-by-side master-detail. |
+| `--sessions-list-h` | 45% of the split area, whole rows | Stacked list height (§6.3): at least 3 rows; the preview keeps 240px. Sessions only. |
+| `--panel-w` | 400px (320–640) | Right side panel, docked. |
+| `--chat-max` | 860px | Unchanged. |
+| `--bottom-bar-h` | 56px + safe area | Phone tab bar, labeled. |
+
+### 2.8 Control and Row Heights
+
+| Token | Desktop (fine pointer) | Coarse pointer | Use |
+| --- | --- | --- | --- |
+| `--control-h-sm` | 28px | 36px visual, 44px hit area | Dense toolbars, table row actions, inline actions, badges-as-buttons. |
+| `--control-h` | 32px | 44px | **Default.** Buttons, inputs, selects, segmented, icon buttons, search. |
+| `--control-h-lg` | 40px | 48px | Empty-state primary, onboarding, phone sheet footers. |
+| `--row-h` | 40px | 48px | Single-line list rows, table rows, settings nav rows. |
+| `--row-h-2` | 56px | 64px | Two-line list rows (title plus meta). |
+| `--row-h-dense` | 32px | 44px | Dense rows in trees and file lists only (§5.2). |
+| `--icon-sm` / `--icon` / `--icon-lg` | 14 / 16 / 20px | same | Icon sizes; 24px only for empty-state tiles and the phone tab bar. |
+
+Menu rows use `--control-h` (a menu row is a control; there is no `--row-h-sm`, which would have had
+the same value in both modes). Tabs and rail items use `--control-h-lg` (40, 48 on touch).
+
+Implementation:
+
+```css
+.btn, .icon-btn, .input, .select-trigger, .seg { height: var(--control-h); }
+@media (pointer: coarse) {
+  :root { --control-h: 44px; --control-h-lg: 48px; --control-h-sm: 36px;
+          --row-h: 48px; --row-h-2: 64px; --row-h-dense: 44px; }
+  :is(.btn.sm, .icon-btn.sm, button.chip) { position: relative; }
+  :is(.btn.sm, .icon-btn.sm, button.chip)::after { content: ""; position: absolute; inset: -4px; }  /* 44px hit */
+  .seg.sm { height: var(--control-h); }        /* adjacent options cannot borrow hit area: 44px real */
+  .seg-option { position: relative; }
+  .seg-option::after { content: ""; position: absolute; inset: -3px 0; }   /* 38px option + 2px inset + 1px edge = 44 */
+  .switch { width: 40px; height: 24px; }       /* thumb 18px (::after) */
+  .switch::before { content: ""; position: absolute; inset: -10px -2px; }  /* 44×44 hit; the row label is also a target */
+  .link { position: relative; }
+  .link::after { content: ""; position: absolute; inset: calc(50% - 22px) -4px; }   /* 44px tall band */
+  input, textarea, select, .select-trigger { font-size: 16px; }   /* prevents iOS zoom, applied uniformly */
+}
+```
+
+In the stylesheet the iOS zoom rule keeps its `:root`-prefixed selectors and stays the last rule in
+the file: as bare element selectors it loses to class-scoped input rules, and Safari then zooms on
+focus.
+
+The borrowed hit area (`inset: -4px`) only works when neighbors are at least 8px away; inside a
+`.seg`, a tab strip or a tight icon cluster, the visual size itself must be 44px.
+
+**One hit-area block.** Segmented options, switches and inline text links get their 44px
+coarse-pointer hit area from this block, once, in the shared stylesheet. A segmented option borrows
+the track's 2px inset and 1px edge; the switch uses `::before` because its thumb is `::after`; a link
+gets a 44px band centered on its line. Components never add their own copies of these rules. A link
+whose line sits closer than 12px to another target (dense prose) keeps its visual size and relies on
+the surrounding row being the target.
+
+Every interactive element uses one of these heights. `min-height` never comes from padding. Icon
+buttons are square (`width: var(--control-h)`). Per-selector `min-height: 44px` patches on controls
+are replaced by this one block. Phone composer targets use the coarse `sm` recipe (36px visual, 44px
+hit); the settled composer layout fixes the 44px hit areas and leaves the visual size open.
+
+### 2.9 Motion
+
+Durations are the existing tokens (`--dur-instant` 80, `--dur-fast` 130, `--dur-base` 180,
+`--dur-slow` 260; `--ease-out`). Only user-caused changes animate:
+
+| Change | Motion |
+| --- | --- |
+| Hover, press, focus, selection | Color only, `--dur-fast`. |
+| Menu or popover open | Opacity 0→1 and 4px translate from the anchor, `--dur-fast`. Close is instant. |
+| Dialog open | Opacity plus scale .98→1, `--dur-base`. |
+| Sheet open (phone) | Translate from the bottom, `--dur-slow`. |
+| Disclosure expand | Height, `--dur-base`, chevron rotates 90°. |
+| Toast in | Opacity plus 8px translate, `--dur-base`. |
+| Running dot | The only ambient animation: 1.4s opacity pulse. |
+
+No entrance animations on page load, no hover lift on cards, no `--ease-spring` in UI chrome.
+`prefers-reduced-motion: reduce` removes every transform and the pulse (state stays visible through
+the label).
+
+### 2.10 Breakpoints
+
+| Name | Range | What changes |
+| --- | --- | --- |
+| Phone | ≤ 760px | Bottom tab bar, app bar, sheets, list/detail as routes, tables become rows. |
+| Compact | 761–1099px | Rail stays; page header keeps one primary plus overflow; list pane 280px; the session bar collapses its status to a dot plus `+N` (§15.2). |
+| Desktop | 1100–1439px | Full layout. |
+| Wide | ≥ 1440px | List pane may widen to 360px; nothing else. |
+
+Side columns (right panel, list pane, dialogs) respond to **their own width** with
+`container-type: inline-size` and `@container` rules, never to the viewport. The 600, 640, 680 and
+700px breakpoints are removed.
+
+### 2.11 Contrast (Wollipog Scheme)
+
+Computed with the WCAG 2 formula from the token values, with `color-mix()` resolved in sRGB and washes
+composited over the ground they sit on: 102 pairs per theme, all passing. Text needs 4.5:1; non-text
+state indicators need 3:1.
+
+| Pair | Dark | Light |
+| --- | --- | --- |
+| `--text` on `--bg` / `--bg-elev` / `--bg-elev-3` | 16.05 / 14.82 / 11.28 | 15.30 / 16.29 / 13.32 |
+| `--text-dim` on `--bg` / `--bg-elev-3` / `--surface-selected` | 7.89 / 5.55 / 5.69 | 6.35 / 5.53 / 5.60 |
+| `--text-faint` on `--bg` / `--bg-elev-3` (worst) / `--surface-selected` | 6.42 / **4.51** / 4.63 | 5.24 / **4.56** / 4.62 |
+| `--accent` link on `--bg` / `--bg-elev` | 10.60 / 9.79 | 7.29 / 7.76 |
+| Primary label on rest / hover / pressed | 7.06 / 8.06 / 5.81 | 5.72 / 7.76 / 11.03 |
+| White on `--danger-bg` / hover | 5.02 / 6.45 | 5.36 / 7.87 |
+| `--danger-text` on `--bg-elev` / `--bg-elev-2` | 10.26 / 9.22 | 7.87 / 6.99 |
+| Count badge text on `--amber` | 9.47 | 4.87 |
+| Status text on its 14% wash over `--surface-selected` (worst ground): info / success / warning / danger / neutral | 5.37 / 5.34 / 6.20 / **4.73** / 5.62 | 5.18 / 5.10 / 4.99 / 5.40 / 5.26 |
+| Notice body `--text-dim` on its 7% wash (worst tone) | 6.44 | 6.07 |
+| `--control-outline` vs `--bg` / `--bg-elev` / `--bg-elev-2` (3:1) | 4.77 / 4.40 / 3.96 | 3.99 / 4.25 / 3.78 |
+| Selected segment knob edge vs track (3:1) | 4.77 | 3.99 |
+| Selected row bar / active rail icon (`--accent`) vs `--surface-selected` (3:1) | 7.65 | 6.43 |
+| Status dot vs its wash (worst: danger dark, warning light) (3:1) | 4.49 | 4.06 |
+| Focus ring (`--text`) vs `--bg` | 16.05 | 15.30 |
+
+Two recipes follow from these numbers. A selected segment shown only as a `--bg-elev-3` fill on a
+`--bg` track measures **1.42:1 dark and 1.15:1 light**, near-invisible in light, so the selected option
+carries a `--control-outline` edge (§10.2). Neutral status text uses the existing `--text-dim-on-tint`
+(5.26 worst), not `--text-dim` (4.62 worst). The secondary button edge (`--border-strong`,
+1.94:1 dark, 2.01:1 light) stays decorative on purpose: the label identifies the button. The margins at
+the floor (`--text-faint` on `--bg-elev-3`, danger badge text on a selected row) mean `--text-faint`
+must never sit on a pressed fill with a wash on top, and status badges must not sit on anything darker
+than `--surface-selected`.
+
+---
+
+
+## 3. Buttons and Action Placement
+
+### 3.1 Variants
+
+| Variant | Class | Look | When to use |
+| --- | --- | --- | --- |
+| Primary | `.btn.primary` | Flat `--primary-bg`, `--primary-fg` text, no border. | The one action the region exists for: New Skill, Create Session, Save, Send. **At most one per region** (page header, dialog footer, card, sheet). |
+| Secondary | `.btn` | `--bg-elev-2` fill, 1px `--border-strong` edge, `--text`. | Other real actions next to a primary, or the main action of a region that has no primary. |
+| Ghost | `.btn.ghost` | Transparent, `--text-dim`, hover `--bg-elev-2` + `--text`. | Low-emphasis actions in dense places: Cancel in toolbars, Clear, Show More, toolbar toggles. |
+| Danger | `.btn.danger` | Solid `--danger-bg`, white text. | **Only** the confirm button of a destructive confirmation dialog. Nowhere else. |
+| Danger quiet | `.btn.ghost.danger` | Transparent, `--danger-text`. | A destructive action that must stay visible outside a menu (the tertiary slot of a dialog footer, §7.3). |
+| Icon | `.icon-btn` | Square, transparent, `--text-dim` icon. | Tool actions with a universally understood glyph (close, more, search, copy, panel toggles). Always has `aria-label` and a tooltip that match. |
+| Link | `.link` | `--accent` text, underline on hover. | Navigation inside prose and meta. Never styled as a button; buttons never underline (`a.btn { text-decoration: none }`). |
+
+Sizes: `.btn.sm` (28), default (32), `.btn.lg` (40). Horizontal padding 8 / 12 / 16px; icon 14 /
+16 / 16px; gap 4 / 8 / 8px; text `--type-body-strong` (sm uses 12px). Icon
+buttons: 28 / 32 / 40px square.
+
+States
+
+| State | Treatment |
+| --- | --- |
+| Hover | Fill steps one surface up (ghost: → `--bg-elev-2`; secondary: `--bg-elev-2` → `--bg-elev-3`). Wrapped in `@media (hover: hover)` so taps do not stick. |
+| Pressed | `--bg-elev-3` (primary: `--primary-bg-active`; danger: `--danger-bg-hover`). The secondary button's pressed fill equals its hover fill; press feedback there is the pointer, not a third gray. |
+| Selected / on (toggle buttons) | `--bg-elev-3` fill **plus a 1px `--control-outline` edge** (icon buttons: an inset edge), `aria-pressed="true"`, and an icon or label change. The edge is what separates "on" from "hovered": with one fill for both, a toggle that is on looks hovered. |
+| Focus | 2px `--focus` ring, 2px offset (§16.1). |
+| Disabled | Text `--text-faint`, fill unchanged, no hover, `cursor: not-allowed`. No opacity. A disabled control that the user would reasonably expect to work shows its reason as visible text next to it (§8.6), never only in `title`. |
+| Busy | Label stays; a 14px spinner replaces the leading icon (or is prepended); the button keeps its width (`min-width` locked on press). |
+
+Rules
+
+- Button text never wraps: `white-space: nowrap; flex: none`. If a row cannot fit its buttons, the
+  **row** overflows into a ⋯ menu (§3.3); the button never shrinks.
+- Buttons never stretch. In column-flex and grid containers every button sits in an `.actions` row
+  (`display: flex; gap: var(--space-2); align-items: center`) or has `justify-self: start`. This
+  removes full-width "bar" buttons.
+  One exception: in a request notice inside a narrow card (under 360px wide, such as a
+  board card), Approve and Deny may stretch as an **equal pair** that fills the row, matching the
+  phone sheet footer rule (§7.5). Only that pair, never a single button.
+- Labels are verb plus object in Title Case: "New Skill", "Import from Git…", "Delete Skill". The
+  ellipsis means "opens a dialog or menu that asks for more input before anything happens" (§17).
+- A leading `+` icon marks create actions; no other decorative icons in text buttons unless the
+  icon disambiguates (Refresh, Copy, Open in Editor).
+
+### 3.2 Button Groups
+
+- Order in any horizontal action group: **[destructive tertiary] … spacer … [ghost] [secondary] [⋯]
+  [primary]**. Primary is last (rightmost on desktop). The overflow ⋯ sits immediately before the
+  primary because it holds more secondaries.
+- Gap 8px between buttons. Groups never mix heights: every control in one row uses the same
+  control-height token.
+- Segmented and split buttons count as one control.
+- Pills are never actions. A clickable status (for example a descendant-request count) is a
+  `.btn.sm.ghost` containing a status badge, so it looks and hits like a button.
+
+### 3.3 Where Actions Live
+
+| Region | Holds | Visible limit before ⋯ |
+| --- | --- | --- |
+| Page header (§4.2) | Create and import for the destination; destination-level settings. | Desktop: 1 primary + 2 secondary. Compact: 1 primary + 1 secondary. Phone: primary as a 44px `+` icon button (label in `aria-label`), everything else in ⋯. |
+| Detail bar (§4.3) | Actions on the open entity. | Desktop: 1 primary + 1 secondary + ⋯. Destructive actions live **only** in ⋯, last, after a separator, in `--danger-text`. |
+| List row | Open (row click) plus one inline action and ⋯. | Inline actions show on hover or focus on fine pointers, always on coarse. |
+| Dialog footer (§7.3) | Cancel and the dialog's one primary, optional destructive tertiary on the left. | 3 on desktop; 2 on phone. |
+| Section (in page) | At most one action, in the section title row, right-aligned (`.section-head .actions`). | 1 + ⋯. |
+| Notice | Its resolving action(s), bottom-left of the copy on desktop, full width on phone. | 2. |
+| Toast | One action plus close. | 1. |
+
+---
+
+## 4. Page Anatomy
+
+### 4.1 Shell
+
+```
+┌────┬──────────────────────────────────────────────────────────────────────┐
+│    │ [offline / pairing banner: full width, 36px, only when present]      │
+│ R  ├──────────────────────────────────────────────────────────────────────┤
+│ a  │  Page header (in the page container, not a separate bar)             │
+│ i  │  ──────────────────────────────────────────────────────────────────  │
+│ l  │  Page content: sections, or a master-detail grid that fills height    │
+│ 64 │                                                                      │
+└────┴──────────────────────────────────────────────────────────────────────┘
+```
+
+- **Rail (desktop).** 64px, `--bg-elev`, hairline right edge. Square items at `--control-h-lg` (40px;
+  48px on touch tablets), 20px outline icons,
+  4px gap, 12px gap plus a hairline between groups: *Work* (Sessions, Automations, Projects),
+  *Oversight* (Multi-Agent, Pods, Connections, Skills), *Records* (Archived, Usage). Settings is pinned
+  at the bottom. Active: `--accent` icon, 3px `--accent` bar on the left edge, `--surface-selected`
+  fill. Hover: `--bg-elev-2`. Digit hints appear only in the tooltip ("Automations  2"), not as
+  8px superscripts. One count badge per item (§11.4). Archived uses an outline archive-box glyph.
+  The instance switcher (Tauri) replaces the brand tile at the top as a 32px monogram tile with a
+  status corner dot.
+- **One name per destination**, used for the rail tooltip, `aria-label`, page title, More sheet and
+  palette: Sessions, Automations, Projects, Multi-Agent Runs, Pods, Connections, Agent Skills,
+  Archived Sessions, Usage and Cost, Settings. (`GLOBAL_VIEW_ITEMS.label`/`title`/`paletteLabel`
+  collapse to one field.) "Inbox" is retired from all copy.
+- **Search.** A rail item "Search" (Ctrl/Cmd+K) at the top of the Work group and a search icon in the
+  phone app bar open the command palette.
+
+### 4.2 Page Header (Destination Pages)
+
+Replaces both the 54px `.topbar` and every in-page `h2` (`.view-heading`, `.skills-heading`,
+`.automation-heading`, `.projects-intro`, the Usage `#usage-heading`).
+
+```
+ ← page gutter 24 →
+┌──────────────────────────────────────────────────────────────────────────────┐
+│  Agent Skills                                   [Manage Groups] [Import ▾] [+ New Skill] │
+│  Write a skill once, then choose which machines and agents get it.           │
+│  [Tabs, when the destination has sibling views]                              │
+├──────────────────────────────────────────────────────────────────────────────┤  hairline
+```
+
+| Part | Spec |
+| --- | --- |
+| Container | Inside the page container, so its left edge is the content's left edge. Padding `20px 0 16px`, 4px between title and description. Background `--bg`. Bottom hairline `--border` only when tabs are absent or when content scrolls under it. |
+| Title | `h1#page-title`, `--type-page-title` (20/28, 600). The only `h1`. Focusable for route-change focus but with no visible ring (§16.1). |
+| Description | Optional, **one line**, `--type-body` in `--text-dim`, max 80 characters, truncated with ellipsis if the window is narrow. It says what the page is for in user terms. Hidden on phones. |
+| Actions | `.page-actions`, top-aligned with the title's 28px line box (`align-self: start`, control height 32). Follow §3.2 order and §3.3 limits. Priority+ overflow via `@container`: secondary buttons move into ⋯ from the left as width shrinks; the primary never moves. |
+| Tabs | Optional underline tabs (§10.1) as the header's last row, flush with the bottom hairline. |
+| Sticky | Not sticky. In master-detail pages the columns scroll, so the header stays in view anyway. |
+| Height | 64px title only, 88px with the description, 124px with description and tabs (20 + 28 + 4 + 20 + 12 + 40). This replaces a 54px bar plus 130–180px of in-page heading. |
+
+Phones: the page header becomes the **app bar** (§15.1): 48px, title `--type-title` (16/600), a
+search icon, the primary as a 44px `+` icon button, and ⋯.
+
+### 4.3 Detail Bar (Entity Pages and the Session)
+
+Every entity view (Session, Run, Pod, Project, a Skill or Automation on phone) uses the same bar,
+extending the settled one-bar session chrome app-wide.
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐ 48px
+│ ‹  Docs Overhaul Bake-Off With Four…  ● Running           [Secondary] [⋯] [Primary] │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+- Back: 32px icon button with `ChevronLeft`, `aria-label="Back to <Destination>"`.
+- Title: `--type-title` 16/600, single line, truncates; takes all free space (`flex: 1; min-width: 0`).
+- One status badge (§11), placed right after the title.
+- Actions per §3.3. Destructive actions only in ⋯.
+- Background `--bg`, bottom hairline. No gradient.
+- The generic "Run" / "Pod" top bar title and the separate `.detail-head` with a `←` glyph are
+  deleted. Project detail gets the same back control.
+- Session specifics follow the settled session designs: the one-bar desktop session chrome with a
+  docked Pinned Summary, and the phone session header.
+
+### 4.4 Bar Height: 48px
+
+All bars share `--bar-h: 48px`: the desktop session bar, detail bars, and the phone app bar. The
+settled session chrome uses 44px. The reason for +4px: a bar must hold 32px desktop controls with 8px
+of air on the 4px grid, and on phones it must contain 44px touch targets. A 44px bar gives phone
+targets zero margin and forces them down to 36px, which is too small in the phone session header. One height
+everywhere also ends the 54 / 57 / 50 / 40px jumps between routes. The session's saving versus today
+(about 100px) is essentially unchanged.
+
+### 4.5 Page Container
+
+```css
+.page { padding: 0 var(--page-gutter) var(--space-16); max-width: calc(var(--page-max) + 2 * var(--page-gutter)); }
+.page.wide { max-width: calc(var(--page-max-wide) + 2 * var(--page-gutter)); }  /* tables, charts, card grids */
+.page.form { max-width: calc(var(--page-max-form) + 2 * var(--page-gutter)); }
+.page.full { max-width: none; }                 /* master-detail, board */
+```
+
+- Left-aligned (`margin: 0`), never centered. Every destination title sits at `rail + 24px`.
+- Exactly one scroll container per column. Inner route roots never reuse `.main-body` (Settings
+  nested-scroll bug).
+- Sections within a page: `--type-section` title row (title left, one action right), 12px to content,
+  32px between sections. Sections are not boxed (§5.1).
+- Why 960 for list pages: a row's trailing status and actions should stay within one eye movement
+  of its title. The People and Devices tab, the calmest list page, runs at about 880px; at 1200px a machine row's Manage button sits 1,100px from the name.
+  Wide content (tables with 5+ columns, the usage chart, card grids) opts into `.page.wide`.
+- A component never uses negative margins to escape its parent's padding (`.subagents-panel {
+  margin: -12px -14px }`). Hosts offer a flush modifier instead. Optical bleed inside one component
+  (list rows bleeding into the gutter so their text aligns with the title) is allowed and commented.
+
+### 4.6 Terminal Placement
+
+Terminal tabs have one per-device preference, **Terminal Placement**, a row in Settings › Appearance ›
+Display (This Device) with the segments **Bottom Dock** (the default) and **Right Panel**. An unset
+or unreadable value means Bottom Dock.
+
+- **Bottom Dock.** The shell dock sits under the composer on desktop (220px by default) with one 40px
+  head: tabs with an accent underline, then Search, New, More Terminal Actions (⋯) and Hide as icon
+  buttons. On phones it takes the composer's place while open.
+- **Right Panel.** The same tabs and head become the right panel's **Terminal** tool and follow the
+  panel frame (the 48px header with the tool switcher, a 40px tab strip, container queries on the
+  panel's own width; on phones the full-screen sheet with one Back). The bottom dock is not shown.
+- Each place's ⋯ menu offers the other: **Move to Right Panel** in the dock, **Move to Bottom Dock** in
+  the panel tool. Both menus and the Settings row write the same preference and update each other
+  live. Moving never restarts a running shell; its tab and scrollback move with it.
+- The Terminal toggle and Ctrl+` open the terminal wherever it is placed.
+
+---
+
+## 5. Lists, Rows and Cards
+
+### 5.1 Container Tiers
+
+| Tier | Class | Look | Use |
+| --- | --- | --- | --- |
+| Section | `.section` | No border, no fill. Title row + content. 32px between sections, optional hairline between. | Every page and detail section (Content, Deployment, Assignments). |
+| Surface | `.surface` | `--bg-elev`, 1px `--border`, `--radius-md`, no padding by default; rows inside separated by hairlines. | A group of rows that belong together (a settings group, a list of machines, a code block). |
+| Callout | `.notice` (§13) | Tone tint, no border or a 1px tone edge at 30%. | Attention only: warnings, errors, held updates. |
+
+At most **one bordered level** inside a page region. No card inside a card inside a card; a Surface
+may contain rows, never another Surface. Inside dialogs, Surfaces are allowed only for lists and code.
+
+### 5.2 Rows
+
+| Row type | Height | Anatomy |
+| --- | --- | --- |
+| Single-line | `--row-h` 40 | `[16 icon] Title ........ [meta] [badge] [action]` |
+| Two-line | `--row-h-2` 56 | Line 1: title (`--type-body-strong`, 1 line, ellipsis) + trailing status badge or time. Line 2: meta or description (`--type-small`, `--text-dim`, **1 line, ellipsis**). |
+| Dense (trees, file lists) | `--row-h-dense` 32 | `.row.dense`: `[16 icon] Name ........ [meta]`, one line, `--type-body`. **Fine pointers only**: on coarse pointers the token is 44px, so a touch tree is never denser than a menu. Only for trees and file lists, where 40px rows would show too few items (the Files tree shows 16 at 40px). Never for lists of entities. |
+| Card row (sessions list) | per the settled sessions list design (#882) | Two rows on desktop (exactly `--row-h-2`), three on phone. Unchanged by this spec except tokens. In the stacked layout, when the list is 880px or wider, the same two lines add a snippet after the title and move status, time, activity and flags into fixed trailing columns (§6.3). |
+
+Rules
+
+- Fixed heights: a list never mixes row heights except for group headers. Virtualised lists use one
+  estimate.
+- Text clamps: titles 1 line; descriptions 1 line in rows, 2 lines in cards (`line-clamp: 2`), full
+  text only in the detail view.
+- Metadata placement: identity (agent icon, machine, project) on line 2, left; time and counts
+  trailing, tabular, `--text-faint`; status badge trailing on line 1. At most one status badge per row.
+- Meta items are separated by 12px space, each prefixed by a 14px icon or a short label, not by
+  middle dots.
+- Hover: `--bg-elev-2` (fine pointers only). Selected: `--surface-selected` fill plus a 2px
+  `--accent` bar on the leading edge; text stays `--text`. Focus: the ring (§16). The three are
+  always distinguishable.
+- **Phone lists never show a selected row.** When opening a row pushes a separate route (§6.2),
+  the list has no selection to show; the last opened row is not highlighted on return. Selection
+  styling is a desktop and compact master-detail state only.
+- Row actions: trailing, `.icon-btn.sm` or `.btn.sm.ghost`; on fine pointers visible on row hover or
+  focus-within; on coarse pointers always visible or behind the row's ⋯.
+- A description equal to the name (case-insensitive) is not shown.
+- Group headers inside a list: `--type-label` in `--text-dim`, 32px tall, Title Case exactly as
+  written, optional count in `--text-faint`. Not sticky unless the list is long (>30).
+
+### 5.3 Cards (Grid)
+
+Use cards only when items are browsed visually side by side and each item is one object with a few
+facts (automation templates, instance tiles). Machines, instances, runs and pods are **lists** by
+default (converge on the People & Devices anatomy).
+
+- `display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); align-items: start`.
+- Card: `.surface` + padding 16, `--radius-md`. Title 1 line, description clamp 2, meta row, actions
+  pinned to the bottom-right in an `.actions` row. Fixed height per grid (all cards in one grid are
+  equal because content is bounded).
+- A card is an `<article>` with a stretched link or button for the primary click, never a
+  `<button>` wrapping content.
+
+---
+
+## 6. Master-Detail Layout
+
+Used side by side by Agent Skills, Projects, Connections › Machines (when selected), Settings
+(section nav plus content), and the Requests panel. Sessions (list plus preview) uses the stacked
+variant by default and offers side by side as a user preference (§6.3).
+
+```
+┌ Page header (full width) ────────────────────────────────────────────────┐
+├──────────────────────┬───────────────────────────────────────────────────┤
+│ [Search ⌕] [Filter]  │ Detail bar or detail header                        │
+│ Group label          │                                                   │
+│ ▌Row (selected)      │ Sections…                                         │
+│  Row                 │                                                   │
+│  Row                 │                                                   │
+│ 320px, own scroll    │ fills, own scroll                                 │
+└──────────────────────┴───────────────────────────────────────────────────┘
+```
+
+- Grid: `grid-template-columns: var(--list-pane-w) minmax(0, 1fr)`, height fills the viewport below
+  the page header; each column scrolls independently; `scrollTop` resets on selection change.
+- The list pane is flush (no card), with a hairline divider between the columns. A 4px resize handle
+  sits on the divider (hover shows a 2px `--border-strong` grip; drag or arrow keys resize 280–440px).
+- List pane header: search field (`--control-h`, full width) and at most one filter control.
+- **Selection lives in the URL** (`/skills/~<id>`) so Back and deep links work.
+- Detail pane gets `container-type: inline-size`. Grids inside it use `minmax(0, 1fr)` tracks, and
+  wide tables sit in a horizontal scroll wrapper, so the detail can never overflow the viewport.
+- **Class names.** Production uses `.master-detail` (`.master-detail-list`,
+  `.master-detail-list-head`, `.master-detail-list-body`, `.master-detail-detail`,
+  `.master-detail-resize`). `.md` stays reserved for rendered markdown, which production already uses.
+
+### 6.1 The Default Detail State (No Selection)
+
+Never a centered sentence. Pick the first rule that applies:
+
+1. **Collection Overview** (default for Skills, Projects, Connections): a top-aligned summary of
+   the collection that is useful without a selection.
+   - Title row: `--type-title` "Library Overview" (or the destination noun) + one line of counts.
+   - **Needs Attention**: a Surface of rows, one per item that needs the user (error, drift, offline,
+     held update), each with a status badge and an action ("Review"). If nothing needs attention, one
+     line with a green dot: "Every skill is deployed as assigned."
+   - **Recently Changed**: up to 5 rows (the last items edited or deployed), each opening the item.
+   - **Get Started** (only while the collection is small, <3 items): the create and import actions as
+     secondary buttons with one line each.
+2. **Auto-select** (desktop and compact only) when there is no meaningful overview and selecting has no
+   side effects: select the first row.
+3. **Sessions** keeps its existing behavior: open the most urgent session in the preview, per the
+   priority rule of the settled sessions list design.
+
+If the **collection is empty**, the list pane and detail pane are replaced by one empty state spanning
+the content area (§12.1), not an empty list beside a void.
+
+### 6.2 Phone
+
+List and detail are two routes. Tapping a row pushes the detail route; the app bar shows ‹ Back and the
+entity title (§15.1). The list keeps its scroll position on return, and shows no selected row.
+
+### 6.3 Stacked List and Preview (Sessions)
+
+For a triage list whose rows are read across the full width and whose detail is a quick look rather
+than a place to work. Sessions uses it by default and keeps its list over the preview. Other
+master-detail pages stay side by side.
+
+```
+┌ Page header and tab row (full width) ────────────────────────────────────┐
+├──────────────────────────────────────────────────────────────────────────┤
+│ ▌Row (selected)                         activity  status          time   │
+│  Row                                                                     │
+│  Row          whole rows only, 45% of the area, at least 3, own scroll   │
+├─────────────────────────────────── ▬ ────────────────────────────────────┤
+│ Detail bar: title, status ............ actions, Open Session             │
+│ Preview body, left-aligned at the page gutter, max 860px, own scroll     │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+- **Grid.** `grid-template-columns: minmax(0, 1fr)`; `grid-template-rows: var(--sessions-list-h)
+  minmax(0, 1fr)`, filling the height under the page header. The list height is a stored ratio of the
+  split area (default 0.45, clamp 0.25–0.75) rounded down to whole rows plus the list's 8px top pad,
+  never under 3 rows, and never so tall that the preview drops under 240px. At 1440×900 that is 6 rows
+  of `--row-h-2`; the divider never cuts a row. Rows must be exactly their row token for this to hold.
+- **Panes.** Both panes are flush (no card) and span the page between the gutters, so the page
+  title, the tab row, the rows and the preview all start at one left edge. The list body and the
+  preview body each scroll on their own; the page never scrolls. Notices above the list (order
+  changed, sign-in) take list height; they do not push the divider. A new selection resets the
+  preview's scroll to its request or latest turn; resizing never scrolls either pane.
+- **Divider.** The list's 1px `--border` bottom edge is the divider. A 9px hit band (17px on coarse
+  pointers) is centered on it with `cursor: row-resize`, plus a 32×4px `--border-strong` grip in the
+  middle that is always visible (40×6 on touch): a plain rule between two full-width panes does not
+  read as movable. Hover and drag draw the line at 2px `--border-strong`; keyboard focus draws it at
+  2px `--focus`. No band, no second rule. `role="separator"`, `aria-orientation="horizontal"`,
+  `aria-label="Resize List and Preview"`, `aria-valuenow` in percent.
+- **Resize.** Drag follows the pointer and snaps to the nearest whole row on release. ↑/↓ move one row;
+  Home = 3 rows; End = the tallest list that keeps a 240px preview; Enter or double-click resets to the
+  default. The ratio persists per device.
+- **Rows use the width.** The list pane is a size container. At 880px and wider, rows keep their
+  height and add what a narrow column cannot: a one-line snippet after the title and fixed trailing
+  columns that line up down the list (status, time, then activity and flags). Row actions get their
+  own trailing column, so hover never hides the time or the status.
+- **Keyboard.** F6 and Shift+F6 cycle rail → list → preview (§16.1). ↑/↓ move the selection and the
+  preview follows; keys that act on the previewed item (page the preview, approve, open) work while
+  focus stays in the list. Tab from the list reaches the divider, then the preview bar. Escape in the
+  preview returns focus to the selected row.
+- **Side by side as a preference.** Sessions offers the §6 side-by-side grid as **Preview Right**
+  (list 400px, 280–440, vertical divider with the hover-only grip of §6). The choice is a per-device
+  preference with **Preview Below** as the default; it is set by an icon segmented control right
+  after List/Board (accessible names "Preview Below" and "Preview Right") and by the Sessions Layout
+  row in Settings › Appearance › Display. Both write one key and update each other live.
+- **Widths.** Preview Right applies at 1100px and wider only; at compact widths (761–1099px) Sessions
+  is always stacked and the control is hidden, which also keeps the compact header to its budget
+  (§15.2). Phones have no preview (§6.2), whatever the preference.
+- **Empty.** An empty list replaces both panes with one state (§6.1); no divider is drawn.
+
+---
+
+## 7. Dialogs and Sheets
+
+### 7.1 Sizes
+
+| Size | Width | Use |
+| --- | --- | --- |
+| `.modal.sm` | 400px | Confirmations. |
+| `.modal` (md) | 560px | Forms (New Session, New Skill, Rename). |
+| `.modal.lg` | 800px | Review and diff, two-pane managers, pickers with previews. |
+| `.modal.full` | `min(1200px, 100vw - 48px)`, height `100vh - 48px` | Rare: long review flows. |
+| Phone | Bottom sheet, full width | All of the above at ≤760px. |
+
+`max-height: calc(100dvh - 48px)`. The body scrolls; header and footer stay fixed. The body never
+has a fixed `min-height` (the 340px Find Agent Sessions void): content sizes the dialog, and a height
+change animates with `--dur-base`. Dialogs are portalled to `document.body`, so an ancestor's
+`transform` or `overflow` cannot clip them (as it clipped Rename Project inside the tab strip).
+
+Nested dialogs (New Session → Create Project, a confirmation from a form): on desktop the child
+stacks on the parent, which stays visible under one shared dim (no second backdrop, no blur); closing
+the child returns focus to the control that opened it inside the parent. On phones the child pushes
+onto the sheet with a back arrow (§7.5). A child never discards its parent, which loses the user's
+input.
+
+**Phones: a confirmation replaces the sheet's content.** A confirmation opened from a sheet
+takes over that sheet's content under the same dim: its header shows a Back arrow (accessible name
+"Back to <parent title>") where the tone icon or close would be, and the confirmation slides in from
+the right. Back or Cancel returns to the parent content with every value kept. A second sheet never
+stacks on the first. Desktop keeps stacked dialogs as above.
+
+### 7.2 Anatomy
+
+```
+┌──────────────────────────────────────────────┐
+│ [!] Title                              [×]    │ header: 56px, padding 12 12 12 20, hairline below
+│     One-line description (optional)           │
+├──────────────────────────────────────────────┤
+│ Body: padding 20, gap 16, fields or content   │
+│                                              │
+├──────────────────────────────────────────────┤
+│ [Delete…]                 [Cancel] [Primary]  │ footer: padding 16 20, hairline above
+└──────────────────────────────────────────────┘
+```
+
+- Radius `--radius-lg`, `--bg-elev`, 1px `--border-strong`, `--elev-3`.
+- Title: `--type-title`, Title Case, a label (not a question): "Rename Session", "Delete Skill".
+- Close: 32px square `.icon-btn` with the Lucide `X`, `aria-label="Close"`. Confirmations have no
+  close button (Cancel does that job).
+- Description (optional): `--type-body`, `--text-dim`, one sentence.
+- Body sections: `--type-section` headings with 24px above; no bordered subsections.
+- The card itself is focused on open **without** a visible ring (§16.1); the first field (or Cancel in
+  a destructive confirmation, or the name field in a type-to-confirm dialog, §7.4) receives focus.
+
+### 7.3 Footer and Action Order
+
+- Right-aligned: **Cancel** (`.btn`, secondary, never ghost) then the **primary**. The primary label
+  repeats the dialog's verb ("Create Session", never "OK", "Submit" or "Continue").
+- **Steppers.** On an intermediate step of a stepper dialog (Pair Device step 1 of 3) the
+  primary may be **Continue**, with Back as the secondary from step 2 on. The final step's primary
+  names the outcome ("Pair Device"), never Continue.
+- A destructive tertiary action (Delete Team, Remove Location) goes far left as `.btn.ghost.danger`
+  and opens its own confirmation.
+- Submit errors render as a danger Notice directly **above** the footer, inside the body's end. Field
+  errors render under the field (§8.5).
+- A disabled primary shows why in the footer's left slot as `--type-small` `--text-dim` text ("Choose
+  a preset or enter a time.").
+- Close-only dialogs (read-only info) have one secondary "Done" button, not a primary.
+
+### 7.4 Destructive Confirmation
+
+```
+┌ [⚠ red 20] Archive and Stop Session ───────────┐
+│ "Fix the half-cent rounding bug" stops now and  │
+│ moves to Archived Sessions. You can restore it. │
+├─────────────────────────────────────────────────┤
+│                      [Cancel] [Archive and Stop] │  ← .btn.danger, solid
+└─────────────────────────────────────────────────┘
+```
+
+- `.modal.sm`, danger tone icon (TriangleAlert, `--red`) before the title.
+- Title: the action in Title Case, no question mark: "Delete Skill", "Archive and Stop Session",
+  "Discard Copy".
+- Body: **one or two sentences**: what happens, to which named object, and whether it can be undone.
+  No mechanism, no ids.
+- Confirm button: `.btn.danger`, same verb as the title and the trigger. Cancel has initial focus.
+- Irreversible actions affecting many items ("Delete Group and Its Assignments") add a type-to-confirm
+  field only when more than one item is affected.
+- **Type-to-confirm dialogs focus the name field**, not Cancel: the user must type before
+  anything else can happen, and the danger button stays disabled until the name matches, so focus
+  there cannot confirm by accident.
+- Non-destructive confirmations (Recover Session) use a primary button and no tone icon.
+- `window.confirm` is banned; every confirmation goes through `useFeedback().confirm`.
+
+### 7.5 Phone: Bottom Sheet
+
+- Full width, anchored bottom, `--radius-lg` on top corners only, 4px × 36px grabber (decorative, the
+  scrim and Cancel close it), `max-height: 92dvh`.
+- Header 48px: title 16/600, close icon 44px hit.
+- Footer sticky at the bottom with the safe-area inset; **at most two buttons, side by side, equal
+  width, 48px** (`--control-h-lg` coarse): Cancel left, primary right. A destructive tertiary moves
+  into the body end as a full-width ghost danger row.
+- Long forms (New Session) open as a **full-height sheet** (`height: 100dvh`, no grabber, back
+  arrow instead of close).
+- Nested dialogs push onto the sheet with a back arrow instead of replacing the parent. A
+  confirmation opened from a sheet replaces the sheet's content, with Back, and keeps the parent's
+  values (§7.1); it never stacks a second sheet.
+- Menus and popovers shown as sheets (§9.2) carry the same 36px grabber.
+
+---
+
+## 8. Forms
+
+### 8.1 Field Anatomy (One Primitive: `.field`)
+
+```
+Label                               (Optional)
+[ control ..................................... ]
+Helper text, one sentence.            ← or the error, which replaces it
+```
+
+- Label: `--type-label` (12/16, 500) in `--text`, 8px above the control. Title Case. Optional
+  fields say "(Optional)" in `--text-faint`; required is the default and unmarked.
+- Control: `--control-h`, `--field-bg`, 1px `--control-outline`, `--radius-sm`, padding 0 12px,
+  `--type-body` weight 400. Placeholder `--text-faint`, example-style ("e.g. staging-vpc"), never a
+  label substitute.
+- Helper: `--type-small`, `--text-dim`, 4px below. One sentence.
+- Fields stack with 16px gap; related fields share a row on desktop with 12px gap
+  (`.field-row`, collapses to one column in a container under 480px).
+- Fieldsets: `--type-section` legend, 24px above, no border.
+
+### 8.2 Setting Rows (Instant-Apply Preferences)
+
+For Settings and other preference lists, the label sits left:
+
+```
+Title                                              [ control 240 ]
+Description, one line of --text-dim 12px.
+```
+
+One grid for every setting row: `grid-template-columns: minmax(0, 1fr) var(--setting-control-w, 240px);
+gap: 24px; min-height: var(--row-h-2); padding: 12px 16px`, inside a Surface with hairlines between
+rows. Title `--type-body-strong`, description `--type-small` `--text-dim` (12px, never smaller). The
+control column is right-aligned; controls fill it (`width: 100%`) except switches (right-aligned).
+Under a 560px container the control drops below the text at full width.
+
+### 8.3 Field Widths
+
+| Class | Width | Use |
+| --- | --- | --- |
+| default | 100% of the form column | Text, selects, comboboxes. **Selects default to full width** inside `.field`. |
+| `.w-xs` | 96px | Numbers, ports, counts (with unit suffix inside the field). |
+| `.w-sm` | 200px | Short codes, times. |
+| `.w-md` | 360px | Names in wide forms. |
+
+Form column max: 560px in dialogs (the dialog body), 760px on pages. Select lists open at least as
+wide as the trigger and at least 280px, never narrower, so descriptions do not wrap to 5 lines.
+
+### 8.4 Control Set
+
+| Control | Spec |
+| --- | --- |
+| Text input / textarea | As §8.1. Textarea starts at 3 rows and grows to 12. `resize: vertical`. |
+| Select | Custom `Select` everywhere (native `<select>` removed). Trigger shows a `ChevronDown` 14px. |
+| Combobox | Same trigger with `ChevronDown`; typing filters; brand icons sit inside the field, not outside. |
+| Checkbox | 16px box, `--radius-xs`, `--control-outline`; checked = `--accent` fill with a check. Label to the right, 8px gap, the whole row is the target (≥32px, 44px coarse). Used for multi-select and consent. Consent labels are sentences and stay in sentence case ("Open the session after creating it"). |
+| Radio | 16px circle; checked = accent ring plus dot. Used inside ChoiceRows. |
+| Switch | 32×18 track (40×24 on touch), `--radius-pill`, `--control-outline` edge; on = `--accent` track. **For settings that apply instantly.** Label is the row title, and `aria-label` matches it. Never a button that says "On"/"Off". |
+| ChoiceRow | One component for radio cards, member checklists, instance pickers: leading control, title, one-line description, trailing meta; selected = `--surface-selected` + accent control; hover distinct. Markers align in one column. |
+| File picker | A dropzone row: icon, "Drop files here or", `.btn.sm` "Choose Folder…". Never the native "Choose Files / No file chosen". |
+| Number with unit | `.w-xs` input with the unit as a suffix inside the field ("30 s"). |
+
+### 8.5 Validation
+
+- `noValidate` on every form: no native browser bubbles.
+- Validate a field on blur after it was edited, and every field on submit. Errors clear as the user
+  types a valid value.
+- Invalid field: `aria-invalid="true"`, 1px `--red` border, and the helper is replaced by the error:
+  `CircleAlert` 14px + `--type-small` in `--danger-text`, associated with `aria-describedby`.
+- Error copy: what is wrong and how to fix it, one sentence: "Use lowercase letters, digits, dots or
+  dashes."
+- Submit errors (server, network): danger Notice directly above the submit row, rewritten for users;
+  raw detail behind "Show Details".
+- Primary stays enabled while the form is incomplete in short forms (clicking it reveals the errors);
+  in long forms it is disabled with a visible reason in the footer (§7.3).
+
+### 8.6 Save Models
+
+| Model | Where | Pattern |
+| --- | --- | --- |
+| Instant | Toggles, selects in settings rows. | Applies on change; a quiet "Saved" check appears for 2s at the row's right edge. |
+| Dialog | Creation and focused edits. | Footer Cancel + primary. |
+| Editor | Multi-field editors in a page (Agent Defaults, Orchestrator, Automation editor). | A sticky save bar at the bottom of the page region, visible only when dirty: "Unsaved changes" + Discard (ghost) + Save (primary). Save is disabled when clean. |
+
+---
+
+## 9. Menus and Popovers
+
+### 9.1 Menu (One Primitive for `.menu-pop`, `.plus-pop` and the Desktop More Sheet)
+
+- Container: `--bg-elev`, 1px `--border-strong`, `--radius-md`, `--elev-2`, padding 4px, min-width
+  200px, max-width 320px.
+- Item: `--control-h` (32px, 44px on touch), padding 0 8px, `--radius-sm`, `--type-body`. Leading 16px icon slot
+  (kept empty for alignment when any item has an icon). Optional second line (`--type-small`
+  `--text-dim`) makes the row auto-height (min 44px). Trailing slot: keycap (fine pointer only),
+  submenu chevron, or selection check.
+- Selected (radio-like menus): a trailing `Check` icon in `--accent`. Not color alone.
+- Section label: `--type-label` in `--text-dim`, 28px row, Title Case, not uppercase.
+- Separator: 1px `--border` with 4px vertical margin, full width.
+- Destructive items are last, after a separator, in `--danger-text`, with a trailing ellipsis if they
+  confirm.
+- Disabled items: `--text-faint` with the reason as the second line.
+- Keyboard: arrow keys, Home/End, type-ahead, Enter/Space, Escape closes and returns focus.
+
+### 9.2 Popover
+
+Anchored, 8px from the trigger, same container recipe as the menu, padding 16px, width 280–360px.
+Optional title row (`--type-section` + close icon). Used for inline detail (usage cost breakdown,
+context window). Rules for both menus and popovers:
+
+- `consumeEscape: true` by default (fixes Escape leaving the session).
+- Close on outside click and on ancestor scroll (or re-anchor); never float over a dialog header.
+- Only one floating layer open at a time; opening another closes the first.
+- On phones every menu and popover becomes a bottom sheet with a 48px title row and 44px items,
+  and the same 4px × 36px grabber as a dialog sheet (§7.5), so every bottom sheet reads alike.
+
+### 9.3 Tooltip
+
+`--bg-elev-3`, `--text`, `--type-small`, `--radius-xs`, padding 4px 8px, max-width 280px, 500ms delay,
+sentence case. Tooltips never hold information the user needs to act (disabled reasons, option
+descriptions): that information must also be visible.
+
+---
+
+## 10. Tabs and Segmented Controls
+
+### 10.1 Tabs (Switch Between Sibling Views of a Place)
+
+Examples: Connections (Machines, Instances, People and Devices), Sessions project splits, Settings on
+compact widths, detail sub-views.
+
+- `--control-h-lg` tall (40px, 48px on touch), `--type-body-strong`, `--text-dim`; hover `--text`; active `--text` plus a 2px `--accent`
+  underline on the tab's bottom edge, sitting on the header's hairline.
+- 24px between tabs (no fills, no borders).
+- Counts: 4px after the label, `--type-micro` `--text-faint`, tabular. An attention count uses a warning
+  count badge (§11.4) instead.
+- Overflow: horizontal scroll with a 24px edge fade on the clipped side; the active tab scrolls into
+  view on load. On phones, more than 4 tabs become a Select-styled "view picker" in the app bar.
+- Tabs change the URL.
+
+### 10.2 Segmented Control (Switch the Mode or Filter of the Same Content)
+
+Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
+
+- Track: `--control-h` (or `--control-h-sm` in dense toolbars on fine pointers; always `--control-h`
+  on touch), `--bg`, 1px `--border` (decorative), `--radius-sm`, 2px inset.
+- Options: equal-width, `--type-body-strong` `--text-dim`, nowrap, `--radius-xs`. Selected: the
+  **knob**, a `--bg-elev` fill with a 1px `--control-outline` edge and `--elev-1`, text `--text`.
+  **No accent fill.** The edge carries the state (4.77:1 dark, 3.99:1 light); a fill-only chip
+  measures 1.42:1 and 1.15:1 and fails WCAG 1.4.11.
+- The same rule marks every neutral "chosen one among peers": the knob and a toggle that is on
+  (§3.1). Hover never draws the edge.
+- 2 to 4 options, each label fits on one line at the control's width. If they do not fit, use a
+  Select. A segmented control never wraps.
+- Counts inside options: `--text-faint`, tabular, after the label.
+- Keyboard: radio-group semantics (arrow keys move and select).
+
+---
+
+## 11. Badges, Status and Meta
+
+### 11.1 Status Badge (the Only Colored Chip)
+
+```
+( ● Approval Required )   pill: 20px (sm) or 24px (md), padding 0 8px, radius pill
+```
+
+- Tinted fill `color-mix(tone var(--tint))`, text `--tone-text` (§2.2), **no border**, `--type-micro`
+  (11px/500, tabular) at sm, 12px/500 at md. Padding 0 8px; leading 6px dot in the tone's full color,
+  4px gap.
+- The dot pulses only for Running/Starting.
+- Inline variant `.status.inline`: dot + label with no pill, for dense rows and tables.
+- Label is Title Case from one vocabulary (§11.2), never raw enum text, never uppercased by CSS.
+- **One status badge per entity per surface.** Attention outranks lifecycle: if the session needs the
+  user, show only the attention badge(s) (one pill per attention kind, as in the settled sessions
+  list design), not "Awaiting Input" as well.
+
+### 11.2 One Vocabulary and Tone Table
+
+| Domain | Label | Tone |
+| --- | --- | --- |
+| Session attention | Approval Required, Answer Required, Authentication Required, Account Required | warning |
+| Session attention | Recovery Required | danger |
+| Session lifecycle | Starting, Running, Stopping | info (pulse on Running/Starting) |
+| Session lifecycle | Awaiting Prompt | neutral |
+| Session lifecycle | Stalled, Failed, Stop Failed | danger |
+| Session lifecycle | Stopped, Archived, Snoozed | neutral |
+| Session lifecycle | Completed | success |
+| Machine / instance | Online | success |
+| Machine / instance | Connecting | info |
+| Machine / instance | Offline | neutral (hollow dot) |
+| Machine / instance / device | Update Required, Sign-In Required, Pairing Required | warning |
+| Machine / instance | Unreachable, Error | danger |
+| Skill deployment | Linked | success |
+| Skill deployment | Pending | neutral |
+| Skill deployment | Edited (a machine copy differs from the library) | warning |
+| Skill deployment | Error | danger |
+| Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger |
+| Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |
+| Session family rollup chip | "N Awaiting Input" when a child waits on the user: warning. Otherwise neutral. The settled design's "tints orange" is implemented as the warning tone; `--accent-2` keeps no UI role. |
+| Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
+| Session header, background work | "Background Work Lost": danger (was "Background Work Orphaned") |
+| Delivery receipt | Delivered: success (inline, no pill) · Delivery Failed: danger |
+| Workflow gate / run decision | Awaiting Decision: warning · Approved: success (inline) · Rejected: neutral |
+| Pod | Active: info · Paused: neutral · Conflicted: warning · Failed: danger |
+| Provider account | Signed In: success (inline) · Sign-In Required: warning · Signed Out: neutral |
+| Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
+| Pull request | Open, Draft, Merged and Closed are **facts**: row meta with the Git icon, not status badges. |
+
+"Orphaned" is retired everywhere, including the session header badge, which reads "Background Work
+Lost". Update Required applies to machines, instances and devices alike.
+
+Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
+meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;
+`STATE_LABELS`, `LIFECYCLE_LABELS` and per-component label tables are deleted.
+
+### 11.3 Meta (Neutral Facts)
+
+- Default: plain `--type-small` `--text-dim` text with a 14px leading icon (branch, machine, agent,
+  project), separated by 12px.
+- Meta chip `.chip`: only when the fact is clickable or removable (a filter, a reference): 20px, 1px
+  `--border`, `--radius-xs`, padding 0 8px, `--type-micro` weight 400, `--text-dim`. A clickable chip
+  gets the 44px hit area on touch. Never colored. Machine and agent
+  tags lose their purple and blue.
+- Flag badge: a non-interactive flag next to a status ("Required" beside a Blocker or Major severity)
+  is a **neutral badge**, `.status.t-neutral.no-dot`, not a chip. `.chip` stays for facts
+  you can click or remove.
+- IDs, hashes and paths: `--font-mono` 12px, shortened (12 characters for hashes, directory-first
+  truncation for paths), with a copy button. Full ids live behind "Show Details" or copy only.
+
+### 11.4 Counts
+
+- Plain count: `--type-micro`, `--text-faint`, tabular, no pill (tabs, groups, segmented options).
+- Count badge (needs attention): 16px pill, min-width 16px, 11px/600 tabular, `--amber` fill with `--count-warning-fg` (9.47:1 dark, 4.87:1 light); danger variant uses
+  `--danger-bg` with `--danger-fg`.
+  One per rail item, showing the highest-severity tone and the total.
+- Zero is never shown in color ("0 Stalled" is not red).
+
+### 11.5 Keycap
+
+`kbd`: `--font-mono` 11px, 18px tall, min-width 18px, padding 0 4px, 1px `--border-strong`,
+`--radius-xs`, `--bg-elev-2`, `--text-dim`. One recipe for hints, menus and the shortcut reference.
+Hidden on coarse pointers.
+
+---
+
+## 12. Empty, Loading, Error and Offline States
+
+One `State` component with variants; the states are **mutually exclusive** in this priority order:
+**offline → loading → error → empty → no results → content**.
+
+### 12.1 Empty (First Use)
+
+```
+ ┌──────┐
+ │  ⌗   │  40px tile, --bg-elev-2, --radius-md, 24px icon in --text-dim
+ └──────┘
+ No Skills Yet                                  --type-title
+ Skills teach an agent a repeatable task.       --type-reading, --text-dim, max 56ch
+ Write one, or import from Git or a machine.
+ [+ New Skill]  [Import from Git…]              primary (lg on page) + secondary
+```
+
+- Top-aligned and **left-aligned with the page grid**, `padding-top: var(--space-12)`, max-width
+  480px. It spans the whole content area when the collection is empty (not squeezed into a list
+  column). In a narrow panel it is left-aligned at the panel's padding.
+- Title in Title Case, one or two sentences in sentence case, at least one action. The action is not a
+  duplicate of the page header's primary if that is visible: the header primary is hidden while the
+  empty state shows it.
+- No bordered card around it, no ✓ glyph.
+
+### 12.2 No Results
+
+Inline in the list: `Search` icon, "No skills match “terr”." and a `.btn.sm` "Clear Search". Neutral
+tone, never a success mark.
+
+### 12.3 Loading
+
+- Under 300ms: render nothing new (keep the previous content).
+- Lists: skeleton rows at the real row height and anatomy (a 60% title bar and a 40% meta bar),
+  flush with the list's padding. 3–6 rows.
+- Detail: skeleton title plus two section blocks.
+- Buttons: inline spinner (§3.1 Busy). Spinners are never a page's only content for more than 1s.
+- Status text in sentence case: "Loading sessions…". No "Showing 0 Sessions" while loading.
+
+### 12.4 Error
+
+A danger Notice (§13.2) in place of the content: title "Couldn't Load Skills", one sentence in user
+terms, **Retry** as the action, raw detail behind "Show Details" in mono. Render-error boundary uses
+the same notice with Reload and Copy Error Details, top-left in the content area.
+
+### 12.5 Offline
+
+- A single global banner (§13.3). Per-view data states show a neutral "Reconnecting…" line with the
+  last-known content dimmed, never "All Agents Unblocked", zero counts or "No … Yet".
+- Copy is for users: "Can't reach Wollipog on this machine. Reconnecting…" with **Retry Now**.
+  Developer hints (`pnpm dev`, origins) are shown only in a dev build, behind "Show Details".
+- The banner appears only after 2s of disconnection (no cold-load flash).
+
+---
+
+## 13. Toasts and Notices
+
+### 13.1 Toast
+
+```
+┌───────────────────────────────────────────────┐
+│ [✓] Session snoozed until tomorrow.  [Undo] [×]│  360px, padding 12, gap 12
+└───────────────────────────────────────────────┘
+```
+
+- Position: toasts appear at the bottom and **never cover the app bar**.
+  - Desktop: bottom right, `bottom: calc(var(--toast-clear, 0px) + 16px); right: 16px`, 360px wide.
+  - Touch widths (phone): bottom center, `left: 8px; right: 8px`, just above the tab bar or the
+    composer and inside the safe area:
+    `bottom: calc(var(--toast-clear) + env(safe-area-inset-bottom) + 8px)`.
+  - `--toast-clear` is the height of whatever is docked at the bottom of the view: the tab bar on
+    phones, the composer in a session (measured), 0 elsewhere. A toast never covers Send, the tab bar
+    or a dialog footer. Phones show the newest toast only.
+  - The "+N More" list opens upward from the stack.
+- Container recipe of a menu (`--bg-elev`, `--border-strong`, `--radius-md`, `--elev-2`). No colored
+  left stripe. Tone is carried by a 16px icon in the tone color (Info, CircleCheck, TriangleAlert,
+  CircleAlert).
+- Message `--type-body`; optional detail line `--type-small` `--text-dim`. Title Case only in the
+  action ("Undo", "Retry Undo", "Open Session").
+- One `.btn.sm.ghost` action (44px coarse) and a Lucide `X` close.
+- Info and success dismiss after 5s (paused on hover or focus); errors persist. Maximum 3 visible,
+  newest on top; older ones collapse into "+2 More".
+- Redundant toasts are removed: nothing that the UI already shows (an attached file chip, a visible
+  state change) gets a toast.
+- A decision is never a toast (the desktop close guard becomes a confirmation with Keep Open / Quit
+  Anyway).
+
+### 13.2 Notice (Inline, One Primitive for Every Banner and Callout)
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ [⚠] Conversation Quarantined                       [×]   │  title --type-body-strong
+│     The provider rejected an item in this history.       │  body --type-body, 1–2 sentences
+│     [Recover Session]  Show Details                      │  actions
+└─────────────────────────────────────────────────────────┘
+```
+
+| Part | Spec |
+| --- | --- |
+| Tones | info (blue), warning (amber), danger (red), success (green), neutral. Tone must match the badge tone of the same state. |
+| Surface | `color-mix(tone 7%, var(--bg-elev))`, 1px `color-mix(tone 32%, transparent)` (a low tint keeps amber from turning olive on slate), `--radius-md`, padding 12px 16px. No left stripe. |
+| Icon | 16px tone icon at the title's first line. |
+| Title | Optional, `--type-body-strong`, Title Case. |
+| Body | `--type-body`, 1–2 sentences, sentence case. Everything else behind "Show Details". |
+| Actions | `.btn.sm` row under the body, left-aligned; the resolving action first (primary only if it is the page's main next step). |
+| Compact | One line: icon + sentence + one `.btn.sm` trailing, 40px. For inline field-group and composer notices. |
+| Placement | Directly where the problem is: above the composer for session state, above the footer for submit errors, at the top of a section for section state. Aligned to that column's edges. |
+| Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error, a held update), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts, the status strip and queued rows are not notices and do not share this slot. This is the bottom-edge counterpart of the one-bar rule for the top of the session. A pending request (the request dock below) takes this slot ahead of every notice. |
+
+Replaces `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`,
+`.campaign-continuation-notice`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`,
+`.queued-error`, `.form-error` (when used as a banner), `.settings-inline-error`, `.skills-git-held`
+and `PendingSetting`.
+
+**Request dock.** Pending permission requests and questions dock directly above the composer, in the
+notice slot, in attention priority order. The dock is the only amber surface for a request, and it
+follows these rules so it never crowds out the conversation it asks about:
+
+- **The transcript keeps at least half.** The dock caps at 40% of the chat column (the space between
+  the session bar and the composer) on desktop and 50% on phones, and at 40% while the software
+  keyboard is open. The card's head, title and footer stay fixed; only its body scrolls.
+- **Only the top request is expanded.** The others wait behind one "+N More Requests" row that opens
+  into one-line rows (kind icon, title, owner, time; owner hidden on phones). Choosing a row brings
+  that request to the top for this view; the priority order is unchanged. A and D act on the
+  expanded request; a decision brings up the next one.
+- **Reading back shrinks it to a strip.** While the reader scrolls up away from the live tail, the
+  dock becomes one 44px strip: kind icon, title, count ("1 of 3") and Expand. Returning to the tail or
+  activating the strip restores the dock and moves focus to the card's heading. A new request updates
+  the strip's title and count and is announced. The request never disappears.
+- **The question and its context link both ways.** The transcript keeps a compact neutral marker
+  where a question was asked ("Question · title", with Jump to Question). The card head has Show Where
+  Asked, which scrolls the transcript so the marker sits in the upper third, gives the marker the
+  selected wash until the next scroll, and shrinks the dock to its strip. Jump to Question restores
+  the dock (or the answer panel) and moves focus to it.
+- **Answer Mode has Show Context.** When a question is answered in the composer, the answer panel's
+  header has Show Context, which shrinks the panel to its header (the question, a summary of the
+  selections so far, Show Answer). Nothing resets: selections, draft and step are kept. Below 760px
+  Show Context, Show Where Asked and Jump to Question are icon buttons with the same accessible names.
+
+### 13.3 Page Banner
+
+A Notice variant spanning the top of the main area (under the rail's top, above the page header):
+36px, no radius, no side borders, bottom hairline in the tone. For offline, pairing and update-held
+states only. It pushes content down with a `--dur-base` height transition.
+
+---
+
+## 14. Tables
+
+- Use a table only when rows are compared across 3+ columns. Otherwise use rows (§5.2).
+- Header: 32px, `--type-label` (12/500) in `--text-dim`, Title Case, no uppercase, bottom hairline.
+  Sortable columns show a 14px sort chevron on hover and when sorted.
+- Rows: `--row-h` (40px), `--type-body`, hairline dividers, no vertical lines, no zebra. Hover
+  `--bg-elev-2`; selected as §5.2.
+- Alignment: text left, numbers, costs and durations right with tabular numerals; status column uses
+  the inline badge.
+- `table-layout: fixed` with declared column widths; cells truncate with ellipsis
+  (`overflow-wrap: anywhere` is never inherited by cells). The name column takes the remaining width.
+- The first column is the row's name and is the open target (the whole row is clickable).
+- Actions column: last, right-aligned, one inline `.btn.sm.ghost` plus `.icon-btn.sm` ⋯. No
+  wrapping, no 2–4 text buttons.
+- Totals row: `--type-body-strong`, top hairline in `--border-strong`.
+- Sortable headers are buttons; on touch the header row is 44px tall.
+- Wide tables sit in a scroll wrapper with a right edge fade; the name column is sticky.
+- **Phone (and containers under 560px): tables become two-line rows**: name + status on line 1, the
+  two most important other columns as meta on line 2, the rest in the detail. No 620–980px min-widths.
+
+---
+
+## 15. Mobile and Compact Adaptation
+
+### 15.1 Phone (≤ 760px)
+
+| Element | Phone behavior |
+| --- | --- |
+| Rail | Bottom tab bar, 56px + safe area, **labeled** (24px icon + 11px label). Default slots: Sessions, Projects, Connections, Automations, More. Experimental destinations never take a primary slot by default. Active: accent icon and label plus a tinted pill behind the icon (not a bar below it). |
+| More | A real bottom sheet with a scrim and a "More" title; rows 48px with icons; Settings last after a separator. |
+| App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯). Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
+| Page header actions | Primary as `+` icon (accessible name "New Skill"), all others in ⋯ sheet. |
+| Master-detail | Two routes (§6.2). |
+| Dialogs, menus, popovers, selects | Bottom sheets (§7.5, §9.2), each with the 36px grabber. |
+| Tables | Rows (§14). |
+| Toolbars and filters | One row: search field + a "Filters" button that opens a sheet with the filters and a result count. Native selects that size to their longest option are removed. |
+| Tabs | Scroll with fade and active-into-view; more than 4 become a view picker. |
+| Toasts | Bottom center above the tab bar or composer, inside the safe area; one visible (§13.1). |
+| Request dock | Caps at 50% of the chat column, 40% while the software keyboard is open; its body scrolls, and it shrinks to the 44px strip while reading back (§13.2). |
+| Keyboard hints | Hidden (`pointer: coarse`). |
+| Fixed bottom layers | Every bottom-anchored surface (right panel sheet, shell dock, composer) follows the same `:has(textarea:focus)` rule as the rail so nothing shows through. |
+| Gutter | `--page-gutter: 16px`. Centered columns use `max(var(--space-3), (100% - max) / 2)` so content never touches the screen edge. |
+
+### 15.2 Compact Desktop (761–1099px, Including the Tauri 940px Minimum)
+
+- Rail unchanged. Page header: primary + one secondary + ⋯.
+- Master-detail list pane 280px. Sessions is always stacked here (§6.3); its Preview Right option
+  applies at 1100px and wider.
+- Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
+  with the label in its tooltip plus `+N` for extra attention kinds; the project crumb is dropped;
+  text buttons become icon buttons with tooltips.
+- Right panel docks at 320px or overlays as a sheet from the right with a scrim when the chat column
+  would drop below 480px.
+
+### 15.3 Touch on Any Width
+
+`@media (pointer: coarse)` applies the control and row sizes in §2.8 regardless of width (tablets at
+834px get 44px targets). Hover styles are wrapped in `@media (hover: hover)`.
+
+---
+
+## 16. Focus, Keyboard and Motion
+
+### 16.1 Focus
+
+```css
+:where(:focus-visible) { outline: var(--focus-width) solid var(--focus); outline-offset: var(--focus-offset); }
+:where([tabindex="-1"]):focus { outline: none; }            /* page title, dialog card, panes */
+.clip-focus :focus-visible { outline-offset: calc(-1 * var(--focus-width)); }  /* inside overflow:hidden */
+input:focus-visible, textarea:focus-visible, .select-trigger:focus-visible {
+  outline: none; border-color: var(--focus); box-shadow: 0 0 0 1px var(--focus);
+}
+```
+
+- The ring is neutral (`--text`), not teal, so focus is never confused with selection.
+- `:where()` keeps the global rule at zero specificity so components that draw their own focus do
+  not get two rings (composer, search fields).
+- Programmatic focus targets (`#page-title`, `.modal`, `.detail-scroll`) never show a ring.
+- Controls inside `overflow: hidden` containers use the inset ring (`.clip-focus`).
+- F6 zones exist on every page (rail, list, main). The zone indicator is a 2px `--focus` line on the
+  zone's top edge, shown for 1.5s after F6 only, never after a click or route change. F6 into the
+  rail lands on the current destination, not the logo.
+
+### 16.2 Keyboard
+
+- Every interactive element is reachable; row lists use roving tabindex with arrow keys.
+- Shortcuts shown in menus and tooltips use the keycap recipe (§11.5), fine pointers only.
+- Escape closes the top-most layer only (popover → menu → dialog → selection), consumed at each layer.
+- Closing a menu, popover or dialog returns focus to the control that opened it.
+- Controls inside a focus-holding region (the composer, the side-chat composer, the terminal search)
+  call `preventDefault` on `pointerdown`, so a tap acts on the first press instead of first blurring
+  the textarea and reflowing the region.
+
+### 16.3 Motion
+
+See §2.9. Reduced motion is honored everywhere, including sheets (fade only) and the Running pulse.
+
+---
+
+## 17. Copy Rules
+
+### 17.1 Casing
+
+The casing rules follow `AGENTS.md`.
+
+**Title Case** (standard title casing: capitalize first, last and principal words; keep short
+articles, coordinating conjunctions and prepositions lowercase unless first or last; phrasal-verb
+particles are capitalized: "Set Up", "Sign In", "Log Out"):
+
+- Buttons, links styled as actions, menu items, tabs, segmented options, navigation items.
+- Page, dialog, section, fieldset and card titles; field labels; table headers; list-group labels.
+- Badges and status labels; definition terms.
+- Accessible names of controls, matching the visible label exactly. Icon-only controls use Title
+  Case names ("Close", "More Actions", "New Skill").
+
+**Sentence case**:
+
+- Descriptions, helper text, placeholders, empty-state and error sentences, notices' bodies,
+  toasts' messages, tooltips, confirmation bodies, validation messages.
+- Checkbox consent labels, which read as sentences ("Open the session after creating it",
+  "I understand this deletes 3 assignments").
+- Loading and status messages ("Loading sessions…", "No skills match “terr”.").
+
+Never use CSS `text-transform` to achieve either. Enum values pass through `statusMeta` or a
+`labelFor()` formatter; `titleCaseLabel` must preserve acronyms (HTML, PR, SSH, URL, ID, MCP, CLI, UI).
+
+### 17.2 Words
+
+- One name per destination (§4.1) and one verb per action across trigger, dialog title, confirm
+  button and toast: Archive → "Archive Session" → "Archive Session" → "Session archived".
+- Trailing ellipsis in a label only when the action opens a dialog, menu or sheet that needs more
+  input before anything happens ("Import from Git…", "Rename…"). Navigation never has an ellipsis.
+- User nouns, not system nouns: "machine" (lowercase in prose), "sign in", "changes", "background
+  work". Retire: control plane (use "Wollipog"), runtime capacity, durable, snapshot, projection,
+  runner protocol numbers, reminder parser, `pnpm dev`.
+- No raw ids, enums, MIME types, provider option ids, hashes or env var names in headline slots.
+- Errors say what happened and what to do. They do not apologise and do not show raw exceptions
+  (those go behind "Show Details").
+- Explanations are one sentence at most in the UI; longer policy text moves behind an "About…"
+  disclosure or a Learn More link.
+- Locale: US English spelling ("Color", "Behavior").
+- Relative times in sentence case: "4m ago" (never "4m Ago").
+
+---
+
+## 18. Icons
+
+- Lucide only, through `Icons.tsx`, stroke 1.8, outline. Sizes 14, 16, 20 (24 for empty-state tiles
+  and the phone tab bar). An icon inherits `currentColor`.
+- Remove every emoji and text glyph used as an icon: `× ✕ ✓ ⚠ ▸ ▾ ↻ ← → ▤ ❞ △ ◐ ○ 📁 📄 📎 🔐 ❓ 🛡️ ⚖️
+  💰 📅 🧰 🔑 📖 ✏️ 🔎 ⚡ 🌐 🔧 💭 ⑃ ✎ ◒ ↯ ↳ ⓘ`. Map: close `X`, check `Check`, warning
+  `TriangleAlert`, error `CircleAlert`, disclosure `ChevronRight` (rotates to down), back
+  `ChevronLeft`, refresh `RefreshCw`, folder `Folder`, file `File`, attach `Paperclip`, info `Info`,
+  permission `Shield`, question `MessageCircleQuestion`.
+- Disclosure has one look: a 14px `ChevronRight` that rotates 90° when open. The right chevron alone
+  means "navigate"; a disclosure chevron sits at the leading edge.
+- One glyph per meaning; duplicate aliases (`WarningIcon`/`WarningTriangleIcon`,
+  `GearIcon`/`SettingsIcon`, Automations and Service Tier both `Zap`) are removed.
+
+---
+
+## 19. Migration Map
+
+### 19.1 Tokens
+
+| Current | New | Note |
+| --- | --- | --- |
+| `body { font-size: 14px }` | `body { font: var(--type-body) }` (13px) | Unclassed text drops 1px; it was larger than its designed neighbors. |
+| `--text-2xs` (10) | `--text-xs` (11) | Removed. |
+| `--text-status` (11.5) | `--text-xs` (11) | Removed. |
+| `--text-lg` (17) | `--text-lg` (16) | Value change; page titles move to `--text-xl`. |
+| literal 12.5 / 13.5 / 15 / 16.38px | nearest role token | 12.5→12 (`--text-sm`), 15→16 (`--type-title`). |
+| `--radius-sm` 8 | `--radius-sm` 6 | Controls tighten. |
+| `--radius-md` 10 | `--radius-md` 8 | Containers. |
+| `--radius` 12 | `--radius-lg` 12 | Rename; keep alias for one release. |
+| literal radii 2/3/5/7/9px | nearest tier | 2–5→`--radius-xs`, 7→`--radius-sm`, 9→`--radius-md`. |
+| `--shadow` | `--elev-2` (popovers) / `--elev-3` (dialogs) | Removed. |
+| `--primary-to`, `--primary-hover-to`, `--primary-active-to`, `--primary-*-border`, `--primary-hover-inset` | unused | Flat primary; keep in schemes until regeneration, then drop. |
+| `--row-pad-*`, `--inbox-row-pad-*`, `--project-row-pad-*`, `--card-pad-*`, `--agent-row-pad-*`, `--finding-row-pad-*`, `--ext-row-pad-*`, `--artifact-row-pad-*`, `--run-card-pad-*`, `--runner-card-pad-*`, `--ws-row-pad-*`, `--files-entry-pad-*`, `--usage-cell-pad-*` | `--row-pad-x` + `--row-h*` | Density changes row height, not per-family padding. |
+| `--bp-tablet` 900 / `--bp-desktop` 1240 | `--bp-compact` 1100 / `--bp-wide` 1440 | Documentation tokens; media queries use 760 / 1100 / 1440. |
+| where `--radius-sm/-md` live | edit the values in the `:root, :root[data-theme="dark"]` block | They are declared only there, and `:root` also matches in light, so one edit covers both themes. Do not redeclare them in the shared token block (its comment explains the specificity trap). |
+| `--mobile-session-action-gap` 7px | `--space-2` | |
+| (none) | `--control-h-sm/-/-lg`, `--row-h/-2/-dense`, `--bar-h`, `--rail-w`, `--page-max/-wide/-form`, `--page-gutter`, `--measure`, `--list-pane-w`, `--sessions-list-h`, `--panel-w`, `--bottom-bar-h`, `--toast-clear`, `--space-0-5`, `--space-12`, `--space-16`, `--focus*`, `--surface-selected`, `--field-bg`, `--primary-bg*`, `--primary-fg`, `--danger-bg*`, `--danger-fg`, `--count-warning-fg`, `--tint`, `--type-*`, `--icon*` | New. Nothing else: no aliases of palette names. |
+
+### 19.2 Classes and Components
+
+| Current | New |
+| --- | --- |
+| `.topbar` (title-only), `.view-heading`, `.skills-heading`, `.automation-heading`, `.projects-intro`, in-page `h2` | `PageHeader` → `.page-header` (`.page-title`, `.page-desc`, `.page-actions`, `.page-tabs`) |
+| `.topbar-create` (Runs `btn.sm`, Pods `icon-btn +`) | Page header primary `.btn.primary` with `+` icon |
+| `.detail-head` + `←` glyph (Run, Pod), session `.detail-head` | `.detail-bar` |
+| `.btn` (padding-sized, 34px) | `.btn` (`--control-h`, secondary look) |
+| `.btn.sm` (26px) | `.btn.sm` (28px) |
+| `.btn.primary` gradient | `.btn.primary` flat |
+| `.btn.danger` tint | `.btn.danger` solid (confirm only); inline destructive → menu item or `.btn.ghost.danger` |
+| `.btn.subtle`, `.btn.secondary` (no CSS), `.btn-rediscover`, `.connection-details-trigger`, `.seg-btn`, `.scope-opt`, `.hunk-act`, `.rp-back`, `.rp-close` | `.btn` / `.btn.ghost` / `.icon-btn` / `.seg` at a token height |
+| `.icon-btn` (padding only, 27–40px) | `.icon-btn` (square, 28/32/40) |
+| classless `<button>` | `button { background: none; border: 0; color: inherit; font: inherit; padding: 0 }` reset + a component class |
+| `.menu-pop`, `.plus-pop`/`.plus-item`, `.rail-more-sheet` (desktop), `.palette-item` rows | `.menu`, `.menu-item`, `.menu-label`, `.menu-sep` |
+| `.plus-section`, `.menu-label` (uppercase) | `.menu-label` (Title Case, `--type-label`) |
+| `.modal-head h2` 15px, `.modal-body` 18px pad, `.modal-foot` 14/18 pad | `.modal-head .modal-title` (`--type-title`), `.modal-body` (20), `.modal-foot` (16/20) |
+| `ConfirmationDialog` sentence-case question titles, default "Continue" | Title Case action titles, verb-matched confirm label; `.modal.sm` |
+| `.status-badge`, `.inbox-status-pill`, `.background-work-badge`, `.automation-state`, `.pod-status`, `.pod-orchestration-status`, `.workflow-status`, `.connection-status`, `.subscription-state`, `.loc-kind`, `.project-availability`, `.access-role-badge`, tool-row uppercase pills, receipt rectangles | `.status` (`.sm`/`.md`, `.inline`, tone classes `.t-info/.t-success/.t-warning/.t-danger/.t-neutral`) |
+| `.tag`, `.tag-machine`, `.tag-agent`, `.tag-wt`, `.atag`, `.os-badge`, `.cctx-chip` | plain meta (`.meta-item`) or `.chip` (neutral) |
+| `.tab-count`, `.group-count`, rail `.rail-badge` | `.count` (plain) or `.count-badge` (attention) |
+| `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`, `.campaign-continuation-notice`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`, `.queued-error`, `.settings-inline-error`, `.settings-pending-reason`, `.skills-git-held`, `.error-boundary` | `.notice` (`.t-*`, `.compact`) |
+| `.toast` + 4px left stripe, `.toast-region` under the bar | `.toast` + tone icon; `.toast-region` bottom right (bottom center on phones) above `--toast-clear` (§13.1) |
+| offline banner, pairing banner | `.notice.page-banner` |
+| `.empty` (bordered card), `.empty-title` 15px, `.inbox-zero-mark ✓`, `.sidechat-empty`, `.background-work-empty`, `.subagents-empty`, `.rp-launcher` centring, "Select a …" detail placeholders | `.state` (`.state-icon`, `.state-title`, `.state-body`, `.actions`), top-left aligned; `.overview` default detail |
+| `.skeleton` (flat bars, 16px inset) | `.skeleton-row` shaped like the real row |
+| `.skills-section` (all tiers), `.project-location-card` in cards, `.runner-card` stacks | `.section` / `.surface` / `.notice` tiers |
+| `.skills-item`, `.project-manager-item`, `.run-card` (button) | `.row` (`.row-2` for two-line) or `article.card` |
+| `.ui-seg` / `.ui-seg-option` / `.sessions-view-toggle` | `.seg` / `.seg-option` (neutral selected chip) |
+| `.inbox-tab`, `.connections-tabs > button`, `.settings-nav` on phone | `.tabs` / `.tab` |
+| `.ui-select-trigger` (160px min, content width), native `<select>` | `.select-trigger` (full width in `.field`, list min 280px) |
+| `ui/ChoiceControls` `Checkbox` (native 13px) | `.checkbox` + `.switch` |
+| `.field` / `.access-form` (two systems) | `.field` (label, control, helper/error) |
+| `.ui-row`, `.ui-row-choice`, `.orchestrator-number-row`, `.orchestrator-policy-control`, `.rail-order-row`, `.agent-defaults-editor` grids | `.setting-row` |
+| `.archive-table`, `.usage-table`, `.skills-table`, assignment matrix | `.table` (fixed layout) with phone row fallback |
+| `.shortcut-row kbd`, `.shortcut-hint kbd` (9px) | `kbd` (one recipe) |
+| `code` global chip | `:not(pre) > code` chip only |
+| `a` (unstyled) | `a, .link { color: var(--accent) }`; `accent-color: var(--accent)` on `:root` |
+| `:focus-visible` accent ring | `:where(:focus-visible)` neutral ring + programmatic-focus suppression |
+| zone frame `.inbox-preview-pane:has(.detail-scroll:focus-visible)::after` | F6-only top-edge indicator |
+| `.inbox-splitter` (10px band, borders top and bottom, 40×2px grip), `.inbox-list-pane` / `.inbox-preview-pane` inline heights | `.master-detail.sessions-md` stacked grid with `.master-detail-resize` on the list's bottom hairline (§6.3) |
+| Per-page master-detail grids (Skills, Projects, Machines, Settings) | `.master-detail` (§6); `.md` stays the markdown class |
+| `.review-required` chip | `.status.t-neutral.no-dot` flag badge (§11.3) |
+| `.inbox-activity-footer`, `.inbox-shortcut-rail` between the list and the preview | nothing: counts move to tabs and the rail, actions to the preview and row menus |
+
+### 19.3 Rollout Order
+
+1. Base resets and tokens: `font: inherit` on form controls and buttons, classless button reset,
+   body 13px, `:where` focus, programmatic focus suppression, `accent-color`, link color, `code`
+   scope, flow-spacing reset. (One PR; fixes Arial inputs, gray buttons and the teal focus box
+   around page titles app-wide.)
+2. Control heights and `.btn` / `.icon-btn` / inputs / selects / `.seg` on tokens, plus the single
+   coarse-pointer block. Delete per-selector 44px patches.
+3. `Modal` portal + anatomy + phone sheet; `ConfirmationDialog` copy rules.
+4. `PageHeader` + page container + detail bar; delete in-page h2s.
+5. `StatusBadge` + `statusMeta` table; `Notice`; `State`; `Toast` anatomy.
+6. Menus, tabs, segmented; tables and rows; then per-area redesigns.
+
+A CI check should fail on: `text-transform: uppercase|capitalize`, literal `font-size`,
+`border-radius`, `gap` or `padding` px outside the token block, a hard-coded `"Cascadia Code"` stack
+instead of `var(--font-mono)`, `justify-content: flex-end` together with `overflow-x: auto` (the start
+becomes unreachable), a viewport `@media` query inside a panel's rules, `window.confirm`, TSX class
+names with no CSS rule, and emoji in TSX outside content.
+
+Organize the new component CSS by component (one block per primitive, in the order of this
+document) rather than appending to the area where it was first needed. The timeline alone is spread
+over four regions of the stylesheet today, which is how one component drifts into several recipes.
+
+Two engineering fixes are not visual but cause visual bugs: key detail views by
+entity id (`RunDetail`, `PodDetail`) so drafts and errors do not carry across resources, and guard list
+views on snapshot load and connection state so they render Loading or Reconnecting instead of a
+"No … Yet" empty state (§12.5).
+
+---
+
+## 20. Problems Addressed
+
+| Problem | Fixed by |
+| --- | --- |
+| No control-height scale | §2.8, §3.1 |
+| Arial inputs, 13.333px button rows, bold automation values | §2.3 rules |
+| Body 14px vs `--text-base` 13px; 11+ literal sizes | §2.3 |
+| Literal spacing, radius drift, no nesting rule | §2.4, §2.5 |
+| No page header; duplicate titles; inverted type scale; ragged action rows | §4.2, §3.2, §3.3 |
+| No page container; six left edges | §4.5 |
+| Three back patterns; triple chrome on Run and Pod | §4.3 |
+| Buttons stretch to full-width bars; buttons wrap to 2 lines | §3.1 rules |
+| Accent overload; focus ring on page title, dialogs, panes | §2.2, §16.1 |
+| Tracked all-caps labels; `text-transform` Title Case shims | §2.3, §17.1 |
+| Five-plus chip styles; status said 2–3 times; color misused for identity | §11 |
+| Four notice recipes; bare colored-sentence errors; `PendingSetting` | §13.2 |
+| Toasts over Send and the phone rail; tone by stripe only | §13.1 |
+| Empty void detail panes; bordered empty banners; success-looking offline states | §6.1, §12 |
+| Modals not portalled; phone dialogs as 350px centered cards with 34px footers | §7 |
+| Three menu primitives; selection by color only; uppercase menu labels | §9 |
+| Loud accent segmented controls; segmented wrapping | §10.2 |
+| Wide tables on phones; row actions as text-button strings | §14 |
+| One breakpoint (dead zone 761–1000px); ad hoc 600/640/680/700px; viewport queries inside panels | §2.10, §15.2 |
+| Hover sticks on touch; touch targets patched per selector | §2.8, §3.1, §15.3 |
+| Unicode glyphs and emoji as icons; filled rail outlier; duplicate icon aliases | §18, §4.1 |
+| Two names per destination; "Inbox"; vocabulary drift; jargon; raw ids | §4.1, §17 |
+| Card nesting (card > card > card > chip) | §5.1 |
+| Errors far from their cause; three form systems; native validation bubbles | §8.5, §7.3 |
+| Master-detail with no phone route and no URL selection; scroll leaks | §6, §6.2 |
+| Popovers leak Escape; floating layers stack | §9.2 |
+| Disabled reasons hidden in `title` | §3.1, §7.3, §9.1 |
+| Unbuilt features advertised in production UI | §13.2 (`PendingSetting` removed) |
+| Selected segment invisible in light theme (1.15:1) | §10.2, §2.11 |
+| Hover looks the same as on for toggle buttons | §3.1 |
+| First tap lost in a focused composer | §16.2 |
+| Bottom-edge chrome stacking between transcript and composer | §13.2 Budget |
+| Fixed `min-height` dialog bodies; nested dialogs replacing their parent | §7.1 |
+| Negative margins escaping a parent's padding | §4.5 |
+| Sibling management pages at different widths (880 vs full) | §2.7, §4.5 |
+| Hard-coded mono stacks; one component's CSS in four places | §19.3 |
+| Unkeyed detail components; list views without a snapshot guard | §19.3, §12.5 |
+
+---
+
+## 21. Known Tensions
+
+These trade-offs are deliberate. Keep them in mind when a screen seems to argue against a rule.
+
+1. **Density vs 44px on touch laptops.** `@media (pointer: coarse)` also fires on touch-screen
+   laptops running the Tauri app at desktop widths, so every row grows 8px there. That is intended:
+   touch needs the size. Do not add a width condition to avoid it.
+2. **The session bar status.** The desktop session bar shows status as a dot with a tooltip, while
+   §9.3 says a tooltip must never be the only carrier of needed information. The docked Pinned
+   Summary is the always-visible label, and compact widths show dot plus label when it fits
+   (§15.2). If the dot proves too quiet in use, add a status chip to the session footer rather
+   than a second pill in the bar.
+3. **The phone session header's badge line.** The phone session header keeps full pills beside
+   Share and More Actions on its second line. With several attention kinds (one pill per kind)
+   that line can hold two or three pills. Treat per-kind attention pills as one badge group that
+   truncates to "+N" before it pushes the two buttons.
+4. **Top-left empty states in tall panes.** This system top-aligns every state. In a 900px right
+   panel a top-left state can read as part of the header, so inside panels use `.state.compact`
+   (24px top).
+5. **Amber meaning.** Amber is "needs you" (attention, held updates, edited copies). The settled
+   composer layout also tints its shield amber for no-approval modes. That is a risk warning, not
+   a request, so it takes the warning color **on the icon only**, never an amber pill or count.
+6. **Light theme hierarchy is compressed.** `--text-dim` and `--text-faint` are only 1.2:1 apart in
+   light (6.35 vs 5.24 on `--bg`), so timestamps and descriptions read as one gray. Use weight and
+   size, not the faint tier, to build hierarchy in dense light screens. Re-spacing the tiers is a
+   separate palette change.
+7. **Danger fill in other schemes.** `--danger-bg` is set for the Wollipog scheme only. Until the
+   scheme generator emits a checked `--danger-bg`, destructive confirm buttons in Dracula, Monokai,
+   GitHub and One Dark use the Wollipog red.

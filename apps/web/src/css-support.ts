@@ -96,7 +96,7 @@ export type CssFeature = RequiresFloor | Downlevelled | Degrades;
  * time.)
  *
  * Deliberately absent, because they are older than every version below and so cannot raise the
- * floor: `:is()`, `content-visibility`, `accent-color`, `inert`, `dvh` units.
+ * floor: `:is()`, `:where()`, `content-visibility`, `accent-color`, `inert`, `dvh` units.
  */
 export const CSS_FEATURES: readonly CssFeature[] = [
   {
@@ -203,7 +203,7 @@ export const CSS_SURFACE = {
   pseudos: [
   "active", "after", "before", "disabled", "empty", "first-child", "first-of-type", "focus",
   "focus-visible", "focus-within", "has", "hover", "is", "last-child", "not", "nth-child",
-  "root",
+  "root", "where",
   ],
   /** Function names appearing in declaration values. */
   functions: [

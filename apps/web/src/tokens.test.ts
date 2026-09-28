@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { MOBILE_BREAKPOINT_PX, TABLET_BREAKPOINT_PX } from "./components/useIsMobile.js";
 import { customProperties, mediaBlocks, topLevelRule } from "./css-rules.js";
+import { ALTERNATIVES, SCHEMES, THEMES } from "./palettes.js";
 
 const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
 
@@ -35,11 +36,12 @@ test("no root scope declares the same custom property twice", () => {
   }
 });
 
-test("the legacy radius tokens keep their existing values", () => {
+test("the palette radius tokens hold the design system's control and container tiers", () => {
+  // docs/design-system.md §2.5 and §19.1: controls tightened from 8 to 6, containers from 10 to 8.
   const palette = scope(PALETTE);
   assert.equal(only(palette, "--radius", "the palette block"), "12px");
-  assert.equal(only(palette, "--radius-sm", "the palette block"), "8px");
-  assert.equal(only(palette, "--radius-md", "the palette block"), "10px");
+  assert.equal(only(palette, "--radius-sm", "the palette block"), "6px");
+  assert.equal(only(palette, "--radius-md", "the palette block"), "8px");
 });
 
 /**
@@ -75,7 +77,7 @@ test("the type scale is the intended rem ladder", () => {
   const expected: ReadonlyArray<[string, string, number]> = [
     ["--text-2xs", "0.625rem", 10], ["--text-xs", "0.6875rem", 11],
     ["--text-sm", "0.75rem", 12], ["--text-base", "0.8125rem", 13],
-    ["--text-md", "0.875rem", 14], ["--text-lg", "1.0625rem", 17],
+    ["--text-md", "0.875rem", 14], ["--text-lg", "1rem", 16],
     ["--text-xl", "1.25rem", 20], ["--text-2xl", "1.5rem", 24],
   ];
   for (const [name, value, px] of expected) {
@@ -90,8 +92,8 @@ test("the radius scale is an exact px ladder", () => {
   const tokens = scope(TOKENS);
   const palette = scope(PALETTE);
   assert.equal(only(tokens, "--radius-xs", "the token block"), "4px");
-  assert.equal(only(palette, "--radius-sm", "the palette block"), "8px");
-  assert.equal(only(palette, "--radius-md", "the palette block"), "10px");
+  assert.equal(only(palette, "--radius-sm", "the palette block"), "6px");
+  assert.equal(only(palette, "--radius-md", "the palette block"), "8px");
   assert.equal(only(tokens, "--radius-lg", "the token block"), "12px");
   assert.equal(only(tokens, "--radius-pill", "the token block"), "999px");
 });
@@ -154,12 +156,17 @@ test("the token block declares every promised member of every scale", () => {
     "--text-2xs", "--text-xs", "--text-sm", "--text-base", "--text-md", "--text-lg", "--text-xl", "--text-2xl",
     "--leading-tight", "--leading-normal", "--leading-relaxed",
     "--weight-normal", "--weight-medium", "--weight-semibold", "--weight-bold",
-    "--space-1", "--space-2", "--space-3", "--space-4", "--space-5", "--space-6", "--space-8", "--space-10",
+    "--type-page-title", "--type-title", "--type-section", "--type-body", "--type-body-strong",
+    "--type-reading", "--type-small", "--type-label", "--type-micro", "--type-figure",
+    "--space-0-5", "--space-1", "--space-2", "--space-3", "--space-4", "--space-5", "--space-6", "--space-8",
+    "--space-10", "--space-12", "--space-16",
     "--radius-xs", "--radius-lg", "--radius-pill",
     "--dur-instant", "--dur-fast", "--dur-base", "--dur-slow", "--ease-out", "--ease-spring",
     "--elev-1", "--elev-2", "--elev-3",
     "--z-sticky", "--z-dock", "--z-popover", "--z-backdrop", "--z-modal", "--z-palette", "--z-toast",
     "--bp-phone", "--bp-tablet", "--bp-desktop",
+    "--surface-selected", "--focus", "--focus-width", "--focus-offset",
+    "--primary-bg", "--primary-bg-hover", "--primary-bg-active", "--primary-fg", "--tint",
   ];
   const missing = promised.filter((name) => !tokens.has(name));
   assert.deepEqual(missing, [], `promised but not declared globally: ${missing.join(", ")}`);
@@ -175,4 +182,93 @@ test("the elevation ramp is complete in both themes", () => {
   // topLevelRule throws unless there is exactly one, so reaching here proves it.
   assert.doesNotThrow(() => topLevelRule(css, LIGHT),
     "a theme must be declared in exactly one top-level block");
+});
+
+/**
+ * The values docs/design-system.md §2.2–§2.4 fixes. Derived colours are `var()` references in the
+ * shared block, so every scheme resolves them from its own palette; asserting the reference rather
+ * than a hex is what keeps them derived.
+ */
+test("the foundation tokens hold the design system's values", () => {
+  const tokens = scope(TOKENS);
+  const expected: ReadonlyArray<[string, string]> = [
+    ["--surface-selected", "color-mix(in srgb, var(--accent) 12%, var(--bg-elev))"],
+    ["--focus", "var(--text)"], ["--focus-width", "2px"], ["--focus-offset", "2px"],
+    ["--primary-bg", "var(--primary-from)"], ["--primary-bg-hover", "var(--primary-hover-from)"],
+    ["--primary-bg-active", "var(--primary-active-from)"], ["--primary-fg", "var(--on-accent)"],
+    ["--tint", "14%"],
+    ["--type-page-title", "600 var(--text-xl)/28px var(--font-ui)"],
+    ["--type-title", "600 var(--text-lg)/24px var(--font-ui)"],
+    ["--type-section", "600 var(--text-md)/20px var(--font-ui)"],
+    ["--type-body", "400 var(--text-base)/20px var(--font-ui)"],
+    ["--type-body-strong", "500 var(--text-base)/20px var(--font-ui)"],
+    ["--type-reading", "400 var(--text-md)/22px var(--font-ui)"],
+    ["--type-small", "400 var(--text-sm)/16px var(--font-ui)"],
+    ["--type-label", "500 var(--text-sm)/16px var(--font-ui)"],
+    ["--type-micro", "500 var(--text-xs)/16px var(--font-ui)"],
+    ["--type-figure", "600 var(--text-2xl)/32px var(--font-ui)"],
+    ["--space-0-5", "2px"], ["--space-12", "48px"], ["--space-16", "64px"],
+  ];
+  for (const [name, value] of expected) assert.equal(only(tokens, name, "the token block"), value, name);
+});
+
+/**
+ * Per-theme tokens live in the two theme blocks, one value each. The four generated schemes inherit
+ * them (colour-schemes.test.ts measures that the inherited pairs still read in every scheme).
+ */
+test("the per-theme foundation tokens have a value in each theme", () => {
+  const palette = scope(PALETTE);
+  const light = scope(LIGHT);
+  const expected: ReadonlyArray<[string, string, string]> = [
+    ["--field-bg", "var(--bg)", "var(--bg-elev)"],
+    ["--danger-bg", "#c93c37", "#cf222e"],
+    ["--danger-bg-hover", "#b62324", "#a40e26"],
+    ["--danger-fg", "#ffffff", "#ffffff"],
+    ["--count-warning-fg", "#1b1300", "#ffffff"],
+  ];
+  for (const [name, dark, lightValue] of expected) {
+    assert.equal(only(palette, name, "the palette block"), dark, `${name} (dark)`);
+    assert.equal(only(light, name, "the light theme"), lightValue, `${name} (light)`);
+    assert.equal(scope(TOKENS).get(name), undefined, `${name} in the token block would outrank the light theme`);
+  }
+});
+
+const FOUNDATION_TOKENS = [
+  "--surface-selected", "--focus", "--focus-width", "--focus-offset", "--primary-bg", "--primary-bg-hover",
+  "--primary-bg-active", "--primary-fg", "--danger-fg", "--tint", "--field-bg", "--danger-bg",
+  "--danger-bg-hover", "--count-warning-fg", "--type-page-title", "--type-title", "--type-section",
+  "--type-body", "--type-body-strong", "--type-reading", "--type-small", "--type-label", "--type-micro",
+  "--type-figure", "--space-0-5", "--space-12", "--space-16",
+] as const;
+
+/**
+ * Every foundation token resolves, through its whole `var()` chain, in every scheme and theme.
+ *
+ * The cascade on `<html>` is modelled the way the selectors apply: the token block and the palette
+ * block match in both themes, the light block overrides in light, and a scheme block overrides last.
+ * A derived token that names something a scheme lacks, or a per-theme token missing from one theme,
+ * fails here rather than rendering as an invalid declaration in that one palette.
+ */
+test("the foundation tokens resolve in every colour scheme and theme", () => {
+  assert.ok(ALTERNATIVES.length >= 4, "the four generated schemes must be registered");
+  for (const scheme of SCHEMES) {
+    for (const theme of THEMES) {
+      const layers = [scope(TOKENS), scope(PALETTE)];
+      if (theme === "light") layers.push(scope(LIGHT));
+      if (scheme !== "wollipog") layers.push(scope(`:root[data-scheme="${scheme}"][data-theme="${theme}"]`));
+      const merged = new Map<string, string>();
+      for (const layer of layers) for (const [name, values] of layer) merged.set(name, values[values.length - 1]!);
+
+      const resolve = (name: string, seen: string[]): string => {
+        assert.ok(!seen.includes(name), `${scheme}/${theme}: ${[...seen, name].join(" -> ")} is a cycle`);
+        const value = merged.get(name);
+        assert.ok(value !== undefined, `${scheme}/${theme}: ${seen.at(-1) ?? name} references undeclared ${name}`);
+        return value.replace(/var\(\s*(--[a-z0-9-]+)\s*\)/g, (_, inner: string) => resolve(inner, [...seen, name]));
+      };
+      for (const name of FOUNDATION_TOKENS) {
+        const value = resolve(name, []);
+        assert.doesNotMatch(value, /var\(/, `${scheme}/${theme}: ${name} did not resolve (${value})`);
+      }
+    }
+  }
 });

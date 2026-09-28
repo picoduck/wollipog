@@ -149,13 +149,22 @@ test("the CIEDE2000 implementation matches the published reference pairs", () =>
   }
 });
 
+/**
+ * Literal colours the generated schemes deliberately inherit from the base theme
+ * (docs/design-system.md §2.2). They are not a scheme's identity: a solid danger fill carrying white
+ * text, and the ink on an amber count badge. What makes inheriting them safe is that the pairs they
+ * form still clear AA against every scheme's own colours, which the test below measures.
+ */
+const INHERITED_BY_SCHEMES = new Set(["--danger-bg", "--danger-bg-hover", "--danger-fg", "--count-warning-fg"]);
+
 test("every scheme declares every colour the base theme declares", () => {
   // A missing token is not a missing colour — it is WOLLIPOG'S colour, inherited into a foreign
   // palette. Dracula with Wollipog's teal accent looks deliberate and is not.
   for (const theme of THEMES) {
     const base = [...declared(topLevelRule(css, BASE[theme]), `${theme} base`)]
       .filter(([, value]) => /^#[0-9a-fA-F]{6}$/.test(value.trim()))
-      .map(([name]) => name);
+      .map(([name]) => name)
+      .filter((name) => !INHERITED_BY_SCHEMES.has(name));
     assert.ok(base.length > 40, `the ${theme} base declares only ${base.length} literal colours`);
     for (const scheme of ALTERNATIVES) {
       const block = topLevelRule(css, `:root[data-scheme="${scheme}"][data-theme="${theme}"]`);
@@ -215,6 +224,23 @@ test("text on a filled accent clears AA in every scheme", () => {
     }
   }
   assert.deepEqual(failures, [], "a fill that carries text has to be readable in every scheme");
+});
+
+test("the inherited danger and count-warning pairs clear AA in every scheme", () => {
+  const failures: string[] = [];
+  for (const scheme of SCHEMES) {
+    for (const theme of THEMES) {
+      const tokens = tokensFor(scheme, theme);
+      for (const [ink, ground] of [["--danger-fg", "--danger-bg"], ["--danger-fg", "--danger-bg-hover"],
+        ["--count-warning-fg", "--amber"]] as const) {
+        const [a, b] = [literal(tokens, ink), literal(tokens, ground)];
+        assert.ok(a && b, `${scheme}/${theme}: ${ink} and ${ground} must both resolve to a literal colour`);
+        const measured = contrast(a, b);
+        if (measured < 4.5) failures.push(`${scheme}/${theme}: ${ink} on ${ground} is ${measured.toFixed(2)}:1`);
+      }
+    }
+  }
+  assert.deepEqual(failures, [], "a scheme that inherits these tokens must still read at 4.5:1");
 });
 
 test("the committed schemes are what the generator produces", () => {

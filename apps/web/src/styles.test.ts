@@ -123,10 +123,80 @@ test("every referenced custom property is defined in the shared root scope", () 
 test("the global focus ring does not restyle the focused element", () => {
   // Anchored to the complete selector: a substring search matches the tail of component rules such
   // as `.rail-brand:focus-visible`, which would leave this test green if the global rule regressed.
-  const body = soleRuleBody(":focus-visible");
+  const body = soleRuleBody(":where(:focus-visible)");
   assert.match(body, /outline:/);
   assert.doesNotMatch(body, /border-radius/,
     "border-radius in :focus-visible changes the element's shape, not the outline's");
+});
+
+/** The one top-level rule whose selector, with all whitespace removed, is exactly this. */
+function baseRule(selector: string): string {
+  const squash = (text: string) => text.replace(/\s+/g, "");
+  const matches = allDeclarations(css).filter((declaration) => squash(declaration.selector) === squash(selector));
+  assert.ok(matches.length > 0, `the base layer must contain a rule for ${selector}`);
+  return matches.map((declaration) => `${declaration.prop}: ${declaration.value};`).join("\n");
+}
+
+/**
+ * Focus is neutral (docs/design-system.md §16.1). The global ring is `--focus` at zero specificity,
+ * programmatic targets (`tabIndex={-1}`: the page title, a dialog card, the Settings panel heading)
+ * show none, and text fields show focus on their own edge.
+ */
+test("the global focus ring is neutral, zero-specificity and absent on programmatic targets", () => {
+  assert.equal(soleRuleBody(":where(:focus-visible)"),
+    "outline: var(--focus-width) solid var(--focus);\noutline-offset: var(--focus-offset);");
+  assert.equal(soleRuleBody(':where([tabindex="-1"]):focus'), "outline: none;");
+  assert.equal(soleRuleBody(".clip-focus :focus-visible"), "outline-offset: calc(-1 * var(--focus-width));");
+  // A bare `:focus-visible` is (0,1,0) and would outrank component rules that draw their own focus.
+  assert.throws(() => topLevelRule(css, ":focus-visible"), /found 0/,
+    "the global ring must stay inside :where() so it never outranks a component");
+
+  const field = baseRule(':where(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], ' +
+    '[type="color"]), textarea, select, .ui-select-trigger, .ui-searchable-combobox-input):focus-visible');
+  assert.match(field, /border-color: var\(--focus\);/);
+  assert.match(field, /outline: 1px solid var\(--focus\);/);
+});
+
+test("no focus ring anywhere is drawn in the accent colour", () => {
+  // Teal marks selection. A component that restates the ring restates it neutral; the components
+  // that draw focus another way (a field's border, the composer card) are not outlines.
+  // One exception, until selection moves to the accent bar (§5.2): the selected Sessions row is a
+  // --text ring today, so a neutral focus ring on that row would be indistinguishable from it.
+  const SELECTION_IS_NEUTRAL = new Set([".inbox-row:focus-visible"]);
+  const accentRings = allDeclarations(css).filter((declaration) =>
+    /:focus/.test(declaration.selector) && /^outline/.test(declaration.prop) && /--accent\b/.test(declaration.value)
+    && !SELECTION_IS_NEUTRAL.has(declaration.selector));
+  assert.deepEqual(accentRings.map((declaration) => `${declaration.line}: ${declaration.selector}`), []);
+  assert.match(soleRuleBody(".inbox-row-shell.selected .inbox-row"), /border-color: var\(--text\);/,
+    "the exception exists only while the selected row is drawn in --text; remove it when that changes");
+});
+
+/**
+ * The base resets (docs/design-system.md §2.3 and §2.4). Without them inputs render in the browser's
+ * Arial, unsized buttons at 13.333px, a field inside a bold label renders bold, and a button with no
+ * class renders as a gray browser button.
+ */
+test("form controls and buttons inherit the app's type, and bare buttons reset", () => {
+  assert.equal(baseRule("body").split("\n").find((line) => line.startsWith("font:")), "font: var(--type-body);");
+  assert.doesNotMatch(baseRule("body"), /font-size|font-family/, "body type comes from --type-body alone");
+  assert.equal(baseRule("button, input, select, textarea"), "font: inherit;");
+  assert.equal(baseRule("input, select, textarea").split("\n")[0], "font-weight: 400;");
+  assert.equal(baseRule(":where(button)"),
+    ["background: none;", "border: 0;", "color: inherit;", "font: inherit;", "padding: 0;"].join("\n"));
+  // The Automation form's fields inherited 600 from their label through a local `font: inherit`.
+  assert.doesNotMatch(soleRuleBody(".automation-form-grid input, .automation-form-grid select, .automation-form-grid textarea"),
+    /font:/, "a local font shorthand would re-inherit the label's weight");
+});
+
+test("links, native controls and code use the base recipes", () => {
+  assert.equal(baseRule("html"), "accent-color: var(--accent);");
+  assert.equal(baseRule("a, .link"), "color: var(--accent);");
+  assert.equal(baseRule("a.btn"), "text-decoration: none;");
+  assert.equal(baseRule("code, pre"), "font-family: var(--font-mono);");
+  assert.match(baseRule(":not(pre) > code"), /border: 1px solid var\(--border\);/);
+  // The chip belongs to inline code only. A bare `code` rule would put it back inside `pre`.
+  assert.throws(() => topLevelRule(css, "code"), /found 0/, "the chip must stay scoped to :not(pre) > code");
+  assert.equal(baseRule(":where(.form, .section, .surface, .modal-body, .notice, .empty) > *"), "margin: 0;");
 });
 
 test("the permission-mode popover keeps rows compact while long labels can wrap", () => {

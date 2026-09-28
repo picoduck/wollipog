@@ -358,8 +358,6 @@
     "|.ws-create-name|font-size|13",
     "|.ws-name|font-size|12.5",
     "|.ws-path|font-size|11.5",
-    "|body|font-size|14",
-    "|code|font-size|12",
     "|select,input,textarea|font-size|13"
   ],
   "radiusLiterals": [
@@ -533,8 +531,7 @@
     "|.workflow-status|border-radius|999",
     "|.working-dots span|border-radius|50",
     "|.workspace-list li|border-radius|8",
-    "|::-webkit-scrollbar-thumb|border-radius|6",
-    "|code|border-radius|6"
+    "|::-webkit-scrollbar-thumb|border-radius|6"
   ],
   "zIndexLiterals": [
     "|.cbar-pop|z-index|1",
@@ -568,6 +565,7 @@
     "checkbox",
     "chip",
     "chips",
+    "clip-focus",
     "col-done",
     "col-input_required",
     "col-review",
@@ -603,10 +601,12 @@
     "following",
     "is-pass",
     "is-pending",
+    "link",
     "loc-local",
     "loc-ssh",
     "modal",
     "modal-wide",
+    "notice",
     "onboard-health-fail",
     "onboard-health-pass",
     "onboard-health-warning",
@@ -642,6 +642,7 @@
     "sdot-queued",
     "sdot-running",
     "sdot-starting",
+    "section",
     "session-preview",
     "st-done",
     "st-stopped",
@@ -651,6 +652,7 @@
     "status-missing-credential",
     "status-offline",
     "status-online",
+    "surface",
     "timed-out",
     "toast-error",
     "toast-success",

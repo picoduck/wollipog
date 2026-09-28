@@ -690,7 +690,7 @@ export function AgentsPanel(props: Props) {
             {!owner && request.ownerToolUseId && compactOwner?.resolved !== true && " · Child Owner Unavailable"}
           </button>;
         })}
-        {requests.length > requestLimit && <button type="button" onClick={() => setRequestLimit((value) => value + PAGE_SIZE)}>Show More Requests</button>}
+        {requests.length > requestLimit && <button type="button" className="btn ghost sm" onClick={() => setRequestLimit((value) => value + PAGE_SIZE)}>Show More Requests</button>}
         {selectedRequest && primaryInSession && <button ref={primaryRequestRef} type="button" className="btn"
           onClick={() => props.onOpenPrimaryRequest?.(selectedRequest.requestId)}>Open Request in Session</button>}
         {selectedRequest && !primaryInSession && <div ref={requestDetailRef} tabIndex={-1} role="region" aria-label="Selected Worker Request"
@@ -713,7 +713,7 @@ export function AgentsPanel(props: Props) {
       {registryLoading && registry === null && <p className="hint" role="status">Loading recorded workers…</p>}
       {registryRetry && !registryRetryExhausted && <p className="hint" role="status">Recorded worker inventory changed while loading. Retrying…</p>}
       {registryRetryExhausted && <p className="hint" role="status">Recorded worker inventory kept changing.
-        <button type="button" onClick={() => {
+        <button type="button" className="btn sm" onClick={() => {
           setRegistryRetryExhausted(false);
           loadRegistry(registryRetryAfter ?? 0);
         }}>Retry Recorded Workers</button>
@@ -721,7 +721,7 @@ export function AgentsPanel(props: Props) {
       {workflowError && <p className="hint" role="status">Workflow phase details are unavailable. Session status remains visible.</p>}
       {session.backgroundJobsAvailable && !session.backgroundJobs && <p className="hint" role="status">
         {props.inventoryError || "Loading background work…"}
-        {props.inventoryError && <button type="button" onClick={props.onRetryInventory}>Retry Background Work</button>}
+        {props.inventoryError && <button type="button" className="btn sm" onClick={props.onRetryInventory}>Retry Background Work</button>}
       </p>}
       {session.backgroundWorkTracking === "untracked" && <p className="hint">This provider does not expose a managed background-job inventory. Detached work cannot be verified.</p>}
       {session.backgroundJobsTruncated && <p className="hint">Older background-job history is outside the loaded inventory.</p>}
@@ -759,8 +759,8 @@ export function AgentsPanel(props: Props) {
           </div>;
         })}
       </div>
-      {filtered.length > limit && <button type="button" onClick={() => setLimit((value) => value + PAGE_SIZE)}>Show More Workers</button>}
-      {registryAfter !== null && registry !== null && <button type="button" disabled={registryLoading}
+      {filtered.length > limit && <button type="button" className="btn ghost sm" onClick={() => setLimit((value) => value + PAGE_SIZE)}>Show More Workers</button>}
+      {registryAfter !== null && registry !== null && <button type="button" className="btn ghost sm" disabled={registryLoading}
         onClick={() => loadRegistry(registryAfter)}>{registryLoading ? "Loading More Workers…" : "Load More Recorded Workers"}</button>}
       {(selected?.target.kind === "subagent" || requestedId) &&
         <SubagentsPanel {...props} detailOnly requestedId={requestedId || (selected?.target.kind === "subagent" ? selected.target.id : null)} />}
