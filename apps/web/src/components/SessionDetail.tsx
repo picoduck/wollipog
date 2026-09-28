@@ -3880,17 +3880,12 @@ function SessionDetailLoaded({
   };
   // The Plan pill and each attachment ✕ unmount when they act. A pointer never focuses them, but a
   // keyboard user's focus would fall to the page with them, so it moves to the composer (#1913).
-  // A composer that cannot prompt is disabled and refuses focus; then the nearest enabled button
-  // that stays in the composer takes it, the next one first.
+  // A composer that cannot prompt is disabled and refuses focus; then Session Activity takes it, as
+  // it does when a resolved request cannot hand focus back to the composer.
   const keepFocusInComposer = (control: HTMLElement) => {
     const document = control.ownerDocument;
     if (document.activeElement !== control) return;
-    const leaving = control.closest(".image-thumb, .workspace-reference-chip") ?? control;
-    const staying = [...control.closest(".composer-box")?.querySelectorAll<HTMLElement>("button:not(:disabled)") ?? []]
-      .filter((button) => !leaving.contains(button));
-    const next = staying.filter((button) => leaving.compareDocumentPosition(button) & Node.DOCUMENT_POSITION_FOLLOWING);
-    const previous = staying.filter((button) => !next.includes(button)).reverse();
-    for (const target of [inputRef.current, ...next, ...previous]) {
+    for (const target of [inputRef.current, scrollRef.current]) {
       target?.focus({ preventScroll: true });
       if (document.activeElement === target) return;
     }
