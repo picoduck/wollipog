@@ -102,12 +102,12 @@ test("the page header owns the page title and orders its actions for priority+ o
     await act(async () => more.click());
     const menu = domWindow.document.querySelector('[role="menu"]')!;
     assert.equal(container.contains(menu as never), false, "the pop is not inside the header");
-    assert.equal(menu.parentElement, domWindow.document.body);
+    assert.ok(menu.parentElement === domWindow.document.body, "the pop is a child of <body>");
     const items = [...menu.querySelectorAll('[role="menuitem"]')];
     assert.deepEqual(items.map((item) => item.textContent), ["Import from Machine"]);
     await act(async () => (items[0] as unknown as HTMLButtonElement).click());
     assert.deepEqual(calls, ["Import from Machine"]);
-    assert.equal(domWindow.document.activeElement, more as never, "choosing an item returns focus to ⋯");
+    assert.ok(domWindow.document.activeElement === (more as never), "choosing an item returns focus to ⋯");
   } finally {
     await view.unmount();
   }
@@ -140,8 +140,11 @@ test("⋯ lists exactly the secondaries whose buttons the header hid, plus its o
     await press(menu, "ArrowDown");
     assert.equal(domWindow.document.activeElement?.textContent, "Manage Groups");
     await press(menu, "Escape");
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
-    assert.equal(domWindow.document.activeElement, more as never, "Escape returns focus to ⋯");
+    assert.ok(domWindow.document.querySelector('[role="menu"]') === null, "the menu closed");
+    // Escape restores focus on the next task (`restoreTriggerFocus`), so let it run. Identity, not
+    // assert.equal: a failing diff of two DOM nodes walks the whole happy-dom graph.
+    await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 5)); });
+    assert.ok(domWindow.document.activeElement === (more as never), "Escape returns focus to ⋯");
   } finally {
     await view.unmount();
     style.remove();
@@ -226,8 +229,8 @@ test("a detail bar keeps the phone app bar's instance switcher, and Tab leaves �
     const menu = domWindow.document.querySelector('[role="menu"]') as unknown as Element;
     assert.equal(domWindow.document.activeElement?.textContent, "Rename…");
     await press(menu, "Tab");
-    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
-    assert.equal(domWindow.document.activeElement, more as never,
+    assert.ok(domWindow.document.querySelector('[role="menu"]') === null, "the menu closed");
+    assert.ok(domWindow.document.activeElement === (more as never),
       "the browser's Tab continues from ⋯, not from the end of <body> where the pop lived");
   } finally {
     await view.unmount();

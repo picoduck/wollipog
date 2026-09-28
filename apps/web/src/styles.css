@@ -1237,9 +1237,10 @@ pre {
   .page-more[data-overflow] { display: block; }
 }
 
-/* The Tauri instance switcher, in the phone app bar: its icon only. The trigger carries its own
-   accessible name ("Switch Instance, Current <name>"), so dropping the visible label is safe. */
-.page-actions .instance-selector-trigger {
+/* The Tauri instance switcher, in the phone app bar and the phone detail bar: its icon only. The
+   trigger carries its own accessible name ("Switch Instance, Current <name>"), so dropping the
+   visible label is safe, and a long instance name can never take the title's room. */
+:is(.page-actions, .detail-bar-actions) .instance-selector-trigger {
   width: var(--control-h);
   height: var(--control-h);
   flex: none;
@@ -1247,8 +1248,8 @@ pre {
   padding: 0;
   border-color: transparent;
 }
-.page-actions .instance-selector-label,
-.page-actions .instance-selector-chevron { display: none; }
+:is(.page-actions, .detail-bar-actions) .instance-selector-label,
+:is(.page-actions, .detail-bar-actions) .instance-selector-chevron { display: none; }
 
 /* Entity pages: one 48px bar with Back, the entity title as the page's h1, one status badge, then
    the actions (§4.3). The title takes the free space and truncates; the badge follows it. */

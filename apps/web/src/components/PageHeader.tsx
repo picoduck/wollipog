@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState, type ReactNode, type Ref } from "react";
+import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { createPortal } from "react-dom";
 import { ChevronLeftIcon, MoreHorizontalIcon, PlusIcon } from "./Icons.js";
 import { useAccessibleMenu, useAnchoredMenuStyle } from "./interactions.js";
@@ -207,7 +207,25 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
   const shown = open
     ? items.filter((item) => item.slot === undefined || !slotButtonShown(menu.triggerRef.current, item.slot))
     : [];
-  const { close, triggerRef } = menu;
+  const { close, triggerRef, menuRef } = menu;
+  // Whether keyboard focus is in the pop. A width change can drop the focused item from a menu
+  // that stays open (its button reappeared); focus then stays in the menu, not on <body>. A layout
+  // effect, so it runs in the same commit, before the shell's route and layout focus rescue.
+  const focusInMenu = useRef(false);
+  // The slot of the item focus was last on: a re-render can remove that item before the observer
+  // below runs, and it still needs to know which button now stands for it.
+  const focusedSlot = useRef<string | undefined>(undefined);
+  useLayoutEffect(() => {
+    if (!open) {
+      focusInMenu.current = false;
+      focusedSlot.current = undefined;
+      return;
+    }
+    const pop = menuRef.current;
+    if (focusInMenu.current && pop && !pop.contains(pop.ownerDocument.activeElement)) {
+      pop.querySelector<HTMLElement>('[role="menuitem"]:not(:disabled)')?.focus();
+    }
+  });
   // A width change can show the buttons ⋯ was standing in for, or hide ⋯ itself: re-read the list,
   // and close a menu whose trigger is gone or that has nothing left to offer. Observed on the
   // action row and the trigger rather than on `resize`, which can arrive before the width tiers
@@ -217,15 +235,30 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
     const row = trigger?.closest<HTMLElement>(".page-actions, .detail-bar-actions");
     if (!open || !trigger || typeof ResizeObserver === "undefined") return;
     const observer = new ResizeObserver(() => {
-      const orphaned = trigger.getClientRects().length === 0 ||
+      const active = trigger.ownerDocument.activeElement as HTMLElement | null;
+      const hadFocus = Boolean(active && menuRef.current?.contains(active)) || focusInMenu.current;
+      const slot = focusedSlot.current;
+      const triggerShown = trigger.getClientRects().length > 0;
+      const orphaned = !triggerShown ||
         !items.some((item) => item.slot === undefined || !slotButtonShown(trigger, item.slot));
-      if (orphaned) close(false);
-      else remeasure((tick) => tick + 1);
+      if (!orphaned) {
+        remeasure((tick) => tick + 1);
+        return;
+      }
+      close(false);
+      if (!hadFocus) return;
+      // The focused item is going away with its menu: keep keyboard focus in the header, on the
+      // button that now stands for the item, else on ⋯, else on the page title (§16.1).
+      const button = slot ? row?.querySelector<HTMLElement>(`.page-action[data-slot="${slot}"]`) : null;
+      const target = button && button.getClientRects().length > 0 ? button
+        : triggerShown ? trigger
+        : trigger.ownerDocument.getElementById("page-title");
+      target?.focus();
     });
     observer.observe(trigger);
     if (row) observer.observe(row);
     return () => observer.disconnect();
-  }, [open, items, close, triggerRef]);
+  }, [open, items, close, triggerRef, menuRef]);
   const menuStyle = useAnchoredMenuStyle(open, menu.triggerRef, {
     desiredWidth: 220,
     // A touch row is 44px plus the 2px gap; the pop adds its padding and a separator.
@@ -267,6 +300,16 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
             // Fixed from the first commit: before the anchor is measured, `.menu-pop`'s own absolute
             // position would put it at the end of <body>, and focusing its first item scrolls there.
             style={menuStyle ?? UNANCHORED_POP}
+            onFocus={(event) => {
+              focusInMenu.current = true;
+              focusedSlot.current = (event.target as HTMLElement).dataset.slot;
+            }}
+            onBlur={(event) => {
+              // Only a real move out; a removed item blurs with no related target.
+              if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) {
+                focusInMenu.current = false;
+              }
+            }}
             onKeyDown={(event) => {
               // The pop lives at the end of <body>, so Tab from it would leave the page header.
               // Put focus back on ⋯ first; the browser's Tab then moves on from there.
@@ -280,6 +323,7 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
                 type="button"
                 role="menuitem"
                 className={`menu-item${item.danger ? " menu-danger" : ""}${index === firstDanger && index > 0 ? " menu-separated" : ""}`}
+                data-slot={item.slot}
                 disabled={item.disabled}
                 title={item.title}
                 onClick={() => choose(item.onClick)}

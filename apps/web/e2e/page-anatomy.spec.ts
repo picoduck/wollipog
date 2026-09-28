@@ -180,11 +180,16 @@ test.describe("page header actions follow the width tiers", () => {
     await page.setViewportSize({ width: 390, height: 844 });
     await openDestination(page, "/skills", "Agent Skills");
     const trigger = page.locator(".page-header").getByRole("button", { name: "More Actions", exact: true });
-    await trigger.click();
+    await trigger.focus();
+    await page.keyboard.press("Enter");
     const items = page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem");
     await expect(items).toHaveText(["Import from Machine", "Manage Groups", "Import from Git"]);
+    await page.keyboard.press("End");
+    await expect(items.last()).toBeFocused();
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(items).toHaveText(["Import from Machine"]);
+    // The focused item left the list; focus stays in the menu instead of falling to <body>.
+    await expect(items.first()).toBeFocused();
 
     // Connections has one secondary, so ⋯ exists only while that button is hidden: widening past
     // the phone tier hides ⋯ itself, and its menu and backdrop must go with it.
@@ -192,12 +197,15 @@ test.describe("page header actions follow the width tiers", () => {
     await page.goto(shell("/connections"));
     await expect(page.getByRole("heading", { level: 1, name: "Connections" })).toBeVisible();
     await expect(page.locator(".page-header .page-action")).toHaveText(["Add Native Runner"]);
-    await page.locator(".page-header").getByRole("button", { name: "More Actions", exact: true }).click();
+    await page.locator(".page-header").getByRole("button", { name: "More Actions", exact: true }).focus();
+    await page.keyboard.press("Enter");
     await expect(page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem")).toHaveText(["Add Native Runner"]);
+    await expect(page.getByRole("menuitem", { name: "Add Native Runner" })).toBeFocused();
     await page.setViewportSize({ width: 1440, height: 900 });
     await expect(page.getByRole("menu", { name: "More Actions" })).toHaveCount(0);
     await expect(page.locator(".menu-backdrop")).toHaveCount(0);
-    await expect(page.locator(".page-header").getByRole("button", { name: "Add Native Runner", exact: true })).toBeVisible();
+    // Keyboard focus moves to the button that now stands for the item it was on.
+    await expect(page.locator(".page-header").getByRole("button", { name: "Add Native Runner", exact: true })).toBeFocused();
   });
 
   test.describe("on a phone", () => {
