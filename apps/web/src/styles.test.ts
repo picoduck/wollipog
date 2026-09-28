@@ -244,6 +244,16 @@ test("phone-width rules resize controls but never change their font family", () 
   assert.deepEqual(guard, ["font-size: 16px"], "the focus-zoom guard sets the size and nothing else");
 });
 
+test("a connection banner takes the top safe area only at the very top of the main area", () => {
+  // On a phone page route the banner sits above the page header, which gives up its safe-area
+  // padding (#1801); on the phone Session route it sits below the Session bar, which keeps it.
+  const phone = mediaBlocks(css).filter((block) => block.maxWidths.includes(760));
+  const first = phone.flatMap((block) => block.declarationsForSelector(".main > .notice.page-banner:first-child").get("padding-top") ?? []);
+  assert.deepEqual(first, ["max(var(--space-1), env(safe-area-inset-top, 0px))"]);
+  const bare = phone.flatMap((block) => block.declarationsForSelector(".notice.page-banner").get("padding-top") ?? []);
+  assert.deepEqual(bare, [], "a bare page-banner inset would clear the safe area twice under the Session bar");
+});
+
 test("a crashed route's error notice lines up with its page header", () => {
   // ErrorBoundary puts the notice in `.page` under the route's PageHeader (#1801); the page supplies
   // the gutter, so the notice's own standalone margin would push it right of the header.

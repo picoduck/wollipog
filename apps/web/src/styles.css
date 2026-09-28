@@ -1823,11 +1823,12 @@ button.status { cursor: pointer; }
 }
 .notice.page-banner .notice-actions { margin-top: 0; }
 @media (max-width: 760px) {
-  /* The banner sits above the page header, so it takes the top safe area the header gives up. */
   .notice.page-banner {
-    padding-top: max(var(--space-1), env(safe-area-inset-top, 0px));
     padding-inline: max(var(--space-4), env(safe-area-inset-left, 0px)) max(var(--space-4), env(safe-area-inset-right, 0px));
   }
+  /* At the very top of the main area the banner takes the safe area the page header gives up. Below
+     the phone Session bar, which already clears it, it does not. */
+  .main > .notice.page-banner:first-child { padding-top: max(var(--space-1), env(safe-area-inset-top, 0px)); }
 }
 
 /* --------------------------------- States --------------------------------
