@@ -908,8 +908,9 @@ pre {
   overflow: auto;
 }
 /* The instance recovery screen is not a routed page, so it keeps the inset `.main-body` used to
-   give every view (the page container is the gutter everywhere else). */
-.instance-recovery-body { padding: var(--space-5) var(--page-gutter) var(--space-8); }
+   give every view (the page container is the gutter everywhere else). Compound, so the phone
+   `.main-body` safe-area rule later in the sheet does not override it. */
+.main-body.instance-recovery-body { padding: var(--space-5) var(--page-gutter) var(--space-8); }
 
 /* ---------------------- Recovery and instance controls ------------------ */
 .brand {

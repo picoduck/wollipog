@@ -205,6 +205,35 @@ test("the detail bar names Back for its destination and keeps destructive action
   }
 });
 
+test("a detail bar keeps the phone app bar's instance switcher, and Tab leaves ⋯ from its trigger", async () => {
+  const view = await mount(
+    <PageChromeProvider appBarControl={<button type="button" className="instance-selector-trigger">I</button>}>
+      <DetailBar
+        title="Final QA Run"
+        backLabel="Back to Multi-Agent Runs"
+        onBack={() => undefined}
+        menu={[{ label: "Rename…", onClick: () => undefined }]}
+      />
+    </PageChromeProvider>,
+  );
+  try {
+    const actions = view.container.querySelector(".detail-bar-actions")!;
+    assert.equal(actions.firstElementChild?.className, "instance-selector-trigger",
+      "a detail route on a phone still offers instance switching, as the top bar did");
+
+    const more = view.container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!;
+    await act(async () => more.click());
+    const menu = domWindow.document.querySelector('[role="menu"]') as unknown as Element;
+    assert.equal(domWindow.document.activeElement?.textContent, "Rename…");
+    await press(menu, "Tab");
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+    assert.equal(domWindow.document.activeElement, more as never,
+      "the browser's Tab continues from ⋯, not from the end of <body> where the pop lived");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a crashed route keeps its page title above the error card", async () => {
   function Broken(): React.ReactNode {
     throw new Error("render failed");

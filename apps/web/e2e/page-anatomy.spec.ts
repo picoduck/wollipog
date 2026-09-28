@@ -166,6 +166,38 @@ test.describe("page header actions follow the width tiers", () => {
     })).toEqual([900, 800]);
     await page.mouse.click(450, 700);
     await expect(menu).toHaveCount(0);
+
+    // Keyboard: Tab out of ⋯ reaches the primary beside it, not the end of the document.
+    await trigger.focus();
+    await page.keyboard.press("Enter");
+    await expect(menu).toBeVisible();
+    await page.keyboard.press("Tab");
+    await expect(menu).toHaveCount(0);
+    await expect(page.locator(".page-header").getByRole("button", { name: "New Skill", exact: true })).toBeFocused();
+  });
+
+  test("⋯ follows a resize: it re-reads its list, and closes when it has nothing left", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await openDestination(page, "/skills", "Agent Skills");
+    const trigger = page.locator(".page-header").getByRole("button", { name: "More Actions", exact: true });
+    await trigger.click();
+    const items = page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem");
+    await expect(items).toHaveText(["Import from Machine", "Manage Groups", "Import from Git"]);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(items).toHaveText(["Import from Machine"]);
+
+    // Connections has one secondary, so ⋯ exists only while that button is hidden: widening past
+    // the phone tier hides ⋯ itself, and its menu and backdrop must go with it.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto(shell("/connections"));
+    await expect(page.getByRole("heading", { level: 1, name: "Connections" })).toBeVisible();
+    await expect(page.locator(".page-header .page-action")).toHaveText(["Add Native Runner"]);
+    await page.locator(".page-header").getByRole("button", { name: "More Actions", exact: true }).click();
+    await expect(page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem")).toHaveText(["Add Native Runner"]);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(page.getByRole("menu", { name: "More Actions" })).toHaveCount(0);
+    await expect(page.locator(".menu-backdrop")).toHaveCount(0);
+    await expect(page.locator(".page-header").getByRole("button", { name: "Add Native Runner", exact: true })).toBeVisible();
   });
 
   test.describe("on a phone", () => {

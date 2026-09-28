@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, type ReactNode, type Ref } from "react";
+import React, { createContext, useContext, useEffect, useState, type ReactNode, type Ref } from "react";
 import { createPortal } from "react-dom";
 import { ChevronLeftIcon, MoreHorizontalIcon, PlusIcon } from "./Icons.js";
 import { useAccessibleMenu, useAnchoredMenuStyle } from "./interactions.js";
@@ -148,6 +148,8 @@ export function DetailBar({
   /** ⋯ contents. Destructive actions belong only here (§3.3). */
   menu?: PageMenuAction[];
 }) {
+  // On phones a detail bar is the app bar too, so it keeps the instance switcher (§15.1).
+  const { appBarControl } = useContext(PageChromeContext);
   return (
     <header className="detail-bar">
       <button type="button" className="icon-btn detail-bar-back" onClick={onBack} title={backLabel} aria-label={backLabel}>
@@ -157,8 +159,9 @@ export function DetailBar({
         <h1 id="page-title" className="detail-bar-title" tabIndex={-1} title={title}>{title}</h1>
         {status}
       </div>
-      {(primary || secondary || menu.length > 0) && (
+      {(appBarControl || primary || secondary || menu.length > 0) && (
         <div className="detail-bar-actions">
+          {appBarControl}
           {secondary && (
             <button type="button" className="btn" disabled={secondary.disabled} title={secondary.title} onClick={secondary.onClick}>
               {secondary.label}
@@ -198,11 +201,31 @@ function slotButtonShown(trigger: HTMLElement | null, slot: number): boolean {
  */
 function ActionsMenu({ className, overflow, items }: { className?: string; overflow: string; items: ActionsMenuItem[] }) {
   const [open, setOpen] = useState(false);
+  const [, remeasure] = useState(0);
   const menu = useAccessibleMenu(open, setOpen, "page-actions-menu");
   // Read while open, so the list matches the buttons the header is showing right now.
   const shown = open
     ? items.filter((item) => item.slot === undefined || !slotButtonShown(menu.triggerRef.current, item.slot))
     : [];
+  const { close, triggerRef } = menu;
+  // A width change can show the buttons ⋯ was standing in for, or hide ⋯ itself: re-read the list,
+  // and close a menu whose trigger is gone or that has nothing left to offer. Observed on the
+  // action row and the trigger rather than on `resize`, which can arrive before the width tiers
+  // and the header's container queries have been re-applied.
+  useEffect(() => {
+    const trigger = triggerRef.current;
+    const row = trigger?.closest<HTMLElement>(".page-actions, .detail-bar-actions");
+    if (!open || !trigger || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      const orphaned = trigger.getClientRects().length === 0 ||
+        !items.some((item) => item.slot === undefined || !slotButtonShown(trigger, item.slot));
+      if (orphaned) close(false);
+      else remeasure((tick) => tick + 1);
+    });
+    observer.observe(trigger);
+    if (row) observer.observe(row);
+    return () => observer.disconnect();
+  }, [open, items, close, triggerRef]);
   const menuStyle = useAnchoredMenuStyle(open, menu.triggerRef, {
     desiredWidth: 220,
     // A touch row is 44px plus the 2px gap; the pop adds its padding and a separator.
@@ -244,7 +267,12 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
             // Fixed from the first commit: before the anchor is measured, `.menu-pop`'s own absolute
             // position would put it at the end of <body>, and focusing its first item scrolls there.
             style={menuStyle ?? UNANCHORED_POP}
-            onKeyDown={menu.onMenuKeyDown}
+            onKeyDown={(event) => {
+              // The pop lives at the end of <body>, so Tab from it would leave the page header.
+              // Put focus back on ⋯ first; the browser's Tab then moves on from there.
+              if (event.key === "Tab") menu.triggerRef.current?.focus();
+              menu.onMenuKeyDown(event);
+            }}
           >
             {ordered.map((item, index) => (
               <button
