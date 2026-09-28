@@ -1,3 +1,4 @@
+import { fireDomEvent } from "./test-dom-events.js";
 import assert from "node:assert/strict";
 import test from "node:test";
 import React, { act } from "react";
@@ -8,6 +9,7 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { bucketLabel } from "../usage-view-model.js";
+import { FeedbackProvider } from "./FeedbackProvider.js";
 import { UsageView } from "./UsageView.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -18,6 +20,7 @@ for (const [name, value] of Object.entries({
   HTMLElement: domWindow.HTMLElement,
   HTMLButtonElement: domWindow.HTMLButtonElement,
   HTMLInputElement: domWindow.HTMLInputElement,
+  Element: domWindow.Element,
   Node: domWindow.Node,
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
@@ -488,6 +491,61 @@ test("a retention save preserves aggregation changes made while the request is i
   await act(async () => { finishRetention!(); await settleLoad(); });
   assert.equal(option("Usage Aggregation", "Week").getAttribute("aria-checked"), "true");
   assert.equal(option("Usage Breakdown", "Week").getAttribute("aria-checked"), "true");
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("shortening retention asks in the in-app confirmation dialog, and only Shorten Retention saves", async () => {
+  const at = Date.UTC(2026, 8, 21);
+  const writes: { hourlyDays: number; dailyDays: number }[] = [];
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => ({
+      ...response([bucket(at, 6, 0.06)], query.granularity ?? "day"),
+      canManageRetention: true,
+    }),
+    updateUsageRetention: async (input: { hourlyDays: number; dailyDays: number }) => {
+      writes.push(input);
+      return { retention: { ...input, coverageStartedAt: 0 } };
+    },
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><FeedbackProvider><UsageView /></FeedbackProvider></ApiProvider>));
+  await act(async () => { await settleLoad(); });
+  // Dialogs are portalled to <body>, outside the view's container.
+  const dialog = () => domWindow.document.body.querySelector('[role="dialog"]') as unknown as HTMLElement | null;
+  const dialogButton = (name: string) => {
+    const button = [...dialog()!.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === name);
+    assert.ok(button, `expected ${name} in the confirmation`);
+    return button;
+  };
+  const hourly = [...container.querySelectorAll("label")]
+    .find((label) => label.textContent?.startsWith("Hourly Buckets"))!.querySelector("input")!;
+  const save = [...container.querySelectorAll("button")]
+    .find((button) => button.textContent?.trim() === "Save Retention") as HTMLButtonElement;
+
+  await act(async () => { fireDomEvent.change(hourly, { target: { value: "7" } }); });
+  await act(async () => { save.click(); await Promise.resolve(); });
+  assert.ok(dialog(), "the confirmation is the app's dialog, not the browser's");
+  assert.match(dialog()!.textContent ?? "", /Shorten Usage Retention[\s\S]*permanently removed/);
+  assert.equal(dialogButton("Cancel").className, "btn");
+  assert.equal(dialogButton("Shorten Retention").className, "btn danger");
+
+  await act(async () => { dialogButton("Cancel").click(); await drain(); });
+  assert.equal(dialog(), null);
+  assert.deepEqual(writes, [], "Cancel keeps the current retention");
+
+  await act(async () => { save.click(); await Promise.resolve(); });
+  await act(async () => { dialogButton("Shorten Retention").click(); await settleLoad(); });
+  assert.equal(dialog(), null);
+  assert.deepEqual(writes, [{ hourlyDays: 7, dailyDays: 365 }]);
 
   await act(async () => root.unmount());
   container.remove();

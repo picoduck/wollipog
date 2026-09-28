@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
-import { basename, join } from "node:path";
+import { basename, join, relative, sep } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import postcss from "postcss";
@@ -436,61 +436,209 @@ export function numericLiterals(rawValue: string): string[] {
  * fails, because its identity is not in the file. The totals below are still reported, as a
  * summary, and no longer as the guard.
  */
-export interface DebtInventory {
+export interface DebtInventory extends CssRuleDebt {
   shadowedDeclarations: string[];
+  deadClasses: string[];
+  unstyledClasses: string[];
+  emojiLiterals: string[];
+}
+
+/** The inventories read from the declarations of one style rule at a time. */
+export interface CssRuleDebt {
   fontSizeLiterals: string[];
   radiusLiterals: string[];
   zIndexLiterals: string[];
-  deadClasses: string[];
-  unstyledClasses: string[];
+  textTransform: string[];
+  gapLiterals: string[];
+  paddingLiterals: string[];
+  monoStacks: string[];
+  flexEndOverflow: string[];
 }
 
+/**
+ * What each inventory's failure tells its author to do instead, and where the design system says so.
+ *
+ * A guard that only says "new debt" sends the author to the JSON, and the JSON is the one place the
+ * fix is not: adding the identity there is how an inventory becomes a rubber stamp.
+ */
+const DEBT_GUIDANCE: Record<keyof DebtInventory, string> = {
+  shadowedDeclarations: "the same selector sets the same property twice in one context and the last one silently " +
+    "wins; merge the rules",
+  fontSizeLiterals: "use a --text-* token (docs/design-system.md §2.3)",
+  radiusLiterals: "use a --radius-* token (docs/design-system.md §2.5)",
+  zIndexLiterals: "use a --z-* token",
+  textTransform: "write the label in Title Case in the source, per AGENTS.md; never use text-transform " +
+    "(docs/design-system.md §2.3, §17.1)",
+  gapLiterals: "use a --space-* token (docs/design-system.md §2.4)",
+  paddingLiterals: "use a --space-* token (docs/design-system.md §2.4)",
+  monoStacks: "use var(--font-mono) instead of a hard-coded monospace stack (docs/design-system.md §2.3, §19.3)",
+  flexEndOverflow: "an overflowing row justified to the end cannot scroll back to its start; align to the start, " +
+    "or use margin-inline-start: auto on the first item (docs/design-system.md §19.3)",
+  deadClasses: "render the class or delete the rule",
+  unstyledClasses: "style the class or stop rendering it",
+  emojiLiterals: "use an icon from components/Icons.tsx instead of an emoji (docs/design-system.md §18)",
+};
+
 const LITERAL_PROPERTIES = { "font-size": "fontSizeLiterals", "border-radius": "radiusLiterals", "z-index": "zIndexLiterals" } as const;
+
+/** `grid-gap` and its longhands are the legacy spellings of the same properties, not a way around them. */
+const GAP_PROPERTIES = new Set(["gap", "row-gap", "column-gap", "grid-gap", "grid-row-gap", "grid-column-gap"]);
+
+/** `padding` and every longhand, physical and logical: `padding-top` through `padding-inline-end`. */
+const isPaddingProperty = (prop: string) => /^padding(?:-|$)/.test(prop);
+
+/**
+ * The monospace tokens themselves. Every other declaration naming a monospace family is a second
+ * copy of the stack, which is how the keycaps drifted to three different fonts.
+ */
+const MONO_TOKENS = new Set(["--font-mono", "--font-terminal"]);
+
+/**
+ * Every non-zero `px` literal in a value, signed, including one sitting beside or inside a token.
+ *
+ * `0px` is not a size choice, and `calc(var(--space-2) + 1px)` still hard-codes the 1px — the same
+ * reasoning `numericLiterals` gives for reading through `var()`.
+ */
+export function pxLiterals(rawValue: string): string[] {
+  const value = stripComments(rawValue).replace(/--[A-Za-z0-9_-]+/g, " ");
+  return (value.match(/-?(?<![\w.])\d*\.?\d+px(?![\w-])/gi) ?? [])
+    .map((literal) => literal.toLowerCase())
+    .filter((literal) => Number.parseFloat(literal) !== 0);
+}
+
+/**
+ * Whether a value names a monospace family: the generic keywords or a known monospace face.
+ *
+ * Custom-property NAMES are removed first, so `var(--font-mono)` is a token read and not a stack.
+ */
+export function namesMonospaceFamily(rawValue: string): boolean {
+  const value = stripComments(rawValue).replace(/--[A-Za-z0-9_-]+/g, " ");
+  return /\b(?:ui-)?monospace\b|\bmono\b|sfmono|jetbrains|cascadia|consolas|menlo|monaco|courier|fira code|source code pro|lucida console/i
+    .test(value);
+}
+
+/** `justify-content` values that pack a row against its end edge. `safe` keeps the start reachable. */
+const packsToEnd = (value: string) => {
+  const words = value.toLowerCase().split(/\s+/);
+  return !words.includes("safe") && words.some((word) => word === "flex-end" || word === "end" || word === "right");
+};
+const scrolls = (value: string) => value.toLowerCase().split(/\s+/).some((word) => word === "auto" || word === "scroll");
+
+/**
+ * The per-rule inventories of one stylesheet, by identity: rule context, selector, property and value.
+ *
+ * Takes the parsed sheet rather than reading `styles.css` itself, so the synthetic tests at the
+ * bottom of this file drive exactly the code the real guard runs.
+ */
+export function cssRuleDebt(sheet: postcss.Root): CssRuleDebt {
+  const debt: CssRuleDebt = {
+    fontSizeLiterals: [], radiusLiterals: [], zIndexLiterals: [], textTransform: [],
+    gapLiterals: [], paddingLiterals: [], monoStacks: [], flexEndOverflow: [],
+  };
+  sheet.walkRules((rule) => {
+    const where = contextKey(rule);
+    const declarations = rule.nodes.filter((node): node is postcss.Declaration => node.type === "decl");
+    for (const node of declarations) {
+      const bucket = LITERAL_PROPERTIES[node.prop as keyof typeof LITERAL_PROPERTIES];
+      // One entry per LITERAL, so `7px` growing into `7px 7px 0 0` is three new identities rather
+      // than the same declaration wearing a longer value.
+      if (bucket) for (const literal of numericLiterals(node.value)) debt[bucket].push(`${where}|${node.prop}|${literal}`);
+
+      const prop = node.prop.toLowerCase();
+      const value = stripComments(node.value).replace(/\s+/g, " ").trim();
+      if (prop === "text-transform" && value.toLowerCase() !== "none") debt.textTransform.push(`${where}|${prop}|${value}`);
+      if (GAP_PROPERTIES.has(prop)) for (const literal of pxLiterals(node.value)) debt.gapLiterals.push(`${where}|${prop}|${literal}`);
+      if (isPaddingProperty(prop)) for (const literal of pxLiterals(node.value)) debt.paddingLiterals.push(`${where}|${prop}|${literal}`);
+      const fontValue = prop === "font-family" || prop === "font" || (prop.startsWith("--") && !MONO_TOKENS.has(prop));
+      if (fontValue && namesMonospaceFamily(node.value)) debt.monoStacks.push(`${where}|${prop}|${value}`);
+    }
+    // One rule, because that is the unit the author wrote together; a cascade across rules is a
+    // question for the browser, not for a scan of text.
+    const justify = declarations.filter((node) => node.prop.toLowerCase() === "justify-content" && packsToEnd(node.value));
+    const overflow = declarations.filter((node) => /^overflow(?:-x)?$/i.test(node.prop) && scrolls(node.value));
+    for (const end of justify) {
+      for (const scroller of overflow) {
+        debt.flexEndOverflow.push(`${where}|justify-content: ${end.value.trim()}|${scroller.prop.toLowerCase()}: ${scroller.value.trim()}`);
+      }
+    }
+  });
+  for (const key of Object.keys(debt) as (keyof CssRuleDebt)[]) debt[key].sort();
+  return debt;
+}
 
 export function measureDebt(): DebtInventory {
   const shadowedDeclarations = [...selectorCounts()]
     .filter(([, count]) => count > 1)
     .map(([key]) => key);
-
-  const literals: Record<string, string[]> = { fontSizeLiterals: [], radiusLiterals: [], zIndexLiterals: [] };
-  root.walkRules((rule) => {
-    const where = contextKey(rule);
-    for (const node of rule.nodes) {
-      if (node.type !== "decl") continue;
-      const bucket = LITERAL_PROPERTIES[node.prop as keyof typeof LITERAL_PROPERTIES];
-      if (!bucket) continue;
-      // One entry per LITERAL, so `7px` growing into `7px 7px 0 0` is three new identities rather
-      // than the same declaration wearing a longer value.
-      for (const literal of numericLiterals(node.value)) literals[bucket]!.push(`${where}|${node.prop}|${literal}`);
-    }
-  });
+  const rules = cssRuleDebt(root);
 
   const rendered = new Set([...RENDERED, ...HELPER_CLASSES.keys()]);
   const sorted = (values: string[]) => [...values].sort();
   return {
     shadowedDeclarations: sorted(shadowedDeclarations),
-    fontSizeLiterals: sorted(literals.fontSizeLiterals!),
-    radiusLiterals: sorted(literals.radiusLiterals!),
-    zIndexLiterals: sorted(literals.zIndexLiterals!),
+    fontSizeLiterals: rules.fontSizeLiterals,
+    radiusLiterals: rules.radiusLiterals,
+    zIndexLiterals: rules.zIndexLiterals,
+    textTransform: rules.textTransform,
+    gapLiterals: rules.gapLiterals,
+    paddingLiterals: rules.paddingLiterals,
+    monoStacks: rules.monoStacks,
+    flexEndOverflow: rules.flexEndOverflow,
     deadClasses: sorted([...STYLED].filter((name) => !rendered.has(name) && !emittedByLibrary(name))),
     unstyledClasses: sorted([...rendered].filter((name) => !STYLED.has(name))),
+    emojiLiterals: sorted(productionSources().flatMap(({ file, source }) => emojiLiterals(source, file))),
   };
+}
+
+/**
+ * `left` minus `right`, counting repeats.
+ *
+ * Set membership let a recorded identity vouch for any number of copies of itself: `padding: 6px`
+ * growing into `padding: 6px 6px` added a literal and passed, because `…|padding|6px` was already
+ * in the file. The inventory records one entry per literal, so the comparison has to as well.
+ */
+function withoutEach(left: readonly string[], right: readonly string[]): string[] {
+  const remaining = new Map<string, number>();
+  for (const identity of right) remaining.set(identity, (remaining.get(identity) ?? 0) + 1);
+  return left.filter((identity) => {
+    const count = remaining.get(identity) ?? 0;
+    if (count > 0) remaining.set(identity, count - 1);
+    return count === 0;
+  });
+}
+
+/**
+ * The ratchet: every measured inventory equals the recorded one, entry for entry.
+ *
+ * Keys are read from BOTH sides. Reading only the recorded keys meant deleting a key from the JSON
+ * switched its check off, and reading only the measured keys would leave a stale key unnoticed.
+ */
+export function assertInventoryMatches(recorded: Record<string, readonly string[]>, measured: Record<string, readonly string[]>): void {
+  for (const key of new Set([...Object.keys(measured), ...Object.keys(recorded)])) {
+    assert.ok(key in measured, `${key}: stylesheet-debt.json records an inventory nothing measures; remove the key`);
+    assert.ok(Array.isArray(recorded[key]),
+      `${key}: stylesheet-debt.json has no ${key} inventory; regenerate it when the rule is introduced`);
+    const guidance = DEBT_GUIDANCE[key as keyof DebtInventory] ?? "fix the source";
+    const added = withoutEach(measured[key]!, recorded[key]!);
+    assert.deepEqual(added, [],
+      `${key}: new debt that is not in stylesheet-debt.json — ${guidance}. Adding it to the inventory is not the fix.`);
+    const paid = withoutEach(recorded[key]!, measured[key]!);
+    assert.deepEqual(paid, [],
+      `${key}: ${paid.length} entries are recorded but no longer present. Good — regenerate ` +
+      "stylesheet-debt.json in this commit so the inventory keeps matching the tree.");
+  }
 }
 
 const RECORDED = JSON.parse(readFileSync(join(WEB, "src/stylesheet-debt.json"), "utf8")) as DebtInventory;
 
 test("no debt is added, and none is traded for other debt", () => {
-  const measured = measureDebt();
-  for (const key of Object.keys(RECORDED) as (keyof DebtInventory)[]) {
-    const added = measured[key].filter((identity) => !RECORDED[key].includes(identity));
-    assert.deepEqual(added, [],
-      `${key}: new debt that is not in stylesheet-debt.json — use a token, or style the class, ` +
-      "or delete the rule. Adding it to the inventory is not the fix.");
-    const paid = RECORDED[key].filter((identity) => !measured[key].includes(identity));
-    assert.deepEqual(paid, [],
-      `${key}: ${paid.length} entries are recorded but no longer present. Good — regenerate ` +
-      "stylesheet-debt.json in this commit so the inventory keeps matching the tree.");
-  }
+  assertInventoryMatches(RECORDED as unknown as Record<string, string[]>, measureDebt() as unknown as Record<string, string[]>);
+});
+
+test("window.confirm is never called; confirmations use the in-app dialog", () => {
+  // A prohibition rather than an inventory: the last two calls were converted, so there is nothing
+  // left to pay down and no reason to allow one.
+  assertNoNativeConfirm(productionSources().flatMap(({ file, source }) => nativeConfirmReferences(source, file)));
 });
 
 test("no selector is defined more than twice", () => {
@@ -522,6 +670,97 @@ function sourceFiles(dir: string, out: string[] = []): string[] {
     out.push(path);
   }
   return out;
+}
+
+/** Production sources with their `src`-relative, forward-slash path — the identity a file has in the inventory. */
+function productionSources(): { file: string; source: string }[] {
+  const src = join(WEB, "src");
+  return sourceFiles(src).map((path) => ({
+    file: relative(src, path).split(sep).join("/"),
+    source: readFileSync(path, "utf8"),
+  }));
+}
+
+function parseSource(source: string, fileName: string): ts.SourceFile {
+  return ts.createSourceFile(fileName, source, ts.ScriptTarget.Latest, true,
+    fileName.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+}
+
+const PICTOGRAPHIC = /\p{Extended_Pictographic}/u;
+
+/**
+ * Every emoji in a string literal, template chunk or JSX text, by identity: file, character and
+ * the enclosing literal's text.
+ *
+ * The AST decides what is a literal, so comments are ignored and an escaped `"✅"` is read as
+ * the character it renders. `Extended_Pictographic` is the emoji property, so text glyphs such as
+ * ✓, ✕ and × are not reported here; §18 retires those through the area issues.
+ *
+ * No production file is exempt: every emoji the scan finds today stands in for an icon. Should a
+ * fixture or user-content file arrive, exempt it by NAME with a reason, as the library classes are.
+ */
+export function emojiLiterals(source: string, fileName: string): string[] {
+  const out: string[] = [];
+  const visit = (node: ts.Node): void => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateHead(node)
+      || ts.isTemplateMiddle(node) || ts.isTemplateTail(node) || ts.isJsxText(node)) {
+      const text = node.text.replace(/\s+/g, " ").trim();
+      for (const char of text) if (PICTOGRAPHIC.test(char)) out.push(`${fileName}|${char}|${text}`);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(parseSource(source, fileName));
+  return out;
+}
+
+const NATIVE_GLOBALS = new Set(["window", "globalThis", "self"]);
+
+/**
+ * Every reference to the browser's native `confirm`, as `file:line: code`.
+ *
+ * `window.confirm`, `globalThis.confirm`, `window["confirm"]`, and a bare `confirm(...)` in a file
+ * that binds no `confirm` of its own. STATED LIMIT: the binding check is per file, not per scope,
+ * so a bare call in a file that also destructures `confirm` from `useFeedback()` elsewhere is not
+ * reported. Every current caller takes it from `useFeedback()`, and a scope-accurate answer needs
+ * the type checker this file deliberately does not start.
+ */
+export function nativeConfirmReferences(source: string, fileName: string): string[] {
+  const file = parseSource(source, fileName);
+  const found: ts.Node[] = [];
+  let bindsConfirm = false;
+  const isGlobal = (node: ts.Node) => {
+    const inner = transparent(node);
+    return Boolean(inner && ts.isIdentifier(inner) && NATIVE_GLOBALS.has(inner.text));
+  };
+  const visit = (node: ts.Node): void => {
+    if (ts.isIdentifier(node) && node.text === "confirm") {
+      const parent = node.parent;
+      if ((ts.isVariableDeclaration(parent) || ts.isParameter(parent) || ts.isBindingElement(parent)
+        || ts.isFunctionDeclaration(parent) || ts.isImportSpecifier(parent) || ts.isImportClause(parent)
+        || ts.isNamespaceImport(parent)) && parent.name === node) bindsConfirm = true;
+    }
+    if (ts.isPropertyAccessExpression(node) && node.name.text === "confirm" && isGlobal(node.expression)) found.push(node);
+    if (ts.isElementAccessExpression(node) && ts.isStringLiteralLike(node.argumentExpression)
+      && node.argumentExpression.text === "confirm" && isGlobal(node.expression)) found.push(node);
+    ts.forEachChild(node, visit);
+  };
+  visit(file);
+  const bare: ts.Node[] = [];
+  if (!bindsConfirm) {
+    const visitCalls = (node: ts.Node): void => {
+      if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && node.expression.text === "confirm") bare.push(node);
+      ts.forEachChild(node, visitCalls);
+    };
+    visitCalls(file);
+  }
+  return [...found, ...bare].map((node) =>
+    `${fileName}:${file.getLineAndCharacterOfPosition(node.getStart(file)).line + 1}: ${node.getText(file)}`);
+}
+
+export function assertNoNativeConfirm(references: string[]): void {
+  assert.deepEqual(references, [],
+    "window.confirm: the browser's native confirm is banned — use the confirmation dialog, " +
+    "useFeedback().confirm, with an action title and a verb-matched confirm label (docs/design-system.md §7.4)");
 }
 
 /**
@@ -1180,4 +1419,137 @@ test("numericLiterals counts every literal in a value", () => {
   assert.deepEqual(numericLiterals("clamp(12px, 5vw, 20px)"), ["12", "5", "20"]);
   assert.deepEqual(numericLiterals("7px 7px 0 0"), ["7", "7", "0", "0"]);
   assert.deepEqual(numericLiterals("var(--radius)"), []);
+});
+
+/**
+ * The design-system rules, on synthetic input, through the same assertion the real inventory uses.
+ *
+ * Each case starts from a clean rule or component, records its (empty) inventory, adds ONE
+ * violation, and requires the ratchet to fail with a message naming the rule and what to use
+ * instead. A rule only ever run against `styles.css` would pass for a scanner that sees nothing.
+ */
+const CLEAN_RULE = ".clean { display: flex; gap: var(--space-2); padding: var(--space-3); font-family: var(--font-mono); }";
+const cssDebtOf = (sheet: string) => cssRuleDebt(postcss.parse(sheet)) as unknown as Record<string, string[]>;
+const failsNaming = (...parts: string[]) => (error: unknown) => {
+  assert.ok(error instanceof Error);
+  for (const part of parts) assert.ok(error.message.includes(part), `expected "${part}" in: ${error.message}`);
+  return true;
+};
+
+test("each style rule fails a clean rule that breaks it, naming the rule and its replacement", () => {
+  const recorded = cssDebtOf(CLEAN_RULE);
+  assert.doesNotThrow(() => assertInventoryMatches(recorded, cssDebtOf(CLEAN_RULE)));
+  const cases: [addition: string, key: string, ...message: string[]][] = [
+    ["text-transform: uppercase", "textTransform", "Title Case", "§17.1"],
+    ["gap: 6px", "gapLiterals", "--space-*", "§2.4"],
+    ["padding: 10px", "paddingLiterals", "--space-*", "§2.4"],
+    ['font-family: "Cascadia Code", monospace', "monoStacks", "var(--font-mono)"],
+    ["justify-content: flex-end; overflow-x: auto", "flexEndOverflow", "margin-inline-start: auto"],
+    ["font-size: 13px", "fontSizeLiterals", "--text-*"],
+    ["border-radius: 6px", "radiusLiterals", "--radius-*"],
+  ];
+  for (const [addition, key, ...message] of cases) {
+    const measured = cssDebtOf(CLEAN_RULE.replace(" }", ` ${addition}; }`));
+    assert.throws(() => assertInventoryMatches(recorded, measured),
+      failsNaming(`${key}: new debt`, ...message), `${addition} must fail ${key}`);
+  }
+});
+
+test("the ratchet checks identity and multiplicity, not totals", () => {
+  const recorded = cssDebtOf(".a { gap: 6px; padding: 6px; } .b { color: red; }");
+  // Paying one literal while adding another elsewhere leaves every total unchanged, and still fails.
+  const traded = cssDebtOf(".a { gap: var(--space-2); padding: 6px; } .b { color: red; gap: 8px; }");
+  assert.equal(traded.gapLiterals!.length, recorded.gapLiterals!.length);
+  assert.throws(() => assertInventoryMatches(recorded, traded), failsNaming("gapLiterals: new debt"));
+  // A recorded identity vouches for one literal, not for every copy of it.
+  const doubled = cssDebtOf(".a { gap: 6px; padding: 6px 6px; } .b { color: red; }");
+  assert.throws(() => assertInventoryMatches(recorded, doubled), failsNaming("paddingLiterals: new debt"));
+  // Paying debt without regenerating fails with the regenerate instruction.
+  const paid = cssDebtOf(".a { gap: var(--space-2); padding: 6px; } .b { color: red; }");
+  assert.throws(() => assertInventoryMatches(recorded, paid),
+    failsNaming("gapLiterals: 1 entries are recorded but no longer present", "regenerate stylesheet-debt.json in this commit"));
+  // Deleting an inventory's key does not switch its check off.
+  const withoutGap = { ...recorded };
+  delete withoutGap.gapLiterals;
+  assert.throws(() => assertInventoryMatches(withoutGap, recorded), failsNaming("stylesheet-debt.json has no gapLiterals"));
+});
+
+test("the literal rules read px sizes only, and read them wherever they sit in a value", () => {
+  assert.deepEqual(pxLiterals("6px 10px"), ["6px", "10px"]);
+  assert.deepEqual(pxLiterals("0 0px 4px"), ["4px"], "zero is not a size choice");
+  assert.deepEqual(pxLiterals("calc(var(--space-2) + 1px)"), ["1px"]);
+  assert.deepEqual(pxLiterals("var(--space-2, 8px)"), ["8px"], "a fallback literal is still a literal");
+  assert.deepEqual(pxLiterals("-2px"), ["-2px"]);
+  assert.deepEqual(pxLiterals("var(--space-12) 1.5rem 2em 10%"), [], "token names and other units are not px");
+  assert.deepEqual(pxLiterals("/* 6px */ var(--space-2)"), [], "a comment is not a value");
+  const debt = cssDebtOf(".x { padding-inline: 6px; padding-block-start: 3px; row-gap: 2px; grid-gap: 5px; " +
+    "margin: 7px; --local-pad: 9px; }");
+  assert.deepEqual(debt.paddingLiterals, ["|.x|padding-block-start|3px", "|.x|padding-inline|6px"]);
+  assert.deepEqual(debt.gapLiterals, ["|.x|grid-gap|5px", "|.x|row-gap|2px"],
+    "margin and custom-property declarations are outside these two rules");
+});
+
+test("text-transform reports every value except none", () => {
+  const debt = cssDebtOf(".a { text-transform: none; } .b { text-transform: capitalize; } .c { TEXT-TRANSFORM: Uppercase; }");
+  assert.deepEqual(debt.textTransform, ["|.b|text-transform|capitalize", "|.c|text-transform|Uppercase"]);
+});
+
+test("the mono-stack rule exempts only the two font tokens and reads only styles.css", () => {
+  const debt = cssDebtOf(":root { --font-mono: \"Cascadia Code\", ui-monospace, monospace; " +
+    "--font-terminal: \"JetBrainsMono Nerd Font\", monospace; --font-ui: system-ui, sans-serif; " +
+    "--code-font: Consolas, monospace; } " +
+    ".token { font-family: var(--font-mono); } .kbd { font: 9px \"Cascadia Code\", Consolas, monospace; } " +
+    ".sf { font-family: SFMono-Regular, Menlo; } .ui { font-family: var(--font-ui); }");
+  assert.deepEqual(debt.monoStacks, [
+    "|.kbd|font|9px \"Cascadia Code\", Consolas, monospace",
+    "|.sf|font-family|SFMono-Regular, Menlo",
+    "|:root|--code-font|Consolas, monospace",
+  ]);
+  // The TypeScript xterm stack in terminal-font.ts is out of scope by construction: the rule takes a
+  // parsed stylesheet, and the production guard hands it styles.css and nothing else.
+  assert.ok(RECORDED.monoStacks.every((identity) => !identity.includes("terminal-font")));
+});
+
+test("flex-end with overflow is reported per rule, and the safe keyword is not", () => {
+  const debt = cssDebtOf(".a { justify-content: end; overflow: hidden auto; } .b { justify-content: safe flex-end; overflow-x: auto; } " +
+    ".c { justify-content: flex-end; overflow-x: hidden; } .d { justify-content: flex-end; } .d { overflow-x: scroll; }");
+  assert.deepEqual(debt.flexEndOverflow, ["|.a|justify-content: end|overflow: hidden auto"]);
+});
+
+test("window.confirm fails in a clean component, naming the dialog to use instead", () => {
+  const clean = "export function A() { const { confirm } = useFeedback(); " +
+    "return <button onClick={async () => { if (await confirm({ title: \"Delete Key\" })) remove(); }}>Delete Key</button>; }";
+  assert.deepEqual(nativeConfirmReferences(clean, "A.tsx"), []);
+  assert.doesNotThrow(() => assertNoNativeConfirm(nativeConfirmReferences(clean, "A.tsx")));
+  for (const call of ["window.confirm(\"Delete?\")", "globalThis.confirm(\"Delete?\")", "window[\"confirm\"](\"Delete?\")"]) {
+    const found = nativeConfirmReferences(clean.replace("remove();", `remove(); ${call};`), "A.tsx");
+    assert.equal(found.length, 1, call);
+    assert.throws(() => assertNoNativeConfirm(found), failsNaming("window.confirm", "confirmation dialog", "§7.4"));
+  }
+  // A bare call reaches the global only in a file that binds no `confirm` of its own.
+  assert.equal(nativeConfirmReferences("export const ok = () => confirm(\"Sure?\");", "b.ts").length, 1);
+  assert.equal(nativeConfirmReferences("const { confirm: ask } = f(); ask(); confirm(\"Sure?\");", "c.ts").length, 1);
+  // Text that merely mentions it is not a call.
+  assert.deepEqual(nativeConfirmReferences("// window.confirm(\"x\")\nconst s = \"window.confirm\";", "d.ts"), []);
+});
+
+test("an emoji in a clean component fails, and glyphs, comments and escapes are read correctly", () => {
+  const clean = "export function A() { return <span title=\"Done\">Done</span>; }";
+  const recorded = { emojiLiterals: emojiLiterals(clean, "A.tsx") };
+  assert.deepEqual(recorded.emojiLiterals, []);
+  for (const component of [
+    "export function A() { return <span title=\"Done\">Done ✅</span>; }",
+    "export function A() { return <span title=\"⚠ Done\">Done</span>; }",
+    "export function A() { return <span title={`Done ${n} 🔐`}>Done</span>; }",
+    "export function A() { return <span title=\"Done\">{\"\\u2705\"}</span>; }",
+  ]) {
+    const measured = { emojiLiterals: emojiLiterals(component, "A.tsx") };
+    assert.equal(measured.emojiLiterals.length, 1, component);
+    assert.throws(() => assertInventoryMatches(recorded, measured),
+      failsNaming("emojiLiterals: new debt", "components/Icons.tsx", "§18"));
+  }
+  assert.deepEqual(emojiLiterals("export const A = () => <span>Saved ✓ ✕ ×</span>;", "A.tsx"), [],
+    "text glyphs are §18's area work, not the emoji rule");
+  assert.deepEqual(emojiLiterals("// ✅ done\nexport const A = 1; /* 🔐 */", "a.ts"), []);
+  assert.deepEqual(emojiLiterals("export const A = () => <b>  Thinking\n  💭  </b>;", "A.tsx"), ["A.tsx|💭|Thinking 💭"]);
 });

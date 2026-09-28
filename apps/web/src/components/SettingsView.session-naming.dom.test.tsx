@@ -8,6 +8,7 @@ import type { SessionNamingMode, SessionNamingSettingsView } from "@wollipog/pro
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
+import { FeedbackProvider } from "./FeedbackProvider.js";
 import { SessionNamingPanel } from "./SettingsView.js";
 
 const domWindow = new Window({ url: "http://localhost/settings/behavior" });
@@ -18,6 +19,8 @@ const globals = {
   navigator: domWindow.navigator,
   HTMLElement: domWindow.HTMLElement,
   HTMLButtonElement: domWindow.HTMLButtonElement,
+  HTMLInputElement: domWindow.HTMLInputElement,
+  Element: domWindow.Element,
   Node: domWindow.Node,
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
@@ -77,14 +80,18 @@ function baseView(mode: SessionNamingMode = "prompt_text_only"): SessionNamingSe
   };
 }
 
-async function renderPanel(transport: ApiTransport): Promise<{ container: HTMLDivElement; root: Root }> {
+async function renderPanel(
+  transport: ApiTransport,
+  { feedback = false }: { feedback?: boolean } = {},
+): Promise<{ container: HTMLDivElement; root: Root }> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
+  const panel = <SessionNamingPanel />;
   await act(async () => {
     root.render(
       <ApiProvider client={createApiClient(transport)}>
-        <SessionNamingPanel />
+        {feedback ? <FeedbackProvider>{panel}</FeedbackProvider> : panel}
       </ApiProvider>,
     );
   });
@@ -535,6 +542,60 @@ test("editing a saved custom endpoint requires the complete URL and excludes com
       await pendingSave;
     });
     assert.equal(container.querySelector("#session-naming-editor"), null);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("Delete API Key asks in the in-app confirmation dialog, and only Delete API Key deletes", async () => {
+  const current: SessionNamingSettingsView = {
+    ...baseView("custom_model_endpoint"),
+    customModel: {
+      endpointOrigin: "https://models.example",
+      model: "title-model",
+      timeoutMs: 900,
+      apiKeyConfigured: true,
+      configurationSource: "runner",
+      runnerId: "runner-build",
+      machineName: "Build Machine",
+      online: true,
+    },
+  };
+  const deletes: string[] = [];
+  const transport: ApiTransport = {
+    instanceId: "test",
+    publicOrigin: "http://localhost",
+    close() {},
+    async request(path, init) {
+      if (init?.method === "DELETE") deletes.push(path);
+      return new Response(JSON.stringify(current), { headers: { "content-type": "application/json" } });
+    },
+  };
+  const { container, root } = await renderPanel(transport, { feedback: true });
+  // Dialogs are portalled to <body>, outside the panel's container.
+  const dialog = () => domWindow.document.body.querySelector('[role="dialog"]') as unknown as HTMLElement | null;
+  const dialogButton = (name: string) => {
+    const button = [...dialog()!.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === name);
+    assert.ok(button, `expected ${name} in the confirmation`);
+    return button;
+  };
+  try {
+    await act(async () => buttonNamed(container, "Session Naming").click());
+    await act(async () => buttonNamed(container, "Delete API Key").click());
+    assert.ok(dialog(), "the confirmation is the app's dialog, not the browser's");
+    assert.match(dialog()!.textContent ?? "", /Delete API Key[\s\S]*The API key is deleted from the selected machine/);
+    assert.equal(dialogButton("Cancel").className, "btn");
+    assert.equal(dialogButton("Delete API Key").className, "btn danger");
+
+    await act(async () => dialogButton("Cancel").click());
+    assert.equal(dialog(), null);
+    assert.deepEqual(deletes, [], "Cancel deletes nothing");
+
+    await act(async () => buttonNamed(container, "Delete API Key").click());
+    await act(async () => dialogButton("Delete API Key").click());
+    assert.equal(dialog(), null);
+    assert.deepEqual(deletes, ["/api/session-naming/custom-model/api-key"]);
   } finally {
     await act(async () => root.unmount());
     container.remove();

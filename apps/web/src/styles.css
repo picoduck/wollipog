@@ -10542,9 +10542,11 @@ body.shell-dock-dragging * {
 .inbox-shortcut-rail {
   overflow-x: auto;
   flex: 1;
-  justify-content: flex-end;
   scrollbar-width: none;
 }
+/* The auto margin packs the shortcuts to the end while they fit and collapses to zero when they
+   overflow, so the first shortcut stays reachable; `justify-content: flex-end` put it off-screen. */
+.inbox-shortcut-rail > :first-child { margin-inline-start: auto; }
 .inbox-shortcut-rail::-webkit-scrollbar { display: none; }
 .inbox-shortcut-rail.is-empty { min-height: 25px; }
 .inbox-shortcut-context {
