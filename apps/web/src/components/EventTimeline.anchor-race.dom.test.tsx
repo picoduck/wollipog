@@ -398,6 +398,47 @@ test("a preceding row measured as the mount anchor releases keeps the saved row 
     "the preceding row must never be adopted as the reading anchor");
 });
 
+test("a touch on iOS keeps the saved row during session return and compensates growth once", async () => {
+  // iOS WebKit defers TanStack's scroll compensation while a touch is active and applies it after
+  // the touch ends. A reader who touches the timeline right after returning must not see the saved
+  // row move during the touch or jump when it ends.
+  const userAgent = Object.getOwnPropertyDescriptor(domWindow.navigator, "userAgent");
+  Object.defineProperty(domWindow.navigator, "userAgent", {
+    configurable: true,
+    get: () => "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15",
+  });
+  _resetIOSDetectionForTests();
+  try {
+    const reader = await returnToSavedRow();
+    assert.equal(layout.scrollTop, SAVED_INDEX * ROW_HEIGHT - SAVED_OFFSET, "mount restoration applied the saved offset");
+    assertSavedRowHeld(await frame(), "restore frame");
+
+    const readerElement = domWindow.document.querySelector(`[data-testid='${READER_ID}']`)!;
+    await act(async () => { readerElement.dispatchEvent(new domWindow.Event("touchstart")); });
+    assertSavedRowHeld(
+      await frame({ beforeResizeObservations: () => layout.heights.set(PRECEDING_KEY, ROW_HEIGHT + GROWTH) }),
+      "measurement frame",
+    );
+    for (let count = 1; count <= 16; count += 1) {
+      assertSavedRowHeld(await frame(), `held touch frame ${count}`);
+    }
+    await act(async () => { readerElement.dispatchEvent(new domWindow.Event("touchend")); });
+    await settle((painted) => assertSavedRowHeld(painted, "after touch"));
+
+    assert.equal(layout.scrollTop, SAVED_INDEX * ROW_HEIGHT + GROWTH - SAVED_OFFSET,
+      "the preceding row's growth is compensated exactly once");
+    const anchor = await reader.durableAnchor();
+    assert.equal(anchor?.key, SAVED_KEY, "the saved row remains the reading anchor");
+    assert.equal(anchor?.offset, SAVED_OFFSET);
+    assert.ok(!reader.reports.some((report) => report.key === PRECEDING_KEY),
+      "the preceding row must never be adopted as the reading anchor");
+  } finally {
+    if (userAgent) Object.defineProperty(domWindow.navigator, "userAgent", userAgent);
+    else delete (domWindow.navigator as { userAgent?: string }).userAgent;
+    _resetIOSDetectionForTests();
+  }
+});
+
 test("width reflow after restoration keeps the saved row without a second compensation", async () => {
   const reader = await returnToSavedRow();
   await settle((painted) => assertSavedRowHeld(painted, "restore"));
@@ -417,21 +458,14 @@ test("width reflow during restoration keeps the saved row without a second compe
   assertSavedRowHeld(await frame(), "restore frame 1");
   assertSavedRowHeld(await frame(), "restore frame 2");
 
-  // The width reseed runs in a layout effect. While the mount anchor is pending, TanStack's
-  // compensation for fully preceding rows requests a flushSync there, which React defers with a
-  // development warning. Tolerate only that warning; the painted result is asserted below.
-  const errors: string[] = [];
-  const originalError = console.error;
-  console.error = (...args: unknown[]) => { errors.push(args.map(String).join(" ")); };
-  try {
+  // The width reseed runs in a layout effect, where no synchronous render may be requested. The
+  // mount anchor owns the fully preceding rows, so TanStack must not compensate them there.
+  await withoutConsoleErrors(async () => {
     layout.width = 400;
     for (const row of paint()) layout.heights.set(row.key, 200);
     assertSavedRowHeld(await frame(), "width frame");
     await settle((painted) => assertSavedRowHeld(painted, "after width change"));
-  } finally {
-    console.error = originalError;
-  }
-  assert.deepEqual(errors.filter((error) => !error.includes("flushSync was called from inside a lifecycle method")), []);
+  });
 
   assert.equal(layout.scrollTop, SAVED_INDEX * 200 - SAVED_OFFSET);
   assert.equal((await reader.durableAnchor())?.key, SAVED_KEY);
