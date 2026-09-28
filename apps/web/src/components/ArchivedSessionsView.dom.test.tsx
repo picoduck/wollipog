@@ -1218,6 +1218,52 @@ test("each row has one inline action and ⋯ for the rest, with Delete last afte
   }
 });
 
+test("every row action behind ⋯ is reachable from the keyboard: Stop, Open, then Delete after a separator", async () => {
+  // §14: the name is the row's open target and the actions column is one inline action plus ⋯, so
+  // the actions that moved into ⋯ have to stay reachable without a pointer.
+  const target = session(8, { title: "Keyboard Row", status: "running" });
+  const fixture = await mount([target]);
+  const doc = domWindow.document as unknown as Document;
+  const focused = () => (doc.activeElement?.querySelector(".menu-text") ?? doc.activeElement)?.textContent?.trim();
+  const settle = () => act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  try {
+    const trigger = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="More Actions for Keyboard Row"]')!;
+    const openMenu = async () => {
+      trigger.focus();
+      await act(async () => { fireDomEvent.keyDown(trigger, { key: "ArrowDown" }); });
+      await settle();
+    };
+    const key = async (name: string) => {
+      await act(async () => { fireDomEvent.keyDown(doc.activeElement!, { key: name }); });
+    };
+
+    await openMenu();
+    assert.equal(focused(), "Stop", "ArrowDown on ⋯ opens it on its first item");
+    await key("ArrowDown");
+    assert.equal(focused(), "Open");
+    await key("End");
+    assert.equal(focused(), "Delete", "Delete is last");
+    const items = [...doc.querySelectorAll('[role="menu"] [role="menuitem"], [role="menu"] [role="separator"]')];
+    assert.equal(items.at(-2)?.getAttribute("role"), "separator", "after a separator");
+
+    // Enter activates the focused item, as a button does natively.
+    await act(async () => { (doc.activeElement as HTMLButtonElement).click(); await Promise.resolve(); });
+    assert.match(doc.querySelector('[role="dialog"]')?.textContent ?? "", /permanently removed/u, "Delete asks for confirmation");
+    const cancel = [...doc.querySelectorAll<HTMLButtonElement>('[role="dialog"] button')]
+      .find((candidate) => candidate.textContent?.trim() === "Cancel")!;
+    await act(async () => { cancel.click(); await Promise.resolve(); });
+    await settle();
+
+    await openMenu();
+    await key("ArrowDown");
+    assert.equal(focused(), "Open");
+    await act(async () => { (doc.activeElement as HTMLButtonElement).click(); await Promise.resolve(); });
+    assert.deepEqual(fixture.navigated.at(-1), { name: "session", id: target.id }, "Open opens the session");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a person the server allows keeps every row action as before", async () => {
   const allowed = { allowed: true as const };
   for (const commandPermissions of [

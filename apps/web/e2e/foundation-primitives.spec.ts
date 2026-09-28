@@ -57,6 +57,23 @@ for (const pointer of ["fine", "coarse"] as const) {
   });
 }
 
+test.describe("at 1440px", () => {
+  test.use({ viewport: { width: 1440, height: 900 } });
+
+  test("the Archive State column shows every badge whole", async ({ page }) => {
+    await page.goto(shell("/archived"));
+    await expect(page.locator(".archive-state-badges .status").first()).toBeVisible();
+    const clipped = await page.locator(".archive-state-badges .status").evaluateAll((badges) => badges
+      .filter((badge) => {
+        const cell = badge.closest("td")!.getBoundingClientRect();
+        const box = badge.getBoundingClientRect();
+        return badge.scrollWidth > badge.clientWidth + 0.5 || box.right > cell.right + 0.5 || box.left < cell.left - 0.5;
+      })
+      .map((badge) => badge.textContent));
+    expect(clipped, "no badge is cut off by its cell").toEqual([]);
+  });
+});
+
 test("a required finding shows a neutral Required badge beside its severity", async ({ page }) => {
   await page.goto("/review-anchor-reload-e2e.html");
   const badge = page.locator(".status", { hasText: /^Required$/ }).first();

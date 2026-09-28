@@ -14609,12 +14609,13 @@ body.shell-dock-dragging * {
   background: var(--bg-elev);
 }
 /* Declared widths (§14): the Session column takes what is left. */
-.archive-table .col-state { width: 190px; }
+.archive-table .col-state { width: 250px; }
 .archive-table .col-project,
 .archive-table .col-location { width: 140px; }
 .archive-table .col-agent { width: 120px; }
 .archive-table .col-created { width: 110px; }
-.archive-table .col-actions { width: 320px; }
+/* One inline action ("Unarchive and Restart" at the longest) and ⋯ (§14). */
+.archive-table .col-actions { width: 210px; }
 .archive-session-cell > a {
   display: block;
   overflow: hidden;
@@ -14630,7 +14631,16 @@ body.shell-dock-dragging * {
   color: var(--text-faint);
   text-overflow: ellipsis;
 }
-.archive-state-badges,
+/* The State cell is a badge list: its badges are whole words, so a rare third one (a stop in
+   progress) wraps inside the cell rather than being cut mid-word. */
+.archive-state-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1);
+  padding-block: var(--space-1);
+  white-space: normal;
+}
 /* 8px apart, so on touch the two small controls' borrowed hit areas meet rather than overlap
    (§2.8), and nothing clips those hit areas. */
 .archive-row-actions {
