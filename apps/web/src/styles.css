@@ -10043,9 +10043,11 @@ body.shell-dock-dragging * {
   border-right: 1px solid var(--border);
   background: color-mix(in srgb, var(--bg-elev-2) 68%, var(--bg));
 }
+/* The bordered label is the field (its input is borderless), so it is one control height. */
 .project-manager-search {
   display: flex;
   align-items: center;
+  height: var(--control-h);
   gap: 8px;
   margin: 14px 14px 10px;
   padding: 0 10px;
@@ -10057,7 +10059,7 @@ body.shell-dock-dragging * {
 .project-manager-search input {
   width: 100%;
   min-width: 0;
-  height: 36px;
+  height: 100%;
   padding: 0;
   border: 0;
   outline: 0;
