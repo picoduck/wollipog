@@ -333,7 +333,7 @@ function BoardColumnBody({
         rowGap={10}
         pinDraggedRow
         className="column-virtual-list"
-        ariaLabel="Sessions in column"
+        ariaLabel="Sessions in Column"
         dataKind="board-column"
       />
     </div>

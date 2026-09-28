@@ -139,7 +139,7 @@ test("a setup notice remains inside its own grid cell", async () => {
     ));
     const row = container.querySelector<HTMLElement>('[role="row"]')!;
     assert.deepEqual([...row.children].map((child) => child.getAttribute("role")), ["gridcell", "gridcell"]);
-    assert.ok(row.querySelector('[role="gridcell"] aside[aria-label="Set up This Project"]'));
+    assert.ok(row.querySelector('[role="gridcell"] aside[aria-label="Set Up This Project"]'));
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -180,7 +180,7 @@ async function withSetupNotice(
           onSessionMenu={() => {}} />
       </ApiProvider>,
     ));
-    const notice = container.querySelector<HTMLElement>('aside[aria-label="Set up This Project"]');
+    const notice = container.querySelector<HTMLElement>('aside[aria-label="Set Up This Project"]');
     assert.ok(notice, "the setup notice is rendered");
     await run(notice, calls);
   } finally {

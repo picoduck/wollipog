@@ -19,7 +19,7 @@ test("setup notice uses Title Case actions, an external help link, and no nested
   const root = createRoot(container);
   try {
     await act(async () => root.render(<WorktreeSetupNotice onGenerate={() => {}} onDismiss={() => {}} />));
-    assert.equal(container.querySelector("aside")?.getAttribute("aria-label"), "Set up This Project");
+    assert.equal(container.querySelector("aside")?.getAttribute("aria-label"), "Set Up This Project");
     assert.deepEqual([...container.querySelectorAll("button")].map((button) => button.textContent || button.getAttribute("aria-label")),
       ["Generate", "Dismiss Setup Notice"]);
     assert.equal(container.querySelector("a")?.textContent, "Learn More");

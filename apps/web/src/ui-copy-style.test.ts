@@ -32,6 +32,18 @@ const MINOR_WORDS = new Set([
   "via",
   "with",
 ]);
+/**
+ * AGENTS.md and docs/design-system.md §17.1: the particle of a phrasal verb is part of the verb and
+ * is capitalized ("Set Up This Project", "Sign In", "Start Over"), although "up", "in", "on" and
+ * "over" are otherwise lowercase prepositions. A particle counts as one when it directly follows a
+ * verb from this list; a preposition after any other word keeps the minor-word rule ("Open in
+ * Browser"). The list is the verbs this app's labels actually use, so it is closed on purpose.
+ */
+const PHRASAL_PARTICLES = new Set(["down", "in", "off", "on", "out", "over", "up"]);
+const PHRASAL_VERBS = new Set([
+  "back", "check", "clean", "follow", "hand", "log", "look", "opt", "pick", "set", "sign", "start",
+  "take", "turn",
+]);
 const LABEL_TAGS = new Set(["button", "caption", "dt", "h1", "h2", "h3", "h4", "h5", "h6", "legend", "summary", "th"]);
 const LABEL_PROPERTIES = new Set(["actionLabel", "cancelLabel", "confirmLabel", "label", "paletteLabel"]);
 
@@ -63,6 +75,9 @@ function isTitleCase(value: string): boolean {
   return words.every((word, index) => {
     if (/^[A-Z0-9]+(?:[-/][A-Z0-9]+)*$/.test(word)) return true;
     const lower = word.toLowerCase();
+    if (index > 0 && PHRASAL_PARTICLES.has(lower) && PHRASAL_VERBS.has(words[index - 1]!.toLowerCase())) {
+      return /^[A-Z]/.test(word);
+    }
     if (index > 0 && index < words.length - 1 && MINOR_WORDS.has(lower)) return word === lower;
     return /^[A-Z]/.test(word);
   });
@@ -92,8 +107,10 @@ test("static compact UI labels use Title Case", () => {
       }
       if (ts.isJsxAttribute(node) && node.initializer && ts.isStringLiteral(node.initializer)) {
         const name = node.name.getText(sourceFile);
-        const tag = ts.isJsxOpeningLikeElement(node.parent) ? node.parent.tagName.getText(sourceFile) : "";
-        if (name === "aria-label" || name === "data-menu-label" || name === "label" || (name === "title" && (tag === "Empty" || tag === "Modal"))) {
+        // A JsxAttribute sits in JsxAttributes; the element that owns it is one level further up.
+        const owner = node.parent.parent;
+        const tag = ts.isJsxOpeningLikeElement(owner) ? owner.tagName.getText(sourceFile) : "";
+        if (name === "aria-label" || name === "ariaLabel" || name === "data-menu-label" || name === "label" || (name === "title" && (tag === "State" || tag === "Notice" || tag === "Modal"))) {
           report(node, name, node.initializer.text);
         }
       }
@@ -102,9 +119,7 @@ test("static compact UI labels use Title Case", () => {
           ts.isJsxExpression(node.initializer) && node.initializer.expression &&
           ts.isJsxOpeningLikeElement(node.parent.parent) && node.parent.parent.tagName.getText(sourceFile) === "Modal") {
         for (const branch of staticBranches(node.initializer.expression) ?? []) {
-          // §17.1 capitalizes a phrasal-verb particle ("Set Up This Machine"), which the minor-word
-          // list would otherwise read as a lowercase preposition.
-          report(node, "Modal title", branch.replace(/\b(Set|Sign|Log|Back) Up\b/g, "$1 up"));
+          report(node, "Modal title", branch);
           if (branch.trim().endsWith("?")) failures.push(`${path.relative(SOURCE_ROOT, file)} Modal title is a question: ${JSON.stringify(branch)}`);
         }
       }

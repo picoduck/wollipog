@@ -21,7 +21,7 @@ export function WorktreeSetupNotice({
 }) {
   const refusalId = `worktree-setup-refusal-${useId().replace(/:/gu, "")}`;
   return (
-    <Notice as="aside" tone="neutral" ariaLabel="Set up This Project" title="Set up This Project"
+    <Notice as="aside" tone="neutral" ariaLabel="Set Up This Project" title="Set Up This Project"
       dismissLabel="Dismiss Setup Notice" dismissDisabled={busy} onDismiss={onDismiss}
       actions={(
         <>
