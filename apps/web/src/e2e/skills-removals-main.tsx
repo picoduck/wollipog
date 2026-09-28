@@ -22,6 +22,9 @@ const drift = new URLSearchParams(location.search).has("drift");
 const orphans = new URLSearchParams(location.search).has("orphans");
 // #1714: Build Machine offers container and cloud targets; Other Machine stays host-only.
 const targets = new URLSearchParams(location.search).has("targets");
+// `?assignment=1` gives the skill one direct assignment, so its assignments table has a row with an
+// Invocation picker.
+const assignment = new URLSearchParams(location.search).has("assignment");
 const hostTarget = (runnerId: string): ExecutionTargetDefinition => ({
   id: `${runnerId}-host`, runnerId, name: "Runner Host · worktree", kind: "local", workspaceStrategy: "worktree", adapter: "host",
   boundaries: { filesystem: "worktree", network: "inherit", secrets: "runner_local", billing: "agent_account" }, available: true,
@@ -217,7 +220,10 @@ const client = {
     },
     assignments: [],
   }),
-  listSkillAssignments: async () => ({ assignments: [] }),
+  listSkillAssignments: async () => ({ assignments: assignment ? [{
+    id: "assignment-1", skillId: "skill-1", scopeKind: "instance" as const,
+    agentSelector: { kind: "all" as const }, enabled: true, invocation: "agent" as const,
+  }] : [] }),
   runnerSkills: async () => runnerSkills,
   getMachineSkillVersionPolicy: async () => ({ policy: null }),
   syncRunnerSkills: async () => {

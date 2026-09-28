@@ -81,6 +81,42 @@ test.describe("at 1440px", () => {
   });
 });
 
+// A picker inside a table opens against its trigger and whole: the table wrapper is a size container
+// and a sideways scroller, and neither may become the fixed list's containing block or clip it.
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`an Invocation picker in the Skills assignments table opens beside its trigger at ${viewport.width}px`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/skills-removals-e2e.html?assignment=1");
+    await page.getByRole("button", { name: /code-review/i }).first().click();
+    const trigger = page.locator(".skills-table").getByRole("button", { name: /^Invocation:/ });
+    await trigger.scrollIntoViewIfNeeded();
+    await trigger.click();
+    const list = page.getByRole("listbox", { name: "Invocation" });
+    await expect(list).toBeVisible();
+    const geometry = await list.evaluate((element) => {
+      const trigger = document.querySelector<HTMLElement>('.skills-table [aria-haspopup="listbox"]')!.getBoundingClientRect();
+      const box = element.getBoundingClientRect();
+      const options = [...element.querySelectorAll<HTMLElement>('[role="option"]')];
+      return {
+        gap: Math.min(Math.abs(box.top - trigger.bottom), Math.abs(trigger.top - box.bottom)),
+        overlapsHorizontally: box.left < trigger.right && box.right > trigger.left,
+        // Every option is where a pointer can reach it: the topmost element at its centre is it.
+        reachable: options.every((option) => {
+          const rect = option.getBoundingClientRect();
+          return option.contains(document.elementFromPoint(rect.left + rect.width / 2, rect.top + rect.height / 2));
+        }),
+        count: options.length,
+      };
+    });
+    expect(geometry.count).toBe(2);
+    expect(geometry.gap, "the list opens against its trigger").toBeLessThanOrEqual(8);
+    expect(geometry.overlapsHorizontally).toBe(true);
+    expect(geometry.reachable, "no option is clipped or covered").toBe(true);
+    await list.getByRole("option", { name: /Manual/ }).click();
+    await expect(list).toBeHidden();
+  });
+}
+
 test("a required finding shows a neutral Required badge beside its severity", async ({ page }) => {
   await page.goto("/review-anchor-reload-e2e.html");
   const badge = page.locator(".status", { hasText: /^Required$/ }).first();
