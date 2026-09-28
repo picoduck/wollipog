@@ -811,7 +811,7 @@ export function shortcutUnavailableReason(
 
 export function shortcutLayerActive(document: Document, exceptPalette = false): boolean {
   const modal = exceptPalette ? '[aria-modal="true"]:not(.palette)' : '[aria-modal="true"]';
-  return Boolean(document.querySelector(exceptPalette ? modal : `${modal}, [role="menu"], .plus-pop[role="dialog"]`));
+  return Boolean(document.querySelector(exceptPalette ? modal : `${modal}, [role="menu"], .menu[role="dialog"], .popover[role="dialog"]`));
 }
 
 export function isEditableShortcutTarget(target: EventTarget | null): boolean {

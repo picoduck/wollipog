@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 const TOKEN_A = `${"a".repeat(20)}-ABC_${"x".repeat(18)}`;
 const TOKEN_B = `${"b".repeat(20)}-DEF_${"y".repeat(18)}`;
@@ -47,6 +48,7 @@ test("compact selector stays adjacent to its Rail trigger across viewport change
   await trigger.click();
   const menu = page.getByRole("menu", { name: "Switch Instance" });
   await expect(menu).toBeVisible();
+  await dialogMotionSettled(page);
   await expectMenuContentFits(page);
 
   const expectAnchored = async () => {
@@ -67,8 +69,9 @@ test("compact selector stays adjacent to its Rail trigger across viewport change
         viewportWidth: window.innerWidth,
       };
     });
-    expect(geometry.gap).toBeGreaterThanOrEqual(5);
-    expect(geometry.gap).toBeLessThanOrEqual(7);
+    // The shared menu opens 4px from its trigger (docs/design-system.md §2.9, §9.1).
+    expect(geometry.gap).toBeGreaterThanOrEqual(3);
+    expect(geometry.gap).toBeLessThanOrEqual(5);
     expect(geometry.menuTop).toBeGreaterThanOrEqual(8);
     expect(Math.abs(geometry.menuLeft - geometry.triggerLeft)).toBeLessThanOrEqual(1);
     expect(geometry.menuRight).toBeLessThanOrEqual(geometry.viewportWidth - 8);
@@ -79,7 +82,7 @@ test("compact selector stays adjacent to its Rail trigger across viewport change
   await expect.poll(async () => {
     const boxes = await Promise.all([trigger.boundingBox(), menu.boundingBox()]);
     return boxes[0] && boxes[1] ? Math.round(boxes[0].y - (boxes[1].y + boxes[1].height)) : null;
-  }).toBe(6);
+  }).toBe(4);
   await expectAnchored();
 
   // A 125% desktop scale exposes fewer CSS pixels for the same physical window. Exercise both
@@ -101,7 +104,7 @@ test("compact selector stays adjacent to its Rail trigger across viewport change
   await expect.poll(async () => {
     const boxes = await Promise.all([trigger.boundingBox(), menu.boundingBox()]);
     return boxes[0] && boxes[1] ? Math.round(boxes[0].y - (boxes[1].y + boxes[1].height)) : null;
-  }).toBe(6);
+  }).toBe(4);
   await expectAnchored();
 
   await page.keyboard.press("Escape");

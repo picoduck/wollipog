@@ -3361,8 +3361,8 @@ test("phone composer controls survive a pointer click when the browser does not 
     });
 
     assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false);
-    assert.ok(fixture.container.querySelector(".plus-pop"),
-      "the original pointer activation must still open the composer menu");
+    assert.ok(domWindow.document.querySelector('.menu[aria-label="Session Attachments, Modes, and Guardrails"]'),
+      "the original pointer activation must still open the composer menu (portalled to <body>)");
   } finally {
     domWindow.matchMedia = priorMatchMedia;
     await unmountFixture(fixture);

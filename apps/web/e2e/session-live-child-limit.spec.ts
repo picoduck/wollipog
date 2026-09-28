@@ -25,7 +25,7 @@ test("the Composer exposes and saves the live-child limit at desktop and mobile 
   await expect(input).toBeVisible();
   await expect(input).toHaveValue("6");
   await expect(input).toHaveAttribute("max", "64");
-  const menu = page.locator(".plus-menu");
+  const menu = page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
   await expect(menu).toContainText("Live Child Limit");
   await expect(menu).not.toContainText("Pauses when spend reaches this amount");
   await expect(menu.getByRole("button", { name: /^About / })).toHaveCount(4);
@@ -61,7 +61,7 @@ test("guardrail help stays within a short viewport", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 440 });
   await openSession(page);
   await page.getByRole("button", { name: "Add and Modes" }).click();
-  const menu = page.locator(".composer-plus-pop");
+  const menu = page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
   await menu.evaluate((element) => { element.scrollTop = element.scrollHeight; });
   await menu.getByRole("button", { name: "About Cost Checkpoints" }).click();
   const box = await menu.locator(".plus-budget-help-popover").boundingBox();

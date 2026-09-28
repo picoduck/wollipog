@@ -199,8 +199,10 @@ test("the detail bar names Back for its destination and keeps destructive action
     const items = [...domWindow.document.querySelectorAll('[role="menuitem"]')];
     assert.deepEqual(items.map((item) => [item.textContent, item.className]), [
       ["Rename…", "menu-item"],
-      ["Close Pod", "menu-item menu-danger menu-separated"],
+      ["Close Pod", "menu-item danger"],
     ]);
+    assert.equal(items[1]!.previousElementSibling?.getAttribute("role"), "separator",
+      "a separator sets the destructive item apart (§9.1)");
     await act(async () => back.click());
     assert.deepEqual(calls, ["back"]);
   } finally {

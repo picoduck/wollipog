@@ -67,11 +67,16 @@ async function renderHeader(protocolVersion: number, client: ApiClient, current:
       </ApiProvider>,
     );
   });
-  const more = [...container.querySelectorAll<HTMLButtonElement>("button")]
+  const more = [...page().querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.getAttribute("aria-label") === "More Actions");
   assert.ok(more);
   await act(async () => { more.click(); await tick(); });
   return { container, mountPoint, root };
+}
+
+/** Menus are portalled to <body> (the shared MenuSurface), so queries look there. */
+function page(): HTMLElement {
+  return domWindow.document.body as unknown as HTMLElement;
 }
 
 test("Switch Account lists headroom and submits the selected account", async () => {
@@ -95,14 +100,14 @@ test("Switch Account lists headroom and submits the selected account", async () 
     RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch,
     client,
   );
-  const action = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+  const action = [...page().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
     .find((button) => button.textContent?.trim() === "Switch Account…");
   assert.ok(action);
   assert.equal(action.disabled, false);
   await act(async () => { action.click(); await tick(); await tick(); });
-  assert.match(container.textContent ?? "", /Personal/);
-  assert.match(container.textContent ?? "", /5 Hour: 70% remaining/);
-  const submit = [...container.querySelectorAll<HTMLButtonElement>("button")]
+  assert.match(page().textContent ?? "", /Personal/);
+  assert.match(page().textContent ?? "", /5 Hour: 70% remaining/);
+  const submit = [...page().querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent?.trim() === "Switch Account");
   assert.ok(submit);
   await act(async () => { submit.click(); await tick(); });
@@ -116,7 +121,7 @@ test("an older runner exposes the action as disabled with an update requirement"
     RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch - 1,
     { ...api } as ApiClient,
   );
-  const action = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+  const action = [...page().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
     .find((button) => button.textContent?.trim() === "Switch Account…");
   assert.ok(action);
   assert.equal(action.disabled, true);
@@ -149,7 +154,7 @@ test("email-shaped account labels stay masked in the header and the Switch Accou
     .find((button) => button.getAttribute("aria-label") === name || button.textContent?.trim() === name) as
       HTMLButtonElement | undefined;
   const openSwitch = async () => {
-    const action = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+    const action = [...page().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
       .find((button) => button.textContent?.trim() === "Switch Account…");
     assert.ok(action);
     await act(async () => { action.click(); await tick(); await tick(); });
@@ -172,7 +177,7 @@ test("email-shaped account labels stay masked in the header and the Switch Accou
     const cancel = buttonNamed("Cancel");
     assert.ok(cancel);
     await act(async () => { cancel.click(); await tick(); });
-    await act(async () => { (container.querySelector('[aria-label="More Actions"]') as HTMLButtonElement).click(); await tick(); });
+    await act(async () => { (page().querySelector('[aria-label="More Actions"]') as HTMLButtonElement).click(); await tick(); });
     await openSwitch();
     assert.equal(html().includes("@example."), false, "reopening the dialog starts hidden again");
   } finally {

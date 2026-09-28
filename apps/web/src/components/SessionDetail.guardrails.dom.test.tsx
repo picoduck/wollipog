@@ -57,6 +57,11 @@ after(() => {
   }
 });
 
+/** Menus are portalled to <body> (the shared MenuSurface), so queries look there. */
+function page(): HTMLElement {
+  return domWindow.document.body as unknown as HTMLElement;
+}
+
 test("campaign continuation status explains missing results and exposes explicit acknowledgement", async () => {
   const acknowledged: string[] = [];
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
@@ -77,11 +82,11 @@ test("campaign continuation status explains missing results and exposes explicit
     }} onAcknowledge={(commandId) => acknowledged.push(commandId)} />);
   });
   try {
-    const notice = container.querySelector<HTMLElement>('[aria-label="Campaign Continuation: Missing Result"]');
+    const notice = page().querySelector<HTMLElement>('[aria-label="Campaign Continuation: Missing Result"]');
     assert.ok(notice);
     assert.match(notice.textContent ?? "", /3 Pending Events · Attempt 2/);
     assert.match(notice.textContent ?? "", /will not be replayed automatically/);
-    const acknowledge = container.querySelector<HTMLButtonElement>("button");
+    const acknowledge = page().querySelector<HTMLButtonElement>("button");
     assert.equal(acknowledge?.textContent, "Acknowledge Missing Result");
     await act(async () => fireDomEvent.click(acknowledge!));
     assert.deepEqual(acknowledged, ["campaign_prompt_one"]);
@@ -111,7 +116,7 @@ test("a Viewer reads the campaign continuation's Acknowledge disabled with a vis
     }} actionRefusal={reason} onAcknowledge={(commandId) => acknowledged.push(commandId)} />);
   });
   try {
-    const acknowledge = container.querySelector<HTMLButtonElement>("button")!;
+    const acknowledge = page().querySelector<HTMLButtonElement>("button")!;
     assert.equal(acknowledge.disabled, true);
     const described = acknowledge.getAttribute("aria-describedby");
     assert.equal(described ? domWindow.document.getElementById(described)?.textContent : null, reason);
@@ -143,10 +148,10 @@ test("campaign continuation status exposes an explicit retry after automatic ret
     }} onRetry={(commandId) => retried.push(commandId)} />);
   });
   try {
-    const notice = container.querySelector<HTMLElement>('[aria-label="Campaign Continuation: Failed"]');
+    const notice = page().querySelector<HTMLElement>('[aria-label="Campaign Continuation: Failed"]');
     assert.ok(notice);
     assert.match(notice.textContent ?? "", /Automatic retrying stopped/);
-    const retry = container.querySelector<HTMLButtonElement>("button");
+    const retry = page().querySelector<HTMLButtonElement>("button");
     assert.equal(retry?.textContent, "Retry Campaign Continuation");
     await act(async () => fireDomEvent.click(retry!));
     assert.deepEqual(retried, ["campaign_prompt_failed"]);
@@ -176,48 +181,48 @@ test("the Composer guardrails expose and persist the concurrent live-child limit
     />);
   });
   try {
-    const trigger = container.querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]');
+    const trigger = page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]');
     assert.ok(trigger);
     await act(async () => fireDomEvent.click(trigger));
-    const liveChildLabel = [...container.querySelectorAll<HTMLLabelElement>("label")]
+    const liveChildLabel = [...page().querySelectorAll<HTMLLabelElement>("label")]
       .find((candidate) => candidate.textContent === "Live Child Limit");
     const input = liveChildLabel?.htmlFor
-      ? container.querySelector<HTMLInputElement>(`#${liveChildLabel.htmlFor}`)
+      ? page().querySelector<HTMLInputElement>(`#${liveChildLabel.htmlFor}`)
       : null;
     assert.ok(input, "the Composer menu includes a labelled live-child control");
     assert.equal(input.value, "");
     assert.equal(input.placeholder, "4");
     assert.equal(input.max, "64");
-    assert.match(container.textContent ?? "", /Live Child Limit/);
-    assert.doesNotMatch(container.textContent ?? "", /Pauses when spend reaches this amount/,
+    assert.match(page().textContent ?? "", /Live Child Limit/);
+    assert.doesNotMatch(page().textContent ?? "", /Pauses when spend reaches this amount/,
       "verbose guardrail guidance stays out of the compact menu by default");
-    const costHelp = container.querySelector<HTMLButtonElement>('[aria-label="About Recurring Cost Threshold"]');
+    const costHelp = page().querySelector<HTMLButtonElement>('[aria-label="About Recurring Cost Threshold"]');
     assert.ok(costHelp, "each guardrail exposes its guidance through an info control");
     assert.equal(costHelp.getAttribute("aria-expanded"), "false");
     await act(async () => fireDomEvent.click(costHelp));
     assert.equal(costHelp.getAttribute("aria-expanded"), "true");
-    assert.match(container.textContent ?? "", /Pauses when spend reaches this amount/);
-    const helpPopover = container.querySelector<HTMLElement>(".plus-budget-help-popover");
+    assert.match(page().textContent ?? "", /Pauses when spend reaches this amount/);
+    const helpPopover = page().querySelector<HTMLElement>(".plus-budget-help-popover");
     assert.ok(helpPopover);
     assert.equal(costHelp.getAttribute("aria-controls"), helpPopover.id);
     assert.equal(costHelp.getAttribute("aria-describedby"), helpPopover.id);
-    const toolHelp = container.querySelector<HTMLButtonElement>('[aria-label="About Tool-Call Threshold"]');
+    const toolHelp = page().querySelector<HTMLButtonElement>('[aria-label="About Tool-Call Threshold"]');
     assert.ok(toolHelp);
     await act(async () => {
       fireDomEvent.pointerDown(toolHelp);
       fireDomEvent.click(toolHelp);
     });
-    assert.equal(container.querySelectorAll(".plus-budget-help-popover").length, 1,
+    assert.equal(page().querySelectorAll(".plus-budget-help-popover").length, 1,
       "an outside pointer dismisses the previous disclosure before opening another");
     assert.equal(costHelp.getAttribute("aria-expanded"), "false");
     assert.equal(toolHelp.getAttribute("aria-expanded"), "true");
     await act(async () => fireDomEvent.keyDown(toolHelp, { key: "Escape" }));
     assert.equal(toolHelp.getAttribute("aria-expanded"), "false");
-    assert.equal(container.querySelectorAll(".plus-budget-help-popover").length, 0);
-    const childHelp = container.querySelector<HTMLButtonElement>('[aria-label="About Live Child Limit"]');
+    assert.equal(page().querySelectorAll(".plus-budget-help-popover").length, 0);
+    const childHelp = page().querySelector<HTMLButtonElement>('[aria-label="About Live Child Limit"]');
     assert.ok(childHelp);
     await act(async () => fireDomEvent.click(childHelp));
-    assert.match(container.textContent ?? "", /4 limit · 3 occupied · 1 remaining/,
+    assert.match(page().textContent ?? "", /4 limit · 3 occupied · 1 remaining/,
       "the running session exposes its effective capacity, not only the configured override");
     await act(async () => fireDomEvent.keyDown(childHelp, { key: "Escape" }));
     await act(async () => {
@@ -335,33 +340,33 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
   await act(async () => render("default"));
   try {
     await act(async () => fireDomEvent.click(
-      container.querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!,
+      page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!,
     ));
-    assert.equal(container.querySelector('[aria-label^="Parent Control:"]'), null);
+    assert.equal(page().querySelector('[aria-label^="Parent Control:"]'), null);
 
     await act(async () => render("orchestrator"));
-    const select = container.querySelector<HTMLButtonElement>('[aria-label="Parent Control: Human"]');
+    const select = page().querySelector<HTMLButtonElement>('[aria-label="Parent Control: Human"]');
     assert.ok(select);
-    assert.match(container.textContent ?? "", /Campaign Behavior/);
-    assert.match(container.textContent ?? "", /claude · Claude Code · Native/);
-    assert.match(container.textContent ?? "", /claude-opus-5/);
-    assert.match(container.textContent ?? "", /Session Override/);
-    assert.match(container.textContent ?? "", /keeps its stored policy when account defaults change/);
-    assert.match(container.textContent ?? "", /Waiting for HumanPolicy Revision 3/);
-    assert.match(container.textContent ?? "", /0 Verified/);
-    assert.match(container.textContent ?? "", /1 Duplicates Skipped/);
-    assert.match(container.textContent ?? "", /assigned to the Orchestrator but is routed to a human\. No image reader\./,
+    assert.match(page().textContent ?? "", /Campaign Behavior/);
+    assert.match(page().textContent ?? "", /claude · Claude Code · Native/);
+    assert.match(page().textContent ?? "", /claude-opus-5/);
+    assert.match(page().textContent ?? "", /Session Override/);
+    assert.match(page().textContent ?? "", /keeps its stored policy when account defaults change/);
+    assert.match(page().textContent ?? "", /Waiting for HumanPolicy Revision 3/);
+    assert.match(page().textContent ?? "", /0 Verified/);
+    assert.match(page().textContent ?? "", /1 Duplicates Skipped/);
+    assert.match(page().textContent ?? "", /assigned to the Orchestrator but is routed to a human\. No image reader\./,
       "the campaign explains the specific reason instead of a generic one");
     await act(async () => fireDomEvent.click(select));
-    const questions = [...container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    const questions = [...page().querySelectorAll<HTMLButtonElement>('[role="option"]')]
       .find((option) => option.textContent?.includes("Questions") && !option.textContent?.includes("Approvals"));
     assert.ok(questions);
     await act(async () => fireDomEvent.click(questions));
     assert.deepEqual(selected, ["questions"]);
-    const mergeAuthority = container.querySelector<HTMLButtonElement>('[aria-label="PR Merge Approval: Human"]');
+    const mergeAuthority = page().querySelector<HTMLButtonElement>('[aria-label="PR Merge Approval: Human"]');
     assert.ok(mergeAuthority, "each sensitive workflow category has its own authority control");
     await act(async () => fireDomEvent.keyDown(mergeAuthority, { key: "ArrowDown" }));
-    const authorityOptions = container.querySelector<HTMLElement>('[role="listbox"][aria-label="PR Merge Approval"]');
+    const authorityOptions = page().querySelector<HTMLElement>('[role="listbox"][aria-label="PR Merge Approval"]');
     assert.ok(authorityOptions);
     await act(async () => fireDomEvent.keyDown(authorityOptions, { key: "ArrowDown" }));
     await act(async () => fireDomEvent.keyDown(authorityOptions, { key: "Enter" }));
@@ -369,13 +374,13 @@ test("the Composer exposes human-controlled Parent Control only for Orchestrator
     for (const label of [
       "Implementation Questions", "PR Merge Approval", "Merged Branch Deletion",
       "Follow-Up Issue Publication", "UI Evidence Approval",
-    ]) assert.ok(container.querySelector(`[aria-label^="${label}:"]`), `${label} is explicitly labelled`);
-    assert.match(container.textContent ?? "", /provider may retain images in provider-local transcripts or media logs/,
+    ]) assert.ok(page().querySelector(`[aria-label^="${label}:"]`), `${label} is explicitly labelled`);
+    assert.match(page().textContent ?? "", /provider may retain images in provider-local transcripts or media logs/,
       "the session override discloses provider-local retention before delegation");
-    assert.match(container.textContent ?? "", /provider-local retention is outside those audit guarantees/);
-    assert.match(container.textContent ?? "", /Video evidence otherwise requires human review, including video attached as a Session artifact/);
-    assert.match(container.textContent ?? "", /Only an authenticated human can change/);
-    assert.match(container.textContent ?? "", /unconsumed approvals are revoked/);
+    assert.match(page().textContent ?? "", /provider-local retention is outside those audit guarantees/);
+    assert.match(page().textContent ?? "", /Video evidence otherwise requires human review, including video attached as a Session artifact/);
+    assert.match(page().textContent ?? "", /Only an authenticated human can change/);
+    assert.match(page().textContent ?? "", /unconsumed approvals are revoked/);
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -478,20 +483,20 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
     await act(async () => intervalHandler?.());
     assert.equal(requests.length, 1, "a slow request coalesces the next interval poll");
 
-    await act(async () => fireDomEvent.click(container.querySelector("button")!));
+    await act(async () => fireDomEvent.click(page().querySelector("button")!));
     assert.equal(requests.length, 2, "a resolution forces an immediate replacement request");
     assert.equal(requests[0]!.signal?.aborted, true);
     await act(async () => {
       requests[1]!.resolve({ requests: [descendantRequest("new")] });
       await requests[1]!.promise;
     });
-    assert.equal(container.querySelector("span")?.textContent, "new");
+    assert.equal(page().querySelector("span")?.textContent, "new");
     assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "ready");
     await act(async () => {
       requests[0]!.resolve({ requests: [descendantRequest("stale")] });
       await requests[0]!.promise;
     });
-    assert.equal(container.querySelector("span")?.textContent, "new",
+    assert.equal(page().querySelector("span")?.textContent, "new",
       "a superseded response cannot overwrite the current list");
 
     const referenceChangesAfterNewResult = requestReferenceChanges;
@@ -504,7 +509,7 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
       "a structurally unchanged poll retains the current state reference");
 
     await act(async () => intervalHandler?.());
-    await act(async () => fireDomEvent.click(container.querySelector("button")!));
+    await act(async () => fireDomEvent.click(page().querySelector("button")!));
     assert.equal(requests[3]!.signal?.aborted, true);
     await act(async () => {
       requests[4]!.resolve({ requests: [descendantRequest("newer")] });
@@ -514,35 +519,35 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
       requests[3]!.reject(new Error("late failure"));
       await requests[3]!.promise.catch(() => {});
     });
-    assert.equal(container.querySelector("span")?.textContent, "newer",
+    assert.equal(page().querySelector("span")?.textContent, "newer",
       "a superseded failure cannot clear a newer successful result");
 
-    await act(async () => fireDomEvent.click(container.querySelector("button")!));
+    await act(async () => fireDomEvent.click(page().querySelector("button")!));
     await act(async () => {
       requests[5]!.reject(new Error("offline"));
       await requests[5]!.promise.catch(() => {});
     });
-    assert.equal(container.querySelector("span")?.textContent, "",
+    assert.equal(page().querySelector("span")?.textContent, "",
       "a current request failure clears stale request controls");
     assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "unavailable",
       "a current request failure is not mistaken for an authoritative empty result");
     const referenceChangesAfterFirstUnavailable = requestReferenceChanges;
 
-    await act(async () => fireDomEvent.click(container.querySelector("button")!));
+    await act(async () => fireDomEvent.click(page().querySelector("button")!));
     await act(async () => {
       requests[6]!.resolve({
         requests: [{ ...descendantRequest("old-control-plane"), eventEpoch: undefined as unknown as number }],
       });
       await requests[6]!.promise;
     });
-    assert.equal(container.querySelector("span")?.textContent, "",
+    assert.equal(page().querySelector("span")?.textContent, "",
       "mixed-version rows without exact routing metadata fail closed");
     assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "unavailable",
       "an incompatible response is not treated as an authoritative empty result");
     assert.equal(requestReferenceChanges, referenceChangesAfterFirstUnavailable,
       "an equivalent incompatible result retains the unavailable request reference");
 
-    await act(async () => fireDomEvent.click(container.querySelector("button")!));
+    await act(async () => fireDomEvent.click(page().querySelector("button")!));
     await act(async () => {
       requests[7]!.reject(new Error("still offline"));
       await requests[7]!.promise.catch(() => {});
@@ -550,18 +555,18 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
     assert.equal(requestReferenceChanges, referenceChangesAfterFirstUnavailable,
       "repeated failures retain the unavailable request reference while polling continues");
 
-    await act(async () => fireDomEvent.click(container.querySelector("button")!));
+    await act(async () => fireDomEvent.click(page().querySelector("button")!));
     await act(async () => render("parent-b", true));
     assert.equal(requests[8]!.signal?.aborted, true, "changing sessions aborts the old request");
     assert.equal(requests.length, 10);
     assert.equal(requests[9]!.sessionId, "parent-b");
-    assert.equal(container.querySelector("span")?.textContent, "");
+    assert.equal(page().querySelector("span")?.textContent, "");
     assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "loading",
       "switching sessions cannot reuse the prior session's authoritative state");
     const enabledRefresh = exposedRefreshAfterResolution;
     await act(async () => render("parent-b", false));
     assert.equal(requests[9]!.signal?.aborted, true, "disabling Parent Control aborts the request");
-    assert.equal(container.querySelector("span")?.textContent, "");
+    assert.equal(page().querySelector("span")?.textContent, "");
     assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "idle");
     await act(async () => enabledRefresh?.());
     assert.equal(requests.length, 10, "a stale resolution callback cannot restart disabled polling");
@@ -571,7 +576,7 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
       requests[10]!.resolve({ requests: [descendantRequest("before-disconnect")] });
       await requests[10]!.promise;
     });
-    assert.equal(container.querySelector("span")?.textContent, "before-disconnect");
+    assert.equal(page().querySelector("span")?.textContent, "before-disconnect");
     const referenceChangesBeforeDisconnect = requestReferenceChanges;
     await act(async () => intervalHandler?.());
     assert.equal(requests.length, 12);
@@ -579,7 +584,7 @@ test("descendant polling coalesces intervals and rejects superseded responses", 
     await act(async () => render("parent-b", true, false));
     assert.equal(requests[11]!.signal?.aborted, true, "disconnecting aborts the active request");
     assert.equal(container.firstElementChild?.getAttribute("data-poll-status"), "unavailable");
-    assert.equal(container.querySelector("span")?.textContent, "");
+    assert.equal(page().querySelector("span")?.textContent, "");
     assert.equal(requestReferenceChanges, referenceChangesBeforeDisconnect + 1,
       "disconnecting clears populated request controls exactly once");
     assert.equal(intervalRegistrations, intervalRegistrationsBeforeDisconnect,
@@ -656,7 +661,7 @@ test("descendant polling keeps replacement deadlines when expired timer ids are 
       requests[0]!.resolve({ requests: [descendantRequest("current")] });
       await requests[0]!.promise;
     });
-    assert.equal(container.querySelector("span")?.textContent, "current");
+    assert.equal(page().querySelector("span")?.textContent, "current");
     assert.equal(timeouts.size, 0, "successful settlement clears its deadline");
 
     await act(async () => intervalHandler?.());
@@ -666,15 +671,15 @@ test("descendant polling keeps replacement deadlines when expired timer ids are 
 
     await act(async () => fireActiveTimeout());
     assert.equal(requests[1]!.signal?.aborted, true, "the deadline aborts the hung request");
-    assert.equal(container.querySelector("span")?.getAttribute("data-poll-status"), "unavailable");
-    assert.equal(container.querySelector("span")?.textContent, "",
+    assert.equal(page().querySelector("span")?.getAttribute("data-poll-status"), "unavailable");
+    assert.equal(page().querySelector("span")?.textContent, "",
       "timed-out request controls fail closed without reporting an authoritative empty result");
     const referenceChangesAfterFirstTimeout = requestReferenceChanges;
     await act(async () => {
       requests[1]!.resolve({ requests: [descendantRequest("late-success")] });
       await requests[1]!.promise;
     });
-    assert.equal(container.querySelector("span")?.textContent, "");
+    assert.equal(page().querySelector("span")?.textContent, "");
     assert.equal(requests.length, 2,
       "a timed-out success remains harmless before the next interval starts");
 
@@ -688,7 +693,7 @@ test("descendant polling keeps replacement deadlines when expired timer ids are 
       requests[2]!.reject(new Error("late timeout failure"));
       await requests[2]!.promise.catch(() => {});
     });
-    assert.equal(container.querySelector("span")?.textContent, "");
+    assert.equal(page().querySelector("span")?.textContent, "");
     assert.equal(requests.length, 3,
       "a timed-out failure remains harmless before the next interval starts");
 
@@ -714,7 +719,7 @@ test("descendant polling keeps replacement deadlines when expired timer ids are 
       requests[5]!.resolve({ requests: [descendantRequest("newer")] });
       await requests[5]!.promise;
     });
-    assert.equal(container.querySelector("span")?.textContent, "newer");
+    assert.equal(page().querySelector("span")?.textContent, "newer");
     await act(async () => intervalHandler?.());
     await act(async () => root.unmount());
     assert.equal(requests[6]!.signal?.aborted, true, "unmounting aborts the active request");
@@ -772,14 +777,14 @@ test("a legacy campaign payload derives Integration Isolation from the preset be
     disabled={false} imageMimeTypes={[]} onAttachImages={() => {}}
   />);
   const row = () => {
-    const term = [...container.querySelectorAll("dt")].find((node) => node.textContent === "Integration Isolation");
+    const term = [...page().querySelectorAll("dt")].find((node) => node.textContent === "Integration Isolation");
     assert.ok(term, "the Campaign Behavior panel shows the stored value");
     return term.nextElementSibling!.textContent ?? "";
   };
   const open = async (permissionMode: string, strictProjectIsolation: boolean) => {
     await act(async () => render(permissionMode, strictProjectIsolation));
-    const toggle = container.querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!;
-    if (!container.querySelector('[aria-label="Active Campaign Behavior"]')) {
+    const toggle = page().querySelector<HTMLButtonElement>('[aria-label="Add and Modes"]')!;
+    if (!page().querySelector('[aria-label="Active Campaign Behavior"]')) {
       await act(async () => fireDomEvent.click(toggle));
     }
   };
@@ -790,7 +795,7 @@ test("a legacy campaign payload derives Integration Isolation from the preset be
     assert.match(row(), /^Enabled/,
       "a non-strict coupled preset removed integrations, so strictness must not be read first");
     assert.match(row(), /Legacy Session/, "and the derived value is attributed as legacy provenance");
-    const disclosure = () => [...container.querySelectorAll("dt")]
+    const disclosure = () => [...page().querySelectorAll("dt")]
       .find((node) => node.textContent === "Integration Isolation")!.parentElement!.getAttribute("title") ?? "";
     // A preset launch replaces the provider surface, so it must not borrow the additive launch's
     // "kept" list: a Claude preset keeps neither configured hooks' settings sources nor any MCP server.

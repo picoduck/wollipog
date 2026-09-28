@@ -55,20 +55,20 @@ test("Inbox creation offers both workflows with menu-button keyboard and focus b
     assert.equal(trigger.getAttribute("aria-haspopup"), "menu");
 
     await act(async () => { trigger.click(); });
-    const items = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
+    const items = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
     assert.deepEqual(items.map((item) => item.textContent?.trim()), ["New Session", "New Project"]);
     assert.equal(domWindow.document.activeElement, items[0], "opening by click focuses the first choice");
 
     await act(async () => { items[0]!.click(); });
     assert.equal(sessions, 1);
     assert.equal(projects, 0);
-    assert.equal(container.querySelector('[role="menu"]'), null);
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
     assert.equal(domWindow.document.activeElement, trigger, "choosing a workflow restores focus before opening its layer");
 
     await act(async () => {
       trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowUp", bubbles: true }) as never);
     });
-    const projectItem = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')][1]!;
+    const projectItem = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitem"]')][1]!;
     assert.equal(domWindow.document.activeElement, projectItem, "Arrow Up opens on the last choice");
     await act(async () => { projectItem.click(); });
     assert.equal(projects, 1);

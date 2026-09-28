@@ -173,7 +173,7 @@ test("an active Plan mode remains the one checked state while staying outside se
     onDetails: () => {},
   }));
   assert.equal((html.match(/aria-checked="true"/g) ?? []).length, 1);
-  assert.match(html, /aria-checked="true" class="cbar-opt permission-mode on"[^>]*>[\s\S]*?Plan Only \(Read-Only\)/);
+  assert.match(html, /role="menuitemradio" aria-checked="true"[^>]*>[\s\S]*?Plan Only \(Read-Only\)/);
 });
 
 test("Pi presents its default ask mode once while preserving an explicit stored default", () => {

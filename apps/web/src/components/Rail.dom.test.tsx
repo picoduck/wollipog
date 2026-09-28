@@ -47,6 +47,15 @@ after(() => {
   Object.defineProperty(globalThis, "localStorage", { configurable: true, writable: true, value: priorLocalStorage });
 });
 
+/** The More sheet: the shared portalled menu, so it lives in <body>. */
+const MORE_SHEET = '[role="menu"][aria-label="More Destinations"]';
+
+/** The More sheet's Settings row: the sheet is the shared portalled menu, so it lives in <body>. */
+function settingsRow(): HTMLAnchorElement | null {
+  return [...(domWindow.document as unknown as Document).querySelectorAll<HTMLAnchorElement>('[role="menu"][aria-label="More Destinations"] .menu-item')]
+    .find((row) => row.textContent === "Settings") ?? null;
+}
+
 test("rail exposes every destination, nested active states, live badges, and persistent actions", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -176,23 +185,24 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
 
     const moreTrigger = container.querySelector(".rail-more-trigger")! as unknown as HTMLButtonElement;
     await act(async () => { moreTrigger.click(); });
-    const sheet = container.querySelector(".rail-more-sheet")!;
+    const sheet = (domWindow.document as unknown as Document).querySelector(MORE_SHEET)!;
     // The bar takes the first four VISIBLE destinations (#385), so with every experiment on the
     // sheet holds the visible order past them, and Settings still trails everything.
-    assert.deepEqual([...sheet.querySelectorAll(".rail-more-item")].map((el) => el.querySelector("span")?.textContent),
+    assert.deepEqual([...sheet.querySelectorAll(".menu-item")].map((el) => el.querySelector(".menu-text")?.textContent),
       ["Connections", "Agent Skills", "Projects", "Archived Sessions", "Usage & Cost",
         "Settings"],
       "Settings is the trailing row, after every destination");
     // The default order overflows Connections, so its online count overflows with it (#532
     // round-1 finding): a moved destination must not shed its status.
-    const connectionsRow = [...sheet.querySelectorAll<HTMLElement>(".rail-more-item")]
-      .find((row) => row.querySelector("span")?.textContent === "Connections")!;
+    const connectionsRow = [...sheet.querySelectorAll<HTMLElement>(".menu-item")]
+      .find((row) => row.querySelector(".menu-text")?.textContent === "Connections")!;
     assert.equal(connectionsRow.querySelector(".rail-more-count")?.textContent, "1");
     assert.match(connectionsRow.getAttribute("aria-label") ?? "", /1 Online/);
     assert.equal(sheet.querySelector(".rail-more-control"), null,
       "the sheet must contain no nested dialog or menu content");
-    // Every child of a role=menu must be a menu item, or roving navigation silently skips it.
-    assert.equal(sheet.querySelectorAll(':scope > *:not([role="menuitem"])').length, 0);
+    // Every child of a role=menu must be a menu item, or roving navigation silently skips it. The
+    // sheet's grabber and title row are decorative, and the separator is not focusable.
+    assert.equal(sheet.querySelectorAll(':scope > *:not([role="menuitem"], [role="separator"], [aria-hidden="true"])').length, 0);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -237,7 +247,7 @@ test("More closes when the viewport leaves the phone breakpoint", async () => {
     await act(async () => {
       (container.querySelector(".rail-more-trigger") as unknown as HTMLButtonElement).click();
     });
-    assert.ok(container.querySelector(".rail-more-sheet"), "sheet opens on a phone");
+    assert.ok((domWindow.document as unknown as Document).querySelector(MORE_SHEET), "sheet opens on a phone");
 
     phone = false;
     await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize") as never); });
@@ -247,9 +257,9 @@ test("More closes when the viewport leaves the phone breakpoint", async () => {
     await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize") as never); });
     await render();
 
-    assert.equal(container.querySelector(".rail-more-sheet"), null,
+    assert.equal((domWindow.document as unknown as Document).querySelector(MORE_SHEET), null,
       "returning to phone width must not resurrect the sheet");
-    assert.equal(container.querySelector(".menu-backdrop"), null,
+    assert.equal(domWindow.document.querySelector(".menu-backdrop"), null,
       "a stranded backdrop would swallow every tap");
   } finally {
     await act(async () => { root.unmount(); });
@@ -309,14 +319,14 @@ test("only one element claims the current page while More is open", async () => 
         />,
       );
     });
-    assert.equal(container.querySelectorAll('[aria-current="page"]').length, 1);
+    assert.equal(domWindow.document.querySelectorAll('[aria-current="page"]').length, 1);
 
     await act(async () => {
       (container.querySelector(".rail-more-trigger") as unknown as HTMLButtonElement).click();
     });
-    const current = [...container.querySelectorAll('[aria-current="page"]')];
+    const current = [...domWindow.document.querySelectorAll('[aria-current="page"]')];
     assert.equal(current.length, 1, "exactly one current-page element while the sheet is open");
-    assert.ok(current[0]!.classList.contains("rail-more-item"),
+    assert.ok(current[0]!.classList.contains("menu-item"),
       "the selected destination owns it once the sheet is open, not the trigger");
   } finally {
     await act(async () => { root.unmount(); });
@@ -353,13 +363,13 @@ test("the phone More trigger reads as current on the Settings route and the row 
     assert.equal(trigger.getAttribute("aria-label"), "More Destinations, Settings selected");
 
     await act(async () => { trigger.click(); });
-    const row = container.querySelector(".rail-more-settings")! as unknown as HTMLAnchorElement;
+    const row = settingsRow()! as unknown as HTMLAnchorElement;
     assert.equal(row.getAttribute("role"), "menuitem", "roving navigation must not skip it");
     assert.equal(row.getAttribute("aria-current"), "page");
-    assert.ok(row.classList.contains("active"));
+    assert.ok(row.classList.contains("is-active"));
     assert.equal(row.getAttribute("href"), "/settings/appearance",
       "the row is a real link, so it survives middle-click and copy-link");
-    assert.equal(container.querySelectorAll('[aria-current="page"]').length, 1,
+    assert.equal(domWindow.document.querySelectorAll('[aria-current="page"]').length, 1,
       "the row takes the current-page marker from the trigger while the sheet is open");
 
     // Space, not click: an <a> never activates on Space natively, and role="menuitem" promises it.
@@ -367,7 +377,7 @@ test("the phone More trigger reads as current on the Settings route and the row 
       row.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: " ", bubbles: true }) as never);
     });
     assert.deepEqual(navigated, [{ name: "settings" }]);
-    assert.equal(container.querySelector(".rail-more-sheet"), null, "activating a row closes the sheet");
+    assert.equal((domWindow.document as unknown as Document).querySelector(MORE_SHEET), null, "activating a row closes the sheet");
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
@@ -414,7 +424,7 @@ test("crossing to desktop from the Settings row hands focus to the desktop gear"
     await act(async () => {
       (container.querySelector(".rail-more-trigger") as unknown as HTMLButtonElement).click();
     });
-    const row = container.querySelector(".rail-more-settings") as unknown as HTMLAnchorElement;
+    const row = settingsRow() as unknown as HTMLAnchorElement;
     await act(async () => { row.focus(); });
     // Identity, never assert.equal: a failed deep-diff of two DOM nodes serialises the whole tree
     // and takes the runner out with it.
@@ -511,9 +521,9 @@ test("overflowed destinations keep their status counts and Sessions keeps its sa
     await act(async () => {
       (container.querySelector(".rail-more-trigger") as unknown as HTMLButtonElement).click();
     });
-    const sheet = container.querySelector(".rail-more-sheet")!;
-    const sessionsRow = [...sheet.querySelectorAll<HTMLAnchorElement>(".rail-more-item")]
-      .find((row) => row.querySelector("span")?.textContent === "Sessions")!;
+    const sheet = (domWindow.document as unknown as Document).querySelector(MORE_SHEET)!;
+    const sessionsRow = [...sheet.querySelectorAll<HTMLAnchorElement>(".menu-item")]
+      .find((row) => row.querySelector(".menu-text")?.textContent === "Sessions")!;
     assert.equal(sessionsRow.querySelector(".rail-more-count.blocked")?.textContent, "2");
     assert.equal(sessionsRow.querySelector(".rail-more-count.stalled")?.textContent, "1");
     assert.match(sessionsRow.getAttribute("aria-label") ?? "", /2 Blocked/);

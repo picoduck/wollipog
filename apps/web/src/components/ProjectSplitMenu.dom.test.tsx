@@ -122,7 +122,10 @@ test("project split menu is fixed, keyboard-managed, and restores trigger focus"
   const menu = body.querySelector<HTMLElement>('[role="menu"]')!;
   assert.ok(menu);
   assert.equal(menu.parentElement, body, "the menu must escape tab-strip overflow through a portal");
-  assert.equal(menu.style.position, "fixed");
+  // The shared surface is position: fixed in the stylesheet from its first commit, and placed
+  // against its trigger before paint, so focusing its first item never scrolls the page.
+  assert.ok(menu.classList.contains("menu"), "the shared menu surface");
+  assert.notEqual(menu.style.left, "", "placed against its trigger");
   assert.equal(domWindow.document.activeElement?.textContent?.trim(), "Pin Workspace");
 
   await act(async () => {

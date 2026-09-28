@@ -12,7 +12,7 @@ for (const width of [390, 1440]) {
     if (await idlePreview.isVisible()) await idlePreview.click();
     const trigger = page.locator(".cbar-trigger").filter({ has: page.locator(".cbar-approvals") });
     await trigger.click();
-    const menu = page.locator(".permission-mode-pop");
+    const menu = page.locator('.menu[aria-label="Permission Mode"]');
     const selected = await menu.getByRole("menuitemradio", { checked: true }).textContent();
     const details = menu.getByRole("menuitem").first();
     await details.focus();

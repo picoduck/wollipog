@@ -94,7 +94,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/AutomationsView.tsx", "native-select", 12],
   ["components/Board.tsx", "native-select", 2],
   ["components/BrowserPanel.tsx", "seg", 1],
-  ["components/ComposerControls.tsx", "cbar-opt", 2],
   ["components/FilesPanel.tsx", "native-select", 1],
   ["components/FilesPanel.tsx", "seg", 1],
   ["components/GitDiffViewer.tsx", "native-select", 1],

@@ -177,7 +177,7 @@ test("destination menu launches immediately, persists the primary action, and re
     assert.equal(defaultMain.textContent?.trim(), "Open", "the primary action has a visible label");
 
     await act(async () => { choose.click(); });
-    const choices = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+    const choices = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
     assert.deepEqual(choices.map((item) => item.textContent?.replace("✓", "").trim()), [
       "VS Code", "Cursor", "Devin Desktop", "Future Editor", "IntelliJ IDEA", "WebStorm", "File Manager",
     ]);
@@ -198,7 +198,7 @@ test("destination menu launches immediately, persists the primary action, and re
     }], "choosing a destination launches it immediately");
     assert.equal(domWindow.localStorage.getItem("wollipog.editor.lastUsed"), "cursor");
     assert.equal(domWindow.localStorage.getItem("wollipog.openDestination.lastUsed"), "editor:cursor");
-    assert.equal(container.querySelector('[role="menu"]'), null, "selection closes the menu");
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null, "selection closes the menu");
     assert.equal(domWindow.document.activeElement, choose, "selection restores focus to the picker");
 
     const selectedMain = container.querySelector<HTMLButtonElement>('button[aria-label="Open in Cursor"]');
@@ -213,7 +213,7 @@ test("destination menu launches immediately, persists the primary action, and re
       choose.focus();
       choose.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as unknown as Event);
     });
-    const editorChoices = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
+    const editorChoices = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')];
     const selectedCursor = editorChoices.find((item) => item.textContent?.includes("Cursor"));
     const unselectedCode = editorChoices.find((item) => item.textContent?.includes("VS Code"));
     assert.ok(selectedCursor);
@@ -228,7 +228,7 @@ test("destination menu launches immediately, persists the primary action, and re
       );
     });
     await act(async () => { await new Promise((resolve) => domWindow.setTimeout(resolve, 0)); });
-    assert.equal(container.querySelector('[role="menu"]'), null);
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
     assert.equal(domWindow.document.activeElement, choose, "Escape restores focus to the chevron");
   } finally {
     await mounted.cleanup();
@@ -250,7 +250,7 @@ test("file-manager choices use the fixed session-scoped reveal action and OS-app
     const choose = container.querySelector<HTMLButtonElement>('button[aria-label="Choose Destination"]');
     assert.ok(choose);
     await act(async () => { choose.click(); });
-    const explorer = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    const explorer = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
       .find((item) => item.textContent?.includes("Explorer"));
     assert.ok(explorer);
     await act(async () => { explorer.click(); });
@@ -295,7 +295,7 @@ test("busy launches stay focusable, suppress duplicates, and expose failure feed
     assert.equal(calls.length, 1);
     assert.equal(container.querySelector('[role="status"]')?.textContent, "A destination launch is already in progress.");
     act(() => { choose.click(); });
-    assert.equal(container.querySelector('[role="menu"]'), null, "the menu cannot start another launch while busy");
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null, "the menu cannot start another launch while busy");
 
     await act(async () => {
       settleLaunch(new Error("Editor process failed to start."));
@@ -330,11 +330,11 @@ test("offline runners remain understandable while remote and unsupported runners
     assert.ok(reopenedChoose);
     await act(async () => { reopenedChoose.click(); });
     await offline.pushRunner({ ...runner, status: "offline" });
-    const cursor = [...offline.container.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    const cursor = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
       .find((item) => item.textContent?.includes("Cursor"));
     assert.ok(cursor);
     await act(async () => { cursor.click(); });
-    assert.equal(offline.container.querySelector('[role="menu"]'), null, "an offline transition closes the stale menu");
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null, "an offline transition closes the stale menu");
     assert.equal(offline.container.querySelector('[role="status"]')?.textContent, "Runner is offline.");
   } finally {
     await offline.cleanup();

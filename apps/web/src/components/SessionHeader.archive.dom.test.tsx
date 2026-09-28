@@ -29,11 +29,16 @@ for (const [name, value] of Object.entries({
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
 
 function button(container: HTMLElement, label: string): HTMLButtonElement {
-  const match = [...container.querySelectorAll<HTMLButtonElement>("button")]
+  const match = [...page().querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent?.trim() === label ||
       candidate.getAttribute("aria-label") === label);
   assert.ok(match, `missing button: ${label}`);
   return match;
+}
+
+/** Menus are portalled to <body> (the shared MenuSurface), so queries look there. */
+function page(): HTMLElement {
+  return domWindow.document.body as unknown as HTMLElement;
 }
 
 test("Unarchive on an archived Stop Failed session cancels the archive follow-up", async () => {
@@ -101,22 +106,22 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
     );
   });
 
-  assert.match(container.textContent ?? "", /Disconnected/);
-  assert.match(container.textContent ?? "", /Changes Present/);
-  const shareIcon = button(container, "Share").querySelector("svg");
+  assert.match(page().textContent ?? "", /Disconnected/);
+  assert.match(page().textContent ?? "", /Changes Present/);
+  const shareIcon = button(page(), "Share").querySelector("svg");
   assert.ok(shareIcon, "the Share action uses the shared icon");
   assert.equal(shareIcon.getAttribute("width"), "16",
     "the Share icon keeps its desktop size while phone CSS owns mobile compaction");
-  const forkAction = button(container, "Fork Conversation");
+  const forkAction = button(page(), "Fork Conversation");
   assert.equal(forkAction.title, "Fork Conversation");
   assert.ok(forkAction.querySelector("svg"), "the current-point action uses the dedicated thread-fork icon");
   await act(async () => { forkAction.click(); });
   assert.equal(forks, 1);
-  assert.match(container.textContent ?? "", /Background Work: Waiting on External Job/);
-  assert.ok(container.querySelector('[role="status"][aria-label="Background Work: Waiting on External Job"]'));
-  await act(async () => { button(container, "1 Subagent Active").click(); });
+  assert.match(page().textContent ?? "", /Background Work: Waiting on External Job/);
+  assert.ok(page().querySelector('[role="status"][aria-label="Background Work: Waiting on External Job"]'));
+  await act(async () => { button(page(), "1 Subagent Active").click(); });
   assert.equal(activeSubagentOpens, 1);
-  const moreActions = button(container, "More Actions");
+  const moreActions = button(page(), "More Actions");
   assert.ok(moreActions.classList.contains("session-header-action"), "the trigger carries the fixed-geometry class");
   const moreIcon = moreActions.querySelector("svg");
   assert.ok(moreIcon, "the trigger uses the shared icon instead of a text glyph");
@@ -128,24 +133,24 @@ test("Unarchive on an archived Stop Failed session cancels the archive follow-up
   assert.deepEqual(dots, [["12", "5"], ["12", "12"], ["12", "19"]],
     "More Actions uses the intended vertical overflow icon");
   assert.equal(moreActions.textContent?.trim(), "", "the trigger has no font-dependent ellipsis text");
-  await act(async () => { button(container, "More Actions").click(); await tick(); });
-  const actionLabels = [...container.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+  await act(async () => { button(page(), "More Actions").click(); await tick(); });
+  const actionLabels = [...page().querySelectorAll<HTMLElement>('[role="menuitem"]')]
     .map((item) => item.textContent?.trim());
   assert.ok(actionLabels.indexOf("Rename Session…") < actionLabels.indexOf("Snooze Session…"));
   assert.ok(actionLabels.indexOf("Snooze Session…") < actionLabels.indexOf("Unarchive"),
     "Session actions progress from least to more disruptive when Snooze is supported");
-  assert.equal(container.textContent?.includes("Export Markdown"), false,
+  assert.equal(page().textContent?.includes("Export Markdown"), false,
     "operational actions must not retain sharing or export commands");
-  await act(async () => { button(container, "Share").click(); await tick(); });
-  assert.equal(container.querySelector('[role="menu"][aria-label="Session Actions"]'), null,
+  await act(async () => { button(page(), "Share").click(); await tick(); });
+  assert.equal(page().querySelector('[role="menu"][aria-label="Session Actions"]'), null,
     "opening Share must dismiss More Actions");
-  assert.match(container.textContent ?? "", /Share Transcript…/);
-  assert.match(container.textContent ?? "", /Export Markdown/);
-  assert.match(container.textContent ?? "", /Export JSON/);
-  await act(async () => { button(container, "More Actions").click(); await tick(); });
-  assert.equal(container.querySelector('[role="menu"][aria-label="Session Sharing"]'), null,
+  assert.match(page().textContent ?? "", /Share Transcript…/);
+  assert.match(page().textContent ?? "", /Export Markdown/);
+  assert.match(page().textContent ?? "", /Export JSON/);
+  await act(async () => { button(page(), "More Actions").click(); await tick(); });
+  assert.equal(page().querySelector('[role="menu"][aria-label="Session Sharing"]'), null,
     "opening More Actions must dismiss Share");
-  await act(async () => { button(container, "Unarchive").click(); await tick(); await tick(); });
+  await act(async () => { button(page(), "Unarchive").click(); await tick(); await tick(); });
 
   assert.deepEqual(archived, [[session.id, false]]);
   assert.deepEqual(retries, []);
@@ -207,13 +212,13 @@ test("plain Stop Failed exposes idempotent Retry Stop and withholds Restart", as
     );
   });
 
-  assert.match(container.textContent ?? "", /Stop Failed/);
-  await act(async () => { button(container, "More Actions").click(); await tick(); });
+  assert.match(page().textContent ?? "", /Stop Failed/);
+  await act(async () => { button(page(), "More Actions").click(); await tick(); });
   assert.equal(
-    [...container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Restart"),
+    [...page().querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Restart"),
     false,
   );
-  await act(async () => { button(container, "Retry Stop").click(); await tick(); await tick(); });
+  await act(async () => { button(page(), "Retry Stop").click(); await tick(); await tick(); });
   assert.deepEqual(retries, [session.id]);
   await act(async () => root.unmount());
   container.remove();
@@ -263,10 +268,10 @@ test("archive Stop Failed does not leave an empty Runtime section", async () => 
     );
   });
 
-  await act(async () => { button(container, "More Actions").click(); await tick(); });
-  assert.match(container.textContent ?? "", /Retry Stop/,
+  await act(async () => { button(page(), "More Actions").click(); await tick(); });
+  assert.match(page().textContent ?? "", /Retry Stop/,
     "the Session section retains the archive retry action");
-  assert.equal(container.textContent?.includes("Runtime"), false,
+  assert.equal(page().textContent?.includes("Runtime"), false,
     "Runtime must not render without a following runtime action");
   await act(async () => root.unmount());
   container.remove();
@@ -319,13 +324,13 @@ test("an archived session header offers one Unarchive and Restart without Undo o
     );
   });
 
-  await act(async () => { button(container, "More Actions").click(); await tick(); });
-  const actionLabels = [...container.querySelectorAll<HTMLElement>('[role="menuitem"]')]
+  await act(async () => { button(page(), "More Actions").click(); await tick(); });
+  const actionLabels = [...page().querySelectorAll<HTMLElement>('[role="menuitem"]')]
     .map((item) => item.textContent?.trim());
   assert.ok(actionLabels.includes("Unarchive and Restart"));
   assert.equal(actionLabels.includes("Unarchive"), false);
   assert.equal(actionLabels.includes("Restart"), false, "the two-step Restart is replaced, not duplicated");
-  await act(async () => { button(container, "Unarchive and Restart").click(); await tick(); await tick(); });
+  await act(async () => { button(page(), "Unarchive and Restart").click(); await tick(); await tick(); });
 
   assert.deepEqual(restores, [session.id]);
   assert.deepEqual(toasts, ["Session restored and restarting."]);
@@ -376,8 +381,8 @@ test("an unconfirmed Unarchive and Restart reconciles the header against the ser
     );
   });
 
-  await act(async () => { button(container, "More Actions").click(); await tick(); });
-  await act(async () => { button(container, "Unarchive and Restart").click(); await tick(); await tick(); });
+  await act(async () => { button(page(), "More Actions").click(); await tick(); });
+  await act(async () => { button(page(), "Unarchive and Restart").click(); await tick(); await tick(); });
 
   assert.equal(toasts.length, 1);
   assert.match(toasts[0] ?? "", /Could not confirm Unarchive and Restart/);
@@ -430,8 +435,8 @@ test("a reconciliation reload that fails leaves no unhandled rejection", async (
     );
   });
 
-  await act(async () => { button(container, "More Actions").click(); await tick(); });
-  await act(async () => { button(container, "Unarchive and Restart").click(); await tick(); await tick(); });
+  await act(async () => { button(page(), "More Actions").click(); await tick(); });
+  await act(async () => { button(page(), "Unarchive and Restart").click(); await tick(); await tick(); });
 
   assert.deepEqual(rejections, [], "the connectivity failure that made the outcome uncertain also fails the reload");
   assert.equal(toasts.length, 1, "the uncertainty is reported once");

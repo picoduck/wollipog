@@ -1,7 +1,7 @@
-import React, { createContext, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
-import { createPortal } from "react-dom";
+import React, { createContext, Fragment, useContext, useEffect, useLayoutEffect, useRef, useState, type ReactNode, type Ref } from "react";
 import { ChevronLeftIcon, MoreHorizontalIcon, PlusIcon } from "./Icons.js";
-import { useAccessibleMenu, useAnchoredMenuStyle } from "./interactions.js";
+import { useAccessibleMenu } from "./interactions.js";
+import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 
 /**
  * Page anatomy (docs/design-system.md §4.2, §4.3, §4.5).
@@ -184,8 +184,6 @@ interface ActionsMenuItem extends PageMenuAction {
   slot?: number;
 }
 
-const UNANCHORED_POP: React.CSSProperties = { position: "fixed", top: 0, right: 0 };
-
 /** Whether a header secondary's own button is showing; the stylesheet hides it by width (§3.3). */
 function slotButtonShown(trigger: HTMLElement | null, slot: number): boolean {
   const button = trigger?.closest(".page-actions")?.querySelector<HTMLElement>(`.page-action[data-slot="${slot}"]`);
@@ -195,9 +193,9 @@ function slotButtonShown(trigger: HTMLElement | null, slot: number): boolean {
 /**
  * The ⋯ menu shared by the page header and the detail bar. Destructive items sort last.
  *
- * The pop is portalled: the page header is an inline-size query container, and engines at the
- * build floor that give `container-type` layout containment would make it the containing block of
- * a fixed-position pop and its backdrop.
+ * The menu is the shared MenuSurface, portalled: the page header is an inline-size query container,
+ * and engines at the build floor that give `container-type` layout containment would make it the
+ * containing block of a fixed-position menu and its backdrop.
  */
 function ActionsMenu({ className, overflow, items }: { className?: string; overflow: string; items: ActionsMenuItem[] }) {
   const [open, setOpen] = useState(false);
@@ -259,12 +257,6 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
     if (row) observer.observe(row);
     return () => observer.disconnect();
   }, [open, items, close, triggerRef, menuRef]);
-  const menuStyle = useAnchoredMenuStyle(open, menu.triggerRef, {
-    desiredWidth: 220,
-    // A touch row is 44px plus the 2px gap; the pop adds its padding and a separator.
-    desiredHeight: 48 * Math.max(shown.length, 1) + 16,
-    align: "end",
-  });
   const ordered = [...shown.filter((item) => !item.danger), ...shown.filter((item) => item.danger)];
   const firstDanger = ordered.findIndex((item) => item.danger);
   const choose = (action: () => void) => {
@@ -288,52 +280,47 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
       >
         <MoreHorizontalIcon />
       </button>
-      {open && createPortal((
-        <>
-          <div className="menu-backdrop" onClick={() => menu.close(true)} aria-hidden="true" />
-          <div
-            className="menu-pop"
-            id={menu.menuId}
-            ref={menu.menuRef}
-            role="menu"
-            aria-label="More Actions"
-            // Fixed from the first commit: before the anchor is measured, `.menu-pop`'s own absolute
-            // position would put it at the end of <body>, and focusing its first item scrolls there.
-            style={menuStyle ?? UNANCHORED_POP}
-            onFocus={(event) => {
-              focusInMenu.current = true;
-              focusedSlot.current = (event.target as HTMLElement).dataset.slot;
-            }}
-            onBlur={(event) => {
-              // Only a real move out; a removed item blurs with no related target.
-              if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) {
-                focusInMenu.current = false;
-              }
-            }}
-            onKeyDown={(event) => {
-              // The pop lives at the end of <body>, so Tab from it would leave the page header.
-              // Put focus back on ⋯ first; the browser's Tab then moves on from there.
-              if (event.key === "Tab") menu.triggerRef.current?.focus();
-              menu.onMenuKeyDown(event);
-            }}
-          >
-            {ordered.map((item, index) => (
-              <button
-                key={item.label}
-                type="button"
-                role="menuitem"
-                className={`menu-item${item.danger ? " menu-danger" : ""}${index === firstDanger && index > 0 ? " menu-separated" : ""}`}
+      {open && (
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label="More Actions"
+          align="end"
+          onDismiss={() => menu.close(true)}
+          onFocus={(event) => {
+            focusInMenu.current = true;
+            focusedSlot.current = (event.target as HTMLElement).dataset.slot;
+          }}
+          onBlur={(event) => {
+            // Only a real move out; a removed item blurs with no related target.
+            if (event.relatedTarget && !event.currentTarget.contains(event.relatedTarget as Node)) {
+              focusInMenu.current = false;
+            }
+          }}
+          onKeyDown={(event) => {
+            // The menu lives at the end of <body>, so Tab from it would leave the page header.
+            // Put focus back on ⋯ first; the browser's Tab then moves on from there.
+            if (event.key === "Tab") menu.triggerRef.current?.focus();
+            menu.onMenuKeyDown(event);
+          }}
+        >
+          {ordered.map((item, index) => (
+            <Fragment key={item.label}>
+              {index === firstDanger && index > 0 && <MenuSeparator />}
+              <MenuItem
+                danger={item.danger}
                 data-slot={item.slot}
                 disabled={item.disabled}
                 title={item.title}
                 onClick={() => choose(item.onClick)}
               >
                 {item.label}
-              </button>
-            ))}
-          </div>
-        </>
-      ), document.body)}
+              </MenuItem>
+            </Fragment>
+          ))}
+        </MenuSurface>
+      )}
     </div>
   );
 }

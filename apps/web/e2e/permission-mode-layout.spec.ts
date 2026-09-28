@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 async function openApprovals(page: Page, theme: string) {
   await page.goto("/command-inbox-projects-e2e.html?scenario=permission-mode-layout");
@@ -39,19 +40,25 @@ for (const width of [320, 390]) {
     test.describe(`${width}px ${theme}`, () => {
       test.use({ viewport: { width, height: 844 }, hasTouch: true });
 
-      test("permission details stay inside the pane and open without selecting", async ({ page }, testInfo) => {
+      test("permission details stay inside the phone sheet and open without selecting", async ({ page }, testInfo) => {
         await openApprovals(page, theme);
-        const popover = page.locator(".permission-mode-pop");
-        const pane = page.locator(".main-body.inbox-main-body");
+        // On a phone every menu is a bottom sheet with the dialog sheet's grabber (§9.2, #1803), so
+        // it spans the screen and docks to its bottom edge instead of floating inside the composer.
+        const popover = page.locator('.menu[aria-label="Permission Mode"]');
         await expect(popover).toBeVisible();
-        await expectContained(popover, pane);
-        await expectContained(popover, page.locator(".composer-bar"), true);
+        await expect(popover.locator(".sheet-grabber")).toBeVisible();
+        await dialogMotionSettled(page);
+        const viewport = page.viewportSize()!;
+        const sheet = (await popover.boundingBox())!;
+        expect(sheet.x).toBeGreaterThanOrEqual(0);
+        expect(sheet.x + sheet.width).toBeLessThanOrEqual(viewport.width + 0.5);
+        expect(Math.abs(sheet.y + sheet.height - viewport.height)).toBeLessThanOrEqual(1);
         const selected = await popover.getByRole("menuitemradio", { checked: true }).textContent();
         const details = popover.getByRole("menuitem");
         expect(await details.count()).toBeGreaterThan(3);
         for (let index = 0; index < await details.count(); index++) {
           const action = details.nth(index);
-          await expectContained(action, pane);
+          await action.scrollIntoViewIfNeeded();
           await expectContained(action, popover);
           // Check both edges: a partially clipped button can still pass
           // Playwright's ordinary centre-point actionability check.
@@ -68,24 +75,10 @@ for (const width of [320, 390]) {
           await expect(page.getByRole("dialog")).toHaveCount(0);
           await expect(action).toBeFocused();
         }
-        const longLabel = popover.locator(".cbar-permission-label").last();
+        const longLabel = popover.locator(".menu-text").last();
         expect(await longLabel.evaluate((el) => el.getBoundingClientRect().height)).toBeGreaterThan(30);
         expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
         await page.screenshot({ path: testInfo.outputPath(`after-${width}-${theme}.png`) });
-        // Synthetic lateral safe-area space: the containing bar must track
-        // available pane width rather than assuming a full-width viewport.
-        await pane.evaluate((element) => {
-          element.style.paddingLeft = "20px";
-          element.style.paddingRight = "20px";
-        });
-        await expectContained(popover, pane);
-        await expectContained(popover, page.locator(".composer-bar"), true);
-        for (const action of await details.all()) {
-          await action.scrollIntoViewIfNeeded();
-          await expectContained(action, popover);
-          await expectContained(action, pane);
-        }
-        expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(width);
       });
     });
   }
@@ -94,8 +87,11 @@ for (const width of [320, 390]) {
 test("desktop sizing, mouse disclosure, keyboard traversal, focus return and selection", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   const trigger = await openApprovals(page, "dark");
-  const menu = page.locator(".permission-mode-pop");
-  expect((await menu.boundingBox())!.width).toBe(390);
+  const menu = page.locator('.menu[aria-label="Permission Mode"]');
+  await expect(menu).toBeVisible();
+  await dialogMotionSettled(page);
+  // A menu is at most 320px wide (§9.1), and this one fills it with its descriptions.
+  expect((await menu.boundingBox())!.width).toBe(320);
   const details = menu.getByRole("menuitem").first();
   const selected = menu.getByRole("menuitemradio", { checked: true });
   const initial = await selected.textContent();
@@ -118,7 +114,7 @@ test("desktop sizing, mouse disclosure, keyboard traversal, focus return and sel
   await expect(trigger).toBeFocused();
   await page.keyboard.press("ArrowDown");
   const choice = menu.getByRole("menuitemradio").nth(1);
-  const label = await choice.locator(".cbar-permission-label").textContent();
+  const label = await choice.locator(".menu-text").textContent();
   await choice.click();
   await expect(menu).toHaveCount(0);
   await expect(trigger).toBeFocused();

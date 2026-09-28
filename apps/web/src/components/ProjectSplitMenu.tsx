@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { createPortal } from "react-dom";
 import {
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
@@ -16,7 +15,8 @@ import { useApi } from "../api-context.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { Modal } from "./common.js";
 import { MoreHorizontalIcon } from "./Icons.js";
-import { useAccessibleMenu, useAnchoredMenuStyle } from "./interactions.js";
+import { useAccessibleMenu } from "./interactions.js";
+import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 
 export interface ProjectSplitMenuProps {
@@ -49,13 +49,6 @@ export function ProjectSplitMenu({
   const [renameBusy, setRenameBusy] = useState(false);
   const [renameError, setRenameError] = useState<string | null>(null);
   const menu = useAccessibleMenu(open, setOpen, "project-split-menu");
-  const menuStyle = useAnchoredMenuStyle(open, menu.triggerRef, {
-    desiredWidth: 236,
-    // This is intentionally a maximum: actions and the availability/status note are conditional.
-    // Above-flipped menus anchor their rendered bottom edge, so shorter variants remain adjacent.
-    desiredHeight: 280,
-    align: "start",
-  });
 
   const durableProject = split.project?.kind === "durable" ? split.project.project : null;
   const durableLocation = split.project?.kind === "durable" ? split.project.primaryLocation : null;
@@ -239,141 +232,118 @@ export function ProjectSplitMenu({
       >
         <MoreHorizontalIcon size={14} />
       </button>
-      {open && createPortal((
-        <>
-          <div className="menu-backdrop" onClick={() => menu.close(true)} aria-hidden="true" />
-          <div
-            id={menu.menuId}
-            ref={menu.menuRef}
-            className="menu-pop inbox-project-menu-pop"
-            role="menu"
-            aria-label={actionsLabel}
-            aria-describedby={hasActionStatus ? statusId : undefined}
-            onKeyDown={menu.onMenuKeyDown}
-            style={menuStyle}
+      {open && (
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label={actionsLabel}
+          aria-describedby={hasActionStatus ? statusId : undefined}
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          {durableProject && onManageProject && (
+            <MenuItem
+              data-menu-label="Manage Project…"
+              onClick={() => {
+                menu.close(false);
+                onManageProject();
+              }}
+            >
+              Manage Project…
+            </MenuItem>
+          )}
+          <MenuItem
+            data-menu-label={pinned ? `Unpin ${entityLabel}` : `Pin ${entityLabel}`}
+            onClick={() => {
+              menu.close(true);
+              onPinnedChange(!pinned);
+            }}
           >
-            {durableProject && onManageProject && (
-              <button
-                type="button"
-                className="menu-item"
-                role="menuitem"
-                data-menu-label="Manage Project…"
-                onClick={() => {
-                  menu.close(false);
-                  onManageProject();
-                }}
-              >
-                Manage Project…
-              </button>
-            )}
-            <button
-              type="button"
-              className="menu-item"
-              role="menuitem"
-              data-menu-label={pinned ? `Unpin ${entityLabel}` : `Pin ${entityLabel}`}
-              onClick={() => {
-                menu.close(true);
-                onPinnedChange(!pinned);
-              }}
-            >
-              {pinned ? `Unpin ${entityLabel}` : `Pin ${entityLabel}`}
-            </button>
-            <button
-              type="button"
-              className="menu-item"
-              role="menuitem"
-              disabled={revealUnavailableReason !== null}
-              title={revealUnavailableReason ?? undefined}
-              onClick={reveal}
-            >
-              Reveal in File Manager
-            </button>
-            <button
-              type="button"
-              className="menu-item"
-              role="menuitem"
-              disabled={newSessionUnavailableReason !== null}
-              title={newSessionUnavailableReason ?? undefined}
-              onClick={() => {
-                closeForLayer();
-                if (durableProject) {
-                  onNewSession({
-                    projectId: durableProject.id,
-                    ...(durableLocation ? {
-                      runnerId: durableLocation.runnerId,
-                      workspaceId: durableLocation.workspaceId,
-                      projectLocationId: durableLocation.id,
-                    } : {}),
-                  });
-                  return;
-                }
-                if (runnerId && workspaceId) onNewSession({ runnerId, workspaceId, projectName: split.name });
-              }}
-            >
-              {durableProject && durableAvailableLocations.length > 1 && !durableLocation ? "New Session" : "New Session Here"}
-            </button>
-            <button
-              type="button"
-              className="menu-item"
-              role="menuitem"
-              disabled={newSessionUnavailableReason !== null}
-              title={newSessionUnavailableReason ?? undefined}
-              onClick={() => {
-                closeForLayer();
-                if (durableProject) {
-                  onNewSession({
-                    projectId: durableProject.id,
-                    worktree: true,
-                    ...(durableLocation ? {
-                      runnerId: durableLocation.runnerId,
-                      workspaceId: durableLocation.workspaceId,
-                      projectLocationId: durableLocation.id,
-                    } : {}),
-                  });
-                  return;
-                }
-                if (runnerId && workspaceId) onNewSession({ runnerId, workspaceId, worktree: true });
-              }}
-            >
-              Create Permanent Worktree
-            </button>
-            <button
-              type="button"
-              className="menu-item"
-              role="menuitem"
-              disabled={!canManageProject}
-              title={managementUnavailableReason ?? undefined}
-              onClick={beginRename}
-            >
-              Rename {entityLabel}
-            </button>
-            <button
-              type="button"
-              className="menu-item danger"
-              role="menuitem"
-              disabled={(durableProject ? split.count : split.sessions.length) === 0 || !canManageProject}
-              title={archiveUnavailableReason ?? undefined}
-              onClick={() => void archiveAll()}
-            >
-              {archiveStopsRuntime ? "Archive and Stop All Sessions" : "Archive All Sessions"}
-            </button>
-            {hasActionStatus && (
-              <div id={statusId} className="inbox-project-location-status" role="note">
-                {locationUnavailableReason && <div><strong>Location Actions:</strong> {locationUnavailableReason}</div>}
-                {!locationUnavailableReason && revealUnavailableReason && (
-                  <div><strong>Reveal:</strong> {revealUnavailableReason}</div>
-                )}
-                {managementUnavailableReason && (
-                  <div><strong>{entityLabel} Management:</strong> {managementUnavailableReason}</div>
-                )}
-                {!managementUnavailableReason && archiveUnavailableReason && (
-                  <div><strong>Archive:</strong> {archiveUnavailableReason}</div>
-                )}
-              </div>
-            )}
-          </div>
-        </>
-      ), document.body)}
+            {pinned ? `Unpin ${entityLabel}` : `Pin ${entityLabel}`}
+          </MenuItem>
+          <MenuItem
+            disabled={revealUnavailableReason !== null}
+            title={revealUnavailableReason ?? undefined}
+            onClick={reveal}
+          >
+            Reveal in File Manager
+          </MenuItem>
+          <MenuItem
+            disabled={newSessionUnavailableReason !== null}
+            title={newSessionUnavailableReason ?? undefined}
+            onClick={() => {
+              closeForLayer();
+              if (durableProject) {
+                onNewSession({
+                  projectId: durableProject.id,
+                  ...(durableLocation ? {
+                    runnerId: durableLocation.runnerId,
+                    workspaceId: durableLocation.workspaceId,
+                    projectLocationId: durableLocation.id,
+                  } : {}),
+                });
+                return;
+              }
+              if (runnerId && workspaceId) onNewSession({ runnerId, workspaceId, projectName: split.name });
+            }}
+          >
+            {durableProject && durableAvailableLocations.length > 1 && !durableLocation ? "New Session" : "New Session Here"}
+          </MenuItem>
+          <MenuItem
+            disabled={newSessionUnavailableReason !== null}
+            title={newSessionUnavailableReason ?? undefined}
+            onClick={() => {
+              closeForLayer();
+              if (durableProject) {
+                onNewSession({
+                  projectId: durableProject.id,
+                  worktree: true,
+                  ...(durableLocation ? {
+                    runnerId: durableLocation.runnerId,
+                    workspaceId: durableLocation.workspaceId,
+                    projectLocationId: durableLocation.id,
+                  } : {}),
+                });
+                return;
+              }
+              if (runnerId && workspaceId) onNewSession({ runnerId, workspaceId, worktree: true });
+            }}
+          >
+            Create Permanent Worktree
+          </MenuItem>
+          <MenuItem
+            disabled={!canManageProject}
+            title={managementUnavailableReason ?? undefined}
+            onClick={beginRename}
+          >
+            Rename {entityLabel}
+          </MenuItem>
+          <MenuSeparator />
+          <MenuItem
+            danger
+            disabled={(durableProject ? split.count : split.sessions.length) === 0 || !canManageProject}
+            title={archiveUnavailableReason ?? undefined}
+            onClick={() => void archiveAll()}
+          >
+            {archiveStopsRuntime ? "Archive and Stop All Sessions" : "Archive All Sessions"}
+          </MenuItem>
+          {hasActionStatus && (
+            <div id={statusId} className="menu-note" role="note">
+              {locationUnavailableReason && <div><strong>Location Actions:</strong> {locationUnavailableReason}</div>}
+              {!locationUnavailableReason && revealUnavailableReason && (
+                <div><strong>Reveal:</strong> {revealUnavailableReason}</div>
+              )}
+              {managementUnavailableReason && (
+                <div><strong>{entityLabel} Management:</strong> {managementUnavailableReason}</div>
+              )}
+              {!managementUnavailableReason && archiveUnavailableReason && (
+                <div><strong>Archive:</strong> {archiveUnavailableReason}</div>
+              )}
+            </div>
+          )}
+        </MenuSurface>
+      )}
       {renameOpen && (
         <Modal
           title={`Rename ${entityLabel}`}

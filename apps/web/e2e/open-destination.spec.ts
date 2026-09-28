@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 test.beforeEach(async ({ page }) => {
   await page.addInitScript(() => localStorage.clear());
@@ -82,10 +83,14 @@ test("the compact mobile presentation stays on one line and inside the viewport"
   expect(metrics.scrollWidth).toBe(metrics.clientWidth);
 
   await page.getByRole("button", { name: "Choose Destination" }).click();
+  // On a phone the menu is a bottom sheet across the screen (docs/design-system.md §9.2).
+  await expect(page.getByRole("menu")).toBeVisible();
+  await dialogMotionSettled(page);
   const menuBox = await page.getByRole("menu").boundingBox();
   expect(menuBox).not.toBeNull();
-  expect(menuBox!.x).toBeGreaterThanOrEqual(8);
-  expect(menuBox!.x + menuBox!.width).toBeLessThanOrEqual(312);
+  expect(menuBox!.x).toBe(0);
+  expect(menuBox!.width).toBe(320);
+  expect(menuBox!.y + menuBox!.height).toBeCloseTo(640, 0);
 
   await page.goto("/open-destination-e2e.html?mobile=1&offline=1");
   await page.getByRole("button", { name: "Open Unavailable: Runner Offline" }).dispatchEvent("click");

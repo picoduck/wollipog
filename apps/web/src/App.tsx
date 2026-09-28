@@ -486,7 +486,7 @@ export function Shell() {
       // Dialogs own Escape before the shell's underlying menus, regardless of
       // the order their window listeners were mounted.
       if (document.querySelector('[aria-modal="true"]')) return;
-      const backdrops = Array.from(document.querySelectorAll<HTMLElement>(".plus-backdrop, .menu-backdrop"));
+      const backdrops = Array.from(document.querySelectorAll<HTMLElement>(".menu-backdrop"));
       if (backdrops.length) {
         e.preventDefault();
         pickTopmost(backdrops, (el) => Number.parseInt(getComputedStyle(el).zIndex, 10) || 0)?.click();

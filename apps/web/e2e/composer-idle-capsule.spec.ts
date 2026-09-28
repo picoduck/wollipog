@@ -195,7 +195,7 @@ test("Plus and every primary capsule action work with one activation", async ({ 
   const plus = page.getByRole("button", { name: "Add and Modes" });
   await plus.click();
   await expect(plus).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator(".plus-pop")).toBeVisible();
+  await expect(page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]')).toBeVisible();
 
   await openComposer(page, 393, "&draft=Ship%20it");
   await expect(page.locator(".composer-box")).toHaveClass(/idle-collapsed/);

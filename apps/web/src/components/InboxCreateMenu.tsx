@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { PlusIcon } from "./Icons.js";
-import { useAccessibleMenu, useAnchoredMenuStyle } from "./interactions.js";
+import { useAccessibleMenu } from "./interactions.js";
+import { MenuItem, MenuSurface } from "./Menu.js";
 
 export function InboxCreateMenu({
   onNewSession,
@@ -11,11 +12,6 @@ export function InboxCreateMenu({
 }) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "inbox-create-menu");
-  const menuStyle = useAnchoredMenuStyle(open, menu.triggerRef, {
-    desiredWidth: 180,
-    desiredHeight: 104,
-    align: "end",
-  });
   const choose = (action: () => void) => {
     menu.close(false);
     menu.triggerRef.current?.focus();
@@ -39,32 +35,24 @@ export function InboxCreateMenu({
         <PlusIcon size={16} />
       </button>
       {open && (
-        <>
-          <div className="menu-backdrop" onClick={() => menu.close(true)} aria-hidden="true" />
-          <div
-            className="menu-pop inbox-create-menu-pop"
-            id={menu.menuId}
-            ref={menu.menuRef}
-            role="menu"
-            aria-label="Create"
-            style={menuStyle}
-            onKeyDown={menu.onMenuKeyDown}
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label="Create"
+          align="end"
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          <MenuItem onClick={() => choose(onNewSession)}>New Session</MenuItem>
+          <MenuItem
+            disabled={!onNewProject}
+            description={onNewProject ? undefined : "New Project is unavailable on this connection."}
+            onClick={() => { if (onNewProject) choose(onNewProject); }}
           >
-            <button type="button" className="menu-item" role="menuitem" onClick={() => choose(onNewSession)}>
-              New Session
-            </button>
-            <button
-              type="button"
-              className="menu-item"
-              role="menuitem"
-              disabled={!onNewProject}
-              title={onNewProject ? undefined : "New Project is unavailable on this connection."}
-              onClick={() => { if (onNewProject) choose(onNewProject); }}
-            >
-              New Project
-            </button>
-          </div>
-        </>
+            New Project
+          </MenuItem>
+        </MenuSurface>
       )}
     </div>
   );

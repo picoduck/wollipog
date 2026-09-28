@@ -111,7 +111,7 @@ function Topbar() {
             a fixture that spells a control differently from production is a fixture that answers a
             different selector. InstanceSelector needs the store and a live control plane; the
             element shape a selector sees does not. */}
-        <div className="plus-menu instance-selector compact">
+        <div className="instance-selector compact">
           <button type="button" className="instance-selector-trigger" aria-label="Instance">
             <span className="instance-selector-label">Local</span>
           </button>

@@ -140,7 +140,8 @@ test("Model Settings close control dismisses without selecting and restores trig
     assert.ok(trigger);
     await act(async () => { trigger.click(); });
 
-    const close = container.querySelector<HTMLButtonElement>('[aria-label="Close Model Settings"]');
+    // The menu is portalled to <body> (the shared MenuSurface).
+    const close = domWindow.document.querySelector('[aria-label="Close Model Settings"]') as unknown as HTMLButtonElement | null;
     assert.ok(close, "the open surface exposes an explicitly labelled close control");
     assert.equal(close.getAttribute("role"), "menuitem");
     await act(async () => {
@@ -149,7 +150,7 @@ test("Model Settings close control dismisses without selecting and restores trig
     });
 
     assert.equal(selectionCount, 0, "closing does not activate the selected setting");
-    assert.equal(container.querySelector('[role="menu"]'), null);
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
     assert.equal(domWindow.document.activeElement, trigger, "focus returns to the Model Settings trigger");
   } finally {
     await act(async () => { root.unmount(); });

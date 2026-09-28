@@ -1351,7 +1351,7 @@ test("row and card context menus share one surface, act on their target, and nev
 
   // Archive acts on the right-clicked session with the existing archive semantics.
   await act(async () => {
-    (menu.querySelector(".menu-danger") as unknown as HTMLButtonElement).click();
+    (menu.querySelector(".menu-item.danger") as unknown as HTMLButtonElement).click();
   });
   await act(async () => { await Promise.resolve(); });
   assert.deepEqual(archived, [["B", true]]);

@@ -3,6 +3,17 @@ import { GLOBAL_VIEW_ITEMS, viewPath, viewTitle, type View } from "../src/naviga
 import { MOBILE_PRIMARY_COUNT, defaultRailPreferences, visibleRailViews } from "../src/rail-preferences.js";
 import { DEFAULT_EXPERIMENT_FLAGS } from "../src/experiments.js";
 import { KEYBOARD_DISMISS_BLUR_EVENT } from "../src/mobile-viewport.js";
+import { dialogMotionSettled } from "./dialog-motion.js";
+
+/** The More sheet: the shared menu surface (docs/design-system.md §9), portalled to <body>. */
+const MORE_SHEET = '.menu[aria-label="More Destinations"]';
+
+/** Opens the More sheet and waits out its slide-in, so geometry reads the settled sheet. */
+async function openMoreSheet(page: Page) {
+  await page.locator(".rail-more-trigger").click();
+  await expect(page.locator(MORE_SHEET)).toBeVisible();
+  await dialogMotionSettled(page);
+}
 
 /**
  * The software keyboard, end to end.
@@ -382,7 +393,9 @@ const THEMES = ["dark", "light"] as const;
  *
  *   measured paint / legible at the device's own 2.625 ratio, both themes, portrait and landscape
  *   icon       1154-1547 / 944-1295      moreTrigger   101-108 / 71-86
- *   sheetIcon   346-451  / 292-381       sheetLabel   2084-3204 / 1363-2556
+ *   sheetIcon    297-979  / 177-883       sheetLabel   2084-3204 / 1363-2556
+ *   (sheetIcon re-measured for the shared menu's 16px icon slot, #1803; it was 346-451 / 292-381
+ *   at 20px, and the floors keep the same ratio to the measured minimum.)
  *   sheetShortLabel ("Settings" 1503-1769 / 1038-1229, "Projects" 1413-1588)
  *
  * Short titles need their own floor because the sheetLabel range was measured against long
@@ -403,7 +416,7 @@ const MARKS = {
      minimum as `icon`, so losing a third of the bolt still trips it. */
   boltIcon: { paint: 780, legible: 340, illegibleCells: 0, minContrast: CONTRAST.icon },
   moreTrigger: { paint: 90, legible: 35, illegibleCells: 0, minContrast: CONTRAST.icon },
-  sheetIcon: { paint: 300, legible: 140, illegibleCells: 0, minContrast: CONTRAST.icon },
+  sheetIcon: { paint: 255, legible: 85, illegibleCells: 0, minContrast: CONTRAST.icon },
   sheetLabel: { paint: 1850, legible: 650, illegibleCells: 0, minContrast: CONTRAST.label },
   sheetShortLabel: { paint: 1330, legible: 490, illegibleCells: 0, minContrast: CONTRAST.label },
 } as const satisfies Record<string, Mark>;
@@ -488,8 +501,8 @@ for (const theme of THEMES) {
     await useHarness(page, { theme });
     await openKeyboard(page);
     await expectEveryPrimaryDestinationUsable(page);
-    await page.locator(".rail-more-trigger").click();
-    await expect(page.locator(".rail-more-sheet")).toBeVisible();
+    await openMoreSheet(page);
+    await expect(page.locator(MORE_SHEET)).toBeVisible();
     await expectEveryDestinationReachable(page, KEYBOARD);
   });
 }
@@ -535,30 +548,33 @@ test("every destination is painted with blocked and stalled sessions", async ({ 
 test("no two destinations render the same glyph", async ({ page }) => {
   await useHarness(page);
   await openKeyboard(page);
-  await page.locator(".rail-more-trigger").click();
-  await expect(page.locator(".rail-more-sheet")).toBeVisible();
 
-  const icons = page.locator(".rail-destinations > .rail-item > svg, .rail-more-item > svg");
-  const count = await icons.count();
-  // Every destination plus the sheet's trailing Settings row. The gear is measured with them
-  // rather than excluded: a Settings glyph collapsed into a destination's shape is exactly as
-  // unusable as two destinations sharing one, and this is the only check that would catch it.
-  expect(count, "every destination and the Settings row must carry an icon")
-    .toBe(GLOBAL_VIEW_ITEMS.length + 1);
   // The MASK, not the screenshot. Comparing raw captures compares the backdrop too, so nine
   // identical rectangles over nine `nth-child` background tints five levels apart differed by
   // hundreds of pixels and passed. A mask holds only the positions the glyph itself paints, which
   // is what the difference measurement already isolates, so a backdrop cannot contribute to it.
   const masks: { key: string; positions: number[] }[] = [];
-  for (let index = 0; index < count; index += 1) {
-    const icon = icons.nth(index);
-    await icon.scrollIntoViewIfNeeded();
-    const size = await icon.evaluate((element) => {
-      const box = element.getBoundingClientRect();
-      return `${Math.round(box.width)}x${Math.round(box.height)}`;
-    });
-    masks.push({ key: size, positions: (await inkOf(page, icon, CONTRAST.icon)).mask });
-  }
+  const measure = async (icons: Locator) => {
+    for (let index = 0; index < await icons.count(); index += 1) {
+      const icon = icons.nth(index);
+      await icon.scrollIntoViewIfNeeded();
+      const size = await icon.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        return `${Math.round(box.width)}x${Math.round(box.height)}`;
+      });
+      masks.push({ key: size, positions: (await inkOf(page, icon, CONTRAST.icon)).mask });
+    }
+  };
+  // The bar's glyphs are read before the sheet opens: the sheet's scrim dims the bar under it
+  // (§15.1), and a dimmed glyph is not what a user compares.
+  await measure(page.locator(".rail-destinations > .rail-item > svg"));
+  await openMoreSheet(page);
+  await measure(page.locator(`${MORE_SHEET} .menu-icon > svg`));
+  // Every destination plus the sheet's trailing Settings row. The gear is measured with them
+  // rather than excluded: a Settings glyph collapsed into a destination's shape is exactly as
+  // unusable as two destinations sharing one, and this is the only check that would catch it.
+  expect(masks.length, "every destination and the Settings row must carry an icon")
+    .toBe(GLOBAL_VIEW_ITEMS.length + 1);
 
   // Normalized to each mask's own painted bounding box before comparing. A raw comparison is
   // position-sensitive, so the SAME rectangle shifted 1.5px per destination differed by more than
@@ -576,7 +592,7 @@ test("no two destinations render the same glyph", async ({ page }) => {
   let closest = Number.MAX_SAFE_INTEGER;
   for (let a = 0; a < normalized.length; a += 1) {
     for (let b = a + 1; b < normalized.length; b += 1) {
-      // Different sizes are already different glyphs; the sheet's are 20px and the rail's 26px.
+      // Different sizes are already different glyphs; the sheet's are 16px and the rail's 26px.
       if (normalized[a]!.key !== normalized[b]!.key) continue;
       const [one, two] = [normalized[a]!.positions, normalized[b]!.positions];
       let differing = 0;
@@ -615,12 +631,12 @@ for (const current of GLOBAL_VIEW_ITEMS.filter((item) => !MOBILE_PRIMARY_DEFAULT
     await expect(page.locator(".rail-more-trigger")).toHaveAttribute("aria-current", "page");
     await expectEveryPrimaryDestinationUsable(page);
 
-    await page.locator(".rail-more-trigger").click();
-    const active = page.locator(".rail-more-item.active");
+    await openMoreSheet(page);
+    const active = page.locator(`${MORE_SHEET} .menu-item.is-active`);
     await expect(active).toHaveCount(1);
     // The label span, not the row: an overflowed counted destination (Connections by default)
     // renders its count beside the label.
-    await expect(active.locator(".rail-more-label")).toHaveText(current.title);
+    await expect(active.locator(".menu-text")).toHaveText(current.title);
     await expectEveryDestinationReachable(page, KEYBOARD);
   });
 }
@@ -642,16 +658,16 @@ test("each destination navigates to itself", async ({ page }) => {
   for (let index = 0; index < names.length; index += 1) {
     await primary.nth(index).click();
   }
-  await page.locator(".rail-more-trigger").click();
-  const sheet = page.locator(".rail-more-item");
+  await openMoreSheet(page);
+  const sheet = page.locator(`${MORE_SHEET} .menu-item`);
   const overflow = await sheet.evaluateAll((items) =>
     items.map((item) => new URL((item as HTMLAnchorElement).href).pathname));
   // Activated one at a time: choosing a destination closes the sheet, so it has to be reopened.
   for (let index = 0; index < overflow.length; index += 1) {
-    await expect(page.locator(".rail-more-sheet")).toBeVisible();
-    await page.locator(".rail-more-item").nth(index).click();
-    await expect(page.locator(".rail-more-sheet")).toHaveCount(0);
-    if (index + 1 < overflow.length) await page.locator(".rail-more-trigger").click();
+    await expect(page.locator(MORE_SHEET)).toBeVisible();
+    await page.locator(`${MORE_SHEET} .menu-item`).nth(index).click();
+    await expect(page.locator(MORE_SHEET)).toHaveCount(0);
+    if (index + 1 < overflow.length) await openMoreSheet(page);
   }
 
   const visited = await page.evaluate(() => window.navigations);
@@ -666,11 +682,11 @@ test("each destination navigates to itself", async ({ page }) => {
   // Space, which an anchor does not activate natively but `role="menuitem"` promises. Unhandled it
   // scrolled the sheet instead of navigating, and nothing above would have noticed: pointer
   // activation covers a different code path.
-  await page.locator(".rail-more-trigger").click();
-  const first = page.locator(".rail-more-item").first();
+  await openMoreSheet(page);
+  const first = page.locator(`${MORE_SHEET} .menu-item`).first();
   await first.focus();
   await first.press(" ");
-  await expect(page.locator(".rail-more-sheet"), "Space must also close the sheet").toHaveCount(0);
+  await expect(page.locator(MORE_SHEET), "Space must also close the sheet").toHaveCount(0);
   expect(await page.evaluate(() => window.navigations.at(-1)),
     "Space must navigate to the row it was pressed on")
     .toBe(visited[names.length]);
@@ -769,11 +785,11 @@ test("the bottom rail stays above the keyboard", async ({ page }) => {
   // The sheet too, and with no inset published. Every sheet assertion ran after `openKeyboard`, so
   // `.rail-more-sheet { opacity: 0 }` with an override under `html[style*="--keyboard-inset"]` gave
   // a user opening More in the ordinary state an invisible menu, with the suite green.
-  await page.locator(".rail-more-trigger").click();
-  await expect(page.locator(".rail-more-sheet")).toBeVisible();
+  await openMoreSheet(page);
+  await expect(page.locator(MORE_SHEET)).toBeVisible();
   await expectEveryDestinationReachable(page, 0);
   await page.locator(".menu-backdrop").click();
-  await expect(page.locator(".rail-more-sheet")).toHaveCount(0);
+  await expect(page.locator(MORE_SHEET)).toHaveCount(0);
 
   await openKeyboard(page);
   await expectRailAt(page, KEYBOARD);
@@ -871,9 +887,9 @@ async function expectRailAt(page: Page, occluded: number, { settle = true } = {}
 test("the More sheet opens above the keyboard", async ({ page }) => {
   await useHarness(page);
   await openKeyboard(page);
-  await page.locator(".rail-more-trigger").click();
+  await openMoreSheet(page);
 
-  const sheet = page.locator(".rail-more-sheet");
+  const sheet = page.locator(MORE_SHEET);
   await expect(sheet).toBeVisible();
   const box = (await sheet.boundingBox())!;
   const height = page.viewportSize()!.height;
@@ -896,14 +912,14 @@ test("the More sheet opens above the keyboard", async ({ page }) => {
  */
 async function expectEveryDestinationReachable(page: Page, occluded: number) {
   const height = page.viewportSize()!.height;
-  const sheet = page.locator(".rail-more-sheet");
+  const sheet = page.locator(MORE_SHEET);
   // The container first: if the sheet itself is behind the keyboard, no amount of scrolling helps.
   const sheetBox = (await sheet.boundingBox())!;
   expect(sheetBox.y, "the sheet is above the top of the screen").toBeGreaterThanOrEqual(0);
   expect(sheetBox.y + sheetBox.height, "the sheet is behind the keyboard")
     .toBeLessThanOrEqual(height - occluded + 1);
 
-  const items = sheet.locator(".rail-more-item");
+  const items = sheet.locator(".menu-item");
   const count = await items.count();
   expect(count, "the sheet must contain destinations at all").toBeGreaterThan(0);
   for (let index = 0; index < count; index += 1) {
@@ -919,7 +935,7 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     const expected = destination?.title ?? (path === SETTINGS_ROW.path ? SETTINGS_ROW.title : undefined);
     expect(expected, `no destination is served at ${path}`).toBeDefined();
     const label = expected!;
-    await expect(item.locator(".rail-more-label"), `the row at ${path} must be labelled "${label}"`).toHaveText(label);
+    await expect(item.locator(".menu-text"), `the row at ${path} must be labelled "${label}"`).toHaveText(label);
     // Scrolling within the sheet is the intended way to reach an overflowing item; what must not
     // happen is an item that cannot be brought into the sheet's visible box at all.
     await item.scrollIntoViewIfNeeded();
@@ -936,8 +952,8 @@ async function expectEveryDestinationReachable(page: Page, occluded: number) {
     // overflow icon while the labels kept the item's total above its floor.
     await expectHittable(item, label);
     await expectPainted(page, item.locator("svg"), `${label} icon`, MARKS.sheetIcon);
-    await expectPlainText(item.locator(".rail-more-label"), `${label} label`);
-    await expectPainted(page, item.locator(".rail-more-label"), `${label} label`,
+    await expectPlainText(item.locator(".menu-text"), `${label} label`);
+    await expectPainted(page, item.locator(".menu-text"), `${label} label`,
       SHORT_SHEET_TITLES.has(label) ? MARKS.sheetShortLabel : MARKS.sheetLabel);
   }
 }
@@ -958,12 +974,12 @@ test.describe("in landscape", () => {
     await useHarness(page);
     const occluded = 120;
     await openKeyboard(page, occluded);
-    await page.locator(".rail-more-trigger").click();
-    await expect(page.locator(".rail-more-sheet")).toBeVisible();
+    await openMoreSheet(page);
+    await expect(page.locator(MORE_SHEET)).toBeVisible();
 
     await expectEveryDestinationReachable(page, occluded);
     // Reachable by scrolling counts, but only if the sheet can actually scroll.
-    const overflow = await page.locator(".rail-more-sheet").evaluate((element) => ({
+    const overflow = await page.locator(MORE_SHEET).evaluate((element) => ({
       scrollable: element.scrollHeight > element.clientHeight,
       overflowY: getComputedStyle(element).overflowY,
     }));

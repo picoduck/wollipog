@@ -82,17 +82,22 @@ async function signOutItem(queued: QueuedPromptView[] | undefined) {
       </ApiProvider>,
     );
   });
-  const trigger = [...container.querySelectorAll<HTMLButtonElement>("button")]
+  const trigger = [...page().querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.getAttribute("aria-label") === "More Actions");
   assert.ok(trigger, "the Session Actions trigger is rendered");
   await act(async () => { trigger.click(); await tick(); });
-  const item = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
+  const item = [...page().querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
     .find((candidate) => candidate.textContent?.trim() === "Sign Out");
   assert.ok(item, "an idle ACP Session with a capable runner offers Sign Out");
   const disabled = item.disabled;
   await act(async () => root.unmount());
   container.remove();
   return disabled;
+}
+
+/** Menus are portalled to <body> (the shared MenuSurface), so queries look there. */
+function page(): HTMLElement {
+  return domWindow.document.body as unknown as HTMLElement;
 }
 
 test("settled delivery receipts do not disable ACP Sign Out on an idle Session", async () => {

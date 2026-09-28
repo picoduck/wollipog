@@ -272,11 +272,11 @@ test("links, native controls and code use the base recipes", () => {
   assert.equal(baseRule(":where(.form, .section, .surface, .modal-body, .notice, .state) > *"), "margin: 0;");
 });
 
-test("the permission-mode popover keeps rows compact while long labels can wrap", () => {
-  assert.equal(soleRuleBody(".cbar-pop.permission-mode-pop"),
-    "width: min(390px, calc(100vw - 32px));");
+test("the permission-mode menu keeps rows compact while long labels can wrap", () => {
+  // The menu is the shared surface (#1803); its width is set where it opens, not by a recipe.
   assert.match(soleRuleBody(".cbar-permission-row"), /grid-template-columns: minmax\(0, 1fr\) 30px;/);
-  assert.match(soleRuleBody(".cbar-permission-label"), /overflow-wrap: anywhere;/);
+  // A row with a second line (the mode's outcome) wraps its label instead of truncating it.
+  assert.match(soleRuleBody(".menu-item:has(.menu-desc) .menu-text"), /overflow-wrap: anywhere;/);
   assert.doesNotMatch(css, /\.cbar-permission-description/,
     "full explanations belong in deliberate disclosure, not every menu row");
   assert.match(soleRuleBody(".cbar-permission-details-trigger"), /width: 28px;/);

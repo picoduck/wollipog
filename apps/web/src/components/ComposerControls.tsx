@@ -31,6 +31,7 @@ import {
 import { useStoreSelector } from "../store.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { useAccessibleMenu } from "./interactions.js";
+import { MenuItem, MenuLabel, MenuSurface } from "./Menu.js";
 import { Modal } from "./common.js";
 import { CloseIcon, InfoIcon, ServiceTierIcon, ShieldIcon } from "./Icons.js";
 
@@ -111,6 +112,7 @@ export function BarMenu({
   modelSettings = false,
   showCaret = true,
   menuTitle,
+  menuLabel,
   disabledReason = null,
   children,
 }: {
@@ -122,6 +124,8 @@ export function BarMenu({
   modelSettings?: boolean;
   showCaret?: boolean;
   menuTitle?: string;
+  /** The menu's accessible name and phone sheet title when it has no visible title. */
+  menuLabel?: string;
   /** Why the signed-in person may not change this setting (#1857). The trigger is then disabled,
    * says why, and never opens its menu. */
   disabledReason?: string | null;
@@ -154,33 +158,37 @@ export function BarMenu({
       </button>
       {disabled && <span className="sr-only" id={disabledReasonId}>{disabledReason}</span>}
       {open && !disabled && (
-        <>
-          <div className={`plus-backdrop${modelSettings ? " model-settings-backdrop" : ""}`} onClick={() => menu.close(true)} />
-          <div className={`cbar-pop${permissionMode ? " permission-mode-pop" : ""}${modelSettings ? " model-settings-pop" : ""}`} role="menu" id={menu.menuId} ref={menu.menuRef} onKeyDown={menu.onMenuKeyDown}>
-            {menuTitle && (modelSettings
-              ? (
-                  <div className="cbar-settings-header" role="presentation">
-                    {/* The same grabber as a dialog sheet, shown only while this menu is a phone sheet. It
-                        sits in the sticky title row so it stays put while the settings scroll. */}
-                    <div className="sheet-grabber" aria-hidden="true" />
-                    <div className="cbar-settings-title">{menuTitle}</div>
-                    <button
-                      type="button"
-                      role="menuitem"
-                      className="icon-btn cbar-settings-close"
-                      aria-label="Close Model Settings"
-                      data-menu-label="Close Model Settings"
-                      title="Close Model Settings"
-                      onClick={() => menu.close(true)}
-                    >
-                      <CloseIcon size={18} />
-                    </button>
-                  </div>
-                )
-              : <div className="cbar-settings-title" role="presentation">{menuTitle}</div>)}
-            {children(() => menu.close(true))}
-          </div>
-        </>
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label={menuTitle ?? menuLabel ?? ariaLabel ?? "Options"}
+          align={align === "right" ? "end" : "start"}
+          // Composer menus stay inside the composer's column, which can be a narrow side panel.
+          boundary=".composer-box"
+          head={menuTitle ? (
+            <div className="menu-head persistent" role="presentation">
+              <span className="menu-head-title">{menuTitle}</span>
+              {modelSettings && (
+                <button
+                  type="button"
+                  role="menuitem"
+                  className="icon-btn"
+                  aria-label={`Close ${menuTitle}`}
+                  data-menu-label={`Close ${menuTitle}`}
+                  title={`Close ${menuTitle}`}
+                  onClick={() => menu.close(true)}
+                >
+                  <CloseIcon size={16} />
+                </button>
+              )}
+            </div>
+          ) : undefined}
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          {children(() => menu.close(true))}
+        </MenuSurface>
       )}
     </div>
   );
@@ -193,27 +201,29 @@ interface MenuModelChoice {
   defaultEffort?: string;
 }
 
-/** One menu-radio option shared by the Model, Context Window, and Effort groups. */
-function MenuRadioOption({ checked, title, ariaLabel, onSelect, children }: {
+/** One menu-radio option shared by the Model, Context Window, Effort and Service Tier groups. */
+function MenuRadioOption({ checked, title, ariaLabel, description, icon, onSelect, children }: {
   checked: boolean;
   title?: string;
   ariaLabel?: string;
+  description?: ReactNode;
+  icon?: ReactNode;
   onSelect: () => void;
   children: ReactNode;
 }) {
   return (
-    <button
-      type="button"
+    <MenuItem
       role="menuitemradio"
-      aria-checked={checked}
+      checked={checked}
       aria-label={ariaLabel}
       data-menu-label={ariaLabel}
-      className={`cbar-opt${checked ? " on" : ""}`}
+      description={description}
+      icon={icon}
       title={title}
       onClick={onSelect}
     >
       {children}
-    </button>
+    </MenuItem>
   );
 }
 
@@ -254,26 +264,24 @@ export function ModelEffortMenuChoices({
     <>
       {models.length > 0 && (
         <div role="group" aria-label="Model">
-          <div className="plus-section" role="presentation">Model{modelSource === "cached" ? " (Cached)" : ""}</div>
+          <MenuLabel>Model{modelSource === "cached" ? " (Cached)" : ""}</MenuLabel>
           {models.map((model) => (
             <MenuRadioOption
               key={model.id}
               checked={model.id === modelVal}
               title={model.description}
               ariaLabel={model.displayName ?? model.id}
+              description={model.description}
               onSelect={() => apply({ model: model.id, effort: "", serviceTier: "" })}
             >
-              <span className="cbar-model-option">
-                <span className="cbar-model-option-name">{model.displayName ?? model.id}</span>
-                {model.description && <span className="cbar-model-option-description">{model.description}</span>}
-              </span>
+              {model.displayName ?? model.id}
             </MenuRadioOption>
           ))}
         </div>
       )}
       {contextChoice && (
         <div role="group" aria-label="Context Window">
-          <div className="plus-section" role="presentation">Context Window</div>
+          <MenuLabel>Context Window</MenuLabel>
           {contextChoice.options.map((option) => (
             <MenuRadioOption
               key={option.id}
@@ -305,7 +313,7 @@ export function ModelEffortMenuChoices({
       )}
       {modelEfforts.length > 0 && (
         <div role="group" aria-label="Reasoning Effort">
-          <div className="plus-section" role="presentation">Reasoning Effort</div>
+          <MenuLabel>Reasoning Effort</MenuLabel>
           <MenuRadioOption checked={!effortVal} onSelect={() => apply({ effort: "" })}>
             {selectedModel?.defaultEffort ? `Default (${selectedModel.defaultEffort})` : "Default"}
           </MenuRadioOption>
@@ -438,24 +446,20 @@ export function ServiceTierMenuChoices({ state, apply, close }: {
 }) {
   return (
     <div role="group" aria-label="Service Tier">
-      <div className="plus-section" role="presentation">Service Tier</div>
+      <MenuLabel>Service Tier</MenuLabel>
       {state.choices.map((choice) => (
         <MenuRadioOption
           key={choice.id}
           checked={choice.id === state.selected.id}
           title={choice.description}
+          icon={choice.id.toLowerCase() === "fast" ? <ServiceTierIcon size={16} /> : null}
+          description={choice.description}
           onSelect={() => {
             apply({ serviceTier: choice.id });
             close();
           }}
         >
-          <span className="cbar-service-tier-option">
-            <span className="cbar-service-tier-name">
-              {choice.id.toLowerCase() === "fast" && <ServiceTierIcon size={13} />}
-              {choice.name}
-            </span>
-            <span className="cbar-service-tier-description">{choice.description}</span>
-          </span>
+          {choice.name}
         </MenuRadioOption>
       ))}
     </div>
@@ -610,17 +614,15 @@ function PermissionModeChoice({
   const details = { label, description, outcome };
   return (
     <div className="cbar-permission-row" role="none">
-      <button
-        type="button"
+      <MenuItem
         role="menuitemradio"
-        aria-checked={checked}
-        className={`cbar-opt permission-mode${checked ? " on" : ""}`}
+        checked={checked}
         data-menu-label={label}
+        description={<PermissionModeOutcome outcome={outcome} />}
         onClick={onSelect}
       >
-        <span className="cbar-permission-label">{label}</span>
-        <PermissionModeOutcome outcome={outcome} />
-      </button>
+        {label}
+      </MenuItem>
       <button
         type="button"
         role="menuitem"
@@ -678,7 +680,7 @@ export function ApprovalsMenuChoices({
 
   return (
     <>
-      <div className="plus-section" role="presentation">Permission Mode</div>
+      <MenuLabel>Permission Mode</MenuLabel>
       {showDefault && <PermissionModeChoice
           label={defaultPermissionModeDisplayLabel(driver)}
           description={defaultDescription}
@@ -756,6 +758,7 @@ export function ApprovalsControl({ session, apply, disabledReason = null }: {
     <>
       <BarMenu
         permissionMode
+        menuLabel="Permission Mode"
         showCaret={false}
         label={
           <span className={`cbar-approvals${unrestricted ? " unrestricted" : ""}`}>

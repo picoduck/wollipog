@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 import { join } from "node:path";
 
 async function openSession(page: Page, scenario = "preview-follow", params: Record<string, string> = {}) {
@@ -411,13 +412,15 @@ test("the unified session bar balances navigation, breadcrumb, status, and actio
   await expect(menu.getByRole("menuitem", { name: "Export Markdown" })).toHaveCount(0);
   const stopSession = menu.getByRole("menuitem", { name: "Stop Session" });
   await expect(stopSession).toBeVisible();
-  await expect(stopSession).toHaveClass(/menu-danger/);
+  await expect(stopSession).toHaveClass(/\bdanger\b/);
   const menuItems = menu.getByRole("menuitem");
   await expect(menuItems.last()).toHaveText("Stop Session");
   const menuClearance = await menu.evaluate((element) => {
     const box = element.getBoundingClientRect();
-    const clippingPane = element.closest(".inbox-preview-pane");
-    if (!clippingPane) throw new Error("Session Actions menu is not mounted in the clipping pane");
+    // The menu is the shared surface, portalled to <body> (#1803); it still has to sit inside the
+    // preview pane its trigger lives in.
+    const clippingPane = document.querySelector(".inbox-preview-pane");
+    if (!clippingPane) throw new Error("the preview pane is not mounted");
     const clippingBox = clippingPane.getBoundingClientRect();
     return Math.min(window.innerWidth, clippingBox.right) - box.right;
   });
@@ -1006,16 +1009,22 @@ for (const viewport of [
       await expect(statusPopover.getByText("Waiting on External Job", { exact: true })).toBeVisible();
       await expect(statusPopover.getByRole("button", { name: "1 Worker Active" })).toBeEnabled();
       await expect(statusPopover.getByLabel("All Session Statuses")).toBeFocused();
+      // On a phone every popover is a bottom sheet across the screen (docs/design-system.md §9.2).
+      await dialogMotionSettled(page);
       const popoverGeometry = await statusPopover.evaluate((element) => {
         const box = element.getBoundingClientRect();
         return {
           left: box.left,
           right: box.right,
+          bottom: box.bottom,
+          grabber: getComputedStyle(element.querySelector(".sheet-grabber")!).display,
           contentWrap: getComputedStyle(element.querySelector(".session-status-popover-content")!).flexWrap,
         };
       });
-      expect(popoverGeometry.left).toBeGreaterThanOrEqual(8);
-      expect(popoverGeometry.right).toBeLessThanOrEqual(viewport.width - 8);
+      expect(popoverGeometry.left).toBe(0);
+      expect(popoverGeometry.right).toBe(viewport.width);
+      expect(popoverGeometry.bottom).toBeCloseTo(page.viewportSize()!.height, 0);
+      expect(popoverGeometry.grabber).toBe("block");
       expect(popoverGeometry.contentWrap).toBe("wrap");
       await capture(page, `narrow-${viewport.width}-status-popover`);
       if (viewport.width === 390) {
@@ -1054,6 +1063,8 @@ for (const viewport of [
       await expect(menu.getByRole("menuitem", { name: "Manage Project" })).toBeVisible();
       await expect(menu.getByRole("menuitem", { name: "Move Session…" })).toBeVisible();
       await expect(menu.getByRole("menuitem", { name: "Copy Internal Session Link" })).toHaveCount(0);
+      // Read the rows once the sheet has finished sliding up: mid-motion boxes are fractional.
+      await dialogMotionSettled(page);
       for (const item of await menu.getByRole("menuitem").all()) {
         const box = await item.boundingBox();
         expect(box?.height).toBeGreaterThanOrEqual(44);
@@ -1323,10 +1334,13 @@ test.describe("with a touch pointer", () => {
     await moreActions.click();
     const menu = page.getByRole("menu", { name: "Session Actions" });
     await expect(menu).toBeVisible();
+    // Below the phone breakpoint the menu is a bottom sheet (§9.2): docked to the bottom edge,
+    // clear of the bar that opened it, and never taller than the screen.
+    await dialogMotionSettled(page);
     const triggerBox = await moreActions.boundingBox();
     const menuBox = await menu.boundingBox();
     expect(menuBox!.y).toBeGreaterThanOrEqual(triggerBox!.y + triggerBox!.height);
-    expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(800);
+    expect(menuBox!.y + menuBox!.height).toBeCloseTo(800, 0);
     for (const item of await menu.getByRole("menuitem").all()) {
       const box = await item.boundingBox();
       expect(box?.height).toBeGreaterThanOrEqual(44);
@@ -1391,6 +1405,7 @@ test("the Share menu scrolls inside a short landscape-phone viewport", async ({ 
   await page.locator(".session-detail > .detail-head").getByRole("button", { name: "Share" }).click();
   const menu = page.getByRole("menu", { name: "Session Sharing" });
   await expect(menu).toBeVisible();
+  await dialogMotionSettled(page);
   const geometry = await menu.evaluate((element) => {
     const box = element.getBoundingClientRect();
     return {
@@ -1491,7 +1506,7 @@ test("shared Pod headers keep their trailing controls out of the back-button tra
   await bar.getByRole("button", { name: "More Actions" }).click();
   const close = page.getByRole("menu", { name: "More Actions" }).getByRole("menuitem").last();
   await expect(close).toHaveText("Close Pod");
-  await expect(close).toHaveClass(/menu-danger/);
+  await expect(close).toHaveClass(/\bdanger\b/);
   await page.keyboard.press("Escape");
 
   await page.setViewportSize({ width: 520, height: 800 });

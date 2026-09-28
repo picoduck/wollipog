@@ -1,42 +1,13 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { Fragment, useState } from "react";
 import { instanceAvailabilityMeta, useInstances } from "../instances-context.js";
-import { CheckIcon, ChevronDownIcon, ConnectionsIcon } from "./Icons.js";
-import { useAccessibleMenu, useAnchoredMenuStyle } from "./interactions.js";
-
-
-function desiredInstanceMenuHeight(profileCount: number): number {
-  const profiles = Math.max(1, profileCount);
-  const separators = profiles > 1 ? 2 : 1;
-  // Profile rows contain a title and description; Manage Instances is one line. This is a maximum
-  // as well as the CSS max-height, so every allowance must cover the rows' line boxes: menu items
-  // are buttons, which inherit body's 20px line (16px padding + 20px title + 2px gap + 20px path).
-  // Large registries still scroll without making a 1-2 profile menu pretend it is 336px tall.
-  const profileRows = profiles * 58;
-  const manageRow = 36;
-  const separatorRows = separators * 11;
-  const menuChrome = 14; // 6px padding plus a 1px border on both edges.
-  return Math.min(336, profileRows + manageRow + separatorRows + menuChrome);
-}
+import { ChevronDownIcon, ConnectionsIcon } from "./Icons.js";
+import { useAccessibleMenu } from "./interactions.js";
+import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 
 export function InstanceSelector({ compact = false }: { compact?: boolean }) {
   const instances = useInstances();
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "instance-selector-menu");
-  const menuStyle = useAnchoredMenuStyle(open, menu.triggerRef, {
-    desiredHeight: desiredInstanceMenuHeight(instances.registry.profiles.length),
-    ...(compact ? { desiredWidth: 260 } : { matchTriggerWidth: true }),
-  });
-  const rootRef = useRef<HTMLDivElement>(null);
-
-  useEffect(() => {
-    if (!open) return;
-    const closeOutside = (event: PointerEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) menu.close(false);
-    };
-    document.addEventListener("pointerdown", closeOutside, true);
-    return () => document.removeEventListener("pointerdown", closeOutside, true);
-  }, [menu, open]);
-
   if (!instances.desktopMultiInstance) return null;
 
   const activeStatus = instances.statusByProfile[instances.activeProfile.id]?.availability
@@ -51,7 +22,7 @@ export function InstanceSelector({ compact = false }: { compact?: boolean }) {
   };
 
   return (
-    <div ref={rootRef} className={`plus-menu instance-selector${compact ? " compact" : ""}`}>
+    <div className={`instance-selector${compact ? " compact" : ""}`}>
       <button
         ref={menu.triggerRef}
         type="button"
@@ -70,56 +41,40 @@ export function InstanceSelector({ compact = false }: { compact?: boolean }) {
         <ChevronDownIcon className="instance-selector-chevron" />
       </button>
       {open && (
-        <div
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
           id={menu.menuId}
-          ref={menu.menuRef}
-          className="plus-pop instance-selector-pop"
-          role="menu"
-          aria-label="Switch Instance"
+          label="Switch Instance"
+          width={compact ? 260 : "trigger"}
+          onDismiss={() => menu.close(false)}
           onKeyDown={menu.onMenuKeyDown}
-          style={menuStyle}
         >
           {instances.registry.profiles.map((profile, index) => {
             const active = profile.id === instances.activeProfile.id;
             const status = instances.statusByProfile[profile.id]?.availability ?? "saved";
             return (
-              <div key={profile.id}>
-                {index === 1 && <div className="instance-menu-separator" role="separator" />}
-                <button
-                  type="button"
-                  className={`plus-item instance-selector-item${active ? " on" : ""}`}
+              <Fragment key={profile.id}>
+                {index === 1 && <MenuSeparator />}
+                <MenuItem
                   role="menuitemradio"
-                  aria-checked={active}
+                  checked={active}
+                  icon={<span className={`instance-status-dot status-${status}`} />}
+                  description={profile.kind === "local" ? "Local Control Plane" : profile.origin}
                   data-menu-label={profile.label}
                   onClick={() => select(profile.id)}
                 >
-                  <span className={`instance-status-dot status-${status}`} aria-hidden="true" />
-                  <span className="plus-item-body">
-                    <span className="plus-item-title">{profile.label}</span>
-                    <span className="plus-item-desc">
-                      {profile.kind === "local" ? "Local Control Plane" : profile.origin}
-                    </span>
-                  </span>
-                  <span className="instance-selector-check" aria-hidden="true">
-                    {active && <CheckIcon />}
-                  </span>
-                  <span className="sr-only">{instanceAvailabilityMeta(status).label}</span>
-                </button>
-              </div>
+                  {profile.label}
+                  <span className="sr-only">, {instanceAvailabilityMeta(status).label}</span>
+                </MenuItem>
+              </Fragment>
             );
           })}
-          <div className="instance-menu-separator" role="separator" />
-          <button
-            type="button"
-            className="plus-item instance-selector-item"
-            role="menuitem"
-            data-menu-label="Manage Instances"
-            onClick={manage}
-          >
-            <ConnectionsIcon />
-            <span className="plus-item-title">Manage Instances</span>
-          </button>
-        </div>
+          <MenuSeparator />
+          <MenuItem icon={<ConnectionsIcon />} data-menu-label="Manage Instances" onClick={manage}>
+            Manage Instances
+          </MenuItem>
+        </MenuSurface>
       )}
     </div>
   );

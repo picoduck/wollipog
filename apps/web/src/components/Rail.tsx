@@ -15,6 +15,7 @@ import {
   UsageIcon,
 } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
+import { MenuSeparator, MenuSurface } from "./Menu.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useExperiments } from "../use-experiments.js";
 import { useInstanceScope } from "../instance-scope.js";
@@ -88,7 +89,8 @@ export function Rail({
     const track = () => {
       const active = document.activeElement;
       if (active && active !== document.body) {
-        focusInsideRailRef.current = active.closest?.(".rail-more") != null;
+        // The sheet is portalled to <body>, so it is found by its menu id, not inside the rail.
+        focusInsideRailRef.current = active.closest?.('.rail-more, [id^="rail-more-menu-"]') != null;
       }
     };
     document.addEventListener("focusin", track);
@@ -260,61 +262,65 @@ export function Rail({
               <MoreHorizontalIcon size={RAIL_ICON_SIZE} />
             </button>
             {moreOpen && (
-              <>
-                {/* .menu-backdrop is what the shell's Escape ladder clicks to peel one layer. */}
-                <div className="menu-backdrop" onClick={() => more.close(true)} aria-hidden="true" />
-                <div
-                  className="rail-more-sheet"
-                  id={more.menuId}
-                  ref={more.menuRef}
-                  role="menu"
-                  aria-label="More Destinations"
-                  onKeyDown={more.onMenuKeyDown}
+              // The shared menu, a bottom sheet at this width (§15.1). Its backdrop is what the
+              // shell's Escape ladder clicks to peel one layer.
+              <MenuSurface
+                surfaceRef={more.menuRef}
+                anchor={{ trigger: more.triggerRef }}
+                id={more.menuId}
+                label="More Destinations"
+                head={<div className="menu-head" aria-hidden="true">More</div>}
+                onDismiss={() => more.close(true)}
+                onKeyDown={more.onMenuKeyDown}
+              >
+                {overflowItems.map((item) => {
+                  const Icon = VIEW_ICONS[item.name];
+                  const destination = { name: item.name } as View;
+                  // A reordered rail can push a counted destination into the sheet; its status
+                  // must overflow WITH it, or moving Connections fifth silently hides the
+                  // online count and moving Sessions hides its blocked/stalled attention.
+                  const blocked = item.name === "inbox" ? blockedCount : 0;
+                  const stalled = item.name === "inbox" ? stalledCount : 0;
+                  const online = item.name === "runners" ? onlineConnections : 0;
+                  const countLabel = item.name === "inbox"
+                    ? `${blocked > 0 ? `, ${blocked} Blocked` : ""}${stalled > 0 ? `, ${stalled} Stalled` : ""}`
+                    : online > 0 ? `, ${online} Online` : "";
+                  return (
+                    <a
+                      key={item.name}
+                      className={`menu-item${selected === item.name ? " is-active" : ""}`}
+                      aria-label={`${item.title}${countLabel}`}
+                      {...sheetItemProps(
+                        destination,
+                        selected === item.name,
+                        item.name === "inbox" ? sessionsViewDestination : undefined,
+                      )}
+                    >
+                      <span className="menu-icon" aria-hidden="true"><Icon size={16} /></span>
+                      <span className="menu-body"><span className="menu-text">{item.title}</span></span>
+                      {(blocked > 0 || stalled > 0 || online > 0) && (
+                        <span className="menu-trail" aria-hidden="true">
+                          {blocked > 0 && <span className="rail-more-count blocked">{blocked}</span>}
+                          {stalled > 0 && <span className="rail-more-count stalled">{stalled}</span>}
+                          {online > 0 && <span className="rail-more-count">{online}</span>}
+                        </span>
+                      )}
+                    </a>
+                  );
+                })}
+                {/* Settings closes the sheet, separated from the destinations above it. On a
+                    phone this is the only Settings entry point in the chrome: the header gear
+                    is gone (see the note by .rail-spacer). Safe here now that Settings is a
+                    route — the layer-nesting defect that evicted it belonged to the dialog. */}
+                <MenuSeparator />
+                <a
+                  className={`menu-item${settingsSelected ? " is-active" : ""}`}
+                  {...sheetItemProps({ name: "settings" }, settingsSelected)}
                 >
-                  {overflowItems.map((item) => {
-                    const Icon = VIEW_ICONS[item.name];
-                    const destination = { name: item.name } as View;
-                    // A reordered rail can push a counted destination into the sheet; its status
-                    // must overflow WITH it, or moving Connections fifth silently hides the
-                    // online count and moving Sessions hides its blocked/stalled attention.
-                    const blocked = item.name === "inbox" ? blockedCount : 0;
-                    const stalled = item.name === "inbox" ? stalledCount : 0;
-                    const online = item.name === "runners" ? onlineConnections : 0;
-                    const countLabel = item.name === "inbox"
-                      ? `${blocked > 0 ? `, ${blocked} Blocked` : ""}${stalled > 0 ? `, ${stalled} Stalled` : ""}`
-                      : online > 0 ? `, ${online} Online` : "";
-                    return (
-                      <a
-                        key={item.name}
-                        className={`rail-more-item${selected === item.name ? " active" : ""}`}
-                        aria-label={`${item.title}${countLabel}`}
-                        {...sheetItemProps(
-                          destination,
-                          selected === item.name,
-                          item.name === "inbox" ? sessionsViewDestination : undefined,
-                        )}
-                      >
-                        <Icon size={20} />
-                        <span className="rail-more-label">{item.title}</span>
-                        {blocked > 0 && <span className="rail-more-count blocked" aria-hidden="true">{blocked}</span>}
-                        {stalled > 0 && <span className="rail-more-count stalled" aria-hidden="true">{stalled}</span>}
-                        {online > 0 && <span className="rail-more-count" aria-hidden="true">{online}</span>}
-                      </a>
-                    );
-                  })}
-                  {/* Settings closes the sheet, separated from the destinations above it. On a
-                      phone this is the only Settings entry point in the chrome: the header gear
-                      is gone (see the note by .rail-spacer). Safe here now that Settings is a
-                      route — the layer-nesting defect that evicted it belonged to the dialog. */}
-                  <a
-                    className={`rail-more-item rail-more-settings${settingsSelected ? " active" : ""}`}
-                    {...sheetItemProps({ name: "settings" }, settingsSelected)}
-                  >
-                    <GearIcon size={20} />
-                    <span className="rail-more-label">Settings</span>
-                  </a>
-                </div>
-              </>
+                  <span className="menu-icon" aria-hidden="true"><GearIcon size={16} /></span>
+                  <span className="menu-body"><span className="menu-text">Settings</span></span>
+                </a>
+              </MenuSurface>
             )}
           </div>
         )}

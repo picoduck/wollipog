@@ -40,8 +40,9 @@ const readOnly: SessionCommandPermissions = {
 };
 
 function menuItem(container: HTMLElement, label: string): HTMLButtonElement {
+  // A refused item's reason is its second line, so match the label, not the whole row.
   const match = [...container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')]
-    .find((candidate) => candidate.textContent?.trim() === label);
+    .find((candidate) => (candidate.querySelector(".menu-text") ?? candidate).textContent?.trim() === label);
   assert.ok(match, `missing menu item: ${label}`);
   return match;
 }
@@ -92,13 +93,18 @@ async function renderHeader(
       </ApiProvider>,
     );
   });
-  const moreActions = container.querySelector<HTMLButtonElement>('button[aria-label="More Actions"]');
+  const moreActions = page().querySelector<HTMLButtonElement>('button[aria-label="More Actions"]');
   assert.ok(moreActions, "missing More Actions");
   await act(async () => { moreActions.click(); await tick(); });
   return {
     container,
     unmount: async () => { await act(async () => root.unmount()); container.remove(); },
   };
+}
+
+/** Menus are portalled to <body> (the shared MenuSurface), so queries look there. */
+function page(): HTMLElement {
+  return domWindow.document.body as unknown as HTMLElement;
 }
 
 test("a Viewer sees Stop Session disabled with the reason, and nothing is confirmed or sent (#1843)", async () => {
@@ -108,7 +114,7 @@ test("a Viewer sees Stop Session disabled with the reason, and nothing is confir
     commandPermissions: readOnly,
   } as SessionView, calls);
   try {
-    const stop = menuItem(header.container, "Stop Session");
+    const stop = menuItem(page(), "Stop Session");
     assert.equal(stop.disabled, true);
     assert.equal(stop.title, VIEWER);
     assert.equal(description(stop), VIEWER);
@@ -126,7 +132,7 @@ test("a Viewer sees Restart and Retry Stop disabled with the reason (#1843)", as
     commandPermissions: readOnly,
   } as SessionView, calls);
   try {
-    const restart = menuItem(stopped.container, "Restart");
+    const restart = menuItem(page(), "Restart");
     assert.equal(restart.disabled, true);
     assert.equal(description(restart), VIEWER);
     await act(async () => { restart.click(); await tick(); });
@@ -142,10 +148,10 @@ test("a Viewer sees Restart and Retry Stop disabled with the reason (#1843)", as
     commandPermissions: readOnly,
   } as SessionView, calls);
   try {
-    const retry = menuItem(failed.container, "Retry Stop");
+    const retry = menuItem(page(), "Retry Stop");
     assert.equal(retry.disabled, true);
     assert.equal(description(retry), VIEWER);
-    assert.equal(failed.container.querySelectorAll("#session-runtime-caution").length, 1,
+    assert.equal(page().querySelectorAll("#session-runtime-caution").length, 1,
       "one caution serves every refused Runtime item");
     await act(async () => { retry.click(); await tick(); });
   } finally {
@@ -167,11 +173,11 @@ test("a person who may stop and restart keeps the Runtime items as before (#1843
       ...(commandPermissions ? { commandPermissions } : {}),
     } as SessionView, calls);
     try {
-      const stop = menuItem(header.container, "Stop Session");
+      const stop = menuItem(page(), "Stop Session");
       assert.equal(stop.disabled, false);
       assert.equal(stop.getAttribute("aria-describedby"), null);
       assert.equal(stop.title, "Terminate the agent process and discard queued messages");
-      assert.equal(header.container.querySelector("#session-runtime-caution"), null);
+      assert.equal(page().querySelector("#session-runtime-caution"), null);
       await act(async () => { stop.click(); await tick(); await tick(); });
       assert.deepEqual(calls, ["confirm", "stop:session-running"]);
     } finally {
@@ -202,11 +208,11 @@ test("a Viewer sees the archive item disabled with the reason in every state, an
       id: "session-archive", runnerId: "runner-1", title: "Archive", ...session, commandPermissions: readOnly,
     } as SessionView, calls, unarchiveAndRestart);
     try {
-      const item = menuItem(header.container, label);
+      const item = menuItem(page(), label);
       assert.equal(item.disabled, true, `${label} is disabled`);
       assert.equal(item.title, VIEWER);
       assert.equal(description(item), VIEWER, `${label} is described by the reason`);
-      assert.equal(header.container.querySelector("#session-archive-caution")?.textContent, VIEWER,
+      assert.equal(page().querySelector("#session-archive-caution")?.textContent, VIEWER,
         "the reason is visible in the menu");
       await act(async () => { item.click(); await tick(); await tick(); });
       assert.deepEqual(calls, [], `${label} confirms and sends nothing`);
@@ -232,10 +238,10 @@ test("a person who may archive and unarchive keeps the archive item as before", 
       ...(commandPermissions ? { commandPermissions } : {}),
     } as SessionView, calls);
     try {
-      const archive = menuItem(running.container, "Archive and Stop");
+      const archive = menuItem(page(), "Archive and Stop");
       assert.equal(archive.disabled, false);
       assert.equal(archive.getAttribute("aria-describedby"), null);
-      assert.equal(running.container.querySelector("#session-archive-caution"), null);
+      assert.equal(page().querySelector("#session-archive-caution"), null);
       await act(async () => { archive.click(); await tick(); await tick(); });
       assert.deepEqual(calls, ["confirm", "archived:session-running:true"]);
     } finally {
@@ -247,7 +253,7 @@ test("a person who may archive and unarchive keeps the archive item as before", 
       ...(commandPermissions ? { commandPermissions } : {}),
     } as SessionView, calls, true);
     try {
-      const restore = menuItem(archived.container, "Unarchive and Restart");
+      const restore = menuItem(page(), "Unarchive and Restart");
       assert.equal(restore.disabled, false);
       await act(async () => { restore.click(); await tick(); await tick(); });
       assert.deepEqual(calls, ["unarchive-and-restart:session-archived"]);
@@ -265,14 +271,14 @@ test("a Viewer sees Rename Session disabled with the reason, and the rename dial
       ...(commandPermissions ? { commandPermissions } : {}),
     } as SessionView, []);
     try {
-      const rename = menuItem(header.container, "Rename Session…");
+      const rename = menuItem(page(), "Rename Session…");
       assert.equal(rename.disabled, refused, refused ? "refused rename is disabled" : "rename is offered as before");
       if (refused) {
         assert.equal(rename.title, VIEWER);
         assert.equal(description(rename), VIEWER);
-        assert.equal(header.container.querySelector("#session-rename-caution")?.textContent, VIEWER);
+        assert.equal(page().querySelector("#session-rename-caution")?.textContent, VIEWER);
       } else {
-        assert.equal(header.container.querySelector("#session-rename-caution"), null);
+        assert.equal(page().querySelector("#session-rename-caution"), null);
       }
       await act(async () => { rename.click(); await tick(); });
       const dialog = domWindow.document.querySelector('[role="dialog"]');
@@ -320,7 +326,7 @@ test("a Viewer's Fork Conversation is disabled and describes the refusal; an all
       assert.equal(fork.disabled, false);
       assert.equal(fork.title, "Fork Conversation");
       assert.equal(fork.getAttribute("aria-describedby"), null);
-      assert.equal(allowed.container.querySelector("#session-fork-refusal"), null);
+      assert.equal(page().querySelector("#session-fork-refusal"), null);
     } finally {
       await allowed.unmount();
     }

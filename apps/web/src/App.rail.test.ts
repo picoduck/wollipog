@@ -11,6 +11,7 @@ const inboxList = readFileSync(new URL("./components/InboxList.tsx", import.meta
 const inboxRow = readFileSync(new URL("./components/InboxRow.tsx", import.meta.url), "utf8");
 const inboxShortcutRail = readFileSync(new URL("./components/InboxShortcutRail.tsx", import.meta.url), "utf8");
 const projectSplitMenu = readFileSync(new URL("./components/ProjectSplitMenu.tsx", import.meta.url), "utf8");
+const menuSurface = readFileSync(new URL("./components/Menu.tsx", import.meta.url), "utf8");
 const projectsView = readFileSync(new URL("./components/ProjectsView.tsx", import.meta.url), "utf8");
 const pageHeader = readFileSync(new URL("./components/PageHeader.tsx", import.meta.url), "utf8");
 const runsView = readFileSync(new URL("./components/RunsView.tsx", import.meta.url), "utf8");
@@ -222,9 +223,12 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
     "Escape exits the search field even when the query is already empty");
   assert.match(inbox, /inbox-tab-group\$\{hasMenu \? " has-menu" : ""\}/,
     "project actions are owned by their tab instead of a separate layout item");
-  assert.match(projectSplitMenu, /createPortal\([\s\S]*document\.body\)/,
+  // The shared menu surface (#1803) is the portal: ProjectSplitMenu renders it.
+  assert.match(projectSplitMenu, /<MenuSurface/,
     "project menus must render outside the overflow-clipped tab strip");
-  assert.match(css, /\.menu-pop\s*\{[^}]*overflow-y:\s*auto;/,
+  assert.match(menuSurface, /createPortal\([\s\S]*document\.body,?\s*\)/,
+    "the shared menu surface is portalled to <body>");
+  assert.match(css, /\.menu,\s*\.popover\s*\{[^}]*overflow-y:\s*auto;/,
     "capped Project action menus scroll instead of painting outside their surface");
   assert.match(css, /\.inbox-toolbar\s*\{[^}]*align-items:\s*center;[^}]*padding:\s*7px 14px;/);
   assert.match(css, /\.inbox-tabs\s*\{[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;[^}]*scrollbar-width:\s*none;/);
@@ -263,7 +267,7 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "the Inbox menu routes each choice into its existing context-aware workflow");
   assert.match(inboxCreateMenu, /aria-label="Create"[\s\S]*New Session[\s\S]*New Project/,
     "the control and both visible choices use accessible Title Case names");
-  assert.match(inboxCreateMenu, /useAccessibleMenu[\s\S]*useAnchoredMenuStyle/,
+  assert.match(inboxCreateMenu, /useAccessibleMenu[\s\S]*<MenuSurface/,
     "the same focus-managed, viewport-anchored menu works for desktop and touch layouts");
   assert.match(inbox, /creatingProject && \([\s\S]*<CreateProjectDialog/,
     "New Project opens the existing Project creation workflow");
@@ -357,9 +361,11 @@ test("the software keyboard shrinks the layout viewport, not just the visual one
 });
 
 test("an open More sheet suppresses the toast stack", () => {
-  // The merged suppression named .menu-pop and .instance-selector-pop. The More sheet is neither,
-  // so persistent toasts still covered and intercepted taps on its lower destinations.
-  const rule = /body:has\(\.rail-more-sheet\) \.toast-region/.test(css);
+  // The merged suppression named .menu-pop and .instance-selector-pop, and the More sheet was
+  // neither, so persistent toasts still covered and intercepted taps on its lower destinations.
+  // The sheet is now the shared menu surface (#1803), which the one menu guard covers.
+  assert.match(rail, /<MenuSurface/, "the More sheet is the shared menu surface");
+  const rule = /body:has\(> \.menu\) \.toast-region/.test(css);
   assert.ok(rule, "the More sheet must suppress toasts like every other open menu");
 });
 
@@ -401,7 +407,7 @@ test("Settings survives the breakpoint because it is a route", () => {
     "the shell mounts the gear once, for the desktop rail only");
   assert.match(app, /settingsControl: <SettingsTrigger /,
     "and passes it as the rail's desktop control");
-  assert.match(rail, /rail-more-settings[\s\S]*?sheetItemProps\(\{ name: "settings" \}/,
+  assert.match(rail, /<MenuSeparator \/>[\s\S]*?sheetItemProps\(\{ name: "settings" \}/,
     "the phone entry point is a routed row in the More sheet");
   // Gated on the breakpoint, not on overflowItems: hiding every optional destination by experiment
   // would otherwise unmount the trigger and leave Settings no entry point in the phone chrome.
@@ -517,7 +523,7 @@ test("keyboard reachability does not depend on optional viewport metadata alone"
 test("More-sheet toast suppression covers the whole rail breakpoint", () => {
   // The rail and its sheet are active to 760px; the suppression sat in a 600px block, so at 667px
   // the toast stack still covered the sheet's lower destinations.
-  const block = /@media \(max-width: 760px\) \{[^@]*?body:has\(\.rail-more-sheet\) \.toast-region \{[^}]*\}/s.test(css);
+  const block = /@media \(max-width: 760px\) \{[^@]*?body:has\(> \.menu\) \.toast-region[^{]*\{[^}]*\}/s.test(css);
   assert.ok(block, "suppression must apply through 760px, not just the phone breakpoint");
 });
 
@@ -534,8 +540,10 @@ test("crossing the breakpoint always closes More", () => {
 test("the fixed More sheet clears the software keyboard too", () => {
   // position: fixed anchors to the LAYOUT viewport, so shortening the root leaves the sheet where
   // it was — its destinations stayed behind the keyboard even though the rail that opened it moved.
-  const sheet = /\.rail-more-sheet \{([^}]*)\}/.exec(css)?.[1];
-  assert.ok(sheet, ".rail-more-sheet must exist");
+  // The More sheet is the shared menu surface (#1803); its phone sheet rule is the one that docks
+  // it (top: auto) rather than the desktop placement.
+  const sheet = /\.menu,\s*\.popover \{([^}]*top: auto;[^}]*)\}/.exec(css)?.[1];
+  assert.ok(sheet, "the menu sheet rule must exist");
   assert.match(sheet!, /bottom:[^;]*var\(--keyboard-inset, 0px\)/,
     "the sheet's bottom offset must clear the occlusion");
   assert.match(sheet!, /max-height:[\s\S]*?var\(--keyboard-inset, 0px\)/,

@@ -156,6 +156,7 @@ import { useRecoveryWorktreeCreation } from "../recovery-worktree-creation.js";
 import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { useAccessibleMenu, useDismissiblePopover } from "./interactions.js";
+import { MenuItem, MenuLabel, MenuSeparator, MenuSurface } from "./Menu.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ContextWindowMeter } from "./ContextWindowMeter.js";
 import { resolveContextWindowCapacity } from "../context-window-capacity.js";
@@ -779,6 +780,23 @@ export function useDescendantRequestPolling({
   };
 }
 
+/**
+ * Whether a node belongs to the composer: inside its box, or inside a menu one of its controls
+ * opened. Composer menus are portalled to <body> (the shared MenuSurface), so moving focus into one,
+ * or tapping its backdrop, must not read as leaving the composer and collapse it on a phone.
+ */
+function composerOwns(box: Element | null | undefined, node: EventTarget | null): boolean {
+  if (!box || !(node instanceof Node)) return false;
+  if (box.contains(node)) return true;
+  const element = node instanceof Element ? node : node.parentElement;
+  const layer = element?.closest(".menu, .popover, .menu-backdrop");
+  // A backdrop is rendered just before the surface it dismisses.
+  const surface = layer?.classList.contains("menu-backdrop") ? layer.nextElementSibling : layer;
+  const id = surface?.id;
+  return Boolean(id && [...box.querySelectorAll("[aria-controls]")]
+    .some((control) => control.getAttribute("aria-controls") === id));
+}
+
 function SessionDetailLoaded({
   sessionId,
   sourceLocation,
@@ -1313,7 +1331,7 @@ function SessionDetailLoaded({
       markExplicitTransfer();
       // Safari and Firefox on macOS need the inside marker because clicking a button may blur the
       // textarea without focusing the button. The control must survive until its click completes.
-      composerPointerTransferRef.current = composer.closest(".composer-box")?.contains(event.target)
+      composerPointerTransferRef.current = composerOwns(composer.closest(".composer-box"), event.target)
         ? "inside"
         : "outside";
     };
@@ -1326,8 +1344,7 @@ function SessionDetailLoaded({
       const composer = inputRef.current;
       const composerBox = composer?.closest(".composer-box");
       const activeElement = composer?.ownerDocument.activeElement;
-      if (transfer === "outside" &&
-          (!composerBox || !activeElement || !composerBox.contains(activeElement))) {
+      if (transfer === "outside" && !composerOwns(composerBox, activeElement ?? null)) {
         setComposerExpanded(false);
       }
     };
@@ -1391,7 +1408,7 @@ function SessionDetailLoaded({
     composerExplicitFocusTransferRef.current = false;
     if (explicit || composerComposingRef.current || !backgroundTarget) {
       if (explicit && composerPointerTransferRef.current === null &&
-          !element.closest(".composer-box")?.contains(relatedElement)) {
+          !composerOwns(element.closest(".composer-box"), relatedElement)) {
         setComposerExpanded(false);
       }
       pendingComposerFocusRestoreRef.current = null;
@@ -6150,40 +6167,31 @@ function DurableProjectChip({ session, onOpenInbox }: { session: SessionView; on
         <MoreVerticalIcon size={14} />
       </button>
       {menuOpen && (
-        <>
-          <div className="menu-backdrop" onClick={() => menu.close(true)} />
-          <div
-            className="menu-pop"
-            id={menu.menuId}
-            ref={menu.menuRef}
-            role="menu"
-            aria-label="Project Actions"
-            onKeyDown={menu.onMenuKeyDown}
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label="Project Actions"
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          <MenuItem
+            onClick={() => {
+              menu.close(false);
+              navigate(session.projectId ? { name: "projects", id: session.projectId } : { name: "projects" });
+            }}
           >
-            <button
-              className="menu-item"
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                menu.close(false);
-                navigate(session.projectId ? { name: "projects", id: session.projectId } : { name: "projects" });
-              }}
-            >
-              Manage Project
-            </button>
-            <button
-              className="menu-item"
-              type="button"
-              role="menuitem"
-              onClick={() => {
-                menu.close(false);
-                setMoveOpen(true);
-              }}
-            >
-              Move Session…
-            </button>
-          </div>
-        </>
+            Manage Project
+          </MenuItem>
+          <MenuItem
+            onClick={() => {
+              menu.close(false);
+              setMoveOpen(true);
+            }}
+          >
+            Move Session…
+          </MenuItem>
+        </MenuSurface>
       )}
       {moveOpen && (
         <MoveToProjectDialog
@@ -6563,7 +6571,7 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
   };
 
   return (
-    <div className="plus-menu">
+    <div>
       <button
         ref={menu.triggerRef}
         type="button"
@@ -6582,136 +6590,116 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
         </span>
       </button>
       {open && (
-        <>
-          <div className="plus-backdrop" onClick={close} />
-          <div
-            className={`plus-pop narrow${creating ? " creating" : ""}`}
-            id={menu.menuId}
-            ref={menu.menuRef}
-            role={creating ? "dialog" : "menu"}
-            aria-label={creating ? "Create Workspace" : "Choose Workspace"}
-            onKeyDown={creating
-              ? (event) => {
-                  if (event.key !== "Escape" || browsing) return;
-                  event.preventDefault();
-                  event.stopPropagation();
-                  close();
-                }
-              : menu.onMenuKeyDown}
-          >
-            {creating ? (
-              <div className="ws-create">
-                <div className="plus-section">New Workspace</div>
-                <input
-                  className="ws-create-name"
-                  value={name}
-                  autoFocus
-                  spellCheck={false}
-                  placeholder="Workspace Name"
-                  onChange={(e) => setName(e.target.value)}
-                  aria-label="Workspace Name"
-                />
-                {browsedPath ? (
-                  <div className="ws-chosen">
-                    <span className="ws-chosen-path" title={browsedPath}>
-                      {shortenPath(browsedPath)}
-                    </span>
-                    <button type="button" className="icon-btn" aria-label="Clear Workspace Selection" title="Clear — pick another folder" onClick={clearBrowsedPath}>
-                      ✕
-                    </button>
-                  </div>
-                ) : browsing ? (
-                  <DirectoryPicker
-                    runnerId={session.runnerId}
-                    protocolVersion={runner?.protocolVersion}
-                    distro={browseDistro}
-                    onPick={chooseBrowsedPath}
-                    onCancel={cancelBrowse}
-                  />
-                ) : (
-                  <button
-                    type="button"
-                    className="btn ghost sm ws-browse"
-                    onClick={() => setBrowsing(true)}
-                    disabled={!browseSupported}
-                    title={
-                      browseSupported
-                        ? "Browse the runner for a workspace folder"
-                        : runnerCapabilityRequirement(runner?.protocolVersion, "directoryListing", "Directory browsing")
-                    }
-                  >
-                    Browse for a Folder…
-                  </button>
-                )}
-                {error && <div className="form-error" role="alert">{error}</div>}
-                <div className="ws-create-actions">
-                  <button type="button" className="btn ghost sm" onClick={cancelCreate} disabled={busy}>
-                    Cancel
-                  </button>
-                  <button
-                    type="button"
-                    className="btn primary sm"
-                    onClick={() => void createWorkspaceGroup()}
-                    disabled={busy || !name.trim() || !browsedPath}
-                  >
-                    {busy ? "Creating…" : "Create"}
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          kind={creating ? "popover" : "menu"}
+          role={creating ? "dialog" : "menu"}
+          label={creating ? "Create Workspace" : "Choose Workspace"}
+          onDismiss={close}
+          onKeyDown={creating
+            ? (event) => {
+                if (event.key !== "Escape" || browsing) return;
+                event.preventDefault();
+                event.stopPropagation();
+                close();
+              }
+            : menu.onMenuKeyDown}
+        >
+          {creating ? (
+            <div className="ws-create">
+              <div className="menu-label">New Workspace</div>
+              <input
+                className="ws-create-name"
+                value={name}
+                autoFocus
+                spellCheck={false}
+                placeholder="Workspace Name"
+                onChange={(e) => setName(e.target.value)}
+                aria-label="Workspace Name"
+              />
+              {browsedPath ? (
+                <div className="ws-chosen">
+                  <span className="ws-chosen-path" title={browsedPath}>
+                    {shortenPath(browsedPath)}
+                  </span>
+                  <button type="button" className="icon-btn" aria-label="Clear Workspace Selection" title="Clear — pick another folder" onClick={clearBrowsedPath}>
+                    ✕
                   </button>
                 </div>
+              ) : browsing ? (
+                <DirectoryPicker
+                  runnerId={session.runnerId}
+                  protocolVersion={runner?.protocolVersion}
+                  distro={browseDistro}
+                  onPick={chooseBrowsedPath}
+                  onCancel={cancelBrowse}
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="btn ghost sm ws-browse"
+                  onClick={() => setBrowsing(true)}
+                  disabled={!browseSupported}
+                  title={
+                    browseSupported
+                      ? "Browse the runner for a workspace folder"
+                      : runnerCapabilityRequirement(runner?.protocolVersion, "directoryListing", "Directory browsing")
+                  }
+                >
+                  Browse for a Folder…
+                </button>
+              )}
+              {error && <div className="form-error" role="alert">{error}</div>}
+              <div className="ws-create-actions">
+                <button type="button" className="btn ghost sm" onClick={cancelCreate} disabled={busy}>
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  className="btn primary sm"
+                  onClick={() => void createWorkspaceGroup()}
+                  disabled={busy || !name.trim() || !browsedPath}
+                >
+                  {busy ? "Creating…" : "Create"}
+                </button>
               </div>
-            ) : (
-              <>
-                <div className="plus-section" role="presentation">Workspace</div>
-                <button
-                  type="button"
-                  className={`plus-item${session.workspaceId == null ? " on" : ""}`}
+            </div>
+          ) : (
+            <>
+              <MenuLabel>Workspace</MenuLabel>
+              <MenuItem
+                role="menuitemradio"
+                checked={session.workspaceId == null}
+                description="Not Grouped"
+                onClick={() => pick(null)}
+              >
+                No Workspace
+              </MenuItem>
+              {workspaces.map((ws) => (
+                <MenuItem
+                  key={ws.id}
                   role="menuitemradio"
-                  aria-checked={session.workspaceId == null}
-                  onClick={() => pick(null)}
+                  checked={session.workspaceId === ws.id}
+                  description={<span title={ws.path}>{shortenPath(ws.path)}</span>}
+                  onClick={() => pick(ws.id)}
                 >
-                  <span className="plus-check">{session.workspaceId == null ? "✓" : ""}</span>
-                  <span className="plus-item-body">
-                    <span className="plus-item-title">No Workspace</span>
-                    <span className="plus-item-desc">Not Grouped</span>
-                  </span>
-                </button>
-                {workspaces.map((ws) => (
-                  <button
-                    key={ws.id}
-                    type="button"
-                    className={`plus-item${session.workspaceId === ws.id ? " on" : ""}`}
-                    role="menuitemradio"
-                    aria-checked={session.workspaceId === ws.id}
-                    onClick={() => pick(ws.id)}
-                  >
-                    <span className="plus-check">{session.workspaceId === ws.id ? "✓" : ""}</span>
-                    <span className="plus-item-body">
-                      <span className="plus-item-title">{ws.name}</span>
-                      <span className="plus-item-desc" title={ws.path}>
-                        {shortenPath(ws.path)}
-                      </span>
-                    </span>
-                  </button>
-                ))}
-                <div className="plus-divider" />
-                <button
-                  type="button"
-                  className="plus-item plus-add"
-                  role="menuitem"
-                  disabled={!runnerOnline}
-                  title={runnerOnline ? undefined : "Runner offline — start it to browse for a folder"}
-                  onClick={() => setCreating(true)}
-                >
-                  <span className="plus-check" aria-hidden="true">
-                    ＋
-                  </span>
-                  <span className="plus-item-body">
-                    <span className="plus-item-title">New Workspace</span>
-                  </span>
-                </button>
-              </>
-            )}
-          </div>
-        </>
+                  {ws.name}
+                </MenuItem>
+              ))}
+              <MenuSeparator />
+              <MenuItem
+                icon={<PlusIcon size={16} />}
+                disabled={!runnerOnline}
+                description={runnerOnline ? undefined : "Runner offline. Start it to browse for a folder."}
+                onClick={() => setCreating(true)}
+              >
+                New Workspace
+              </MenuItem>
+            </>
+          )}
+        </MenuSurface>
       )}
     </div>
   );
@@ -6824,14 +6812,13 @@ export function ComposerPlusMenu({
   const [open, setOpen] = useState(false);
   const popover = useDismissiblePopover(open, setOpen, "composer-modes-popover");
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const attachDescriptionId = useId();
   const imagesSupported = imageMimeTypes.length > 0;
   // Attachment follows the composer, exactly as paste (a disabled textarea) and drop (its own
   // `canPrompt` guard) already do. `disabled` can flip while the panel — or the native chooser —
   // is already open, so the item and the change handler are gated separately.
   const canAttach = !disabled && imagesSupported;
   return (
-    <div className="plus-menu">
+    <div className="composer-plus">
       {/*
         The one image ingress that works on a phone: paste and drag-and-drop have no reliable
         mobile equivalent. Mounted OUTSIDE the `open &&` panel so activating the item can close the
@@ -6880,200 +6867,185 @@ export function ComposerPlusMenu({
         <PlusIcon size={16} />
       </button>
       {open && (
-        <>
-          <div className="plus-backdrop" onClick={() => popover.close(true)} />
-          <div
-            className="plus-pop composer-plus-pop"
-            id={popover.panelId}
-            ref={popover.panelRef}
-            role="dialog"
-            aria-label="Session Attachments, Modes, and Guardrails"
-            onKeyDown={popover.onPanelKeyDown}
+        // Menu-shaped, but it holds the guardrail fields too, so it is a dialog rather than a menu.
+        <MenuSurface
+          surfaceRef={popover.panelRef}
+          anchor={{ trigger: popover.triggerRef }}
+          id={popover.panelId}
+          role="dialog"
+          label="Session Attachments, Modes, and Guardrails"
+          width={320}
+          boundary=".composer-box"
+          onDismiss={() => popover.close(true)}
+          onKeyDown={popover.onPanelKeyDown}
+        >
+          <MenuLabel>Attach</MenuLabel>
+          <MenuItem
+            role="button"
+            icon={<ImageIcon size={16} />}
+            description={!imagesSupported
+              ? "The selected model does not support image input."
+              : disabled
+                ? "This session cannot accept a prompt right now."
+                : `Photos, camera, or files · up to ${MAX_PROMPT_IMAGES}`}
+            disabled={!canAttach}
+            onClick={() => {
+              fileInputRef.current?.click();
+              popover.close(true);
+            }}
           >
-            <div className="plus-section">Attach</div>
-            <button
-              type="button"
-              className="plus-item"
-              // The item carries its own explanation, so the name is set explicitly rather than
-              // computed from the row's text.
-              aria-label="Attach Image"
-              aria-describedby={attachDescriptionId}
-              disabled={!canAttach}
-              onClick={() => {
-                fileInputRef.current?.click();
-                popover.close(true);
-              }}
-            >
-              <span className="plus-check"><ImageIcon size={14} /></span>
-              <span className="plus-item-body">
-                <span className="plus-item-title">Attach Image</span>
-                <span className="plus-item-desc" id={attachDescriptionId}>
-                  {!imagesSupported
-                    ? "The selected model does not support image input."
-                    : disabled
-                      ? "This session cannot accept a prompt right now."
-                      : `Photos, camera, or files · up to ${MAX_PROMPT_IMAGES}`}
-                </span>
-              </span>
-            </button>
+            Attach Image
+          </MenuItem>
 
-            {planSupported && (
-              <>
-                <div className="plus-section">Modes</div>
-                <button
-                  type="button"
-                  className={`plus-item${planActive ? " on" : ""}`}
-                  role="checkbox"
-                  aria-checked={planActive}
-                  onClick={() => {
-                    onTogglePlan();
-                    popover.close(true);
-                  }}
-                >
-                  <span className="plus-check">{planActive ? "✓" : ""}</span>
-                  <span className="plus-item-body">
-                    <span className="plus-item-title">Plan Mode</span>
-                    <span className="plus-item-desc">
-                      Research + propose a plan, no edits. Or type <code>/plan</code>.
-                    </span>
-                  </span>
-                </button>
-              </>
-            )}
+          {planSupported && (
+            <>
+              <MenuLabel>Modes</MenuLabel>
+              <MenuItem
+                role="checkbox"
+                checked={planActive}
+                description={<>Research + propose a plan, no edits. Or type <code>/plan</code>.</>}
+                onClick={() => {
+                  onTogglePlan();
+                  popover.close(true);
+                }}
+              >
+                Plan Mode
+              </MenuItem>
+            </>
+          )}
 
-            <div className="plus-section">Guardrails</div>
-            <GuardrailInput
-              prefix="$"
-              label="Recurring Cost Threshold"
-              step="0.5"
-              value={session.costBudgetUsd}
-              hint="Pauses when spend reaches this amount. Continue advances the next threshold by another equal allowance."
-              onCommit={(v) => onApply({ costBudgetUsd: v })}
-            />
-            <CheckpointsInput
-              value={session.costCheckpointsUsd ?? null}
-              approvedUsd={session.costCheckpointApprovedUsd ?? null}
-              onCommit={(list) => onApply({ costCheckpointsUsd: list })}
-            />
-            <GuardrailInput
-              prefix="#"
-              label="Tool-Call Threshold"
-              step="1"
-              integer
-              value={session.maxToolCalls}
-              hint={
-                "Pauses after this many tool calls." +
-                (session.maxToolCalls != null && session.toolCallCount != null ? ` ${session.toolCallCount} used.` : "")
-              }
-              onCommit={(v) => onApply({ maxToolCalls: v })}
-            />
-            <GuardrailInput
-              prefix="↳"
-              label="Live Child Limit"
-              step="1"
-              integer
-              value={session.maxChildSessions}
-              placeholder={String(DEFAULT_LIVE_CHILD_LIMIT)}
-              max={String(MAX_LIVE_CHILD_LIMIT)}
-              emptyMeansNoop
-              hint={session.liveChildCapacity
-                ? `${session.liveChildCapacity.limit} limit · ${session.liveChildCapacity.occupied} occupied · ${session.liveChildCapacity.remaining} remaining. Set 0 to pause new child admission. Terminal and archived children release their slots.`
-                : "A session can run four live children by default. Set 0 to pause new child admission. Terminal and archived children release their slots."}
-              onCommit={(v) => onApply({ maxChildSessions: v })}
-            />
-            {sessionRole(session) === "orchestrator" && (
-              <div className="plus-budget">
-                <span className="plus-budget-prefix" aria-hidden="true">↯</span>
-                <div className="parent-control-settings">
-                  {session.orchestratorPolicy && <section className="active-campaign-policy" aria-label="Active Campaign Behavior">
-                    <strong>Campaign Behavior</strong>
-                    <span className="muted">This campaign keeps its stored policy when account defaults change.</span>
-                    <dl>
-                      {session.orchestratorCampaign && <div><dt>Campaign Status</dt><dd>{session.orchestratorCampaign.status === "waiting_human" ? "Waiting for Human" : titleCaseLabel(session.orchestratorCampaign.status.replaceAll("_", " "))}<small>Policy Revision {session.orchestratorCampaign.policyRevision}</small></dd></div>}
-                      <div><dt>Child Harness</dt><dd>{session.orchestratorPolicy.behavior.childHarness
-                        ? agentHarnessIdentityLabel(session.orchestratorPolicy.behavior.childHarness)
-                        : "Automatic"}<small>{titleCaseLabel((session.orchestratorPolicy.sources.behavior.childHarness ?? "legacy_session").replaceAll("_", " "))}</small></dd></div>
-                      <div><dt>Child Model</dt><dd>{session.orchestratorPolicy.behavior.childModel ?? "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childModel.replaceAll("_", " "))}</small></dd></div>
-                      <div><dt>Child Effort</dt><dd>{session.orchestratorPolicy.behavior.childEffort ? titleCaseLabel(session.orchestratorPolicy.behavior.childEffort) : "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childEffort.replaceAll("_", " "))}</small></dd></div>
-                      <div><dt>Maximum Concurrent Children</dt><dd>{session.orchestratorPolicy.behavior.maximumConcurrentChildren}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.maximumConcurrentChildren.replaceAll("_", " "))}</small></dd></div>
-                      <div><dt>Follow-Ups</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.followUps.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.followUps.replaceAll("_", " "))}</small></dd></div>
-                      <div><dt>Completion</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.completion.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.completion.replaceAll("_", " "))}</small></dd></div>
-                      {/* An older control plane publishes no execution block at all, and one between
-                          v144 and v164 publishes it without this field. Read both defensively and
-                          fall back the same way the stored policy's own migration does: a strict
-                          policy is only ever delivered by a preset launch, which carries no user
-                          integration. */}
-                      {(() => {
-                        // A pre-v164 payload has no field. Derive it in the same order the
-                        // control-plane migration does, and for the same reason: EVERY coupled
-                        // preset launch replaces the provider surface and so carries no user
-                        // integration, including the non-strict Claude and Codex preset shapes,
-                        // where `strictProjectIsolation` is false. Reading strictness first would
-                        // report those as Disabled even though they removed the integrations.
-                        const enabled = session.orchestratorPolicy!.execution?.integrationIsolation ??
-                          (usesOrchestratorPresetPermissions(session) ||
-                            (session.orchestratorPolicy!.execution?.strictProjectIsolation ?? true));
-                        // A preset launch is not the additive launch minus integrations, so it
-                        // gets its own sentence instead of the per-harness "kept" list.
-                        const copy = integrationIsolationDisclosure(session.driver);
-                        const disclosure = usesOrchestratorPresetPermissions(session)
-                          ? ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE
-                          : `${copy.removed} ${copy.kept}`;
-                        return <div title={enabled ? disclosure : undefined}>
-                          <dt>Integration Isolation</dt>
-                          <dd>{enabled ? "Enabled" : "Disabled"}<small>{titleCaseLabel(
-                            (session.orchestratorPolicy!.sources.execution?.integrationIsolation ?? "legacy_session")
-                              .replaceAll("_", " "))}</small></dd>
-                        </div>;
-                      })()}
-                      {session.orchestratorCampaign && <>
-                        <div><dt>Children</dt><dd>{session.orchestratorCampaign.children.total}<small>{session.orchestratorCampaign.children.verified} Verified · {session.orchestratorCampaign.children.active} Active · {session.orchestratorCampaign.children.waitingHuman} Waiting for Human · {session.orchestratorCampaign.children.blocked} Blocked</small></dd></div>
-                        <div><dt>Follow-Up Recommendations</dt><dd>{session.orchestratorCampaign.followUps.unique}<small>{session.orchestratorCampaign.followUps.duplicates} Duplicates Skipped</small></dd></div>
-                      </>}
-                    </dl>
-                    {session.orchestratorCampaign?.uiEvidenceReview.status === "unavailable" && <span className="muted" role="status">UI Evidence Approval is assigned to the Orchestrator but is routed to a human. {session.orchestratorCampaign.uiEvidenceReview.reason ?? "This Orchestrator client cannot inspect the evidence bytes."}</span>}
-                    {session.orchestratorCampaign?.uiEvidenceReview.status === "available" && session.orchestratorCampaign.uiEvidenceReview.effectiveOwner === "orchestrator" && <span className="muted" role="status">The Orchestrator reviews image evidence attached as Session artifacts. Video normally goes to a human; one operator-enabled short-frame validation campaign may delegate it. Externally stored evidence goes to a human.</span>}
-                  </section>}
-                  <div className="parent-control-setting">
-                    <span className="parent-control-setting-label">Descendant Requests</span>
-                    <Select<ParentControlMode>
-                      label="Parent Control"
-                      value={session.parentControl ?? "off"}
-                      onChange={(value) => onSetParentControl?.(value)}
+          <MenuLabel>Guardrails</MenuLabel>
+          <GuardrailInput
+            prefix="$"
+            label="Recurring Cost Threshold"
+            step="0.5"
+            value={session.costBudgetUsd}
+            hint="Pauses when spend reaches this amount. Continue advances the next threshold by another equal allowance."
+            onCommit={(v) => onApply({ costBudgetUsd: v })}
+          />
+          <CheckpointsInput
+            value={session.costCheckpointsUsd ?? null}
+            approvedUsd={session.costCheckpointApprovedUsd ?? null}
+            onCommit={(list) => onApply({ costCheckpointsUsd: list })}
+          />
+          <GuardrailInput
+            prefix="#"
+            label="Tool-Call Threshold"
+            step="1"
+            integer
+            value={session.maxToolCalls}
+            hint={
+              "Pauses after this many tool calls." +
+              (session.maxToolCalls != null && session.toolCallCount != null ? ` ${session.toolCallCount} used.` : "")
+            }
+            onCommit={(v) => onApply({ maxToolCalls: v })}
+          />
+          <GuardrailInput
+            prefix="↳"
+            label="Live Child Limit"
+            step="1"
+            integer
+            value={session.maxChildSessions}
+            placeholder={String(DEFAULT_LIVE_CHILD_LIMIT)}
+            max={String(MAX_LIVE_CHILD_LIMIT)}
+            emptyMeansNoop
+            hint={session.liveChildCapacity
+              ? `${session.liveChildCapacity.limit} limit · ${session.liveChildCapacity.occupied} occupied · ${session.liveChildCapacity.remaining} remaining. Set 0 to pause new child admission. Terminal and archived children release their slots.`
+              : "A session can run four live children by default. Set 0 to pause new child admission. Terminal and archived children release their slots."}
+            onCommit={(v) => onApply({ maxChildSessions: v })}
+          />
+          {sessionRole(session) === "orchestrator" && (
+            <div className="plus-budget">
+              <span className="plus-budget-prefix" aria-hidden="true">↯</span>
+              <div className="parent-control-settings">
+                {session.orchestratorPolicy && <section className="active-campaign-policy" aria-label="Active Campaign Behavior">
+                  <strong>Campaign Behavior</strong>
+                  <span className="muted">This campaign keeps its stored policy when account defaults change.</span>
+                  <dl>
+                    {session.orchestratorCampaign && <div><dt>Campaign Status</dt><dd>{session.orchestratorCampaign.status === "waiting_human" ? "Waiting for Human" : titleCaseLabel(session.orchestratorCampaign.status.replaceAll("_", " "))}<small>Policy Revision {session.orchestratorCampaign.policyRevision}</small></dd></div>}
+                    <div><dt>Child Harness</dt><dd>{session.orchestratorPolicy.behavior.childHarness
+                      ? agentHarnessIdentityLabel(session.orchestratorPolicy.behavior.childHarness)
+                      : "Automatic"}<small>{titleCaseLabel((session.orchestratorPolicy.sources.behavior.childHarness ?? "legacy_session").replaceAll("_", " "))}</small></dd></div>
+                    <div><dt>Child Model</dt><dd>{session.orchestratorPolicy.behavior.childModel ?? "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childModel.replaceAll("_", " "))}</small></dd></div>
+                    <div><dt>Child Effort</dt><dd>{session.orchestratorPolicy.behavior.childEffort ? titleCaseLabel(session.orchestratorPolicy.behavior.childEffort) : "Automatic"}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.childEffort.replaceAll("_", " "))}</small></dd></div>
+                    <div><dt>Maximum Concurrent Children</dt><dd>{session.orchestratorPolicy.behavior.maximumConcurrentChildren}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.maximumConcurrentChildren.replaceAll("_", " "))}</small></dd></div>
+                    <div><dt>Follow-Ups</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.followUps.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.followUps.replaceAll("_", " "))}</small></dd></div>
+                    <div><dt>Completion</dt><dd>{titleCaseLabel(session.orchestratorPolicy.behavior.completion.replaceAll("_", " "))}<small>{titleCaseLabel(session.orchestratorPolicy.sources.behavior.completion.replaceAll("_", " "))}</small></dd></div>
+                    {/* An older control plane publishes no execution block at all, and one between
+                        v144 and v164 publishes it without this field. Read both defensively and
+                        fall back the same way the stored policy's own migration does: a strict
+                        policy is only ever delivered by a preset launch, which carries no user
+                        integration. */}
+                    {(() => {
+                      // A pre-v164 payload has no field. Derive it in the same order the
+                      // control-plane migration does, and for the same reason: EVERY coupled
+                      // preset launch replaces the provider surface and so carries no user
+                      // integration, including the non-strict Claude and Codex preset shapes,
+                      // where `strictProjectIsolation` is false. Reading strictness first would
+                      // report those as Disabled even though they removed the integrations.
+                      const enabled = session.orchestratorPolicy!.execution?.integrationIsolation ??
+                        (usesOrchestratorPresetPermissions(session) ||
+                          (session.orchestratorPolicy!.execution?.strictProjectIsolation ?? true));
+                      // A preset launch is not the additive launch minus integrations, so it
+                      // gets its own sentence instead of the per-harness "kept" list.
+                      const copy = integrationIsolationDisclosure(session.driver);
+                      const disclosure = usesOrchestratorPresetPermissions(session)
+                        ? ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE
+                        : `${copy.removed} ${copy.kept}`;
+                      return <div title={enabled ? disclosure : undefined}>
+                        <dt>Integration Isolation</dt>
+                        <dd>{enabled ? "Enabled" : "Disabled"}<small>{titleCaseLabel(
+                          (session.orchestratorPolicy!.sources.execution?.integrationIsolation ?? "legacy_session")
+                            .replaceAll("_", " "))}</small></dd>
+                      </div>;
+                    })()}
+                    {session.orchestratorCampaign && <>
+                      <div><dt>Children</dt><dd>{session.orchestratorCampaign.children.total}<small>{session.orchestratorCampaign.children.verified} Verified · {session.orchestratorCampaign.children.active} Active · {session.orchestratorCampaign.children.waitingHuman} Waiting for Human · {session.orchestratorCampaign.children.blocked} Blocked</small></dd></div>
+                      <div><dt>Follow-Up Recommendations</dt><dd>{session.orchestratorCampaign.followUps.unique}<small>{session.orchestratorCampaign.followUps.duplicates} Duplicates Skipped</small></dd></div>
+                    </>}
+                  </dl>
+                  {session.orchestratorCampaign?.uiEvidenceReview.status === "unavailable" && <span className="muted" role="status">UI Evidence Approval is assigned to the Orchestrator but is routed to a human. {session.orchestratorCampaign.uiEvidenceReview.reason ?? "This Orchestrator client cannot inspect the evidence bytes."}</span>}
+                  {session.orchestratorCampaign?.uiEvidenceReview.status === "available" && session.orchestratorCampaign.uiEvidenceReview.effectiveOwner === "orchestrator" && <span className="muted" role="status">The Orchestrator reviews image evidence attached as Session artifacts. Video normally goes to a human; one operator-enabled short-frame validation campaign may delegate it. Externally stored evidence goes to a human.</span>}
+                </section>}
+                <div className="parent-control-setting">
+                  <span className="parent-control-setting-label">Descendant Requests</span>
+                  <Select<ParentControlMode>
+                    label="Parent Control"
+                    value={session.parentControl ?? "off"}
+                    onChange={(value) => onSetParentControl?.(value)}
+                    options={[
+                      { value: "off", label: "Human", description: "Keep descendant requests human-owned." },
+                      { value: "questions", label: "Questions", description: "Delegate non-secret descendant questions." },
+                      { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
+                    ]}
+                  />
+                </div>
+                {session.parentControlPolicy && ([
+                  ["implementation_question", "Implementation Questions"],
+                  ["pr_merge", "PR Merge Approval"],
+                  ["merged_branch_deletion", "Merged Branch Deletion"],
+                  ["follow_up_issue_publication", "Follow-Up Issue Publication"],
+                  ["ui_evidence_approval", "UI Evidence Approval"],
+                ] as Array<[WorkflowDecisionCategory, string]>).map(([category, label]) => (
+                  <div className="parent-control-setting" key={category}>
+                    <span className="parent-control-setting-label">{label}</span>
+                    <Select<WorkflowDecisionAuthority>
+                      label={label}
+                      value={session.parentControlPolicy!.decisions[category]}
+                      onChange={(value) => onSetParentControlPolicy?.(category, value)}
                       options={[
-                        { value: "off", label: "Human", description: "Keep descendant requests human-owned." },
-                        { value: "questions", label: "Questions", description: "Delegate non-secret descendant questions." },
-                        { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
+                        { value: "human", label: "Human", description: "Require a human decision for this exact workflow gate." },
+                        { value: "orchestrator", label: "Orchestrator", description: "Let the controlling Orchestrator review this typed gate." },
                       ]}
                     />
+                    {category === "ui_evidence_approval" && <span className="muted parent-control-help">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</span>}
                   </div>
-                  {session.parentControlPolicy && ([
-                    ["implementation_question", "Implementation Questions"],
-                    ["pr_merge", "PR Merge Approval"],
-                    ["merged_branch_deletion", "Merged Branch Deletion"],
-                    ["follow_up_issue_publication", "Follow-Up Issue Publication"],
-                    ["ui_evidence_approval", "UI Evidence Approval"],
-                  ] as Array<[WorkflowDecisionCategory, string]>).map(([category, label]) => (
-                    <div className="parent-control-setting" key={category}>
-                      <span className="parent-control-setting-label">{label}</span>
-                      <Select<WorkflowDecisionAuthority>
-                        label={label}
-                        value={session.parentControlPolicy!.decisions[category]}
-                        onChange={(value) => onSetParentControlPolicy?.(category, value)}
-                        options={[
-                          { value: "human", label: "Human", description: "Require a human decision for this exact workflow gate." },
-                          { value: "orchestrator", label: "Orchestrator", description: "Let the controlling Orchestrator review this typed gate." },
-                        ]}
-                      />
-                      {category === "ui_evidence_approval" && <span className="muted parent-control-help">{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</span>}
-                    </div>
-                  ))}
-                  <span className="muted parent-control-help">Only an authenticated human can change these assignments. Existing unconsumed approvals are revoked when the policy changes. Secrets, authentication, persistent grants, governance, budgets, and tool guardrails remain human-only.</span>
-                </div>
+                ))}
+                <span className="muted parent-control-help">Only an authenticated human can change these assignments. Existing unconsumed approvals are revoked when the policy changes. Secrets, authentication, persistent grants, governance, budgets, and tool guardrails remain human-only.</span>
               </div>
-            )}
-          </div>
-        </>
+            </div>
+          )}
+        </MenuSurface>
       )}
     </div>
   );

@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 const EVIDENCE = "test-results/composer-bar-evidence";
 
@@ -32,7 +33,7 @@ test("Pi exposes verified permission choices and their delivery outcomes", async
   await openFixture(page, 900, "pi");
   await expect(page.locator(".composer-input")).toBeVisible();
   await page.getByRole("button", { name: "Permission Mode: Ask Every Time" }).click();
-  const menu = page.locator(".permission-mode-pop");
+  const menu = page.locator('.menu[aria-label="Permission Mode"]');
   await expect(menu).toBeVisible();
   await expect(menu).toContainText("Permission Mode");
   await expect(menu.getByRole("menuitemradio", { name: /Default/ })).toContainText("Approvals Available");
@@ -113,8 +114,9 @@ test.describe("with a touch pointer", () => {
     await page.screenshot({ path: `${EVIDENCE}/after-mobile-orchestrator.png` });
     const trigger = page.getByRole("button", { name: /^Model Settings:/ });
     await trigger.click();
-    const sheet = page.locator(".model-settings-pop");
+    const sheet = page.locator('.menu[aria-label="Model Settings"]');
     await expect(sheet).toBeVisible();
+    await dialogMotionSettled(page);
     await expect(sheet).toContainText("Model Settings");
     const close = sheet.getByRole("menuitem", { name: "Close Model Settings" });
     await expect(close).toBeVisible();
@@ -148,7 +150,7 @@ test.describe("with a touch pointer", () => {
     await expect(trigger).toBeFocused();
 
     await trigger.click();
-    await page.locator(".model-settings-backdrop").click({ position: { x: 1, y: 1 } });
+    await page.locator(".menu-backdrop").click({ position: { x: 1, y: 1 } });
     await expect(sheet).toHaveCount(0);
     await expect(trigger).toBeFocused();
 
@@ -169,7 +171,9 @@ for (const { frameWidth, plan } of [
     if (plan) await expect(page.getByRole("button", { name: "◒ Plan" })).toBeVisible();
     const trigger = page.getByRole("button", { name: /^Model Settings:/ });
     await trigger.click();
-    const popover = page.locator(".model-settings-pop");
+    const popover = page.locator('.menu[aria-label="Model Settings"]');
+    await expect(popover).toBeVisible();
+    await dialogMotionSettled(page);
     const close = popover.getByRole("menuitem", { name: "Close Model Settings" });
     const [frameBox, triggerBox, popoverBox, closeBox] = await Promise.all([
       page.locator("#frame").boundingBox(),

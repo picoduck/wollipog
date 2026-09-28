@@ -124,9 +124,6 @@ test("no unacknowledged rule sets a layer on a guarded surface", () => {
   const EXPECTED = new Set([
     ".modal-backdrop", ".menu-backdrop", ".palette-backdrop", ".toast-region",
     ".slash-palette", ".right-panel", ".instance-selector",
-    // The one deliberate state override: an OPEN selector rises just above the menu backdrop so
-    // its own menu paints over it, while the closed trigger stays below every blocking backdrop.
-    ".instance-selector:has(.instance-selector-pop)",
   ]);
   const touching = new Set<string>();
   for (const decl of zIndexDecls) {
@@ -157,8 +154,10 @@ test("a dialog covers every popover and panel beneath it", () => {
 test("a closed instance selector sits below every blocking backdrop", () => {
   assert.equal(layerOf(".instance-selector"), "var(--z-sticky)",
     "above the backdrop its trigger was clickable through an open dialog");
+  // Its menu is the shared portalled surface (#1803), which sits one above its own backdrop, so
+  // the selector itself never has to rise while the menu is open.
   // Exact, not "contains": calc(var(--z-popover) + 1000) also contains the token text.
-  assert.equal(layerOf(".instance-selector:has(.instance-selector-pop)"), "calc(var(--z-popover) + 1)");
+  assert.equal(layerOf(".menu"), "calc(var(--z-popover) + 1)");
 });
 
 test("the slash palette stays below the mobile right panel", () => {
@@ -183,12 +182,15 @@ test("the slash palette stays below the mobile right panel", () => {
 test("an open menu suppresses the phone toast stack entirely", () => {
   const guards: Rule[] = [];
   parse(css).walkRules((rule) => {
-    if (rule.selectors.some((selector) => /body:has\(\.(instance-selector-pop|menu-pop)\)/.test(selector) &&
+    if (rule.selectors.some((selector) => /body:has\(> \.(menu|popover)\)/.test(selector) &&
       selector.includes(".toast-region"))) guards.push(rule);
   });
   assert.ok(guards.length > 0, "an open menu must suppress the phone toast stack");
 
-  for (const kind of ["instance-selector-pop", "menu-pop"]) {
+  // Every menu and popover is the shared portalled surface (#1803), a direct child of <body>, and
+  // a bottom sheet on a phone, so one guard covers the instance selector, the More sheet and the
+  // composer menus alike.
+  for (const kind of ["menu", "popover"]) {
     assert.ok(guards.some((rule) => rule.selectors.some((selector) => selector.includes(kind))),
       `.${kind} must suppress the toast stack too`);
   }

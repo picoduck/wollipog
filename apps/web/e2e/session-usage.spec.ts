@@ -24,8 +24,8 @@ test("desktop: Parent Control exposes five independent typed workflow authoritie
   await expect(page.getByText(/provider may retain images in provider-local transcripts or media logs/)).toBeVisible();
   await expect(page.getByText(/Existing unconsumed approvals are revoked/)).toBeVisible();
   await page.getByText(/provider may retain images in provider-local transcripts or media logs/).scrollIntoViewIfNeeded();
-  await page.locator(".composer-plus-pop").evaluate((menu) => { menu.scrollTop = menu.scrollHeight; });
-  await page.locator(".composer-plus-pop").screenshot({ path: `${SHOT}/desktop-typed-parent-control.png` });
+  await page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]').evaluate((menu) => { menu.scrollTop = menu.scrollHeight; });
+  await page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]').screenshot({ path: `${SHOT}/desktop-typed-parent-control.png` });
 });
 
 for (const viewport of [
@@ -36,7 +36,7 @@ for (const viewport of [
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await page.goto(`/session-usage-e2e.html?width=${viewport.fixtureWidth}&height=${viewport.fixtureHeight}&composer=orchestrator&campaign-state=off`);
     await page.getByRole("button", { name: "Add and Modes" }).click();
-    const beforeSummary = page.locator(".composer-plus-pop .active-campaign-policy");
+    const beforeSummary = page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"] .active-campaign-policy');
     await expect(beforeSummary).toBeVisible();
     await expect(beforeSummary.getByText("Campaign Status", { exact: true })).toHaveCount(0);
     await beforeSummary.getByText("Child Model", { exact: true }).scrollIntoViewIfNeeded();
@@ -45,7 +45,7 @@ for (const viewport of [
     await page.goto(`/session-usage-e2e.html?width=${viewport.fixtureWidth}&height=${viewport.fixtureHeight}&composer=orchestrator`);
     await page.getByRole("button", { name: "Add and Modes" }).click();
 
-    const menu = page.locator(".composer-plus-pop");
+    const menu = page.locator('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
     const summary = menu.locator(".active-campaign-policy");
     await expect(summary.getByText("Campaign Behavior", { exact: true })).toBeVisible();
     await expect(summary).toContainText("Waiting for Human");

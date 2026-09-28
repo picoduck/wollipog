@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useRef, type CSSProperties } from "react";
+import { useEffect, useRef } from "react";
 import type { SessionReminderView } from "@wollipog/protocol";
 import { reminderMenuActionLabel } from "../session-reminders.js";
-import { createPortal } from "react-dom";
-import { anchoredMenuPlacement, consumeLongPressClick, handleMenuKeyDown, pointAnchorRect } from "./interactions.js";
+import { consumeLongPressClick, handleMenuKeyDown } from "./interactions.js";
+import { MenuItem, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
 
 export interface SessionContextMenuState {
   sessionId: string;
@@ -13,17 +13,14 @@ export interface SessionContextMenuState {
   restoreTarget: () => HTMLElement | null;
 }
 
-const MENU_WIDTH = 220;
-const MENU_HEIGHT = 240;
-
 /**
  * The row/card context menu (#154): one portalled `role="menu"` shared by the Sessions list and
  * the board, anchored to the invoking pointer. It manages target identity and dismissal only —
  * every action keeps its owner's confirmation, undo, and availability semantics, which is why
  * the items receive the target `sessionId` back rather than closing over view state.
  *
- * Rendering `.menu-backdrop` + `role="menu"` buys the shell behaviors for free: the app-level
- * Escape ladder clicks the backdrop, and `shortcutLayerActive` suppresses every global binding
+ * Rendering the shared MenuSurface (`.menu-backdrop` + `role="menu"`) buys the shell behaviors
+ * for free: the app-level Escape ladder clicks the backdrop, and `shortcutLayerActive` suppresses every global binding
  * (j/k, digits, `b`) while the menu is open. Collection-owned keyboard handling comes from
  * `handleMenuKeyDown`, since one hook instance per virtualized row is not an option.
  */
@@ -60,25 +57,6 @@ export function SessionContextMenu({
 }) {
   const menuRef = useRef<HTMLDivElement>(null);
 
-  const style = useMemo<CSSProperties>(() => {
-    const placement = anchoredMenuPlacement({
-      trigger: pointAnchorRect(state.anchor.x, state.anchor.y),
-      viewportWidth: window.innerWidth,
-      viewportHeight: window.innerHeight,
-      desiredWidth: MENU_WIDTH,
-      desiredHeight: MENU_HEIGHT,
-    });
-    return {
-      position: "fixed",
-      top: placement.top === "auto" ? "auto" : placement.top,
-      bottom: placement.bottom === "auto" ? "auto" : placement.bottom,
-      left: placement.left,
-      right: "auto",
-      width: placement.width,
-      maxHeight: placement.maxHeight,
-    };
-  }, [state.anchor.x, state.anchor.y]);
-
   // The menu owns focus while open; the virtualized collections never focus their rows, so
   // initial focus goes straight to the first action.
   useEffect(() => {
@@ -98,77 +76,59 @@ export function SessionContextMenu({
     action(target);
   };
 
-  return createPortal(
-    <>
-      <div
-        className="menu-backdrop"
-        onClick={() => {
-          // The click a long-press releases lands HERE — the backdrop mounted over the finger.
-          // That click is the opening gesture, not a dismissal; consuming it once keeps the
-          // NEXT backdrop click (a dismissal tap, the Escape ladder) working normally.
-          if (consumeLongPressClick()) return;
-          close(true);
-        }}
-        aria-hidden="true"
-      />
-      <div
-        ref={menuRef}
-        className="menu-pop"
-        role="menu"
-        aria-label={`Session Actions for ${sessionTitle}`}
-        style={style}
-        onKeyDown={(event) => handleMenuKeyDown(event, close)}
-        onContextMenu={(event) => event.preventDefault()}
+  // One refusal that covers both Rename and Archive is said once, above them, not under each.
+  const sharedRefusal = renameRefusal !== null && renameRefusal === archiveRefusal ? renameRefusal : null;
+  const sharedRefusalId = `session-menu-refusal-${state.sessionId}`;
+
+  return (
+    <MenuSurface
+      surfaceRef={menuRef}
+      anchor={{ point: state.anchor }}
+      label={`Session Actions for ${sessionTitle}`}
+      onDismiss={() => {
+        // The click a long-press releases lands on the backdrop — mounted over the finger. That
+        // click is the opening gesture, not a dismissal; consuming it once keeps the NEXT backdrop
+        // click (a dismissal tap, the Escape ladder) working normally.
+        if (consumeLongPressClick()) return;
+        close(true);
+      }}
+      onKeyDown={(event) => handleMenuKeyDown(event, close)}
+      onContextMenu={(event) => event.preventDefault()}
+    >
+      {sharedRefusal !== null && <MenuNote id={sharedRefusalId}>{sharedRefusal}</MenuNote>}
+      <MenuItem
+        disabled={renameRefusal !== null}
+        description={sharedRefusal === null ? renameRefusal ?? undefined : undefined}
+        aria-describedby={sharedRefusal === null ? undefined : sharedRefusalId}
+        title={renameRefusal ?? undefined}
+        onClick={act(onRename, false)}
       >
-        {renameRefusal !== null && (
-          <div className="menu-caution" id={`session-menu-rename-caution-${state.sessionId}`} role="presentation">
-            {renameRefusal}
-          </div>
-        )}
-        <button
-          type="button"
-          className="menu-item"
-          role="menuitem"
-          disabled={renameRefusal !== null}
-          aria-describedby={renameRefusal !== null ? `session-menu-rename-caution-${state.sessionId}` : undefined}
-          title={renameRefusal ?? undefined}
-          onClick={act(onRename, false)}
-        >
-          Rename Session…
-        </button>
-        <button type="button" className="menu-item" role="menuitem" onClick={act(onTogglePin, true)}>
-          {pinned ? "Unpin Session" : "Pin Session"}
-        </button>
-        {snoozeAvailable && (
-          <button type="button" className="menu-item" role="menuitem" onClick={act(onSnooze, false)}>
-            {reminderMenuActionLabel(reminder)}
-          </button>
-        )}
-        {reminder?.state === "fired" && onDismissReminder && (
-          <button type="button" className="menu-item" role="menuitem" onClick={act(onDismissReminder, true)}>
-            Dismiss Reminder
-          </button>
-        )}
-        {archiveRefusal !== null && archiveRefusal !== renameRefusal && (
-          <div className="menu-caution" id={`session-menu-archive-caution-${state.sessionId}`} role="presentation">
-            {archiveRefusal}
-          </div>
-        )}
-        <button
-          type="button"
-          className="menu-item menu-danger"
-          role="menuitem"
-          disabled={archiveRefusal !== null}
-          aria-describedby={archiveRefusal === null ? undefined : archiveRefusal === renameRefusal
-            ? `session-menu-rename-caution-${state.sessionId}`
-            : `session-menu-archive-caution-${state.sessionId}`}
-          title={archiveRefusal ?? undefined}
-          onClick={act(onArchive, true)}
-        >
-          Archive
-        </button>
-      </div>
-    </>,
-    document.body,
+        Rename Session…
+      </MenuItem>
+      <MenuItem onClick={act(onTogglePin, true)}>
+        {pinned ? "Unpin Session" : "Pin Session"}
+      </MenuItem>
+      {snoozeAvailable && (
+        <MenuItem onClick={act(onSnooze, false)}>
+          {reminderMenuActionLabel(reminder)}
+        </MenuItem>
+      )}
+      {reminder?.state === "fired" && onDismissReminder && (
+        <MenuItem onClick={act(onDismissReminder, true)}>
+          Dismiss Reminder
+        </MenuItem>
+      )}
+      <MenuSeparator />
+      <MenuItem
+        danger
+        disabled={archiveRefusal !== null}
+        description={sharedRefusal === null ? archiveRefusal ?? undefined : undefined}
+        aria-describedby={sharedRefusal === null ? undefined : sharedRefusalId}
+        title={archiveRefusal ?? undefined}
+        onClick={act(onArchive, true)}
+      >
+        Archive
+      </MenuItem>
+    </MenuSurface>
   );
 }

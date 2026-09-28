@@ -3,7 +3,8 @@ import { useEffect, useRef, useState, type ComponentType } from "react";
 import { useApi } from "../api-context.js";
 import { titleCaseLabel } from "../format.js";
 import { useStoreSelector } from "../store.js";
-import { useAccessibleMenu, useAnchoredMenuStyle } from "./interactions.js";
+import { useAccessibleMenu } from "./interactions.js";
+import { MenuItem, MenuSurface } from "./Menu.js";
 import {
   ChevronDownIcon,
   CodeIcon,
@@ -93,11 +94,6 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
     }
   });
   const menu = useAccessibleMenu(open, setOpen, "editor-menu");
-  const menuStyle = useAnchoredMenuStyle(open, menu.triggerRef, {
-    desiredWidth: 220,
-    desiredHeight: 260,
-    align: "end",
-  });
 
   const session = sessions.get(sessionId);
   const runner = session ? runners.get(session.runnerId) : undefined;
@@ -191,33 +187,28 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
         <ChevronDownIcon size={13} />
       </button>
       {open && (
-        <>
-          <div className="menu-backdrop" onClick={() => menu.close(true)} />
-          <div
-            className="menu-pop editor-pop"
-            role="menu"
-            id={menu.menuId}
-            ref={menu.menuRef}
-            style={menuStyle}
-            onKeyDown={menu.onMenuKeyDown}
-          >
-            {destinations.map((destination) => (
-              <button
-                key={destination.key}
-                type="button"
-                className="menu-item editor-destination-item"
-                role="menuitemradio"
-                aria-checked={destination.key === chosen.key}
-                data-menu-label={destination.name}
-                onClick={() => chooseAndLaunch(destination)}
-              >
-                <DestinationIcon destination={destination} />
-                <span>{destination.name}</span>
-                {destination.key === chosen.key && <span className="editor-current" aria-hidden="true">✓</span>}
-              </button>
-            ))}
-          </div>
-        </>
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label="Choose Destination"
+          align="end"
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          {destinations.map((destination) => (
+            <MenuItem
+              key={destination.key}
+              role="menuitemradio"
+              checked={destination.key === chosen.key}
+              icon={<DestinationIcon destination={destination} />}
+              data-menu-label={destination.name}
+              onClick={() => chooseAndLaunch(destination)}
+            >
+              {destination.name}
+            </MenuItem>
+          ))}
+        </MenuSurface>
       )}
     </div>
   );
