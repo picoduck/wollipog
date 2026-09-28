@@ -509,8 +509,6 @@
   ],
   "deadClasses": [
     "access-heading",
-    "access-status-active",
-    "access-status-suspended",
     "agent-anthropic",
     "agent-google",
     "agent-icon",

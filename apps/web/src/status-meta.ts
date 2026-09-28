@@ -181,6 +181,11 @@ const VOCABULARY = {
     running: info("Running", { pulse: true }),
     stopped: neutral("Stopped"),
   },
+  /** An organization member's account (People & Devices). */
+  member: {
+    active: success("Active"),
+    suspended: danger("Suspended"),
+  },
   provider_account: {
     signed_in: success("Signed In"),
     sign_in_required: warning("Sign-In Required"),

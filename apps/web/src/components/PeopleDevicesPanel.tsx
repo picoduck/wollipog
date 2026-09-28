@@ -1,5 +1,6 @@
 import React, { useEffect, useId, useMemo, useRef, useState } from "react";
 import { StatusBadge } from "./StatusBadge.js";
+import { statusMeta } from "../status-meta.js";
 import { QRCodeSVG } from "qrcode.react";
 import type {
   DeviceView,
@@ -631,7 +632,7 @@ export function PeopleDevicesPanel({
                   <strong><PersonalIdentifier value={member.userName} label="Person Name" /></strong>
                   <span className="access-row-meta">
                     <StatusBadge tone="neutral" noDot label={titleCaseLabel(member.role)} />
-                    <span className={`access-status access-status-${member.userStatus}`}>{titleCaseLabel(member.userStatus)}</span>
+                    <StatusBadge meta={statusMeta("member", member.userStatus)} />
                   </span>
                 </div>
                 {admin && (
