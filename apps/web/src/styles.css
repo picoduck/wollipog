@@ -1780,9 +1780,11 @@ textarea {
   color: var(--amber);
   margin-bottom: 7px;
 }
+/* 8px apart: on touch each small button borrows 4px on every side for its 44px target (§2.8), and
+   closer neighbours would share a strip of each other's target. */
 .approval-actions {
   display: flex;
-  gap: 6px;
+  gap: var(--space-2);
 }
 
 /* ---------------------------- Session detail ---------------------------- */
@@ -9771,7 +9773,7 @@ button.agent-pick {
 .source-editor-select {
   min-width: 0;
   max-width: 150px;
-  height: var(--control-h-sm);
+  height: var(--control-h);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
@@ -14832,8 +14834,10 @@ body.shell-dock-dragging * {
   font-size: var(--text-sm);
   font-weight: 650;
 }
+/* The search frame is the field here (its input is borderless), so it is one control height like
+   the filter selects beside it. */
 .archive-search > div {
-  height: 38px;
+  height: var(--control-h);
   padding: 0 10px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-md);
@@ -14849,6 +14853,8 @@ body.shell-dock-dragging * {
 .archive-search input {
   min-width: 0;
   width: 100%;
+  height: 100%;
+  padding: 0;
   border: 0;
   outline: 0;
   background: transparent;
