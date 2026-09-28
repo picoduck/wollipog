@@ -1868,15 +1868,19 @@ button.status { cursor: pointer; }
   color: var(--text-dim);
   font: var(--type-small);
 }
-/* Time and counts: trailing, tabular, faint. */
+/* Time and counts: trailing, tabular, faint. They give way to the title rather than the other way
+   round: at most half the row, truncated, so a long trailing value can never push the row's name
+   out of a narrow list. */
 .row-trail {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: var(--space-2);
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  overflow: hidden;
   color: var(--text-faint);
   font: var(--type-small);
   font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* A Surface (§5.1): one bordered group of rows that belong together, divided by hairlines. */
 .surface {
@@ -14627,13 +14631,14 @@ body.shell-dock-dragging * {
   text-overflow: ellipsis;
 }
 .archive-state-badges,
+/* 8px apart, so on touch the two small controls' borrowed hit areas meet rather than overlap
+   (§2.8), and nothing clips those hit areas. */
 .archive-row-actions {
   display: flex;
   align-items: center;
-  gap: var(--space-1);
-  overflow: hidden;
+  justify-content: flex-end;
+  gap: var(--space-2);
 }
-.archive-row-actions { justify-content: flex-end; }
 .archive-pagination {
   display: flex;
   justify-content: flex-end;

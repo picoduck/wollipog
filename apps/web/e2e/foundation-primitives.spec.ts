@@ -72,6 +72,43 @@ test("a required finding shows a neutral Required badge beside its severity", as
 test.describe("at 390px", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
+  test("an Archive row's inline action and ⋯ are separate 44px touch targets", async ({ page }) => {
+    await page.goto(shell("/archived"));
+    const actions = page.locator(".archive-row-actions").first();
+    await expect(actions).toBeVisible();
+    const hits = await actions.evaluate((element) => {
+      const [inline, more] = [...element.querySelectorAll<HTMLElement>("button")];
+      const a = inline!.getBoundingClientRect();
+      const b = more!.getBoundingClientRect();
+      const y = a.top + a.height / 2;
+      const at = (x: number, yy: number) => document.elementFromPoint(x, yy);
+      return {
+        gap: b.left - a.right,
+        // 3px past each visible edge, inside its own borrowed area and not the neighbour's.
+        inlineRight: inline!.contains(at(a.right + 3, y)),
+        moreLeft: more!.contains(at(b.left - 3, y)),
+        // The borrowed area above and below is not clipped by the actions container.
+        inlineAbove: inline!.contains(at(a.left + a.width / 2, a.top - 3)),
+        moreBelow: more!.contains(at(b.left + b.width / 2, b.bottom + 3)),
+      };
+    });
+    expect(hits.gap, "neighbours sit at least 8px apart (§2.8)").toBeGreaterThanOrEqual(8);
+    expect(hits).toMatchObject({ inlineRight: true, moreLeft: true, inlineAbove: true, moreBelow: true });
+  });
+
+  test("a long trailing value gives way to the row's title", async ({ page }) => {
+    await page.goto("/colour-schemes-e2e.html");
+    const row = page.locator(".surface > .row.row-2");
+    await expect(row).toBeVisible();
+    const widths = await row.evaluate((element) => ({
+      row: element.getBoundingClientRect().width,
+      title: element.querySelector(".row-title")!.getBoundingClientRect().width,
+      trail: element.querySelector(".row-trail")!.getBoundingClientRect().width,
+    }));
+    expect(widths.trail, "the trailing slot is at most half the row").toBeLessThanOrEqual(widths.row / 2);
+    expect(widths.title, "the title keeps its room").toBeGreaterThan(widths.row * 0.4);
+  });
+
   // The Archive in the real shell; the Usage breakdowns in their own fixture, which serves usage.
   for (const [url, title] of [[shell("/archived"), "Archived Sessions"], ["/usage-view-e2e.html", "Usage & Cost"]] as const) {
     test(`${title} tables become two-line rows without sideways scroll`, async ({ page }) => {

@@ -329,11 +329,18 @@ export function InboxView({
   const inboxSplitKey = inbox.splitKey;
   const inboxSplitKeyRef = useRef(inboxSplitKey);
   inboxSplitKeyRef.current = inboxSplitKey;
+  // Widening from a phone restores the desktop's remembered Inbox state (the layout effect below),
+  // which can name another tab than the URL does. The URL is what Back and reload return to, so it
+  // is applied again after that restore, even when it matched the phone's tab before it.
+  const wasMobileRef = useRef(isMobile);
   useEffect(() => {
-    if (routeSplit === undefined || routeSplit === inboxSplitKeyRef.current) return;
+    const persistenceResumed = wasMobileRef.current && !isMobile;
+    wasMobileRef.current = isMobile;
+    if (routeSplit === undefined) return;
+    if (!persistenceResumed && routeSplit === inboxSplitKeyRef.current) return;
     clearHeldOrder();
     setInboxSplit(routeSplit, !isMobile);
-  }, [routeSplit]); // eslint-disable-line react-hooks/exhaustive-deps -- applied when the URL changes
+  }, [routeSplit, isMobile]); // eslint-disable-line react-hooks/exhaustive-deps -- applied when the URL or the breakpoint changes
 
   useLayoutEffect(() => {
     setInboxPersistenceEnabled(!isMobile);

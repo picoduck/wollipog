@@ -264,7 +264,7 @@ function Sample() {
               Projects and Review rather than opted out. */}
           {/* The §5.2 rows, whose height comes from the row tokens rather than their padding. */}
           <div className="surface">
-            <button type="button" className="row row-2"><span className="row-body"><span className="row-title">A project row</span><span className="row-sub">~/project</span></span></button>
+            <button type="button" className="row row-2"><span className="row-body"><span className="row-title">A project row</span><span className="row-sub">~/project</span></span><span className="row-trail">a-very-long-workspace-name-that-would-otherwise-take-the-whole-row · Created 3h ago</span></button>
             <button type="button" className="row"><span className="row-title">A one-line row</span></button>
             <button type="button" className="row dense"><span className="row-title">A file entry</span></button>
           </div>
