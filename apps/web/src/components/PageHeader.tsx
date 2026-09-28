@@ -298,12 +298,8 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
               focusInMenu.current = false;
             }
           }}
-          onKeyDown={(event) => {
-            // The menu lives at the end of <body>, so Tab from it would leave the page header.
-            // Put focus back on ⋯ first; the browser's Tab then moves on from there.
-            if (event.key === "Tab") menu.triggerRef.current?.focus();
-            menu.onMenuKeyDown(event);
-          }}
+          // Tab hands focus back to ⋯ first (useAccessibleMenu), so it continues from the header.
+          onKeyDown={menu.onMenuKeyDown}
         >
           {ordered.map((item, index) => (
             <Fragment key={item.label}>

@@ -237,7 +237,9 @@ export function handleMenuKeyDown(
     return;
   }
   if (event.key === "Tab") {
-    onClose(false);
+    // Menus are portalled to the end of <body>, so the browser's Tab would continue from there.
+    // Restoring focus first (synchronously) lets it continue from where the menu was opened.
+    onClose(true);
     return;
   }
   const items = menuItems(event.currentTarget);
@@ -397,6 +399,10 @@ export function useAccessibleMenu(
       return;
     }
     if (event.key === "Tab") {
+      // The menu lives at the end of <body> (the shared MenuSurface), so the browser's Tab would
+      // continue from there. Focus the trigger first; the browser's Tab then moves on from it, so
+      // closing does not steal the next focus target.
+      triggerRef.current?.focus();
       close(false);
       return;
     }

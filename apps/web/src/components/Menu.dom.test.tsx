@@ -146,6 +146,9 @@ async function assertKeyboardContract(name: string, reopen: () => Promise<HTMLEl
   assert.ok(doc().querySelector(`[role="menu"][aria-label="${name}"]`), `${name} opens again`);
   await press("Tab");
   assert.equal(doc().querySelector(`[role="menu"][aria-label="${name}"]`), null, "Tab closes the menu");
+  // The menu lived at the end of <body>: focus returns to the trigger before the browser's Tab
+  // moves on, so Tab continues from where the menu was opened (the interaction contract).
+  assert.equal(doc().activeElement, trigger, "Tab continues from the trigger, not the end of <body>");
   assert.equal(doc().querySelector(".menu-backdrop"), null, "and leaves no backdrop behind");
   assert.equal(trigger.getAttribute("aria-expanded"), "false");
 }

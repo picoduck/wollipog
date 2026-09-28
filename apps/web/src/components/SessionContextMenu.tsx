@@ -71,6 +71,10 @@ export function SessionContextMenu({
   // Dialog-opening actions close WITHOUT restoring focus — the dialog takes it, and its own
   // return-focus handling brings it back (the SessionHeader menu's established ordering).
   const act = (action: (sessionId: string) => void, restoreFocus: boolean) => () => {
+    // On a phone the menu is a bottom sheet, which can mount under the finger that long-pressed a
+    // low row: the click its release synthesizes lands on an item, not on the backdrop. That click
+    // is the opening gesture, so it is consumed here too and runs nothing.
+    if (consumeLongPressClick()) return;
     const target = state.sessionId;
     close(restoreFocus);
     action(target);
