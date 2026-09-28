@@ -8561,8 +8561,11 @@ button.file-head.source-path-link {
 @keyframes sheet-open { from { transform: translateY(100%); } }
 @keyframes sheet-push { from { transform: translateX(100%); } }
 @media (prefers-reduced-motion: reduce) {
+  /* Fade only (§2.9, §16.3): no scale, no slide, no drop, for dialogs, menus and their sheets. */
   .modal,
-  .modal-panel.pushed { animation: modal-fade-in var(--dur-base) var(--ease-out); }
+  .modal-panel.pushed,
+  .menu,
+  .popover { animation: modal-fade-in var(--dur-base) var(--ease-out); }
 }
 .shortcut-intro,
 .shortcut-footnote {

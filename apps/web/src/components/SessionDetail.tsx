@@ -5573,7 +5573,9 @@ function SessionDetailLoaded({
                 // Dialogs are portalled to <body>, so a dialog opened from a composer control (the
                 // permission details) takes focus outside this box. It hands focus back on close.
                 const intoDialog = next instanceof Element && next.closest(".modal-backdrop") !== null;
-                if (!event.currentTarget.contains(next) && !intoDialog) {
+                // Composer menus are portalled too: a keyboard-opened menu takes focus from its
+                // trigger into <body>, which is still the composer's own control.
+                if (!composerOwns(event.currentTarget, next) && !intoDialog) {
                   if (composerPointerTransferRef.current === null) setComposerExpanded(false);
                 }
               }}

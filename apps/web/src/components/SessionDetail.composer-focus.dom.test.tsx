@@ -3369,6 +3369,53 @@ test("phone composer controls survive a pointer click when the browser does not 
   }
 });
 
+test("a keyboard-opened composer menu keeps the phone composer expanded around it", async () => {
+  const priorMatchMedia = domWindow.matchMedia;
+  domWindow.matchMedia = ((query: string) => ({
+    matches: query.includes("max-width: 760px"),
+    media: query,
+    onchange: null,
+    addEventListener() {},
+    removeEventListener() {},
+    addListener() {},
+    removeListener() {},
+    dispatchEvent: () => false,
+  })) as never;
+  const draft = deferred<ComposerDraft | null>();
+  const fixture = await mountFixture(draft);
+  try {
+    await resolveComposerDraft(draft, { text: "", images: [], updatedAt: 1 });
+    await focusRequestedComposer(fixture);
+    const plusTrigger = fixture.container.querySelector(
+      'button[aria-label="Add and Modes"]',
+    ) as HTMLButtonElement | null;
+    assert.ok(plusTrigger);
+    await act(async () => { plusTrigger.focus(); });
+    // The menu is portalled to <body>, so opening it from the keyboard moves focus out of the
+    // composer box: that is still the composer's own control, not leaving the composer.
+    await act(async () => {
+      plusTrigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowDown", bubbles: true }) as never);
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+    const menu = domWindow.document.querySelector('.menu[aria-label="Session Attachments, Modes, and Guardrails"]');
+    assert.ok(menu, "ArrowDown opens the composer menu");
+    assert.ok(menu.contains(domWindow.document.activeElement), "the menu takes focus");
+    assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false,
+      "focus in a composer menu keeps the phone composer expanded");
+    await act(async () => {
+      domWindow.document.activeElement?.dispatchEvent(
+        new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never,
+      );
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+    assert.equal(domWindow.document.activeElement, plusTrigger, "Escape returns focus to a trigger that is still shown");
+    assert.equal(fixture.container.querySelector(".composer-box")?.classList.contains("idle-collapsed"), false);
+  } finally {
+    domWindow.matchMedia = priorMatchMedia;
+    await unmountFixture(fixture);
+  }
+});
+
 test("a phone queue tap cannot collapse while WebKit retains textarea focus", async () => {
   const priorMatchMedia = domWindow.matchMedia;
   domWindow.matchMedia = ((query: string) => ({
