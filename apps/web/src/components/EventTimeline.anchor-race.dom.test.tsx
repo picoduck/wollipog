@@ -443,14 +443,80 @@ test("a preceding row growing under a structural anchor keeps the saved row", as
   const reader = await returnToSavedRow();
   await settle((painted) => assertSavedRowHeld(painted, "restore"));
 
-  // A streamed tail row makes the visible row a structural anchor. That anchor owns the reflow:
-  // TanStack does not compensate the growth, and the anchor restores the row when it commits.
+  // A streamed tail row makes the visible row a structural anchor. TanStack compensates the fully
+  // preceding row's growth and renders it before paint; the anchor then has nothing left to correct.
   await reader.setItems([...items, { kind: "user_message", id: 13, text: "Streamed follow-up" }]);
   assertSavedRowHeld(paint(), "structural commit");
-  await frame({ beforeResizeObservations: () => layout.heights.set(PRECEDING_KEY, ROW_HEIGHT + GROWTH) });
+  assertSavedRowHeld(
+    await frame({ beforeResizeObservations: () => layout.heights.set(PRECEDING_KEY, ROW_HEIGHT + GROWTH) }),
+    "measurement frame",
+  );
   await settle((rows) => assertSavedRowHeld(rows, "after growth"));
 
   assert.equal(layout.scrollTop, SAVED_INDEX * ROW_HEIGHT + GROWTH - SAVED_OFFSET);
+  assert.equal((await reader.durableAnchor())?.key, SAVED_KEY);
+});
+
+test("a preceding row measured as a streamed row's structural anchor releases keeps the saved row", async () => {
+  const streamed: TimelineItem = { kind: "user_message", id: 13, text: "Streamed follow-up" };
+  // Count the structural anchor's bounded window on an undisturbed stream rather than hard-coding it.
+  const probe = await returnToSavedRow();
+  await settle((painted) => assertSavedRowHeld(painted, "probe restore"));
+  await probe.setItems([...items, streamed]);
+  let releaseFrame = 0;
+  for (let count = 1; count <= 32 && releaseFrame === 0; count += 1) {
+    assertSavedRowHeld(await frame(), `undisturbed frame ${count}`);
+    if (frameCallbacks.length === 0) releaseFrame = count;
+  }
+  assert.ok(releaseFrame > 1, "the structural anchor must own more than one frame");
+  await probe.unmount();
+
+  const reader = await returnToSavedRow();
+  await settle((painted) => assertSavedRowHeld(painted, "restore"));
+  await reader.setItems([...items, streamed]);
+  assertSavedRowHeld(paint(), "structural commit");
+  for (let count = 1; count < releaseFrame - 1; count += 1) {
+    assertSavedRowHeld(await frame(), `structural frame ${count}`);
+  }
+  let measurementFrame: PaintedRow[] = [];
+  let releasingFrame: PaintedRow[] = [];
+  await act(async () => {
+    // As in the mount-anchor race: hold the growth's render past the next frame's callbacks so it
+    // lands on the frame that clears the structural anchor.
+    measurementFrame = runFrame({
+      beforeResizeObservations: () => layout.heights.set(PRECEDING_KEY, ROW_HEIGHT + GROWTH),
+    });
+    releasingFrame = runFrame();
+    assert.equal(frameCallbacks.length, 0, "the second held frame must be the one that releases the structural anchor");
+  });
+  assertSavedRowHeld(measurementFrame, "measurement frame");
+  assertSavedRowHeld(releasingFrame, "release frame");
+  await settle((painted) => assertSavedRowHeld(painted, "after release"));
+
+  assert.equal(layout.scrollTop, SAVED_INDEX * ROW_HEIGHT + GROWTH - SAVED_OFFSET,
+    "the preceding row's growth is compensated exactly once");
+  const anchor = await reader.durableAnchor();
+  assert.equal(anchor?.key, SAVED_KEY, "the saved row remains the reading anchor");
+  assert.equal(anchor?.offset, SAVED_OFFSET);
+  assert.ok(!reader.reports.some((report) => report.key === PRECEDING_KEY),
+    "the preceding row must never be adopted as the reading anchor");
+});
+
+test("width reflow under a streamed row's structural anchor keeps the saved row without a second compensation", async () => {
+  const reader = await returnToSavedRow();
+  await settle((painted) => assertSavedRowHeld(painted, "restore"));
+
+  await reader.setItems([...items, { kind: "user_message", id: 13, text: "Streamed follow-up" }]);
+  assertSavedRowHeld(paint(), "structural commit");
+  assertSavedRowHeld(await frame(), "structural frame");
+
+  // The width owner, not TanStack, restores the saved row even though a structural anchor is pending.
+  layout.width = 400;
+  for (const row of paint()) layout.heights.set(row.key, 200);
+  assertSavedRowHeld(await frame(), "width frame");
+  await settle((painted) => assertSavedRowHeld(painted, "after width change"));
+
+  assert.equal(layout.scrollTop, SAVED_INDEX * 200 - SAVED_OFFSET);
   assert.equal((await reader.durableAnchor())?.key, SAVED_KEY);
 });
 

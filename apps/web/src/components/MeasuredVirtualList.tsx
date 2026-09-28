@@ -117,19 +117,25 @@ export function shouldAdjustVirtualScrollForResize({
   scrollOffset,
   anchorPending,
   mountRestorePending,
+  widthReflowPending,
 }: {
   itemStart: number;
   itemEnd: number;
   scrollOffset: number;
   anchorPending: boolean;
   mountRestorePending: boolean;
+  /** Read only when it decides the result; the caller may consult live layout. */
+  widthReflowPending: () => boolean;
 }): boolean {
-  // On session return, a fully preceding row must compensate immediately even while the mount
-  // anchor is pending. Its measurement can land in the frame that releases the bounded window;
-  // without compensation the next render adopts the wrong visible row. Width and structural
-  // anchors own their entire reflow, so compensating those rows here would scroll twice.
+  // On session return or under a streamed row's structural anchor, a fully preceding row must
+  // compensate immediately even while the anchor is pending. TanStack then renders the grown row
+  // before paint. Otherwise that frame paints it over the anchor, and when the measurement lands
+  // as the bounded window releases, the next render adopts the wrong visible row. A width anchor
+  // owns its entire reflow, so compensating those rows here would scroll twice; session return
+  // keeps its existing compensation through a width change.
   return itemStart < scrollOffset &&
-    (!anchorPending || (mountRestorePending && itemEnd <= scrollOffset));
+    (!anchorPending ||
+      (itemEnd <= scrollOffset && (mountRestorePending || !widthReflowPending())));
 }
 
 interface VirtualMeasurementReseeder {
@@ -526,10 +532,12 @@ function VirtualList<T>({
   // Every external scrollRef host carries `measured-virtual-scroll`, disabling native anchoring.
   // Logical-key corrections and TanStack's measured-row adjustments must be the only scroll
   // owners; native anchoring sees transformed rows as ordinary flow and applies a third correction.
-  // The logical-key anchor corrects structural/width changes while pending. During a session
-  // return, a fully preceding row still needs TanStack's immediate adjustment when its measured
-  // growth lands at the end of that window. Below-viewport rows must not move paused readers.
+  // The logical-key anchor corrects structural/width changes while pending. Outside a width
+  // reflow, a fully preceding row still needs TanStack's immediate adjustment when its measured
+  // growth lands in that window. Below-viewport rows must not move paused readers.
   // The public tracked offset includes each adjustment before the next row is measured.
+  // TanStack's row observer can report rewrapped rows before the viewport observer below records
+  // the new width, so a width reflow is also pending while the live width differs from that record.
   virtualizer.shouldAdjustScrollPositionOnItemSizeChange = (item, _delta, instance) =>
     shouldAdjustVirtualScrollForResize({
       itemStart: item.start,
@@ -537,6 +545,12 @@ function VirtualList<T>({
       scrollOffset: instance.scrollOffset ?? 0,
       anchorPending: pendingAnchorRef.current != null,
       mountRestorePending: anchorCorrectionRequiresIntentRef.current,
+      widthReflowPending: () => {
+        if (widthAnchorRef.current != null) return true;
+        const scroll = scrollRef.current;
+        return scroll != null && viewportWidthRef.current !== 0 &&
+          Math.round(scroll.getBoundingClientRect().width) !== viewportWidthRef.current;
+      },
     });
 
   useEffect(() => {
