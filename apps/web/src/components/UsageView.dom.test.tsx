@@ -541,6 +541,71 @@ test("aggregation switches ignore stale responses and show request failures with
   container.remove();
 });
 
+test("a late failed request cannot overwrite the newer selection's loading state or data", async () => {
+  const initialDay = Date.UTC(2026, 8, 20);
+  const newerDay = Date.UTC(2026, 8, 21);
+  const pending: Array<{
+    granularity: UsageAggregationGranularity;
+    resolve: (value: UsageAggregationResponse) => void;
+    reject: (reason?: unknown) => void;
+  }> = [];
+  let initialLoaded = false;
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => {
+      const granularity = query.granularity ?? "day";
+      if (!initialLoaded) {
+        initialLoaded = true;
+        return response([bucket(initialDay, 6, 0.06)], granularity);
+      }
+      return await new Promise<UsageAggregationResponse>((resolve, reject) => {
+        pending.push({ granularity, resolve, reject });
+      });
+    },
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); });
+  const aggregation = () => container.querySelector('[role="radiogroup"][aria-label="Usage Aggregation"]')!;
+  const option = (label: string) => [...aggregation().querySelectorAll("[role=radio]")]
+    .find((node) => node.textContent?.trim() === label) as HTMLButtonElement;
+  // Compare text, not nodes: a failing `assert.equal` on a happy-dom node inspects its whole graph.
+  const alertText = () => container.querySelector('[role="alert"]')?.textContent;
+  const loadingShown = () => [...container.querySelectorAll('[role="status"]')]
+    .some((node) => node.textContent === "Loading usage…");
+
+  await act(async () => { option("Week").click(); await settleLoad(); });
+  await act(async () => { option("Day").click(); await settleLoad(); });
+  assert.deepEqual(pending.map((request) => request.granularity), ["week", "day"],
+    "the Week request is still in flight when the newer Day request starts");
+  const [weekly, daily] = pending;
+
+  await act(async () => { weekly!.reject(new Error("Weekly usage is temporarily unavailable")); await drain(); });
+  assert.equal(alertText(), undefined, "the late Week failure does not surface as an error for the Day selection");
+  assert.equal(loadingShown(), true, "the Day request is still loading after the Week request fails");
+
+  await act(async () => { daily!.resolve(response([bucket(newerDay, 7, 0.07)], "day")); await drain(); });
+  assert.equal(alertText(), undefined);
+  assert.equal(loadingShown(), false, "loading ends when the Day request resolves");
+  assert.equal(container.querySelector("[aria-busy]")?.getAttribute("aria-busy"), "false");
+  assert.equal(option("Day").getAttribute("aria-checked"), "true");
+  assert.match(container.querySelector(".usage-chart-section h3")?.textContent ?? "", /Daily Cost/);
+  assert.equal(container.querySelector("#usage-table-caption")?.textContent, "Daily Usage in UTC");
+  assert.deepEqual(
+    [...container.querySelectorAll(".usage-table tbody th")].map((cell) => cell.textContent ?? ""),
+    [bucketLabel(newerDay, "day")],
+  );
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
 test("Subscription Usage shows remaining allowance, local and relative resets, stale state, and text warnings", async () => {
   const now = Date.now();
   const subscription = (status: "warning" | "exhausted", remainingPercent: number): SubscriptionUsageResponse => ({
