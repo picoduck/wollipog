@@ -489,7 +489,7 @@ test.describe("desktop: context and cost flank the live-output control", () => {
     expect(legible.visible).toBeGreaterThanOrEqual(legible.needed - 0.5);
 
     // 580px sits between the cutoff calibrated on "Paused" (~556px) and the one budgeted for the
-    // widest label (590px), so this is what actually fails if the budget regresses to the narrower
+    // widest label (596px), so this is what actually fails if the budget regresses to the narrower
     // figure — the 600px pane above is inside neither cutoff and would pass either way.
     await page.goto("/session-usage-e2e.html?width=580&height=780&cost=12345.67");
     await expect(page.locator(".follow-tail-chip")).toBeVisible();

@@ -12406,8 +12406,10 @@ body.shell-dock-dragging * {
    these rules back out of this file, measures what the follow-state control, the hint, and a wide
    cost actually render at, and fails when the constants stop covering them. Retuning any control in
    this strip therefore fails that spec rather than silently squeezing the cost. Change these numbers
-   only in response to a measurement, and let the spec confirm it. */
-@container transcript-pane (max-width: 590px) {
+   only in response to a measurement, and let the spec confirm it. 596px: the keycap hints beside the
+   follow control moved from the retired 10px size to 11px (#1802), and in the widest fallback face
+   the strip then measured 590.1px. */
+@container transcript-pane (max-width: 596px) {
   .transcript-status-actions { display: none; }
 }
 @container transcript-pane (max-width: calc(330px + 16rem)) {
