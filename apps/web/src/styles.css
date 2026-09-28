@@ -1287,6 +1287,7 @@ pre {
   }
   .editor-select > .editor-main {
     width: 34px;
+    max-width: none;
     padding-inline: var(--space-2);
   }
   .editor-main-label { display: none; }
@@ -2217,8 +2218,12 @@ button.status { cursor: pointer; }
    (SELECT_MENU_MAX_HEIGHT_PX in ChoiceControls.tsx), so the menu's own width limits and cap step
    aside. Its options keep their own height (block flow, not the menu's shrinking flex column).
    On a phone it stays anchored to its field rather than becoming a sheet: the anchor's inline
-   placement wins over the sheet's, and this rule restates the container the sheet rules replace. */
+   placement wins over the sheet's, and this rule restates the container the sheet rules replace.
+   It has no stylesheet corner (`top`/`left` auto): until the anchor places it, it sits where its
+   field is, so nothing moves or transitions from the viewport's corner. */
 .menu.listbox {
+  top: auto;
+  left: auto;
   display: block;
   min-width: 0;
   max-width: none;
