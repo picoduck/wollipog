@@ -85,7 +85,7 @@ function ConnectedWorktreeSetupNotice({ session, onGenerated }: {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const generateRefusal = sessionCommandRefusal(session, "worktreeSetup");
-  return <WorktreeSetupNotice compact busy={busy} error={error} generateRefusal={generateRefusal} onDismiss={() => {
+  return <WorktreeSetupNotice busy={busy} error={error} generateRefusal={generateRefusal} onDismiss={() => {
     setBusy(true);
     setError(null);
     void api.dismissWorktreeSetupNotice(session.projectId).catch((cause) => {

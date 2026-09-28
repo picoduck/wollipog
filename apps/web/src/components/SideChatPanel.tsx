@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
+import { State } from "./State.js";
+import { Notice } from "./Notice.js";
 import { isTerminal, type SessionEvent, type SessionStatus, type SessionView, type SideChatView } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
@@ -279,21 +281,22 @@ export function SideChatPanel({
     }
   };
 
-  if (sideChat === undefined) return <div className="hint" role="status">Loading side chat…</div>;
+  if (sideChat === undefined) return <State variant="loading" compact>Loading side chat…</State>;
   if (!sideChat) {
     const unavailable = !session.agentId
       ? "This session has no reusable agent."
       : !runnerOnline ? "The runner must be online to start a side chat." : null;
     return (
-      <div className="sidechat-empty">
-        <p>Start a separate conversation using this session&apos;s agent in an isolated worktree.</p>
-        <p className="hint">No prompt, transcript, attachments, artifacts, or budget are copied. Only text you explicitly insert returns to the primary composer.</p>
-        {unavailable && <div className="hint warn" role="status">{unavailable}</div>}
-        {error && <div className="error-box" role="alert">{error}</div>}
+      <State compact title="No Side Chat Yet" actions={(
         <button type="button" className="btn primary" disabled={creating || Boolean(unavailable)} onClick={() => void create()}>
-        {creating ? "Starting…" : "Start Side Chat"}
+          {creating ? "Starting…" : "Start Side Chat"}
         </button>
-      </div>
+      )}>
+        <p>Start a separate conversation using this session&apos;s agent in an isolated worktree.</p>
+        <p>No prompt, transcript, attachments, artifacts, or budget are copied. Only text you explicitly insert returns to the primary composer.</p>
+        {unavailable && <Notice tone="warning" compact role="status">{unavailable}</Notice>}
+        {error && <Notice tone="danger" compact role="alert">{error}</Notice>}
+      </State>
     );
   }
 

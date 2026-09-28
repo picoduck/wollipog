@@ -16,6 +16,7 @@ for (const [name, value] of Object.entries({
   Node: domWindow.Node,
   Event: domWindow.Event,
   KeyboardEvent: domWindow.KeyboardEvent,
+  MouseEvent: domWindow.MouseEvent,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) {
   Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -60,6 +61,7 @@ function Harness() {
           feedback.showToast(`Persistent ${index}.`, { tone: "error", durationMs: 0, action: { label: `Recover ${index}`, run: () => {} } });
         }
       }}>Persistent burst</button>
+      <button data-testid="info" onClick={() => feedback.showToast("Saved.")}>Info</button>
       <button data-testid="double-action" onClick={() => feedback.showToast("Run once.", { action: { label: "Run", run: () => { setActionCount((count) => count + 1); } } })}>Double action</button>
       <button data-testid="pending-action" onClick={() => feedback.showToast("Opening link.", { action: { label: "Retry", busyLabel: "Retrying…", run: () => new Promise<void>((resolve) => { finishPendingAction = resolve; }) } })}>Pending Action</button>
       <output data-testid="result">{result}</output>
@@ -151,45 +153,112 @@ test("undo runs once, dismisses on success, and keeps actionable failure feedbac
 
   await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="broken-undo"]')!.click(); });
   await act(async () => { container.querySelector<HTMLButtonElement>('.toast .btn')!.click(); });
-  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Undo failed: runner offline.*Retry undo/);
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Undo failed: runner offline.*Retry Undo/);
 
   await act(async () => { container.querySelector<HTMLButtonElement>('.toast .icon-btn')!.click(); });
   await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="broken-recovery"]')!.click(); });
   await act(async () => { container.querySelector<HTMLButtonElement>('.toast .btn')!.click(); });
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Restore sessions failed: runner offline.*Retry/);
-  assert.doesNotMatch(container.querySelector('[role="alert"]')?.textContent ?? "", /Retry undo/);
+  assert.doesNotMatch(container.querySelector('[role="alert"]')?.textContent ?? "", /Retry Undo/);
 
   await act(async () => { root.unmount(); });
   container.remove();
 });
 
-test("transient toast bursts preserve a bounded persistent recovery action", async () => {
+test("a burst shows three toasts newest on top and keeps the persistent recovery action behind +N More", async () => {
   const { container, root } = await renderHarness();
   await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="toast-burst"]')!.click(); });
-  const toasts = [...container.querySelectorAll<HTMLElement>('.toast')];
-  assert.equal(toasts.length, 4);
-  assert.match(toasts.map((toast) => toast.textContent).join("\n"), /Persistent recovery.*Restore sessions/);
-  assert.doesNotMatch(toasts.map((toast) => toast.textContent).join("\n"), /Transient 1/);
-  assert.match(toasts.map((toast) => toast.textContent).join("\n"), /Transient 4/);
+  // docs/design-system.md §13.1: at most three visible on desktop, newest on top.
+  const visible = [...container.querySelectorAll<HTMLElement>('.toast-region > .toast')];
+  assert.deepEqual(visible.map((toast) => toast.querySelector(".toast-message")?.textContent),
+    ["Transient 4.", "Transient 3.", "Transient 2."]);
+  const more = container.querySelector<HTMLButtonElement>(".toast-more")!;
+  assert.equal(more.textContent, "+2 More");
+  assert.equal(more.getAttribute("aria-expanded"), "false");
+  await act(async () => { more.click(); });
+  const older = [...container.querySelectorAll<HTMLElement>('.toast-more-list .toast')];
+  assert.match(older.map((toast) => toast.textContent).join("\n"), /Persistent recovery.*Restore sessions/,
+    "no recovery action is evicted out of reach");
+  assert.match(older.map((toast) => toast.textContent).join("\n"), /Transient 1/);
   await act(async () => { root.unmount(); });
   container.remove();
 });
 
-test("persistent recovery overflow keeps the newest action visible and queues older actions", async () => {
+test("dismissing the newest toast brings the next one out of +N More", async () => {
   const { container, root } = await renderHarness();
   await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="persistent-burst"]')!.click(); });
-  let toasts = [...container.querySelectorAll<HTMLElement>('.toast')];
-  assert.equal(toasts.length, 4);
-  assert.match(toasts.map((toast) => toast.textContent).join("\n"), /Persistent 5.*Recover 5/);
-  assert.doesNotMatch(toasts.map((toast) => toast.textContent).join("\n"), /Persistent 1/);
+  let visible = [...container.querySelectorAll<HTMLElement>('.toast-region > .toast')];
+  assert.equal(visible.length, 3);
+  assert.match(visible[0]!.textContent ?? "", /Persistent 5.*Recover 5/);
+  assert.equal(container.querySelector(".toast-more")?.textContent, "+2 More");
 
-  const newest = toasts.find((toast) => toast.textContent?.includes("Persistent 5"))!;
-  await act(async () => { newest.querySelector<HTMLButtonElement>('.icon-btn')!.click(); });
-  toasts = [...container.querySelectorAll<HTMLElement>('.toast')];
-  assert.equal(toasts.length, 4);
-  assert.match(toasts.map((toast) => toast.textContent).join("\n"), /Persistent 1.*Recover 1/);
+  await act(async () => { visible[0]!.querySelector<HTMLButtonElement>('[aria-label="Dismiss Notification"]')!.click(); });
+  visible = [...container.querySelectorAll<HTMLElement>('.toast-region > .toast')];
+  assert.equal(visible.length, 3);
+  assert.match(visible.map((toast) => toast.textContent).join("\n"), /Persistent 2.*Recover 2/);
+  assert.equal(container.querySelector(".toast-more")?.textContent, "+1 More");
   await act(async () => { root.unmount(); });
   container.remove();
+});
+
+test("a toast carries a tone icon and an icon close named Dismiss Notification", async () => {
+  const { container, root } = await renderHarness();
+  await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="broken-recovery"]')!.click(); });
+  const toast = container.querySelector<HTMLElement>(".toast")!;
+  assert.ok(toast.classList.contains("t-danger"), "an error toast takes the danger tone");
+  assert.ok(toast.querySelector(".toast-icon svg"), "the tone icon carries the tone, not colour alone");
+  const close = toast.querySelector<HTMLButtonElement>('[aria-label="Dismiss Notification"]')!;
+  assert.ok(close.querySelector("svg"));
+  assert.doesNotMatch(close.textContent ?? "", /×/);
+  await act(async () => { root.unmount(); });
+  container.remove();
+});
+
+test("an info toast dismisses after five seconds unless the stack is hovered, and an error persists", async () => {
+  const { container, root } = await renderHarness();
+  const originalNow = Date.now;
+  let now = 1_000_000;
+  const timers: Array<{ id: number; at: number; run: () => void }> = [];
+  let nextId = 1;
+  const realSet = domWindow.setTimeout;
+  const realClear = domWindow.clearTimeout;
+  Date.now = () => now;
+  domWindow.setTimeout = ((run: () => void, delay = 0) => {
+    const id = nextId++;
+    timers.push({ id, at: now + delay, run });
+    return id;
+  }) as never;
+  domWindow.clearTimeout = ((id: number) => {
+    const index = timers.findIndex((timer) => timer.id === id);
+    if (index >= 0) timers.splice(index, 1);
+  }) as never;
+  const advance = async (ms: number) => {
+    now += ms;
+    for (const timer of [...timers].filter((candidate) => candidate.at <= now)) {
+      timers.splice(timers.indexOf(timer), 1);
+      await act(async () => { timer.run(); });
+    }
+  };
+  try {
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="broken-recovery"]')!.click(); });
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="info"]')!.click(); });
+    assert.equal(container.querySelectorAll(".toast").length, 2);
+    const region = container.querySelector<HTMLElement>(".toast-region")!;
+    await act(async () => { region.dispatchEvent(new domWindow.MouseEvent("mouseover", { bubbles: true }) as never); });
+    await advance(20_000);
+    assert.equal(container.querySelectorAll(".toast").length, 2, "hovering the stack pauses every timer");
+    await act(async () => { region.dispatchEvent(new domWindow.MouseEvent("mouseout", { bubbles: true }) as never); });
+    await advance(5_000);
+    const remaining = [...container.querySelectorAll(".toast")].map((toast) => toast.textContent ?? "");
+    assert.equal(remaining.length, 1, "the info toast dismissed once its five seconds ran after the pause");
+    assert.match(remaining[0]!, /Partial archive/, "an error persists until dismissed");
+  } finally {
+    Date.now = originalNow;
+    domWindow.setTimeout = realSet;
+    domWindow.clearTimeout = realClear;
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
 });
 
 test("a synchronous double-click cannot run one toast action twice", async () => {
@@ -281,7 +350,7 @@ test("a dismissed in-flight undo still reports failure, while teardown suppresse
   await act(async () => { container.querySelector<HTMLButtonElement>('.toast .icon-btn')!.click(); });
   assert.equal(container.querySelector('.toast'), null);
   await act(async () => { rejectUndo?.(new Error("runner offline")); await tick(); });
-  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Undo failed: runner offline.*Retry undo/);
+  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Undo failed: runner offline.*Retry Undo/);
 
   await act(async () => { container.querySelector<HTMLButtonElement>('.toast .icon-btn')!.click(); });
   await act(async () => { container.querySelector("button")!.click(); });

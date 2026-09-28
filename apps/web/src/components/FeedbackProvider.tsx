@@ -10,6 +10,9 @@ import React, {
   type ReactNode,
 } from "react";
 import { Modal } from "./common.js";
+import { CloseIcon } from "./Icons.js";
+import { ToneIcon } from "./Notice.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 export interface ConfirmationOptions {
   /** The action in Title Case, with no question mark: "Stop Session", "Delete Skill" (§7.4). */
@@ -45,7 +48,11 @@ function confirmationFingerprint(options: ConfirmationOptions): string {
 }
 
 export interface ToastOptions {
-  tone?: "info" | "success" | "error";
+  tone?: "info" | "success" | "warning" | "error";
+  /** An optional second line under the message, in the secondary text colour. */
+  detail?: string;
+  /** Milliseconds before an info or success toast dismisses itself; 0 keeps it until dismissed.
+   * Warnings and errors persist unless a duration is given (§13.1). */
   durationMs?: number;
   action?: {
     label: string;
@@ -100,12 +107,15 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   const mounted = useRef(true);
   const [toasts, setToasts] = useState<ToastEntry[]>([]);
   const nextToastId = useRef(1);
-  const toastTimers = useRef(new Map<number, number>());
+  /** Each auto-dismissing toast's pending timer and the time it still has left. Hovering or
+   * focusing the stack pauses every timer; leaving it resumes each with what it had left. */
+  const toastTimers = useRef(new Map<number, { timer: number | null; deadline: number; remaining: number }>());
+  const toastsPaused = useRef(false);
   const toastActionsInFlight = useRef(new Set<number>());
 
   const clearToastTimer = useCallback((id: number) => {
-    const timer = toastTimers.current.get(id);
-    if (timer != null) window.clearTimeout(timer);
+    const entry = toastTimers.current.get(id);
+    if (entry?.timer != null) window.clearTimeout(entry.timer);
     toastTimers.current.delete(id);
   }, []);
 
@@ -115,30 +125,46 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
     setToasts((current) => current.filter((toast) => toast.id !== id));
   }, [clearToastTimer]);
 
+  const armToastTimer = useCallback((id: number, remaining: number) => {
+    const deadline = Date.now() + remaining;
+    const timer = toastsPaused.current ? null : window.setTimeout(() => dismissToast(id), remaining);
+    toastTimers.current.set(id, { timer, deadline, remaining });
+  }, [dismissToast]);
+
+  const pauseToastTimers = useCallback(() => {
+    if (toastsPaused.current) return;
+    toastsPaused.current = true;
+    const now = Date.now();
+    for (const entry of toastTimers.current.values()) {
+      if (entry.timer != null) window.clearTimeout(entry.timer);
+      entry.timer = null;
+      entry.remaining = Math.max(0, entry.deadline - now);
+    }
+  }, []);
+
+  const resumeToastTimers = useCallback(() => {
+    if (!toastsPaused.current) return;
+    toastsPaused.current = false;
+    for (const [id, entry] of toastTimers.current) armToastTimer(id, entry.remaining);
+  }, [armToastTimer]);
+
   const showToast = useCallback((message: string, options: ToastOptions = {}) => {
     if (!mounted.current) return -1;
     const id = nextToastId.current++;
     const entry: ToastEntry = { id, message, ...options };
-    setToasts((current) => {
-      const kept = [...current, entry];
-      const transient = kept.filter((toast) => toast.durationMs !== 0);
-      const evictedTransientIds = new Set(transient.slice(0, Math.max(0, transient.length - 4)).map((toast) => toast.id));
-      evictedTransientIds.forEach(clearToastTimer);
-      // Persistent recovery actions remain queued until explicitly dismissed or completed. The
-      // render projection below exposes the newest four and reveals older actions as space opens.
-      return kept.filter((toast) => !evictedTransientIds.has(toast.id));
-    });
-    const duration = options.durationMs ?? (options.action ? 10_000 : options.tone === "error" ? 8_000 : 5_000);
-    if (duration > 0) {
-      toastTimers.current.set(id, window.setTimeout(() => dismissToast(id), duration));
-    }
+    // Every toast stays in state until it expires or is dismissed: the stack shows the newest few
+    // and the rest wait behind "+N More", so no recovery action is ever evicted out of reach.
+    setToasts((current) => [...current, entry]);
+    const persistsByDefault = options.tone === "error" || options.tone === "warning";
+    const duration = options.durationMs ?? (persistsByDefault ? 0 : options.action ? 10_000 : 5_000);
+    if (duration > 0) armToastTimer(id, duration);
     return id;
-  }, [clearToastTimer, dismissToast]);
+  }, [armToastTimer]);
 
   const showUndo = useCallback((message: string, undo: () => void | Promise<void>) => (
     showToast(message, {
       tone: "success",
-      action: { label: "Undo", busyLabel: "Undoing…", run: undo, failureLabel: "Undo failed", retryLabel: "Retry undo" },
+      action: { label: "Undo", busyLabel: "Undoing…", run: undo, failureLabel: "Undo failed", retryLabel: "Retry Undo" },
       durationMs: 10_000,
     })
   ), [showToast]);
@@ -247,7 +273,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       confirmationQueue.current = [];
       pendingConfirmationFingerprints.current.clear();
       pending.forEach((request) => request.resolve(false));
-      for (const timer of toastTimers.current.values()) window.clearTimeout(timer);
+      for (const entry of toastTimers.current.values()) if (entry.timer != null) window.clearTimeout(entry.timer);
       toastTimers.current.clear();
       toastActionsInFlight.current.clear();
     };
@@ -259,37 +285,153 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
     showToast,
     showUndo,
   ]);
-  const visibleToasts = useMemo(() => {
-    const persistent = toasts.filter((toast) => toast.durationMs === 0).slice(-4);
-    const persistentIds = new Set(persistent.map((toast) => toast.id));
-    const remaining = 4 - persistent.length;
-    const transient = remaining > 0
-      ? toasts.filter((toast) => toast.durationMs !== 0 && !persistentIds.has(toast.id)).slice(-remaining)
-      : [];
-    return [...persistent, ...transient].sort((left, right) => left.id - right.id);
-  }, [toasts]);
+  const isPhone = useIsMobile();
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreListId = useId();
+  // Newest on top. Three are visible on desktop and one on a phone (§13.1); older ones wait behind
+  // "+N More", whose list opens upward, so a persistent recovery toast is always reachable.
+  const newestFirst = useMemo(() => [...toasts].sort((left, right) => right.id - left.id), [toasts]);
+  const visibleCount = isPhone ? 1 : 3;
+  const visibleToasts = newestFirst.slice(0, visibleCount);
+  const olderToasts = newestFirst.slice(visibleCount);
+  useEffect(() => {
+    if (olderToasts.length === 0) setMoreOpen(false);
+  }, [olderToasts.length]);
+  useToastClearance(toasts.length > 0);
+
+  const renderToast = (toast: ToastEntry) => (
+    <div
+      className={`toast ${toast.tone === "success" ? "t-success"
+        : toast.tone === "warning" ? "t-warning"
+          : toast.tone === "error" ? "t-danger"
+            : "t-info"}`}
+      key={toast.id}
+      role={toast.tone === "error" ? "alert" : "status"}
+    >
+      <span className="toast-icon" aria-hidden="true">
+        <ToneIcon tone={toast.tone === "error" ? "danger" : toast.tone ?? "info"} />
+      </span>
+      <div className="toast-copy">
+        <span className="toast-message">{toast.message}</span>
+        {toast.detail && <span className="toast-detail">{toast.detail}</span>}
+      </div>
+      <div className="toast-actions">
+        {toast.action && (
+          <button className="btn ghost sm" type="button" disabled={toast.actionBusy} onClick={() => void runToastAction(toast)}>
+            {toast.actionBusy ? toast.action.busyLabel ?? "Working…" : toast.action.label}
+          </button>
+        )}
+        <button className="icon-btn sm" type="button" aria-label="Dismiss Notification" title="Dismiss Notification"
+          onClick={() => dismissToast(toast.id)}>
+          <CloseIcon />
+        </button>
+      </div>
+    </div>
+  );
 
   return (
     <FeedbackContext.Provider value={value}>
       {children}
       {active && <ConfirmationDialog request={active} onSettle={settleConfirmation} />}
-      <div className="toast-region" aria-label="Notifications" aria-live="polite" aria-relevant="additions text">
-        {visibleToasts.map((toast) => (
-          <div className={`toast toast-${toast.tone ?? "info"}`} key={toast.id} role={toast.tone === "error" ? "alert" : "status"}>
-            <span>{toast.message}</span>
-            <div className="toast-actions">
-              {toast.action && (
-                <button className="btn ghost sm" type="button" disabled={toast.actionBusy} onClick={() => void runToastAction(toast)}>
-                  {toast.actionBusy ? toast.action.busyLabel ?? "Working…" : toast.action.label}
-                </button>
-              )}
-              <button className="icon-btn" type="button" aria-label="Dismiss Notification" onClick={() => dismissToast(toast.id)}>×</button>
-            </div>
-          </div>
-        ))}
+      <div
+        className="toast-region"
+        aria-label="Notifications"
+        aria-live="polite"
+        aria-relevant="additions text"
+        onMouseEnter={pauseToastTimers}
+        onMouseLeave={(event) => {
+          if (!event.currentTarget.contains(document.activeElement)) resumeToastTimers();
+        }}
+        onFocus={pauseToastTimers}
+        onBlur={(event) => {
+          const next = event.relatedTarget as Node | null;
+          if (!next || !event.currentTarget.contains(next)) {
+            if (!event.currentTarget.matches(":hover")) resumeToastTimers();
+          }
+        }}
+      >
+        {moreOpen && olderToasts.length > 0 && (
+          <ul className="toast-more-list" id={moreListId} aria-label="Older Notifications">
+            {[...olderToasts].reverse().map((toast) => <li key={toast.id}>{renderToast(toast)}</li>)}
+          </ul>
+        )}
+        {olderToasts.length > 0 && (
+          <button type="button" className="btn sm toast-more" aria-expanded={moreOpen} aria-controls={moreListId}
+            onClick={() => setMoreOpen((open) => !open)}>
+            {moreOpen ? "Show Fewer" : `+${olderToasts.length} More`}
+          </button>
+        )}
+        {visibleToasts.map(renderToast)}
       </div>
     </FeedbackContext.Provider>
   );
+}
+
+/**
+ * Publishes --toast-clear: the height docked at the bottom of the view that toasts must sit above —
+ * the phone tab bar, a session's composer, a sheet's footer (docs/design-system.md §13.1). Docked
+ * chrome stacks (a phone session's composer sits on its tab bar), so the measurement walks up from
+ * the bottom of the app through every visible candidate whose bottom edge touches the stack so far.
+ * A candidate taller than half the app is skipped: the desktop rail spans the full height and sits
+ * beside the stack, not under it. Measured only while a toast is showing, on resize and on a short
+ * interval, because the docked chrome changes with navigation and the software keyboard.
+ */
+function useToastClearance(active: boolean) {
+  useEffect(() => {
+    const root = document.documentElement;
+    if (!active) {
+      root.style.removeProperty("--toast-clear");
+      return;
+    }
+    const measure = () => {
+      const app = document.getElementById("root") ?? document.body;
+      const bottom = app.getBoundingClientRect().bottom;
+      const boxes = [...document.querySelectorAll<HTMLElement>(".app-rail, .composer, .modal-foot")]
+        .map((element) => element.getBoundingClientRect())
+        .filter((box) => box.width > 0 && box.height > 0 && box.height <= bottom / 2)
+        .sort((left, right) => right.bottom - left.bottom);
+      let stackTop = bottom;
+      for (const box of boxes) {
+        if (Math.abs(box.bottom - stackTop) > 2) continue;
+        stackTop = Math.min(stackTop, box.top);
+      }
+      root.style.setProperty("--toast-clear", `${Math.ceil(bottom - stackTop)}px`);
+    };
+    // Event-driven rather than polled: the docked chrome changes when it mounts or unmounts (a
+    // route change, a modal opening) or when it resizes (the composer growing with its draft).
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = 0;
+        measure();
+      });
+    };
+    const resizes = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
+    const observeChrome = () => {
+      if (!resizes) return;
+      resizes.disconnect();
+      resizes.observe(document.documentElement);
+      for (const element of document.querySelectorAll(".app-rail, .composer, .modal-foot")) resizes.observe(element);
+    };
+    const mutations = typeof MutationObserver === "undefined" ? null : new MutationObserver(() => {
+      observeChrome();
+      schedule();
+    });
+    mutations?.observe(document.body, { childList: true, subtree: true });
+    observeChrome();
+    measure();
+    window.addEventListener("resize", schedule);
+    window.visualViewport?.addEventListener("resize", schedule);
+    return () => {
+      if (frame) window.cancelAnimationFrame(frame);
+      mutations?.disconnect();
+      resizes?.disconnect();
+      window.removeEventListener("resize", schedule);
+      window.visualViewport?.removeEventListener("resize", schedule);
+      root.style.removeProperty("--toast-clear");
+    };
+  }, [active]);
 }
 
 function ConfirmationDialog({ request, onSettle }: {

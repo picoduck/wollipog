@@ -20,9 +20,11 @@ import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { InboxIcon, SearchIcon } from "./Icons.js";
-import { Empty, Spinner } from "./common.js";
+import { Spinner } from "./common.js";
 import { PageHeader } from "./PageHeader.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { Notice } from "./Notice.js";
+import { State, stateVariant } from "./State.js";
 import { Select } from "./ui/ChoiceControls.js";
 
 const DEFAULT_FILTERS: ArchiveBrowserFilters = {
@@ -507,23 +509,41 @@ export function ArchivedSessionsView() {
         Showing {pageSessions.length} Session{pageSessions.length === 1 ? "" : "s"}
       </div>
 
-      {error && <div className="archive-error" role="alert">{error} <button className="link-button" type="button" onClick={() => void refreshCatalog()}>Try Again</button></div>}
-      {loading && pageSessions.length === 0 ? (
-        <div className="archive-loading" role="status"><Spinner /> Loading Archived Sessions…</div>
+      {error && pageSessions.length > 0 && (
+        <Notice tone="danger" compact role="alert"
+          actions={<button className="btn sm" type="button" onClick={() => void refreshCatalog()}>Try Again</button>}>
+          {error}
+        </Notice>
+      )}
+      {pageSessions.length === 0 && stateVariant({
+        offline: conn !== "online" && conn !== "connecting",
+        loading: loading,
+        error: Boolean(error),
+      }) === "offline" ? (
+        <State variant="offline">Reconnecting…</State>
+      ) : loading && pageSessions.length === 0 ? (
+        <State variant="loading">Loading archived sessions…</State>
+      ) : error && pageSessions.length === 0 ? (
+        <State variant="error" title="Couldn't Load Archived Sessions"
+          actions={<button className="btn sm" type="button" onClick={() => void refreshCatalog()}>Try Again</button>}>
+          {error}
+        </State>
       ) : pageSessions.length === 0 ? (
-        <Empty
+        <State
+          variant={hasActiveFilters ? "no-results" : "empty"}
           title={hasActiveFilters
             ? "No Matching Sessions"
             : "No Archived Sessions"}
-          hint={hasActiveFilters
-            ? "Try clearing search text or changing a filter."
-            : "Archived sessions will appear here with their lifecycle state and transcript."}
-          icon={<InboxIcon size={28} />}
-          action={<button type="button" className="btn primary" onClick={() => {
+          icon={<InboxIcon />}
+          actions={<button type="button" className={hasActiveFilters ? "btn sm" : "btn primary"} onClick={() => {
             if (hasActiveFilters) { setQueryInput(""); setFilters(DEFAULT_FILTERS); setPage(1); setCursors([null]); }
             else navigate({ name: "inbox" });
           }}>{hasActiveFilters ? "Reset Filters" : "Go to Inbox"}</button>}
-        />
+        >
+          {hasActiveFilters
+            ? "Try clearing search text or changing a filter."
+            : "Archived sessions will appear here with their lifecycle state and transcript."}
+        </State>
       ) : (
         <div className="archive-table-wrap" role="region" aria-label="Archived Sessions Table" tabIndex={0}>
           <table className="archive-table">

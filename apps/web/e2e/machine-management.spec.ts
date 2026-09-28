@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
 const recoveryGeometry = (notice: HTMLElement) => {
-  const message = notice.firstElementChild as HTMLElement;
+  const message = notice.querySelector(".notice-body") as HTMLElement;
   const button = notice.querySelector("button");
   const noticeRect = notice.getBoundingClientRect();
   const messageRect = message.getBoundingClientRect();
@@ -371,9 +371,11 @@ test("offline recovery stays stacked and usable in a narrow card on a desktop vi
 
   const repair = page.getByRole("button", { name: "Repair Credentials", exact: true });
   await expect(repair).toHaveText("Repair Credentials");
-  const geometry = await page.locator(".connection-recovery").evaluate(recoveryGeometry);
+  const geometry = await page.locator('[aria-label="Connection Offline"]').evaluate(recoveryGeometry);
   expect(geometry.button).not.toBeNull();
-  expect(geometry.button!.top).toBeGreaterThanOrEqual(geometry.message.bottom + 11);
+  // A Notice puts its actions in a row under the body (docs/design-system.md §13.2): the content
+  // gap plus the row's top margin, 8px, replacing the old box hint's 12px.
+  expect(geometry.button!.top).toBeGreaterThanOrEqual(geometry.message.bottom + 7);
   expect(Math.abs(geometry.button!.left - geometry.message.left)).toBeLessThanOrEqual(0.5);
   // At its own width under the message, not stretched into a bar (§3.1), and a small button's
   // control height: 28px with this fine pointer.
@@ -399,9 +401,9 @@ test.describe("on a touch phone", () => {
 
     const repair = page.getByRole("button", { name: "Repair Credentials", exact: true });
     await expect(repair).toBeVisible();
-    const geometry = await page.locator(".connection-recovery").evaluate(recoveryGeometry);
+    const geometry = await page.locator('[aria-label="Connection Offline"]').evaluate(recoveryGeometry);
     expect(geometry.button).not.toBeNull();
-    expect(geometry.button!.top).toBeGreaterThanOrEqual(geometry.message.bottom + 11);
+    expect(geometry.button!.top).toBeGreaterThanOrEqual(geometry.message.bottom + 7);
     expect(Math.abs(geometry.button!.left - geometry.message.left)).toBeLessThanOrEqual(0.5);
     expect(geometry.button!.width).toBeLessThanOrEqual(geometry.message.width + 0.5);
     // A small button is 36px to look at on touch and borrows 4px on each side for a 44px target.

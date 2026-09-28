@@ -14,7 +14,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     const expand = page.getByRole("button", { name: "Expand Session" });
     if (await expand.isVisible()) await expand.click();
 
-    const banner = page.locator(".quarantine-banner");
+    const banner = page.locator('[aria-label="Conversation Quarantined"]');
     await expect(banner).toContainText("Conversation Quarantined");
     await expect(banner).toContainText("cannot repair it");
     await expect(banner).toContainText("turn 1");
@@ -33,7 +33,7 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
     // The recovered session opens with the retained prompt waiting in its composer, unsent.
     await expect(page.locator(".composer-input")).toBeEnabled();
     await expect(page.locator(".composer-input")).toHaveValue("Now scan every changed file.");
-    await expect(page.locator(".quarantine-banner")).toHaveCount(0);
+    await expect(page.locator('[aria-label="Conversation Quarantined"]')).toHaveCount(0);
     expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.recoveryRequests()))
       .toEqual([{ id: "session-alpha", turn: 1 }]);
     expect(await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests())).toEqual([]);

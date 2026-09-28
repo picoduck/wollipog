@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { Notice } from "./Notice.js";
 import type { SessionView, WorkflowArtifactView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { normalizeBrowserUrl } from "../artifact-preview.js";
@@ -127,7 +128,7 @@ export function BrowserPanel({ session }: { session: SessionView }) {
             />
             <button className="btn primary sm" type="submit">Go</button>
           </form>
-          {urlError && <div className="composer-error" role="alert">{urlError}</div>}
+          {urlError && <Notice tone="danger" compact role="alert">{urlError}</Notice>}
           <div className="muted sm browser-security-note">Remote pages receive no device token, referrer, session data, or same-origin privileges.</div>
           {url ? (
             <>
@@ -157,7 +158,7 @@ export function BrowserPanel({ session }: { session: SessionView }) {
       ) : (
         <div className="browser-artifacts">
           <p className="muted sm">Session artifacts are listed without loading their bodies. Choose one to fetch and verify its exact bytes.</p>
-          {listError && <div className="composer-error" role="alert">{listError}</div>}
+          {listError && <Notice tone="danger" compact role="alert">{listError}</Notice>}
           <ul className="browser-artifact-list" aria-busy={listBusy}>
             {artifacts.map((artifact) => (
               <li key={artifact.artifactId}>

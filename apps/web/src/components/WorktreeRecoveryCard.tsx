@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useState } from "react";
+import { Notice } from "./Notice.js";
 import type { SessionView } from "@wollipog/protocol";
 import { Select } from "./ui/ChoiceControls.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
@@ -95,19 +96,17 @@ export function WorktreeRecoveryCard({
   };
 
   return (
-    <section className="quarantine-banner worktree-recovery" aria-label="Worktree Recovery Required">
-      <div className="quarantine-copy">
-        <span className="quarantine-title">Worktree Recovery Required</span>
+    <Notice as="section" tone="danger" ariaLabel="Worktree Recovery Required" title="Worktree Recovery Required">
         <p id={detailId}>{recovery.detail}</p>
         <p id={retainedId}>
           This worktree cannot start another turn. Messages marked <strong>Not Sent</strong>
           {" "}can be retried after this session has a verified worktree.
         </p>
         {refusal !== null && <p id={refusalId}>{refusal}</p>}
-        {!runnerOnline && <p id={offlineId} className="worktree-recovery-error">The runner is offline.</p>}
-        {error && <p className="worktree-recovery-error" role="alert">{error}</p>}
+        {!runnerOnline && <p id={offlineId} className="notice-error">The runner is offline.</p>}
+        {error && <p className="notice-error" role="alert">{error}</p>}
         {creationFailure && (
-          <p id={creationFailedId} className="worktree-recovery-error" role="alert">
+          <p id={creationFailedId} className="notice-error" role="alert">
             <strong>{failedPhase ? `Creation Failed: ${failedPhase.label}` : "Creation Failed"}</strong>
             {" "}{creationFailure.error}
           </p>
@@ -119,7 +118,6 @@ export function WorktreeRecoveryCard({
             <progress max={WORKTREE_CREATION_STEPS} value={phase.step} aria-hidden="true" />
           </div>
         )}
-      </div>
       <div className="worktree-recovery-controls">
         <fieldset disabled={disabled}>
           <legend>Create Replacement Worktree</legend>
@@ -179,6 +177,6 @@ export function WorktreeRecoveryCard({
           </button>
         </fieldset>
       </div>
-    </section>
+    </Notice>
   );
 }

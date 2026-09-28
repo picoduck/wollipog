@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { Notice } from "./Notice.js";
 import type { WorkflowArtifactView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { artifactDownloadFilename } from "../artifact-download.js";
@@ -100,7 +101,7 @@ export function ArtifactPreview({ artifact }: { artifact: WorkflowArtifactView }
       </div>
       <p className="muted sm">Previewed bytes are exact and authenticated. Raw downloads are not redacted and may contain secrets or personal data.</p>
       {busy && <div className="hint" role="status">Loading and verifying preview…</div>}
-      {error && <div className="composer-error" role="alert">{error}</div>}
+      {error && <Notice tone="danger" compact role="alert">{error}</Notice>}
       {loaded?.kind === "image" && <img className="artifact-preview-image" src={loaded.objectUrl} alt={artifact.name} />}
       {loaded?.kind === "video" && (
         <video className="artifact-preview-video" src={loaded.objectUrl} controls playsInline preload="metadata"

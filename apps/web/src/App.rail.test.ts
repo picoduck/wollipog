@@ -25,8 +25,10 @@ const newSessionShortcut = readFileSync(new URL("./useNewSessionShortcut.ts", im
 
 test("the application shell is rail-first and the legacy sidebar is fully retired", () => {
   const combined = [app, rail, inbox, shortcuts, css].join("\n");
-  assert.equal(app.match(/<BannerStatusIcon kind=/g)?.length, 3,
-    "every offline and pairing banner uses the same scalable status icon treatment");
+  // docs/design-system.md §13.3: the offline and pairing banners are one Notice page banner, whose
+  // tone icon is the scalable status icon treatment.
+  assert.equal(app.match(/<Notice pageBanner /g)?.length, 3,
+    "every offline and pairing banner renders the Notice page banner");
   for (const retired of [
     ["Projects", "Sidebar"].join(""),
     ["Sidebar", "View", "Switcher"].join(""),

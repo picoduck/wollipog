@@ -70,7 +70,7 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.settleInterrupted("session-alpha"));
   await composer.fill("/stop");
   await page.keyboard.press("Enter");
-  await expect(page.locator(".composer-error").getByText("There is no active turn to stop.", { exact: true })).toBeVisible();
+  await expect(page.locator('.composer > .notice.t-danger[role="alert"]').getByText("There is no active turn to stop.", { exact: true })).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(2);
 
   await composer.fill("");

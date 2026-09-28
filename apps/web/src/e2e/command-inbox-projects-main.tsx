@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
@@ -39,7 +39,7 @@ import {
 } from "../queued-edit-recovery.js";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { FeedbackProvider } from "../components/FeedbackProvider.js";
+import { FeedbackProvider, useFeedback, type ToastOptions } from "../components/FeedbackProvider.js";
 import { InboxView } from "../components/InboxView.js";
 import { NewSessionDialog, type NewSessionPreset } from "../components/NewSessionDialog.js";
 import { PodDetail } from "../components/PodsView.js";
@@ -1627,6 +1627,8 @@ let nextProjectUpdateError: string | null = null;
 
 declare global {
   interface Window {
+    /** Raises toasts through the real provider, for the placement and stacking specs. */
+    __WOLLIPOG_TOASTS_E2E__?: { show(message: string, options?: Omit<ToastOptions, "action"> & { actionLabel?: string }): number };
     __WOLLIPOG_PROJECT_INBOX_E2E__: {
       failNextProjectUpdate(message?: string): void;
       updateProject(id: string, patch: Partial<Pick<ProjectView, "name" | "hidden" | "childSessionDefaults">>): void;
@@ -2189,6 +2191,19 @@ function FixtureSurface() {
   );
 }
 
+function ToastHook() {
+  const feedback = useFeedback();
+  useEffect(() => {
+    window.__WOLLIPOG_TOASTS_E2E__ = {
+      show: (message, { actionLabel, ...options } = {}) => feedback.showToast(message, {
+        ...options,
+        ...(actionLabel ? { action: { label: actionLabel, run: () => undefined } } : {}),
+      }),
+    };
+  }, [feedback]);
+  return null;
+}
+
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root element");
 createRoot(root).render(
@@ -2196,6 +2211,7 @@ createRoot(root).render(
     <InstanceScopeProvider instanceScope="project-inbox-e2e">
       <ApiProvider client={client}>
         <FeedbackProvider>
+          <ToastHook />
           <StoreProvider connection={connection} navigation={navigation}>
             {FIXTURE_QUERY.get("fullShell") === "1" ? <ThemeProvider><Shell /></ThemeProvider> : SCENARIO === "permission-mode-layout" ? (
               <div className="app">

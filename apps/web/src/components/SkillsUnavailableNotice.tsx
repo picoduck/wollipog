@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Notice } from "./Notice.js";
 import type { ExecutionTargetDefinition, ExecutionTargetRef } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import type { RunnerDesiredSkill } from "../skills.js";
@@ -32,15 +33,15 @@ export function assignedSkillNamesForAgent(desired: RunnerDesiredSkill[], agentI
  * every managed skill, so the notice stays and only the list is omitted. */
 export function SkillsUnavailableNotice({ skillNames }: { skillNames: string[] | null }) {
   return (
-    <aside className="skills-unavailable-notice" role="status" aria-label="Skills Unavailable on This Target">
-      <strong>Skills Unavailable on This Target</strong>
-      <span>{SKILLS_UNAVAILABLE_ON_TARGET} The agent in this session cannot use them.</span>
+    <Notice as="aside" tone="warning" role="status" ariaLabel="Skills Unavailable on This Target"
+      title="Skills Unavailable on This Target">
+      <p>{SKILLS_UNAVAILABLE_ON_TARGET} The agent in this session cannot use them.</p>
       {skillNames && (
-        <small>
+        <p className="notice-meta">
           {skillNames.length} Assigned {skillNames.length === 1 ? "Skill" : "Skills"}: {skillNames.join(", ")}
-        </small>
+        </p>
       )}
-    </aside>
+    </Notice>
   );
 }
 

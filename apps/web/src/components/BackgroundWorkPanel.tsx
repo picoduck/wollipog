@@ -1,4 +1,5 @@
 import { useId, useMemo, useState } from "react";
+import { State } from "./State.js";
 import {
   BACKGROUND_JOB_STALL_MS,
   MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
@@ -347,29 +348,30 @@ export function BackgroundWorkPanel({
       )}
 
       {groups.length === 0 ? (
-        <div className="background-work-empty" role="status">
-          <strong>{inventoryPending
-            ? inventoryError ? "Background Work Unavailable" : "Loading Background Work"
-            : inventoryProjectionUnknown
-              ? "Background Work Unverified"
+        inventoryPending && inventoryError ? (
+          <State variant="error" compact title="Background Work Unavailable"
+            actions={onRetryInventory && <button type="button" className="btn sm" onClick={onRetryInventory}>Retry Loading</button>}>
+            The durable per-job history could not be loaded.
+          </State>
+        ) : inventoryPending ? (
+          <State variant="loading" compact title="Loading Background Work">
+            Loading the durable per-job history for this session.
+          </State>
+        ) : (
+          <State compact title={inventoryProjectionUnknown
+            ? "Background Work Unverified"
             : aggregateState
-            ? aggregateState === "orphaned" ? "Background Work Lost" : "Background Work Status Available"
-            : "No Background Work Recorded"}</strong>
-          <p>{inventoryPending
-            ? inventoryError
-              ? "The durable per-job history could not be loaded."
-              : "Loading the durable per-job history for this session."
-            : inventoryProjectionUnknown
+              ? aggregateState === "orphaned" ? "Background Work Lost" : "Background Work Status Available"
+              : "No Background Work Recorded"}>
+            {inventoryProjectionUnknown
               ? "This control plane does not expose whether durable per-job history is available."
-            : aggregateState
-            ? "The runner reports current background work, but per-job lifecycle evidence is unavailable."
-            : inventorySupported
-              ? "Managed jobs will appear here when the runner reports them."
-              : "Update the runner to inspect individual jobs."}</p>
-          {inventoryPending && inventoryError && onRetryInventory && (
-            <button type="button" className="btn ghost sm" onClick={onRetryInventory}>Retry Loading</button>
-          )}
-        </div>
+              : aggregateState
+                ? "The runner reports current background work, but per-job lifecycle evidence is unavailable."
+                : inventorySupported
+                  ? "Managed jobs will appear here when the runner reports them."
+                  : "Update the runner to inspect individual jobs."}
+          </State>
+        )
       ) : (
         <div className="background-work-groups" role="list" aria-label="Background Work History">
           {groups.map((group, groupIndex) => {

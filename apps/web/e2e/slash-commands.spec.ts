@@ -232,7 +232,7 @@ test("a lost command response retries with the same durable submission ID", asyn
   const composer = page.locator(".composer-input");
   await composer.fill("/review storage");
   await page.keyboard.press("Enter");
-  await expect(page.locator(".composer-error")).toContainText("Simulated lost provider command response");
+  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toContainText("Simulated lost provider command response");
   await expect(composer).toHaveValue("/review storage");
   await expect(page.getByRole("region", { name: "Provider Command Receipts" })).toContainText("Sent");
 
@@ -311,7 +311,7 @@ test("forbid attachment metadata blocks provider dispatch and preserves the draf
   await composer.fill("/deploy production");
   await page.keyboard.press("Enter");
 
-  await expect(page.locator(".composer-error")).toHaveText("/deploy cannot run with attachments.");
+  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toHaveText("/deploy cannot run with attachments.");
   await expect(composer).toHaveValue("/deploy production");
   await expect(page.getByRole("button", { name: "Remove Image" })).toBeVisible();
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.promptRequests().length)).toBe(0);
@@ -474,7 +474,7 @@ test("rename-session moves into a retryable status receipt without disturbing th
 
   await composer.fill("/stop");
   await page.keyboard.press("Enter");
-  const composerError = page.locator(".composer-error");
+  const composerError = page.locator('.composer > .notice.t-danger[role="alert"]');
   await expect(composerError).toContainText("There is no active turn to stop.");
   const [errorBox, receiptBox] = await Promise.all([composerError.boundingBox(), receipt.boundingBox()]);
   expect(errorBox).not.toBeNull();
@@ -753,7 +753,7 @@ test("IME owns menu keys and unavailable commands explain without dispatching", 
   const activeDescendant = await composer.getAttribute("aria-activedescendant");
 
   await stop.dispatchEvent("mousedown", { button: 0 });
-  await expect(page.locator(".composer-error")).toHaveText("There is no active turn to stop.");
+  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toHaveText("There is no active turn to stop.");
 
   for (const key of ["ArrowDown", "Escape", "Enter"]) {
     await composer.dispatchEvent("keydown", { key, code: key, keyCode: 229, isComposing: true });
@@ -765,6 +765,6 @@ test("IME owns menu keys and unavailable commands explain without dispatching", 
   await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.cancelTurnCount())).toBe(0);
 
   await page.keyboard.press("Enter");
-  await expect(page.locator(".composer-error")).toHaveText("There is no active turn to stop.");
+  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toHaveText("There is no active turn to stop.");
   await expect(composer).toHaveValue("/stop");
 });

@@ -253,7 +253,7 @@ test("links, native controls and code use the base recipes", () => {
   // The chip belongs to inline code only. A bare `code` rule would put it back inside `pre`.
   assert.throws(() => topLevelRule(css, "code"), /found 0/, "the chip must stay scoped to :not(pre) > code");
   // #1800 adds `.modal-body` together with its 16px body gap (§2.4, §7.2).
-  assert.equal(baseRule(":where(.form, .section, .surface, .modal-body, .notice, .empty) > *"), "margin: 0;");
+  assert.equal(baseRule(":where(.form, .section, .surface, .modal-body, .notice, .state) > *"), "margin: 0;");
 });
 
 test("the permission-mode popover keeps rows compact while long labels can wrap", () => {

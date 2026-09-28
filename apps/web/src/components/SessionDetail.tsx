@@ -1,4 +1,5 @@
 import { browserRandomUUID } from "../browser-crypto.js";
+import { State } from "./State.js";
 import {
   type KeyboardEvent,
   type MouseEvent as ReactMouseEvent,
@@ -67,12 +68,12 @@ import {
   BackgroundNotificationBadge,
   BackgroundWorkBadge,
   UntrackedBackgroundWorkBadge,
-  Empty,
   Modal,
   Spinner,
   SessionStatusIndicators,
 } from "./common.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { Notice } from "./Notice.js";
 import { statusMeta } from "../status-meta.js";
 import { EventTimeline, TranscriptErrorAlert, type TimelineRevealRequest } from "./EventTimeline.js";
 import { ConversationHandoffDialog } from "./ConversationHandoffDialog.js";
@@ -602,7 +603,7 @@ export function SessionDetail(props: SessionDetailProps) {
             </div>
           </div>
         )}
-        <Empty title={placeholder.title} hint={placeholder.hint} />
+        <State variant={placeholder.variant} title={placeholder.title}>{placeholder.hint}</State>
       </div>
     );
   }
@@ -4807,10 +4808,9 @@ function SessionDetailLoaded({
           adapter={session.executionTarget?.adapter}
         />
         {activeWorktreeSetupConfig?.status === "invalid" && (
-          <div className="worktree-setup-config-error" role="alert">
-            <strong>Invalid Worktree Setup Configuration</strong>
+          <Notice tone="danger" role="alert" title="Invalid Worktree Setup Configuration">
             <code>{activeWorktreeSetupConfig.error}</code>
-          </div>
+          </Notice>
         )}
         </>
       ) : (
@@ -5026,12 +5026,14 @@ function SessionDetailLoaded({
               {transcript.body === "skeleton" ? (
                 <TranscriptSkeleton />
               ) : transcript.body === "unavailable" ? (
-                <Empty
+                <State
+                  variant={transcript.error ? "error" : "offline"}
                   title={conn === "unauthorized" ? "Pair to Load Activity" : "Activity Unavailable"}
-                  hint={transcript.error ?? (conn === "offline" ? "Reconnect to load this transcript." : "This device needs access to the control plane.")}
-                />
+                >
+                  {transcript.error ?? (conn === "offline" ? "Reconnect to load this transcript." : "This device needs access to the control plane.")}
+                </State>
               ) : transcript.body === "empty" && (session.pendingPrompts?.length ?? 0) === 0 ? (
-                <Empty title="No Activity Yet" hint="Waiting for the agent…" />
+                <State compact title="No Activity Yet">Waiting for the agent…</State>
               ) : (
                 <>
                   {items.length > 0 && (
@@ -5207,7 +5209,7 @@ function SessionDetailLoaded({
                   ? `Rename failed. ${retitleFeedback.message}`
                   : ""}
             </span>
-            {error && <div className="composer-error" role="alert">{error}</div>}
+            {error && <Notice tone="danger" compact role="alert">{error}</Notice>}
             {worktreeRecovery && (
               <WorktreeRecoveryCard
                 session={session}
@@ -5218,16 +5220,7 @@ function SessionDetailLoaded({
               />
             )}
             {failedSetupWorktree && (
-              <div className="quarantine-banner" role="status" aria-label="Worktree Setup Failed">
-                <div className="quarantine-copy">
-                  <span className="quarantine-title">Worktree Setup Failed</span>
-                  <p>
-                    {failedSetupWorktree.setup?.error ?? "A required setup step failed."}
-                    {" "}The worktree was retained. Retry resumes at the failed required step.
-                  </p>
-                  {worktreeSetupRefusal !== null && <p id="worktree-setup-retry-refusal">{worktreeSetupRefusal}</p>}
-                </div>
-                <div className="quarantine-actions">
+              <Notice tone="danger" role="status" ariaLabel="Worktree Setup Failed" title="Worktree Setup Failed" actions={(
                   <button
                     type="button"
                     className="btn primary sm"
@@ -5238,13 +5231,28 @@ function SessionDetailLoaded({
                   >
                     {setupRetryPending ? "Retrying Setup…" : "Retry Setup"}
                   </button>
-                </div>
-              </div>
+                )}>
+                <p>
+                  {failedSetupWorktree.setup?.error ?? "A required setup step failed."}
+                  {" "}The worktree was retained. Retry resumes at the failed required step.
+                </p>
+                {worktreeSetupRefusal !== null && <p id="worktree-setup-retry-refusal">{worktreeSetupRefusal}</p>}
+              </Notice>
             )}
             {historyQuarantine && (
-              <div className="quarantine-banner" role="status" aria-label="Conversation Quarantined">
-                <div className="quarantine-copy">
-                  <span className="quarantine-title">Conversation Quarantined</span>
+              <Notice tone="danger" role="status" ariaLabel="Conversation Quarantined" title="Conversation Quarantined"
+                actions={historyQuarantine.recoveryTurn !== undefined && (
+                  <button
+                    type="button"
+                    className="btn primary sm"
+                    disabled={busy || !runnerOnline || forkRefusal !== null}
+                    title={forkRefusal ?? (runnerOnline ? undefined : "Runner is offline.")}
+                    aria-describedby={forkRefusal !== null ? "history-quarantine-recovery-refusal" : undefined}
+                    onClick={() => void onRecoverQuarantinedConversation()}
+                  >
+                    Recover Session
+                  </button>
+                )}>
                   <p>
                     The agent provider rejects an item stored in this conversation&rsquo;s own history, so
                     prompts fail before the model runs. Sending again or <code>/compact</code> cannot
@@ -5259,27 +5267,11 @@ function SessionDetailLoaded({
                   {historyQuarantine.recoveryTurn !== undefined && forkRefusal !== null && (
                     <p id="history-quarantine-recovery-refusal">{forkRefusal}</p>
                   )}
-                </div>
-                {historyQuarantine.recoveryTurn !== undefined && (
-                  <div className="quarantine-actions">
-                    <button
-                      type="button"
-                      className="btn primary sm"
-                      disabled={busy || !runnerOnline || forkRefusal !== null}
-                      title={forkRefusal ?? (runnerOnline ? undefined : "Runner is offline.")}
-                      aria-describedby={forkRefusal !== null ? "history-quarantine-recovery-refusal" : undefined}
-                      onClick={() => void onRecoverQuarantinedConversation()}
-                    >
-                      Recover Session
-                    </button>
-                  </div>
-                )}
-              </div>
+              </Notice>
             )}
             {accountSwitchFailure && (
-              <div className="quarantine-banner" role="status" aria-label="Account Switch Failed">
-                <div className="quarantine-copy">
-                  <span className="quarantine-title">Account Switch Failed</span>
+              <Notice tone="danger" role="status" ariaLabel="Account Switch Failed" title="Account Switch Failed"
+                dismissLabel="Dismiss Notice" onDismiss={() => setDismissedAccountSwitchFailureKey(accountSwitchFailureKey)}>
                   <p>
                     Wollipog could not resume this conversation with{" "}
                     <PersonalIdentifier value={accountSwitchFailure.providerAccountLabel} label="Account Email" />.
@@ -5290,17 +5282,7 @@ function SessionDetailLoaded({
                     choose an account with usage headroom. You can also dismiss this notice to send
                     a new message with the session&rsquo;s configured account.
                   </p>
-                </div>
-                <div className="quarantine-actions">
-                  <button
-                    type="button"
-                    className="btn ghost sm"
-                    onClick={() => setDismissedAccountSwitchFailureKey(accountSwitchFailureKey)}
-                  >
-                    Dismiss Notice
-                  </button>
-                </div>
-              </div>
+              </Notice>
             )}
             {retitleFeedback && (
               <div
@@ -5445,10 +5427,10 @@ function SessionDetailLoaded({
                       <span className="queued-text">
                         {q.hasImages && <span className="queued-img" aria-hidden="true">📎 </span>}
                         {q.text || (q.hasImages ? "(attachment)" : "")}
-                        {q.durableDeliveryError && (
-                          <span className="queued-error"> — {q.durableDeliveryError}</span>
-                        )}
                       </span>
+                      {q.durableDeliveryError && (
+                        <Notice tone="danger" compact>{q.durableDeliveryError}</Notice>
+                      )}
                       <div className="queued-actions">
                         <button
                           type="button"
@@ -5657,9 +5639,7 @@ function SessionDetailLoaded({
                 }}
               />
               {commandPreservesAttachedImages && (
-                <div className="composer-attachment-notice" role="status">
-                  {DURABLE_COMMAND_ATTACHMENT_NOTICE}
-                </div>
+                <Notice tone="warning" compact role="status">{DURABLE_COMMAND_ATTACHMENT_NOTICE}</Notice>
               )}
               <textarea
                 ref={inputRef}
@@ -6772,45 +6752,47 @@ export function CampaignContinuationNotice({
   const canRetry = continuation.state === "failed" && continuation.canRetry === true &&
     Boolean(continuation.commandId) && onRetry;
   return (
-    <div
-      className="campaign-continuation-notice"
-      data-state={continuation.state}
+    <Notice
+      tone={continuation.state === "failed" || continuation.state === "missing_result" ? "warning" : "neutral"}
+      dataState={continuation.state}
       role="status"
-      aria-label={`Campaign Continuation: ${label}`}
-      aria-busy={acknowledgementPending || undefined}
+      ariaLabel={`Campaign Continuation: ${label}`}
+      ariaBusy={acknowledgementPending}
+      title={`Campaign Continuation: ${label}`}
+      actions={(canAcknowledge || canRetry) && (
+        <>
+          {canAcknowledge && (
+            <button
+              type="button"
+              className="btn sm"
+              disabled={acknowledgementPending || actionRefusal !== null}
+              title={actionRefusal ?? undefined}
+              aria-describedby={actionRefusal !== null ? refusalId : undefined}
+              onClick={() => onAcknowledge(continuation.commandId!)}
+            >
+              {acknowledgementPending ? "Acknowledging…" : "Acknowledge Missing Result"}
+            </button>
+          )}
+          {canRetry && (
+            <button
+              type="button"
+              className="btn sm"
+              disabled={acknowledgementPending || actionRefusal !== null}
+              title={actionRefusal ?? undefined}
+              aria-describedby={actionRefusal !== null ? refusalId : undefined}
+              onClick={() => onRetry(continuation.commandId!)}
+            >
+              {acknowledgementPending ? "Retrying…" : "Retry Campaign Continuation"}
+            </button>
+          )}
+        </>
+      )}
     >
-      <div className="campaign-continuation-copy">
-        <strong>Campaign Continuation: {label}</strong>
-        <span>{explanation}</span>
-        <small>{eventLabel} · Attempt {continuation.attemptCount}</small>
-        {continuation.error && <small>{continuation.error}</small>}
-        {actionRefusal !== null && (canAcknowledge || canRetry) && <small id={refusalId}>{actionRefusal}</small>}
-      </div>
-      {canAcknowledge && (
-        <button
-          type="button"
-          className="btn sm"
-          disabled={acknowledgementPending || actionRefusal !== null}
-          title={actionRefusal ?? undefined}
-          aria-describedby={actionRefusal !== null ? refusalId : undefined}
-          onClick={() => onAcknowledge(continuation.commandId!)}
-        >
-          {acknowledgementPending ? "Acknowledging…" : "Acknowledge Missing Result"}
-        </button>
-      )}
-      {canRetry && (
-        <button
-          type="button"
-          className="btn sm"
-          disabled={acknowledgementPending || actionRefusal !== null}
-          title={actionRefusal ?? undefined}
-          aria-describedby={actionRefusal !== null ? refusalId : undefined}
-          onClick={() => onRetry(continuation.commandId!)}
-        >
-          {acknowledgementPending ? "Retrying…" : "Retry Campaign Continuation"}
-        </button>
-      )}
-    </div>
+      <p>{explanation}</p>
+      <p className="notice-meta">{eventLabel} · Attempt {continuation.attemptCount}</p>
+      {continuation.error && <p className="notice-meta">{continuation.error}</p>}
+      {actionRefusal !== null && (canAcknowledge || canRetry) && <p className="notice-meta" id={refusalId}>{actionRefusal}</p>}
+    </Notice>
   );
 }
 

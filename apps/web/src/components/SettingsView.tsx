@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
+import { Notice } from "./Notice.js";
 import {
   PROTOCOL_VERSION,
   type AgentDriverKind,
@@ -366,7 +367,7 @@ export function PendingSetting({ title, description, reason }: { title: string; 
   return (
     <StaticRow
       title={title}
-      description={<>{description} <small className="settings-pending-reason">{reason}</small></>}
+      description={<>{description} <Notice tone="neutral" compact>{reason}</Notice></>}
     />
   );
 }
@@ -786,19 +787,15 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
         <div id={controlsId} className="agent-defaults-list" aria-busy={loading || busy || undefined}>
           <div className="agent-defaults-toolbar">
             {loadError && (
-              <span
-                className="settings-inline-error"
-                role={mutationError ? undefined : "alert"}
-                aria-hidden={mutationError ? true : undefined}
-              >
+              <Notice tone="danger" compact role={mutationError ? undefined : "alert"} ariaHidden={Boolean(mutationError)}>
                 {refreshFailure}
-              </span>
+              </Notice>
             )}
             {mutationError && !editing && (
-              <span className="settings-inline-error" role="alert">
+              <Notice tone="danger" compact role="alert">
                 {mutationError}
                 {mutationRecoveryAnnouncement && <span className="sr-only">{mutationRecoveryAnnouncement}</span>}
-              </span>
+              </Notice>
             )}
             <span className="agent-defaults-action-spacer" />
             <button type="button" className="btn ghost sm" disabled={loading || busy} onClick={(event) => {
@@ -855,7 +852,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                       <p className="ui-row-desc">This Agent Harness advertises no configurable models, efforts, or permission modes.</p>
                     )}
                     {option.installations.length === 0 && (
-                      <p className="settings-inline-error" role="status">This saved Agent Harness is no longer discovered. Reset it to use the Wollipog default.</p>
+                      <Notice tone="warning" compact role="status">This saved Agent Harness is no longer discovered. Reset it to use the Wollipog default.</Notice>
                     )}
                     <p
                       className={`agent-defaults-draft-notice${draftNotice ? "" : " sr-only"}`}
@@ -927,10 +924,10 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
                       </label>
                     )}
                     {mutationError && (
-                      <p className="settings-inline-error" role="alert">
+                      <Notice tone="danger" compact role="alert">
                         {mutationError}
                         {mutationRecoveryAnnouncement && <span className="sr-only">{mutationRecoveryAnnouncement}</span>}
-                      </p>
+                      </Notice>
                     )}
                     <div className="agent-defaults-actions">
                       {option.preference && (
@@ -1669,13 +1666,16 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
     description = "Update checks are turned off for this installation by WOLLIPOG_DISABLE_UPDATE_CHECK.";
   } else if (update.heldSessions !== null) {
     description = (
-      <>
-        <span className="settings-inline-error" role="alert">{updateWarning(update.heldSessions)}</span>{" "}
-        <button type="button" className="btn sm" disabled={busy} onClick={() => update.install(true)}>
-          {update.installing ? "Installing…" : "Install Anyway"}
-        </button>{" "}
-        <button type="button" className="btn ghost sm" disabled={busy} onClick={update.dismissHold}>Not Now</button>
-      </>
+      <Notice tone="warning" actions={(
+        <>
+          <button type="button" className="btn sm" disabled={busy} onClick={() => update.install(true)}>
+            {update.installing ? "Installing…" : "Install Anyway"}
+          </button>
+          <button type="button" className="btn ghost sm" disabled={busy} onClick={update.dismissHold}>Not Now</button>
+        </>
+      )}>
+        <span role="alert">{updateWarning(update.heldSessions)}</span>
+      </Notice>
     );
   } else if (update.installing) {
     description = "Downloading and verifying the update. Wollipog restarts when it is installed.";
@@ -1711,7 +1711,7 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
         description={
           <>
             {description}
-            {update.error && <span className="settings-inline-error" role="alert"> {update.error}</span>}
+            {update.error && <Notice tone="danger" compact role="alert">{update.error}</Notice>}
           </>
         }
       />

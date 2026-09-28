@@ -1,4 +1,5 @@
 import { QuestionPoliciesPanel } from "./components/QuestionPoliciesPanel.js";
+import { State } from "./components/State.js";
 import {
   useCallback,
   useEffect,
@@ -11,6 +12,7 @@ import { useStoreActions, useStoreSelector, type View } from "./store.js";
 import { useApi } from "./api-context.js";
 import { notifier } from "./notify.js";
 import { CONTROL_PLANE_HTTP, CONTROL_PLANE_WS } from "./config.js";
+import { useConnectionLostFor } from "./connection-lost.js";
 import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken, parsePairingInput, storeDeviceToken } from "./device-token.js";
 import {
   adoptManagedDesktopPairing,
@@ -69,8 +71,9 @@ import {
   saveBrowserStorageValue,
 } from "./instance-storage.js";
 import { FeedbackProvider } from "./components/FeedbackProvider.js";
-import { Empty, Modal } from "./components/common.js";
-import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, WarningTriangleIcon } from "./components/Icons.js";
+import { Modal } from "./components/common.js";
+import { Notice } from "./components/Notice.js";
+import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { viewPath, viewTitle } from "./navigation.js";
 import { useInstanceScope } from "./instance-scope.js";
@@ -257,6 +260,7 @@ export function Shell() {
   settingsReturnViewRef.current = settingsReturnView;
   const conn = useStoreSelector((s) => s.conn);
   const authRequired = useStoreSelector((s) => s.authRequired);
+  const offlineHeld = useConnectionLostFor(conn, 2000);
   useEffect(() => {
     if (!desktopMultiInstance || activeInstanceKind !== "remote") return;
     if (authRequired) {
@@ -716,7 +720,7 @@ export function Shell() {
             ? <RemoteInstanceBanner authenticationRequired />
             : <PairingBanner connecting={conn === "connecting"} />
         ) : (
-          conn === "offline" && (
+          offlineHeld && (
             instances.activeProfile.kind === "remote"
               ? <RemoteInstanceBanner />
               : <OfflineBanner />
@@ -880,28 +884,21 @@ export function Shell() {
 function RemoteInstanceBanner({ authenticationRequired = false }: { authenticationRequired?: boolean }) {
   const instances = useInstances();
   return (
-    <div className="offline-banner pairing-banner" role="status">
-      <BannerStatusIcon kind={authenticationRequired ? "lock" : "warning"} />
-      <span>
-        {authenticationRequired
-          ? `${instances.activeProfile.label} requires a new pairing credential.`
-          : `Can't reach ${instances.activeProfile.label} at ${instances.activeProfile.origin}.`}
-      </span>
-      <span className="pairing-controls">
+    <Notice pageBanner tone="warning" role="status" actions={(
+      <>
         {!authenticationRequired && (
           <button type="button" className="btn primary sm" onClick={() => void instances.retryActive()}>Retry</button>
         )}
         <button type="button" className="btn sm" onClick={instances.manageInstances}>
           {authenticationRequired ? "Re-Pair in Instances" : "Manage Instances"}
         </button>
-      </span>
-    </div>
+      </>
+    )}>
+      {authenticationRequired
+        ? `${instances.activeProfile.label} requires a new pairing credential.`
+        : `Can't reach ${instances.activeProfile.label} at ${instances.activeProfile.origin}.`}
+    </Notice>
   );
-}
-
-function BannerStatusIcon({ kind }: { kind: "lock" | "warning" }) {
-  const Icon = kind === "lock" ? LockIcon : WarningTriangleIcon;
-  return <Icon className="offline-icon" />;
 }
 
 export function Header({
@@ -968,28 +965,30 @@ function ExperimentDisabledNotice({
   onOpenSettings: () => void;
 }) {
   return (
-    <Empty
+    <State
       headingLevel={2}
       title={`${EXPERIMENT_TITLES[experiment]} Is Turned Off`}
-      hint="This experimental feature is hidden on this device."
-      action={
-        <button type="button" className="btn sm" onClick={onOpenSettings}>
+      actions={
+        <button type="button" className="btn primary" onClick={onOpenSettings}>
           Open Experimental Settings
         </button>
       }
-    />
+    >
+      This experimental feature is hidden on this device.
+    </State>
   );
 }
 
 function OfflineBanner() {
   return (
-    <div className="offline-banner" role="status">
-      <BannerStatusIcon kind="warning" />
-      <span>
-        Can't reach the control plane at <code>{CONTROL_PLANE_HTTP}</code>. Start it (for the local stack, run{" "}
-        <code>pnpm dev</code>) — the UI reconnects automatically.
-      </span>
-    </div>
+    <Notice pageBanner tone="warning" role="status">
+      Can't reach Wollipog on this machine. Reconnecting…
+      <details className="notice-details">
+        <summary>Show Details</summary>
+        Nothing answers at <code>{CONTROL_PLANE_HTTP}</code>. Start it (for the local stack, run{" "}
+        <code>pnpm dev</code>) and the page reconnects on its own.
+      </details>
+    </Notice>
   );
 }
 
@@ -1033,19 +1032,7 @@ function PairingBanner({ connecting }: { connecting: boolean }) {
     }
   };
   return (
-    <div className="offline-banner pairing-banner" role="status">
-      <BannerStatusIcon kind="lock" />
-      {nativePairingFailure ? (
-        <span>
-          The desktop could not read its managed local pairing credential. Retry pairing, or paste
-          a pairing link or token from the control-plane owner:
-        </span>
-      ) : (
-        <span>
-          This device isn't paired with the control plane. Open its startup pairing URL, or print it
-          again on the control-plane machine with <code>--print-pair-url</code>, then paste the link or token here:
-        </span>
-      )}
+    <Notice pageBanner tone="warning" role="status" actions={(
       <span className="pairing-controls">
         {nativePairingFailure && (
           <button
@@ -1054,7 +1041,7 @@ function PairingBanner({ connecting }: { connecting: boolean }) {
             onClick={() => void retryDesktopPairing()}
             disabled={retrying || connecting}
           >
-            {retrying ? "Retryingâ€¦" : "Retry Pairing"}
+            {retrying ? "Retrying…" : "Retry Pairing"}
           </button>
         )}
         <input
@@ -1076,11 +1063,18 @@ function PairingBanner({ connecting }: { connecting: boolean }) {
           {connecting ? "Pairing…" : "Pair"}
         </button>
       </span>
-      {error && <span className="pairing-error">{error}</span>}
+    )}>
+      {nativePairingFailure
+        ? "The desktop could not read its managed local pairing credential. Retry pairing, or paste a pairing link or token from the control-plane owner:"
+        : <>
+          This device isn't paired with the control plane. Open its startup pairing URL, or print it
+          again on the control-plane machine with <code>--print-pair-url</code>, then paste the link or token here:
+        </>}
+      {error && <p className="notice-error" role="alert">{error}</p>}
       {submitted && !error && !connecting && (
-        <span className="pairing-error">still not accepted — check the token or pair a fresh one</span>
+        <p className="notice-error" role="alert">Still not accepted. Check the token or pair a fresh one.</p>
       )}
-    </div>
+    </Notice>
   );
 }
 

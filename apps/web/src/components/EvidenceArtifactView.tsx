@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Notice } from "./Notice.js";
 import { MAX_PROMPT_IMAGE_BYTES, MAX_SESSION_VIDEO_BYTES, PROMPT_IMAGE_MIME_TYPES, type WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
@@ -272,8 +273,7 @@ export function UnrenderableEvidenceArtifact({ item }: { item: EvidenceItem }) {
 export function EvidenceSecureContextNotice({ evidence }: { evidence: readonly EvidenceItem[] }) {
   if (evidenceIntegrityCheckAvailable() || !evidence.some(isRenderableEvidence)) return null;
   return (
-    <div className="evidence-secure-context-notice" role="note" aria-label="HTTPS or Localhost Required">
-      <strong>HTTPS or Localhost Required</strong>
+    <Notice tone="warning" role="note" ariaLabel="HTTPS or Localhost Required" title="HTTPS or Localhost Required">
       <p>
         This page is open at <code>{window.location.origin}</code>. Browsers can check evidence against the
         request's digest only on HTTPS or localhost pages, so artifact evidence is not shown here and cannot be
@@ -283,6 +283,6 @@ export function EvidenceSecureContextNotice({ evidence }: { evidence: readonly E
         To finish the review, reopen Wollipog over HTTPS, for example through <code>tailscale serve</code>, or on
         localhost on the machine that runs it.
       </p>
-    </div>
+    </Notice>
   );
 }

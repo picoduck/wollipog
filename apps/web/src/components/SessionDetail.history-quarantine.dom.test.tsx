@@ -168,7 +168,7 @@ async function mount(
   await flushAsyncWork();
   return {
     container, navigated, confirmations, socket, current,
-    banner: () => container.querySelector(".quarantine-banner") as HTMLElement | null,
+    banner: () => container.querySelector('[aria-label="Conversation Quarantined"]') as HTMLElement | null,
     composer: () => container.querySelector(".composer-input") as HTMLTextAreaElement | null,
     unmount: async () => {
       await flushAsyncWork(1);

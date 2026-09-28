@@ -30,10 +30,19 @@ health checklist.
 
 ## Toast and undo lifecycle
 
-- Toasts use a polite live region, remain keyboard actionable, can be dismissed explicitly, and are
-  bounded to four visible messages. Errors use alert semantics. Persistent recovery actions take
-  eviction priority over transient feedback; when more than four recovery actions exist, the newest
-  four remain visible and older actions stay queued until space opens, so no repair path is lost.
+- Toasts use a polite live region, remain keyboard actionable, and can be dismissed explicitly with
+  an icon button named "Dismiss Notification". Errors use alert semantics. Each toast carries a
+  tone icon (info, success, warning, error), so its tone never depends on colour alone
+  (docs/design-system.md §13.1).
+- At most three toasts are visible on desktop and one on a phone, newest on top. Older toasts
+  collapse into a "+N More" control whose list opens upward; nothing is evicted, so a persistent
+  recovery action stays reachable until it is dismissed or completed, and no repair path is lost.
+- Info and success toasts dismiss themselves after five seconds (ten when they carry an action such
+  as Undo); hovering or focusing the stack pauses every timer. Warnings and errors persist until
+  dismissed.
+- Toasts sit at the bottom and never cover the app bar: bottom right on desktop, bottom centre with
+  8px insets on a phone. They sit above whatever is docked at the bottom of the view — the phone tab
+  bar, a session's composer, a sheet's footer — and above the software keyboard.
 - Undo is offered only when the product has a reliable inverse operation. In this slice that means
   single-session archive/unarchive and a successfully completed bulk archive.
 - Bulk undo captures the exact session ids and prior project-pin state. It restores only those ids

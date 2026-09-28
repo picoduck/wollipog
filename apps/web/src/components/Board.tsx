@@ -1,11 +1,12 @@
 import { BoardIcon } from "./Icons.js";
+import { State, useSnapshotState } from "./State.js";
 import { type DragEvent, type MouseEvent, useMemo, useRef, useState } from "react";
 import { BOARD_COLUMNS, type BoardColumn, type BoxView, type SessionReminderView, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime } from "../format.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
-import { SessionStatusIndicators, Empty, ReminderBadge, SessionPinIndicator, SnoozedAttentionBadge, ThreadDot } from "./common.js";
+import { SessionStatusIndicators, ReminderBadge, SessionPinIndicator, SnoozedAttentionBadge, ThreadDot } from "./common.js";
 import { inboxThreadChildrenLabel, inboxThreadChildState, isInboxBlocked, type InboxThreadChildren } from "../inbox.js";
 import { useLongPress } from "./interactions.js";
 import { sessionCommandRefusal } from "../session-command-permissions.js";
@@ -43,6 +44,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   // the reader the app is broken rather than configured.
   const multiAgentEnabled = useExperiments().flags.multiAgent;
   const allSessions = useStoreSelector((s) => s.sessions);
+  const snapshot = useSnapshotState();
   const runners = useStoreSelector((s) => s.runners);
   const boxes = useStoreSelector((s) => s.boxes);
   const filters = useStoreSelector((s) => s.filters);
@@ -195,51 +197,61 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
       </div>
 
 
-      {visible.length === 0 ? (
+      {visible.length === 0 && (snapshot.offline || snapshot.loading) ? (
+        // No snapshot, or no connection: an empty map proves nothing yet (§12.5).
+        <State variant={snapshot.offline ? "offline" : "loading"}>
+          {snapshot.offline ? "Reconnecting…" : "Loading sessions…"}
+        </State>
+      ) : visible.length === 0 ? (
         // An empty board and a filtered-out board are different problems, and only one of them is
         // solved by starting a session. Offering "New Session" against an active filter created on
         // the dialog's default Machine leaves the filter in place and the board still empty — the
         // action looked like a way out and was not one.
         filtered && scopedCount > 0 ? (
-          <Empty
-            icon={<BoardIcon size={28} />}
+          <State
+            variant="no-results"
+            icon={<BoardIcon />}
             title="No Matching Sessions"
-            action={
-              <button type="button" className="btn primary sm" onClick={() => setFilters({ runnerId: null, agentId: null })}>
+            actions={
+              <button type="button" className="btn sm" onClick={() => setFilters({ runnerId: null, agentId: null })}>
                 Clear Filters
               </button>
             }
-            hint={<>{scopedCount} session{scopedCount === 1 ? "" : "s"} {scopedCount === 1 ? "is" : "are"} hidden by the current Machine and Agent filters.</>}
-          />
+          >
+            {scopedCount} session{scopedCount === 1 ? "" : "s"} {scopedCount === 1 ? "is" : "are"} hidden by the current Machine and Agent filters.
+          </State>
         ) : searchActive ? (
           // The shared split tabs or search emptied the scope before the board-local filters ran;
           // "New Session" cannot answer a query mismatch, so the way out is widening the scope.
-          <Empty
-            icon={<BoardIcon size={28} />}
+          <State
+            variant="no-results"
+            icon={<BoardIcon />}
             title="No Matching Sessions"
-            action={
-              <button type="button" className="btn primary sm" onClick={onShowAll}>
+            actions={
+              <button type="button" className="btn sm" onClick={onShowAll}>
                 Show All Sessions
               </button>
             }
-            hint={<>No sessions match the current group or search.</>}
-          />
+          >
+            No sessions match the current group or search.
+          </State>
         ) : (
-          <Empty
-            icon={<BoardIcon size={28} />}
+          <State
+            icon={<BoardIcon />}
             title="No Sessions Yet"
             // A filter can still be ACTIVE here — archive the last unarchived session and the count
             // is zero while Machine B stays selected. Creating a session on the dialog's own default
             // would then be hidden by that filter, and the board would come back empty. An action
             // that advertises a way out cannot leave a filter behind that undoes it.
-            action={<button type="button" className="btn primary sm" onClick={() => {
+            actions={<button type="button" className="btn primary" onClick={() => {
               if (filtered) setFilters({ runnerId: null, agentId: null });
               onNewSession();
             }}>New Session</button>}
-            hint={multiAgentEnabled
+          >
+            {multiAgentEnabled
               ? <>Click “New Session” to start an agent, or “Multi-Agent Run” to compare several.</>
               : <>Click “New Session” to start an agent.</>}
-          />
+          </State>
         )
       ) : (
         <div className="board">

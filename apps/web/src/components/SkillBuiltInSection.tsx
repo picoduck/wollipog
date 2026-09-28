@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
 import type { RunnerView } from "@wollipog/protocol";
 import { skillRecommended, type SkillSummary } from "../skills.js";
@@ -92,13 +93,11 @@ export function SkillBuiltInSection({ skill, runners, machineLabels, busy, onAss
         </div>
       )}
       {held && (
-        <div className="skills-built-in-held" role="status">
-          <p>
-            Wollipog {held.release} includes an updated version of this skill. The library's latest version has changes made
-            here, so the update waits for your review instead of replacing them.
-          </p>
-          <button type="button" className="btn sm" disabled={busy} onClick={onReview}>Review Built-In Update</button>
-        </div>
+        <Notice tone="warning" role="status"
+          actions={<button type="button" className="btn sm" disabled={busy} onClick={onReview}>Review Built-In Update</button>}>
+          Wollipog {held.release} includes an updated version of this skill. The library's latest version has changes made
+          here, so the update waits for your review instead of replacing them.
+        </Notice>
       )}
     </section>
   );

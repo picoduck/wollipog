@@ -48,7 +48,9 @@ exports.
 | `CopyIcon` | Lucide | `Copy` | Generic copy action. |
 | `CheckIcon` | Lucide | `Check` | Generic success state. |
 | `WarningIcon` | Lucide | `TriangleAlert` | Generic warning state. |
-| `InfoIcon` | Lucide | `Info` | Generic information state. |
+| `InfoIcon` | Lucide | `Info` | Generic information state; the info and neutral tone icon on toasts and notices. |
+| `SuccessIcon` | Lucide | `CircleCheck` | The success tone icon on toasts and notices. |
+| `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices. |
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts. |
 | `LockIcon` | Lucide | `Lock` | Locked or restricted state. |
 | `EyeIcon` | Lucide | `Eye` | Reveal a masked personal identifier. |

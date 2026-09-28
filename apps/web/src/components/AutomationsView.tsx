@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
 import type {
@@ -16,7 +17,6 @@ import type {
 } from "@wollipog/protocol";
 import { runnerSupportsProtocol } from "@wollipog/protocol";
 import { AutomationsIcon } from "./Icons.js";
-import { Empty } from "./common.js";
 import { useApi } from "../api-context.js";
 import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { titleCaseLabel } from "../format.js";
@@ -159,6 +159,8 @@ export function AutomationsView() {
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const { navigate } = useStoreActions();
   const [items, setItems] = useState<AutomationSchedule[]>([]);
+  /** The list has been read once; before that an empty list proves nothing (§12). */
+  const [listLoaded, setListLoaded] = useState(false);
   const [details, setDetails] = useState<Record<string, AutomationExecution[]>>({});
   const [triggers, setTriggers] = useState<Record<string, AutomationTriggerView[]>>({});
   const [credential, setCredential] = useState<AutomationTriggerCredential | null>(null);
@@ -202,6 +204,7 @@ export function AutomationsView() {
     const automationResult = await api.automations();
     if (!current()) return;
     setItems(automationResult.automations);
+    setListLoaded(true);
 
     const workflowsLoaded = api.workflowDefinitions()
       .then((workflowResult) => { if (current()) setWorkflows(workflowResult); });
@@ -875,21 +878,22 @@ export function AutomationsView() {
       )}
 
       <div className="automation-list">
-        {items.length === 0 && !showForm && (
-          <Empty
-            icon={<AutomationsIcon size={28} />}
+        {items.length === 0 && !showForm && (listLoaded ? (
+          <State
+            icon={<AutomationsIcon />}
             title="No Automations Yet"
             // This screen exposed an `h3` before the conversion, and heading navigation is how a
             // screen-reader user finds a section. Losing it is not a styling change.
             headingLevel={3}
-            hint="Create a finite, auditable schedule that runs while this control plane stays online."
-            action={
-              <button type="button" className="btn primary sm" onClick={openNewAutomation}>
+            actions={
+              <button type="button" className="btn primary" onClick={openNewAutomation}>
                 New Automation
               </button>
             }
-          />
-        )}
+          >
+            Create a finite, auditable schedule that runs while this control plane stays online.
+          </State>
+        ) : !error && <State variant="loading">Loading automations…</State>)}
         {items.map((item) => {
           const executions = details[item.automationId] ?? [];
           const triggerItems = triggers[item.automationId] ?? [];

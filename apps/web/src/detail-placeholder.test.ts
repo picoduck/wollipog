@@ -10,7 +10,7 @@ import {
 
 test("detail placeholders do not claim a resource is missing before authoritative data", () => {
   assert.deepEqual(detailPlaceholder("Session", { authoritative: false, conn: "connecting" }), {
-    title: "Loading Session…", hint: "Waiting for the control-plane snapshot.",
+    title: "Loading Session…", hint: "Waiting for the control-plane snapshot.", variant: "loading",
   });
   assert.equal(detailPlaceholder("Run", { authoritative: false, conn: "offline" }).title, "Run Unavailable");
   assert.equal(detailPlaceholder("Pod", { authoritative: false, conn: "unauthorized" }).title, "Pair to Load Pod");
@@ -19,40 +19,40 @@ test("detail placeholders do not claim a resource is missing before authoritativ
 test("detail placeholder loading and unpaired titles are in Title Case with sentence-case hints", () => {
   for (const resource of ["Session", "Run", "Pod"] as const) {
     assert.deepEqual(detailPlaceholder(resource, { authoritative: false, conn: "connecting" }), {
-      title: `Loading ${resource}…`, hint: "Waiting for the control-plane snapshot.",
+      title: `Loading ${resource}…`, hint: "Waiting for the control-plane snapshot.", variant: "loading",
     });
     assert.deepEqual(detailPlaceholder(resource, { authoritative: false, conn: "unauthorized" }), {
-      title: `Pair to Load ${resource}`, hint: "This device needs access to the control plane.",
+      title: `Pair to Load ${resource}`, hint: "This device needs access to the control plane.", variant: "offline",
     });
   }
 });
 
 test("list placeholders name the loading, offline and unpaired states in Title Case", () => {
   assert.deepEqual(listPlaceholder("Multi-Agent Runs", "connecting"), {
-    title: "Loading Multi-Agent Runs…", hint: "Waiting for the control-plane snapshot.",
+    title: "Loading Multi-Agent Runs…", hint: "Waiting for the control-plane snapshot.", variant: "loading",
   });
   assert.deepEqual(listPlaceholder("Collaboration Pods", "offline"), {
-    title: "Collaboration Pods Unavailable", hint: "Reconnect to the control plane to load this list.",
+    title: "Collaboration Pods Unavailable", hint: "Reconnect to the control plane to load this list.", variant: "offline",
   });
   assert.deepEqual(listPlaceholder("Multi-Agent Runs", "unauthorized"), {
-    title: "Pair to Load Multi-Agent Runs", hint: "This device needs access to the control plane.",
+    title: "Pair to Load Multi-Agent Runs", hint: "This device needs access to the control plane.", variant: "offline",
   });
 });
 
 test("only an authoritative miss renders Not Found and transport errors stay distinct", () => {
   assert.equal(detailPlaceholder("Session", { authoritative: true, conn: "online" }).title, "Session Not Found");
   assert.deepEqual(detailPlaceholder("Session", { authoritative: false, conn: "online", error: "request failed" }), {
-    title: "Session Unavailable", hint: "request failed",
+    title: "Session Unavailable", hint: "request failed", variant: "error",
   });
 });
 
 test("current pairing and offline state outrank a stale lookup error", () => {
   const failed = { sessionId: "session-a", complete: true, error: "request failed" };
   assert.deepEqual(routedSessionPlaceholder("session-a", failed, "unauthorized"), {
-    title: "Pair to Load Session", hint: "This device needs access to the control plane.",
+    title: "Pair to Load Session", hint: "This device needs access to the control plane.", variant: "offline",
   });
   assert.deepEqual(routedSessionPlaceholder("session-a", failed, "offline"), {
-    title: "Session Unavailable", hint: "Reconnect to the control plane to load this link.",
+    title: "Session Unavailable", hint: "Reconnect to the control plane to load this link.", variant: "offline",
   });
 });
 

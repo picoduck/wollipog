@@ -4,6 +4,7 @@ import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
 import { encodeResourceId } from "../navigation.js";
 import type { InboxThreadPosition } from "../inbox.js";
 import { useStoreSelector } from "../store.js";
+import { State, useSnapshotState } from "./State.js";
 import { InboxRow, type InboxRowProps } from "./InboxRow.js";
 import { MeasuredVirtualList } from "./MeasuredVirtualList.js";
 import { useIsTabletOrSmaller } from "./useIsMobile.js";
@@ -123,6 +124,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
   // array it was worse: `[]` froze the handle at the first render, which for the inbox is the empty
   // state that returns before attaching anything, so the forwarded ref stayed null forever.
   // A callback ref fires only when the NODE changes, which is the actual event both sides want.
+  const snapshot = useSnapshotState();
   const listRef = useRef<HTMLDivElement | null>(null);
   const attachList = useCallback((node: HTMLDivElement | null) => {
     listRef.current = node;
@@ -135,19 +137,34 @@ export const InboxList = forwardRef<HTMLDivElement, {
   // position InboxView restores when collapsing out of the expanded view.
   if (entries.length === 0) {
     return (
+      // The focus target for the list zone stays this container; what it says follows the §12 order,
+      // so a list that has not loaded, or has lost its connection, never claims to be empty.
       <div className="inbox-zero" role="status" tabIndex={-1}>
-        <div className="inbox-zero-mark" aria-hidden="true">✓</div>
-        <strong>{filtered ? "No Matching Sessions" : emptyState?.title ?? "All Agents Unblocked"}</strong>
-        <span>{filtered
-          ? "Try a different search."
-          : emptyState?.description ?? `Running: ${runningCount}. Queued: ${queuedCount}. Starting: ${startingCount}.`}</span>
-        {!filtered && (emptyState?.showNewSession ?? true) && (
-          <button type="button" className="btn primary sm" onClick={onNewSession}>
-            New Session <kbd aria-hidden="true">C</kbd>
-          </button>
-        )}
-        {!filtered && emptyState?.actionLabel && emptyState.onAction && (
-          <button type="button" className="btn sm" onClick={emptyState.onAction}>{emptyState.actionLabel}</button>
+        {snapshot.offline ? (
+          <State variant="offline" compact>Reconnecting…</State>
+        ) : snapshot.loading ? (
+          <State variant="loading" compact>Loading sessions…</State>
+        ) : filtered ? (
+          <State variant="no-results" compact title="No Matching Sessions">Try a different search.</State>
+        ) : (
+          <State
+            compact
+            title={emptyState?.title ?? "All Agents Unblocked"}
+            actions={(
+              <>
+                {(emptyState?.showNewSession ?? true) && (
+                  <button type="button" className="btn primary" onClick={onNewSession}>
+                    New Session <kbd aria-hidden="true">C</kbd>
+                  </button>
+                )}
+                {emptyState?.actionLabel && emptyState.onAction && (
+                  <button type="button" className="btn" onClick={emptyState.onAction}>{emptyState.actionLabel}</button>
+                )}
+              </>
+            )}
+          >
+            {emptyState?.description ?? `Running: ${runningCount}. Queued: ${queuedCount}. Starting: ${startingCount}.`}
+          </State>
         )}
       </div>
     );

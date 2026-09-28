@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { Notice } from "./Notice.js";
 import {
   parseSourceLocation,
   runnerSupportsProtocol,
@@ -273,7 +274,7 @@ export function FilesBrowser({
   return (
     <div className="files-browser">
       {!runnerOnline && <div className="hint warn">Runner is offline — files are unavailable.</div>}
-      {error && <div className="composer-error">{error}</div>}
+      {error && <Notice tone="danger" compact>{error}</Notice>}
 
       <div className="git-status-row">
         <nav className="files-crumbs" aria-label="Path">

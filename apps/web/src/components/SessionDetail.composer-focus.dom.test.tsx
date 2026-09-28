@@ -453,7 +453,7 @@ test("a failed account switch notice can be dismissed to edit and retry the curr
     const banner = fixture.container.querySelector('[aria-label="Account Switch Failed"]');
     assert.ok(banner);
     const dismiss = [...banner.querySelectorAll("button")].find((button) =>
-      button.textContent?.trim() === "Dismiss Notice");
+      button.getAttribute("aria-label") === "Dismiss Notice");
     assert.ok(dismiss);
     await act(async () => { dismiss.click(); });
     assert.equal(fixture.container.querySelector('[aria-label="Account Switch Failed"]'), null);
@@ -1093,7 +1093,7 @@ test("a queued edit that fails after navigation restores its exact retry and kee
     assert.equal(recovered.value, "Revised content awaiting confirmation");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
     assert.equal(fixture.container.querySelector('button[aria-label="Save Queued Message"] .spinner'), null);
-    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "",
+    assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "",
       /edit was not confirmed.*changed before/i);
     assert.equal(edits.length, 1);
 
@@ -1219,7 +1219,7 @@ test("a live queue revision change disables recovered retry while preserving con
     assert.ok(fixture.container.querySelector(".queued-edit-banner"),
       "a failed materialization must keep the recovery available");
     assert.equal(fixture.composer.value, "Recovered revision for reuse");
-    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /attachment could not be retained/i);
+    assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "", /attachment could not be retained/i);
 
     exportFailure = null;
     await withCapturedAnimationFrames(domWindow, async (frames) => {
@@ -1390,7 +1390,7 @@ test("malformed recovered image collections stay recoverable without starting ex
       "materialization validation must fail before starting any additional artifact exports");
     assert.ok(fixture.container.querySelector(".queued-edit-banner"),
       "invalid retained attachments must leave recovery available");
-    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "",
+    assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "",
       new RegExp(`at most ${MAX_PROMPT_IMAGES} images`, "i"));
   } finally {
     await unmountFixture(fixture);
@@ -1509,7 +1509,7 @@ test("mount hydration reconciles a newer recovery saved while its displaced draf
     const currentComposer = fixture.container.querySelector(".composer-input") as HTMLTextAreaElement;
     assert.equal(currentComposer.value, "Newer recovered edit");
     assert.ok(fixture.container.querySelector(".queued-edit-banner"));
-    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /Newer recovery/);
+    assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "", /Newer recovery/);
     await flushAsyncWork(450);
     const reconciled = loadDurableQueuedEditRecovery(recoveryScope);
     assert.equal(reconciled?.edit.editRevision, "qer_newer");
@@ -1714,7 +1714,7 @@ test("a recovery persistence refusal blocks submission and releases the edit loc
     await act(async () => { save.click(); });
     await flushAsyncWork();
     assert.deepEqual(edits, []);
-    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /could not be saved safely/i);
+    assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "", /could not be saved safely/i);
 
     await act(async () => {
       fixture.composer.value = "Small retry after storage refusal";
@@ -2497,7 +2497,7 @@ test("a queued edit interrupted by runtime reload returns as unconfirmed recover
     assert.equal(reloaded.value, "Indeterminate submission");
     assert.equal(fixture.container.querySelector('button[aria-label="Save Queued Message"] .spinner'), null);
     assert.match(
-      fixture.container.querySelector(".composer-error")?.textContent ?? "",
+      fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "",
       /outcome was not recorded/i,
     );
   } finally {
@@ -2564,7 +2564,7 @@ test("a queued edit accepted after navigation restores only the displaced draft"
     await flushAsyncWork();
     assert.equal(pending.value, "Displaced local draft");
     assert.equal(fixture.container.querySelector(".queued-edit-banner"), null);
-    assert.equal(fixture.container.querySelector(".composer-error"), null);
+    assert.equal(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)"), null);
 
     clearSessionDetailComposerRuntimeForInstance(fixture.instanceScope);
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
@@ -2697,7 +2697,7 @@ test("typing during a failing queued edit request keeps the latest composer cont
     await flushAsyncWork();
 
     assert.equal(recovered.value, "Submitted revision plus late typing");
-    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /not confirmed/i);
+    assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "", /not confirmed/i);
     assert.ok(fixture.container.querySelector(".queued-edit-banner"));
   } finally {
     await unmountFixture(fixture);
@@ -2758,7 +2758,7 @@ test("a failed queued edit keeps its draft and uses idempotency only for byte-id
     assert.equal(fixture.composer.value, "Revised exact content");
     assert.equal(fixture.container.querySelectorAll(".image-thumb").length, 1);
     assert.ok(fixture.container.querySelector(".queued-edit-banner"));
-    assert.match(fixture.container.querySelector(".composer-error")?.textContent ?? "", /timed out/i);
+    assert.match(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "", /timed out/i);
 
     await act(async () => { save.click(); });
     await flushAsyncWork();
@@ -2952,9 +2952,9 @@ test("cleanup throwing after accepted steering cannot recover the accepted draft
     assert.deepEqual(
       calls,
       ["steer once"],
-      fixture.container.querySelector(".composer-error")?.textContent ?? "steering was not invoked",
+      fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)")?.textContent ?? "steering was not invoked",
     );
-    assert.equal(fixture.container.querySelector(".composer-error"), null);
+    assert.equal(fixture.container.querySelector(".notice.t-danger[role=\"alert\"]:not(.state-error)"), null);
     const remounted = await fixture.remountWithDraftLoader(loadComposerDraft);
     await flushAsyncWork();
     assert.equal(remounted.value, "");

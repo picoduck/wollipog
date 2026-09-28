@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { Notice } from "./Notice.js";
 import { useApi } from "../api-context.js";
 import { viewPath } from "../navigation.js";
 import { skillRecommended, skillsFromPayload, type SkillSummary } from "../skills.js";
@@ -56,15 +57,17 @@ export function RecommendedSkillsNotice({ onOpen }: { onOpen: (skillId: string) 
 
   if (skills.length === 0) return null;
   return (
-    <section className="recommended-skills-notice" aria-label="Recommended Skills">
-      <div className="recommended-skills-notice-copy">
-        <strong>Recommended Skills</strong>
-        <span>
-          Wollipog includes skills that teach agents in Wollipog sessions to use its tools. They are not on any machine
-          until they are assigned in Skills.
-        </span>
-        {error && <span className="recommended-skills-notice-error" role="alert">{error}</span>}
-      </div>
+    <Notice as="section" tone="info" ariaLabel="Recommended Skills" title="Recommended Skills"
+      actions={(
+        <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void dismiss(skills)}>
+          Dismiss All
+        </button>
+      )}>
+      <p>
+        Wollipog includes skills that teach agents in Wollipog sessions to use its tools. They are not on any machine
+        until they are assigned in Skills.
+      </p>
+      {error && <p className="notice-error" role="alert">{error}</p>}
       <ul className="recommended-skills-notice-list">
         {skills.map((skill) => (
           <li key={skill.id}>
@@ -86,11 +89,6 @@ export function RecommendedSkillsNotice({ onOpen }: { onOpen: (skillId: string) 
           </li>
         ))}
       </ul>
-      <div className="recommended-skills-notice-actions">
-        <button type="button" className="btn ghost sm" disabled={busy} onClick={() => void dismiss(skills)}>
-          Dismiss All
-        </button>
-      </div>
-    </section>
+    </Notice>
   );
 }

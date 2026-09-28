@@ -1,4 +1,5 @@
 import type { SkillGitAutoUpdate } from "../skills.js";
+import { Notice } from "./Notice.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 
 export function formatUpdateInterval(ms: number | undefined): string {
@@ -30,12 +31,12 @@ export function SkillGitAutoUpdateControls({ status, gitRef, busy, onChange }: {
       ? `Last checked ${formatTime(status.checkedAt)}${status.checkedCommit ? ` · Commit ${status.checkedCommit.slice(0, 12)}` : ""}`
       : "Waiting for the first check."}</p>}
     {enabled && status?.error && <p className="form-error">Last check failed {formatTime(status.error.at)}: {status.error.message} Existing versions and deployments are unchanged.</p>}
-    {held && <p className="skills-git-held" role="status">
+    {held && <Notice tone="warning" role="status">
       Update to commit {held.commit.slice(0, 12)} is held for review because {held.reason === "scripts"
         ? `it adds or changes scripts: ${held.scriptPaths.join(", ")}.`
         : held.reason === "untracked_modes"
           ? `the last import predates executable-file tracking, so changed files need one review: ${held.scriptPaths.join(", ")}.`
           : "the library has edits made since the last Git import."} Review it before it can deploy.
-    </p>}
+    </Notice>}
   </div>;
 }

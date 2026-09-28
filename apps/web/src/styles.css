@@ -486,6 +486,9 @@
   --tint: 14%;
   /* The tone a tinted component reads (§2.2). Tone classes (`.t-info` and the rest, beside the
      status recipe) set both locally; these root values make anything without one neutral. */
+  /* The height docked at the bottom of the view (tab bar, composer, sheet footer) that toasts sit
+     above (§13.1). FeedbackProvider measures it onto the root element while a toast is showing. */
+  --toast-clear: 0px;
   --tone: var(--text-faint);
   --tone-text: var(--text-dim-on-tint);
 
@@ -514,8 +517,8 @@
   --z-modal: 60;
   --z-palette: 70;
   /* Notifications sit ABOVE dialogs on purpose: an error raised while a dialog is open has to stay
-     visible. That is only safe because the toast region is positioned clear of dialog controls —
-     see the mobile rule, which anchors it to the top rather than over a dialog's action row. */
+     visible. That is only safe because the toast region stays clear of dialog controls: it sits
+     above --toast-clear, which counts a dialog footer docked at the bottom of the view. */
   --z-toast: 80;
 
   /* --- Breakpoints, as documented values. CSS cannot use custom properties in media queries, so
@@ -594,7 +597,7 @@ pre {
   color: var(--code-accent);
 }
 /* Flow spacing comes from the container's gap, not from default element margins (§2.4). */
-:where(.form, .section, .surface, .modal-body, .notice, .empty) > * {
+:where(.form, .section, .surface, .modal-body, .notice, .state) > * {
   margin: 0;
 }
 /* Focus is a neutral ring (§16.1). `:where()` keeps it at zero specificity, so a component that
@@ -1337,8 +1340,8 @@ pre {
     padding-top: env(safe-area-inset-top, 0px);
   }
   /* A connection banner above the page takes the safe area instead. */
-  .main:has(> .offline-banner) :is(.page-header, .detail-bar) { padding-top: 0; }
-  .main:has(> .offline-banner) .detail-bar { height: var(--bar-h); }
+  .main:has(> .notice.page-banner) :is(.page-header, .detail-bar) { padding-top: 0; }
+  .main:has(> .notice.page-banner) .detail-bar { height: var(--bar-h); }
 }
 /* Labeled session-root destination split button. */
 .editor-select {
@@ -1726,6 +1729,168 @@ button.status { cursor: pointer; }
     opacity: 0.35;
   }
 }
+
+/* -------------------------------- Notices -------------------------------
+   One inline notice for every banner, callout and boxed error (docs/design-system.md §13.2): a
+   16px tone icon at the title's first line, an optional Title Case title, a sentence-case body and
+   a left-aligned action row, on a 7% wash of the tone with a 32% edge. No left stripe: the icon and
+   the words carry the tone, so it never depends on colour alone. */
+.notice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border: 1px solid color-mix(in srgb, var(--tone) 32%, transparent);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--tone) 7%, var(--bg-elev));
+  color: var(--text);
+  font: var(--type-body);
+  text-align: left;
+}
+.notice-icon {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  color: var(--tone);
+}
+.notice-icon svg { width: var(--icon); height: var(--icon); }
+.notice-content {
+  display: grid;
+  gap: var(--space-1);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.notice-title { font: var(--type-body-strong); }
+.notice-body { min-width: 0; }
+.notice-body > p { margin: 0; }
+.notice-body > p + p { margin-top: var(--space-1); }
+/* Secondary facts under the body: an attempt count, a raw reason. */
+.notice-meta { color: var(--text-dim); font: var(--type-small); }
+/* Raw detail stays behind a disclosure: one sentence in the notice, the rest on request (§13.2). */
+.notice-details > summary { color: var(--text-dim); cursor: pointer; }
+.notice-details[open] > summary { margin-bottom: var(--space-1); }
+/* A render failure stands in for the view it replaced, at the top left of the content area. */
+.notice.view-error { max-width: 560px; margin: var(--space-6); }
+/* An operation inside the notice failed; it reads as the notice's own error line. */
+.notice-error { color: var(--danger-text); }
+/* A setting row's reason or failure sits under its description, clear of the words above it. */
+.ui-row-desc > .notice { margin-top: var(--space-2); }
+.agent-defaults-toolbar > .notice { flex: 1 1 auto; }
+/* Session-level notices sit in the session column under its bar; list-row notices in their cell. */
+.session-detail > .notice { margin: var(--space-2) var(--space-3); }
+.inbox-row-setup-cell > .notice { margin: var(--space-1) var(--space-2) var(--space-2); }
+.notice-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+.notice-dismiss { margin: calc(var(--space-1) * -1) calc(var(--space-2) * -1) 0 0; }
+/* One line for field-group and composer notices: icon, sentence, one trailing action. */
+.notice.compact {
+  align-items: center;
+  min-height: 40px;
+  padding: var(--space-1) var(--space-3);
+}
+.notice.compact .notice-content {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-3);
+}
+.notice.compact .notice-body { flex: 1 1 12rem; }
+.notice.compact .notice-actions { margin-top: 0; }
+.notice.compact .notice-dismiss { margin: 0; }
+/* The page banner spans the top of the main area (§13.3): no radius, no side edges, a hairline
+   in the tone below it. */
+.notice.page-banner {
+  align-items: center;
+  min-height: 36px;
+  padding: var(--space-1) var(--space-6);
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--tone) 32%, transparent);
+  border-radius: initial;
+}
+.notice.page-banner .notice-content {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  column-gap: var(--space-3);
+}
+.notice.page-banner .notice-actions { margin-top: 0; }
+@media (max-width: 760px) {
+  /* The banner sits above the page header, so it takes the top safe area the header gives up. */
+  .notice.page-banner {
+    padding-top: max(var(--space-1), env(safe-area-inset-top, 0px));
+    padding-inline: max(var(--space-4), env(safe-area-inset-left, 0px)) max(var(--space-4), env(safe-area-inset-right, 0px));
+  }
+}
+
+/* --------------------------------- States --------------------------------
+   Empty, no results, loading, error and offline (docs/design-system.md §12): one component, top-
+   and left-aligned with the content's edge, no bordered card and no success glyph. An empty state
+   is a place to act, so it offers the next step. */
+.state {
+  display: grid;
+  justify-items: start;
+  align-content: start;
+  gap: var(--space-2);
+  max-width: 480px;
+  padding-top: var(--space-12);
+  color: var(--text-dim);
+  text-align: left;
+}
+/* Inside panels a 48px drop reads as part of the header above it (§21.4). */
+.state.compact { padding-top: var(--space-6); }
+.state-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  margin-bottom: var(--space-2);
+  border-radius: var(--radius-md);
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
+}
+.state-icon svg { width: 24px; height: 24px; }
+.state-title {
+  margin: 0;
+  color: var(--text);
+  font: var(--type-title);
+}
+.state-body {
+  max-width: 56ch;
+  font: var(--type-reading);
+}
+.state-body > p { margin: 0; }
+.state .actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2);
+  margin-top: var(--space-2);
+}
+/* Loading and offline are one sentence beside a spinner or on their own; no results sits inline in
+   the list it filtered. */
+.state.loading,
+.state.offline,
+.state.no-results {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  padding-top: var(--space-4);
+}
+.state.loading .state-body,
+.state.offline .state-body,
+.state.no-results .state-body { font: var(--type-body); }
+/* An error state is a danger notice in the content's place, at the state's drop and measure. */
+.notice.state-error {
+  max-width: 480px;
+  margin-top: var(--space-12);
+}
+.notice.state-error.compact-state { margin-top: var(--space-6); }
 
 /* -------------------------------- Board --------------------------------- */
 .board-wrap {
@@ -2788,25 +2953,8 @@ textarea {
   font-size: var(--text-xs);
 }
 /* Shown once per card when this page cannot check artifact evidence at all. */
-.evidence-secure-context-notice {
-  display: grid;
-  gap: 6px;
-  margin: 0 0 11px;
-  padding: 10px 12px;
-  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
-  border-radius: var(--radius);
-  color: var(--warning-on-tint);
-  background: color-mix(in srgb, var(--warning) 10%, transparent);
-  font-size: var(--text-sm);
-}
-.evidence-secure-context-notice p {
-  margin: 0;
-  color: inherit;
-  font-size: inherit;
-}
-.evidence-secure-context-notice code {
-  overflow-wrap: anywhere;
-}
+.evidence-review-list > .notice,
+.approval-evidence > .notice { margin: 0 0 var(--space-3); }
 .evidence-artifact-full {
   display: block;
   max-width: 100%;
@@ -3088,13 +3236,6 @@ textarea {
   color: var(--text-dim);
   font-size: var(--text-xs);
 }
-.background-work-empty {
-  margin: auto;
-  padding: 28px 14px;
-  color: var(--text-dim);
-  text-align: center;
-}
-.background-work-empty p { margin: 8px auto 0; max-width: 32ch; }
 .background-work-privacy {
   margin: auto 0 0;
   padding-top: 4px;
@@ -3203,16 +3344,7 @@ textarea {
 .subagent-selection-unavailable:focus { outline: var(--focus-width) solid var(--focus); outline-offset: -2px; }
 .subagent-selection-unavailable { margin: 12px; }
 .subagent-output .timeline { padding-bottom: 12px; }
-.subagent-output-empty,
-.subagents-empty { color: var(--text-faint); }
-.subagent-output-empty { padding: 18px 4px; text-align: center; font-size: var(--text-sm); }
-.subagents-empty { max-width: 32ch; margin: auto; padding: 24px 12px; text-align: center; }
-.subagents-empty-title {
-  color: var(--text-dim);
-  font-size: var(--text-base);
-  font-weight: var(--weight-semibold);
-}
-.subagents-empty p { margin: 8px 0 0; font-size: var(--text-sm); line-height: var(--leading-normal); }
+.subagent-output-empty { padding: 18px 4px; color: var(--text-faint); text-align: center; font-size: var(--text-sm); }
 /* The Codex empty state: a vertically centered launcher list. */
 .rp-launcher {
   flex: 1;
@@ -3373,16 +3505,14 @@ textarea {
 
 /* Provider-neutral auxiliary conversation. The boundary disclosure stays above the independently
    polled transcript; only the explicit insert action can cross back into the primary composer. */
-.sidechat-panel,
-.sidechat-empty {
+.sidechat-panel {
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 10px;
 }
 .sidechat-panel { flex: 1; min-height: 0; }
-.sidechat-empty { margin: auto 0; }
-.sidechat-empty p { margin: 0; line-height: 1.45; }
+.state-body > .notice { margin-top: var(--space-2); }
 .sidechat-boundary {
   display: flex;
   flex-direction: column;
@@ -3860,12 +3990,6 @@ textarea {
   padding-left: max(0px, calc((100% - var(--chat-max)) / 2));
   padding-right: max(0px, calc((100% - var(--chat-max)) / 2));
 }
-.composer-error {
-  color: var(--red);
-  font-size: 12px;
-  line-height: 1.35;
-  margin-bottom: 8px;
-}
 .retitle-receipt {
   display: grid;
   gap: 7px;
@@ -3920,6 +4044,7 @@ textarea {
 }
 .queued-item {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
   padding: 5px 8px 5px 10px;
@@ -3956,12 +4081,16 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.queued-error { color: var(--danger-text); }
 .queued-actions {
   display: flex;
   align-items: center;
   gap: 5px;
   flex: none;
+}
+/* A delivery failure takes its own line under the queued message rather than a fragment of it. */
+.queued-item > .notice {
+  flex-basis: 100%;
+  order: 1;
 }
 .queued-steer,
 .queued-dismiss,
@@ -4057,39 +4186,8 @@ textarea {
   }
 }
 
-/* A quarantined conversation is a dead end, not a transient warning: the banner has to carry
-   enough prose to explain why retrying cannot work, so it stacks copy above its action. */
-.quarantine-banner {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 8px;
-  padding: 9px 11px;
-  border: 1px solid var(--warning);
-  border-radius: var(--radius-sm);
-  background: color-mix(in srgb, var(--warning) 12%, var(--bg-elev));
-  color: var(--text);
-  font-size: var(--text-sm);
-}
-.quarantine-copy {
-  display: grid;
-  gap: 4px;
-  min-width: 0;
-}
-.quarantine-copy p { margin: 0; color: var(--text-dim); }
-.quarantine-copy code {
-  font-family: var(--font-mono);
-  font-size: var(--text-xs);
-}
-.quarantine-title { font-weight: 600; }
-.quarantine-actions {
-  display: flex;
-  align-items: center;
-  gap: 5px;
-  flex: none;
-}
-.worktree-recovery { align-items: stretch; flex-direction: column; }
+/* The composer's notices (quarantine, recovery, a failed send) stack above the input. */
+.composer > .notice { margin-bottom: var(--space-2); }
 .worktree-recovery-controls {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4110,7 +4208,6 @@ textarea {
 .worktree-recovery-controls input,
 .worktree-recovery-controls .ui-select { width: 100%; min-width: 0; }
 .worktree-recovery-controls .btn { justify-self: start; }
-.worktree-recovery-error { color: var(--danger-text) !important; }
 .worktree-recovery-progress {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -4136,13 +4233,6 @@ textarea {
 .worktree-recovery-progress progress::-webkit-progress-value { background: var(--warning); }
 .worktree-recovery-progress progress::-moz-progress-bar { background: var(--warning); }
 @media (max-width: 600px) {
-  .quarantine-banner {
-    align-items: stretch;
-    flex-direction: column;
-  }
-  .quarantine-actions .btn {
-    width: 100%;
-  }
   .worktree-recovery-controls { grid-template-columns: minmax(0, 1fr); }
   .worktree-recovery-controls .btn { width: 100%; }
 }
@@ -5383,8 +5473,7 @@ textarea,
 .slash-detail-disabled {
   color: var(--amber-on-tint);
 }
-.slash-detail-attachments,
-.composer-attachment-notice {
+.slash-detail-attachments {
   color: var(--amber-on-tint);
 }
 .slash-detail-argument code {
@@ -5609,10 +5698,6 @@ textarea,
 }
 .workspace-reference-details dt { color: var(--text-dim); }
 .workspace-reference-details dd { min-width: 0; margin: 0; overflow-wrap: anywhere; }
-.composer-attachment-notice {
-  font-size: var(--text-xs);
-  line-height: 1.35;
-}
 .image-thumb {
   position: relative;
   width: 64px;
@@ -7583,19 +7668,8 @@ button.file-head.source-path-link {
 .runner-workspaces {
   margin-top: 16px;
 }
-.connection-recovery {
-  display: flex;
-  align-items: stretch;
-  flex-direction: column;
-  gap: 12px;
-  margin-top: 12px;
-}
-.connection-recovery > * {
-  min-width: 0;
-}
-.connection-recovery .btn {
-  width: 100%;
-}
+/* A machine card's notices (offline recovery, update guidance) follow its facts at card rhythm. */
+.runner-card > .notice { margin-top: var(--space-3); }
 .update-runner.needs-update {
   border-color: color-mix(in srgb, var(--amber) 55%, transparent);
   color: var(--amber);
@@ -7916,78 +7990,6 @@ button.file-head.source-path-link {
   color: var(--danger-text);
   border-color: color-mix(in srgb, var(--red) 40%, transparent);
 }
-.worktree-setup-notice {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  margin: 8px 12px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-elev);
-}
-
-.worktree-setup-notice.compact {
-  margin: 4px 8px 8px;
-  padding: 8px 10px;
-}
-
-.worktree-setup-notice-copy {
-  display: grid;
-  gap: 3px;
-  min-width: 0;
-  font-size: var(--text-sm);
-}
-
-.worktree-setup-notice-actions {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  flex: none;
-}
-
-.worktree-setup-notice-error,
-.worktree-setup-config-error {
-  color: var(--red);
-}
-
-.worktree-setup-config-error {
-  display: grid;
-  gap: 6px;
-  margin: 8px 12px;
-  padding: 10px 12px;
-  border: 1px solid currentColor;
-  border-radius: var(--radius-md);
-}
-
-.worktree-setup-config-error code {
-  white-space: normal;
-  overflow-wrap: anywhere;
-}
-
-.campaign-continuation-notice {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--space-3);
-  margin: 8px 12px;
-  padding: 10px 12px;
-  color: var(--text);
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-}
-.campaign-continuation-notice[data-state="failed"],
-.campaign-continuation-notice[data-state="missing_result"] { border-color: var(--warning); }
-.campaign-continuation-copy { display: grid; gap: 2px; min-width: 0; }
-.campaign-continuation-copy span { color: var(--text-dim); }
-.campaign-continuation-copy small { color: var(--text-faint); overflow-wrap: anywhere; }
-
-@media (max-width: 600px) {
-  .campaign-continuation-notice { align-items: stretch; flex-direction: column; }
-}
-
 /* A held child is a condition to clear, not a request: warning-edged status, no controls. */
 .campaign-held-children {
   display: grid;
@@ -8036,19 +8038,6 @@ button.file-head.source-path-link {
   .campaign-held-child-hold > div { grid-template-columns: minmax(0, 1fr); gap: 0; }
 }
 
-.skills-unavailable-notice {
-  display: grid;
-  gap: 2px;
-  margin: 8px 12px;
-  padding: 10px 12px;
-  color: var(--text);
-  background: var(--bg-elev-2);
-  border: 1px solid var(--warning);
-  border-radius: var(--radius-md);
-}
-.skills-unavailable-notice span { color: var(--text-dim); }
-.skills-unavailable-notice small { color: var(--text-faint); overflow-wrap: anywhere; }
-
 .project-location-setup-status {
   display: grid;
   justify-items: start;
@@ -8081,38 +8070,14 @@ button.file-head.source-path-link {
   color: var(--text-dim);
 }
 
-.recommended-skills-notice {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  margin: 0 12px 10px;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-elev);
-}
-
-.recommended-skills-notice-copy {
-  display: grid;
-  flex: 1 1 260px;
-  gap: 3px;
-  min-width: 0;
-  font-size: var(--text-sm);
-}
-
-.recommended-skills-notice-copy > span {
-  color: var(--text-dim);
-}
-
-.recommended-skills-notice-error {
-  color: var(--red);
-}
+/* The Inbox's recommendation sits in the list pane, inset like the provider sign-ins above it. */
+.inbox-list-pane > .notice { margin: 0 var(--space-3) var(--space-3); }
 
 .recommended-skills-notice-list {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-  margin: 0;
+  margin: var(--space-1) 0 0;
   padding: 0;
   list-style: none;
 }
@@ -8136,31 +8101,6 @@ button.file-head.source-path-link {
 
 .recommended-skills-notice-list a:hover {
   text-decoration: underline;
-}
-
-.recommended-skills-notice-actions {
-  display: flex;
-  flex: none;
-}
-
-@media (max-width: 680px) {
-  .worktree-setup-notice {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .worktree-setup-notice-actions {
-    flex-wrap: wrap;
-  }
-
-  .recommended-skills-notice {
-    align-items: stretch;
-    flex-direction: column;
-  }
-
-  .recommended-skills-notice-copy {
-    flex: none;
-  }
 }
 
 /* Version-skew: the runner registered with an older PROTOCOL_VERSION than this dashboard. */
@@ -9001,59 +8941,103 @@ button.file-head.source-path-link {
   font-size: 11px;
 }
 
-/* -------------------------- Toast / reversible actions ----------------- */
+/* --------------------------------- Toasts --------------------------------
+   docs/design-system.md §13.1 and §1.3. Toasts sit at the bottom and never cover the app bar:
+   bottom right on desktop, bottom centre on phones, always above whatever is docked at the bottom
+   of the view — the tab bar on a phone, the composer in a session — which FeedbackProvider measures
+   into --toast-clear. The container is a menu's (raised surface, strong edge, elevation); a 16px
+   tone icon carries the tone, never a coloured stripe. */
 .toast-region {
   position: fixed;
-  right: max(18px, env(safe-area-inset-right));
-  bottom: max(18px, env(safe-area-inset-bottom));
+  right: max(var(--space-4), env(safe-area-inset-right, 0px));
+  bottom: calc(var(--toast-clear) + var(--space-4));
   z-index: var(--z-toast);
-  width: min(420px, calc(100vw - 36px));
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  align-items: stretch;
+  gap: var(--space-2);
+  width: min(360px, calc(100vw - var(--space-8)));
   pointer-events: none;
 }
 .toast {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  min-height: 52px;
-  padding: 10px 10px 10px 14px;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: var(--space-3);
+  padding: var(--space-3);
   border: 1px solid var(--border-strong);
-  border-left: 4px solid var(--blue);
-  border-radius: var(--radius-sm);
+  border-radius: var(--radius-md);
   background: var(--bg-elev);
+  box-shadow: var(--elev-2);
   color: var(--text);
-  box-shadow: var(--shadow);
+  font: var(--type-body);
   pointer-events: auto;
+  animation: toast-in var(--dur-base) var(--ease-out);
 }
-.toast-success { border-left-color: var(--green); }
-.toast-error { border-left-color: var(--red); }
+.toast-icon {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  color: var(--tone);
+}
+.toast-icon svg { width: var(--icon); height: var(--icon); }
+.toast-copy {
+  display: grid;
+  gap: var(--space-0-5);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.toast-message { min-width: 0; }
+.toast-detail {
+  color: var(--text-dim);
+  font: var(--type-small);
+}
 .toast-actions {
   display: flex;
   align-items: center;
-  gap: 4px;
-  flex: 0 0 auto;
+  gap: var(--space-1);
+  margin: calc(var(--space-1) * -1) calc(var(--space-1) * -1) calc(var(--space-1) * -1) 0;
 }
-.toast-actions .btn { color: var(--accent); }
-
-@media (max-width: 600px) {
+/* Older toasts wait behind one control above the stack; their list opens upward from it. */
+.toast-more {
+  align-self: flex-end;
+  pointer-events: auto;
+  box-shadow: var(--elev-2);
+}
+.toast-more-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: min(50vh, 420px);
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  list-style: none;
+  pointer-events: auto;
+}
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: none; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
+}
+/* Touch widths: bottom centre with 8px side insets, above the tab bar or the composer, inside the
+   safe area, and above the software keyboard on browsers that only shrink the visual viewport
+   (#280). */
+@media (max-width: 760px) {
   .toast-region {
-    right: max(10px, env(safe-area-inset-right));
-    bottom: max(10px, env(safe-area-inset-bottom));
-    width: calc(100vw - 20px);
+    left: max(var(--space-2), env(safe-area-inset-left, 0px));
+    right: max(var(--space-2), env(safe-area-inset-right, 0px));
+    bottom: calc(max(var(--toast-clear), env(safe-area-inset-bottom, 0px)) + var(--keyboard-inset, 0px) + var(--space-2));
+    width: auto;
   }
 
-  /* On a phone the toast stack and any open menu compete for the same screen. Relocating the
-     stack does not fix this — there is no free edge: bottom-anchored it covers the Instance
-     Selector's menu, and top-anchored it covers the editor menu that opens from the topbar.
-
-     So while a menu is open the stack is hidden outright rather than moved. Nothing is dismissed
-     or lost; menus are transient and user-initiated, and the toasts reappear the moment one
-     closes. visibility (not display) keeps the cards in the accessibility tree and preserves the
-     region's layout, and pointer-events guarantees they cannot intercept a tap aimed at the menu
-     beneath them. */
+  /* On a phone the stack and an open menu compete for the same screen, and there is no free edge
+     to move the stack to. So while a menu is open the stack is hidden outright rather than moved.
+     Nothing is dismissed or lost; the toasts reappear the moment the menu closes. visibility (not
+     display) keeps the cards in the accessibility tree and preserves the region's layout, and
+     pointer-events guarantees they cannot intercept a tap aimed at the menu beneath them. */
   body:has(.instance-selector-pop) .toast-region,
   body:has(.menu-pop) .toast-region {
     visibility: hidden;
@@ -9388,51 +9372,6 @@ button.agent-pick {
 .new-session-project-actions .muted { flex: 1; }
 
 /* ------------------------------- Misc ----------------------------------- */
-/* §F8: a dashed 1px border with 54px of padding, no icon, no action — the shape was the problem.
-   A solid surface reads as part of the app rather than as a placeholder waiting to be filled, and
-   the vertical rhythm comes from the stack rather than from one large pad. */
-.empty {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--space-3);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: var(--space-8) var(--space-6);
-  text-align: center;
-  background: var(--bg-elev);
-}
-.empty-icon {
-  display: inline-flex;
-  color: var(--text-faint);
-}
-/* Same reason: this sits inside a flex column, so its own top margin stacks with the gap.
-   SCOPED to the empty state. The bare `.empty-sub` that used to be in this list would have zeroed
-   the margin on every one of RunnersView's status lines too, and the only reason it did not is that
-   a later `.empty-sub` rule overrode it — so the selector was both wrong and inert. §F4's guard
-   reported the shadowed declaration. */
-.empty-hint > .empty-sub,
-.empty > .empty-sub {
-  margin-top: 0;
-}
-.empty-action {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: center;
-  gap: var(--space-2);
-}
-.empty-title {
-  font-size: 15px;
-  /* Zero, because the flex gap owns the vertical rhythm now. Flex-item margins do NOT collapse the
-     way the previous block layout allowed, so the retained 8px bottom margin added to the 12px gap
-     and produced 20px between title and hint — a rhythm nobody chose. */
-  margin: 0;
-}
-.empty-hint {
-  margin: 0;
-  font-size: 13px;
-  color: var(--text-dim);
-}
 .muted {
   color: var(--text-faint);
 }
@@ -9480,14 +9419,6 @@ button.agent-pick {
   color: var(--danger-text);
   word-break: break-word;
 }
-.box-hint {
-  color: var(--text-dim);
-  border-left: 2px solid var(--accent);
-  padding-left: 8px;
-  line-height: 1.45;
-  word-break: break-word;
-}
-
 /* ---- Copy button (reused in onboarding) ---- */
 .copy-btn {
   border: 1px solid var(--border);
@@ -11211,29 +11142,12 @@ body.shell-dock-dragging * {
   .inbox-list,
   .detail-scroll { transition: none; }
 }
+/* The Sessions list's own state: the list zone's focus target, holding a top-left `State`. */
 .inbox-zero {
-  display: grid;
   min-height: 0;
   flex: 1;
   overflow: auto;
-  place-content: center;
-  justify-items: center;
-  gap: 5px;
-  color: var(--text-dim);
-  text-align: center;
-}
-.inbox-zero strong { color: var(--text); font-size: 16px; }
-.inbox-zero-mark {
-  display: grid;
-  width: 34px;
-  height: 34px;
-  margin-bottom: 5px;
-  place-items: center;
-  border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
-  border-radius: 50%;
-  color: var(--accent-on-tint);
-  background: color-mix(in srgb, var(--accent) 10%, transparent);
-  font-size: 18px;
+  padding: 0 var(--space-4);
 }
 .inbox-splitter {
   position: relative;
@@ -11922,28 +11836,6 @@ body.shell-dock-dragging * {
 }
 
 /* ---- Offline banner (control plane unreachable) ---- */
-.offline-banner {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 0 24px;
-  padding: 10px 14px;
-  background: color-mix(in srgb, var(--amber) 12%, var(--bg-elev));
-  border: 1px solid color-mix(in srgb, var(--amber) 40%, var(--border));
-  border-radius: var(--radius-sm);
-  color: var(--text-dim);
-  font-size: 13px;
-}
-.offline-banner .offline-icon {
-  color: var(--amber);
-  width: 16px;
-  height: 16px;
-  flex: 0 0 16px;
-}
-.offline-banner code {
-  color: var(--text);
-}
-
 /* Agent-first discovery for unmanaged (CLI-started) sessions. */
 .runner-agent-sessions-action {
   display: flex;
@@ -12263,26 +12155,6 @@ body.shell-dock-dragging * {
   background: color-mix(in srgb, var(--accent) 6%, transparent);
 }
 
-.error-boundary {
-  margin: 24px auto;
-  max-width: 560px;
-  padding: 16px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  background: var(--bg-elev);
-}
-.error-boundary-title {
-  font-weight: 600;
-  margin-bottom: 6px;
-}
-.error-boundary-message {
-  color: var(--text-dim);
-  font-family: var(--mono, monospace);
-  font-size: 12px;
-  margin-bottom: 12px;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
 
 .transcript-status-strip {
   display: grid;
@@ -12968,9 +12840,6 @@ body.shell-dock-dragging * {
 }
 
 /* -------- Pairing banner (unauthorized /ui socket — device needs a token) -------- */
-.pairing-banner {
-  flex-wrap: wrap;
-}
 .pairing-controls {
   display: inline-flex;
   align-items: center;
@@ -12980,11 +12849,6 @@ body.shell-dock-dragging * {
   width: 220px;
   padding: 6px 9px;
   font-size: 13px;
-}
-.pairing-error {
-  flex-basis: 100%;
-  color: var(--red);
-  font-size: 12px;
 }
 /* --------------------------- Phone layout (≤760px) --------------------------- */
 /* Keep the breakpoint in sync with MOBILE_BREAKPOINT_PX in components/useIsMobile.ts. */
@@ -13186,10 +13050,6 @@ body.shell-dock-dragging * {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
-  }
-  /* Banners (offline + pairing) sit OUTSIDE the inset-padded .main-body — inset them too. */
-  .offline-banner {
-    margin: 0 calc(12px + env(safe-area-inset-right, 0px)) 0 calc(12px + env(safe-area-inset-left, 0px));
   }
   /* The generic 16px rule below is (0,0,1); the desktop .pairing-controls input rule is
      (0,1,1) and would win — restate it at equal specificity so iOS doesn't focus-zoom. */
@@ -13647,16 +13507,11 @@ body.shell-dock-dragging * {
 .skill-import-content { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 300px; overflow: auto; padding: 12px; background: var(--bg-elev-2); }
 .skills-git-source { min-width: 0; overflow-wrap: anywhere; }
 .skills-git-auto-update { display: grid; gap: 4px; margin: 8px 0; }
-.skills-git-held { margin: 0; padding: 8px 10px; border: 1px solid var(--warning); border-radius: var(--radius-sm);
-  color: var(--warning-on-tint); background: color-mix(in srgb, var(--warning) 10%, transparent); font-size: var(--text-sm); }
 .skills-machine-import { min-width: 0; overflow-wrap: anywhere; }
 .skills-built-in { min-width: 0; overflow-wrap: anywhere; }
 .skills-built-in p { margin: 0; }
 .skills-built-in-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .skills-built-in-actions .btn { white-space: normal; }
-.skills-built-in-held { display: grid; gap: 8px; justify-items: start; padding: 8px 10px; border: 1px solid var(--warning);
-  border-radius: var(--radius-sm); color: var(--warning-on-tint); background: color-mix(in srgb, var(--warning) 10%, transparent);
-  font-size: var(--text-sm); }
 .skill-groups-dialog .skills-section-heading { flex-wrap: wrap; }
 .skill-groups-dialog .btn { white-space: normal; overflow-wrap: anywhere; }
 .skill-assignment-matrix, .skill-assignment-matrix > article { min-width: 0; overflow-wrap: anywhere; }
@@ -14857,7 +14712,6 @@ body.shell-dock-dragging * {
   background: color-mix(in srgb, var(--blue) 10%, transparent);
   font-size: var(--text-xs);
 }
-.settings-inline-error { color: var(--red); font-size: var(--text-xs); }
 @media (max-width: 760px) {
   .agent-defaults-list { margin-left: var(--space-2); }
   .agent-defaults-editor { grid-template-columns: minmax(0, 1fr); }
@@ -14888,7 +14742,6 @@ body.shell-dock-dragging * {
   .session-naming-custom-fields { grid-template-columns: minmax(0, 1fr); }
   .session-naming-key-field { grid-column: auto; }
 }
-.settings-pending-reason { display: block; margin-top: 2px; color: var(--amber-on-tint); font-size: var(--text-xs); }
 .settings-about { display: grid; grid-template-columns: auto 1fr; gap: 4px var(--space-4); margin: 0; }
 .settings-about dt { color: var(--text-dim); font-size: var(--text-sm); }
 .settings-about dd { margin: 0; font-family: var(--font-mono); font-size: var(--text-sm); }
@@ -14989,12 +14842,6 @@ body.shell-dock-dragging * {
   width: 100%;
 }
 .archive-results-summary,
-.archive-loading {
-  color: var(--text-dim);
-  font-size: var(--text-sm);
-}
-.archive-loading { display: flex; align-items: center; gap: 8px; }
-.archive-error { color: var(--danger-text); font-size: var(--text-sm); }
 .archive-table-wrap {
   min-width: 0;
   overflow-x: auto;

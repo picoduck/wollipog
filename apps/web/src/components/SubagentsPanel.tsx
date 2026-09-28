@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
+import { State } from "./State.js";
 import type { SessionView } from "@wollipog/protocol";
 import { formatDuration, formatRecordedRelativeTime } from "../format.js";
 import {
@@ -127,10 +128,9 @@ export function SubagentsPanel({
 
   if (descriptors.length === 0 && !selectionUnavailable) {
     return (
-      <div className="subagents-empty" role="status">
-        <div className="subagents-empty-title">No Selectable Subagents</div>
-        <p>{subagentEmptyMessage(session, runnerOnline, earlierActivityUnloaded)}</p>
-      </div>
+      <State compact title="No Selectable Subagents">
+        {subagentEmptyMessage(session, runnerOnline, earlierActivityUnloaded)}
+      </State>
     );
   }
 

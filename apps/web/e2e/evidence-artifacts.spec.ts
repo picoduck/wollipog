@@ -248,7 +248,7 @@ test("over plain HTTP a short desktop panel with child requests keeps the whole 
   const layout = await page.locator(".evidence-review-surface").evaluate((surface) => ({
     overflow: surface.scrollHeight - surface.clientHeight,
     listHeight: surface.querySelector(".evidence-review-list")!.clientHeight,
-    noticeInList: Boolean(surface.querySelector(".evidence-review-list .evidence-secure-context-notice")),
+    noticeInList: Boolean(surface.querySelector('.evidence-review-list > .notice[aria-label="HTTPS or Localhost Required"]')),
   }));
   expect(layout.overflow).toBeLessThanOrEqual(1);
   expect(layout.listHeight).toBeGreaterThan(40);

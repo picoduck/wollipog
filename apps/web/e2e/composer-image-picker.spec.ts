@@ -87,7 +87,7 @@ test("cancelling the chooser leaves the draft and attachments untouched", async 
 
   await expect(composer).toHaveValue("keep this draft");
   await expect(thumbnails(page)).toHaveCount(1);
-  await expect(page.locator(".composer-error")).toHaveCount(0);
+  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toHaveCount(0);
 });
 
 test("a text-only model explains itself instead of opening a picker", async ({ page }) => {

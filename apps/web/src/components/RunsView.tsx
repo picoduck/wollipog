@@ -1,4 +1,5 @@
 import { RunsIcon } from "./Icons.js";
+import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -6,7 +7,7 @@ import type { RunView, WorkflowArtifactView, WorkflowInstanceDetail } from "@wol
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
 import { useApi } from "../api-context.js";
-import { SessionStatusIndicators, Empty } from "./common.js";
+import { SessionStatusIndicators } from "./common.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { useTimeline } from "./useTimeline.js";
 import { sessionAgentLabel } from "./agent-options.js";
@@ -78,17 +79,19 @@ export function RunsView({ onNewRun }: { onNewRun: () => void }) {
   );
 
   let body: ReactNode;
-  if (list.length === 0 && !snapshotLoaded) {
+  if (list.length === 0 && (!snapshotLoaded || conn !== "online")) {
+    // An empty map proves nothing before the first snapshot or while disconnected (§12.5).
     const placeholder = listPlaceholder("Multi-Agent Runs", conn);
-    body = <Empty icon={<RunsIcon size={28} />} title={placeholder.title} hint={placeholder.hint} />;
+    body = <State variant={placeholder.variant} icon={<RunsIcon />} title={placeholder.title}>{placeholder.hint}</State>;
   } else if (list.length === 0) {
     body = (
-      <Empty
-        icon={<RunsIcon size={28} />}
+      <State
+        icon={<RunsIcon />}
         title="No Multi-Agent Runs Yet"
-        hint="Start one to compare several agents on the same task."
-        action={<button type="button" className="btn primary sm" onClick={onNewRun}>New Multi-Agent Run</button>}
-      />
+        actions={<button type="button" className="btn primary" onClick={onNewRun}>New Multi-Agent Run</button>}
+      >
+        Start one to compare several agents on the same task.
+      </State>
     );
   } else {
     body = <RunList runs={list} onOpen={(runId) => navigate({ name: "run", id: runId })} />;
@@ -296,7 +299,7 @@ function RunDetailContent({ runId }: { runId: string }) {
     return (
       <div className="run-detail">
         <DetailBar title="Multi-Agent Run" backLabel="Back to Multi-Agent Runs" onBack={back} />
-        <Empty title={placeholder.title} hint={placeholder.hint} />
+        <State variant={placeholder.variant} title={placeholder.title}>{placeholder.hint}</State>
       </div>
     );
   }

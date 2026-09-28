@@ -210,11 +210,11 @@ test("the empty state's New Automation creates, even after an edit was cancelled
   await act(async () => { fireDomEvent.click(confirmDelete!); });
   await act(async () => { await Promise.resolve(); });
 
-  // This screen exposed its empty state as an `h3` before it moved to `Empty`, and heading
+  // This screen exposed its empty state as an `h3` before it moved to `State`, and heading
   // navigation is how a screen-reader user finds a section. A paragraph is not in that list.
-  assert.equal(container.querySelector(".empty-title")?.tagName, "H3");
+  assert.equal(container.querySelector(".state-title")?.tagName, "H3");
 
-  const wayOut = [...container.querySelectorAll(".empty-action button")][0];
+  const wayOut = [...container.querySelectorAll(".state .actions button")][0];
   assert.ok(wayOut, "the empty state offers a way out");
   await act(async () => { fireDomEvent.click(wayOut as never); });
 
@@ -267,14 +267,14 @@ test("a board emptied by a filter offers to clear the filter, not to create", as
   const { container, socket, unmount } = await mount({}, <BoardHarness onNewSession={() => { created += 1; }} />);
   await act(async () => { socket.push(snapshot({ sessions: [session] })); });
 
-  assert.equal(container.querySelector(".empty"), null, "one unfiltered session is not an empty board");
+  assert.equal(container.querySelector(".state"), null, "one unfiltered session is not an empty board");
 
   const machine = container.querySelector("select") as unknown as HTMLSelectElement;
   await act(async () => {
     machine.value = "runner-1";
     fireDomEvent.change(machine as never, { target: { value: "runner-1" } as never });
   });
-  assert.equal(container.querySelector(".empty"), null, "the filter that matches is not empty either");
+  assert.equal(container.querySelector(".state"), null, "the filter that matches is not empty either");
 
   // A Machine with no sessions on it.
   await act(async () => { socket.push(snapshot({ runners: [runner, { ...runner, runnerId: "runner-2", hostname: "other" }], sessions: [session] })); });
@@ -284,14 +284,14 @@ test("a board emptied by a filter offers to clear the filter, not to create", as
     fireDomEvent.change(machine2 as never, { target: { value: "runner-2" } as never });
   });
 
-  const title = container.querySelector(".empty-title")?.textContent ?? "";
+  const title = container.querySelector(".state-title")?.textContent ?? "";
   assert.equal(title, "No Matching Sessions", `a filtered-out board said "${title}"`);
-  const action = container.querySelector(".empty-action button") as unknown as HTMLButtonElement;
+  const action = container.querySelector(".state .actions button") as unknown as HTMLButtonElement;
   assert.equal((action.textContent ?? "").trim(), "Clear Filters");
 
   await act(async () => { fireDomEvent.click(action as never); });
   assert.equal(created, 0, "clearing a filter is not creating a session");
-  assert.equal(container.querySelector(".empty"), null, "and it has to actually put the sessions back");
+  assert.equal(container.querySelector(".state"), null, "and it has to actually put the sessions back");
   await unmount();
 });
 
@@ -314,7 +314,7 @@ test("a remote instance with no machines is not offered local setup", async () =
   await act(async () => { socket.push(snapshot({ runners: [], boxes: [] })); });
   await act(async () => { await Promise.resolve(); });
 
-  const action = container.querySelector(".empty-action button") as unknown as HTMLButtonElement | null;
+  const action = container.querySelector(".state .actions button") as unknown as HTMLButtonElement | null;
   assert.ok(action, "an owner looking at an empty remote instance is still offered a way to add a machine");
   assert.equal((action!.textContent ?? "").trim(), "Connect via SSH");
 
@@ -333,8 +333,8 @@ test("a genuinely empty board still offers to create", async () => {
   const { container, socket, unmount } = await mount({}, <BoardHarness onNewSession={() => { created += 1; }} />);
   await act(async () => { socket.push(snapshot({ sessions: [] })); });
 
-  assert.equal(container.querySelector(".empty-title")?.textContent, "No Sessions Yet");
-  const action = container.querySelector(".empty-action button") as unknown as HTMLButtonElement;
+  assert.equal(container.querySelector(".state-title")?.textContent, "No Sessions Yet");
+  const action = container.querySelector(".state .actions button") as unknown as HTMLButtonElement;
   assert.equal((action.textContent ?? "").trim(), "New Session");
   await act(async () => { fireDomEvent.click(action as never); });
   assert.equal(created, 1);
@@ -456,8 +456,8 @@ test("a board emptied by archiving still clears its filter on the way out", asyn
   // The only session is archived: nothing unarchived is left, and the filter is still Machine 1.
   await act(async () => { socket.push(snapshot({ sessions: [{ ...session, archived: true } as SessionView] })); });
 
-  assert.equal(container.querySelector(".empty-title")?.textContent, "No Sessions Yet");
-  await act(async () => { fireDomEvent.click(container.querySelector(".empty-action button") as never); });
+  assert.equal(container.querySelector(".state-title")?.textContent, "No Sessions Yet");
+  await act(async () => { fireDomEvent.click(container.querySelector(".state .actions button") as never); });
   assert.equal(created, 1, "the action still creates");
   const after = container.querySelector("select") as unknown as HTMLSelectElement;
   assert.equal(after.value, "", "and it must not leave a filter on that would hide what it creates");

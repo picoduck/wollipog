@@ -4,6 +4,8 @@ import {
   ArrowUp as LucideArrowUp,
   ChartNoAxesColumn as LucideChartNoAxesColumn,
   Check as LucideCheck,
+  CircleAlert as LucideCircleAlert,
+  CircleCheck as LucideCircleCheck,
   ChevronDown as LucideChevronDown,
   ChevronLeft as LucideChevronLeft,
   ChevronRight as LucideChevronRight,
@@ -238,6 +240,16 @@ export function WarningIcon(props: IconProps) {
 
 export function InfoIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideInfo} {...props} />;
+}
+
+/** The success tone's icon on toasts and notices (docs/design-system.md §13). */
+export function SuccessIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCircleCheck} {...props} />;
+}
+
+/** The danger tone's icon on toasts and notices (docs/design-system.md §13). */
+export function ErrorIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideCircleAlert} {...props} />;
 }
 
 export function KeyboardIcon(props: IconProps) {

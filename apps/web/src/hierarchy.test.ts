@@ -14,7 +14,7 @@ import { declarationsOf } from "./css-rules.js";
  */
 
 const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
-const common = readFileSync(fileURLToPath(new URL("./components/common.tsx", import.meta.url)), "utf8");
+const stateSource = readFileSync(fileURLToPath(new URL("./components/State.tsx", import.meta.url)), "utf8");
 
 /** The type scale, in px, so a rule can be compared against the ramp rather than against a number. */
 const SCALE: Record<string, number> = {
@@ -59,59 +59,67 @@ test("the page title is larger than the labels inside the page", () => {
 });
 
 /**
- * Every `<Empty` call site in the app, with the props it actually passes.
+ * Every `<State` call site in the app, with the props and children it actually passes.
  *
- * Scanned at brace depth ZERO rather than with a lazy `/>` match. Once the icons landed, every call
- * site contained `icon={<RunsIcon size={28} />}` — and a lazy match stops at THAT `/>`, truncating
- * the props before `action=` and reporting every caller as actionless. The test failed rather than
- * passing, which is the only reason this was a two-minute fix instead of a wrong green.
+ * Scanned at brace depth ZERO rather than with a lazy `/>` match: an `icon={<RunsIcon />}` prop
+ * contains its own `/>`, and a lazy match stops there, truncating the props before `actions=`. A
+ * state with children runs to its `</State>`, so a hint written as children counts as content.
  */
-function emptyCallSites(): { file: string; props: string }[] {
+function stateCallSites(): { file: string; props: string }[] {
   const dir = fileURLToPath(new URL("./components/", import.meta.url));
   const sites: { file: string; props: string }[] = [];
   for (const entry of readdirSync(dir)) {
     if (!entry.endsWith(".tsx") || entry.endsWith(".test.tsx")) continue;
     const source = readFileSync(join(dir, entry), "utf8");
-    let index = source.indexOf("<Empty");
+    let index = source.search(/<State[\s>]/);
     while (index !== -1) {
       let depth = 0;
-      let cursor = index + "<Empty".length;
+      let cursor = index + "<State".length;
       const from = cursor;
+      let selfClosing = false;
       while (cursor < source.length) {
         const character = source[cursor]!;
         if (character === "{") depth += 1;
         else if (character === "}") depth -= 1;
-        else if (depth === 0 && character === "/" && source[cursor + 1] === ">") break;
+        else if (depth === 0 && character === "/" && source[cursor + 1] === ">") { selfClosing = true; break; }
+        else if (depth === 0 && character === ">") break;
         cursor += 1;
       }
-      sites.push({ file: entry, props: source.slice(from, cursor) });
-      index = source.indexOf("<Empty", cursor);
+      const end = selfClosing ? cursor : source.indexOf("</State>", cursor);
+      sites.push({ file: entry, props: source.slice(from, end) });
+      const next = source.slice(end).search(/<State[\s>]/);
+      index = next === -1 ? -1 : end + next;
     }
   }
   return sites;
 }
+
+/**
+ * TERMINAL states only. A loading, offline, error or no-results state is a transient answer rather
+ * than an empty screen, and decorating it would be claiming the app has nothing when it simply does
+ * not know yet. `State` names those with its `variant`; a variant computed from a placeholder is
+ * transient too, and the "No Activity Yet" wait is recognised by its content.
+ */
+const transient = (props: string) => /variant=|Waiting/.test(props);
 
 test("the empty states a user actually sees have an icon", () => {
   // The first version of this checked that the PROPS EXIST on the component. They did, and not one
   // of the nine callers passed either — so the §F8 requirement was unmet in everything a user sees
   // while the test reported it done. Testing an API instead of its callers is the same shape as
   // every other finding on this campaign.
-  const sites = emptyCallSites();
-  assert.ok(sites.length >= 8, `expected the app to render several empty states, found ${sites.length}`);
-  // TERMINAL states only. A loading, waiting or unavailable placeholder is a transient message
-  // rather than an empty screen, and decorating it would be claiming the app has nothing when it
-  // simply does not know yet. Those are recognised by their content, not exempted by file: they
-  // render a `detailPlaceholder` result or a connection-dependent message.
-  const transient = (props: string) => /placeholder\.|Unavailable|Waiting|Pair to Load/.test(props);
+  const sites = stateCallSites();
+  assert.ok(sites.length >= 8, `expected the app to render several states, found ${sites.length}`);
   const terminal = sites.filter((site) => !transient(site.props));
   assert.ok(terminal.length >= 4, `expected several terminal empty states, found ${terminal.length}`);
-  const withoutIcon = terminal.filter((site) => !/icon=/.test(site.props)).map((site) => site.file);
+  // Panel states (compact, §21.4) are one line inside a card and carry no icon tile.
+  const withoutIcon = terminal.filter((site) => !/\bcompact\b/.test(site.props) && !/icon=/.test(site.props))
+    .map((site) => site.file);
   assert.deepEqual([...new Set(withoutIcon)], [],
     "an empty screen with no icon is the 2015 pattern §F8 asked to replace");
 });
 
 test("the session activity placeholder names the unpaired state in Title Case", () => {
-  const activity = emptyCallSites().filter((site) => site.file === "SessionDetail.tsx" && /Activity Unavailable/.test(site.props));
+  const activity = stateCallSites().filter((site) => site.file === "SessionDetail.tsx" && /Activity Unavailable/.test(site.props));
   assert.equal(activity.length, 1);
   assert.match(activity[0]!.props, /"Pair to Load Activity"/);
 });
@@ -121,38 +129,29 @@ test("the empty states a user actually sees offer the action that ends them", ()
   // action with no caller passing one. An empty screen is the one moment the app knows exactly what
   // the user should do next; a screen that names the absence and then makes you find the button
   // elsewhere has described the problem and kept the solution.
-  //
-  // Board, Runs and Pods open their dialogs from the shell, so each takes one callback rather than
-  // reaching for it — that plumbing is the reason this was a separate commit from the icons.
-  const terminal = emptyCallSites().filter((site) =>
-    !/placeholder\.|Unavailable|Waiting|Pair to Load/.test(site.props));
-  const withoutAction = terminal.filter((site) => !/action=/.test(site.props)).map((site) => site.file);
+  const terminal = stateCallSites().filter((site) => !transient(site.props) && !/\bcompact\b/.test(site.props));
+  const withoutAction = terminal.filter((site) => !/actions=/.test(site.props)).map((site) => site.file);
   assert.deepEqual([...new Set(withoutAction)], [],
     "a terminal empty state has to offer the thing that ends it");
 });
 
 test("no screen hand-rolls an empty state", () => {
   // AutomationsView rendered a bare `.empty-state` div with an h3 and a p, so it inherited none of
-  // this and could not be fixed by changing `Empty`.
+  // this and could not be fixed by changing the shared component.
   const dir = fileURLToPath(new URL("./components/", import.meta.url));
   const offenders = readdirSync(dir)
     .filter((entry) => entry.endsWith(".tsx") && !entry.endsWith(".test.tsx"))
-    .filter((entry) => /className="empty-state"/.test(readFileSync(join(dir, entry), "utf8")));
-  assert.deepEqual(offenders, [], "an empty state that bypasses Empty cannot be improved by Empty");
+    .filter((entry) => /className="(empty|empty-state)"/.test(readFileSync(join(dir, entry), "utf8")));
+  assert.deepEqual(offenders, [], "an empty state that bypasses State cannot be improved by State");
 });
 
 test("the empty state offers a way out of itself", () => {
   // §F8 called it a 2015 pattern: a dashed border, 54px of padding, no icon and no action. An empty
   // screen is the one moment the app knows exactly what the user should do next.
-  assert.match(common, /icon\?: ReactNode;/, "an empty state needs somewhere to put an icon");
-  assert.match(common, /action\?: ReactNode;/, "and somewhere to put the action that ends it");
-  assert.match(common, /className="empty-action"/);
-  // Both optional, deliberately: every existing caller passes neither, so this is additive rather
-  // than a demand that eight screens invent an action inside a styling change.
-  assert.match(common, /icon\?:/, "the slots must be optional or this is not additive");
-
-  const border = declarationsOf(css, "border").find(({ selector }) => selector.includes(".empty"));
-  assert.ok(border, "the empty state must declare a border");
-  assert.doesNotMatch(border!.value, /dashed/,
-    "a dashed box reads as a placeholder waiting to be filled rather than as part of the app");
+  assert.match(stateSource, /icon\?: ReactNode;/, "an empty state needs somewhere to put an icon");
+  assert.match(stateSource, /actions\?: ReactNode;/, "and somewhere to put the action that ends it");
+  assert.match(stateSource, /className="actions"/);
+  // docs/design-system.md §12: top-aligned with the content's edge and no bordered card at all.
+  const border = declarationsOf(css, "border").find(({ selector }) => /(^|[\s,])\.state(\s|,|$)/.test(selector));
+  assert.equal(border, undefined, "a state is not a bordered card");
 });

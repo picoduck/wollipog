@@ -548,7 +548,7 @@ test("an oversized recovered attachment set stays recoverable and reports the li
 
   await expect(page.getByText("Recovered Queued Message", { exact: true })).toBeVisible();
   await expect(page.locator(".composer-input")).toHaveValue("Keep this oversized recovered message");
-  await expect(page.locator(".composer-error")).toContainText("at most 6 images may be attached");
+  await expect(page.locator('.composer > .notice.t-danger[role="alert"]')).toContainText("at most 6 images may be attached");
 });
 
 test("a definite direct rejection preserves the draft and never creates a transcript bubble", async ({ page }) => {

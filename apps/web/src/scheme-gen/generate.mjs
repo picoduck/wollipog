@@ -187,17 +187,21 @@ function readDemands(cssPath) {
     demands.set(ink, list);
   }
   // Pairs the schemes were tuned against before #1802 folded the per-surface status badges into
-  // the one `.status` recipe, which paints its own on-tint inks. Nothing declares these three any
-  // more, and dropping them would retune five schemes as a side effect of a CSS cleanup: `--text-dim`
-  // would drift toward `--text-faint` past the hierarchy floor, and `--danger-text` would lighten.
-  // They stay as a baseline until a palette change retunes the tiers on purpose.
+  // the one `.status` recipe and the banners and callouts into the one `.notice`, which paint their
+  // own inks. Nothing declares these any more, and dropping them would retune schemes as a side
+  // effect of a CSS cleanup: `--text-dim` would drift toward `--text-faint` past the hierarchy floor,
+  // and `--danger-text` would lighten. They stay as a baseline until a palette change retunes the
+  // tiers on purpose.
   for (const [ink, entry] of [
     ["--text-dim", { hue: "--text-dim", strength: 0.1 }],
     ["--text-dim", { hue: "--text-faint", strength: 0.12 }],
     ["--danger-text", { hue: "--red", strength: 0.16 }],
+    ["--text-dim", { hue: "--amber", strength: 0.12, base: "--bg-elev" }],
+    ["--text", { hue: "--warning", strength: 0.12, base: "--bg-elev" }],
+    ["--warning-on-tint", { hue: "--warning", strength: 0.1 }],
   ]) {
     const list = demands.get(ink) ?? [];
-    if (!list.some((d) => d.hue === entry.hue && d.strength === entry.strength && d.base === undefined)) list.push(entry);
+    if (!list.some((d) => d.hue === entry.hue && d.strength === entry.strength && d.base === entry.base)) list.push(entry);
     demands.set(ink, list);
   }
   return demands;

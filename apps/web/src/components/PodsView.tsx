@@ -1,4 +1,5 @@
 import { PodsIcon } from "./Icons.js";
+import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
@@ -18,7 +19,7 @@ import {
 import { useApi } from "../api-context.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
-import { Empty, SessionStatusIndicators } from "./common.js";
+import { SessionStatusIndicators } from "./common.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { useTimeline } from "./useTimeline.js";
@@ -210,24 +211,26 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
   const list = useMemo(() => [...pods.values()].sort((a, b) => b.updatedAt - a.updatedAt), [pods]);
   const header = <PageHeader title="Collaboration Pods" primary={{ label: "New Collaboration Pod", onClick: onNewPod }} />;
   if (list.length === 0) {
-    if (!snapshotLoaded) {
+    // An empty map proves nothing before the first snapshot or while disconnected (§12.5).
+    if (!snapshotLoaded || conn !== "online") {
       const placeholder = listPlaceholder("Collaboration Pods", conn);
       return (
         <div className="page">
           {header}
-          <Empty icon={<PodsIcon size={28} />} title={placeholder.title} hint={placeholder.hint} />
+          <State variant={placeholder.variant} icon={<PodsIcon />} title={placeholder.title}>{placeholder.hint}</State>
         </div>
       );
     }
     return (
       <div className="page">
         {header}
-        <Empty
-          icon={<PodsIcon size={28} />}
+        <State
+          icon={<PodsIcon />}
           title="No Collaboration Pods Yet"
-          hint="Group isolated sessions to relay context across agents and runners."
-          action={<button type="button" className="btn primary sm" onClick={onNewPod}>New Pod</button>}
-        />
+          actions={<button type="button" className="btn primary" onClick={onNewPod}>New Pod</button>}
+        >
+          Group isolated sessions to relay context across agents and runners.
+        </State>
       </div>
     );
   }
@@ -403,7 +406,7 @@ function PodDetailContent({ podId }: { podId: string }) {
     return (
       <div className="run-detail pod-detail">
         <DetailBar title="Collaboration Pod" backLabel="Back to Collaboration Pods" onBack={() => navigate({ name: "pods" })} />
-        <Empty title={placeholder.title} hint={placeholder.hint} />
+        <State variant={placeholder.variant} title={placeholder.title}>{placeholder.hint}</State>
       </div>
     );
   }

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { State } from "./State.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
 import { SKILL_DESCRIPTION_MAX_CHARS, runnerSupportsProtocol, type RunnerView, type SkillDriftState, type SkillFile, type SkillInvocationPolicy } from "@wollipog/protocol";
@@ -6,7 +7,7 @@ import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { machineOptionLabels } from "../runners.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { Empty, Modal, Skeleton } from "./common.js";
+import { Modal, Skeleton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { Select } from "./ui/ChoiceControls.js";
 import { SkillsIcon } from "./Icons.js";
@@ -504,19 +505,22 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
               <span className="skills-item-description">Edited copies on machines that no library skill shows</span>
             </button>
           )}
-          {skills === null && <Skeleton rows={4} announce="Loading skills" />}
+          {/* A failed load reports its error above; it must not also spin as if it were still loading. */}
+          {skills === null && !error && <Skeleton rows={4} announce="Loading skills" />}
           {skills !== null && skills.length === 0 && (
-            <Empty
-              icon={<SkillsIcon size={28} />}
+            <State
+              compact
+              icon={<SkillsIcon />}
               title="No Skills Yet"
               headingLevel={3}
-              hint="Create a skill to share reusable instructions with the agents on your machines."
-              action={
-                <button type="button" className="btn primary sm" onClick={() => setDialog("new-skill")}>
+              actions={
+                <button type="button" className="btn primary" onClick={() => setDialog("new-skill")}>
                   New Skill
                 </button>
               }
-            />
+            >
+              Create a skill to share reusable instructions with the agents on your machines.
+            </State>
           )}
           {grouped.map((group) => (
             <div className="skills-group" key={group.id ?? "ungrouped"}>

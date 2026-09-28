@@ -101,7 +101,7 @@ for (const exception of [
   { name: "attachment", query: "&attachment=1", visible: ".image-strip" },
   { name: "pending approval", query: "&approval=checkpoint", visible: ".tl-request-card" },
   { name: "pending question", query: "&approval=question&draft=Preserved", visible: ".composer-question-waiting" },
-  { name: "recovery notice", query: "&quarantine=1", visible: ".quarantine-banner" },
+  { name: "recovery notice", query: "&quarantine=1", visible: '[aria-label="Conversation Quarantined"]' },
 ]) {
   test(`${exception.name} keeps the phone composer expanded`, async ({ page }) => {
     await openComposer(page, 393, exception.query);

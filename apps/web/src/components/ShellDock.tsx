@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { Notice } from "./Notice.js";
 import { isTerminal, nativeTuiHasTrackedGuardrails, type ShellKind, type ShellView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
@@ -556,7 +557,7 @@ export function ShellDock({
               Agent TUI is unavailable while this session has a cost budget, cost checkpoint, or tool-call limit. Clear those guardrails or use Direct.
             </div>
           )}
-          {error && <div className="composer-error">{error}</div>}
+          {error && <Notice tone="danger" compact>{error}</Notice>}
           {activeShell?.kind === "agent_tui" && (
             <div className="hint" role="status">
               {hookGovernanceActive

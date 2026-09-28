@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
+import { State, useSnapshotState } from "./State.js";
 import {
   agentContextKey,
   runnerCapabilityRequirement,
@@ -30,8 +31,9 @@ import {
   unknownRunnerTitle,
 } from "../runners.js";
 
-import { CopyButton, Empty, Modal, Spinner } from "./common.js";
+import { CopyButton, Modal, Spinner } from "./common.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { Notice } from "./Notice.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { OnboardRunnerDialog } from "./OnboardRunnerDialog.js";
 import { AddBoxDialog } from "./AddBoxDialog.js";
@@ -535,7 +537,7 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
                 <span>Find Agent Sessions</span>
               </button>
             </div>
-            {!externalSessionsSupported && <div className="empty-sub box-hint">{unsupported}</div>}
+            {!externalSessionsSupported && <Notice tone="neutral" compact>{unsupported}</Notice>}
           </div>
         )}
       </div>
@@ -558,25 +560,19 @@ function NativeRunnerHealth({
   const hint = nativeRunnerUpdateHint(runner.protocolVersion);
   if (runner.status === "offline") {
     return (
-      <div className="empty-sub box-hint connection-recovery" role="status">
-        <div>
-          <strong>Connection is offline.</strong> The runner process may be stopped or its saved credential may no longer be active.
-        </div>
-        {canRepair ? (
-          <button className="btn sm" type="button" onClick={onRepair}>Repair Credentials</button>
-        ) : (
-          <span>Ask an organization owner or admin to repair this connection.</span>
-        )}
-      </div>
+      <Notice tone="warning" role="status" ariaLabel="Connection Offline" title="Connection Offline"
+        actions={canRepair && <button className="btn sm" type="button" onClick={onRepair}>Repair Credentials</button>}>
+        <p>The runner process may be stopped or its saved credential may no longer be active.</p>
+        {!canRepair && <p>Ask an organization owner or admin to repair this connection.</p>}
+      </Notice>
     );
   }
   if (!hint) return null;
   return (
-    <div className="empty-sub box-hint" role="status">
-      <strong>Native runner update required.</strong> {hint} Standalone installs should rerun the
-      matching <code>scripts/install-runner</code> installer before relaunching. See{" "}
-      <code>docs/runner-updates.md</code>.
-    </div>
+    <Notice tone="warning" role="status" title="Native Runner Update Required">
+      {hint} Standalone installs should rerun the matching <code>scripts/install-runner</code> installer before
+      relaunching. See <code>docs/runner-updates.md</code>.
+    </Notice>
   );
 }
 
@@ -1492,10 +1488,8 @@ export function BoxCard({
         </div>
       )}
       {updateResult && <div className="runner-update-result" role="status">{updateResult}</div>}
-      {connHint && <div className="empty-sub box-hint">{connHint}</div>}
-      <div className="empty-sub box-hint">
-        {sshRunnerLifecycleHint()}
-      </div>
+      {connHint && <Notice tone="info">{connHint}</Notice>}
+      <Notice tone="neutral">{sshRunnerLifecycleHint()}</Notice>
       {runner ? (
         <RunnerDetails runner={runner} online={harnessStatusCurrent} />
       ) : inProgress ? (
@@ -1588,6 +1582,7 @@ export function NativeRunnerCard({
 export function RunnersView() {
   const api = useApi();
   const { runners, boxes, view, navigate } = useStore();
+  const snapshot = useSnapshotState();
   const instances = useInstances();
   const bundledLocalRunner = hasBundledLocalRunner();
   const [busy, setBusy] = useState<Record<string, boolean>>({});
@@ -1794,21 +1789,15 @@ export function RunnersView() {
             <button type="button" className="btn ghost sm" onClick={loadMachineAccess}>Retry</button>
           </div>
         )}
-        {total === 0 ? (
-          <Empty
-            icon={<ComputerIcon size={28} />}
+        {total === 0 && (snapshot.offline || snapshot.loading) ? (
+          // An empty machine list proves nothing before the first snapshot or while disconnected.
+          <State variant={snapshot.offline ? "offline" : "loading"}>
+            {snapshot.offline ? "Reconnecting…" : "Loading machines…"}
+          </State>
+        ) : total === 0 ? (
+          <State
+            icon={<ComputerIcon />}
             title="No Machines Connected"
-            hint={
-              <div className="empty-sub">
-                {canManageMachines ? (
-                  <>Connect via SSH or add a native runner to start working on this dashboard.</>
-                ) : identityRole ? (
-                  <>Ask an organization owner or admin to connect a machine.</>
-                ) : (
-                  <>Loading machine access…</>
-                )}
-              </div>
-            }
             // Only where the user CAN act. A viewer without machine-management rights is told to
             // ask an admin, and offering them a button that fails is worse than offering none —
             // §11.3's rule about disabled controls carrying a reason, applied to an empty state.
@@ -1817,12 +1806,20 @@ export function RunnersView() {
             // control plane — so on a remote instance it set up a machine the empty screen in front
             // of you does not show, and could overwrite the local runner while doing it. The gate is
             // `offerLocalSetup`, the same one the toolbar uses.
-            action={!canManageMachines ? undefined : offerLocalSetup
-              ? <button type="button" className="btn primary sm" onClick={() => setOnboarding("local")}>
+            actions={!canManageMachines ? undefined : offerLocalSetup
+              ? <button type="button" className="btn primary" onClick={() => setOnboarding("local")}>
                   {localRunnerStatus?.enabled ? "Reconnect This Machine" : "Set Up This Machine"}
                 </button>
-              : <button type="button" className="btn primary sm" onClick={() => setAddingBox(true)}>Connect via SSH</button>}
-          />
+              : <button type="button" className="btn primary" onClick={() => setAddingBox(true)}>Connect via SSH</button>}
+          >
+            {canManageMachines ? (
+              <>Connect via SSH or add a native runner to start working on this dashboard.</>
+            ) : identityRole ? (
+              <>Ask an organization owner or admin to connect a machine.</>
+            ) : (
+              <>Loading machine access…</>
+            )}
+          </State>
         ) : <div className="runner-grid">
         {boxList.map((box) => (
           <BoxCard

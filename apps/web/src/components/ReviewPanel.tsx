@@ -1,4 +1,5 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { Notice } from "./Notice.js";
 import {
   isTerminal,
   normalizeSourcePath,
@@ -748,10 +749,10 @@ export function ReviewPanel({
           {fineDiffHint}
         </div>
       )}
-      {error && <div className="composer-error">{error}</div>}
+      {error && <Notice tone="danger" compact>{error}</Notice>}
       {/* A failed status refresh keeps the last-known numbers on screen — say so, or the
           stale branch/file count reads as current. */}
-      {git.error && <div className="composer-error">Git status refresh failed: {git.error}</div>}
+      {git.error && <Notice tone="danger" compact>Git status refresh failed: {git.error}</Notice>}
 
       <div className="git-status-row">
         <button className="btn ghost sm" onClick={loadStatus} disabled={disabled}>
@@ -850,7 +851,7 @@ export function ReviewPanel({
             ))}
           </div>
         </div>
-        {diffError && <div className="composer-error">{diffError}</div>}
+        {diffError && <Notice tone="danger" compact>{diffError}</Notice>}
         {stageNotice && <div className="hint warn">{stageNotice}</div>}
         {diffLagsStatus && (
           // Amber only for the failure: it persists until the user acts, while a deferred reload
@@ -934,7 +935,7 @@ export function ReviewPanel({
           </div>
         </div>
         {findingRefusal !== null && <p id={findingRefusalId} className="muted review-findings-refusal">{findingRefusal}</p>}
-        {findingError && <div className="composer-error">Review findings: {findingError}</div>}
+        {findingError && <Notice tone="danger" compact>Review findings: {findingError}</Notice>}
         {findingNotice && <div className="git-ok">✓ {findingNotice}</div>}
         {findings.filter((finding) => finding.status === "open" || finding.status === "sent").length === 0 ? (
           <div className="muted review-findings-empty">Add a comment from any exact diff line to start a review.</div>

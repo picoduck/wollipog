@@ -1,4 +1,5 @@
 import React, { Component, type ErrorInfo, type ReactNode } from "react";
+import { Notice } from "./Notice.js";
 import { PageHeader } from "./PageHeader.js";
 
 /**
@@ -34,13 +35,14 @@ export class ErrorBoundary extends Component<
   render() {
     if (this.state.error) {
       const card = (
-        <div className="error-boundary" role="alert">
-          <div className="error-boundary-title">Something broke rendering the {this.props.label}.</div>
-          <div className="error-boundary-message">{String(this.state.error)}</div>
-          <button className="btn sm" onClick={() => this.setState({ error: null })}>
-            Try Again
-          </button>
-        </div>
+        <Notice tone="danger" role="alert" className="view-error" title="Something Went Wrong"
+          actions={<button type="button" className="btn sm" onClick={() => this.setState({ error: null })}>Try Again</button>}>
+          <p>Something broke rendering the {this.props.label}.</p>
+          <details className="notice-details">
+            <summary>Show Details</summary>
+            <code>{String(this.state.error)}</code>
+          </details>
+        </Notice>
       );
       if (this.props.pageTitle === undefined) return card;
       return (
