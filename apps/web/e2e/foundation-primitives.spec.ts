@@ -141,6 +141,20 @@ test.describe("at 390px", () => {
     });
     expect(drivers.count, "the fixture has a per-driver split").toBeGreaterThan(0);
     expect(drivers).toMatchObject({ visible: true, named: true });
+
+    // The headers are off screen here, so every figure on a meta line carries its own name: the
+    // period breakdown and Cost by User as the view opens, then the Model breakdown.
+    const unnamed = () => page.locator(".usage-table tbody td.cell-meta").evaluateAll((cells) => cells
+      .filter((cell) => getComputedStyle(cell).display !== "none" && cell.getBoundingClientRect().height > 0)
+      .filter((cell) => {
+        const label = cell.querySelector(".cell-label");
+        return !label || getComputedStyle(label).display === "none" || !label.textContent?.trim();
+      })
+      .map((cell) => `${cell.closest("table")?.querySelector("caption")?.textContent}: ${cell.textContent}`));
+    expect(await unnamed(), "no unlabelled figure on a phone").toEqual([]);
+    await page.getByRole("radiogroup", { name: "Usage Breakdown" }).getByRole("radio", { name: "Model" }).click();
+    await expect(page.locator(".usage-breakdown-section caption")).toHaveText("Usage by Model");
+    expect(await unnamed(), "nor in the Model breakdown").toEqual([]);
   });
 
   test("a long trailing value gives way to the row's title", async ({ page }) => {

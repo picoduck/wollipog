@@ -725,8 +725,8 @@ export function UsageView() {
                       <tr key={row.key}>
                         <th scope="row">{row.key}{row.costSource === "unpriced" ? " · unpriced" : ""}</th>
                         <td className="num cell-status">{formatMoney(row.costUsd)}</td>
-                        <td className="num cell-meta cell-dim">{formatShare(row.share)}</td>
-                        <td className="num cell-meta cell-dim">{formatCompactTokens(processedTokens(row))}</td>
+                        <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Share: </span>{formatShare(row.share)}</td>
+                        <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Tokens: </span>{formatCompactTokens(processedTokens(row))}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -857,13 +857,14 @@ export function UsageView() {
                         <tr key={row.userId}>
                           <th scope="row"><PersonalIdentifier value={row.userName} label="User Name" />{over ? " · paused by daily budget" : ""}</th>
                           <td className="num cell-status">
+                            <span className="cell-label" aria-hidden="true">Today: </span>
                             {formatMoney(row.todayUsd)}
                             {row.dailyBudgetUsd != null && (
                               <span className="cell-dim"> of {formatMoney(row.dailyBudgetUsd)}</span>
                             )}
                           </td>
-                          <td className="num cell-meta cell-dim">{formatMoney(row.last7DaysUsd)}</td>
-                          <td className="num cell-meta cell-dim">{formatMoney(row.last30DaysUsd)}</td>
+                          <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Last 7 Days: </span>{formatMoney(row.last7DaysUsd)}</td>
+                          <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Last 30 Days: </span>{formatMoney(row.last30DaysUsd)}</td>
                         </tr>
                       );
                     })}
