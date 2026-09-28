@@ -68,6 +68,19 @@ const TABLE: readonly Row[] = [
   ["job", "result_missing", "Result Missing", "warning"],
   // Session header, background work
   ["background_work", "orphaned", "Background Work Lost", "danger"],
+  // Queued message (the transcript's pending bubbles and the composer's queue)
+  ["queuedMessage", "pending", "Pending", "neutral"],
+  ["queuedMessage", "sent", "Sending", "info"],
+  ["queuedMessage", "accepted", "Accepted", "info"],
+  ["queuedMessage", "queued", "Queued", "neutral"],
+  ["queuedMessage", "started", "Starting", "info"],
+  ["queuedMessage", "pending_delivery", "Pending Delivery", "info"],
+  ["queuedMessage", "steering", "Steering…", "info"],
+  ["queuedMessage", "held", "Held", "warning"],
+  ["queuedMessage", "uncertain", "Delivery Uncertain", "warning"],
+  ["queuedMessage", "failed", "Delivery Failed", "danger"],
+  ["queuedMessage", "not_sent", "Not Sent", "danger"],
+  ["queuedMessage", "cancelled", "Cancelled", "neutral"],
   // Delivery receipt
   ["delivery", "delivered", "Delivered", "success"],
   ["delivery", "delivery_failed", "Delivery Failed", "danger"],
@@ -107,6 +120,7 @@ test("only actively progressing work pulses, and an unverified source draws a ho
   // A Stop waiting on an offline runner is not being delivered, so it does not claim progress (#208).
   assert.equal(statusMeta("session", "stop_waiting_for_runner").pulse, false);
   assert.equal(statusMeta("job", "running").pulse, true);
+  assert.deepEqual(pulsing("queuedMessage"), ["sent", "started", "steering"]);
   assert.equal(statusMeta("job", "stalled").pulse, false);
   assert.equal(statusMeta("machine", "offline").hollow, true);
   assert.equal(statusMeta("job", "unverified").hollow, true);
@@ -120,7 +134,8 @@ test("an unknown value reads Status Unavailable, never its raw enum or a prototy
 
 test("every label is Title Case copy, with no glyph and no CSS transform needed", () => {
   for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "tool", "family",
-    "job", "background_work", "delivery", "notification", "workflow", "pod", "member", "provider_account", "usage"] as const) {
+    "job", "background_work", "queuedMessage", "delivery", "notification", "workflow", "pod", "member", "provider_account",
+    "usage"] as const) {
     for (const value of statusValues(domain)) {
       const { label, shortLabel } = statusMeta(domain, value);
       for (const text of [label, shortLabel].filter((entry): entry is string => Boolean(entry))) {

@@ -142,6 +142,26 @@ const VOCABULARY = {
     continuation_pending: info("Continuation Pending", { pulse: true, shortLabel: "Pending" }),
     orphaned: danger("Background Work Lost", { shortLabel: "Lost" }),
   },
+  /**
+   * A message the user sent that the agent has not taken yet: the transcript's pending bubbles
+   * and the composer's queue. Keys are the wire `PendingPromptState` values, plus the states the
+   * queue derives (Pending Delivery, Steering…, Held) and the two failure readings (Not Sent,
+   * Cancelled).
+   */
+  queuedMessage: {
+    pending: neutral("Pending"),
+    sent: info("Sending", { pulse: true }),
+    accepted: info("Accepted"),
+    queued: neutral("Queued"),
+    started: info("Starting", { pulse: true }),
+    pending_delivery: info("Pending Delivery"),
+    steering: info("Steering…", { pulse: true }),
+    held: warning("Held"),
+    uncertain: warning("Delivery Uncertain"),
+    failed: danger("Delivery Failed"),
+    not_sent: danger("Not Sent"),
+    cancelled: neutral("Cancelled"),
+  },
   /** Delivery receipts: a background result returning, or a push notification. */
   delivery: {
     delivered: success("Delivered"),

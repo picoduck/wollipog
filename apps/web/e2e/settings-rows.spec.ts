@@ -758,7 +758,7 @@ test("a fresh load leaves the tab order at the top of the page", async ({ page }
 test("every section renders its own panel", async ({ page }) => {
   for (const { id, title } of SETTINGS_SECTIONS) {
     await useHarness(page, "dark", { section: id });
-    await expect(page.locator(".settings-panel .ui-row, .settings-panel .settings-about").first(),
+    await expect(page.locator(".settings-panel .ui-row, .settings-panel .facts").first(),
       `the ${title} panel must render something`).toBeVisible();
     await expect(page.locator(`.settings-section-link[aria-current="page"]`)).toHaveText(title);
   }

@@ -119,7 +119,7 @@ test("cards expose semantic relative timing while every mounted timeline shares 
     assert.equal(intervalStarts, 1, "two timelines and many rows still create one interval");
     assert.equal(visibilityAdds, 1, "the page clock owns one visibility listener");
 
-    for (const disclosure of container.querySelectorAll<HTMLButtonElement>(".tl-work > .tl-disclosure")) {
+    for (const disclosure of container.querySelectorAll<HTMLButtonElement>(".tl-work > .disclosure-trigger")) {
       await act(async () => disclosure.click());
     }
 
@@ -337,7 +337,7 @@ test("live elapsed time never falls behind the latest observed activity", async 
   }];
   try {
     await act(async () => root.render(<EventTimeline items={observedTool} sessionActive />));
-    const disclosure = container.querySelector<HTMLButtonElement>(".tl-work > .tl-disclosure");
+    const disclosure = container.querySelector<HTMLButtonElement>(".tl-work > .disclosure-trigger");
     assert.ok(disclosure);
     await act(async () => disclosure.click());
     assert.match(container.textContent ?? "", /Elapsed 10s/,
@@ -370,7 +370,7 @@ test("a live one-observation tool remains Started until it becomes a stable reco
   }];
   try {
     await act(async () => root.render(<EventTimeline items={oneObservationTool} sessionActive />));
-    const disclosure = container.querySelector<HTMLButtonElement>(".tl-work > .tl-disclosure");
+    const disclosure = container.querySelector<HTMLButtonElement>(".tl-work > .disclosure-trigger");
     assert.ok(disclosure);
     await act(async () => disclosure.click());
     assert.equal(container.querySelector(".tl-tool .tl-timestamp-label")?.textContent, "Started");
@@ -425,7 +425,7 @@ test("inactive sessions show stable absolute times and bound dangling tools to o
     await act(async () => {
       root.render(<EventTimeline items={items} sessionActive={false} />);
     });
-    for (const disclosure of container.querySelectorAll<HTMLButtonElement>(".tl-work > .tl-disclosure")) {
+    for (const disclosure of container.querySelectorAll<HTMLButtonElement>(".tl-work > .disclosure-trigger")) {
       await act(async () => disclosure.click());
     }
 
@@ -472,7 +472,7 @@ test("inactive sessions show stable absolute times and bound dangling tools to o
       },
     ];
     await act(async () => root.render(<EventTimeline items={subagentItems} sessionActive={false} />));
-    for (const disclosure of container.querySelectorAll<HTMLButtonElement>(".tl-work > .tl-disclosure")) {
+    for (const disclosure of container.querySelectorAll<HTMLButtonElement>(".tl-work > .disclosure-trigger")) {
       await act(async () => disclosure.click());
     }
     const subagent = container.querySelector<HTMLElement>(".tl-subagent");

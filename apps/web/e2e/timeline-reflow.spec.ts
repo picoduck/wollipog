@@ -720,13 +720,13 @@ test("semantic reveal opens collapsed ancestors, yields to the reader, and can b
   await expect(target).toHaveAttribute("data-virtual-target", "true");
   await expect(target).toHaveAttribute("aria-current", "location");
   await expect.poll(async () => target.evaluate((row) => row === document.activeElement)).toBe(true);
-  await expect(page.locator(".tl-work .tl-disclosure")).toHaveAttribute("aria-expanded", "true");
-  await expect(page.locator(".tl-subagent .tl-disclosure")).toHaveCount(2);
-  for (const disclosure of await page.locator(".tl-subagent .tl-disclosure").all()) {
+  await expect(page.locator(".tl-work .disclosure-trigger")).toHaveAttribute("aria-expanded", "true");
+  await expect(page.locator(".tl-subagent .subagent-toggle")).toHaveCount(2);
+  for (const disclosure of await page.locator(".tl-subagent .subagent-toggle").all()) {
     await expect(disclosure).toHaveAttribute("aria-expanded", "true");
   }
 
-  const innerDisclosure = page.locator(".tl-subagent .tl-disclosure").last();
+  const innerDisclosure = page.locator(".tl-subagent .subagent-toggle").last();
   await innerDisclosure.click();
   await expect(innerDisclosure).toHaveAttribute("aria-expanded", "false");
   await settleLayout(page, 4);
@@ -766,7 +766,7 @@ test("a completed semantic reveal cannot leak across a history epoch", async ({ 
   await remount.click();
   await expect(target).toHaveCount(0);
   await expect(page.locator("[aria-current='location']")).toHaveCount(0);
-  await expect(page.locator(".tl-work .tl-disclosure")).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".tl-work .disclosure-trigger")).toHaveAttribute("aria-expanded", "false");
   await expect.poll(async () => remount.evaluate((button) => button === document.activeElement)).toBe(true);
 });
 

@@ -417,8 +417,13 @@ export function Modal({
     );
   }
   const panelPortal = createPortal(panel, panelHost);
+  // Stacked dialogs share one dim (§7.1): only the oldest open dialog's backdrop draws it.
+  const stacked = owner !== undefined && owner.id !== layerId;
   const sheet = (
-    <div className="modal-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeTopOfSheet(); }}>
+    <div
+      className={stacked ? "modal-backdrop stacked" : "modal-backdrop"}
+      onMouseDown={(event) => { if (event.target === event.currentTarget) closeTopOfSheet(); }}
+    >
       <div
         ref={surfaceRef}
         className={["modal", size === "md" ? "" : size, phoneSheet === "full" ? "sheet-full" : ""].filter(Boolean).join(" ")}

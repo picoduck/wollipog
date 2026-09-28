@@ -25,7 +25,7 @@ export function PersonalIdentifierRevealButton({
   return (
     <button
       type="button"
-      className={`personal-identifier-toggle${withText ? " with-text" : ""}`}
+      className={`pid-toggle${withText ? " with-text" : ""}`}
       aria-label={withText ? undefined : action}
       aria-controls={controls}
       title={withText ? undefined : action}
@@ -40,7 +40,7 @@ export function PersonalIdentifierRevealButton({
 /** The fixed-length mask; assistive technology hears "Hidden", never the value or its length. */
 export function PersonalIdentifierMask() {
   return (
-    <span className="personal-identifier-mask">
+    <span className="pid-mask">
       <span aria-hidden="true">{MASKED_IDENTIFIER}</span>
       <span className="sr-only">Hidden</span>
     </span>
@@ -88,8 +88,8 @@ export function PersonalIdentifier({
   const masked = sensitive ?? isPersonalIdentifier(value);
   if (!masked) return <span className={className}>{value}</span>;
   return (
-    <span className={`personal-identifier${className ? ` ${className}` : ""}`} data-revealed={revealed}>
-      {revealed ? <span className="personal-identifier-value">{value}</span> : <PersonalIdentifierMask />}
+    <span className={`pid${className ? ` ${className}` : ""}`} data-revealed={revealed}>
+      {revealed ? <span className="pid-value">{value}</span> : <PersonalIdentifierMask />}
       <PersonalIdentifierRevealButton
         label={label}
         revealed={revealed}

@@ -12,7 +12,7 @@ test("activity timestamps tick without layout shift and become stable absolute r
   await page.goto("/timeline-timestamps-e2e.html");
   await expect(page.locator('[data-virtual-kind="timeline"]')).toHaveAttribute("data-virtual-total", "42");
   expect(await page.locator("[data-virtual-row]").count()).toBeLessThan(42);
-  await page.locator(".tl-work > .tl-disclosure").click();
+  await page.locator(".tl-work > .disclosure-trigger").click();
 
   await expect(page.locator(".tl-agent-msg time")).toHaveCount(2);
   await expect(page.locator(".tl-reasoning time")).toHaveCount(1);

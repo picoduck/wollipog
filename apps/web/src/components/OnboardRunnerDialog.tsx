@@ -22,6 +22,7 @@ import {
 import { skillRecommended, skillsFromPayload, type SkillSummary } from "../skills.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { CopyButton, Modal, Spinner } from "./common.js";
+import { Steps } from "./Steps.js";
 
 /** Built-in skills the signed-in user has neither assigned nor dismissed. Hidden when none remain,
  * and when the library cannot be read: a pointer never gets in the way of connecting a machine. */
@@ -343,7 +344,7 @@ export function OnboardRunnerDialog({
             server, a Mac. It connects <em>out</em> to this control plane, so there's nothing to expose inbound on the runner.
           </p>
 
-          <ol className="onboard-steps">
+          <Steps>
             <li>
               <div className="step-head">Prerequisites on That Machine</div>
               <ul className="tick">
@@ -449,7 +450,7 @@ export function OnboardRunnerDialog({
               <p className="hint">This checklist updates live while the dialog is open.</p>
               <OnboardingHealthChecklist health={health} />
             </li>
-          </ol>
+          </Steps>
           </>}
           <OnboardingRecommendedSkills onOpen={(skillId) => {
             onClose();

@@ -566,7 +566,7 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
   // While recovery is active, the context meter yields visually while retaining the exact seat
   // width so the centered cluster cannot shift as activity toggles.
   assert.match(compact![1]!,
-    /\.transcript-status-context:has\(> \.transcript-recovery-strip-echo\.active\) > \.context-meter\s*\{\s*visibility:\s*hidden;\s*\}/,
+    /\.transcript-status-context:has\(> \.transcript-recovery-strip-echo\.active\) > \.context-control\s*\{\s*visibility:\s*hidden;\s*\}/,
     "the meter must yield without resizing the active recovery echo's seat");
 
   // The echo's own activity toggle is visibility-only, like the pill's.
@@ -603,7 +603,7 @@ test("short panes keep the status strip, and the pinned summary is bounded by th
   );
   assert.deepEqual(
     phone.declarationsForSelector(
-      ".session-detail .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-meter",
+      ".session-detail .transcript-status-context:has(> .transcript-recovery-strip-echo.active) > .context-control",
     ).get("visibility"),
     ["hidden"],
     "the meter must yield without shifting a full-height phone Session",

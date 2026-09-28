@@ -29,6 +29,7 @@ import {
   useAccessScopeIdentity,
 } from "./AccessScopeControls.js";
 import { Modal } from "./common.js";
+import { ChevronRightIcon } from "./Icons.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
 
 interface NewProjectLocation {
@@ -225,21 +226,19 @@ export function ProjectLocationDialog({
             <span><strong>Generate Starter Config</strong><small>After adding the Location, create .wollipog.json for review. No tools run, and nothing is staged or committed.</small></span>
           </label>
         )}
-        <div className="project-location-create-disclosure">
+        <div className="project-location-create-section">
           <button
             type="button"
-            className="project-location-create-toggle"
+            className="disclosure-trigger"
             aria-expanded={createExpanded}
             aria-controls="create-project-location-panel"
             disabled={busyKey !== null || !canCreateLocation}
             onClick={toggleCreate}
           >
+            <ChevronRightIcon className="disclosure-chevron" />
             <span className="project-location-create-heading">
               <strong id="create-project-location-heading">Create New Location</strong>
               <span className="muted">Register a folder on a connected machine.</span>
-            </span>
-            <span className="project-location-create-indicator" aria-hidden="true">
-              {createExpanded ? "−" : "+"}
             </span>
           </button>
           {!canCreateLocation && (

@@ -572,7 +572,7 @@ export function BackgroundWorkPanel({
                           <strong>Delivery Receipt {deliveryIndex + 1}</strong>
                           <DeliveryStageBadge stage={deliveryStage([delivery], locallyAcknowledgedDelivery)} />
                         </div>
-                        <dl className="background-work-job-meta">
+                        <dl className="facts">
                           <div><dt>Recorded Job Count</dt><dd>{delivery.jobCount}</dd></div>
                           <div><dt>Recorded Terminal Count</dt><dd>{delivery.terminalCount}</dd></div>
                           <div><dt>Notification</dt><dd>{notificationStage([delivery]) ?? "Not Requested"}</dd></div>
@@ -599,7 +599,7 @@ export function BackgroundWorkPanel({
                           <strong>{jobLabel}</strong>
                           <StatusBadge meta={statusMeta("job", state)} />
                         </div>
-                        <dl className="background-work-job-meta">
+                        <dl className="facts">
                           <div><dt>Started</dt><dd>{recordedTime(job.registeredAt, now)}</dd></div>
                           <div><dt>Elapsed</dt><dd>{duration || "Unavailable"}</dd></div>
                           <div><dt>Latest Activity</dt><dd>{recordedTime(job.lastObservedAt, now)}</dd></div>

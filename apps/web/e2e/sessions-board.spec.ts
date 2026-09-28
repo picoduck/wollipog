@@ -13,7 +13,7 @@ const PAGE = "/sessions-board-e2e.html";
 
 async function openHarness(page: Page, path = "/") {
   await page.goto(`${PAGE}?path=${encodeURIComponent(path)}`);
-  await expect(page.locator(".inbox-toolbar")).toBeVisible();
+  await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
 }
 
 function harnessPath(page: Page): string | null {
@@ -450,7 +450,7 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   await expect(page.locator(".inbox-view.expanded")).toHaveCount(0);
 
   await page.reload();
-  await expect(page.locator(".inbox-toolbar")).toBeVisible();
+  await expect(page.locator(".inbox-list-pane > .toolbar")).toBeVisible();
   const persistedQueued = page.locator(".inbox-row-shell", { hasText: "Queued Session" });
   await expect(persistedQueued.getByLabel("Pinned Session")).toBeVisible();
   await persistedQueued.click({ button: "right" });

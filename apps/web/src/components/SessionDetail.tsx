@@ -5388,17 +5388,17 @@ function SessionDetailLoaded({
                   const locallyPromoting = queueSteeringPending.has(q.id);
                   const reserved = q.steeringState === "promoting" || q.steeringState === "uncertain";
                   const durable = q.durableDeliveryState !== undefined;
-                  const queueLabel = q.durableDeliveryState === "failed"
-                    ? "Delivery Failed"
+                  const queueStatus = statusMeta("queuedMessage", q.durableDeliveryState === "failed"
+                    ? "failed"
                     : q.durableDeliveryState === "uncertain"
-                      ? "Delivery Uncertain"
+                      ? "uncertain"
                       : q.durableDeliveryState === "pending"
-                        ? "Pending Delivery"
+                        ? "pending_delivery"
                         : locallyPromoting || q.steeringState === "promoting"
-                    ? "Steering…"
-                    : q.steeringState === "uncertain"
-                      ? "Delivery Uncertain"
-                      : session.queueHeld ? "Held" : "Queued";
+                          ? "steering"
+                          : q.steeringState === "uncertain"
+                            ? "uncertain"
+                            : session.queueHeld ? "held" : "queued");
                   // A terminal durable receipt records delivery that has already stopped, so it can
                   // never be cancelled. It carries dismissal instead, and the two are mutually
                   // exclusive: cancellation removes work that may still run, dismissal only hides
@@ -5433,14 +5433,13 @@ function SessionDetailLoaded({
                       data-testid={`queued-prompt-${q.id}`}
                       aria-current={queuedEdit?.promptId === q.id ? "true" : undefined}
                     >
-                      <span
-                        className={`queued-badge${heldBadge ? " held" : ""}`}
+                      <StatusBadge
+                        meta={queueStatus}
+                        inline
                         title={heldBadge
                           ? "Waiting for the active turn or control-plane decision to settle; resolve any visible prompt to continue"
                           : queueTitle}
-                      >
-                        {queueLabel}
-                      </span>
+                      />
                       <span className="queued-text">
                         {q.hasImages && <span className="queued-img" aria-hidden="true">📎 </span>}
                         {q.text || (q.hasImages ? "(attachment)" : "")}

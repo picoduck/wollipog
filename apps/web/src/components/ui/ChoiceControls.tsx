@@ -614,7 +614,7 @@ export function SearchableCombobox<T extends string>({
           onActiveChange={setActive}
           isOptionDisabled={(option) => Boolean(option.disabled)}
           onSelect={commit}
-          className="ui-searchable-combobox-list ui-select-list"
+          className="ui-searchable-combobox-list menu listbox"
           style={listStyle}
           before={results.length === 0
             ? <p className="ui-select-empty">{emptyLabel}</p>
@@ -742,7 +742,8 @@ export function resetSelectPreviewRegistry(): void {
 export const TOUCH_OPTION_MIN_HEIGHT_PX = 44;
 
 /**
- * `.ui-select-list`'s own box: 4px of padding top and bottom, plus its 1px border on each edge.
+ * The open list's own box (`.menu.listbox`): 4px of padding top and bottom, plus its 1px border on
+ * each edge.
  *
  * It counts because `box-sizing: border-box` is global, so the `max-height` the anchored-menu
  * helper sets has to cover the chrome as well as the rows inside it. The old estimate budgeted 8px
@@ -1103,7 +1104,7 @@ export function Select<T extends string>({
       </button>
       {open && (
         <div
-          className="ui-select-list"
+          className="menu listbox"
           id={popover.panelId}
           ref={popover.panelRef}
           role="listbox"

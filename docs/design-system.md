@@ -505,6 +505,11 @@ Rules
 - Gap 8px between buttons. Groups never mix heights: every control in one row uses the same
   control-height token.
 - Segmented and split buttons count as one control.
+- **Split button** (`.split`): a primary action and the menu of its alternatives (Open in VS Code
+  and Choose Destination). Two `.btn`s in a `.split` join on one shared edge: the first loses its
+  trailing radius, the second its leading radius, a 1px overlap, and 8px side padding for the
+  chevron. The recipe sits at a single class's weight (`:where()`), so a component can size its
+  segments. The session header's Open control is the first consumer (`EditorSelect`).
 - Pills are never actions. A clickable status (for example a descendant-request count) is a
   `.btn.sm.ghost` containing a status badge, so it looks and hits like a button.
 
@@ -648,6 +653,32 @@ or unreadable value means Bottom Dock.
   live. Moving never restarts a running shell; its tab and scrollback move with it.
 - The Terminal toggle and Ctrl+` open the terminal wherever it is placed.
 
+### 4.7 Toolbar
+
+A row of tools above the content they act on: search, filters, view switches and a result count.
+
+- `.toolbar`: one row, `display: flex; align-items: center; gap: var(--space-2); min-width: 0`.
+  Every control in it uses one control height (§3.2).
+- The toolbar is only the row. Where it sits (the Sessions tab bar, the Archive filter card, the
+  space above a machine list) is the region's decision, written as that region's rule on
+  `.toolbar` (`.inbox-list-pane > .toolbar`). Regions do not define their own toolbar class.
+- `.filter-btn` (`FilterButton`) is the phone "Filters" button that opens the filter sheet (§15.1):
+  a `.btn` that says "Filters", with `aria-haspopup="dialog"`. While any filter is applied it is
+  `.is-set`, which gives it the `--control-outline` edge of a chosen control (§3.1), and it shows
+  the number applied. No screen uses it yet.
+- Replaces `.agent-defaults-toolbar`, `.archive-toolbar`, `.board-toolbar`, `.connections-toolbar`
+  with `.view-toolbar`, `.inbox-toolbar` and `.usage-toolbar-controls`.
+
+### 4.8 Breadcrumbs
+
+A path trail, such as the Files panel's folder path.
+
+- `.crumbs` holds the trail: `--type-small`, wrapping onto a second line rather than clipping.
+- Each ancestor is a `button.crumb` in `--accent` (it navigates, like a link, and underlines on
+  hover). The current segment is `.crumb.is-current` in `--text`. A disabled crumb is `--text-dim`.
+- Separators are `.crumb-sep` (`/`, `--text-faint`, `aria-hidden`).
+- Replaces `.files-crumbs` and `.files-crumb`.
+
 ---
 
 ## 5. Lists, Rows and Cards
@@ -706,6 +737,50 @@ default (converge on the People & Devices anatomy).
   equal because content is bounded).
 - A card is an `<article>` with a stretched link or button for the primary click, never a
   `<button>` wrapping content.
+
+### 5.4 Facts (Read-Only Labels and Values)
+
+One recipe for every read-only label and value list. It is the §19.4 merge of the proposed
+`.facts`, `dl.facts`, `.kv` and `.kv-list`.
+
+- `<dl class="facts">`: a two-column grid, `max-content` labels and `minmax(0, 1fr)` values,
+  `gap: var(--space-2) var(--space-4)`, baseline-aligned. Pairs may be flat `<dt>`/`<dd>` or one
+  `<div>` per pair (the `<div>` is `display: contents`).
+- Label (`dt`): `--type-label` in `--text-dim`, Title Case (a definition term, §17.1). Value
+  (`dd`): `--type-body` in `--text`, wrapping anywhere rather than overflowing.
+- `.facts.strip` is the summary strip above a table or chart (Usage totals, later Archive): the
+  pairs side by side between two hairlines, separated by vertical hairlines, the value in
+  `--type-title` with tabular figures. Under 760px the strip becomes rows, label left and value
+  right. It is a modifier, not a second class.
+- A region may set the list's spacing or size (the background work panel uses `--type-small`) but
+  not its structure.
+- Replaces `.agent-details-grid`, `.background-work-job-meta`, `.usage-totals`,
+  `.subscription-buckets`, `.skills-orphan-facts` and `.settings-about`. Twelve more `<dl>` recipes
+  remain (§19.4); each area moves its own onto `.facts` when it is redesigned.
+
+### 5.5 Disclosure (Expand and Collapse)
+
+One look for every expand and collapse: a leading 14px `ChevronRight` (§18) that turns 90° when
+open, with a `--dur-base` transition.
+
+- The container is `.disclosure`. With a `<details class="disclosure">` the `<summary>` is the
+  trigger; otherwise the trigger is a `button.disclosure-trigger` with `aria-expanded`.
+- Trigger: `--control-h-sm` tall, `--type-body-strong` in `--text-dim`, padding `0 8px 0 4px`,
+  `--radius-sm`; hover fills `--bg-elev-2` with `--text`. The icon is `.disclosure-chevron`.
+- The revealed content is `.disclosure-body`: a column with a 12px gap and 8px above.
+- A region may size the trigger to its surroundings (the transcript's Worked row keeps
+  `--type-small` in `--text-faint` and fills its row) but keeps the chevron and its rotation.
+- Replaces `.access-manual-disclosure`, `.project-location-create-disclosure` (with its `+`/`−`
+  text glyph), `.runner-disclosure-chevron` and `.tl-disclosure` (with its `▸` glyph).
+  `.share-disclosure` was a risk warning, not an expand and collapse; it moved to a warning Notice
+  (§13.2).
+
+### 5.6 List Foot
+
+`.list-foot` (`ListFoot`): an entry after the last row of a list that leads somewhere else (the
+Skills list's Orphaned Copies entry, a "Show 20 More" row). It sits 12px below the list with 8px
+above its top hairline, is at least `--row-h` tall, and reads in `--text-dim`. No screen uses it
+yet.
 
 ---
 
@@ -841,7 +916,9 @@ change animates with `--dur-base`. Dialogs are portalled to `document.body`, so 
 
 Nested dialogs (New Session → Create Project, a confirmation from a form): on desktop the child
 stacks on the parent, which stays visible under one shared dim (no second backdrop, no blur); closing
-the child returns focus to the control that opened it inside the parent. On phones the child pushes
+the child returns focus to the control that opened it inside the parent. `Modal` marks every dialog
+opened over another as `.modal-backdrop.stacked`, whose backdrop is transparent; only the oldest open
+dialog draws the dim. The area names `.stacked` and `.nested` both mean this class. On phones the child pushes
 onto the sheet with a back arrow (§7.5). A child never discards its parent, which loses the user's
 input.
 
@@ -988,7 +1065,7 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 | Checkbox | 16px box, `--radius-xs`, `--control-outline`; checked = `--accent` fill with a check. Label to the right, 8px gap, the whole row is the target (≥32px, 44px coarse). Used for multi-select and consent. Consent labels are sentences and stay in sentence case ("Open the session after creating it"). |
 | Radio | 16px circle; checked = accent ring plus dot. Used inside ChoiceRows. |
 | Switch | 32×18 track (40×24 on touch), `--radius-pill`, `--control-outline` edge; on = `--accent` track. **For settings that apply instantly.** Label is the row title, and `aria-label` matches it. Never a button that says "On"/"Off". |
-| ChoiceRow | One component for radio cards, member checklists, instance pickers: leading control, title, one-line description, trailing meta; selected = `--surface-selected` + accent control; hover distinct. Markers align in one column. |
+| ChoiceRow | One component for radio cards, member checklists, instance pickers: leading control, title, one-line description, trailing meta; selected = `--surface-selected` + accent control; hover distinct. Markers align in one column. **Selection follows the checked input**: the row's selected look and its `aria-checked` (or `:checked`) come from one value, so the look never disagrees with what is announced. |
 | File picker | A dropzone row: icon, "Drop files here or", `.btn.sm` "Choose Folder…". Never the native "Choose Files / No file chosen". |
 | Number with unit | `.w-xs` input with the unit as a suffix inside the field ("30 s"). |
 
@@ -1005,6 +1082,13 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
   raw detail behind "Show Details".
 - Primary stays enabled while the form is incomplete in short forms (clicking it reveals the errors);
   in long forms it is disabled with a visible reason in the footer (§7.3).
+- **Field warning** (`.field-warn`, `FieldWarning`): a non-blocking warning about a valid value
+  ("This branch already has a worktree."). It sits under the helper, pulled 4px closer: a 14px
+  `TriangleAlert` in `--amber` and `--type-small` text in `--text-dim`, never amber text. The field's
+  `aria-describedby` points at it. It is the sibling of the field error, which blocks submission and
+  replaces the helper. No screen uses it yet.
+- A failed instant-apply setting (Settings › Network › Tailnet) shows its error in place of the
+  row's description in `--danger-text` (`.danger-text`).
 
 ### 8.6 Save Models
 
@@ -1013,6 +1097,24 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 | Instant | Toggles, selects in settings rows. | Applies on change; a quiet "Saved" check appears for 2s at the row's right edge. |
 | Dialog | Creation and focused edits. | Footer Cancel + primary. |
 | Editor | Multi-field editors in a page (Agent Defaults, Orchestrator, Automation editor). | A sticky save bar at the bottom of the page region, visible only when dirty: "Unsaved changes" + Discard (ghost) + Save (primary). Save is disabled when clean. |
+
+The editor save bar is `.save-bar` (`SaveBar`): sticky at the bottom of its region, `--bg-elev`,
+1px `--border-strong`, `--radius-md`, `--elev-2`, padding 12px 16px, gap 8px, and rendered only
+while there is something to save or a save failed. When a save fails it becomes `.save-bar.is-error`:
+the notice's danger wash (7% `--red` over `--bg-elev`, a 32% `--red` edge), a `CircleAlert`, the
+failure in one sentence (`role="alert"`), and Save becomes **Try Again**. In Settings it floats 16px
+above the bottom of the settings panel. No screen uses it yet.
+
+### 8.7 Steps
+
+`.steps` (`Steps`): numbered instructions, for a real sequence the reader follows in order
+(connecting a machine). It is an `<ol>`, and each `<li>` is one step. The list draws each number in a
+24px circle at the step's leading edge (`--bg-elev-3`, 1px `--border-strong`, `--type-label` in
+`--text`, tabular), and steps are 16px apart. `.steps.horizontal` lays three or four short steps side
+by side with 24px between them (a first-run explainer under an empty state), and stacks them again
+under 760px. It replaced `.onboard-steps`; the proposed `.how-steps` is this variant. The Automations
+workflow step list is a different component and keeps a local name.
+
 
 ---
 
@@ -1033,6 +1135,20 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
   confirm.
 - Disabled items: `--text-faint` with the reason as the second line.
 - Keyboard: arrow keys, Home/End, type-ahead, Enter/Space, Escape closes and returns focus.
+- **Note** (`.menu-note`, `MenuNote`): one sentence of context at the end of a menu, `--type-small`
+  in `--text-dim`, max 280px. It replaced `.menu-caution` (#1803).
+- **Opening upward.** A menu near the bottom of the view opens above its trigger. `Menu.tsx` places
+  every menu and flips it when the space below is short (#1803). An area design that draws
+  `.menu.flip-up` or `.drop-up` means this placement, and there is no class for it: the placement is
+  inline, and a class with a rule of its own would change what the menu draws.
+- **Height.** A desktop menu scrolls inside past 480px: one cap, held by `Menu.tsx` and the `.menu`
+  rule, on the menu surface itself (#1803). An area design that draws `.menu-scroll` means this cap.
+  Per-popup caps (the old `.plus-pop` and `.cbar-pop`) are gone.
+- **Listbox** (`.menu.listbox`): the Select and SearchableCombobox list. It is the menu container
+  around listbox options. `useAnchoredMenuStyle` anchors it to its field and sets its width (at
+  least the trigger and at least 280px, §8.3) and its one height cap, `SELECT_MENU_MAX_HEIGHT_PX` in
+  `ChoiceControls.tsx`; the stylesheet sets no height. It stays anchored to its field on phones.
+  It replaced `.ui-select-list`.
 
 ### 9.2 Popover
 
@@ -1085,6 +1201,9 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 - 2 to 4 options, each label fits on one line at the control's width. If they do not fit, use a
   Select. A segmented control never wraps.
 - Counts inside options: `--text-faint`, tabular, after the label.
+- **Full width** (`.seg.block`): the group fills its row with equal options instead of sitting at
+  its content width, for a filter in a narrow panel (the Projects list's visibility filter). It is
+  opt-in: a segmented control in a toolbar does not stretch.
 - Keyboard: radio-group semantics (arrow keys move and select).
 
 ---
@@ -1133,6 +1252,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
 | Session header, background work | "Background Work Lost": danger (was "Background Work Orphaned") |
 | Delivery receipt | Delivered: success (inline, no pill) · Delivery Failed: danger |
+| Queued message (`queuedMessage`: pending bubbles and the composer queue) | Pending, Queued, Cancelled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
 | Workflow gate / run decision | Awaiting Decision: warning · Approved: success (inline) · Rejected: neutral |
 | Pod | Active: info · Paused: neutral · Conflicted: warning · Failed: danger |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signed Out: neutral |
@@ -1141,6 +1261,11 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 
 "Orphaned" is retired everywhere, including the session header badge, which reads "Background Work
 Lost". Update Required applies to machines, instances and devices alike.
+
+The queued-message labels were the composer's and the pending bubble's own tables (`LABELS` in
+`PendingPromptBubbles.tsx`, `queueLabel` in `SessionDetail.tsx`). The words are unchanged. Held was
+drawn in red and is now the warning tone, and every label now renders in Title Case instead of an
+uppercase transform.
 
 Facts are not statuses: "Detached Work: Untracked", "Changes Present", "Worktree", "Kept Aside" are
 meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {label, tone, pulse}` map;
@@ -1173,6 +1298,47 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
 `kbd`: `--font-mono` 11px, 18px tall, min-width 18px, padding 0 4px, 1px `--border-strong`,
 `--radius-xs`, `--bg-elev-2`, `--text-dim`. One recipe for hints, menus and the shortcut reference.
 Hidden on coarse pointers.
+
+### 11.6 Meter
+
+`.meter`: a level against a known capacity (context window, subscription window, budget). It is the
+§19.4 merge of the areas' `.meter` and the progress bar.
+
+- 6px tall, `--radius-pill`, track `--bg-elev-3`; the fill is a child `<span>` whose width is set
+  inline, in `--text-dim`. A level is not forward progress, so it is not teal (§2.2).
+- `.meter.t-warning` and `.meter.t-danger` fill with the tone when the level needs attention (the
+  context window when full).
+- The element carries `role="progressbar"` with `aria-valuemin`, `aria-valuemax`, `aria-valuenow`
+  and a Title Case `aria-label`.
+- Replaces the context meter's bar (`.context-popover-bar`). The context control itself (the ring
+  button and its popover) is `.context-control`, which is local to the composer.
+
+### 11.7 Code Well
+
+`.code-well`: a read-only command, build or identifier with its copy button. It is the §19.4 merge
+of `.code-well` and `.copy-field`.
+
+- `--bg` (the sunken ground), 1px `--border`, `--radius-md`, padding 4px 4px 4px 12px, the copy
+  button trailing at the top.
+- The value (`code` or `pre`) is `--type-small` in `--font-mono` and `--text`, and wraps anywhere:
+  the whole value is what gets copied, so it is never clipped. A single-line form for one-line
+  secrets and URLs (`.code-well` with the value on one line, ellipsis, and the copy button centered)
+  lands with its first consumer.
+- Replaces `.connection-details-code`.
+
+### 11.8 Masked Personal Identifier
+
+`.pid`: an email or other personal identifier, masked until the person reveals it. It is the §19.4
+merge of `.pid` and `.masked-field`. `PersonalIdentifier.tsx` keeps the logic: while masked, the
+value is not in the DOM.
+
+- `.pid` is inline; the value is `.pid-value`, the mask `.pid-mask` (`--text-dim`, not selectable),
+  and the reveal control `.pid-toggle`: 22px, an Eye icon, `--radius-xs`, with the action as text
+  (`.pid-toggle.with-text`) where there is room. On touch it borrows a 44px hit area around the same
+  glyph, so a tag keeps its height.
+- A field label with a reveal control for the values its picker hides is `.pid-field-head`.
+- Replaces `.personal-identifier`, `.personal-identifier-value`, `.personal-identifier-mask`,
+  `.personal-identifier-toggle` and `.personal-identifier-field-head`.
 
 ---
 
@@ -1228,6 +1394,11 @@ the same notice with Reload and Copy Error Details, top-left in the content area
 - Copy is for users: "Can't reach Wollipog on this machine. Reconnecting…" with **Retry Now**.
   Developer hints (`pnpm dev`, origins) are shown only in a dev build, behind "Show Details".
 - The banner appears only after 2s of disconnection (no cold-load flash).
+- **Last-known content** under a Reconnecting line is `.is-stale` (`StaleContent`): one dimming for
+  the whole block, on the content and never on the Reconnecting line itself. It is done by token
+  (primary text steps down to `--text-dim`), not by `opacity`: subtree opacity multiplies into every
+  color beneath it and un-certifies the contrast checks. It stays readable, scrollable and operable
+  (no `aria-hidden`, no `inert`). No screen uses it yet.
 
 ---
 
@@ -1551,6 +1722,21 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | Per-page master-detail grids (Skills, Projects, Machines, Settings) | `.master-detail` (§6); `.md` stays the markdown class |
 | `.review-required` chip | `.status.t-neutral.no-dot` flag badge (§11.3) |
 | `.inbox-activity-footer`, `.inbox-shortcut-rail` between the list and the preview | nothing: counts move to tabs and the rail, actions to the preview and row menus |
+| `.agent-details-grid`, `.background-work-job-meta`, `.usage-totals`, `.subscription-buckets`, `.skills-orphan-facts`, `.settings-about` | `.facts` (`.facts.strip` for the Usage totals) (§5.4) |
+| `.access-manual-disclosure`, `.project-location-create-disclosure`, `.runner-disclosure-chevron`, `.tl-disclosure` | `.disclosure`, `.disclosure-trigger`, `.disclosure-chevron`, `.disclosure-body` (§5.5) |
+| `.share-disclosure` (a risk warning) | `Notice` with the warning tone (§13.2) |
+| `.context-popover-bar`, and `.context-meter` as the control's root | `.meter` (§11.6); the control's root is `.context-control` |
+| `.ui-select-list` | `.menu.listbox` (§9.1) |
+| `.connection-details-code` | `.code-well` (§11.7) |
+| `.personal-identifier*` | `.pid`, `.pid-value`, `.pid-mask`, `.pid-toggle`, `.pid-field-head` (§11.8) |
+| `.agent-defaults-toolbar`, `.archive-toolbar`, `.board-toolbar`, `.connections-toolbar`, `.view-toolbar`, `.inbox-toolbar`, `.usage-toolbar-controls` | `.toolbar` (§4.7) |
+| `.files-crumbs`, `.files-crumb` | `.crumbs`, `.crumb`, `.crumb-sep` (§4.8) |
+| `.queued-badge`, `LABELS` (`PendingPromptBubbles.tsx`), `queueLabel` (`SessionDetail.tsx`) | `StatusBadge` with `statusMeta("queuedMessage", …)` (§11.2) |
+| `error-text` (Settings › Network, Tailnet) | `.danger-text` (§8.5) |
+| `.editor-split-segment` (Open in Editor) | `.split` of two `.btn`s (§3.2) |
+| `.seg.is-block` | `.seg.block` (§10.2) |
+| `.onboard-steps` | `Steps` → `.steps` (§8.7) |
+| `.modal-backdrop ~ .modal-backdrop` | `.modal-backdrop.stacked`, set by `Modal` (§7.1) |
 
 ### 19.3 Rollout Order
 
@@ -1579,6 +1765,98 @@ Two engineering fixes are not visual but cause visual bugs: key detail views by
 entity id (`RunDetail`, `PodDetail`) so drafts and errors do not carry across resources, and guard list
 views on snapshot load and connection state so they render Loading or Reconnecting instead of a
 "No … Yet" empty state (§12.5).
+
+### 19.4 Area Proposals: Promote, Already Delivered and Reject
+
+The area redesigns proposed 118 classes and patterns beyond this document. Each got one decision
+before any area work starts, by one rule:
+
+- **Promote** a class when two or more areas use it, or when it replaces an existing ad hoc
+  pattern in production.
+- **Merge** overlapping proposals into one class each.
+- **Reject** single-use classes. They stay local to their component's CSS block; area work does not
+  add them to the shared primitives.
+
+In total, 42 proposal entries merge into 20 promotions, 20 are already delivered, and 56 are
+rejected. Cite this section when an area design uses one of these names.
+
+**Promote.** Each promoted class is written once, in the component-ordered part of `styles.css`
+(§19.3), with tokens only. A promoted class with no production screen using it yet lands with its
+shared component (named below), which renders it, so the stylesheet guard's dead-class check stays
+green. Area work adopts the component instead of writing the class again.
+
+| Class | Merges | Section | Status |
+| --- | --- | --- | --- |
+| `.facts` (`.facts.strip` for a summary strip) | `.facts`, `dl.facts`, `.kv`, `.kv-list` | §5.4 | Six production lists |
+| `.disclosure` | three area recipes | §5.5 | Four production disclosures |
+| `.meter` | `.meter` (two areas), the progress bar | §11.6 | The context window meter |
+| `.menu.listbox` | `.menu.listbox`, `.listbox`, the combobox popup | §9.1 | Select and SearchableCombobox |
+| `.modal-backdrop.stacked` | `.stacked`, `.nested`, the stacked modal | §7.1 | `Modal` (#1800 shipped the behavior) |
+| `.menu.flip-up` | `.flip-up`, `.drop-up` | §9.1 | Already delivered: `Menu.tsx` placement (#1803) |
+| `.menu-note` | one area class | §9.1 | Already delivered: `MenuNote` (#1803) |
+| `.menu-scroll` | one area class | §9.1 | Already delivered: the one `Menu` height cap (#1803) |
+| `.code-well` (with a single-line form) | `.code-well`, `.copy-field` | §11.7 | Connection details (the single-line form lands with its first consumer) |
+| `.pid` | `.pid`, `.masked-field` | §11.8 | `PersonalIdentifier` |
+| `.split` (split button) | three area classes | §3.2 | `EditorSelect` |
+| `.seg.block` (full-width segmented) | two area classes | §10.2 | The Projects visibility filter |
+| `.toolbar` with `.filter-btn` | `.toolbar`, `.tools-group` | §4.7 | Seven production toolbars; `FilterButton` |
+| `.is-stale` | four area classes | §12.5 | `StaleContent` |
+| `.field-warn` | two area classes | §8.5 | `FieldWarning` |
+| `.list-foot` | three area classes | §5.6 | `ListFoot` |
+| `.crumbs` | `.crumbs` | §4.8 | The Files panel path |
+| `.save-bar` with `.is-error` | `.save-bar.is-error`, the settings save-bar placement | §8.6 | `SaveBar` |
+| `.steps` (with a horizontal variant) | `.steps` (Machines), `.how-steps` | §8.7 | `Steps` (Connect a Machine) |
+| `statusMeta("queuedMessage", …)` | the composer's queued-message vocabulary | §11.2 | Pending bubbles and the composer queue |
+
+The merged-away names (`.kv`, `.kv-list`, `.copy-field`, `.drop-up`, `.modal-backdrop.nested`,
+`.masked-field`, `.how-steps`, `.tools-group`, `.progress` and a bare `.listbox`) are never
+written. The Automations workflow step list is a different component from `.steps`, and takes a
+local name so the two do not collide.
+
+**Already delivered** (no promotion needed):
+
+- #1799 (§2.8): coarse segmented height and hit area, inline-link hit area, disabled segmented
+  options and switches, `.icon-btn.primary:disabled`, input affixes.
+- #1801: `.detail-head` becomes `.detail-bar`; the list-page tab rows use the page header's tabs.
+- #1802: `.status.family` (family rollup tone), `.notice.compact` with dismiss, the phone toast
+  "+N More", and the page banner's phone stacking.
+- #1803: the dense 32px tree row (§5.2), trailing check slots in menus, the row's single open
+  target, and the Menu primitive's `.menu-note` (which replaced `.menu-caution`), placement that
+  flips upward (the proposed `.menu.flip-up`) and one height cap (the proposed `.menu-scroll`).
+  Neither of the last two needs a class: the placement and the cap are the menu's own, and a rule
+  of their own would change what the menu draws.
+- §6.3 and §19.2: `.sessions-md`, which is `.master-detail.sessions-md` and is built with Sessions.
+- §8.4 ChoiceRow: the choice list, ChoiceRow selection that follows the checked input, and
+  `.cand-list`/`.radio-mark`.
+
+**Reject** (component-local; area work keeps these in its component's CSS block):
+
+- **Notices:** `.composer .send` sizing, the session notice slot (built by the Notices area on
+  `Notice`).
+- **Sessions:** `.srow`, `.activity`, `.bar-picker`, `.bar-strip`, `.board`/`.bcol`/`.bcard`,
+  `.notice.inset`, `.preset-grid`.
+- **Session Chrome:** `.ps` family, `--summary-w`.
+- **Composer:** `--composer-ctl`, `.composer-btn`, `.model-chip`, `.picker*`, `.queue`,
+  `.composer-mode`.
+- **Approvals:** `.request`, the decision record row, evidence tiles and viewer, `.policy-row`.
+- **Right Panel:** `.seg.fit`, `.selbar`, `.outdated`.
+- **Agents:** `.worker-row`, `.sc-composer`, `.dock`/`.term`, `.dock-tab .cmd`.
+- **Skills:** the skill file diff, `.modal-body.split`, `.modal-foot.has-consent`, `.rule-row`.
+- **Projects:** `.select-trigger .value-sub`, `.field-row.two`, `.fb`, `.inline-state`,
+  `.changed-mark`.
+- **Automations:** `.glance`, `.chip.toggle`, `.compare`, check-list rows (a `.surface` of existing
+  check rows), `.foot-note.keep`.
+- **Machines:** `.checklist`, `.signin`.
+- **People:** `.inst-tile`, `.state.recovery`, top-anchored step dialogs.
+- **Archive and Usage:** `.row-3`, `.u-overview`, `.sub-win`, `.usage-capsule`.
+- **Settings:** `.setting-row` details, `.set-sublabel`, `.update-block`, `.modal-body.allow-overflow`
+  (unneeded once #1800 portals menus out of dialogs).
+
+**Remaining `<dl>` recipes.** Twelve other label and value lists still carry their own rules and
+move onto `.facts` with their area: `.context-popover-facts`, `.session-usage-facts`,
+`.auth-recovery-identity`, `.shortcut-list`, `.instance-meta`, `.governance-decision-facts`,
+`.runner-meta`, `.connection-details-list`, `.campaign-held-child-hold`, `.approval-selector-context`,
+`.automation-facts` and `.workspace-reference-details`.
 
 ---
 

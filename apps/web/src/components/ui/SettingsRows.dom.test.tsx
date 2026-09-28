@@ -254,7 +254,7 @@ test("the scheme list requests readable content dimensions while preserving trig
     assert.equal(list.style.left, "600px", "the open list keeps the trigger's start edge");
     assert.equal(list.style.width, "400px", "described schemes get a content-aware width");
     // Five rows budgeted at 58px each, plus the list's own box. Derived rather than spelled "298px":
-    // that literal silently encoded a chrome budget of 8px, which counted `.ui-select-list`'s 4px
+    // that literal silently encoded a chrome budget of 8px, which counted the list's 4px
     // padding on each edge but not its 1px border — and `box-sizing: border-box` is global, so
     // `max-height` has to cover the border too. The list was being asked for 2px less than it drew.
     assert.equal(list.style.maxHeight, `${5 * 58 + SELECT_LIST_CHROME_PX}px`,

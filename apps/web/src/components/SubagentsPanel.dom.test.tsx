@@ -99,7 +99,7 @@ test("master-detail list is labelled, Title Case, depth-aware, and keeps selecti
     assert.equal(firstOutput.classList.contains("measured-virtual-scroll"), true,
       "the subagent virtualizer's scroll owner disables browser-native anchoring");
     assert.match(firstOutput.textContent ?? "", /Outer Output/);
-    const workDisclosure = firstOutput.querySelector<HTMLButtonElement>(".tl-work > .tl-disclosure");
+    const workDisclosure = firstOutput.querySelector<HTMLButtonElement>(".tl-work > .disclosure-trigger");
     if (workDisclosure?.getAttribute("aria-expanded") === "false") {
       await act(async () => workDisclosure.click());
     }
@@ -183,7 +183,7 @@ test("opening a nested agent from the selected output transfers focus to the new
   try {
     await act(async () => root.render(<Harness />));
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 25)); });
-    const workDisclosure = container.querySelector<HTMLButtonElement>(".subagent-output .tl-work > .tl-disclosure");
+    const workDisclosure = container.querySelector<HTMLButtonElement>(".subagent-output .tl-work > .disclosure-trigger");
     if (workDisclosure?.getAttribute("aria-expanded") === "false") {
       await act(async () => workDisclosure.click());
     }
@@ -344,7 +344,7 @@ test("transcript disclosure and Subagents panel action are separate accessible c
   const root = createRoot(container);
   try {
     await act(async () => root.render(<EventTimeline items={items} onOpenSubagent={(id) => opened.push(id)} />));
-    const worked = container.querySelector<HTMLButtonElement>(".tl-work > .tl-disclosure")!;
+    const worked = container.querySelector<HTMLButtonElement>(".tl-work > .disclosure-trigger")!;
     await act(async () => worked.click());
     const toggle = container.querySelector<HTMLButtonElement>(".subagent-toggle")!;
     const open = container.querySelector<HTMLButtonElement>(".subagent-open")!;

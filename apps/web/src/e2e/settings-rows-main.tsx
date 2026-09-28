@@ -241,6 +241,10 @@ function Harness() {
   const section: SettingsSection = SETTINGS_SECTIONS.some((entry) => entry.id === requestedSection)
     ? requestedSection!
     : "appearance";
+  // A failed Tailnet change: the error takes the row description's place (Settings › Network).
+  const tailnetError = params.get("tailnet-error") === "1"
+    ? "Tailscale refused the change. Check that the Tailscale app is running, then try again."
+    : null;
   const schemes = params.get("copy") === "long"
     ? COLOR_SCHEMES.map((option) => ({
       ...option,
@@ -347,7 +351,7 @@ function Harness() {
                     loading: false,
                     desktop: true,
                     busy,
-                    error: null,
+                    error: tailnetError,
                     toggle: () => undefined,
                   }}
                 />

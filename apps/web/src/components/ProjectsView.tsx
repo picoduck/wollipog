@@ -391,7 +391,7 @@ export function ProjectsView({
           {/* Was `role="group"` with `aria-pressed`, which describes three independent toggles
               rather than one choice of three. */}
           <SegmentedControl
-            className="is-block"
+            className="block"
             label="Inbox Visibility"
             value={visibility}
             options={[

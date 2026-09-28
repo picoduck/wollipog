@@ -36,7 +36,7 @@ test("skill rows show the skill name without expansion and are styled apart from
     { kind: "tool_call", id: 3, toolCallId: "generic", title: "Custom", toolKind: "other", status: "completed", text: "" },
   ];
   await act(async () => { root.render(<EventTimeline items={items} />); });
-  for (const disclosure of container.querySelectorAll<HTMLButtonElement>(".tl-work > .tl-disclosure")) {
+  for (const disclosure of container.querySelectorAll<HTMLButtonElement>(".tl-work > .disclosure-trigger")) {
     await act(async () => disclosure.click());
   }
 
@@ -73,7 +73,7 @@ test("tool rows carry the shared status badge: Running, Failed and Pending as ba
     { kind: "tool_call", id: 4, toolCallId: "queued", title: "Deploy", toolKind: "command", status: "pending", text: "" },
   ];
   await act(async () => { root.render(<EventTimeline items={items} />); });
-  for (const disclosure of container.querySelectorAll<HTMLButtonElement>(".tl-work > .tl-disclosure")) {
+  for (const disclosure of container.querySelectorAll<HTMLButtonElement>(".tl-work > .disclosure-trigger")) {
     await act(async () => disclosure.click());
   }
 

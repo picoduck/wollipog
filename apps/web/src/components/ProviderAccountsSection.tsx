@@ -80,11 +80,11 @@ export function ProviderAccountsSection({ runner, online }: { runner: RunnerView
   if (!supported && !(runner.providerAccounts?.length)) return null;
   return (
     <>
-      <details className="runner-agents" open={logins.length > 0 || undefined}>
+      <details className="runner-agents disclosure" open={logins.length > 0 || undefined}>
         <summary>
+          <ChevronRightIcon className="disclosure-chevron" />
           <span className="runner-agents-label">Accounts</span>
           <span className="group-count">{runner.providerAccounts?.length ?? 0}</span>
-          <ChevronRightIcon className="runner-disclosure-chevron" />
         </summary>
         <div className="runner-agents-body">
           <div className="provider-accounts-actions">

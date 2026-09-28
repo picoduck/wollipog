@@ -16,7 +16,7 @@ test("account labels and controls remain readable on narrow usage cards", async 
     const reveal = account.getByRole("button", { name: "Show Account Email" });
     await expect(reveal).toBeVisible();
     await reveal.click();
-    const value = account.locator(".personal-identifier-value");
+    const value = account.locator(".pid-value");
     await expect(value).toHaveText("codex@example.com");
     await expect(account.getByRole("button", { name: "Hide Account Email" })).toBeVisible();
     await expect(card.locator("header > .status")).toBeVisible();
@@ -68,7 +68,7 @@ test("account labels and controls remain readable on narrow usage cards", async 
         linesInsideCard: [...range.getClientRects()].every((line) =>
           line.left >= card.left && line.right <= card.right),
         controlsInsideCard: [...element.closest(".subscription-source")!.querySelectorAll(
-          "header > .status, header > .btn, .personal-identifier-toggle",
+          "header > .status, header > .btn, .pid-toggle",
         )]
           .every((control) => {
             const bounds = control.getBoundingClientRect();
@@ -97,9 +97,9 @@ test.describe("touch", () => {
     const cy = box.y + box.height / 2;
     // Probe 20px from the glyph's centre on every side: all still land on the reveal control.
     const hits = await page.evaluate(([x, y]) => [[x, y - 20], [x, y + 20], [x - 20, y], [x + 20, y]]
-      .map(([px, py]) => Boolean(document.elementFromPoint(px!, py!)?.closest(".personal-identifier-toggle"))), [cx, cy]);
+      .map(([px, py]) => Boolean(document.elementFromPoint(px!, py!)?.closest(".pid-toggle"))), [cx, cy]);
     expect(hits).toEqual([true, true, true, true]);
     await page.touchscreen.tap(cx + 18, cy);
-    await expect(card.locator(".personal-identifier-value")).toHaveText("codex@example.com");
+    await expect(card.locator(".pid-value")).toHaveText("codex@example.com");
   });
 });

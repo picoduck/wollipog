@@ -149,7 +149,7 @@ function LiveQuestionFixture() {
                   <div className="queued-list" aria-label="Queued Messages">
                     {queuedPrompts.map((prompt) => (
                       <div className="queued-item" key={prompt.id}>
-                        <span className="queued-badge">Queued</span>
+                        <span className="status sm t-neutral inline">Queued</span>
                         <span className="queued-text">{prompt.text}</span>
                       </div>
                     ))}

@@ -158,11 +158,11 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
   const availabilityLabel = offline ? "Open Unavailable: Runner Offline" : `Open in ${chosen.name}`;
 
   return (
-    <div className="editor-select">
+    <div className="editor-select split">
       {note && <span className="editor-note" role="status">{note}</span>}
       <button
         type="button"
-        className="editor-split-segment editor-main"
+        className="btn editor-main"
         aria-disabled={unavailable}
         onClick={() => void launch(chosen)}
         title={offline ? "Runner is offline." : availabilityLabel}
@@ -174,7 +174,7 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
       <button
         ref={menu.triggerRef}
         type="button"
-        className="editor-split-segment editor-caret"
+        className="btn editor-caret"
         aria-disabled={unavailable}
         onClick={() => { if (!unavailable) menu.toggle(); }}
         onKeyDown={(event) => { if (!unavailable) menu.onTriggerKeyDown(event); }}

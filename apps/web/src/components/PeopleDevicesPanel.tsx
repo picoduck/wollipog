@@ -15,7 +15,7 @@ import { pairingLinks } from "../device-token.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
 import { accountLabelText, isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
 import { CopyButton, Modal } from "./common.js";
-import { DeviceIcon, EditIcon, PlusIcon, TeamIcon, UserPlusIcon } from "./Icons.js";
+import { ChevronRightIcon, DeviceIcon, EditIcon, PlusIcon, TeamIcon, UserPlusIcon } from "./Icons.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import {
   PersonalIdentifier,
@@ -171,7 +171,7 @@ export function ManagePersonDialog({
       <div className="access-form">
         {nameIsPersonal ? (
           <div className="access-form-field">
-            <div className="personal-identifier-field-head">
+            <div className="pid-field-head">
               {nameShown ? <label htmlFor={nameId}>Name</label> : <span>Name</span>}
               <PersonalIdentifierRevealButton
                 label="Person Name"
@@ -330,17 +330,19 @@ export function PairDeviceDialog({
         )}
         {result.blocked && <p className="hint">{result.blocked}</p>}
         <DialogError error={error} />
-        <details className="access-manual-disclosure">
-          <summary>Manual Setup</summary>
-          <p className="hint">Use this only when the dashboard cannot provide a clickable pairing link.</p>
-          <pre className="code-block install-cmd">
-            {`#pair=${result.token}`}
-            <CopyButton text={`#pair=${result.token}`} />
-          </pre>
-          <pre className="code-block install-cmd">
-            {result.token}
-            <CopyButton text={result.token} />
-          </pre>
+        <details className="disclosure">
+          <summary><ChevronRightIcon className="disclosure-chevron" />Manual Setup</summary>
+          <div className="disclosure-body">
+            <p className="hint">Use this only when the dashboard cannot provide a clickable pairing link.</p>
+            <pre className="code-block install-cmd">
+              {`#pair=${result.token}`}
+              <CopyButton text={`#pair=${result.token}`} />
+            </pre>
+            <pre className="code-block install-cmd">
+              {result.token}
+              <CopyButton text={result.token} />
+            </pre>
+          </div>
         </details>
       </Modal>
     );
@@ -368,7 +370,7 @@ export function PairDeviceDialog({
       {step === "person" ? (
         <>
           {activeMembers.some((member) => isPersonalIdentifier(member.userName)) && (
-            <div className="personal-identifier-field-head">
+            <div className="pid-field-head">
               <PersonalIdentifierRevealButton
                 label="Person Names"
                 revealed={namesRevealed}

@@ -85,7 +85,7 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
     else {
       await expect(echo).toBeVisible();
       await expect(echo).toContainText("Checking for Missed Activity…");
-      await expect(page.locator(".context-meter")).toBeHidden();
+      await expect(page.locator(".context-control")).toBeHidden();
       expect(await echo.locator("span").last().evaluate((label) => label.clientWidth)).toBeGreaterThan(0);
     }
     if (widestFollow) {
@@ -127,7 +127,7 @@ test("full-height mobile Sessions keep recovery readable in the persistent strip
       const reader = rect(".detail-reader");
       const stripBox = rect(".transcript-status-strip");
       const cluster = rect(".transcript-status-cluster");
-      const leading = rect(recoverySettled ? ".context-meter" : ".transcript-recovery-strip-echo");
+      const leading = rect(recoverySettled ? ".context-control" : ".transcript-recovery-strip-echo");
       const leadingLabel = recoverySettled ? null : rect(".transcript-recovery-strip-echo > span:last-child");
       const follow = rect(".follow-tail-chip");
       const usage = rect(".transcript-status-usage");
@@ -216,7 +216,7 @@ test("in a narrow compact expanded pane the active echo wins the leading cell ov
 
   // The context meter (fixed width, wider than the whole leading track at this width) yields
   // while recovery is active — otherwise it starved the echo's label to zero visible width.
-  await expect(page.locator(".context-meter")).toBeHidden();
+  await expect(page.locator(".context-control")).toBeHidden();
 
   // The label keeps genuinely readable width and truncates rather than vanishing.
   const label = echo.locator("span").last();
@@ -226,7 +226,7 @@ test("in a narrow compact expanded pane the active echo wins the leading cell ov
     full: el.scrollWidth,
     textOverflow: getComputedStyle(el).textOverflow,
   }));
-  const meterWidth = await page.locator(".context-meter").evaluate((el) => el.getBoundingClientRect().width);
+  const meterWidth = await page.locator(".context-control").evaluate((el) => el.getBoundingClientRect().width);
   expect(geometry.echo).toBeGreaterThan(meterWidth);
   expect(geometry.visible).toBeGreaterThan(0);
   expect(geometry.full).toBeGreaterThanOrEqual(geometry.visible);

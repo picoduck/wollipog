@@ -48,7 +48,7 @@ test("People and device tasks use progressive disclosure and only Agents collaps
   assert.match(access, /api\.updateIdentityMember\(member\.userId, \{\s*displayName:/s);
   assert.doesNotMatch(access, /device-pair-row/);
   assert.match(view, /<dl className="runner-meta runner-system-meta" aria-label="System Details">/);
-  assert.match(view, /<details className="runner-agents">/);
+  assert.match(view, /<details className="runner-agents disclosure">/);
   assert.doesNotMatch(view, /<details className="runner-details">/);
   assert.match(view, /export function BoxCard\(/);
   assert.match(view, /export function NativeRunnerCard\(/);

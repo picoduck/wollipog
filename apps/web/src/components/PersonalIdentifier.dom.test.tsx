@@ -24,7 +24,7 @@ async function unmount({ container, root }: { container: HTMLDivElement; root: R
 }
 
 function toggle(container: HTMLElement): HTMLButtonElement {
-  const button = container.querySelector<HTMLButtonElement>("button.personal-identifier-toggle");
+  const button = container.querySelector<HTMLButtonElement>("button.pid-toggle");
   assert.ok(button, "a reveal control must be rendered");
   return button;
 }
@@ -41,7 +41,7 @@ test("a personal identifier is absent from text, tooltips, and accessible names 
     assert.equal(button.title, "Show Account Email");
 
     await act(async () => fireDomEvent.click(button));
-    assert.equal(container.querySelector(".personal-identifier-value")?.textContent, EMAIL);
+    assert.equal(container.querySelector(".pid-value")?.textContent, EMAIL);
     assert.equal(toggle(container).getAttribute("aria-label"), "Hide Account Email");
     assert.equal(toggle(container).title, "Hide Account Email");
 
@@ -62,7 +62,7 @@ test("the reveal control is a focusable native button so keyboard users can reve
     // Enter and Space activate a native button as a click; focus stays on the control.
     await act(async () => fireDomEvent.click(button));
     assert.equal(document.activeElement, toggle(mounted.container));
-    assert.equal(mounted.container.querySelector(".personal-identifier-value")?.textContent, EMAIL);
+    assert.equal(mounted.container.querySelector(".pid-value")?.textContent, EMAIL);
   } finally {
     await unmount(mounted);
   }
@@ -134,7 +134,7 @@ test("aliases stay readable and provenance can force masking of any value", asyn
   const forced = await mount(<PersonalIdentifier value="opaque-provider-login" label="Account Email" sensitive />);
   try {
     assert.equal(forced.container.innerHTML.includes("opaque-provider-login"), false);
-    assert.ok(forced.container.querySelector("button.personal-identifier-toggle"));
+    assert.ok(forced.container.querySelector("button.pid-toggle"));
   } finally {
     await unmount(forced);
   }

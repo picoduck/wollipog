@@ -176,7 +176,7 @@ for (const viewport of VIEWPORTS) {
 
       // The structural half: the inline Permission Preset group has no trigger or popup. The
       // initial-focus Project combobox may legitimately have its own autocomplete open.
-      await expect(group.locator(".ui-select-trigger, .ui-select-list")).toHaveCount(0);
+      await expect(group.locator(".ui-select-trigger, .menu.listbox")).toHaveCount(0);
 
       const groupBox = await group.boundingBox();
       expect(groupBox).not.toBeNull();
@@ -267,7 +267,7 @@ for (const viewport of VIEWPORTS) {
       await expect(trigger).toBeVisible();
       await trigger.click();
 
-      const list = page.locator(".ui-select-list");
+      const list = page.locator(".menu.listbox");
       await expect(list).toBeVisible();
       await expect(list.getByRole("option")).toHaveCount(2);
 

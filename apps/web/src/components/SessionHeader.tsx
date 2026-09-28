@@ -48,6 +48,7 @@ import {
   useDismissiblePopover,
 } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuNote, MenuSeparator, MenuSurface } from "./Menu.js";
+import { Notice } from "./Notice.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { useIsMobile } from "./useIsMobile.js";
@@ -1168,10 +1169,10 @@ function TranscriptShareDialog({ sessionId, onClose, returnFocusRef }: {
       returnFocusRef={returnFocusRef}
       footer={<button className="btn" type="button" onClick={onClose}>Done</button>}
     >
-      <p className="share-disclosure" id="share-transcript-disclosure">
+      <Notice tone="warning" id="share-transcript-disclosure">
         This freezes the same cached, possibly partial, operationally redacted projection as export.
         It may still contain secrets, source code, or personal data. Anyone with the link can read it until expiry or revocation.
-      </p>
+      </Notice>
       <div className="share-create-row">
         <label htmlFor="share-expiry">Expires After</label>
         <select id="share-expiry" value={ttl} onChange={(event) => setTtl(Number(event.target.value))} disabled={busy}>

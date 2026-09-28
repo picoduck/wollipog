@@ -122,11 +122,10 @@ function AgentDetailsDialog({ a, os, online, onClose }: { a: AgentDefinition; os
     <Modal
       title={`${displayName} Details`}
       onClose={onClose}
-      className="agent-details-dialog"
       footer={<button type="button" className="btn" onClick={onClose}>Close</button>}
     >
       <p className="agent-details-summary">{agentDriverDescription(a)}</p>
-      <dl className="agent-details-grid">
+      <dl className="facts">
         <div><dt>Integration</dt><dd>{titleCaseLabel(agentDriverLabel(a))}</dd></div>
         <div><dt>Execution Context</dt><dd>{titleCaseLabel(contextLabel(a.context))}</dd></div>
         <div><dt>Source</dt><dd>{titleCaseLabel(a.source ?? "configured")}</dd></div>
@@ -142,7 +141,7 @@ function AgentDetailsDialog({ a, os, online, onClose }: { a: AgentDefinition; os
         {launch.referenceOnly ? (
           <>
             <p>This Windows launch may resolve to a batch wrapper or use an executable with legacy PowerShell argument passing. Those launches can change quotes or expand percent signs. A copyable launch command is unavailable; inspect the configured executable and arguments below.</p>
-            <dl className="agent-details-grid">
+            <dl className="facts">
               <div><dt>Executable</dt><dd><code>{a.command}</code></dd></div>
               <div><dt>Arguments</dt><dd><code>{JSON.stringify(a.args)}</code></dd></div>
             </dl>
@@ -161,7 +160,7 @@ function AgentDetailsDialog({ a, os, online, onClose }: { a: AgentDefinition; os
       {a.update && (
         <section className="agent-details-section">
           <h3>Harness Updates</h3>
-          <dl className="agent-details-grid">
+          <dl className="facts">
             <div><dt>Installed Version</dt><dd>{a.update.installedVersion ?? "Unknown"}</dd></div>
             <div><dt>Latest Known Compatible Version</dt><dd>{a.update.latestKnownCompatibleVersion ?? "Unknown"}</dd></div>
             <div><dt>Latest Published Version</dt><dd>{a.update.latestPublishedVersion ?? "Unknown"}</dd></div>
@@ -452,14 +451,14 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
           )}
         </dl>
         <ProviderAccountsSection runner={runner} online={online} />
-        <details className="runner-agents">
+        <details className="runner-agents disclosure">
           <summary>
+            <ChevronRightIcon className="disclosure-chevron" />
             <span className="runner-agents-label">Agents</span>
             <span className="group-count">{runner.agents.length}</span>
             <span className="runner-agents-summary">
               {availableAgentCount(runner.agents)} Available
             </span>
-            <ChevronRightIcon className="runner-disclosure-chevron" />
           </summary>
           <div className="runner-agents-body">
             {runner.agents.length > 0 ? (
@@ -1292,7 +1291,7 @@ function BoxConnectionDetailsDialog({ box, onClose }: { box: BoxView; onClose: (
         </div>
         <div className="connection-details-wide">
           <dt>Last Deployed Build</dt>
-          <dd className="connection-details-code">
+          <dd className="code-well">
             <code>{build}</code>
             {box.deployedVersion && (
               <CopyButton
@@ -1306,7 +1305,7 @@ function BoxConnectionDetailsDialog({ box, onClose }: { box: BoxView; onClose: (
         </div>
         <div className="connection-details-wide">
           <dt>Runner Platform</dt>
-          <dd className="connection-details-code"><code>{platform}</code></dd>
+          <dd className="code-well"><code>{platform}</code></dd>
         </div>
       </dl>
       <p className="connection-details-note">
@@ -1780,7 +1779,7 @@ export function RunnersView() {
         aria-labelledby="connections-machines-tab"
         className="connections-panel"
       >
-        <div className="view-toolbar connections-toolbar">
+        <div className="toolbar">
           <span className="muted">
             {total} Machine{total === 1 ? "" : "s"}
           </span>

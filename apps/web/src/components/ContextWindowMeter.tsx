@@ -48,7 +48,7 @@ export function ContextWindowMeter({ session, resolution }: {
 
   return (
     <span
-      className={`context-meter${fill.isFull ? " is-full" : ""}${popover.open ? " is-open" : ""}`}
+      className={`context-control${fill.isFull ? " is-full" : ""}${popover.open ? " is-open" : ""}`}
       ref={popover.rootRef}
     >
       <button
@@ -77,7 +77,7 @@ export function ContextWindowMeter({ session, resolution }: {
             />
           )}
         </svg>
-        <span className="meter-label">{fill.formatPct}</span>
+        <span className="context-ring-label">{fill.formatPct}</span>
       </button>
       {popover.open && (
         <div
@@ -91,7 +91,7 @@ export function ContextWindowMeter({ session, resolution }: {
             <strong>Context Window</strong>
             <span>{fill.formatPct}</span>
           </div>
-          <div className="context-popover-bar" role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(fill.fillPct)} aria-label="Context Window Usage">
+          <div className={`meter${fill.isFull ? " t-danger" : ""}`} role="progressbar" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(fill.fillPct)} aria-label="Context Window Usage">
             <span style={{ width: `${fill.fillPct}%` }} />
           </div>
           <dl className="context-popover-facts">

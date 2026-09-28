@@ -272,7 +272,7 @@ test("desktop: an unknown context window hides the ring and keeps the cost contr
 test("the warning state above the threshold", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780&used=186000&driver=claude-code");
-  const meter = page.locator(".context-meter").first();
+  const meter = page.locator(".context-control").first();
   await expect(meter).toHaveClass(/is-full/);
   await expect(page.locator(".context-ring-button").first()).toHaveAttribute("aria-label", /93% Used/);
   await page.locator(".context-ring-button").first().click();

@@ -105,7 +105,7 @@ async function measureParts(page: Page, rootPx: number): Promise<StripParts> {
   return page.locator(".transcript-status-strip").evaluate((strip) => {
     const stripStyle = getComputedStyle(strip);
     const cluster = strip.querySelector(".transcript-status-cluster") as HTMLElement;
-    const context = cluster.querySelector(".context-meter") as HTMLElement;
+    const context = cluster.querySelector(".context-control") as HTMLElement;
     const chip = strip.querySelector(".follow-tail-chip") as HTMLElement;
     const stateLabel = chip.querySelector("span")!;
 

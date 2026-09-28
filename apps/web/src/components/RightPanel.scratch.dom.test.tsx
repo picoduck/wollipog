@@ -287,7 +287,7 @@ const choice = (panel: Panel, group: string, name: string) =>
 const addressBar = (panel: Panel) => panel.container.querySelector<HTMLInputElement>("#browser-url")!;
 
 const crumbs = (panel: Panel) =>
-  [...panel.container.querySelectorAll(".files-crumbs .files-crumb")].map((crumb) => crumb.textContent).join("/");
+  [...panel.container.querySelectorAll(".crumbs .crumb")].map((crumb) => crumb.textContent).join("/");
 
 async function type(element: HTMLInputElement | HTMLTextAreaElement, value: string): Promise<void> {
   await act(async () => fireDomEvent.change(element, { target: { value } }));

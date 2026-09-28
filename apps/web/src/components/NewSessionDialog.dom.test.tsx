@@ -1864,7 +1864,7 @@ test("both permission presets are on screen without opening anything", async () 
       fixture.container.querySelector('button[aria-label^="Session Role:"]'), null,
       "the preset no longer hides behind a popover trigger",
     );
-    assert.equal(fixture.container.querySelector(".ui-select-list"), null, "and opens no list");
+    assert.equal(fixture.container.querySelector(".menu.listbox"), null, "and opens no list");
 
     assert.ok(permissionPresetCard(fixture.container, "Orchestrator"));
     assert.equal(permissionPresetCard(fixture.container, "Orchestrator")?.getAttribute("aria-disabled"), null,

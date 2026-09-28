@@ -431,7 +431,7 @@ test("Agent Harness defaults expose one live alert when mutation recovery also f
     assert.match(alerts[0]?.textContent ?? "", /save rejected/);
     assert.match(alerts[0]?.textContent ?? "", /Could not refresh Agent Harness defaults: recovery unavailable/);
     assert.match(fixture.container.textContent ?? "", /Could not refresh Agent Harness defaults: recovery unavailable/);
-    assert.equal(fixture.container.querySelector('.agent-defaults-toolbar > .notice')?.getAttribute("aria-hidden"), "true");
+    assert.equal(fixture.container.querySelector('.agent-defaults-list > .toolbar > .notice')?.getAttribute("aria-hidden"), "true");
     assert.equal(buttonNamed(fixture.container, "Codex App Server").getAttribute("aria-expanded"), "true");
     assert.equal(buttonNamed(fixture.container, "Save"), save);
   } finally {

@@ -1531,7 +1531,7 @@ export function NewSessionDialog({
 
           {hostExecutionTarget && (providerAccounts.length > 1 || savedProviderAccountMissing) && (
             <div className="field">
-              <div className="personal-identifier-field-head">
+              <div className="pid-field-head">
                 <label className="new-session-field-label">Account</label>
                 {providerAccounts.some((account) => isPersonalIdentifier(account.label)) && (
                   <PersonalIdentifierRevealButton

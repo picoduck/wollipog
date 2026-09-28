@@ -89,7 +89,7 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
                         <strong>{copy.name ?? "Unidentified Copy"}</strong>
                         <StatusBadge tone="neutral" noDot label={copy.kind === "kept_aside" ? "Kept Aside" : "Deleted Skill"} />
                       </div>
-                      <dl className="skills-orphan-facts">
+                      <dl className="facts">
                         <div><dt>Invocation</dt><dd>{copy.variant ? invocationLabel(copy.variant) : "Unknown"}</dd></div>
                         <div><dt>Version</dt><dd>{copy.digest ? copy.digest.slice(0, 12) : "Unknown"}</dd></div>
                         {copy.kind === "kept_aside" && (
@@ -97,7 +97,7 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
                         )}
                         <div><dt>Content</dt><dd>{copy.observedDigest ? "Readable" : "Unreadable"}</dd></div>
                         {copy.kind === "kept_aside" && (
-                          <div className="skills-orphan-entry"><dt>Store Entry</dt><dd><code>.drift-{copy.id}</code></dd></div>
+                          <div><dt>Store Entry</dt><dd><code>.drift-{copy.id}</code></dd></div>
                         )}
                       </dl>
                       {detail && <p className="skills-hint">{detail}</p>}

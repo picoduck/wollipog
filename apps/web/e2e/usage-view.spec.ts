@@ -163,7 +163,7 @@ test("subscription cards show provider allowances in presentation order (#223, #
   // #1648: account emails are masked by default and revealed only by an explicit action.
   await expect(current.locator(".subscription-account")).not.toContainText("primary@example.com");
   await current.getByRole("button", { name: "Show Account Email" }).click();
-  await expect(current.locator(".subscription-account .personal-identifier-value")).toHaveText("primary@example.com");
+  await expect(current.locator(".subscription-account .pid-value")).toHaveText("primary@example.com");
   await expect(current.getByRole("button", { name: "Refresh Account" })).toHaveCount(0);
   const buckets = current.locator(".subscription-bucket");
   await expect(buckets).toHaveCount(3);

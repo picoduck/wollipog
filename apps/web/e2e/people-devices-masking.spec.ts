@@ -191,7 +191,7 @@ test("the identifier observer records transient disclosures that leave no trace 
   // The node granted the reveal may drop it once; writing it back and away again is a new disclosure.
   await watchIdentifierLeaks(page);
   await page.evaluate((owner) => {
-    const revealed = document.querySelector(".access-context .personal-identifier-value")!.firstChild!;
+    const revealed = document.querySelector(".access-context .pid-value")!.firstChild!;
     revealed.textContent = "Hidden";
     revealed.textContent = owner;
     revealed.textContent = "Hidden";

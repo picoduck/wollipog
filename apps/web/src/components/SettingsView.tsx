@@ -785,7 +785,7 @@ export function AgentHarnessDefaultsPanel({ discoveryRevision }: { discoveryRevi
       )}
       {expanded && view && (
         <div id={controlsId} className="agent-defaults-list" aria-busy={loading || busy || undefined}>
-          <div className="agent-defaults-toolbar">
+          <div className="toolbar">
             {loadError && (
               <Notice tone="danger" compact role={mutationError ? undefined : "alert"} ariaHidden={Boolean(mutationError)}>
                 {refreshFailure}
@@ -1533,7 +1533,7 @@ export function NetworkPanel({ tailnet }: { tailnet: TailnetAccessSetting }) {
     <SwitchRow
       title="Enable Tailnet Access for This Machine"
       description={
-        <span className={tailnet.error ? "error-text" : undefined}>
+        <span className={tailnet.error ? "danger-text" : undefined}>
           {tailnet.busy ? "Restarting the local control plane…" : tailnet.error ?? tailnetAccessDescription(status)}
         </span>
       }
@@ -1587,7 +1587,7 @@ export function AboutPanel({ update }: { update?: DesktopUpdateSetting } = {}) {
   const controlPlaneVersion = useControlPlaneVersion();
   return (
     <SettingsGroup title="Versions">
-      <dl className="settings-about">
+      <dl className="facts">
         {update?.status && <><dt>Desktop App</dt><dd>{update.status.currentVersion}</dd></>}
         <dt>Control Plane</dt>
         <dd>{controlPlaneVersion === undefined ? "Reading…" : controlPlaneVersion ?? "Not reported"}</dd>

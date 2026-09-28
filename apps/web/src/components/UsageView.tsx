@@ -476,7 +476,7 @@ export function UsageView() {
                 </header>
                 {source.detail && <p className="subscription-detail">{redactPersonalIdentifiers(source.detail)}</p>}
                 {source.buckets.length > 0 && (
-                  <dl className="subscription-buckets">
+                  <dl className="facts">
                     {source.buckets.map((bucket) => {
                       const remaining = remainingFor(bucket);
                       const warning = bucket.status === "warning";
@@ -548,7 +548,7 @@ export function UsageView() {
         </div>
         {/* These filters deliberately live with the API-equivalent figures they scope. Subscription
             allowance windows above come from providers and never change with these selections. */}
-        <div className="usage-toolbar-controls usage-desktop-controls">
+        <div className="toolbar usage-desktop-controls">
           <SegmentedControl<UsageMetric>
             label="Usage Metric"
             value={metric}
@@ -683,7 +683,7 @@ export function UsageView() {
 
           <section className="usage-totals-section" aria-labelledby="usage-totals-heading">
             <h3 id="usage-totals-heading">Totals</h3>
-            <dl className="usage-totals">
+            <dl className="facts strip">
               <div><dt>Processed Tokens</dt><dd>{formatCompactTokens(processedTokens(data.totals))}</dd></div>
               <div><dt>Cached Input</dt><dd>{formatCompactTokens(data.totals.cachedInputTokens)}</dd></div>
               <div><dt>Uncached Input</dt><dd>{formatCompactTokens(data.totals.uncachedInputTokens)}</dd></div>

@@ -277,12 +277,12 @@ export function FilesBrowser({
       {error && <Notice tone="danger" compact>{error}</Notice>}
 
       <div className="git-status-row">
-        <nav className="files-crumbs" aria-label="Path">
+        <nav className="crumbs" aria-label="Path">
           {crumbs.map((c, i) => (
             <span key={c.path}>
-              {i > 0 && <span className="muted"> / </span>}
+              {i > 0 && <span className="crumb-sep" aria-hidden="true">/</span>}
               <button
-                className="files-crumb"
+                className="crumb"
                 disabled={disabled && !file}
                 onClick={() => {
                   // A crumb can supersede an in-flight file read (crumbs stay enabled while
@@ -304,8 +304,8 @@ export function FilesBrowser({
           ))}
           {file && (
             <span>
-              <span className="muted"> / </span>
-              <span className="files-crumb is-current">{file.path.split("/").pop()}</span>
+              <span className="crumb-sep" aria-hidden="true">/</span>
+              <span className="crumb is-current">{file.path.split("/").pop()}</span>
             </span>
           )}
         </nav>

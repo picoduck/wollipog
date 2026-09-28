@@ -1,27 +1,21 @@
 import type {
-  PendingPromptState,
   PendingPromptView,
   QueuedPromptView,
   SessionStatus,
 } from "@wollipog/protocol";
-
-const LABELS: Record<PendingPromptState, string> = {
-  pending: "Pending",
-  sent: "Sending",
-  accepted: "Accepted",
-  queued: "Queued",
-  started: "Starting",
-  failed: "Delivery Failed",
-  uncertain: "Delivery Uncertain",
-};
+import { statusMeta, type StatusMeta } from "../status-meta.js";
+import { StatusBadge } from "./StatusBadge.js";
 
 const RECOVERY_BLOCKS_RETRY_REASON = "Recover the selected worktree before retrying this message.";
 
-export function pendingPromptLabel(prompt: PendingPromptView): string {
-  if (prompt.state === "failed" && prompt.errorCode === "WORKTREE_RECOVERY_REQUIRED") return "Not Sent";
+/** A pending message's status on the shared queued-message vocabulary (§11.2). */
+export function pendingPromptStatus(prompt: PendingPromptView): StatusMeta {
+  if (prompt.state === "failed" && prompt.errorCode === "WORKTREE_RECOVERY_REQUIRED") {
+    return statusMeta("queuedMessage", "not_sent");
+  }
   return prompt.state === "failed" && prompt.errorCode === "COMMAND_CANCELLED"
-    ? "Cancelled"
-    : LABELS[prompt.state];
+    ? statusMeta("queuedMessage", "cancelled")
+    : statusMeta("queuedMessage", prompt.state);
 }
 
 export function shouldShowOptimisticPrompt(
@@ -105,7 +99,7 @@ export function PendingPromptBubbles({
       >
         <div className={`bubble user-bubble pending-prompt-bubble state-${prompt.state}`}>
           <div className="pending-prompt-meta">
-            <span className="pending-prompt-state">{pendingPromptLabel(prompt)}</span>
+            <StatusBadge meta={pendingPromptStatus(prompt)} inline className="pending-prompt-state" />
             <span className="pending-prompt-attempts">
               {prompt.attemptCount > 1
                 ? `${prompt.attemptCount} Delivery Attempts`

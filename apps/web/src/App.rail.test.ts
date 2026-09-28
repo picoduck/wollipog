@@ -235,7 +235,8 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
   assert.match(css, /\.menu,\s*\.popover\s*\{[^}]*overflow-y:\s*auto;/,
     "capped Project action menus scroll instead of painting outside their surface");
   // The toolbar is one tab-row tall (§10.1): the 40px tabs fill it, so it pads only its sides.
-  assert.match(css, /\.inbox-toolbar\s*\{[^}]*min-height:\s*var\(--control-h-lg\);[^}]*align-items:\s*center;[^}]*padding:\s*0 14px;/);
+  assert.match(css, /\.inbox-list-pane > \.toolbar\s*\{[^}]*min-height:\s*var\(--control-h-lg\);[^}]*padding:\s*0 var\(--space-3\);/);
+  assert.match(css, /\n\.toolbar\s*\{[^}]*align-items:\s*center;/);
   // The strip is the shared tab row (§10.1), which scrolls sideways without scrollbar chrome.
   assert.match(inbox, /<TabList[^>]*className="inbox-tabs"/, "the Project tabs are the shared tab row");
   assert.match(css, /\.tabs\s*\{[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;[^}]*scrollbar-width:\s*none;/);
@@ -332,7 +333,7 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "adding a shared Location does not imply moving it from another Project");
   assert.match(projectsView, /onCreate=\{async \(location, generateSetup\)[\s\S]*api\.createProjectLocation/,
     "Project management uses the atomic Project-scoped Location creation API");
-  assert.match(css, /\.project-location-create-toggle\s*\{[^}]*width:\s*100%;[^}]*text-align:\s*left;/,
+  assert.match(css, /\.project-location-create-section > \.disclosure-trigger\s*\{[^}]*width:\s*100%;/,
     "the collapsed creation disclosure remains a full-width readable target");
   // The phone Projects back control is the detail bar's (#1801): an `.icon-btn` named "Back to
   // Projects", one control height, which a touch screen makes 44px.

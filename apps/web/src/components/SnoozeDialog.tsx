@@ -420,7 +420,7 @@ export function SnoozeDialog({
               getKey={(suggestion) => suggestion.originalExpression}
               onActiveChange={setActiveSuggestion}
               onSelect={selectSuggestion}
-              className="snooze-suggestions ui-searchable-combobox-list ui-select-list"
+              className="snooze-suggestions ui-searchable-combobox-list menu listbox"
               style={suggestionListStyle}
               renderOption={(suggestion) => (
                 <span className="ui-select-option-body">

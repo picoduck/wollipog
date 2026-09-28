@@ -1278,7 +1278,7 @@ export function InboxView({
         aria-hidden={expanded || undefined}
         inert={expanded || undefined}
       >
-        <div className="inbox-toolbar">
+        <div className="toolbar">
           <TabList className="inbox-tabs" label="Inbox Groups">
             {splits.map((split) => {
               const active = split.key === activeSplit?.key;

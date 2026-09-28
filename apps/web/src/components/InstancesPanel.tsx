@@ -61,7 +61,7 @@ export function InstancesPanel() {
 
   return (
     <div className="instances-page">
-      <div className="view-toolbar connections-toolbar">
+      <div className="toolbar">
         <span className="muted">
           {instances.registry.profiles.length} Instance{instances.registry.profiles.length === 1 ? "" : "s"}
         </span>

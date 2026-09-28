@@ -474,9 +474,9 @@ test("a terminal receipt listed beside a held live queue stays dismissible and i
 
     const receiptRow = fixture.container.querySelector<HTMLElement>(`[data-testid="queued-prompt-${COMMAND_ID}"]`);
     assert.ok(receiptRow, "the terminal receipt is listed while the live queue is shown");
-    const receiptBadge = receiptRow.querySelector<HTMLElement>(".queued-badge");
+    const receiptBadge = receiptRow.querySelector<HTMLElement>(".status");
     assert.equal(receiptBadge?.textContent, "Delivery Failed");
-    assert.equal(receiptBadge?.classList.contains("held"), false, "a settled receipt is not paused by the held FIFO");
+    assert.equal(receiptBadge?.classList.contains("t-danger"), true, "a settled receipt is not paused by the held FIFO");
     // Session-wide gates run before per-row state, so every surface that explains the row — badge,
     // Steer, its info popover, and Edit — must carry the receipt's own reason, never a wait.
     const RECEIPT_REASON = "Delivery attempts for this message have ended, so it cannot be steered or edited.";
@@ -503,9 +503,9 @@ test("a terminal receipt listed beside a held live queue stays dismissible and i
 
     const liveRow = fixture.container.querySelector<HTMLElement>('[data-testid="queued-prompt-queue-live"]');
     assert.ok(liveRow);
-    const liveBadge = liveRow.querySelector<HTMLElement>(".queued-badge");
+    const liveBadge = liveRow.querySelector<HTMLElement>(".status");
     assert.equal(liveBadge?.textContent, "Held", "the live entry keeps its held presentation");
-    assert.equal(liveBadge?.classList.contains("held"), true);
+    assert.equal(liveBadge?.classList.contains("t-warning"), true);
     assert.equal(liveBadge?.getAttribute("title"), HELD_TITLE);
     assert.notEqual(
       liveRow.querySelector('button[aria-label="Steer Queued Message"]')?.getAttribute("title"),

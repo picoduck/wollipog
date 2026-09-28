@@ -108,7 +108,7 @@ export function SwitchAccountDialog({
       )}
       {accounts && accounts.length > 0 && (
         <div className="switch-account-picker">
-          <div className="personal-identifier-field-head">
+          <div className="pid-field-head">
             <span className="field-label">Account</span>
             {accounts.some((account) => isPersonalIdentifier(account.label)) && (
               <PersonalIdentifierRevealButton

@@ -246,8 +246,8 @@ const client = {
  * class, not on the one control that hit it.
  *
  * A standalone mount is sound HERE, unlike the dialog itself, for a structural reason rather than
- * convenience: `.ui-select-list` is `position: fixed` and sized by the inline style the anchored-
- * menu helper computes, so its geometry does not depend on any ancestor. What it does depend on is
+ * convenience: the `.menu.listbox` list is `position: fixed` and sized by the inline style the
+ * anchored-menu helper computes, so its geometry does not depend on any ancestor. What it does depend on is
  * the coarse-pointer touch floor in `styles.css`, which this page loads in full.
  */
 function SelectProbe() {

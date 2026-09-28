@@ -126,6 +126,8 @@ test("a child stacks on its parent on desktop, and closing it returns focus insi
 
   const backdrops = [...document.body.children].filter((element) => element.classList.contains("modal-backdrop"));
   assert.equal(backdrops.length, 2, "the child gets its own layer on desktop");
+  // One shared dim (§7.1): only the child's backdrop is `.stacked`, which draws no second dim.
+  assert.deepEqual(backdrops.map((backdrop) => backdrop.classList.contains("stacked")), [false, true]);
   const panels = document.querySelectorAll('[role="dialog"]');
   assert.deepEqual([...panels].map((panel) => panel.querySelector("h2")?.textContent), ["New Session", "Create Project"]);
   assert.equal(panels[0]!.hasAttribute("hidden"), false, "New Session stays visible under the child");

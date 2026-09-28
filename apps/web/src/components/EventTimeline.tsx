@@ -23,7 +23,7 @@ import {
 import { CopyButton } from "./common.js";
 import { accountLabelText } from "../personal-identifiers.js";
 import { GovernanceDecisionFacts } from "./GovernanceDecision.js";
-import { EditIcon, FolderUpIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
+import { ChevronRightIcon, EditIcon, FolderUpIcon, ShareIcon, ThreadForkIcon } from "./Icons.js";
 import { formatTokens, formatCost, formatDuration, formatRecordedRelativeTime, formatRecordedTimestamp, titleCaseLabel } from "../format.js";
 import { toolStatusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
@@ -1612,8 +1612,8 @@ function WorkSummary({
   const summary = parts.length ? `Worked · ${parts.join(", ")}` : "Worked";
   return (
     <div className={`tl-work${open ? " open" : ""}`}>
-      <button type="button" className="tl-disclosure" aria-expanded={open} onClick={onToggle}>
-        <span className="work-caret">▸</span>
+      <button type="button" className="disclosure-trigger" aria-expanded={open} onClick={onToggle}>
+        <ChevronRightIcon className="disclosure-chevron" />
         {summary}
       </button>
     </div>
@@ -1643,7 +1643,7 @@ function SubagentSummary({ tool, depth, open, onToggle, onOpen }: {
       <div className="subagent-head">
         <button
           type="button"
-          className="subagent-toggle tl-disclosure"
+          className="subagent-toggle"
           aria-expanded={open}
           aria-label={`Agent · ${items.length} Step${items.length === 1 ? "" : "s"} · ${toolStatusMeta(tool.status).label}${metrics.length > 0 ? ` · ${metrics.join(" · ")}` : ""}`}
           aria-describedby={hasTimingDescription ? timingDescriptionId : undefined}

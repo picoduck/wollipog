@@ -152,7 +152,7 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
 
   return (
     <div className="board-wrap" tabIndex={-1}>
-      <div className="board-toolbar">
+      <div className="toolbar">
         <div className="filters">
           <label className="filter">
             <span>Machine</span>
