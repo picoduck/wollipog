@@ -1875,6 +1875,8 @@ button.status { cursor: pointer; }
   flex: 0 1 auto;
   min-width: 0;
   max-width: 50%;
+  /* At the trailing edge even in a row with no flexible body, such as a dense file row. */
+  margin-left: auto;
   overflow: hidden;
   color: var(--text-faint);
   font: var(--type-small);

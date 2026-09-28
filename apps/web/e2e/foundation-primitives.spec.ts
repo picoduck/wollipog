@@ -48,6 +48,13 @@ for (const pointer of ["fine", "coarse"] as const) {
       const files = await heights(page, ".files-list .row");
       expect(files.length).toBe(7);
       for (const height of files) expect(height).toBe(dense);
+      // A file's size is trailing meta (§5.2): at the row's end edge, not after its name.
+      const offsets = await page.locator(".files-list .row:has(.row-trail)").evaluateAll((rows) => rows.map((row) => {
+        const trail = row.querySelector(".row-trail")!.getBoundingClientRect();
+        return row.getBoundingClientRect().right - Number.parseFloat(getComputedStyle(row).paddingRight) - trail.right;
+      }));
+      expect(offsets.length).toBeGreaterThan(0);
+      for (const offset of offsets) expect(Math.abs(offset)).toBeLessThan(1);
 
       await page.goto("/review-anchor-reload-e2e.html");
       const changed = await heights(page, ".git-files .row");
