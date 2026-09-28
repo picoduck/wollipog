@@ -1349,6 +1349,58 @@ test.describe("phone viewport", () => {
     expect(Math.abs((await visibleAnchor(page))!.offset - anchor!.offset)).toBeLessThan(1);
   });
 
+  test.describe("iOS user agent", () => {
+    // TanStack detects iOS WebKit from the user agent and then defers its scroll compensation while
+    // a touch is active or the viewport is scrolling, as the restore's own scroll write marks it.
+    test.use({
+      userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 " +
+        "(KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+    });
+
+    for (const touch of ["a held touch", "no touch"] as const) {
+      test(`session return with ${touch} keeps the saved row in place on iOS`, async ({ page }) => {
+        await page.goto("/timeline-reflow-e2e.html?follow=1");
+        const reader = page.getByTestId("reader");
+        await expect(page.locator("[data-virtual-row]").first()).toBeVisible();
+        await settleLayout(page);
+        await page.getByTestId("pause-follow").tap();
+        await expect(reader).toHaveAttribute("data-follow-tail-state", "paused");
+        const anchor = await moveToStableReadingAnchor(page, 0.6);
+        await page.getByTestId("session-beta").tap();
+        await expect(reader).toHaveAttribute("data-session-id", "beta");
+        await settleLayout(page);
+
+        const savedRowOffset = () => reader.evaluate((element, key) => {
+          const row = [...element.querySelectorAll<HTMLElement>("[data-virtual-row]")]
+            .find((candidate) => candidate.dataset.virtualKey === key);
+          return row ? row.getBoundingClientRect().top - element.getBoundingClientRect().top : null;
+        }, anchor.key);
+        const client = await page.context().newCDPSession(page);
+        const box = (await reader.boundingBox())!;
+        if (touch === "a held touch") {
+          await client.send("Input.dispatchTouchEvent", {
+            type: "touchStart",
+            touchPoints: [{ x: box.x + box.width / 2, y: box.y + box.height / 2, id: 1 }],
+          });
+        }
+        // Switch without a tap, which would end the held touch.
+        await page.getByTestId("session-alpha").evaluate((button) => (button as HTMLButtonElement).click());
+        await expect(reader).toHaveAttribute("data-session-id", "alpha");
+        // Outlast the restore window and TanStack's scroll-idle debounce.
+        await settleLayout(page, 40);
+        await page.waitForTimeout(500);
+        expect(Math.abs((await savedRowOffset())! - anchor.offset)).toBeLessThan(1);
+        if (touch === "a held touch") {
+          await client.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
+          await settleLayout(page, 40);
+          await page.waitForTimeout(500);
+          expect(Math.abs((await savedRowOffset())! - anchor.offset)).toBeLessThan(1);
+        }
+        await expectNoOverlap(page);
+      });
+    }
+  });
+
   test("following live tail growth on a touch phone never paints overlapping rows", async ({ page }) => {
     await page.goto("/timeline-reflow-e2e.html?follow=1");
     const reader = page.getByTestId("reader");
