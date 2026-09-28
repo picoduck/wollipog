@@ -513,7 +513,9 @@ export function pxLiterals(rawValue: string): string[] {
  */
 export function namesMonospaceFamily(rawValue: string): boolean {
   const value = stripComments(rawValue).replace(/--[A-Za-z0-9_-]+/g, " ");
-  return /\b(?:ui-)?monospace\b|\bmono\b|sfmono|jetbrains|cascadia|consolas|menlo|monaco|courier|fira code|source code pro|lucida console/i
+  // STATED LIMIT: a face list is never complete. It names the generic keywords, every face with
+  // "Mono" in its name, and the common coding faces that lack it; a new one belongs here.
+  return /\b(?:ui-)?monospace\b|mono\b|jetbrains|cascadia|consolas|menlo|monaco|courier|fira ?code|source code pro|lucida console|inconsolata|iosevka|\bhack\b|anonymous pro/i
     .test(value);
 }
 
@@ -522,7 +524,16 @@ const packsToEnd = (value: string) => {
   const words = value.toLowerCase().split(/\s+/);
   return !words.includes("safe") && words.some((word) => word === "flex-end" || word === "end" || word === "right");
 };
-const scrolls = (value: string) => value.toLowerCase().split(/\s+/).some((word) => word === "auto" || word === "scroll");
+/**
+ * Whether a declaration makes the row scroll horizontally. `overflow: hidden auto` scrolls only
+ * vertically: the shorthand's FIRST value is `overflow-x`, and the second is `overflow-y`.
+ */
+const scrollsHorizontally = (prop: string, value: string) => {
+  const name = prop.toLowerCase();
+  if (name !== "overflow" && name !== "overflow-x") return false;
+  const x = value.trim().toLowerCase().split(/\s+/)[0];
+  return x === "auto" || x === "scroll";
+};
 
 /**
  * The per-rule inventories of one stylesheet, by identity: rule context, selector, property and value.
@@ -555,7 +566,7 @@ export function cssRuleDebt(sheet: postcss.Root): CssRuleDebt {
     // One rule, because that is the unit the author wrote together; a cascade across rules is a
     // question for the browser, not for a scan of text.
     const justify = declarations.filter((node) => node.prop.toLowerCase() === "justify-content" && packsToEnd(node.value));
-    const overflow = declarations.filter((node) => /^overflow(?:-x)?$/i.test(node.prop) && scrolls(node.value));
+    const overflow = declarations.filter((node) => scrollsHorizontally(node.prop, node.value));
     for (const end of justify) {
       for (const scroller of overflow) {
         debt.flexEndOverflow.push(`${where}|justify-content: ${end.value.trim()}|${scroller.prop.toLowerCase()}: ${scroller.value.trim()}`);
@@ -688,6 +699,28 @@ function parseSource(source: string, fileName: string): ts.SourceFile {
 
 const PICTOGRAPHIC = /\p{Extended_Pictographic}/u;
 
+const namedEntities = new Map<string, string>();
+
+/**
+ * JSX character references as the JSX transform renders them. Numeric ones are decoded here;
+ * named ones are asked of the TypeScript emitter, which carries the XHTML entity table JSX uses,
+ * so this never keeps a second copy of it. An unknown name stays as written, as it does in JSX.
+ */
+export function decodeJsxEntities(text: string): string {
+  return text.replace(/&(?:#x([0-9a-f]+)|#(\d+)|([a-z][a-z0-9]*));/gi, (whole, hex?: string, decimal?: string, name?: string) => {
+    if (hex || decimal) {
+      const codePoint = Number.parseInt(hex ?? decimal!, hex ? 16 : 10);
+      return codePoint <= 0x10ffff ? String.fromCodePoint(codePoint) : whole;
+    }
+    if (!namedEntities.has(name!)) {
+      const emitted = ts.transpileModule(`<b>&${name};</b>`, { compilerOptions: { jsx: ts.JsxEmit.React } }).outputText;
+      const literal = /, "((?:[^"\\]|\\.)*)"\)/.exec(emitted)?.[1];
+      namedEntities.set(name!, literal === undefined ? whole : JSON.parse(`"${literal}"`) as string);
+    }
+    return namedEntities.get(name!)!;
+  });
+}
+
 /**
  * Every emoji in a string literal, template chunk or JSX text, by identity: file, character and
  * the enclosing literal's text.
@@ -704,7 +737,10 @@ export function emojiLiterals(source: string, fileName: string): string[] {
   const visit = (node: ts.Node): void => {
     if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node) || ts.isTemplateHead(node)
       || ts.isTemplateMiddle(node) || ts.isTemplateTail(node) || ts.isJsxText(node)) {
-      const text = node.text.replace(/\s+/g, " ").trim();
+      // JSX text and JSX attribute strings keep `&#x1F512;` spelled out in the AST, while the
+      // browser renders 🔒; read them as rendered, or an entity walks past the rule.
+      const jsx = ts.isJsxText(node) || (ts.isStringLiteral(node) && ts.isJsxAttribute(node.parent));
+      const text = (jsx ? decodeJsxEntities(node.text) : node.text).replace(/\s+/g, " ").trim();
       for (const char of text) if (PICTOGRAPHIC.test(char)) out.push(`${fileName}|${char}|${text}`);
     }
     ts.forEachChild(node, visit);
@@ -1505,15 +1541,27 @@ test("the mono-stack rule exempts only the two font tokens and reads only styles
     "|.sf|font-family|SFMono-Regular, Menlo",
     "|:root|--code-font|Consolas, monospace",
   ]);
+  for (const face of ["\"FiraCode Nerd Font\"", "\"Fira Code\"", "Inconsolata", "\"JetBrainsMono Nerd Font\"",
+    "\"Iosevka Term\"", "Hack", "\"Roboto Mono\"", "\"SF Mono\"", "SFMono-Regular"]) {
+    assert.equal(namesMonospaceFamily(face), true, face);
+  }
+  for (const face of ["var(--font-mono)", "system-ui, sans-serif", "Monotype Corsiva", "Hackney"]) {
+    assert.equal(namesMonospaceFamily(face), false, face);
+  }
   // The TypeScript xterm stack in terminal-font.ts is out of scope by construction: the rule takes a
   // parsed stylesheet, and the production guard hands it styles.css and nothing else.
   assert.ok(RECORDED.monoStacks.every((identity) => !identity.includes("terminal-font")));
 });
 
-test("flex-end with overflow is reported per rule, and the safe keyword is not", () => {
-  const debt = cssDebtOf(".a { justify-content: end; overflow: hidden auto; } .b { justify-content: safe flex-end; overflow-x: auto; } " +
-    ".c { justify-content: flex-end; overflow-x: hidden; } .d { justify-content: flex-end; } .d { overflow-x: scroll; }");
-  assert.deepEqual(debt.flexEndOverflow, ["|.a|justify-content: end|overflow: hidden auto"]);
+test("flex-end with horizontal overflow is reported per rule, and the safe keyword is not", () => {
+  const debt = cssDebtOf(".a { justify-content: end; overflow: auto hidden; } .b { justify-content: safe flex-end; overflow-x: auto; } " +
+    ".c { justify-content: flex-end; overflow-x: hidden; } .d { justify-content: flex-end; } .d { overflow-x: scroll; } " +
+    ".e { justify-content: flex-end; overflow: scroll; } .f { justify-content: flex-end; overflow: hidden auto; }");
+  // `.f` scrolls vertically only: the shorthand's first value is overflow-x.
+  assert.deepEqual(debt.flexEndOverflow, [
+    "|.a|justify-content: end|overflow: auto hidden",
+    "|.e|justify-content: flex-end|overflow: scroll",
+  ]);
 });
 
 test("window.confirm fails in a clean component, naming the dialog to use instead", () => {
@@ -1542,6 +1590,10 @@ test("an emoji in a clean component fails, and glyphs, comments and escapes are 
     "export function A() { return <span title=\"⚠ Done\">Done</span>; }",
     "export function A() { return <span title={`Done ${n} 🔐`}>Done</span>; }",
     "export function A() { return <span title=\"Done\">{\"\\u2705\"}</span>; }",
+    // JSX character references render as the character, so they are read as it.
+    "export function A() { return <span title=\"Done\">Locked &#x1F512;</span>; }",
+    "export function A() { return <span title=\"&#128274; Locked\">Done</span>; }",
+    "export function A() { return <span title=\"Done\">&hearts; Done</span>; }",
   ]) {
     const measured = { emojiLiterals: emojiLiterals(component, "A.tsx") };
     assert.equal(measured.emojiLiterals.length, 1, component);
@@ -1551,5 +1603,8 @@ test("an emoji in a clean component fails, and glyphs, comments and escapes are 
   assert.deepEqual(emojiLiterals("export const A = () => <span>Saved ✓ ✕ ×</span>;", "A.tsx"), [],
     "text glyphs are §18's area work, not the emoji rule");
   assert.deepEqual(emojiLiterals("// ✅ done\nexport const A = 1; /* 🔐 */", "a.ts"), []);
+  // Only JSX decodes references; in an ordinary string `&#x1F512;` is nine plain characters.
+  assert.deepEqual(emojiLiterals("export const label = \"&#x1F512;\";", "a.ts"), []);
+  assert.equal(decodeJsxEntities("Save &amp; Close &nope; &#x1F512;"), "Save & Close &nope; 🔒");
   assert.deepEqual(emojiLiterals("export const A = () => <b>  Thinking\n  💭  </b>;", "A.tsx"), ["A.tsx|💭|Thinking 💭"]);
 });
