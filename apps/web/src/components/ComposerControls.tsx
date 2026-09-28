@@ -680,7 +680,8 @@ export function ApprovalsMenuChoices({
 
   return (
     <>
-      <MenuLabel>Permission Mode</MenuLabel>
+      {/* The menu's name: shown on a desktop, where the menu has no title row. */}
+      <MenuLabel className="repeats-title">Permission Mode</MenuLabel>
       {showDefault && <PermissionModeChoice
           label={defaultPermissionModeDisplayLabel(driver)}
           description={defaultDescription}

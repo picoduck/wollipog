@@ -950,29 +950,14 @@ export function SessionHeader({
                     Sign Out
                   </MenuItem>
                 )}
-                {((session.stopOperation?.status === "stop_failed" && !session.archiveStatus) ||
-                  (terminal && runnerOnline && session.stopOperation?.status !== "stop_failed") ||
-                  !terminal || session.archived) && (
-                  <MenuLabel>Runtime</MenuLabel>
-                )}
-                {runtimeCaution && (
+                {/* Runtime heads only what is not destructive (Restart). The destructive items (Retry
+                    Stop, Stop Session and, for an archived session, Delete Session) come last, after
+                    one separator (§9.1). */}
+                {showRestart && <MenuLabel>Runtime</MenuLabel>}
+                {showRestart && runtimeCaution && (
                   <MenuNote id="session-runtime-caution">
                     {runtimeCaution}
                   </MenuNote>
-                )}
-                {showRetryStop && (
-                  <MenuItem
-                    danger
-                    disabled={busy || stopRefusal !== null}
-                    aria-describedby={stopRefusal ? "session-runtime-caution" : undefined}
-                    title={stopRefusal ?? "Retry the same Stop operation without archiving the session"}
-                    onClick={() => {
-                      closeMenu(true);
-                      void run(() => api.retryStop(session.id));
-                    }}
-                  >
-                    Retry Stop
-                  </MenuItem>
                 )}
                 {showRestart && (
                   <MenuItem
@@ -987,62 +972,80 @@ export function SessionHeader({
                     Restart
                   </MenuItem>
                 )}
-                {/* Process-lifecycle destruction stays last and visually distinct: Stop Session
-                    keeps its confirmation dialog, so one extra menu click loses no safety, and
-                    the frequent action (Stop Turn) lives on the composer's send button. */}
-                {!terminal && (
+                {(showRetryStop || !terminal || session.archived) && (
                   <>
                     <MenuSeparator />
-                    <MenuItem
-                      danger
-                      disabled={busy || stopRefusal !== null}
-                      aria-describedby={stopRefusal ? "session-runtime-caution" : undefined}
-                      title={stopRefusal ?? "Terminate the agent process and discard queued messages"}
-                      onClick={() => {
-                        closeMenu(false);
-                        void (async () => {
-                          if (!await confirm({
-                            title: "Stop Session",
-                            message: "The agent process ends and every queued message is discarded. To interrupt only the active turn, use Stop Turn in the composer.",
-                            confirmLabel: "Stop Session",
-                            tone: "danger",
-                            returnFocus: menu.triggerRef,
-                          })) return;
-                          await run(() => api.stop(session.id));
-                        })();
-                      }}
-                    >
-                      Stop Session
-                    </MenuItem>
-                  </>
-                )}
-                {/* Delete remains archived-only, keeping the destructive action one deliberate
-                    step beyond the everyday inbox. */}
-                {session.archived && (
-                  <>
-                    <MenuSeparator />
-                    <MenuItem
-                      danger
-                      disabled={busy}
-                      onClick={() => {
-                        closeMenu(false);
-                        void (async () => {
-                          if (!await confirm({ title: "Delete Session", message: "This session and its history are permanently removed. This cannot be undone.", confirmLabel: "Delete Session", tone: "danger", returnFocus: menu.triggerRef })) return;
-                          void run(async () => {
-                            try {
-                              await api.deleteSession(session.id);
-                              removeFromInstanceKeySet(SESSION_PIN_KEY, instanceScope, session.id); // a deleted session must not resurrect as pinned
-                              void discardComposerDraft(session.id, instanceScope);
-                              onBack(); // don't strand the user on a deleted session
-                            } catch (e) {
-                              setNote((e as Error).message);
-                            }
-                          });
-                        })();
-                      }}
-                    >
-                      Delete Session
-                    </MenuItem>
+                    {!showRestart && runtimeCaution && (
+                      <MenuNote id="session-runtime-caution">
+                        {runtimeCaution}
+                      </MenuNote>
+                    )}
+                    {showRetryStop && (
+                      <MenuItem
+                        danger
+                        disabled={busy || stopRefusal !== null}
+                        aria-describedby={stopRefusal ? "session-runtime-caution" : undefined}
+                        title={stopRefusal ?? "Retry the same Stop operation without archiving the session"}
+                        onClick={() => {
+                          closeMenu(true);
+                          void run(() => api.retryStop(session.id));
+                        }}
+                      >
+                        Retry Stop
+                      </MenuItem>
+                    )}
+                    {/* Process-lifecycle destruction stays last and visually distinct: Stop Session
+                        keeps its confirmation dialog, so one extra menu click loses no safety, and
+                        the frequent action (Stop Turn) lives on the composer's send button. */}
+                    {!terminal && (
+                      <MenuItem
+                        danger
+                        disabled={busy || stopRefusal !== null}
+                        aria-describedby={stopRefusal ? "session-runtime-caution" : undefined}
+                        title={stopRefusal ?? "Terminate the agent process and discard queued messages"}
+                        onClick={() => {
+                          closeMenu(false);
+                          void (async () => {
+                            if (!await confirm({
+                              title: "Stop Session",
+                              message: "The agent process ends and every queued message is discarded. To interrupt only the active turn, use Stop Turn in the composer.",
+                              confirmLabel: "Stop Session",
+                              tone: "danger",
+                              returnFocus: menu.triggerRef,
+                            })) return;
+                            await run(() => api.stop(session.id));
+                          })();
+                        }}
+                      >
+                        Stop Session
+                      </MenuItem>
+                    )}
+                    {/* Delete remains archived-only, keeping the destructive action one deliberate
+                        step beyond the everyday inbox. */}
+                    {session.archived && (
+                      <MenuItem
+                        danger
+                        disabled={busy}
+                        onClick={() => {
+                          closeMenu(false);
+                          void (async () => {
+                            if (!await confirm({ title: "Delete Session", message: "This session and its history are permanently removed. This cannot be undone.", confirmLabel: "Delete Session", tone: "danger", returnFocus: menu.triggerRef })) return;
+                            void run(async () => {
+                              try {
+                                await api.deleteSession(session.id);
+                                removeFromInstanceKeySet(SESSION_PIN_KEY, instanceScope, session.id); // a deleted session must not resurrect as pinned
+                                void discardComposerDraft(session.id, instanceScope);
+                                onBack(); // don't strand the user on a deleted session
+                              } catch (e) {
+                                setNote((e as Error).message);
+                              }
+                            });
+                          })();
+                        }}
+                      >
+                        Delete Session
+                      </MenuItem>
+                    )}
                   </>
                 )}
               </MenuSurface>

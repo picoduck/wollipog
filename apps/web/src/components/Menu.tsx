@@ -24,6 +24,10 @@ const POPOVER_GAP = 8;
 /** The widest a menu or a popover grows (§9.1, §9.2); the stylesheet holds the same caps. */
 const MENU_MAX_WIDTH = 320;
 const POPOVER_MAX_WIDTH = 360;
+/** The tallest a desktop menu grows before it scrolls inside. §9 sets no height; a cap keeps a menu
+ * opened from the composer clear of the page and session header above it. The stylesheet holds the
+ * same cap for the first frame. */
+const MENU_MAX_HEIGHT = 480;
 /** anchoredMenuPlacement's viewport margin. */
 const VIEWPORT_MARGIN = 8;
 /** Below this, a side is too short to scroll in, and the menu is fitted to the viewport instead. */
@@ -69,6 +73,7 @@ function useMenuPlacement(
         : pointAnchorRect(pointX ?? 0, pointY ?? 0);
       if (!surface || !rect) return;
       const edges = surface.offsetHeight - surface.clientHeight;
+      const wantedHeight = Math.min(surface.scrollHeight + edges, MENU_MAX_HEIGHT);
       // Fractional, not offsetWidth: a rounded width let the menu overhang its pane by a pixel.
       const surfaceWidth = surface.getBoundingClientRect().width;
       const next = anchoredMenuPlacement({
@@ -76,7 +81,7 @@ function useMenuPlacement(
         viewportWidth: window.innerWidth,
         viewportHeight: window.innerHeight,
         desiredWidth: surfaceWidth,
-        desiredHeight: surface.scrollHeight + edges,
+        desiredHeight: wantedHeight,
         align,
         gap,
       });
@@ -85,7 +90,7 @@ function useMenuPlacement(
       // scroll there, rather than fitting the menu to the viewport over the trigger it came from.
       const below = window.innerHeight - VIEWPORT_MARGIN - rect.bottom - gap;
       const above = rect.top - gap - VIEWPORT_MARGIN;
-      if (surface.scrollHeight + edges > Math.max(below, above) && Math.max(below, above) >= MIN_SIDE_HEIGHT) {
+      if (wantedHeight > Math.max(below, above) && Math.max(below, above) >= MIN_SIDE_HEIGHT) {
         style.maxHeight = Math.max(below, above);
         if (above > below) {
           style.top = "auto";

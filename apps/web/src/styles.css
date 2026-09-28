@@ -1805,7 +1805,8 @@ button.status { cursor: pointer; }
   z-index: calc(var(--z-popover) + 1);
   display: flex;
   flex-direction: column;
-  max-height: calc(100dvh - var(--space-4));
+  /* A desktop menu scrolls inside past 480px (Menu.tsx holds the same cap). */
+  max-height: min(480px, calc(100dvh - var(--space-4)));
   overflow-y: auto;
   overscroll-behavior: contain;
   border: 1px solid var(--border-strong);
@@ -8505,6 +8506,8 @@ button.file-head.source-path-link {
   /* Sheet rows read at the phone's reading size, like the dialog sheet's body. */
   .menu-item { font-size: var(--text-md); }
   .menu-item kbd { display: none; }
+  /* A section label that only repeats the sheet's title row is dropped. */
+  .menu-label.repeats-title { display: none; }
   /* Long forms open as a full-height sheet with a back arrow and no grabber. */
   .modal.sheet-full {
     height: 100dvh;

@@ -197,6 +197,90 @@ test("the session actions menu keeps the menu keyboard contract", async () => {
   }
 });
 
+/**
+ * A section label heads its own items (§9.1): the next thing after it (past a note) is an item, never
+ * a separator and never the end of the menu. Destructive items come last, after one separator.
+ */
+function assertSectionsHeadItems(menu: Element, state: string): void {
+  const children = [...menu.children].filter((child) =>
+    !child.classList.contains("sheet-grabber") && !child.classList.contains("menu-head"));
+  children.forEach((child, index) => {
+    if (!child.classList.contains("menu-label")) return;
+    const next = children.slice(index + 1).find((candidate) => !candidate.classList.contains("menu-note"));
+    assert.ok(next, `${state}: "${child.textContent}" is the last thing in the menu`);
+    assert.ok(!next.classList.contains("menu-sep") && !next.classList.contains("menu-label"),
+      `${state}: "${child.textContent}" heads a ${next.className} instead of an item`);
+  });
+  const separators = children.filter((child) => child.classList.contains("menu-sep"));
+  const danger = children.filter((child) => child.classList.contains("danger"));
+  if (danger.length === 0) return;
+  assert.equal(separators.length, 1, `${state}: one separator introduces the destructive items`);
+  const separatorAt = children.indexOf(separators[0]!);
+  for (const item of danger) {
+    assert.ok(children.indexOf(item) > separatorAt, `${state}: "${item.textContent}" comes after the separator`);
+  }
+  assert.ok(children.slice(separatorAt + 1).every((child) =>
+    child.classList.contains("danger") || child.classList.contains("menu-note")),
+  `${state}: only destructive items follow the separator`);
+}
+
+test("every Session Actions state keeps its section labels over their own items", async () => {
+  const restore = stubViewport(false);
+  const states: Array<[string, Partial<SessionView>]> = [
+    ["running", { status: "running", archived: false }],
+    ["idle", { status: "idle", archived: false }],
+    ["stopped", { status: "stopped", archived: false }],
+    ["stop failed", {
+      status: "stopped",
+      archived: false,
+      stopOperation: {
+        operationId: "stop-1", status: "stop_failed", requestedAt: 1, lastAttemptAt: 2, attemptCount: 1,
+        capacityReleased: false, failure: { code: "runner_rejected", message: "Stop failed.", failedAt: 3 },
+      },
+    } as Partial<SessionView>],
+    ["archived", { status: "stopped", archived: true }],
+    ["archived and running", { status: "running", archived: true }],
+  ];
+  try {
+    for (const [state, overrides] of states) {
+      const session = { id: `session-${state}`, runnerId: "runner-1", title: state, ...overrides } as SessionView;
+      const mounted = await mount(
+        <ApiProvider client={api}>
+          <FeedbackContext.Provider value={{
+            confirm: async () => false,
+            showToast: () => 1,
+            showUndo: () => 1,
+            dismissToast: () => undefined,
+          }}>
+            <SessionHeader
+              session={session}
+              onBack={() => undefined}
+              onSnooze={() => undefined}
+              runnerOnline
+              runnerProtocolVersion={85}
+              providerLogoutSupported={false}
+              stopBeforeArchiveSupported
+              exportReady={false}
+            />
+          </FeedbackContext.Provider>
+        </ApiProvider>,
+      );
+      try {
+        const trigger = mounted.container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]');
+        assert.ok(trigger);
+        await act(async () => { trigger.click(); await tick(); });
+        const menu = doc().querySelector('[role="menu"][aria-label="Session Actions"]');
+        assert.ok(menu, `${state}: the menu opens`);
+        assertSectionsHeadItems(menu, state);
+      } finally {
+        await unmount(mounted);
+      }
+    }
+  } finally {
+    restore();
+  }
+});
+
 test("the rail's More menu keeps the menu keyboard contract and opens as a sheet", async () => {
   const restore = stubViewport(true);
   const mounted = await mount(
