@@ -312,7 +312,7 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "the collapsed creation disclosure remains a full-width readable target");
   // The phone Projects back control is the detail bar's (#1801): an `.icon-btn` named "Back to
   // Projects", one control height, which a touch screen makes 44px.
-  assert.match(projectsView, /isMobile && selected \? \(\s*<DetailBar[\s\S]*?backLabel="Back to Projects"/,
+  assert.match(projectsView, /const phoneDetail = isMobile && selected;[\s\S]*?\{phoneDetail && \(\s*<DetailBar[\s\S]*?backLabel="Back to Projects"/,
     "the mobile Projects back target is the detail bar's");
   assert.doesNotMatch(projectsView, /project-manager-back|← Back to Projects/);
   assert.match(pageHeader, /className="icon-btn detail-bar-back"[^>]*aria-label=\{backLabel\}/);

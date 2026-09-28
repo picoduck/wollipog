@@ -151,8 +151,38 @@ test.describe("page header actions follow the width tiers", () => {
     expect(new Set(heights)).toEqual(new Set([32]));
   });
 
+  test("⋯ opens under its trigger, over the whole page, and closes from outside", async ({ page }) => {
+    await page.setViewportSize({ width: 900, height: 800 });
+    await openDestination(page, "/skills", "Agent Skills");
+    const trigger = page.locator(".page-header").getByRole("button", { name: "More Actions", exact: true });
+    await trigger.click();
+    const menu = page.getByRole("menu", { name: "More Actions" });
+    const [triggerBox, menuBox] = [await trigger.boundingBox(), await menu.boundingBox()];
+    expect(Math.round(menuBox!.x + menuBox!.width)).toBe(Math.round(triggerBox!.x + triggerBox!.width));
+    expect(menuBox!.y).toBeGreaterThan(triggerBox!.y + triggerBox!.height - 1);
+    expect(await page.locator(".menu-backdrop").evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return [box.width, box.height];
+    })).toEqual([900, 800]);
+    await page.mouse.click(450, 700);
+    await expect(menu).toHaveCount(0);
+  });
+
   test.describe("on a phone", () => {
     test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
+
+    test("an open Project's detail bar is full-bleed like every detail bar", async ({ page }) => {
+      await page.goto(shell(`/projects/~${Buffer.from("alpha", "utf16le").toString("base64url")}`));
+      const bar = page.locator(".detail-bar");
+      await expect(bar.getByRole("heading", { level: 1, name: "Alpha" })).toBeVisible();
+      await expect(page.locator("h1")).toHaveCount(1);
+      const geometry = await bar.evaluate((element) => ({
+        bar: element.getBoundingClientRect().toJSON(),
+        back: element.querySelector(".detail-bar-back")!.getBoundingClientRect().toJSON(),
+      }));
+      expect([geometry.bar.x, geometry.bar.width, geometry.bar.height]).toEqual([0, 390, 48]);
+      expect(geometry.back.x).toBe(16);
+    });
 
     test("the header is a 48px app bar with a 44px plus primary and ⋯", async ({ page }) => {
       await openDestination(page, "/skills", "Agent Skills");

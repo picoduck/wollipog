@@ -907,6 +907,9 @@ pre {
   min-height: 0;
   overflow: auto;
 }
+/* The instance recovery screen is not a routed page, so it keeps the inset `.main-body` used to
+   give every view (the page container is the gutter everywhere else). */
+.instance-recovery-body { padding: var(--space-5) var(--page-gutter) var(--space-8); }
 
 /* ---------------------- Recovery and instance controls ------------------ */
 .brand {
@@ -1216,26 +1219,21 @@ pre {
 
 /* Priority+ overflow (§3.3). Slot 1 is the secondary beside the primary. The widest header shows
    slots 1 and 2; the compact tier and a header narrower than 600px show slot 1; phones and a
-   header narrower than 440px show none. ⋯ holds a menu item for every secondary and shows exactly
-   the ones whose buttons are hidden, and the primary never moves. */
+   header narrower than 440px show none. ⋯ lists exactly the secondaries whose buttons are hidden
+   (PageHeader reads that when it opens), and the primary never moves. */
 .page-more { display: none; }
 .page-more[data-overflow="always"] { display: block; }
-.page-more .menu-item[data-slot="1"],
-.page-more .menu-item[data-slot="2"] { display: none; }
 @media (max-width: 1099px) {
   .page-actions > .page-action[data-slot="2"] { display: none; }
   .page-more[data-overflow="2"] { display: block; }
-  .page-more .menu-item[data-slot="2"] { display: block; }
 }
 @container page-header (max-width: 600px) {
   .page-actions > .page-action[data-slot="2"] { display: none; }
   .page-more[data-overflow="2"] { display: block; }
-  .page-more .menu-item[data-slot="2"] { display: block; }
 }
 @container page-header (max-width: 440px) {
   .page-actions > .page-action { display: none; }
   .page-more[data-overflow] { display: block; }
-  .page-more .menu-item[data-slot] { display: block; }
 }
 
 /* The Tauri instance switcher, in the phone app bar: its icon only. The trigger carries its own
@@ -1305,6 +1303,9 @@ pre {
   .page-header {
     margin-bottom: var(--space-4);
     padding: env(safe-area-inset-top, 0px) 0 0;
+    /* Nothing is width-queried in the app bar, and not being a query container keeps it from ever
+       becoming the containing block of the instance switcher's fixed-position menu. */
+    container: none;
   }
   .page-header-row {
     align-items: center;
@@ -1315,7 +1316,6 @@ pre {
   .page-actions { margin-top: 0; margin-bottom: 0; }
   .page-actions > .page-action { display: none; }
   .page-more[data-overflow] { display: block; }
-  .page-more .menu-item[data-slot] { display: block; }
   .page-actions > .page-primary {
     /* Square: `.btn` caps itself at max-content, which the clipped label no longer widens. */
     width: var(--control-h);

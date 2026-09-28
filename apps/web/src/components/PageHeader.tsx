@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useState, type ReactNode, type Ref } from "react";
+import { createPortal } from "react-dom";
 import { ChevronLeftIcon, MoreHorizontalIcon, PlusIcon } from "./Icons.js";
 import { useAccessibleMenu, useAnchoredMenuStyle } from "./interactions.js";
 
@@ -176,21 +177,39 @@ export function DetailBar({
 }
 
 interface ActionsMenuItem extends PageMenuAction {
-  /** A page-header secondary that also has a button; the stylesheet shows exactly one of the two. */
+  /** A page-header secondary that also has a button; ⋯ lists it only while that button is hidden. */
   slot?: number;
 }
 
-/** The ⋯ menu shared by the page header and the detail bar. Destructive items sort last. */
+const UNANCHORED_POP: React.CSSProperties = { position: "fixed", top: 0, right: 0 };
+
+/** Whether a header secondary's own button is showing; the stylesheet hides it by width (§3.3). */
+function slotButtonShown(trigger: HTMLElement | null, slot: number): boolean {
+  const button = trigger?.closest(".page-actions")?.querySelector<HTMLElement>(`.page-action[data-slot="${slot}"]`);
+  return Boolean(button && button.ownerDocument.defaultView?.getComputedStyle(button).display !== "none");
+}
+
+/**
+ * The ⋯ menu shared by the page header and the detail bar. Destructive items sort last.
+ *
+ * The pop is portalled: the page header is an inline-size query container, and engines at the
+ * build floor that give `container-type` layout containment would make it the containing block of
+ * a fixed-position pop and its backdrop.
+ */
 function ActionsMenu({ className, overflow, items }: { className?: string; overflow: string; items: ActionsMenuItem[] }) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "page-actions-menu");
+  // Read while open, so the list matches the buttons the header is showing right now.
+  const shown = open
+    ? items.filter((item) => item.slot === undefined || !slotButtonShown(menu.triggerRef.current, item.slot))
+    : [];
   const menuStyle = useAnchoredMenuStyle(open, menu.triggerRef, {
     desiredWidth: 220,
     // A touch row is 44px plus the 2px gap; the pop adds its padding and a separator.
-    desiredHeight: 48 * items.length + 16,
+    desiredHeight: 48 * Math.max(shown.length, 1) + 16,
     align: "end",
   });
-  const ordered = [...items.filter((item) => !item.danger), ...items.filter((item) => item.danger)];
+  const ordered = [...shown.filter((item) => !item.danger), ...shown.filter((item) => item.danger)];
   const firstDanger = ordered.findIndex((item) => item.danger);
   const choose = (action: () => void) => {
     menu.close(false);
@@ -213,7 +232,7 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
       >
         <MoreHorizontalIcon />
       </button>
-      {open && (
+      {open && createPortal((
         <>
           <div className="menu-backdrop" onClick={() => menu.close(true)} aria-hidden="true" />
           <div
@@ -222,7 +241,9 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
             ref={menu.menuRef}
             role="menu"
             aria-label="More Actions"
-            style={menuStyle}
+            // Fixed from the first commit: before the anchor is measured, `.menu-pop`'s own absolute
+            // position would put it at the end of <body>, and focusing its first item scrolls there.
+            style={menuStyle ?? UNANCHORED_POP}
             onKeyDown={menu.onMenuKeyDown}
           >
             {ordered.map((item, index) => (
@@ -231,7 +252,6 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
                 type="button"
                 role="menuitem"
                 className={`menu-item${item.danger ? " menu-danger" : ""}${index === firstDanger && index > 0 ? " menu-separated" : ""}`}
-                data-slot={item.slot}
                 disabled={item.disabled}
                 title={item.title}
                 onClick={() => choose(item.onClick)}
@@ -241,7 +261,7 @@ function ActionsMenu({ className, overflow, items }: { className?: string; overf
             ))}
           </div>
         </>
-      )}
+      ), document.body)}
     </div>
   );
 }

@@ -358,17 +358,21 @@ export function ProjectsView({
     );
   }
 
+  // On a phone the list and the detail are two routes, so the open Project takes the detail bar
+  // and its back control (§4.3, §6.2). The bar is full-bleed like every detail bar, so it sits
+  // outside the padded page container; on wider screens both panes share the page header.
+  const phoneDetail = isMobile && selected;
   return (
+    <>
+    {phoneDetail && (
+      <DetailBar
+        title={selected.name}
+        backLabel="Back to Projects"
+        onBack={() => navigate({ name: "projects" })}
+      />
+    )}
     <div className="page full projects-view">
-      {/* On a phone the list and the detail are two routes, so the open Project takes the detail
-          bar and its back control (§4.3, §6.2); on wider screens both panes share the header. */}
-      {isMobile && selected ? (
-        <DetailBar
-          title={selected.name}
-          backLabel="Back to Projects"
-          onBack={() => navigate({ name: "projects" })}
-        />
-      ) : (
+      {!phoneDetail && (
         <PageHeader
           title="Projects"
           description={PROJECTS_DESCRIPTION}
@@ -659,5 +663,6 @@ export function ProjectsView({
         <DeleteProjectDialog project={selected} busy={busy === "delete"} error={error} onClose={() => setDialog(null)} onDelete={deleteProject} />
       )}
     </div>
+    </>
   );
 }

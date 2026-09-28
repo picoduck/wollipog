@@ -96,11 +96,15 @@ test("the page header owns the page title and orders its actions for priority+ o
     assert.equal(primary.textContent, "New Skill", "the label is the primary's accessible name at every width");
     assert.ok(primary.querySelector("svg"), "a create action leads with the + icon");
 
+    // With both buttons showing, ⋯ lists only the secondary that has no button. The pop is
+    // portalled out of the header, which is a query container.
     const more = container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!;
     await act(async () => more.click());
-    const items = [...domWindow.document.querySelectorAll('[role="menuitem"]')];
-    assert.deepEqual(items.map((item) => [item.textContent, item.getAttribute("data-slot")]),
-      [["Import from Machine", "3"], ["Manage Groups", "2"], ["Import from Git", "1"]]);
+    const menu = domWindow.document.querySelector('[role="menu"]')!;
+    assert.equal(container.contains(menu as never), false, "the pop is not inside the header");
+    assert.equal(menu.parentElement, domWindow.document.body);
+    const items = [...menu.querySelectorAll('[role="menuitem"]')];
+    assert.deepEqual(items.map((item) => item.textContent), ["Import from Machine"]);
     await act(async () => (items[0] as unknown as HTMLButtonElement).click());
     assert.deepEqual(calls, ["Import from Machine"]);
     assert.equal(domWindow.document.activeElement, more as never, "choosing an item returns focus to ⋯");
@@ -109,10 +113,10 @@ test("the page header owns the page title and orders its actions for priority+ o
   }
 });
 
-test("⋯ is hidden until a secondary overflows, and keyboard navigation skips items the header shows", async () => {
+test("⋯ lists exactly the secondaries whose buttons the header hid, plus its own items", async () => {
   const style = domWindow.document.createElement("style");
-  // The widest tier: slots 1 and 2 are buttons, so their menu items are not displayed.
-  style.textContent = '.page-more .menu-item[data-slot="1"], .page-more .menu-item[data-slot="2"] { display: none; }';
+  // The compact tier: slot 2's button is hidden, slot 1's still shows.
+  style.textContent = '.page-actions > .page-action[data-slot="2"] { display: none; }';
   domWindow.document.head.append(style);
   const view = await mount(
     <PageHeader
@@ -129,12 +133,15 @@ test("⋯ is hidden until a secondary overflows, and keyboard navigation skips i
     const more = view.container.querySelector<HTMLButtonElement>('[aria-label="More Actions"]')!;
     await act(async () => more.click());
     const menu = domWindow.document.querySelector('[role="menu"]') as unknown as Element;
+    assert.deepEqual([...menu.querySelectorAll('[role="menuitem"]')].map((item) => item.textContent),
+      ["Import from Machine", "Manage Groups", "Skill Settings"],
+      "Import from Git still has its button, so it is not repeated in ⋯");
     assert.equal(domWindow.document.activeElement?.textContent, "Import from Machine");
     await press(menu, "ArrowDown");
-    assert.equal(domWindow.document.activeElement?.textContent, "Skill Settings",
-      "the two secondaries shown as buttons are not stops in ⋯");
-    await press(menu, "ArrowDown");
-    assert.equal(domWindow.document.activeElement?.textContent, "Import from Machine");
+    assert.equal(domWindow.document.activeElement?.textContent, "Manage Groups");
+    await press(menu, "Escape");
+    assert.equal(domWindow.document.querySelector('[role="menu"]'), null);
+    assert.equal(domWindow.document.activeElement, more as never, "Escape returns focus to ⋯");
   } finally {
     await view.unmount();
     style.remove();
