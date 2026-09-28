@@ -83,11 +83,12 @@ class FakeSocket implements UiSocket {
 
 const navigation: ViewNavigation = { current: () => ({ name: "inbox" }), push() {}, listen: () => () => {} };
 
-function snapshot(runnerStatus: "online" | "offline", candidate: SessionView): UiSnapshotMessage {
+function snapshot(runnerStatus: "online" | "offline" | "absent", candidate: SessionView): UiSnapshotMessage {
   return {
     type: "snapshot",
     capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true },
-    runners: [runner(runnerStatus)], boxes: [], projects: [], sessions: [candidate], runs: [], pods: [],
+    runners: runnerStatus === "absent" ? [] : [runner(runnerStatus)],
+    boxes: [], projects: [], sessions: [candidate], runs: [], pods: [],
   } as unknown as UiSnapshotMessage;
 }
 
@@ -168,6 +169,20 @@ test("a Stop waiting for an offline runner reads Stop Waiting for Runner, neutra
     await act(async () => view.socket.push(snapshot("online", candidate)));
     expectBadge(view.surfaces().inbox, "Stop Pending", "info", true);
     expectBadge(view.surfaces().header, "Stop Pending", "info", true);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a runner this client has no record of is unknown, not offline, so the Stop keeps Stop Pending", async () => {
+  const candidate = session("stop_pending");
+  const view = await mount(candidate);
+  try {
+    await act(async () => view.socket.push(snapshot("absent", candidate)));
+    // Both surfaces agree, although the header still reports the runner as disconnected.
+    expectBadge(view.surfaces().inbox, "Stop Pending", "info", true);
+    expectBadge(view.surfaces().header, "Stop Pending", "info", true);
+    assert.ok(domWindow.document.querySelector('[aria-label="Health: Disconnected"]'));
   } finally {
     await view.unmount();
   }

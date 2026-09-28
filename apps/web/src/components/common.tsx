@@ -17,6 +17,7 @@ import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "..
 import { statusMeta, type StatusMeta } from "../status-meta.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { reminderBadgeDescription, reminderBadgeLabel, type SnoozedAttentionReason } from "../session-reminders.js";
+import { useOptionalStoreSelector } from "../store.js";
 import { CheckIcon, CopyIcon, PinIcon, WarningIcon } from "./Icons.js";
 import { StatusBadge, StatusCount } from "./StatusBadge.js";
 
@@ -334,20 +335,26 @@ export function SessionStatusIndicators({
 }: {
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
     "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait" | "queueHold" | "holds" |
-    "orchestratorCampaign" | "pendingRequestOwners">;
-  /** The session's runner is offline. */
+    "orchestratorCampaign" | "pendingRequestOwners"> & Partial<Pick<SessionView, "runnerId">>;
+  /** The session's runner is not connected (offline, or not known to this client). */
   disconnected?: boolean;
   onOpenAttention?: () => void;
   onOpenCampaignRequests?: () => void;
   /** Board cards show the per-kind pills; headers keep the single badge that opens the panel. */
   attention?: "badge" | "pills";
 }) {
+  // A Stop waits for its runner only when the runner is known to be offline. A runner this client
+  // has no record of is unknown, not offline, so the Stop keeps its delivery wording (the Inbox row
+  // reads it the same way). Without a store, the caller's `disconnected` is the only evidence.
+  const storedRunnerStatus = useOptionalStoreSelector((state) =>
+    session.runnerId === undefined ? undefined : state.runners.get(session.runnerId)?.status ?? "unknown");
+  const runnerOnline = storedRunnerStatus === undefined ? !disconnected : storedRunnerStatus !== "offline";
   const lifecycle = sessionLifecycleMeta(session.status, {
     archiveStatus: session.archiveStatus,
     archiveOperation: session.archiveOperation,
     stopOperation: session.stopOperation,
     historyQuarantine: session.historyQuarantine,
-    runnerOnline: !disconnected,
+    runnerOnline,
   });
   const attentionStatus = sessionAttentionStatus(session);
   const humanCampaignRequests = session.orchestratorCampaign?.pendingRequests?.human ?? 0;
@@ -364,7 +371,7 @@ export function SessionStatusIndicators({
         archiveOperation={session.archiveOperation}
         stopOperation={session.stopOperation}
         historyQuarantine={session.historyQuarantine}
-        runnerOnline={!disconnected}
+        runnerOnline={runnerOnline}
         ariaLabel={`Activity: ${lifecycle.label}`}
       />}
       {session.status === "queued" && session.capacityWait && (

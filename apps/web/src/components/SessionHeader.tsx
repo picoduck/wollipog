@@ -53,6 +53,14 @@ import { ChevronLeftIcon, MoreVerticalIcon, ShareIcon, ThreadForkIcon } from "./
 import { useIsMobile } from "./useIsMobile.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 
+/** The badges the measured status row may hide into "+N": the lifecycle and change groups, and the
+ * background-work and active-worker badges that sit directly in the row. */
+export const MEASURED_STATUS_SELECTOR =
+  ".session-status-indicators > .status, " +
+  ".change-status-indicators > .status, " +
+  ":scope > .status[data-group='background-work'], " +
+  ":scope > .active-subagents-badge";
+
 /**
  * The order badges are offered a place in the measured status row when it cannot hold them all
  * (#784).
@@ -66,14 +74,6 @@ import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-c
  * while this fitter still keeps any status that fits and moves the rest into `+N`. Clipping is
  * never an option, and the badge's accessible name remains complete in both locations.
  */
-/** The badges the measured status row may hide into "+N": the lifecycle and change groups, and the
- * background-work and active-worker badges that sit directly in the row. */
-export const MEASURED_STATUS_SELECTOR =
-  ".session-status-indicators > .status, " +
-  ".change-status-indicators > .status, " +
-  ":scope > .status[data-group='background-work'], " +
-  ":scope > .active-subagents-badge";
-
 export function statusKeepOrder(items: HTMLElement[]): HTMLElement[] {
   // Workers are foreground work, so the active-subagents badge ranks with the lifecycle group they
   // run inside, not with background work.

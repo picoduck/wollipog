@@ -456,6 +456,10 @@ export function UsageView() {
                     )}
                   </div>
                   <StatusBadge meta={usageSourceMeta(source)} />
+                  {source.freshness === "stale" && source.state !== "available" && (
+                    // An old reading of any other state is still old; say so beside it.
+                    <StatusBadge tone="neutral" noDot label="Stale" title="This is the last reading the provider reported." />
+                  )}
                   {source.provider === "codex" && source.providerAccountId && (
                     <button
                       type="button"

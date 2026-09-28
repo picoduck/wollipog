@@ -644,7 +644,7 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
       state: "unavailable",
       detail: "Usage appears after a provider response.",
       fetchedAt: now,
-      freshness: "fresh",
+      freshness: "stale",
       runnerStatus: "online",
       runnerName: "Build Machine",
       agentName: "Claude",
@@ -683,6 +683,8 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   assert.match(pageText(), /Approaching Limit/);
   assert.doesNotMatch(pageText(), /[⚠⛔]/);
   assert.match(pageText(), /Last Known — Stale/);
+  // An old reading of any other state still says it is old, in words rather than a glyph.
+  assert.match(pageText(), /Temporarily UnavailableStale/);
   assert.match(pageText(), /Resets in 2 hours/);
   assert.ok(pageText().includes(new Date(now + 90 * 60_000).toLocaleString()), "the exact reset uses the viewer's local time");
   assert.match(pageText(), /Machine Offline/);
