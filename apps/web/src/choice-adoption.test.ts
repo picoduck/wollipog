@@ -93,20 +93,16 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/AgentSessionDiscoveryDialog.tsx", "agent-pick", 1],
   ["components/AutomationsView.tsx", "native-select", 12],
   ["components/Board.tsx", "native-select", 2],
-  ["components/BrowserPanel.tsx", "seg", 1],
   ["components/FilesPanel.tsx", "native-select", 1],
-  ["components/FilesPanel.tsx", "seg", 1],
   ["components/GitDiffViewer.tsx", "native-select", 1],
   ["components/NewPodDialog.tsx", "pod-member-pick", 2],
   ["components/NewRunDialog.tsx", "agent-pick", 4],
   ["components/NewRunDialog.tsx", "native-select", 6],
   ["components/NewRunDialog.tsx", "workflow-preset", 3],
-  ["components/OnboardRunnerDialog.tsx", "seg", 2],
   ["components/PeopleDevicesPanel.tsx", "access-choice", 2],
   ["components/PeopleDevicesPanel.tsx", "native-select", 4],
   ["components/PodsView.tsx", "native-select", 8],
   ["components/ProjectLocationDialog.tsx", "native-select", 1],
-  ["components/ReviewPanel.tsx", "seg", 3],
   ["components/SessionApproval.tsx", "question-option", 2],
   ["components/SessionDetail.tsx", "aria-pressed", 1],
   ["components/SessionHeader.tsx", "native-select", 1],
@@ -118,12 +114,12 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
      semantics inside the primitives file. The entry came off with the control, which is the
      ratchet working rather than an exemption being granted. */
   ["components/AgentSessionDiscoveryDialog.tsx", "raw-radiogroup", 1],
-  ["components/BrowserPanel.tsx", "raw-radiogroup", 2],
-  ["components/FilesPanel.tsx", "raw-radiogroup", 3],
   ["components/NewRunDialog.tsx", "raw-radiogroup", 5],
-  ["components/OnboardRunnerDialog.tsx", "raw-radiogroup", 2],
   ["components/PeopleDevicesPanel.tsx", "raw-radiogroup", 3],
-  ["components/ReviewPanel.tsx", "raw-radiogroup", 9],
+  /* Down from 9 with #1803: the diff scope, index pane and diff layout groups became the shared
+     SegmentedControl, as did the Browser, Files and runner-host groups above, whose entries came
+     off. The one left is the findings list's selection checkbox. */
+  ["components/ReviewPanel.tsx", "raw-radiogroup", 1],
   ["components/SessionApproval.tsx", "raw-radiogroup", 2],
   ["components/AutomationsView.tsx", "raw-radiogroup", 2],
   ["components/CommandPalette.tsx", "raw-radiogroup", 2],

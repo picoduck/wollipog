@@ -10,7 +10,8 @@ const onboarding = readFileSync(new URL("./OnboardRunnerDialog.tsx", import.meta
 const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
 
 test("Connections separates machines from people and exposes durable machine recovery", () => {
-  assert.match(view, /role="tablist"[\s\S]*aria-label="Connection Settings"/);
+  // The shared tab row (§10.1) owns role="tablist"; it sits in the page header's tab slot.
+  assert.match(view, /tabs=\{\(\s*<TabList label="Connection Settings"/);
   assert.match(view, /aria-controls=\{`connections-\$\{item\.id\}-panel`\}/);
   assert.match(view, /handleRovingChoiceKeyDown\(event, "tab"\)/);
   assert.match(view, /id: "instances" as const/);
@@ -122,9 +123,8 @@ test("runner repair preserves identity, rotates when needed, and exposes selecti
   assert.match(onboarding, /showLocalSetup && mode !== "local" && \(\s*<button/);
   assert.match(onboarding, /mode !== "local" && \(!showLocalSetup \|\| advancedOpen\)/);
   assert.match(onboarding, /Wollipog could not access its managed local runner\. Close this dialog and try again\./);
-  assert.match(onboarding, /role="radiogroup"/);
-  assert.match(onboarding, /role="radio"/);
-  assert.match(onboarding, /aria-checked=\{host === h\}/);
+  // The host choice is the shared segmented control (§10.2), which renders the radio group.
+  assert.match(onboarding, /<SegmentedControl\s+className="runner-hosts"\s+label="Runner Connection Host"\s+value=\{host\}/);
 });
 
 test("agent session discovery is a progressive modal instead of an inline runner-card list", () => {

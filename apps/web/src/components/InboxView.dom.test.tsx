@@ -383,9 +383,9 @@ test("InboxView preserves the server-authoritative Project count when reminders 
       pods: [],
     });
   });
-  const projectTab = [...container.querySelectorAll<HTMLElement>(".inbox-tab")]
+  const projectTab = [...container.querySelectorAll<HTMLElement>(".inbox-tabs .tab")]
     .find((tab) => tab.textContent?.includes("Project One"));
-  assert.equal(projectTab?.querySelector(".inbox-tab-count")?.textContent, "7");
+  assert.equal(projectTab?.querySelector(".count")?.textContent, "7");
   await act(async () => { projectTab!.click(); });
   assert.equal(container.querySelector('[title="Active"]')?.getAttribute("aria-label"), "Active, 7 Sessions");
   assert.equal(container.querySelector('[title="Snoozed"]')?.getAttribute("aria-label"), "Snoozed, 0 Sessions");
@@ -450,7 +450,7 @@ test("Active and Snoozed badges follow the selected Project split and live remin
   assert.equal(countLabel("Active"), "Active, 3 Sessions");
   assert.equal(countLabel("Snoozed"), "Snoozed, 2 Sessions");
 
-  const alphaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tab")]
+  const alphaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tabs .tab")]
     .find((tab) => tab.textContent?.includes("Alpha"))!;
   await act(async () => { alphaTab.click(); });
   assert.equal(countLabel("Active"), "Active, 1 Session");
@@ -466,7 +466,7 @@ test("Active and Snoozed badges follow the selected Project split and live remin
   assert.equal(countLabel("Active"), "Active, 0 Sessions");
   assert.equal(countLabel("Snoozed"), "Snoozed, 2 Sessions");
 
-  const betaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tab")]
+  const betaTab = [...container.querySelectorAll<HTMLButtonElement>(".inbox-tabs .tab")]
     .find((tab) => tab.textContent?.includes("Beta"))!;
   await act(async () => { betaTab.click(); });
   assert.equal(countLabel("Active"), "Active, 2 Sessions");
@@ -740,7 +740,7 @@ test("InboxView holds desktop browsing order until the user leaves the window", 
   const applyOrder = [...container.querySelectorAll<HTMLButtonElement>("button")]
     .find((button) => button.textContent?.trim() === "Apply New Order");
   assert.ok(applyOrder, "sustained desktop activity exposes a deliberate reorder boundary");
-  assert.equal(applyOrder.nextElementSibling, container.querySelector(".sessions-view-toggle"),
+  assert.equal(applyOrder.nextElementSibling, container.querySelector('[role="radiogroup"][aria-label="Sessions View"]'),
     "the conditional button leads List / Board so showing it cannot move the toggle (#1675)");
   assert.match(container.textContent ?? "", /A newer Inbox order is available/);
   await act(async () => { applyOrder.click(); });
@@ -1287,7 +1287,7 @@ test("board mode shares the Sessions toolbar scope and toggles back to the list"
   assert.equal(domWindow.document.activeElement, search,
     "Enter does not invent a selected-row focus model for the board");
 
-  const toggle = container.querySelector(".sessions-view-toggle");
+  const toggle = container.querySelector('[role="radiogroup"][aria-label="Sessions View"]');
   assert.ok(toggle, "the List / Board toggle lives in the shared toolbar");
   const listOption = [...toggle!.querySelectorAll("button")]
     .find((option) => option.textContent === "List") as unknown as HTMLButtonElement;

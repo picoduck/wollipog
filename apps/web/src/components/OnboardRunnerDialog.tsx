@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { OnboardingInfo, RunnerCredentialSecret } from "@wollipog/protocol";
+import { SegmentedControl } from "./ui/ChoiceControls.js";
 import { useApi } from "../api-context.js";
 import {
   buildRunnerConfigJson,
@@ -354,20 +355,13 @@ export function OnboardRunnerDialog({
 
             <li>
               <div className="step-head">Where Does the Runner Connect From?</div>
-              <div className="seg" role="radiogroup" aria-label="Runner Connection Host">
-                {hostOptions.map((h) => (
-                  <button
-                    key={h}
-                    type="button"
-                    role="radio"
-                    aria-checked={host === h}
-                    className={`seg-btn ${host === h ? "active" : ""}`}
-                    onClick={() => setHost(h)}
-                  >
-                    {h === "127.0.0.1" ? "This Machine" : h}
-                  </button>
-                ))}
-              </div>
+              <SegmentedControl
+                className="runner-hosts"
+                label="Runner Connection Host"
+                value={host}
+                options={hostOptions.map((h) => ({ value: h, label: h === "127.0.0.1" ? "This Machine" : h }))}
+                onChange={setHost}
+              />
               {isRemote && (
                 <p className="hint warn">
                   Remote machine selected. Start the control plane with <code>CONTROL_PLANE_HOST=0.0.0.0</code> and make sure

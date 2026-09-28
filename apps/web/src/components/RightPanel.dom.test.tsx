@@ -228,7 +228,7 @@ test("RightPanel drops unmounted-generation focus intent and renders honest offl
     assert.equal(container.querySelector(".subagent-detail"), null,
       "a stale target does not select a different session's worker");
     await act(async () => {
-      const history = [...container.querySelectorAll<HTMLButtonElement>(".agents-filters button")]
+      const history = [...container.querySelectorAll<HTMLButtonElement>('[aria-label="Worker Filter"] button')]
         .find((button) => button.textContent?.startsWith("History"))!;
       history.click();
     });

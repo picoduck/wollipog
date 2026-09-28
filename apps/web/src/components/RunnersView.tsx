@@ -1,5 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { State, useSnapshotState } from "./State.js";
+import { TabList } from "./Tabs.js";
 import {
   agentContextKey,
   runnerCapabilityRequirement,
@@ -1714,36 +1715,37 @@ export function RunnersView() {
   const total = runnerList.length + boxList.length;
   const sections: Array<{ id: ConnectionSection; label: React.ReactNode }> = [
     ...(instances.desktopMultiInstance
-      ? [{ id: "instances" as const, label: <>Instances <span className="tab-count">{instances.registry.profiles.length}</span></> }]
+      ? [{ id: "instances" as const, label: <>Instances <span className="count">{instances.registry.profiles.length}</span></> }]
       : []),
-    { id: "machines", label: <>Machines <span className="tab-count">{total}</span></> },
+    { id: "machines", label: <>Machines <span className="count">{total}</span></> },
     { id: "people", label: <>People &amp; Devices</> },
   ];
   return (
     <div className="page">
-      <PageHeader title="Connections" {...machineActions} />
-      <div
-        className="connections-tabs"
-        role="tablist"
-        aria-label="Connection Settings"
-        onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}
-      >
-        {sections.map((item) => (
-          <button
-            key={item.id}
-            id={`connections-${item.id}-tab`}
-            type="button"
-            role="tab"
-            aria-selected={section === item.id}
-            aria-controls={`connections-${item.id}-panel`}
-            tabIndex={section === item.id ? 0 : -1}
-            className={section === item.id ? "active" : ""}
-            onClick={() => selectSection(item.id)}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
+      {/* The tabs sit in the page header's tab slot (§4.2, §10.1), under its title and actions. */}
+      <PageHeader
+        title="Connections"
+        {...machineActions}
+        tabs={(
+          <TabList label="Connection Settings" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
+            {sections.map((item) => (
+              <button
+                key={item.id}
+                id={`connections-${item.id}-tab`}
+                type="button"
+                role="tab"
+                aria-selected={section === item.id}
+                aria-controls={`connections-${item.id}-panel`}
+                tabIndex={section === item.id ? 0 : -1}
+                className="tab"
+                onClick={() => selectSection(item.id)}
+              >
+                {item.label}
+              </button>
+            ))}
+          </TabList>
+        )}
+      />
       {section === "instances" ? (
         <div
           id="connections-instances-panel"

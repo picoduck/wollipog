@@ -887,6 +887,28 @@ function descendantRequestFixture(): DescendantRequestView {
 
 const client = {
   ...api,
+  // One page of the fixture's sessions as the Archived Sessions table lists them. The Archived
+  // filter shows every session as archived, so the table has rows to lay out.
+  archiveSessionPage: async (input: Parameters<typeof api.archiveSessionPage>[0]) => {
+    const sessions = model.sessions
+      .map((value) => (input.archive === "archived" ? { ...value, archived: true } : value))
+      .filter((value) => input.archive === "all" || value.archived === (input.archive === "archived"));
+    const projectName = (id: string | null | undefined) => model.projects.find((candidate) => candidate.id === id)?.name ?? "No Project";
+    return structuredClone({
+      sessions,
+      snippets: {},
+      metadata: Object.fromEntries(sessions.map((value) => [value.id, {
+        project: projectName(value.projectId), location: value.workspaceName ?? "", agent: value.agentName ?? value.agentId,
+      }])),
+      nextCursor: null,
+      hasMore: false,
+      facets: {
+        projects: [...new Set(sessions.map((value) => projectName(value.projectId)))],
+        locations: [...new Set(sessions.map((value) => value.workspaceName ?? ""))],
+        agents: [...new Set(sessions.map((value) => value.agentName ?? value.agentId))],
+      },
+    });
+  },
   sessionUsage: async (sessionId: string) => {
     const value = model.sessions.find((candidate) => candidate.id === sessionId)!;
     const totals = {

@@ -45,16 +45,17 @@ const fillOf = (selector: string) => {
 };
 
 const WRAP = ".usage-table-wrap";
-const ZEBRA = ".usage-table tbody tr:nth-child(even)";
-const HOVER = ".usage-table tbody tr:hover";
+const HOVER = ".table tbody tr:hover";
 const HEADER = ".usage-table thead th";
 const BAR = ".usage-cost-bar";
 
-test("the table stripes, highlights, and keeps its header in view", () => {
-  const zebra = ruleFor(".usage-table tbody tr:nth-child(even)");
-  assert.ok(zebra, "alternating rows need a tint to track a value across a wide row");
-  const hover = ruleFor(".usage-table tbody tr:hover");
-  assert.ok(hover, "and the row under the pointer needs to be the one that stands out");
+test("the table highlights the row under the pointer and keeps its header in view", () => {
+  // The §14 table recipe divides rows with hairlines and draws no zebra: a stripe is a second
+  // meaning for a surface tint, and the hover row already carries the one a reader follows.
+  assert.equal(rulesWith(css, ["background"], []).filter(({ selector }) => /tr:nth-child\((even|odd)\)/.test(selector)).length, 0,
+    "no table stripes its rows (§14)");
+  const hover = ruleFor(HOVER);
+  assert.ok(hover, "the row under the pointer needs to be the one that stands out");
 
   // Every part of what makes a header stick, not just the word. `position: sticky` with no `top` is
   // inert; so is a `top` with no bounded, overflowing ancestor to stick inside. Each of the four is
@@ -70,11 +71,7 @@ test("the table stripes, highlights, and keeps its header in view", () => {
 test("every added colour comes from the palette", () => {
   // Ten palettes: a literal here is right for one of them and wrong for nine, and would pass every
   // contrast check because those measure declared TOKENS.
-  for (const selector of [
-    ".usage-table tbody tr:nth-child(even)",
-    ".usage-table tbody tr:hover",
-    ".usage-table thead th",
-  ]) {
+  for (const selector of [HOVER, HEADER]) {
     const rule = ruleFor(selector);
     assert.ok(rule, `${selector} must declare a background`);
     assert.match(rule!.declarations.background!, /var\(--/,
@@ -104,7 +101,7 @@ test("the scroll region is reachable and shows focus", () => {
   // Scoped to the wrapper's own attributes. Reading these off the whole file matches whichever
   // element declares them first — `aria-labelledby` appears three times in this view, and the first
   // belongs to the page heading, so a file-wide read would have checked the wrong element.
-  const region = /className="usage-table-wrap"[\s\S]{0,800}?\n\s*>/.exec(view)?.[0];
+  const region = /className="table-wrap usage-table-wrap"[\s\S]{0,800}?\n\s*>/.exec(view)?.[0];
   assert.ok(region, "the wrapper's opening tag has to be findable to be checked");
   assert.match(region!, /tabIndex=\{0\}/);
   assert.match(region!, /role="region"/, "a scroll region needs a name as well as a tab stop");

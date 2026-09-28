@@ -12,7 +12,8 @@ const DESTINATIONS = [
   { path: "/projects", title: "Projects", description: true },
   { path: "/runs", title: "Multi-Agent Runs", max: 960 },
   { path: "/pods", title: "Collaboration Pods", max: 960 },
-  { path: "/connections", title: "Connections", max: 960 },
+  // Connections puts its tabs in the header's tab slot (#1803).
+  { path: "/connections", title: "Connections", max: 960, tabs: true },
   { path: "/skills", title: "Agent Skills", description: true },
   { path: "/archived", title: "Archived Sessions", max: 1200 },
   { path: "/usage", title: "Usage & Cost", description: true, max: 1200 },
@@ -66,7 +67,10 @@ test.describe("at 1440×900", () => {
       expect(geometry.marginLeft, "containers are never centred").toBe("0px");
       expect(geometry.containerX).toBe(geometry.railRight);
       if ("max" in destination) expect(geometry.containerWidth).toBe(destination.max + 48);
-      expect(geometry.headerHeight).toBe("description" in destination ? 88 : 64);
+      // §4.2: 64 title only, 88 with the description; a tab row replaces the 16px bottom padding
+      // with 12px and the 40px tabs (100 with tabs, 124 with a description and tabs).
+      const tabs = "tabs" in destination ? 36 : 0;
+      expect(geometry.headerHeight).toBe(("description" in destination ? 88 : 64) + tabs);
       expect(geometry.font).toBe("20px/28px 600");
       expect(geometry.largest, "the page title is the largest text on the page").toBeLessThanOrEqual(20);
       if (geometry.description !== null) {
@@ -117,7 +121,7 @@ test.describe("at 1440×900", () => {
     const title = page.getByRole("heading", { level: 1, name: "Archived Sessions" });
     await expect(title).toBeFocused();
     expect(await title.evaluate((element) => getComputedStyle(element).outlineStyle)).toBe("none");
-    await expect(page.getByRole("region", { name: "Archived Sessions" })).toBeVisible();
+    await expect(page.getByRole("region", { name: "Archived Sessions", exact: true })).toBeVisible();
   });
 });
 

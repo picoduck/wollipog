@@ -48,18 +48,27 @@ test.describe("with a touch pointer", () => {
     await expect(page.locator(".sessions-toolbar-option-icon").first()).toBeHidden();
 
     await page.setViewportSize({ width: 390, height: 844 });
+    // The shared segmented control (§10.2) draws a 38px option inside a 44px track and gives each
+    // option the track's inset as its hit area, so the TARGET is 44px: a tap 2.5px above or below
+    // the visible option still lands on it.
     for (const name of ["List", "Board", "Active, 4 Sessions", "Snoozed, 1 Session"]) {
       const option = page.getByRole("radio", { name });
       await expect(option).toBeVisible();
-      expect((await option.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      const track = option.locator("xpath=ancestor::*[@role='radiogroup'][1]");
+      expect((await track.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+      expect(await option.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        const x = box.left + box.width / 2;
+        return [box.top - 2.5, box.bottom + 2.5].every((y) => element.contains(document.elementFromPoint(x, y)));
+      }), `${name} is a 44px target`).toBe(true);
     }
     await expect(page.locator(".sessions-toolbar-option-text").first()).toBeHidden();
     await expect(page.locator(".sessions-toolbar-option-icon").first()).toBeVisible();
-    await expect(page.locator(".sessions-toolbar-count")).toHaveText(["4", "1"]);
+    await expect(page.locator(".sessions-toolbar-option .count")).toHaveText(["4", "1"]);
 
     const geometry = await page.locator(".inbox-toolbar-actions").evaluate((actions) => {
       const search = actions.querySelector(".inbox-search")!.getBoundingClientRect();
-      const options = [...actions.querySelectorAll<HTMLElement>(".ui-seg-option")]
+      const options = [...actions.querySelectorAll<HTMLElement>(".seg-option")]
         .map((option) => option.getBoundingClientRect());
       return {
         searchWidth: search.width,
@@ -212,13 +221,13 @@ test("the toggle switches modes, the URL follows, and archived sessions never re
   await openHarness(page);
   await expect(page.locator(".inbox-list")).toBeVisible();
 
-  await page.locator(".sessions-view-toggle button", { hasText: "Board" }).click();
+  await page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: /Board/ }).click();
   await expect(page.locator(".board-wrap")).toBeVisible();
   expect(harnessPath(page)).toBe("/board");
   await expect(page.locator(".board .card")).toHaveCount(4);
   await expect(page.locator(".board .card", { hasText: "Archived Session" })).toHaveCount(0);
 
-  await page.locator(".sessions-view-toggle button", { hasText: "List" }).click();
+  await page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: /List/ }).click();
   await expect(page.locator(".inbox-list")).toBeVisible();
   expect(harnessPath(page)).toBe("/");
 });
@@ -241,7 +250,7 @@ test("bare b toggles the mode and stays inert while typing in the shared search"
 
 test("a reload keeps board mode and activating the Sessions rail item reopens it", async ({ page }) => {
   await openHarness(page);
-  await page.locator(".sessions-view-toggle button", { hasText: "Board" }).click();
+  await page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: /Board/ }).click();
   await expect(page.locator(".board-wrap")).toBeVisible();
 
   await page.reload();
@@ -262,7 +271,7 @@ test("history back returns to the mode the session was opened from, in both dire
   await page.goBack();
   await expect(page.locator(".board-wrap")).toBeVisible();
 
-  await page.locator(".sessions-view-toggle button", { hasText: "List" }).click();
+  await page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: /List/ }).click();
   await expect(page.locator(".inbox-list")).toBeVisible();
   const row = page.locator(".inbox-row", { hasText: "Queued Session" });
   await row.click();
@@ -452,7 +461,7 @@ test("long-pressed rows and cards pin their target, persist the state, and expos
   await expect(page.locator('.inbox-row-shell[aria-rowindex="2"] .inbox-row-title')).toHaveText("Approval Session",
     "unpinning restores the existing Inbox ordering");
 
-  await page.locator(".sessions-view-toggle button", { hasText: "Board" }).click();
+  await page.getByRole("radiogroup", { name: "Sessions View" }).getByRole("radio", { name: /Board/ }).click();
   cdp = await touchSession(page);
   const running = page.locator(".board .card", { hasText: "Running Session" });
   await longPressUntilMenu(cdp, page, await centerOf(running));

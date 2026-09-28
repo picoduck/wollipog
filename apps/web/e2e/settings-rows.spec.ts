@@ -904,7 +904,7 @@ for (const theme of THEMES) {
  * `.ui-row-switch:focus-visible, .ui-row-nav:focus-visible { outline: none; box-shadow: none }`
  * left switches and navigation rows with no keyboard indicator at all and passed. Which is why the
  * list below is every KIND rather than one representative, and why the Appearance controls get the
- * same treatment separately: a rule scoped to `.ui-seg-option:focus-visible` is exactly this defect
+ * same treatment separately: a rule scoped to `.seg-option:focus-visible` is exactly this defect
  * one primitive over.
  */
 const FOCUSABLE = [
@@ -1221,13 +1221,17 @@ test.describe("the appearance controls", () => {
         expectPainted(await painted(groupBox), `the ${group} group`, 16);
         await expectInk(page, groupBox, `the ${group} group`, APPEARANCE_INK.pills);
 
-        // The GROUP's border is what makes the unselected pills read as pills: their own border is
-        // transparent, so deleting it leaves a row of bare words until one happens to be selected.
-        const border = parseColor((await painted(groupBox)).borderColor);
+        // The GROUP's track is what makes the unselected options read as one control: their own
+        // border is transparent. §10.2 makes the track's edge decorative (`--border`) and puts the
+        // 3:1 obligation on the selected knob's `--control-outline` edge, which the next test
+        // measures; the options themselves are identified by their labels. So the track must paint
+        // a boundary and a ground distinct from what it sits on, without a 3:1 edge of its own.
+        const track = await painted(groupBox);
+        const border = parseColor(track.borderColor);
         expect(border.a, `the ${group} group paints no boundary`).toBeGreaterThan(0);
         const backdrop = await backdropOf(groupBox);
-        const ratio = contrast(over(border, backdrop), backdrop);
-        expect(ratio, `the ${group} group is ${ratio.toFixed(2)}:1 against its backdrop`).toBeGreaterThanOrEqual(3);
+        expect(over(parseColor(track.background), backdrop), `the ${group} track has no ground of its own`)
+          .not.toEqual(backdrop);
 
         // And the unselected option is a real, laid-out target rather than a label.
         expectPainted(await painted(pill(page, group, other)), `the unselected ${group} option`, 16);
@@ -1282,7 +1286,7 @@ test.describe("the appearance controls", () => {
 
     test(`the appearance controls show a focus ring in ${theme}`, async ({ page }) => {
       // The claim FOCUSABLE makes for the row primitives, made for the two controls that are no
-      // longer rows. `.ui-seg-option:focus-visible { outline: none }` is one rule that takes the
+      // longer rows. `.seg-option:focus-visible { outline: none }` is one rule that takes the
       // keyboard indicator off every segmented control in the app.
       await useHarness(page, theme, { section: "appearance" });
       for (const control of [pill(page, "Theme", "System"), trigger(page)]) {
@@ -1540,7 +1544,7 @@ test.describe("the appearance controls", () => {
       const reached = await page.evaluate(() => {
         const active = document.activeElement;
         if (!(active instanceof HTMLElement)) return null;
-        if (active.classList.contains("ui-seg-option")) {
+        if (active.classList.contains("seg-option")) {
           return `${active.closest("[role=radiogroup]")?.getAttribute("aria-label")}:${active.textContent?.trim()}`;
         }
         return active.classList.contains("ui-select-trigger") ? "picker" : null;
@@ -1580,7 +1584,7 @@ test.describe("the appearance controls", () => {
 
       // And it says who took it away. A faded control with no explanation is the state §11.3
       // forbids: the setting is visible, unusable, and unaccounted for.
-      const reason = seg(page, group).locator("xpath=following-sibling::small[contains(@class,'ui-seg-reason')]");
+      const reason = seg(page, group).locator("xpath=following-sibling::small[contains(@class,'seg-reason')]");
       await expect(reason).toBeVisible();
       await expect(reason).toHaveText("Managed by your workspace administrator.");
       // Resolved through the DOM rather than a CSS selector: `useId` puts colons in the id, which a

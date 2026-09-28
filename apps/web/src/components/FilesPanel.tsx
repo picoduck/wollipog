@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { Notice } from "./Notice.js";
+import { SegmentedControl } from "./ui/ChoiceControls.js";
 import {
   parseSourceLocation,
   runnerSupportsProtocol,
@@ -15,7 +16,6 @@ import { absoluteViewUrl } from "../navigation.js";
 import { instancePublicOrigin, useInstances } from "../instances-context.js";
 import { useStoreSelector } from "../store.js";
 import { Markdown } from "./Markdown.js";
-import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { Spinner } from "./common.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
 import { usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
@@ -322,26 +322,13 @@ export function FilesBrowser({
         <div className="files-viewer" ref={viewerRef}>
           <div className="files-viewer-bar source-location-bar">
             {isMarkdownPath(file.path) && !file.binary && (
-              <div className="scope-seg" role="radiogroup" aria-label="Markdown View" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-                <button
-                  role="radio"
-                  aria-checked={rendered}
-                  tabIndex={rendered ? 0 : -1}
-                  className={`scope-opt${rendered ? " is-active" : ""}`}
-                  onClick={() => setRendered(true)}
-                >
-                  Rendered
-                </button>
-                <button
-                  role="radio"
-                  aria-checked={!rendered}
-                  tabIndex={!rendered ? 0 : -1}
-                  className={`scope-opt${!rendered ? " is-active" : ""}`}
-                  onClick={() => setRendered(false)}
-                >
-                  Source
-                </button>
-              </div>
+              <SegmentedControl
+                className="sm"
+                label="Markdown View"
+                value={rendered ? "rendered" : "source"}
+                options={[{ value: "rendered", label: "Rendered" }, { value: "source", label: "Source" }]}
+                onChange={(view) => setRendered(view === "rendered")}
+              />
             )}
             {!file.binary && (
               <form className="source-symbol-form" onSubmit={(event) => { event.preventDefault(); jumpToSymbol(); }}>
@@ -407,13 +394,13 @@ export function FilesBrowser({
           {entries?.map((e) => (
             <li key={e.path}>
               <button
-                className="files-entry"
+                className="row dense"
                 disabled={disabled || fileBusy !== null}
                 onClick={() => (e.isDir ? void loadDir(e.path) : onOpenLocation({ path: e.path }))}
               >
-                <span className="files-icon">{e.isDir ? "📁" : "📄"}</span>
-                <span className="files-name">{e.name}</span>
-                {!e.isDir && <span className="muted files-size">{fileBusy === e.path ? <Spinner /> : formatBytes(e.size)}</span>}
+                <span className="row-icon" aria-hidden="true">{e.isDir ? "📁" : "📄"}</span>
+                <span className="row-title">{e.name}</span>
+                {!e.isDir && <span className="row-trail">{fileBusy === e.path ? <Spinner /> : formatBytes(e.size)}</span>}
               </button>
             </li>
           ))}

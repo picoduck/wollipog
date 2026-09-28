@@ -246,9 +246,9 @@ function Sample() {
               <a key={section.id} className="settings-section-link" href={`/settings/${section.id}`}>{section.title}</a>
             ))}
           </div>
-          <div className="sample-row">
-            {THEME_OPTIONS.map((option) => (
-              <span key={option.value} className="ui-seg-option">{option.label}</span>
+          <div className="seg" role="radiogroup" aria-label="Theme">
+            {THEME_OPTIONS.map((option, index) => (
+              <span key={option.value} role="radio" aria-checked={index === 0} className="seg-option">{option.label}</span>
             ))}
           </div>
           {/* The two rhythm carriers the density tokens drive. */}
@@ -262,8 +262,11 @@ function Sample() {
           {/* The other row families the density axis reaches. Review found the first version
               stopped at the settings row and the inbox row, so the setting looked broken on Board,
               Projects and Review rather than opted out. */}
-          <div className="project-manager-items">
-            <button type="button" className="project-manager-item"><span>A project row</span></button>
+          {/* The §5.2 rows, whose height comes from the row tokens rather than their padding. */}
+          <div className="surface">
+            <button type="button" className="row row-2"><span className="row-body"><span className="row-title">A project row</span><span className="row-sub">~/project</span></span></button>
+            <button type="button" className="row"><span className="row-title">A one-line row</span></button>
+            <button type="button" className="row dense"><span className="row-title">A file entry</span></button>
           </div>
           <div className="column">
             {/* `.card`, which is what Board actually renders — `.board-card` does not exist. */}
@@ -282,7 +285,6 @@ function Sample() {
           <div className="review-findings-list"><div className="review-finding-row"><span /><span>A finding</span><span /></div></div>
           <div className="ext-session-list"><div className="ext-session"><span>An external session</span></div></div>
           <div className="browser-artifact-row"><span>An artifact</span></div>
-          <div className="run-card"><span>A run card</span></div>
           {/* Real production runner cards. Their headings caused #237, and copied markup would
               allow the fixture to stay green while the components regress again. */}
           <div className="runner-grid">
@@ -303,8 +305,7 @@ function Sample() {
             />
           </div>
           <ul className="workspace-list"><li><span>A workspace row</span></li></ul>
-          <button type="button" className="files-entry"><span>A file entry</span></button>
-          <table className="usage-table"><tbody><tr><td>A usage cell</td></tr></tbody></table>
+          <div className="table-wrap"><table className="table"><tbody><tr><td>A usage cell</td></tr></tbody></table></div>
           <div className="files-source-line">
             <span>a line with a <mark>highlighted</mark> search hit</span>
           </div>

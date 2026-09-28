@@ -236,6 +236,48 @@ function button(container: HTMLElement, label: string): HTMLButtonElement {
   return result;
 }
 
+/** A menu item's label, without the refusal reason on its second line. */
+function itemLabel(item: Element): string | undefined {
+  return (item.querySelector(".menu-text") ?? item).textContent?.trim();
+}
+
+/**
+ * Visit every row action (§14: one inline action, the rest behind the row's ⋯), reading the ⋯
+ * items while that row's menu is open. A menu item is portalled to <body>.
+ */
+async function eachRowAction(
+  container: HTMLElement,
+  visit: (action: HTMLButtonElement, label: string, inMenu: boolean) => Promise<void> | void,
+): Promise<void> {
+  for (const row of container.querySelectorAll("tbody tr")) {
+    for (const inline of row.querySelectorAll<HTMLButtonElement>(".archive-row-actions > .btn")) {
+      await visit(inline, inline.textContent!.trim(), false);
+    }
+    const trigger = row.querySelector<HTMLButtonElement>('button[aria-label^="More Actions for"]');
+    if (!trigger) continue;
+    await act(async () => { fireDomEvent.click(trigger); });
+    for (const item of (domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menu"] [role="menuitem"]')) {
+      await visit(item, itemLabel(item)!, true);
+    }
+    if (trigger.getAttribute("aria-expanded") === "true") await act(async () => { fireDomEvent.click(trigger); });
+  }
+}
+
+/** The row action with this label, inline or in ⋯; a menu item is returned with its menu open. */
+async function rowAction(container: HTMLElement, label: string): Promise<HTMLButtonElement> {
+  const inline = [...container.querySelectorAll<HTMLButtonElement>(".archive-row-actions > .btn")]
+    .find((candidate) => candidate.textContent?.trim() === label);
+  if (inline) return inline;
+  for (const trigger of container.querySelectorAll<HTMLButtonElement>('button[aria-label^="More Actions for"]')) {
+    await act(async () => { fireDomEvent.click(trigger); });
+    const item = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menu"] [role="menuitem"]')]
+      .find((candidate) => itemLabel(candidate) === label);
+    if (item) return item;
+    await act(async () => { fireDomEvent.click(trigger); });
+  }
+  assert.fail(`${label} row action exists`);
+}
+
 test("empty archives expose labelled choice filters and a screen-reader status", async () => {
   const fixture = await mount([]);
   assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
@@ -256,8 +298,7 @@ test("large archives paginate, deep-link, filter, and accept live lifecycle upda
   assert.match(fixture.container.textContent ?? "", /Archived.*Awaiting Prompt/s,
     "archive and canonical lifecycle labels are both text-backed");
   assert.equal(fixture.container.querySelector('nav[aria-label="Archived Sessions Pagination"]')?.textContent?.includes("Page 1"), true);
-  assert.ok([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"),
-    "ordinary nonterminal archived sessions retain the Stop action");
+  assert.ok(await rowAction(fixture.container, "Stop"), "ordinary nonterminal archived sessions retain the Stop action");
   const tableRegion = fixture.container.querySelector<HTMLElement>('[role="region"][aria-label="Archived Sessions Table"]');
   assert.equal(tableRegion?.tabIndex, 0, "the horizontally scrolling table is keyboard reachable");
   assert.equal(fixture.container.querySelectorAll('th[scope="col"]').length, 7,
@@ -542,12 +583,14 @@ test("a successful deletion cannot be resurrected by the live session overlay", 
     deleteSession: async (id) => { deleted.push(id); },
   });
 
+  const open = await rowAction(fixture.container, "Open");
   await act(async () => {
-    fireDomEvent.click(button(fixture.container, "Open"));
+    fireDomEvent.click(open);
     await Promise.resolve();
   });
+  const remove = await rowAction(fixture.container, "Delete");
   await act(async () => {
-    fireDomEvent.click(button(fixture.container, "Delete"));
+    fireDomEvent.click(remove);
     await Promise.resolve();
   });
   await act(async () => {
@@ -935,7 +978,8 @@ test("a REST mutation preserves an unreproducible server search match until boun
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
   const callsBeforeMutation = calls;
 
-  await act(async () => { fireDomEvent.click(button(fixture.container, "Stop")); });
+  const stopAction = await rowAction(fixture.container, "Stop");
+  await act(async () => { fireDomEvent.click(stopAction); });
   await act(async () => {
     fireDomEvent.click(button(fixture.container, "Stop Session"));
     await Promise.resolve();
@@ -1122,30 +1166,55 @@ test("a Viewer sees every refused row action disabled with its reason, and nothi
     const fixture = await mount(viewerRows(viewerPermissions), recordingClient(calls), { unarchiveAndRestart });
     try {
       const restore = unarchiveAndRestart ? "Unarchive and Restart" : "Unarchive";
-      const refused = [
-        ...buttons(fixture.container, restore),
-        ...buttons(fixture.container, "Stop"),
-        ...buttons(fixture.container, "Retry Stop"),
-        ...buttons(fixture.container, "Delete"),
-      ];
-      assert.deepEqual(refused.map((candidate) => candidate.textContent?.trim()).sort(),
-        [restore, restore, "Delete", "Delete", "Retry Stop", "Stop"].sort(), "every refused action stays listed");
-      for (const action of refused) {
-        const label = action.textContent?.trim();
+      const refused: string[] = [];
+      await eachRowAction(fixture.container, async (action, label, inMenu) => {
+        if (label === "Open") {
+          assert.equal(action.disabled, false, "Open still works");
+          return;
+        }
+        refused.push(label);
         assert.equal(action.disabled, true, `${label} is disabled`);
-        assert.equal(action.title, VIEWER, `${label} states the reason on hover`);
+        // Inline, the reason is the button's title; in ⋯ it is the item's visible second line.
+        if (inMenu) assert.equal(action.querySelector(".menu-desc")?.textContent, VIEWER, `${label} shows the reason`);
+        else assert.equal(action.title, VIEWER, `${label} states the reason on hover`);
         const describedBy = action.getAttribute("aria-describedby");
-        assert.ok(describedBy, `${label} is described by its row's reason`);
+        assert.ok(describedBy, `${label} is described by its reason`);
         assert.equal(domWindow.document.getElementById(describedBy)?.textContent, VIEWER);
         await act(async () => { fireDomEvent.click(action); await Promise.resolve(); });
-      }
+      });
+      assert.deepEqual(refused.sort(),
+        [restore, restore, "Delete", "Delete", "Retry Stop", "Stop"].sort(), "every refused action stays listed");
       assert.deepEqual(calls, [], "nothing is sent");
       assert.doesNotMatch(domWindow.document.body.textContent ?? "", /Stop this session\?|Delete this session\?/u,
         "no confirmation opens");
-      for (const open of buttons(fixture.container, "Open")) assert.equal(open.disabled, false, "Open still works");
     } finally {
       await fixture.unmount();
     }
+  }
+});
+
+test("each row has one inline action and ⋯ for the rest, with Delete last after a separator (§14)", async () => {
+  const fixture = await mount([session(7, { title: "Archived Running", status: "running" })]);
+  try {
+    const cell = fixture.container.querySelector("tbody tr .actions-cell")!;
+    assert.deepEqual([...cell.querySelectorAll(".btn")].map((candidate) => candidate.textContent?.trim()), ["Unarchive"],
+      "one small ghost button, never a row of text buttons");
+    const trigger = cell.querySelector<HTMLButtonElement>('button[aria-label="More Actions for Archived Running"]');
+    assert.ok(trigger?.classList.contains("icon-btn"), "the rest are behind an icon ⋯");
+    await act(async () => { fireDomEvent.click(trigger!); });
+    const doc = domWindow.document as unknown as Document;
+    const menu = doc.querySelector('[role="menu"]')!;
+    assert.deepEqual([...menu.querySelectorAll('[role="menuitem"], [role="separator"]')]
+      .map((node) => node.getAttribute("role") === "separator" ? "—" : itemLabel(node)), ["Stop", "Open", "—", "Delete"]);
+    assert.ok(menu.querySelector('[role="menuitem"]:last-of-type')?.classList.contains("danger"));
+    await act(async () => { fireDomEvent.keyDown(menu.querySelector('[role="menuitem"]')!, { key: "Escape" }); });
+    // The trigger takes focus back on the next task, after the menu has unmounted.
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+    assert.ok(doc.querySelector('[role="menu"]') === null, "Escape closes it");
+    // Identity, not assert.equal: a failing equal would try to print both DOM nodes.
+    assert.ok(doc.activeElement === trigger, "and returns focus to ⋯");
+  } finally {
+    await fixture.unmount();
   }
 });
 
@@ -1159,12 +1228,10 @@ test("a person the server allows keeps every row action as before", async () => 
     const calls: string[] = [];
     const fixture = await mount(viewerRows(commandPermissions), recordingClient(calls));
     try {
-      for (const label of ["Unarchive", "Stop", "Retry Stop", "Delete"]) {
-        for (const action of buttons(fixture.container, label)) {
-          assert.equal(action.disabled, false, `${label} stays enabled`);
-          assert.equal(action.getAttribute("aria-describedby"), null);
-        }
-      }
+      await eachRowAction(fixture.container, (action, label) => {
+        assert.equal(action.disabled, false, `${label} stays enabled`);
+        assert.equal(action.getAttribute("aria-describedby"), null);
+      });
       await act(async () => { fireDomEvent.click(buttons(fixture.container, "Retry Stop")[0]!); await Promise.resolve(); });
       assert.deepEqual(calls, ["retry-stop:viewer-stop-failed"]);
     } finally {

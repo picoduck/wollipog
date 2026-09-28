@@ -365,11 +365,12 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   const stationaryToolbar = () => page.locator(".inbox-toolbar-actions > :not(.sr-only, .inbox-order-update)")
     .evaluateAll((elements) => elements.map((element) => {
       const rect = element.getBoundingClientRect();
-      return { className: element.className, left: rect.left, right: rect.right };
+      // The segmented controls by their group name: both are the shared `.seg` (§10.2).
+      return { name: element.getAttribute("aria-label") ?? element.className, left: rect.left, right: rect.right };
     }));
   const toolbarWithoutButton = await stationaryToolbar();
-  expect(toolbarWithoutButton.map(({ className }) => className)).toEqual([
-    "ui-seg sessions-view-toggle", "ui-seg inbox-reminder-view", "inbox-create-menu", "inbox-search",
+  expect(toolbarWithoutButton.map(({ name }) => name)).toEqual([
+    "Sessions View", "Reminder View", "inbox-create-menu", "inbox-search",
   ]);
 
   await page.evaluate(() => {
@@ -383,7 +384,7 @@ test("desktop can apply a pending Inbox order without losing selection or scroll
   await expect(applyOrder).toBeVisible();
   expect(await stationaryToolbar()).toEqual(toolbarWithoutButton);
   const applyOrderBox = await applyOrder.boundingBox();
-  const toggleBox = await page.locator(".sessions-view-toggle").boundingBox();
+  const toggleBox = await page.getByRole("radiogroup", { name: "Sessions View" }).boundingBox();
   expect(applyOrderBox && toggleBox && applyOrderBox.x + applyOrderBox.width <= toggleBox.x).toBe(true);
   // The toolbar gives the button its width from the Project tabs, not by clipping the button.
   expect(await applyOrder.evaluate((button) => button.scrollWidth <= button.clientWidth)).toBe(true);
@@ -833,7 +834,7 @@ test("Inbox titles keep one reading axis across row signals, widths, and densiti
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-alpha", { status: "running" });
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateSession("session-secret", { status: "starting" });
   });
-  await page.getByRole("tab", { name: /^All\d/ }).click();
+  await page.getByRole("tab", { name: /^All \d/ }).click();
   await expect(page.locator(".inbox-row-title")).toHaveCount(3);
 
   for (const density of ["compact", "comfortable"] as const) {
@@ -1297,7 +1298,7 @@ async function openMoveToProjectDialog(page: Page) {
 test("the Project crumb navigates independently beside persistent Project Actions", async ({ page }) => {
   // A longer name keeps its click region separate from the compact trailing actions gutter.
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.updateProject("alpha", { name: "Alpha Project" }));
-  await page.getByRole("tab", { name: /^All\d/ }).click();
+  await page.getByRole("tab", { name: /^All \d/ }).click();
   await page.getByRole("row", { name: /Alpha Session/ }).click();
   await page.getByRole("button", { name: "Expand Session" }).click();
   const projectChip = page.locator(".detail-crumbs .cctx-chip").filter({ hasText: "Alpha Project" });

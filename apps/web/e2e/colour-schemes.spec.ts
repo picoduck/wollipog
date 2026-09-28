@@ -1259,18 +1259,20 @@ test("comfortable density gives every row more room than compact", async ({ page
       return {
         row: box(".ui-row"),
         inbox: box(".inbox-row"),
-        project: box(".project-manager-item"),
         card: box(".column .card"),
         agent: box(".agent-row"),
         finding: box(".review-finding-row"),
         ext: box(".ext-session"),
         artifact: box(".browser-artifact-row"),
-        run: box(".run-card"),
         boxRunner: box(".runner-card.box-card"),
         nativeRunner: box(".runner-card:not(.box-card)"),
         workspace: box(".workspace-list li"),
-        file: box(".files-entry"),
-        usage: box(".usage-table td"),
+        // The §5.2 rows and §14 table cells take their height from the row tokens (§19.1), so
+        // density moves their height and leaves their padding alone.
+        rowOne: box(".surface > .row:not(.row-2, .dense)"),
+        rowTwo: box(".surface > .row.row-2"),
+        rowDense: box(".surface > .row.dense"),
+        cell: box(".table td"),
         gap: Number.parseFloat(getComputedStyle(document.querySelector(".settings-options")!).rowGap),
       };
     });
@@ -1280,7 +1282,7 @@ test("comfortable density gives every row more room than compact", async ({ page
 
   // Each of the three, not the total: a scale that grew one dimension and shrank another could
   // still add up, and "more room" has to mean more room everywhere it is claimed.
-  for (const family of ["row", "inbox", "project", "card", "agent", "finding", "ext", "artifact", "run", "boxRunner", "nativeRunner", "workspace", "file", "usage"] as const) {
+  for (const family of ["row", "inbox", "card", "agent", "finding", "ext", "artifact", "boxRunner", "nativeRunner", "workspace"] as const) {
     // A MEANINGFUL step, not "greater than": a subpixel increase satisfied the first version, and
     // a density setting nobody can see is a setting that does not work.
     expect(comfortable[family].height, `a ${family} row must be meaningfully taller`)
@@ -1292,6 +1294,11 @@ test("comfortable density gives every row more room than compact", async ({ page
     // Roomier, not a different layout. A density setting that doubles a row has become a font-size
     // control, which is a different feature with different accessibility obligations.
     expect(comfortable[family].height).toBeLessThan(compact[family].height * 1.6);
+  }
+  for (const family of ["rowOne", "rowTwo", "rowDense", "cell"] as const) {
+    expect(comfortable[family].height - compact[family].height, `a ${family} grows by one 4px row step`).toBe(4);
+    expect(comfortable[family].padX, `a ${family} keeps its padding`).toBe(compact[family].padX);
+    expect(comfortable[family].padY, `a ${family} keeps its padding`).toBe(compact[family].padY);
   }
   expect(comfortable.gap, "and the rows must sit further apart").toBeGreaterThan(compact.gap);
   expect(comfortable.gap, "without the list becoming a stack of cards").toBeLessThan(compact.gap * 2.5);

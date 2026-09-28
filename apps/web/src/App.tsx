@@ -743,6 +743,7 @@ export function Shell() {
             {view.name !== "session" && <PageHeader title={viewTitle(view)} />}
             <InboxView
               viewMode={view.name === "board" ? "board" : "list"}
+              routeSplit={view.name === "inbox" || view.name === "board" ? view.split : undefined}
               expandedSessionId={view.name === "session" ? view.id : null}
               sourceLocation={view.name === "session" ? view.location : undefined}
               attentionTarget={view.name === "session" ? view.attention : undefined}

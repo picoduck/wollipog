@@ -231,19 +231,25 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
     "the shared menu surface is portalled to <body>");
   assert.match(css, /\.menu,\s*\.popover\s*\{[^}]*overflow-y:\s*auto;/,
     "capped Project action menus scroll instead of painting outside their surface");
-  assert.match(css, /\.inbox-toolbar\s*\{[^}]*align-items:\s*center;[^}]*padding:\s*7px 14px;/);
-  assert.match(css, /\.inbox-tabs\s*\{[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;[^}]*scrollbar-width:\s*none;/);
-  assert.match(css, /\.inbox-tabs::-webkit-scrollbar\s*\{\s*display:\s*none;/);
-  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-project-menu\s*\{[^}]*width:\s*var\(--control-h\);[\s\S]*\.inbox-project-menu-trigger\s*\{[^}]*flex:\s*0 0 var\(--control-h\);[^}]*min-width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);[\s\S]*\.inbox-tab-group\.has-menu \.inbox-tab\s*\{\s*padding-right:\s*calc\(var\(--control-h\) \+ var\(--space-1\)\);/,
+  // The toolbar is one tab-row tall (§10.1): the 40px tabs fill it, so it pads only its sides.
+  assert.match(css, /\.inbox-toolbar\s*\{[^}]*min-height:\s*var\(--control-h-lg\);[^}]*align-items:\s*center;[^}]*padding:\s*0 14px;/);
+  // The strip is the shared tab row (§10.1), which scrolls sideways without scrollbar chrome.
+  assert.match(inbox, /<TabList[^>]*className="inbox-tabs"/, "the Project tabs are the shared tab row");
+  assert.match(css, /\.tabs\s*\{[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;[^}]*scrollbar-width:\s*none;/);
+  assert.match(css, /\.tabs::-webkit-scrollbar\s*\{\s*display:\s*none;/);
+  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-project-menu\s*\{[^}]*width:\s*var\(--control-h\);[\s\S]*\.inbox-project-menu-trigger\s*\{[^}]*flex:\s*0 0 var\(--control-h\);[^}]*min-width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);[\s\S]*\.inbox-tab-group\.has-menu > \.tab\s*\{\s*padding-right:\s*calc\(var\(--control-h\) \+ var\(--space-1\)\);/,
     "touch layouts reserve enough room for the always-visible Project action target");
-  assert.match(css, /\.inbox-project-menu\s*\{[^}]*width:\s*34px;[^}]*linear-gradient\(90deg, transparent, var\(--bg-elev-2\) 42%\)/,
-    "the hover action overlays and fades the tab's trailing text");
+  // A §10.1 tab has no side padding, so an overlay would cover a short tab's middle and take its
+  // click. On fine pointers ⋯ appears in the 24px gap after the tab, so the tabs stay evenly spaced.
+  assert.match(css, /\.inbox-project-menu\s*\{[^}]*left:\s*100%;[^}]*width:\s*var\(--space-6\);/,
+    "the hover action sits in the gap after its tab, never over the label");
+  assert.doesNotMatch(css, /\.inbox-project-menu\s*\{[^}]*linear-gradient/, "so it needs no fade over the label");
+  assert.match(css, /\.inbox-tab-group:hover :is\(\.inbox-project-menu, \.inbox-project-menu-trigger\)/,
+    "on hover the gap belongs to the tab's group, so the pointer can reach ⋯ without losing it");
   assert.match(css, /\.inbox-tab-group:hover \.inbox-project-menu,[\s\S]*opacity:\s*1;/,
     "project actions appear on hover and keyboard focus");
   assert.match(css, /\.inbox-project-menu\s*\{[^}]*pointer-events:\s*none;/,
-    "the fade overlay never steals clicks from the Project tab");
-  assert.match(css, /\.inbox-tab-group:hover \.inbox-project-menu-trigger,[\s\S]*pointer-events:\s*auto;/,
-    "only the visible Project action icon receives pointer events");
+    "a hidden Project action never takes a click");
   assert.match(css, /\.inbox-project-menu-trigger:hover,[\s\S]*color:\s*var\(--accent\);[\s\S]*background:\s*transparent;/,
     "the project action highlights only its icon");
   assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-project-menu\s*\{[^}]*opacity:\s*1;[\s\S]*\.inbox-project-menu-trigger\s*\{[^}]*pointer-events:\s*auto;/,
@@ -572,21 +578,14 @@ test("Shortcut Reference restores focus after a breakpoint change", () => {
     "a fallback chain that can still resolve to nothing is not a fallback");
 });
 
-test("the Inbox reminder filter joins option borders without a wrapper outline", () => {
-  assert.match(inbox, /<SegmentedControl<ReminderInboxMode>[\s\S]*className="inbox-reminder-view"/,
-    "the reminder filter must opt into the scoped joined treatment");
-  assert.match(inbox, /<SegmentedControl<SessionsViewMode>[\s\S]*className="sessions-view-toggle"/,
-    "the Sessions List/Board toggle shares the joined treatment");
-  assert.match(css, /\.ui-seg\.inbox-reminder-view,\s*\.ui-seg\.sessions-view-toggle \{[^}]*isolation: isolate;[^}]*gap: 0;[^}]*padding: 0;[^}]*border: 0;[^}]*background: transparent/,
-    "the reminder wrapper must not paint an outer outline or nested gap");
-  assert.match(css, /\.inbox-reminder-view \.ui-seg-option,\s*\.sessions-view-toggle \.ui-seg-option \{[^}]*border-color: var\(--control-outline\)/,
-    "each reminder choice must carry its own boundary");
-  assert.match(css, /\.inbox-reminder-view \.ui-seg-option \+ \.ui-seg-option,\s*\.sessions-view-toggle \.ui-seg-option \+ \.ui-seg-option \{ margin-left: -1px; \}/,
-    "adjacent reminder borders must collapse to one seam");
-  assert.match(css, /\.inbox-reminder-view \.ui-seg-option\.is-selected,\s*\.sessions-view-toggle \.ui-seg-option\.is-selected \{[^}]*z-index: var\(--z-sticky\);[^}]*border-color: var\(--accent\)/,
-    "the selected boundary must paint above its neighbor");
-  assert.match(css, /\.inbox-reminder-view \.ui-seg-option:focus-visible,\s*\.sessions-view-toggle \.ui-seg-option:focus-visible \{[^}]*z-index: var\(--z-dock\)/,
-    "the keyboard focus ring must paint above every segment");
-  assert.match(css, /\.ui-seg \{[^}]*gap: 2px;[^}]*padding: 2px;[^}]*border: 1px solid var\(--control-outline\)/,
-    "unrelated shared segmented controls must retain their established appearance");
+test("the Inbox reminder filter and the Sessions view toggle are the shared segmented control", () => {
+  // Both used to opt into a joined-border treatment of their own. §10.2 has one segmented control:
+  // a track with a 2px inset and a neutral selected knob, so neither carries a scoping class now.
+  assert.match(inbox, /<SegmentedControl<ReminderInboxMode>/, "the reminder filter is a segmented control");
+  assert.match(inbox, /<SegmentedControl<SessionsViewMode>/, "the Sessions List/Board toggle is a segmented control");
+  assert.doesNotMatch(inbox, /inbox-reminder-view|sessions-view-toggle/, "neither opts out of the shared recipe");
+  assert.doesNotMatch(css, /inbox-reminder-view|sessions-view-toggle/, "no joined-border override remains");
+  assert.match(css, /\.seg \{[^}]*gap: var\(--space-0-5\);[^}]*padding: var\(--space-0-5\);[^}]*border: 1px solid var\(--border\)/,
+    "the shared track has the §10.2 inset and a decorative edge");
 });
+

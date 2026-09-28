@@ -1,5 +1,6 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { prioritizedPendingRequests, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
+import { TabList } from "./Tabs.js";
 import { archiveAndStopMessage, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import {
@@ -30,7 +31,7 @@ import { loadKeySet, saveKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { loadSeen, markSeen, markUnread, saveSeen } from "../sessions-seen.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { encodeResourceId, type AttentionTarget } from "../navigation.js";
+import { encodeResourceId, type AttentionTarget, type SessionsTab } from "../navigation.js";
 import { useApi } from "../api-context.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { InboxList, type InboxListEntry } from "./InboxList.js";
@@ -77,7 +78,7 @@ function SessionsToolbarOption({ icon, label, count }: {
       <span className="sessions-toolbar-option-icon" aria-hidden="true">{icon}</span>
       <span className="sessions-toolbar-option-text">{label}</span>
       {count !== undefined && (
-        <span className="sessions-toolbar-count" aria-hidden="true">{count}</span>
+        <span className="count" aria-hidden="true">{count}</span>
       )}
     </span>
   );
@@ -154,6 +155,9 @@ export function pageInboxPreview(
 export interface InboxViewProps {
   /** The Sessions destination's presentation: the project-grouped list or the status board. */
   viewMode?: SessionsViewMode;
+  /** The Sessions tab the URL names (docs/design-system.md §10.1): a split key, null for All, or
+   * undefined when the URL names none and the last-used tab applies. */
+  routeSplit?: SessionsTab;
   expandedSessionId?: string | null;
   sourceLocation?: SourceLocation;
   attentionTarget?: AttentionTarget;
@@ -172,6 +176,7 @@ export interface InboxViewProps {
 
 export function InboxView({
   viewMode = "list",
+  routeSplit,
   expandedSessionId = null,
   sourceLocation,
   attentionTarget,
@@ -314,7 +319,21 @@ export function InboxView({
   const selectSplit = useCallback((splitKey: string | null) => {
     clearHeldOrder();
     setInboxSplit(splitKey, !isMobile);
-  }, [clearHeldOrder, isMobile, setInboxSplit]);
+    // Tabs change the URL (§10.1): a tab can be linked to, and Back returns to the previous one.
+    // An expanded session owns the URL, and its list's tabs are not on screen.
+    if (expandedSessionId === null) navigate({ name: viewMode === "board" ? "board" : "inbox", split: splitKey });
+  }, [clearHeldOrder, expandedSessionId, isMobile, navigate, setInboxSplit, viewMode]);
+
+  // A tab named by the URL (a link, Back or Forward) selects that tab. A URL that names none keeps
+  // the tab last used on this device.
+  const inboxSplitKey = inbox.splitKey;
+  const inboxSplitKeyRef = useRef(inboxSplitKey);
+  inboxSplitKeyRef.current = inboxSplitKey;
+  useEffect(() => {
+    if (routeSplit === undefined || routeSplit === inboxSplitKeyRef.current) return;
+    clearHeldOrder();
+    setInboxSplit(routeSplit, !isMobile);
+  }, [routeSplit]); // eslint-disable-line react-hooks/exhaustive-deps -- applied when the URL changes
 
   useLayoutEffect(() => {
     setInboxPersistenceEnabled(!isMobile);
@@ -1253,7 +1272,7 @@ export function InboxView({
         inert={expanded || undefined}
       >
         <div className="inbox-toolbar">
-          <div className="inbox-tabs" role="tablist" aria-label="Inbox Groups">
+          <TabList className="inbox-tabs" label="Inbox Groups">
             {splits.map((split) => {
               const active = split.key === activeSplit?.key;
               const hasMenu = split.project !== null;
@@ -1272,21 +1291,23 @@ export function InboxView({
                     role="tab"
                     aria-selected={active}
                     tabIndex={active ? 0 : -1}
-                    className={`inbox-tab${active ? " active" : ""}`}
+                    className="tab"
                     onClick={() => selectSplit(split.key)}
                     onKeyDown={(event) => onTabKeyDown(event, split.key)}
                     title="Switch Inbox Group (Tab / Shift+Tab)"
                   >
                     {split.name}
-                    <span className="inbox-tab-count">{split.count}</span>
+                    <span className="count">{split.count}</span>
+                    {/* Attention counts are count badges (§10.1, §11.4): amber for blocked, red for
+                        stalled; the accessible name still says which. */}
                     {split.blockedCount > 0 && (
-                      <span className="inbox-tab-count blocked" aria-label={`${split.blockedCount} Blocked`}>
-                        {split.blockedCount} ⚠
+                      <span className="count-badge" aria-label={`${split.blockedCount} Blocked`}>
+                        {split.blockedCount}
                       </span>
                     )}
                     {split.stalledCount > 0 && (
-                      <span className="inbox-tab-count stalled" aria-label={`${split.stalledCount} Stalled`}>
-                        {split.stalledCount} Stalled
+                      <span className="count-badge danger" aria-label={`${split.stalledCount} Stalled`}>
+                        {split.stalledCount}
                       </span>
                     )}
                   </button>
@@ -1309,7 +1330,7 @@ export function InboxView({
                 </div>
               );
             })}
-          </div>
+          </TabList>
           <div className="inbox-toolbar-actions">
             <span className="sr-only" aria-live="polite" aria-atomic="true">
               {orderUpdateAvailable ? "A newer Inbox order is available." : ""}
@@ -1328,7 +1349,6 @@ export function InboxView({
               </button>
             )}
             <SegmentedControl<SessionsViewMode>
-              className="sessions-view-toggle"
               label="Sessions View"
               value={viewMode}
               options={[
@@ -1348,12 +1368,12 @@ export function InboxView({
               onChange={(mode) => {
                 if (mode === viewMode) return;
                 // The route IS the mode; the App-level view effect persists it as last-used.
-                navigate(mode === "board" ? { name: "board" } : { name: "inbox" });
+                // A tab the URL names stays named across the mode switch.
+                navigate({ name: mode === "board" ? "board" : "inbox", ...(routeSplit === undefined ? {} : { split: routeSplit }) });
               }}
             />
             {sessionRemindersSupported && (
               <SegmentedControl<ReminderInboxMode>
-                className="inbox-reminder-view"
                 label="Reminder View"
                 value={reminderMode}
                 options={[

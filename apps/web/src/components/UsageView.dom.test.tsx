@@ -832,7 +832,7 @@ test("an unsplit response from an older plane is shown honestly and the window c
   assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /not split by driver/);
   assert.equal(container.querySelector(".usage-legend"), null, "no legend claims a split that does not exist");
   const dayTable = container.querySelector(".usage-breakdown-section table")!;
-  const driverCells = [...dayTable.querySelectorAll("tbody tr")].flatMap((row) => [...row.querySelectorAll("td.usage-cell-dim")].slice(0, 2));
+  const driverCells = [...dayTable.querySelectorAll("tbody tr")].flatMap((row) => [...row.querySelectorAll("td.cell-extra")].slice(0, 2));
   assert.ok(driverCells.length >= 4);
   assert.ok(driverCells.every((cell) => cell.textContent === "—"), "unknown per-driver values read as dashes, not $0.00");
 

@@ -699,7 +699,7 @@ export function AgentsPanel(props: Props) {
           session={{ ...session, pendingApproval: selectedRequest }} runnerOnline={runnerOnline}
           onSessionUpdate={loadSession} showKeyHints={false} /></div>}
       </section>}
-      <SegmentedControl label="Worker Filter" className="agents-filters" value={filter} onChange={selectFilter}
+      <SegmentedControl label="Worker Filter" value={filter} onChange={selectFilter}
         options={(["active", "history", "all"] as const).map((value) => ({
           value,
           label: `${value === "active" ? "Active" : value === "history" ? "History" : "All"} (${rows.filter((row) => value === "all" || (value === "active" ? isCurrentWorker(row) : !isCurrentWorker(row))).length}${registryAfter !== null && registry !== null ? " Loaded" : ""})`,

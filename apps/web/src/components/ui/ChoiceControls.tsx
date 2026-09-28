@@ -216,7 +216,7 @@ export function SegmentedControl<T extends string>({
   return (
     <>
       <div
-        className={`ui-seg${className ? ` ${className}` : ""}`}
+        className={`seg${className ? ` ${className}` : ""}`}
         role="radiogroup"
         aria-label={label}
         aria-describedby={groupReason ? reasonId : undefined}
@@ -238,13 +238,13 @@ export function SegmentedControl<T extends string>({
               // `disabled` would remove it from the roving order, so a disabled option becomes
               // invisible to keyboard users rather than explained to them.
               tabIndex={index === stopAt ? 0 : -1}
-              className={`ui-seg-option${selected ? " is-selected" : ""}${option.disabled ? " is-disabled" : ""}`}
+              className="seg-option"
               title={option.disabled ? option.disabledReason ?? option.title : option.title}
               onClick={() => { if (!option.disabled) onChange(option.value); }}
             >
               {option.label}
               {perOptionReasons && option.disabledReason && (
-                <small className="ui-seg-option-reason">{option.disabledReason}</small>
+                <small className="seg-option-reason">{option.disabledReason}</small>
               )}
             </button>
           );
@@ -259,7 +259,7 @@ export function SegmentedControl<T extends string>({
           ))}
         </span>
       )}
-      {groupReason && <small id={reasonId} className="ui-seg-reason">{groupReason}</small>}
+      {groupReason && <small id={reasonId} className="seg-reason">{groupReason}</small>}
     </>
   );
 }

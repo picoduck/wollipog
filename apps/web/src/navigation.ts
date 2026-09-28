@@ -9,8 +9,8 @@ import {
 export type AttentionTarget = { eventEpoch: number; requestId?: string; activationId?: number };
 
 export type View =
-  | { name: "inbox" }
-  | { name: "board" }
+  | { name: "inbox"; split?: SessionsTab }
+  | { name: "board"; split?: SessionsTab }
   | { name: "runners"; section?: ConnectionSection }
   | { name: "runs" }
   | { name: "pods" }
@@ -176,6 +176,39 @@ export function sameView(a: View, b: View): boolean {
   return a.name === b.name && viewPath(a) === viewPath(b);
 }
 
+/**
+ * A Sessions tab (an Inbox split key), or null for All. Tabs change the URL (docs/design-system.md
+ * §10.1); a Sessions link without a tab opens the tab last used on this device, as every link did
+ * before the tab was written.
+ */
+export type SessionsTab = string | null;
+
+const SESSIONS_TAB_PARAM = "tab";
+/** Split keys always carry a `:` or a leading space, so this never names a real split. */
+const SESSIONS_TAB_ALL = "all";
+const SESSIONS_TAB_MAX_LENGTH = 512;
+
+function sessionsTabSearch(split: SessionsTab | undefined): string {
+  if (split === undefined) return "";
+  return `?${new URLSearchParams({ [SESSIONS_TAB_PARAM]: split ?? SESSIONS_TAB_ALL }).toString()}`;
+}
+
+/** The tab a Sessions URL names: undefined when it names none or its query is not a tab. */
+function sessionsTabFromSearch(search: string): SessionsTab | undefined {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const keys = [...params.keys()];
+  if (keys.length !== 1 || keys[0] !== SESSIONS_TAB_PARAM) return undefined;
+  const split = params.get(SESSIONS_TAB_PARAM) ?? "";
+  if (split === "" || split.length > SESSIONS_TAB_MAX_LENGTH) return undefined;
+  return split === SESSIONS_TAB_ALL ? null : split;
+}
+
+function sessionsView(name: "inbox" | "board", search: string): View {
+  const split = sessionsTabFromSearch(search);
+  // A query that is not a tab keeps the view it always opened rather than failing the route.
+  return split === undefined ? { name } : { name, split };
+}
+
 function sourceLocationSearch(location: SourceLocation): string {
   const params = new URLSearchParams();
   if (location.line !== undefined) params.set("line", String(location.line));
@@ -187,8 +220,8 @@ function sourceLocationSearch(location: SourceLocation): string {
 
 export function viewPath(view: View): string {
   switch (view.name) {
-    case "inbox": return "/";
-    case "board": return "/board";
+    case "inbox": return `/${sessionsTabSearch(view.split)}`;
+    case "board": return `/board${sessionsTabSearch(view.split)}`;
     case "runners": return `/connections/${view.section ?? "machines"}`;
     case "runs": return "/runs";
     case "pods": return "/pods";
@@ -243,8 +276,8 @@ function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string): Vi
  * treated as view ids, which keeps typos and encoded slashes from selecting surprising state. */
 export function viewFromPath(pathname: string, search = ""): View | null {
   const path = pathname.length > 1 ? (pathname.replace(/\/+$/, "") || "/") : pathname;
-  if (path === "/" || path.toLowerCase() === "/index.html" || path === "/inbox") return { name: "inbox" };
-  if (path === "/board") return { name: "board" };
+  if (path === "/" || path.toLowerCase() === "/index.html" || path === "/inbox") return sessionsView("inbox", search);
+  if (path === "/board") return sessionsView("board", search);
   // /runners was the canonical route before the user-facing Connections rename. Keep existing
   // bookmarks valid while all newly-generated URLs consistently use /connections.
   if (path === "/connections" || path === "/runners") return { name: "runners", section: "machines" };

@@ -494,15 +494,17 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
           {(orphanCount > 0 || showOrphans || keptAsideUnreported) && (
             <button
               type="button"
-              className={`skills-item${showOrphans ? " active" : ""}`}
+              className={`row row-2${showOrphans ? " is-selected" : ""}`}
               aria-current={showOrphans ? "true" : undefined}
               onClick={() => { select(null); setShowOrphans(true); }}
             >
-              <span className="skills-item-name">
-                Orphaned Copies
-                {orphanCount > 0 && <StatusBadge tone="warning" noDot label={orphanCount} className="skills-item-drift" />}
+              <span className="row-body">
+                <span className="row-line">
+                  <span className="row-title">Orphaned Copies</span>
+                  {orphanCount > 0 && <StatusBadge tone="warning" noDot label={orphanCount} />}
+                </span>
+                <span className="row-sub">Edited copies on machines that no library skill shows</span>
               </span>
-              <span className="skills-item-description">Edited copies on machines that no library skill shows</span>
             </button>
           )}
           {/* A failed load reports its error above; it must not also spin as if it were still loading. */}
@@ -529,17 +531,19 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
                 <button
                   key={skill.id}
                   type="button"
-                  className={`skills-item${selectedId === skill.id ? " active" : ""}`}
+                  className={`row${skill.description ? " row-2" : ""}${selectedId === skill.id ? " is-selected" : ""}`}
                   aria-current={selectedId === skill.id ? "true" : undefined}
                   onClick={() => { setShowOrphans(false); select(skill.id); }}
                 >
-                  <span className="skills-item-name">
-                    {skill.name}
-                    {driftedSkillNames.has(skill.name) && <StatusBadge meta={statusMeta("skill", "edited")} className="skills-item-drift" />}
-                    {skill.builtIn && <StatusBadge tone="neutral" noDot label="Built-In" className="skills-item-drift" />}
-                    {skillRecommended(skill) && <StatusBadge tone="neutral" noDot label="Recommended" className="skills-item-drift" />}
+                  <span className="row-body">
+                    <span className="row-line">
+                      <span className="row-title">{skill.name}</span>
+                      {driftedSkillNames.has(skill.name) && <StatusBadge meta={statusMeta("skill", "edited")} />}
+                      {skill.builtIn && <StatusBadge tone="neutral" noDot label="Built-In" />}
+                      {skillRecommended(skill) && <StatusBadge tone="neutral" noDot label="Recommended" />}
+                    </span>
+                    {skill.description && <span className="row-sub">{skill.description}</span>}
                   </span>
-                  {skill.description && <span className="skills-item-description">{skill.description}</span>}
                 </button>
               ))}
             </div>
@@ -637,82 +641,90 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
                 {assignments.length === 0 ? (
                   <p className="skills-hint">No direct assignments. Group assignments may still deploy this skill.</p>
                 ) : (
-                  <table className="skills-table">
-                    <thead>
-                      <tr><th scope="col">Scope</th><th scope="col">Agents</th><th scope="col">Invocation</th><th scope="col">Enabled</th><th scope="col"><span className="sr-only">Actions</span></th></tr>
-                    </thead>
-                    <tbody>
-                      {assignments.map((assignment) => {
-                        const runner = assignment.runnerId ? runnersMap.get(assignment.runnerId) : undefined;
-                        return (
-                          <tr key={assignment.id}>
-                            <td>{describeAssignmentScope(assignment, (id) => machineLabels.get(id))}</td>
-                            <td>{describeAgentSelector(assignment.agentSelector, runner?.agents ?? [])}</td>
-                            <td>
-                              <Select<SkillInvocationPolicy>
-                                label="Invocation"
-                                value={assignment.invocation}
-                                disabled={busy}
-                                options={[
-                                  { value: "agent", label: invocationLabel("agent") },
-                                  { value: "manual", label: invocationLabel("manual") },
-                                ]}
-                                onChange={(value) => void mutate(
-                                  () => api.updateSkillAssignment(assignment.id, { invocation: value }),
-                                  async () => {
-                                    await refreshDetail(detail.id);
-                                    await refreshMachines();
-                                  },
-                                )}
-                              />
-                            </td>
-                            <td>
-                              <button
-                                type="button"
-                                role="switch"
-                                aria-checked={assignment.enabled}
-                                aria-label="Enabled"
-                                className="btn sm"
-                                disabled={busy}
-                                onClick={() => void mutate(
-                                  () => api.updateSkillAssignment(assignment.id, { enabled: !assignment.enabled }),
-                                  async () => {
-                                    await refreshDetail(detail.id);
-                                    await refreshMachines();
-                                  },
-                                )}
-                              >
-                                {assignment.enabled ? "On" : "Off"}
-                              </button>
-                            </td>
-                            <td>
-                              <button
-                                type="button"
-                                className="btn ghost danger sm"
-                                disabled={busy}
-                                onClick={() => void (async () => {
-                                  const confirmed = await confirm({
-                                    title: "Remove Assignment",
-                                    message: "The next sync removes the skill from the machines this assignment covered.",
-                                    confirmLabel: "Remove Assignment",
-                                    tone: "danger",
-                                  });
-                                  if (!confirmed) return;
-                                  await mutate(() => api.deleteSkillAssignment(assignment.id), async () => {
-                                    await refreshList();
-                                    await refreshDetail(detail.id);
-                                    await refreshMachines();
-                                  });
-                                })()}
-                              >
-                                Delete
-                              </button>
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
+                  <div className="table-wrap">
+                    <table className="table skills-table">
+                      <thead>
+                        <tr>
+                          <th scope="col">Scope</th>
+                          <th scope="col" className="col-agents">Agents</th>
+                          <th scope="col" className="col-invocation">Invocation</th>
+                          <th scope="col" className="col-enabled">Enabled</th>
+                          <th scope="col" className="col-actions actions-cell"><span className="sr-only">Actions</span></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {assignments.map((assignment) => {
+                          const runner = assignment.runnerId ? runnersMap.get(assignment.runnerId) : undefined;
+                          return (
+                            <tr key={assignment.id}>
+                              <td>{describeAssignmentScope(assignment, (id) => machineLabels.get(id))}</td>
+                              <td className="cell-meta cell-dim">{describeAgentSelector(assignment.agentSelector, runner?.agents ?? [])}</td>
+                              <td className="cell-meta">
+                                <Select<SkillInvocationPolicy>
+                                  label="Invocation"
+                                  value={assignment.invocation}
+                                  disabled={busy}
+                                  options={[
+                                    { value: "agent", label: invocationLabel("agent") },
+                                    { value: "manual", label: invocationLabel("manual") },
+                                  ]}
+                                  onChange={(value) => void mutate(
+                                    () => api.updateSkillAssignment(assignment.id, { invocation: value }),
+                                    async () => {
+                                      await refreshDetail(detail.id);
+                                      await refreshMachines();
+                                    },
+                                  )}
+                                />
+                              </td>
+                              <td className="cell-status">
+                                <button
+                                  type="button"
+                                  role="switch"
+                                  aria-checked={assignment.enabled}
+                                  aria-label="Enabled"
+                                  className="btn sm"
+                                  disabled={busy}
+                                  onClick={() => void mutate(
+                                    () => api.updateSkillAssignment(assignment.id, { enabled: !assignment.enabled }),
+                                    async () => {
+                                      await refreshDetail(detail.id);
+                                      await refreshMachines();
+                                    },
+                                  )}
+                                >
+                                  {assignment.enabled ? "On" : "Off"}
+                                </button>
+                              </td>
+                              <td className="actions-cell">
+                                <button
+                                  type="button"
+                                  className="btn ghost danger sm"
+                                  disabled={busy}
+                                  onClick={() => void (async () => {
+                                    const confirmed = await confirm({
+                                      title: "Remove Assignment",
+                                      message: "The next sync removes the skill from the machines this assignment covered.",
+                                      confirmLabel: "Remove Assignment",
+                                      tone: "danger",
+                                    });
+                                    if (!confirmed) return;
+                                    await mutate(() => api.deleteSkillAssignment(assignment.id), async () => {
+                                      await refreshList();
+                                      await refreshDetail(detail.id);
+                                      await refreshMachines();
+                                    });
+                                  })()}
+                                >
+                                  Delete
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
                 )}
               </section>
 

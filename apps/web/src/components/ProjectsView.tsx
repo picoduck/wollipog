@@ -409,16 +409,19 @@ export function ProjectsView({
                 <button
                   type="button"
                   key={project.id}
-                  className={`project-manager-item${active ? " active" : ""}`}
+                  className={`row row-2${active ? " is-selected" : ""}`}
                   aria-current={active ? "true" : undefined}
                   onClick={() => navigate({ name: "projects", id: project.id })}
                 >
-                  <span className="project-manager-item-heading">
-                    <strong>{project.name}</strong>
-                    {project.hidden && <span className="project-hidden-badge">Hidden</span>}
+                  <span className="row-body">
+                    <span className="row-line">
+                      <span className="row-title">{project.name}</span>
+                      {project.hidden && <span className="project-hidden-badge">Hidden</span>}
+                    </span>
+                    <span className="row-sub">
+                      {project.unarchivedSessionCount} Session{project.unarchivedSessionCount === 1 ? "" : "s"} · {project.locations.length} Location{project.locations.length === 1 ? "" : "s"} · {available > 0 ? `${available} Available` : project.locations.length ? "No Locations Available" : "No Locations"}
+                    </span>
                   </span>
-                  <span>{project.unarchivedSessionCount} Session{project.unarchivedSessionCount === 1 ? "" : "s"} · {project.locations.length} Location{project.locations.length === 1 ? "" : "s"}</span>
-                  <span>{available > 0 ? `${available} Available` : project.locations.length ? "No Locations Available" : "No Locations"}</span>
                 </button>
               );
             })}

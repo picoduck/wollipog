@@ -128,7 +128,9 @@ test("the rhythm is driven by tokens, not by literals", () => {
   // And the families review found the first version bypassed, so the setting is application-wide
   // rather than "works on the two screens I happened to wire".
   for (const [selector, token] of [
-    [".project-manager-item {", "--project-row-pad-y"],
+    // The §5.2 row and §14 cell take their HEIGHT from the row tokens (§19.1), not their padding.
+    [".row {", "--row-h"],
+    [".table :is(td, tbody th) {", "--row-h"],
     [".card {", "--card-pad-y"],
     [".runner-card {", "--runner-card-pad-y"],
   ] as const) {

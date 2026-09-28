@@ -1,5 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { Notice } from "./Notice.js";
+import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { StatusBadge } from "./StatusBadge.js";
 import {
   isTerminal,
   normalizeSourcePath,
@@ -34,7 +36,6 @@ import {
   EMPTY_FINDING_ANCHOR_STORE,
   type FindingAnchorStore,
 } from "../review-anchors.js";
-import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
@@ -769,87 +770,55 @@ export function ReviewPanel({
       {status && status.files.length > 0 && (
         <ul className="git-files">
           {status.files.slice(0, 12).map((f) => (
-            <li key={f.path}>
-              <span className="gfs">{f.status || "·"}</span> {f.path}
+            <li key={f.path} className="row dense">
+              <span className="gfs">{f.status || "·"}</span>
+              <span className="row-title">{f.path}</span>
             </li>
           ))}
-          {status.files.length > 12 && <li className="muted">+{status.files.length - 12} More…</li>}
+          {status.files.length > 12 && <li className="row dense muted">+{status.files.length - 12} More…</li>}
         </ul>
       )}
 
       <div className="git-diff-section" role="group" aria-label="Review Changes">
         <div className="git-diff-controls">
-          <div className="scope-seg" role="radiogroup" aria-label="Diff Scope" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-            <button
-              role="radio"
-              aria-checked={scope === "uncommitted"}
-              tabIndex={scope === "uncommitted" ? 0 : -1}
-              className={`scope-opt${scope === "uncommitted" ? " is-active" : ""}`}
-              onClick={() => setScope("uncommitted")}
-              disabled={!diffSupported}
-            >
-              Uncommitted
-            </button>
-            {session.useWorktree && (
-              <button
-                role="radio"
-                aria-checked={scope === "all_branch"}
-                tabIndex={scope === "all_branch" ? 0 : -1}
-                className={`scope-opt${scope === "all_branch" ? " is-active" : ""}`}
-                onClick={() => setScope("all_branch")}
-                disabled={!diffSupported}
-              >
-                Branch
-              </button>
-            )}
-            {session.useWorktree && (
-              <button
-                role="radio"
-                aria-checked={scope === "last_turn"}
-                tabIndex={scope === "last_turn" ? 0 : -1}
-                className={`scope-opt${scope === "last_turn" ? " is-active" : ""}`}
-                onClick={() => setScope("last_turn")}
-                disabled={!diffSupported}
-              >
-                Last Turn
-              </button>
-            )}
-          </div>
+          <SegmentedControl
+            className="sm"
+            label="Diff Scope"
+            value={scope}
+            options={[
+              { value: "uncommitted", label: "Uncommitted", disabled: !diffSupported },
+              ...(session.useWorktree ? [
+                { value: "all_branch" as const, label: "Branch", disabled: !diffSupported },
+                { value: "last_turn" as const, label: "Last Turn", disabled: !diffSupported },
+              ] : []),
+            ]}
+            onChange={setScope}
+          />
           <button className="btn ghost sm" onClick={() => void loadDiff()} disabled={diffBusy || !runnerOnline || !diffSupported}>
             {diffBusy ? "Loading…" : "↻ Refresh"}
           </button>
         </div>
         <div className="git-diff-view-controls">
           {scope === "uncommitted" && fineDiffSupported && (
-            <div className="scope-seg" role="radiogroup" aria-label="Index Pane" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-              {(["combined", "unstaged", "staged"] as DiffPane[]).map((value) => (
-                <button
-                  role="radio"
-                  aria-checked={pane === value}
-                  tabIndex={pane === value ? 0 : -1}
-                  className={`scope-opt${pane === value ? " is-active" : ""}`}
-                  key={value}
-                  onClick={() => setPane(value)}
-                >
-                  {value === "combined" ? "All Changes" : value === "unstaged" ? "Unstaged" : "Staged"}
-                </button>
-              ))}
-            </div>
+            <SegmentedControl<DiffPane>
+              className="sm"
+              label="Index Pane"
+              value={pane}
+              options={[
+                { value: "combined", label: "All Changes" },
+                { value: "unstaged", label: "Unstaged" },
+                { value: "staged", label: "Staged" },
+              ]}
+              onChange={setPane}
+            />
           )}
-          <div className="scope-seg" role="radiogroup" aria-label="Diff Layout" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-            {(["unified", "split"] as DiffLayout[]).map((value) => (
-              <button
-                role="radio"
-                aria-checked={layout === value}
-                tabIndex={layout === value ? 0 : -1}
-                className={`scope-opt${layout === value ? " is-active" : ""}`}
-                key={value}
-                onClick={() => setLayout(value)}
-              >
-                {value === "unified" ? "Unified" : "Side by Side"}
-              </button>
-            ))}
-          </div>
+          <SegmentedControl<DiffLayout>
+            className="sm"
+            label="Diff Layout"
+            value={layout}
+            options={[{ value: "unified", label: "Unified" }, { value: "split", label: "Side by Side" }]}
+            onChange={setLayout}
+          />
         </div>
         {diffError && <Notice tone="danger" compact>{diffError}</Notice>}
         {stageNotice && <div className="hint warn">{stageNotice}</div>}
@@ -981,7 +950,7 @@ export function ReviewPanel({
                         <code>{findingLocation}</code>
                       )}
                       <span className={`review-severity review-severity-${finding.severity}`}>{titleCaseLabel(finding.severity)}</span>
-                      {finding.required && <span className="review-required">Required</span>}
+                      {finding.required && <StatusBadge tone="neutral" noDot label="Required" />}
                       {finding.status === "sent" && <span>Sent</span>}
                       {stale && <span className="review-stale">Stale Diff Anchor</span>}
                     </div>

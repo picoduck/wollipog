@@ -170,7 +170,7 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
 
   const pageText = () => container.textContent ?? "";
   assert.match(pageText(), /Agent Skills/);
-  const item = [...container.querySelectorAll<HTMLButtonElement>(".skills-item")]
+  const item = [...container.querySelectorAll<HTMLButtonElement>(".skills-list .row")]
     .find((candidate) => candidate.textContent?.includes("code-review"));
   assert.ok(item, "the grouped list renders the skill");
 
@@ -351,7 +351,7 @@ test("SkillsView shows Edited for an edited deployed copy and resolves it by imp
     });
   });
   await act(settle);
-  const item = container.querySelector<HTMLButtonElement>(".skills-item");
+  const item = container.querySelector<HTMLButtonElement>(".skills-list .row");
   assert.match(item?.textContent ?? "", /Edited/, "the skill list marks a skill with an edited copy");
   await act(async () => { item!.click(); });
   await act(settle);
@@ -486,7 +486,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
   await act(settle);
   const button = (label: string) => [...container.querySelectorAll<HTMLButtonElement>("button")]
     .filter((candidate) => candidate.textContent?.trim() === label);
-  const entry = [...container.querySelectorAll<HTMLButtonElement>(".skills-item")]
+  const entry = [...container.querySelectorAll<HTMLButtonElement>(".skills-list .row")]
     .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
   assert.ok(entry, "the skill list offers the orphaned copies independent of any library skill");
   assert.match(entry!.textContent ?? "", /Orphaned Copies5/, "copies beyond the runner's bound are counted");
@@ -568,7 +568,7 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
     });
   });
   await act(settle);
-  const entry = [...container.querySelectorAll<HTMLButtonElement>(".skills-item")]
+  const entry = [...container.querySelectorAll<HTMLButtonElement>(".skills-list .row")]
     .find((candidate) => candidate.textContent?.includes("Orphaned Copies"));
   assert.ok(entry, "an older runner's unreported copies are not hidden behind an empty list");
   assert.equal(entry!.querySelector(".status"), null, "no count is claimed");
@@ -614,8 +614,8 @@ async function mountSkills(client: ApiClient, instanceId: string) {
   await act(settle);
   const button = (label: string, scope: ParentNode = container) => [...scope.querySelectorAll<HTMLButtonElement>("button")]
     .find((candidate) => candidate.textContent?.trim() === label);
-  const listItem = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".skills-item")]
-    .find((candidate) => candidate.querySelector(".skills-item-name")?.firstChild?.textContent === name);
+  const listItem = (name: string) => [...container.querySelectorAll<HTMLButtonElement>(".skills-list .row")]
+    .find((candidate) => candidate.querySelector(".row-title")?.textContent === name);
   return {
     container, button, listItem,
     async click(target: HTMLElement | undefined) {

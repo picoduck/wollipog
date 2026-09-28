@@ -709,19 +709,24 @@ export function UsageView() {
               />
             </div>
             {breakdown === "model" ? (
-              <div className="usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-model-caption">
-                <table className="usage-table">
+              <div className="table-wrap usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-model-caption">
+                <table className="table usage-table">
                   <caption id="usage-model-caption">Usage by Model</caption>
-                  <thead><tr><th scope="col">Model</th><th scope="col">Cost</th><th scope="col">Share</th><th scope="col">Tokens</th></tr></thead>
+                  <thead><tr>
+                    <th scope="col" className="col-name">Model</th>
+                    <th scope="col" className="num">Cost</th>
+                    <th scope="col" className="num">Share</th>
+                    <th scope="col" className="num">Tokens</th>
+                  </tr></thead>
                   <tbody>
                     {models.length === 0 ? (
                       <tr><td colSpan={4} className="usage-empty">No usage was observed in this period.</td></tr>
                     ) : models.map((row) => (
                       <tr key={row.key}>
                         <th scope="row">{row.key}{row.costSource === "unpriced" ? " · unpriced" : ""}</th>
-                        <td>{formatMoney(row.costUsd)}</td>
-                        <td className="usage-cell-dim">{formatShare(row.share)}</td>
-                        <td className="usage-cell-dim">{formatCompactTokens(processedTokens(row))}</td>
+                        <td className="num cell-status">{formatMoney(row.costUsd)}</td>
+                        <td className="num cell-meta cell-dim">{formatShare(row.share)}</td>
+                        <td className="num cell-meta cell-dim">{formatCompactTokens(processedTokens(row))}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -729,7 +734,7 @@ export function UsageView() {
               </div>
             ) : (
               <div
-                className="usage-table-wrap"
+                className="table-wrap usage-table-wrap"
                 // A scroll region needs to be REACHABLE. The max-height that makes the sticky header
                 // work also gives this its own scrollbar, and a plain overflow div is not in the
                 // sequential focus order in WebKit — so a keyboard user tabbed past it.
@@ -737,14 +742,14 @@ export function UsageView() {
                 role="region"
                 aria-labelledby="usage-table-caption"
               >
-                <table className="usage-table">
+                <table className="table usage-table">
                   <caption id="usage-table-caption">{GRANULARITY_LABEL[data.granularity].adjective} Usage in UTC</caption>
                   <thead>
                     <tr>
-                      <th scope="col">{periodNoun}</th>
-                      {drivers.map((driver) => <th scope="col" key={driver}>{driverLabel(driver)}</th>)}
-                      <th scope="col">Total</th>
-                      <th scope="col">{metric === "cost" ? "Tokens" : "Cost"}</th>
+                      <th scope="col" className="col-name">{periodNoun}</th>
+                      {drivers.map((driver) => <th scope="col" className="num" key={driver}>{driverLabel(driver)}</th>)}
+                      <th scope="col" className="num">Total</th>
+                      <th scope="col" className="num">{metric === "cost" ? "Tokens" : "Cost"}</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -759,13 +764,13 @@ export function UsageView() {
                           // No split for the bucket at all means the plane never sent one; a
                           // missing driver inside a split means that driver had nothing.
                           return (
-                            <td className="usage-cell-dim" key={driver}>
+                            <td className="num cell-extra cell-dim" key={driver}>
                               {!split ? "—" : formatMetric(cell ? metricValue(cell, metric) : 0, metric)}
                             </td>
                           );
                         })}
-                        <td>{formatMetric(metricValue(bucket, metric), metric)}</td>
-                        <td className="usage-cell-dim">
+                        <td className="num cell-status">{formatMetric(metricValue(bucket, metric), metric)}</td>
+                        <td className="num cell-meta cell-dim">
                           {metric === "cost" ? formatCompactTokens(processedTokens(bucket)) : formatMoney(bucket.costUsd)}
                         </td>
                       </tr>
@@ -828,15 +833,15 @@ export function UsageView() {
               {dailyBudgetStatus && (
                 <div className="usage-save-status" role={dailyBudgetFailed ? "alert" : "status"}>{dailyBudgetStatus}</div>
               )}
-              <div className="usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-users-caption">
-                <table className="usage-table">
+              <div className="table-wrap usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-users-caption">
+                <table className="table usage-table">
                   <caption id="usage-users-caption">Cost by User in UTC Days</caption>
                   <thead>
                     <tr>
-                      <th scope="col">User</th>
-                      <th scope="col">Today</th>
-                      <th scope="col">Last 7 Days</th>
-                      <th scope="col">Last 30 Days</th>
+                      <th scope="col" className="col-name">User</th>
+                      <th scope="col" className="num">Today</th>
+                      <th scope="col" className="num">Last 7 Days</th>
+                      <th scope="col" className="num">Last 30 Days</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -847,14 +852,14 @@ export function UsageView() {
                       return (
                         <tr key={row.userId}>
                           <th scope="row"><PersonalIdentifier value={row.userName} label="User Name" />{over ? " · paused by daily budget" : ""}</th>
-                          <td>
+                          <td className="num cell-status">
                             {formatMoney(row.todayUsd)}
                             {row.dailyBudgetUsd != null && (
-                              <span className="usage-cell-dim"> of {formatMoney(row.dailyBudgetUsd)}</span>
+                              <span className="cell-dim"> of {formatMoney(row.dailyBudgetUsd)}</span>
                             )}
                           </td>
-                          <td className="usage-cell-dim">{formatMoney(row.last7DaysUsd)}</td>
-                          <td className="usage-cell-dim">{formatMoney(row.last30DaysUsd)}</td>
+                          <td className="num cell-meta cell-dim">{formatMoney(row.last7DaysUsd)}</td>
+                          <td className="num cell-meta cell-dim">{formatMoney(row.last30DaysUsd)}</td>
                         </tr>
                       );
                     })}

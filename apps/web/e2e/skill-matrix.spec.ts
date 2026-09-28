@@ -61,11 +61,14 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
     await page.screenshot({ path: info.outputPath(`matrix-${width}-${theme}.png`), fullPage: true });
     expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
     if (width === 320) {
-      await expect(matrix.locator("td").first()).toHaveCSS("padding", "4px 0px");
+      // The §14 narrow table: each row is a padded two-line flex row and its cells carry no
+      // padding or rules of their own.
+      await expect(matrix.locator("tbody tr").first()).toHaveCSS("display", "flex");
+      await expect(matrix.locator("td").first()).toHaveCSS("padding", "0px");
       await expect(matrix.locator("td").first()).toHaveCSS("border-top-width", "0px");
       const cdp = await page.context().newCDPSession(page);
       const { nodes } = await cdp.send("Accessibility.getFullAXTree");
-      expect(nodes.some(node => !node.ignored && node.role?.value === "columnheader" && node.name?.value === "DESIRED INVOCATION")).toBe(true);
+      expect(nodes.some(node => !node.ignored && node.role?.value === "columnheader" && node.name?.value === "Desired Invocation")).toBe(true);
       expect(nodes.some(node => !node.ignored && node.role?.value === "rowheader" && node.name?.value === "Claude")).toBe(true);
       expect(nodes.some(node => !node.ignored && node.role?.value === "cell" && node.name?.value === "Manual Only")).toBe(true);
       await cdp.detach();

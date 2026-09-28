@@ -1,11 +1,11 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { Notice } from "./Notice.js";
+import { SegmentedControl } from "./ui/ChoiceControls.js";
 import type { SessionView, WorkflowArtifactView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { normalizeBrowserUrl } from "../artifact-preview.js";
 import { formatBytes } from "../files-panel.js";
 import { titleCaseLabel } from "../format.js";
-import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { ArtifactPreview } from "./ArtifactPreview.js";
 import { usePanelScratchChoice, usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
 
@@ -97,21 +97,13 @@ export function BrowserPanel({ session }: { session: SessionView }) {
 
   return (
     <div className="browser-panel">
-      <div className="scope-seg browser-tabs" role="radiogroup" aria-label="Browser Content" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "radio")}>
-        {(["artifacts", "web"] as const).map((candidate) => (
-          <button
-            key={candidate}
-            type="button"
-            role="radio"
-            aria-checked={mode === candidate}
-            tabIndex={mode === candidate ? 0 : -1}
-            className={`scope-opt${mode === candidate ? " is-active" : ""}`}
-            onClick={() => setMode(candidate)}
-          >
-            {candidate === "artifacts" ? "Artifacts" : "Web URL"}
-          </button>
-        ))}
-      </div>
+      <SegmentedControl
+        className="browser-tabs sm"
+        label="Browser Content"
+        value={mode}
+        options={[{ value: "artifacts", label: "Artifacts" }, { value: "web", label: "Web URL" }]}
+        onChange={setMode}
+      />
 
       {mode === "web" ? (
         <div className="browser-web">

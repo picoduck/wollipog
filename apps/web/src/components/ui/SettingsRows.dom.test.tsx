@@ -137,7 +137,7 @@ test("the row kinds are distinguishable in their inert state", async () => {
 
     // Each carries an affordance naming its kind, in every state — including the two that used to
     // be a column of rows whose unselected members showed an empty ring and nothing else.
-    assert.ok(segmented!.querySelector(".ui-seg"), "a segmented row shows its group of pills");
+    assert.ok(segmented!.querySelector(".seg"), "a segmented row shows its group of pills");
     assert.equal(segmented!.querySelectorAll('[role="radio"]').length, 3,
       "and every alternative is on screen, which is the point of a segmented row");
     assert.ok(select!.querySelector(".ui-select-trigger"), "a picker row shows a trigger");
@@ -148,16 +148,16 @@ test("the row kinds are distinguishable in their inert state", async () => {
     // And they are not each other.
     assert.equal(segmented!.querySelector(".ui-switch"), null);
     assert.equal(segmented!.querySelector(".ui-select-trigger"), null);
-    assert.equal(select!.querySelector(".ui-seg"), null);
-    assert.equal(sw!.querySelector(".ui-seg"), null);
-    assert.equal(nav!.querySelector(".ui-seg"), null);
+    assert.equal(select!.querySelector(".seg"), null);
+    assert.equal(sw!.querySelector(".seg"), null);
+    assert.equal(nav!.querySelector(".seg"), null);
     assert.equal(nav!.querySelector(".ui-switch"), null);
 
     // The roles remain honest. A row that CONTAINS a control is not itself one: giving the row a
     // role would announce a radiogroup wrapping a radiogroup, and make the label a second target.
     assert.equal(segmented!.getAttribute("role"), null);
-    assert.equal(segmented!.querySelector(".ui-seg")!.getAttribute("role"), "radiogroup");
-    assert.equal(segmented!.querySelector(".ui-seg")!.getAttribute("aria-label"), "Theme");
+    assert.equal(segmented!.querySelector(".seg")!.getAttribute("role"), "radiogroup");
+    assert.equal(segmented!.querySelector(".seg")!.getAttribute("aria-label"), "Theme");
     assert.equal(select!.querySelector(".ui-select-trigger")!.getAttribute("aria-haspopup"), "listbox");
     assert.equal(select!.querySelector(".ui-select-trigger")!.getAttribute("aria-expanded"), "false");
     assert.equal(sw!.getAttribute("role"), "switch");
@@ -321,8 +321,8 @@ test("checked state is exposed structurally, not just by colour", async () => {
     const pills = [...container.querySelectorAll('[role="radio"]')];
     assert.deepEqual(pills.map((pill) => pill.getAttribute("aria-checked")), ["false", "true", "false"],
       "exactly one option is checked, and the others say so rather than saying nothing");
-    // The CSS keys its fill off the class and the state off the attribute, so both have to be there.
-    assert.ok(pills[1]!.className.includes("is-selected"));
+    // The CSS keys the selected knob off the attribute itself, so there is no class to fall out of sync.
+    assert.ok(pills.every((pill) => pill.className === "seg-option"));
     const sw = container.querySelector(".ui-row-switch")!;
     assert.equal(sw.getAttribute("aria-checked"), "true");
     assert.ok(sw.className.includes("ui-row-switch"));
@@ -1012,7 +1012,7 @@ test("a disabled segmented row says who took it away", async () => {
     assert.ok(reasonId, "the reason has to be associated with the group, not merely rendered near it");
     assert.equal(domWindow.document.getElementById(reasonId!)?.textContent,
       "Managed by your workspace administrator.");
-    assert.equal(container.querySelector(".ui-seg-reason")?.textContent,
+    assert.equal(container.querySelector(".seg-reason")?.textContent,
       "Managed by your workspace administrator.", "and it is rendered, not hidden in a title");
   } finally {
     await cleanup();
@@ -1105,18 +1105,19 @@ test("each affordance has real geometry in the stylesheet, not just a class name
   // The group's own border is what makes the unselected pills read as pills rather than as bare
   // words: their own border is transparent, so deleting this leaves a segmented control that looks
   // like a row of text until one of them happens to be selected.
-  const group = ruleOf(".ui-seg");
+  const group = ruleOf(".seg");
   assert.match(group.get("border") ?? "", /solid/, "the pill group needs a visible boundary");
   assertVisible(group, "the pill group");
 
-  const pill = ruleOf(".ui-seg-option");
+  const pill = ruleOf(".seg-option");
   assertVisible(pill, "an unselected pill");
   assert.ok(/\d/.test(pill.get("padding") ?? ""), "a pill needs real padding or it is just its label");
 
-  // Selection is a FILL plus a border, not colour alone on the text.
-  const selectedPill = ruleOf(".ui-seg-option.is-selected");
-  assert.match(selectedPill.get("background") ?? "", /var\(--accent\)/, "the selected pill must be filled");
-  assert.match(selectedPill.get("border-color") ?? "", /var\(--accent\)/, "and outlined");
+  // Selection is a FILL plus a border, not colour alone on the text: the neutral knob (§10.2), with
+  // the 3:1 --control-outline edge rather than an accent that reads as a primary action.
+  const selectedPill = ruleOf('.seg-option[aria-checked="true"]');
+  assert.match(selectedPill.get("background") ?? "", /var\(--bg-elev\)/, "the selected pill must be filled");
+  assert.match(selectedPill.get("border-color") ?? "", /var\(--control-outline\)/, "and outlined");
 
   // The picker's resting state has to look like something you can open.
   const trigger = ruleOf(".ui-select-trigger");
@@ -1172,7 +1173,7 @@ test("Appearance controls share one fixed trailing column and fill it", () => {
   assert.match(ruleOf(".ui-row-choice").get("grid-template-columns") ?? "", /220px/,
     "the value-column edge must not depend on each row's content width");
   assert.equal(ruleOf(".ui-row-choice-control").get("width"), "100%");
-  assert.equal(ruleOf(".ui-row-choice-control > .ui-seg").get("width"), "100%");
+  assert.equal(ruleOf(".ui-row-choice-control > .seg").get("width"), "100%");
   assert.equal(ruleOf(".ui-row-picker").get("width"), "100%");
 });
 

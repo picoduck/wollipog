@@ -207,7 +207,7 @@ for (const viewport of VIEWPORTS) {
       const formBox = (await form.boundingBox())!;
       // `.loc-pick` and the native Project/Agent selects are gone. Include both responsive owners
       // so the two controls #218 migrated cannot overflow unnoticed.
-      for (const selector of [".ui-choice-card", ".ui-seg", ".ui-select-trigger", ".ui-searchable-combobox-input"]) {
+      for (const selector of [".ui-choice-card", ".seg", ".ui-select-trigger", ".ui-searchable-combobox-input"]) {
         for (const control of await page.locator(selector).all()) {
           if (!(await control.isVisible())) continue;
           const box = (await control.boundingBox())!;

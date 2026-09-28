@@ -230,7 +230,7 @@ test("a group whose options are ALL unavailable says why, rendered", () => {
       onChange={() => undefined}
     />,
   );
-  assert.match(html, /class="ui-seg-reason"[^>]*>Unavailable while saving retention</,
+  assert.match(html, /class="seg-reason"[^>]*>Unavailable while saving retention</,
     "the reason has to be rendered, not left in a title");
   const described = /aria-describedby="([^"]+)"/.exec(html)?.[1];
   assert.ok(described, "and associated with the group, or a screen reader never reaches it");
@@ -243,7 +243,7 @@ test("a group with any option available does not claim to be unavailable", () =>
   const html = render(
     <SegmentedControl options={SIZES} value="md" onChange={() => undefined} label="Size" />,
   );
-  assert.doesNotMatch(html, /ui-seg-reason/);
+  assert.doesNotMatch(html, /seg-reason/);
   assert.doesNotMatch(html, /aria-describedby/);
 });
 
@@ -262,7 +262,7 @@ test("options with DIFFERENT reasons each keep their own", () => {
       onChange={() => undefined}
     />,
   );
-  assert.doesNotMatch(html, /ui-seg-reason"/, "one sentence cannot describe two different reasons");
+  assert.doesNotMatch(html, /seg-reason"/, "one sentence cannot describe two different reasons");
   assert.match(html, />Requires admin</);
   assert.match(html, />Unavailable offline</);
 });

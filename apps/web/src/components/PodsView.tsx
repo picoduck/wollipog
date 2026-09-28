@@ -237,19 +237,21 @@ export function PodsView({ onNewPod }: { onNewPod: () => void }) {
   return (
     <div className="page">
     {header}
-    <div className="runs-list">
+    <div className="runs-list surface">
       {list.map((pod) => (
-        <button key={pod.id} type="button" className="run-card" onClick={() => navigate({ name: "pod", id: pod.id })}>
-          <div className="run-card-head">
-            <span className="run-title">{pod.title}</span>
-            <StatusBadge meta={statusMeta("pod", pod.status)} />
-          </div>
-          <div className="run-prompt">{pod.objective || "Manual collaboration pod"}</div>
-          <div className="muted sm">
+        <button key={pod.id} type="button" className="row row-2" onClick={() => navigate({ name: "pod", id: pod.id })}>
+          <span className="row-body">
+            <span className="row-line">
+              <span className="row-title">{pod.title}</span>
+              <StatusBadge meta={statusMeta("pod", pod.status)} />
+            </span>
+            <span className="row-sub">{pod.objective || "Manual collaboration pod"}</span>
+          </span>
+          <span className="row-trail">
             {pod.members.length} Members · {titleCaseLabel(pod.orchestration?.policy.mode.replaceAll("_", " ") ?? "manual")}
             {pod.orchestration?.state.status === "running" ? ` · turn ${pod.orchestration.state.turnsUsed}` : ""}
             {` · updated ${relativeTime(pod.updatedAt)}`}
-          </div>
+          </span>
         </button>
       ))}
     </div>

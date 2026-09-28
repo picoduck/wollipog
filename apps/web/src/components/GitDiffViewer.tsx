@@ -1,5 +1,6 @@
 import { Fragment, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { normalizeSourcePath, REVIEW_ANCHOR_TEXT_MAX_LENGTH } from "@wollipog/protocol";
+import { StatusBadge } from "./StatusBadge.js";
 import type {
   CreateReviewFindingRequest,
   CreateWorkspaceReferenceRequest,
@@ -668,7 +669,7 @@ function HunkView({
           <div className={`diff-inline-finding diff-inline-finding-${finding.status}`} key={finding.findingId}>
             <div className="diff-inline-finding-head">
               <span className={`review-severity review-severity-${finding.severity}`}>{titleCaseLabel(finding.severity)}</span>
-              {finding.required && <span className="review-required">Required</span>}
+              {finding.required && <StatusBadge tone="neutral" noDot label="Required" />}
               <span>{titleCaseLabel(finding.source)} · {finding.author.id ?? titleCaseLabel(finding.author.kind)} · {titleCaseLabel(finding.status)}</span>
             </div>
             <div className="diff-inline-finding-body">{finding.body}</div>

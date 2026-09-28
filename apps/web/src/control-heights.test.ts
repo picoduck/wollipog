@@ -77,7 +77,7 @@ test("the control, row and icon tokens hold the §2.8 values, and touch resizes 
 
 test("the coarse-pointer block comes after every control rule it resizes", () => {
   const at = coarseBlock().source!.start!.offset;
-  for (const selector of [".btn", ".icon-btn", ".ui-switch", ".ui-seg-option", ".ui-select-trigger, .ui-searchable-combobox-input"]) {
+  for (const selector of [".btn", ".icon-btn", ".ui-switch", ".seg-option", ".ui-select-trigger, .ui-searchable-combobox-input"]) {
     assert.ok(topLevelRule(css, selector).source!.start!.offset < at, `${selector} precedes the block`);
   }
   assert.ok(at < css.indexOf("/* --- COLOUR SCHEMES, GENERATED --- */") || !css.includes("COLOUR SCHEMES"),
@@ -123,10 +123,9 @@ test("every core control is one control height, never sized by its padding", () 
   assert.equal(trigger.get("background"), "var(--field-bg)");
   assert.ok(!trigger.has("min-width"), "the 160px minimum is gone");
 
-  for (const track of [".ui-seg", ".seg", ".scope-seg"]) {
-    assert.equal(ruleBody(track).get("height"), "var(--control-h)", `${track} is one track height`);
-  }
-  assert.ok(!ruleBody(".seg").has("flex-wrap"), "the legacy segmented control no longer wraps its options");
+  assert.equal(ruleBody(".seg").get("height"), "var(--control-h)", "the segmented track is one control height");
+  assert.equal(ruleBody(".seg.sm").get("height"), "var(--control-h-sm)", "a dense toolbar's track is the small control height");
+  assert.ok(!ruleBody(".seg").has("flex-wrap"), "a segmented control never wraps its options (§10.2)");
 
   // Fields framed by a component take the same height as the controls beside them.
   assert.equal(ruleBody(".source-symbol-form input, .source-editor-select").get("height"), "var(--control-h)");
@@ -147,13 +146,11 @@ test("every core control is one control height, never sized by its padding", () 
 const REMAINING_MIN_HEIGHT_44 = [
   // The phone Session header row; its geometry is asserted in styles.test.ts (#1801 detail bar).
   "@media (max-width: 760px)|.session-detail > .detail-head",
-  // A project row on touch (#1803 rows).
-  "@media (hover: none), (pointer: coarse)|.project-manager-item",
   // The Settings rail-order row (#1803 rows).
   "|.rail-order-row",
 ];
 
-const CORE_CONTROL = /\.btn\b|\.icon-btn\b|(^|[\s>+~(])(input|select|textarea)\b|\.ui-select-trigger|\.ui-searchable-combobox-input|\.ui-seg-option|\.seg-btn|\.scope-opt|\.ui-switch|\.menu-item|\.plus-item|\.ui-select-option/;
+const CORE_CONTROL = /\.btn\b|\.icon-btn\b|(^|[\s>+~(])(input|select|textarea)\b|\.ui-select-trigger|\.ui-searchable-combobox-input|\.seg-option|\.ui-switch|\.menu-item|\.plus-item|\.ui-select-option/;
 
 test("no per-selector 44px patch remains on a control; only listed bars, rows and containers", () => {
   const minHeights: string[] = [];
@@ -177,9 +174,10 @@ test("the hit areas are drawn once, in the coarse-pointer block", () => {
   assert.equal(coarseRule(":is(.btn.sm, .icon-btn.sm, button.chip)::after").get("inset"), "-4px");
   assert.equal(coarseRule(":is(.btn.sm, button.chip)::after").get("inset"), "-5px", "bordered small controls");
   assert.equal(coarseRule(":where(.btn.sm, .icon-btn.sm, button.chip)").get("position"), "relative");
-  assert.equal(coarseRule(".ui-seg-option::after").get("inset"), "-4px 0",
+  assert.equal(coarseRule(".seg-option::after").get("inset"), "-4px 0",
     "38px option + 2px inset + 1px edge on each side, from inside the option's 1px border");
-  assert.equal(coarseRule(".seg-btn::after").get("inset"), "-2px 0");
+  assert.equal(coarseRule(".seg.sm").get("height"), "var(--control-h)",
+    "a dense toolbar's track is a full control tall on touch, since options cannot borrow height");
   assert.equal(coarseRule(".ui-switch::before").get("inset"), "-11px -3px",
     "40×24 grows to 44×44 from inside its 1px border; the thumb is ::after");
   assert.equal(coarseRule(".link::after").get("inset"), "calc(50% - 22px) -4px", "a 44px band on the line");
@@ -190,7 +188,7 @@ test("the hit areas are drawn once, in the coarse-pointer block", () => {
     const media = mediaOf(decl).join(" ");
     if (!/max-width/.test(media) || /pointer/.test(media)) return;
     const rule = decl.parent as Rule;
-    if (rule.selectors.some((selector) => /(^|\s)\.btn\b[^ ]*$|\.icon-btn\b[^ ]*$|\.ui-seg-option$/.test(selector.trim()))
+    if (rule.selectors.some((selector) => /(^|\s)\.btn\b[^ ]*$|\.icon-btn\b[^ ]*$|\.seg-option$/.test(selector.trim()))
       && /44px|--control-h/.test(decl.value)) widthKeyed.push(`${media}|${rule.selector}`);
   });
   assert.deepEqual(widthKeyed, []);

@@ -107,6 +107,24 @@ test("Session Naming is no longer a primary Settings destination and its legacy 
   assert.equal(viewPath(viewFromPath("/settings/session-naming")!), "/settings/behavior");
 });
 
+test("a Sessions tab is part of the URL and survives a reload (§10.1)", () => {
+  for (const name of ["inbox", "board"] as const) {
+    for (const split of [null, "project:p_1", "path:/work/alpha beta", " no-project"]) {
+      const view: View = { name, split };
+      const url = new URL(viewPath(view), "http://localhost");
+      assert.deepEqual(viewFromPath(url.pathname, url.search), view, `${name} ${String(split)}`);
+    }
+  }
+  assert.equal(viewPath({ name: "inbox", split: null }), "/?tab=all", "All is named, so it is not the remembered tab");
+  assert.equal(viewPath({ name: "inbox" }), "/", "a link without a tab stays the plain route");
+  // A query that is not exactly one usable tab keeps the plain view rather than failing the route.
+  for (const search of ["", "?tab=", "?other=1", "?tab=a&tab=b", "?tab=a&other=1", `?tab=${"a".repeat(513)}`]) {
+    assert.deepEqual(viewFromPath("/", search), { name: "inbox" }, search);
+  }
+  assert.equal(sameView({ name: "inbox", split: "project:p_1" }, { name: "inbox", split: "project:p_2" }), false,
+    "switching tabs is a navigation");
+});
+
 test("route parser rejects unknown, ambiguous, malformed, empty, and oversized resource paths", () => {
   for (const path of [
     "/unknown", "/sessions", "/sessions/a", "/sessions/~a/b", "/sessions/~%zz", "/sessions/~IA",

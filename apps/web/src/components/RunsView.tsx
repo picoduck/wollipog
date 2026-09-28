@@ -107,19 +107,21 @@ export function RunsView({ onNewRun }: { onNewRun: () => void }) {
 
 function RunList({ runs, onOpen }: { runs: RunView[]; onOpen: (runId: string) => void }) {
   return (
-    <div className="runs-list">
+    <div className="runs-list surface">
       {runs.map((run) => (
-        <button key={run.id} type="button" className="run-card" onClick={() => onOpen(run.id)}>
-          <div className="run-card-head">
-            <span className="run-title">{run.title}</span>
-            <span className="run-count">
-              {run.sessionIds.length} Agent{run.sessionIds.length === 1 ? "" : "s"}
+        <button key={run.id} type="button" className="row row-2" onClick={() => onOpen(run.id)}>
+          <span className="row-body">
+            <span className="row-line">
+              <span className="row-title">{run.title}</span>
+              <span className="count">
+                {run.sessionIds.length} Agent{run.sessionIds.length === 1 ? "" : "s"}
+              </span>
             </span>
-          </div>
-          <div className="run-prompt">{run.prompt}</div>
-          <div className="muted sm">
+            <span className="row-sub">{run.prompt}</span>
+          </span>
+          <span className="row-trail">
             {run.workspaceName ? `${run.workspaceName} · ` : ""}Created {relativeTime(run.createdAt)}
-          </div>
+          </span>
         </button>
       ))}
     </div>

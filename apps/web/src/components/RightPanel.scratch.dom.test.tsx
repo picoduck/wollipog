@@ -331,15 +331,15 @@ test("the Files directory survives a mode switch", async () => {
   try {
     await panel.show("files");
     assert.equal(crumbs(panel), "root");
-    await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
-    await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
+    await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-list .row")!));
+    await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-list .row")!));
     assert.equal(crumbs(panel), "root/apps/web");
 
     await panel.show("review");
     await panel.show("files");
     assert.equal(crumbs(panel), "root/apps/web", "the browser resumes two directories deep");
     assert.equal(
-      panel.container.querySelector(".files-entry .files-name")?.textContent,
+      panel.container.querySelector(".files-list .row-title")?.textContent,
       "index.ts",
       "and it listed that directory rather than the root",
     );
@@ -352,7 +352,7 @@ test("a remembered directory that no longer exists falls back to the root listin
   const panel = await mountPanel();
   try {
     await panel.show("files");
-    await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
+    await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-list .row")!));
     assert.equal(crumbs(panel), "root/apps");
     delete tree.apps;
     try {
@@ -362,7 +362,7 @@ test("a remembered directory that no longer exists falls back to the root listin
       assert.deepEqual(listed, ["apps", ""], "it resumes the remembered directory, then falls back");
       assert.equal(crumbs(panel), "root", "a gone directory cannot strand the browser on an error");
       assert.equal(panel.container.querySelector(".composer-error"), null);
-      assert.equal(panel.container.querySelector(".files-entry .files-name")?.textContent, "apps");
+      assert.equal(panel.container.querySelector(".files-list .row-title")?.textContent, "apps");
     } finally {
       tree.apps = [{ name: "web", path: "apps/web", isDir: true }];
     }
@@ -377,7 +377,7 @@ test("state is scoped per session: another session never shows the first one's d
     await panel.show("review");
     await type(field(panel, "PR Description")!, "session one only");
     await panel.show("files");
-    await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
+    await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-list .row")!));
     assert.equal(crumbs(panel), "root/apps");
 
     await panel.switchSession("session-2");
@@ -438,7 +438,7 @@ test("every mode resumes where it was left after a page reload", async () => {
   await act(async () => fireDomEvent.click(choice(before, "Diff Layout", "Side by Side")));
 
   await before.show("files");
-  await act(async () => fireDomEvent.click(before.container.querySelector<HTMLButtonElement>(".files-entry")!));
+  await act(async () => fireDomEvent.click(before.container.querySelector<HTMLButtonElement>(".files-list .row")!));
   assert.equal(crumbs(before), "root/apps");
 
   await before.show("browser");
@@ -525,7 +525,7 @@ test("StrictMode's doubled mount effect still resumes the remembered directory",
   const first = await mountPanel();
   try {
     await first.show("files");
-    await act(async () => fireDomEvent.click(first.container.querySelector<HTMLButtonElement>(".files-entry")!));
+    await act(async () => fireDomEvent.click(first.container.querySelector<HTMLButtonElement>(".files-list .row")!));
     assert.equal(crumbs(first), "root/apps");
   } finally {
     await first.dispose();
@@ -645,7 +645,7 @@ test("a resumed listing superseded by an opened file is still owed its directory
   const panel = await mountPanel();
   try {
     await panel.show("files");
-    await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
+    await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-list .row")!));
     assert.equal(crumbs(panel), "root/apps");
 
     await panel.show("review");
@@ -707,7 +707,7 @@ test("a tour of sessions that each leave scratch behind still cannot evict a dra
     for (let visit = 0; visit <= PANEL_SCRATCH_SESSION_LIMIT; visit += 1) {
       await panel.switchSession(`tour-session-${visit}`);
       await panel.show("files");
-      await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
+      await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-list .row")!));
       assert.equal(crumbs(panel), "root/apps", "each visited session leaves a directory behind");
       await panel.show("review");
     }
@@ -733,7 +733,7 @@ test("a session whose draft was left blank is evicted like any other", async () 
     for (let visit = 0; visit <= PANEL_SCRATCH_SESSION_LIMIT; visit += 1) {
       await panel.switchSession(`tour-session-${visit}`);
       await panel.show("files");
-      await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
+      await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-list .row")!));
       await panel.show("review");
     }
 
@@ -759,7 +759,7 @@ async function writeRequest(panel: Panel): Promise<void> {
 /** Leave a browsed directory behind in the current session: real scratch that eviction can take. */
 async function browseIntoApps(panel: Panel): Promise<void> {
   await panel.show("files");
-  await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-entry")!));
+  await act(async () => fireDomEvent.click(panel.container.querySelector<HTMLButtonElement>(".files-list .row")!));
   assert.equal(crumbs(panel), "root/apps");
 }
 
