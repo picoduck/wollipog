@@ -187,6 +187,7 @@ function deferred<T>(): Deferred<T> {
 interface Fixture {
   composer: HTMLTextAreaElement;
   container: HTMLDivElement;
+  mountPoint: HTMLDivElement;
   root: Root;
   rerenderWithDraftLoader: (loader: ComposerDraftLoader) => Promise<void>;
   rerenderSessionWithDraftLoader: (sessionId: string, loader: ComposerDraftLoader) => Promise<void>;
@@ -309,9 +310,11 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
     showSubagent() {},
     consumeSubagentFocusRequest() {},
   };
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   let detailMount = 0;
   const renderWithDraftLoader = (
     loader: ComposerDraftLoader,
@@ -399,6 +402,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
   return {
     composer,
     container,
+    mountPoint,
     root,
     rerenderWithDraftLoader,
     rerenderSessionWithDraftLoader,
@@ -429,7 +433,7 @@ async function mountFixture(draft: Deferred<ComposerDraft | null>, options: Fixt
 
 async function unmountFixture(fixture: Fixture) {
   await act(async () => fixture.root.unmount());
-  fixture.container.remove();
+  fixture.mountPoint.remove();
   frames = [];
 }
 

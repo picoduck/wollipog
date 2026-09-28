@@ -48,9 +48,11 @@ function claude(serviceTiers?: { id: string; name: string }[]): AgentDefinition 
 }
 
 async function mount(agent: AgentDefinition, sourceServiceTier?: string, refusal?: string | null) {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const created: Array<{ agentId: string; config: unknown }> = [];
   await act(async () => root.render(
     <ConversationHandoffDialog
@@ -70,7 +72,7 @@ async function mount(agent: AgentDefinition, sourceServiceTier?: string, refusal
     tierTrigger: () => button(/^Service Tier:/),
     create: () => [...container.querySelectorAll("button")].find((element) => element.textContent === "Create Handoff") as HTMLButtonElement,
     text: () => container.textContent ?? "",
-    unmount: async () => { await act(async () => root.unmount()); container.remove(); },
+    unmount: async () => { await act(async () => root.unmount()); mountPoint.remove(); },
   };
 }
 
@@ -174,9 +176,11 @@ test("a person refused Fork while the dialog is open cannot create the handoff, 
 
 test("a refusal that arrives after a failed attempt is still stated beside the error (#1864)", async () => {
   const reason = "Your Viewer role is read-only.";
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const render = (refusal: string | null) => root.render(
     <ConversationHandoffDialog
       agents={[claude()]}
@@ -199,6 +203,6 @@ test("a refusal that arrives after a failed attempt is still stated beside the e
     assert.equal(described?.textContent, reason, "the refusal is stated even after an earlier error");
   } finally {
     await act(async () => root.unmount());
-    container.remove();
+    mountPoint.remove();
   }
 });

@@ -12,10 +12,14 @@ import React, {
 import { Modal } from "./common.js";
 
 export interface ConfirmationOptions {
+  /** The action in Title Case, with no question mark: "Stop Session", "Delete Skill" (§7.4). */
   title: string;
+  /** One or two sentences: what happens, to which named object, and whether it can be undone. */
   message: string;
   details?: ReactNode;
-  confirmLabel?: string;
+  /** Required, and repeats the title's verb. There is no generic default such as "Continue": the
+   * button names the outcome it runs. */
+  confirmLabel: string;
   tone?: "default" | "danger";
   /** Durable element to restore focus to after settling. Needed when the invoking control is
    * a menu item that unmounts as the confirmation opens — the activeElement snapshot below
@@ -34,7 +38,7 @@ function confirmationFingerprint(options: ConfirmationOptions): string {
   return [
     options.title,
     options.message,
-    options.confirmLabel ?? "",
+    options.confirmLabel,
     options.tone ?? "",
     typeof options.details === "string" ? options.details : "",
   ].join("\u0000");
@@ -159,6 +163,11 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       : null;
     if (stableCandidate) stableConfirmationInvoker.current = stableCandidate;
     const invoker = stableCandidate ?? stableConfirmationInvoker.current;
+    // Fail closed: a confirmation that cannot name its outcome never runs it.
+    if (typeof options.confirmLabel !== "string" || !options.confirmLabel.trim()) {
+      resolve(false);
+      return;
+    }
     const fingerprint = confirmationFingerprint(options);
     if (pendingConfirmationFingerprints.current.has(fingerprint)) {
       resolve(false);
@@ -288,18 +297,29 @@ function ConfirmationDialog({ request, onSettle }: {
   onSettle: (confirmed: boolean) => void;
 }) {
   const descriptionId = useId();
+  const danger = request.tone === "danger";
   return (
-    <Modal className="feedback-confirmation" title={request.title} onClose={() => onSettle(false)} describedBy={descriptionId} returnFocusRef={request.returnFocus} footer={(
-      <>
-        <button className="btn" type="button" autoFocus onClick={() => onSettle(false)}>Cancel</button>
-        <button className={`btn ${request.tone === "danger" ? "danger" : "primary"}`} type="button" onClick={() => onSettle(true)}>
-          {request.confirmLabel ?? "Continue"}
-        </button>
-      </>
-    )}>
+    <Modal
+      className="feedback-confirmation"
+      size="sm"
+      title={request.title}
+      tone={danger ? "danger" : undefined}
+      closeButton={false}
+      onClose={() => onSettle(false)}
+      describedBy={descriptionId}
+      returnFocusRef={request.returnFocus}
+      footer={(
+        <>
+          <button className="btn" type="button" autoFocus onClick={() => onSettle(false)}>Cancel</button>
+          <button className={`btn ${danger ? "danger" : "primary"}`} type="button" onClick={() => onSettle(true)}>
+            {request.confirmLabel}
+          </button>
+        </>
+      )}
+    >
       <div className="confirmation-copy" id={descriptionId}>
         <p>{request.message}</p>
-        {request.details && <div className="confirmation-details">{request.details}</div>}
+        {request.details && <div>{request.details}</div>}
       </div>
     </Modal>
   );

@@ -397,8 +397,8 @@ export function ArchivedSessionsView() {
 
   const stop = async (session: SessionView) => {
     const approved = await confirm({
-      title: "Stop this session?",
-      message: "This terminates the agent process and discards every queued message. The archived session and its transcript remain available.",
+      title: "Stop Session",
+      message: `${session.title ? `“${session.title}”` : "This session"} stops and discards every queued message. It stays in Archived Sessions with its transcript.`,
       confirmLabel: "Stop Session",
       tone: "danger",
     });
@@ -416,8 +416,8 @@ export function ArchivedSessionsView() {
 
   const deleteSession = async (session: SessionView) => {
     const approved = await confirm({
-      title: "Delete this session?",
-      message: "This permanently removes the session and its history from the dashboard.",
+      title: "Delete Session",
+      message: `${session.title ? `“${session.title}”` : "This session"} and its history are permanently removed. This cannot be undone.`,
       confirmLabel: "Delete Session",
       tone: "danger",
     });

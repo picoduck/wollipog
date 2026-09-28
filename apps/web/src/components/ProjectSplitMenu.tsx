@@ -168,10 +168,14 @@ export function ProjectSplitMenu({
     const sessionCount = durableProject ? split.count : sessionIds.length;
     if (sessionCount === 0) return;
     const accepted = await confirm({
-      title: `${archiveStopsRuntime ? "Archive and stop" : "Archive"} ${sessionCount} session${sessionCount === 1 ? "" : "s"}?`,
+      title: archiveStopsRuntime ? "Archive and Stop Sessions" : "Archive Sessions",
       message: archiveStopsRuntime
-        ? `Sessions will move to Archived Sessions after their runtimes stop. Queued work will be canceled and runtime capacity will be released.${durableProject ? " The server applies the same stop-before-archive rule to Project sessions that are not currently loaded." : ""} To keep work running outside the Inbox, use Snooze instead.`
-        : `Move every session in “${split.name}” to Archived. The server will still stop any session that can hold runtime capacity before archiving it.`,
+        ? sessionCount === 1
+          ? `The session in “${split.name}” stops and moves to Archived Sessions, and its queued work is canceled. You can restore it, or use Snooze instead to keep it running.`
+          : `All ${sessionCount} sessions in “${split.name}” stop and move to Archived Sessions, and their queued work is canceled. You can restore them, or use Snooze instead to keep them running.`
+        : sessionCount === 1
+          ? `The session in “${split.name}” moves to Archived Sessions. If it is still running, it is stopped first.`
+          : `All ${sessionCount} sessions in “${split.name}” move to Archived Sessions. Any that are still running are stopped first.`,
       confirmLabel: archiveStopsRuntime ? "Archive and Stop" : "Archive Sessions",
       ...(archiveStopsRuntime ? { tone: "danger" as const } : {}),
     });
@@ -376,7 +380,7 @@ export function ProjectSplitMenu({
           onClose={closeRename}
           footer={(
             <>
-              <button type="button" className="btn ghost" onClick={closeRename} disabled={renameBusy}>Cancel</button>
+              <button type="button" className="btn" onClick={closeRename} disabled={renameBusy}>Cancel</button>
               <button type="submit" className="btn primary" form="rename-project-split-form" disabled={renameBusy}>
                 {renameBusy ? "Saving…" : "Save"}
               </button>

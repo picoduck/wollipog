@@ -77,9 +77,11 @@ function manager(overrides: Partial<InstanceManager> = {}): InstanceManager {
 function mount(element: React.ReactElement) {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
-  return { container, root, render: () => act(async () => { root.render(element); }) };
+  const mountPoint = happyContainer as unknown as HTMLDivElement;
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
+  return { container, mountPoint, root, render: () => act(async () => { root.render(element); }) };
 }
 
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
@@ -115,7 +117,7 @@ test("instance selector remains keyboard-managed and exposes switching plus mana
     assert.equal(managed, 1);
   } finally {
     await act(async () => { mounted.root.unmount(); });
-    mounted.container.remove();
+    mounted.mountPoint.remove();
   }
 });
 
@@ -168,7 +170,7 @@ test("compact instance selector stays bottom-anchored inside the real desktop Ra
     assert.equal(menu.style.maxHeight, "188px", "two profiles right-size the menu maximum");
   } finally {
     await act(async () => { mounted.root.unmount(); });
-    mounted.container.remove();
+    mounted.mountPoint.remove();
     Object.defineProperty(domWindow, "innerWidth", { configurable: true, value: priorWidth });
     Object.defineProperty(domWindow, "innerHeight", { configurable: true, value: priorHeight });
   }
@@ -195,7 +197,7 @@ test("instances panel keeps This Machine immutable and makes credential recovery
     assert.equal(mounted.container.querySelector('[role="dialog"] h2')?.textContent, "Re-Pair Instance");
   } finally {
     await act(async () => { mounted.root.unmount(); });
-    mounted.container.remove();
+    mounted.mountPoint.remove();
   }
 });
 
@@ -229,7 +231,7 @@ test("add dialog submits a canonical token-free origin and clears the pairing cr
     assert.doesNotMatch(mounted.container.textContent ?? "", /abcdefghijklmnop/);
   } finally {
     await act(async () => { mounted.root.unmount(); });
-    mounted.container.remove();
+    mounted.mountPoint.remove();
   }
 });
 
@@ -256,7 +258,7 @@ test("re-pair rejects a link for a different saved address before invoking nativ
     assert.match(mounted.container.querySelector('[role="alert"]')?.textContent ?? "", /different server address/);
   } finally {
     await act(async () => { mounted.root.unmount(); });
-    mounted.container.remove();
+    mounted.mountPoint.remove();
   }
 });
 
@@ -293,6 +295,6 @@ test("changing an instance address requires a matching fresh pairing link", asyn
     }]);
   } finally {
     await act(async () => { mounted.root.unmount(); });
-    mounted.container.remove();
+    mounted.mountPoint.remove();
   }
 });

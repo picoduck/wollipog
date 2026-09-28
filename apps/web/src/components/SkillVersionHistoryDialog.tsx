@@ -53,7 +53,7 @@ export function SkillVersionHistoryDialog({ skillId, onClose, onRestored }: {
     } catch (cause) { setPreview(null); setAccepted(false); setError((cause as Error).message); }
     finally { setBusy(false); }
   };
-  return <Modal title="Version History" wide onClose={() => { if (!busy) onClose(); }} footer={<>
+  return <Modal title="Version History" size="lg" onClose={() => { if (!busy) onClose(); }} footer={<>
     <button type="button" className="btn ghost" disabled={busy} onClick={onClose}>Close</button>
     <button type="button" className="btn primary" disabled={busy || !accepted || !preview?.currentVersion?.id || preview.version.id === preview.currentVersion.id} onClick={() => void restore()}>Restore Version</button>
   </>}>

@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 /**
  * #832, in the only place that can answer it: a rendering engine.
@@ -45,6 +46,7 @@ const VIEWPORTS = [
 async function openDialog(page: Page, query = "") {
   await page.goto(`/new-session-choices-e2e.html${query}`);
   await expect(page.getByRole("heading", { name: "New Session" })).toBeVisible();
+  await dialogMotionSettled(page);
 }
 
 test("selects a provider account and submits its opaque id", async ({ page }) => {
@@ -117,7 +119,8 @@ async function selectCommonProjectWithoutPointer(page: Page, touch = false) {
     : page.getByRole("combobox", { name: "Project" });
   if (touch) {
     await page.keyboard.press("Tab");
-    await expect(page.getByRole("button", { name: "Close" })).toBeFocused();
+    // A phone shows New Session as a full-height sheet, whose header has Back instead of Close (§7.5).
+    await expect(page.getByRole("button", { name: "Back" })).toBeFocused();
     await page.keyboard.press("Tab");
   }
   await expect(project).toBeFocused();
@@ -439,13 +442,18 @@ test.describe("responsive Project and Agent presentation", () => {
 
   test("does not move unrelated focus when the responsive controls change", async ({ page }) => {
     await openDialog(page);
-    const close = page.getByRole("button", { name: "Close" });
+    // The header's Close becomes Back on a phone sheet (§7.5). It is one element, so the crossing
+    // renames it without moving focus.
+    const close = page.getByRole("dialog", { name: "New Session" }).locator(".modal-head .icon-btn");
+    await expect(close).toHaveAccessibleName("Close");
     await close.focus();
 
     await page.setViewportSize({ width: 390, height: 780 });
     await expect(close).toBeFocused();
+    await expect(close).toHaveAccessibleName("Back");
     await page.setViewportSize({ width: 1280, height: 900 });
     await expect(close).toBeFocused();
+    await expect(close).toHaveAccessibleName("Close");
   });
 
   test("keeps both selections while switching between searchable and tap-only controls", async ({ page }) => {

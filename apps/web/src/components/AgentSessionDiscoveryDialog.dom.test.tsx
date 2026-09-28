@@ -131,8 +131,10 @@ test("Pi is selectable only when the runner proves source-preserving session ado
 
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
+  const mountPoint = happyContainer as unknown as HTMLDivElement;
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   try {
     await act(async () => {
       root.render(<AgentSessionDiscoveryDialog runner={{ ...runner, protocolVersion: 155 }} onClose={() => {}} />);
@@ -143,15 +145,17 @@ test("Pi is selectable only when the runner proves source-preserving session ado
     assert.match(container.textContent ?? "", /requires protocol v156/);
   } finally {
     await act(async () => { root.unmount(); });
-    container.remove();
+    mountPoint.remove();
   }
 });
 
 test("an old runner explains why Codex App Server discovery requires an update", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
+  const mountPoint = happyContainer as unknown as HTMLDivElement;
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   try {
     await act(async () => {
       root.render(<AgentSessionDiscoveryDialog runner={{ ...runner, protocolVersion: 62 }} onClose={() => {}} />);
@@ -167,15 +171,17 @@ test("an old runner explains why Codex App Server discovery requires an update",
     assert.equal((container.querySelector('input[value="codex-exec"]') as HTMLInputElement).disabled, false);
   } finally {
     await act(async () => { root.unmount(); });
-    container.remove();
+    mountPoint.remove();
   }
 });
 
 test("agent selection keeps ACP session sources when the same provider has a native driver", async () => {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
+  const mountPoint = happyContainer as unknown as HTMLDivElement;
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const claudeAcp = {
     id: "claude-acp",
     name: "Claude Code (ACP)",
@@ -208,7 +214,7 @@ test("agent selection keeps ACP session sources when the same provider has a nat
     assert.ok(container.querySelector('input[value="claude-acp"]'), "ACP Claude sessions remain discoverable");
   } finally {
     await act(async () => { root.unmount(); });
-    container.remove();
+    mountPoint.remove();
   }
 });
 
@@ -245,8 +251,10 @@ test("agent session discovery waits for a selection and scopes the result list",
 
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
+  const mountPoint = happyContainer as unknown as HTMLDivElement;
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   try {
     await act(async () => {
       root.render(<AgentSessionDiscoveryDialog runner={runner} onClose={() => {}} />);
@@ -307,7 +315,7 @@ test("agent session discovery waits for a selection and scopes the result list",
   } finally {
     await act(async () => { root.unmount(); });
     api.listExternalSessions = priorList;
-    container.remove();
+    mountPoint.remove();
   }
 });
 
@@ -329,8 +337,10 @@ test("a stale scan cannot overwrite the most recently selected agent", async () 
 
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
+  const mountPoint = happyContainer as unknown as HTMLDivElement;
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   try {
     await act(async () => {
       root.render(<AgentSessionDiscoveryDialog runner={runner} onClose={() => {}} />);
@@ -368,6 +378,6 @@ test("a stale scan cannot overwrite the most recently selected agent", async () 
   } finally {
     await act(async () => { root.unmount(); });
     api.listExternalSessions = priorList;
-    container.remove();
+    mountPoint.remove();
   }
 });

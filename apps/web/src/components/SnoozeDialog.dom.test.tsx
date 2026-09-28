@@ -27,9 +27,11 @@ for (const [name, value] of Object.entries({
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 
 test("Snooze Again requires a newly selected future schedule and replaces the exact fired reminder", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const scheduledFor = Date.now() - 60_000;
   const reminder: SessionReminderView = {
     reminderId: "reminder-1",
@@ -77,13 +79,15 @@ test("Snooze Again requires a newly selected future schedule and replaces the ex
   assert.equal(container.querySelector(".form-error"), null);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("Snooze Again submits a keyboard-selected suggestion on the first Enter", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const fired: SessionReminderView = {
     reminderId: "reminder-activity-fired",
     sessionId: "session-1",
@@ -121,13 +125,15 @@ test("Snooze Again submits a keyboard-selected suggestion on the first Enter", a
   assert.ok((saved[0]?.scheduledFor ?? 0) > Date.now());
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("a removed fired reminder's preserved draft still requires a newly selected schedule", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const scheduledFor = Date.now() - 60_000;
   const fired: SessionReminderView = {
     reminderId: "reminder-fired",
@@ -170,13 +176,15 @@ test("a removed fired reminder's preserved draft still requires a newly selected
   assert.equal(saved && "rescheduleFired" in saved, false);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("live reminder changes preserve the complete draft and require an explicit reload", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const original: SessionReminderView = {
     reminderId: "reminder-original",
     sessionId: "session-1",
@@ -257,13 +265,15 @@ test("live reminder changes preserve the complete draft and require an explicit 
   assert.equal(saved[0]?.expectedReminderId, "reminder-original");
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("the server echo from the dialog's own save is not announced as a remote conflict", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const original: SessionReminderView = {
     reminderId: "reminder-original",
     sessionId: "session-1",
@@ -299,13 +309,15 @@ test("the server echo from the dialog's own save is not announced as a remote co
     await savePending;
   });
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("fired, removed, and recreated reminders have distinct live-conflict messages", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const original: SessionReminderView = {
     reminderId: "reminder-original",
     sessionId: "session-1",
@@ -358,7 +370,7 @@ test("fired, removed, and recreated reminders have distinct live-conflict messag
   assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /removed and recreated in another client/i);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 function deferred<T>(): { promise: Promise<T>; resolve(value: T): void; reject(cause: unknown): void } {
@@ -433,9 +445,11 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
   ];
 
   for (const scenario of cases) {
-    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-    domWindow.document.body.append(container as never);
-    const root = createRoot(container);
+    const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(mountPoint as never);
+    // Dialogs are portalled to <body>, so the test queries the body.
+    const container = domWindow.document.body as unknown as HTMLDivElement;
+    const root = createRoot(mountPoint);
     let saveCalls = 0;
     let reconciliations = 0;
     let accepted: SetSessionReminderRequest | undefined;
@@ -504,14 +518,16 @@ test("409 reconciliation distinguishes authoritative reminder states without liv
     assert.equal(acceptedPrevious?.reminderId, scenario.authoritative?.reminderId, scenario.name);
 
     await act(async () => { root.unmount(); });
-    container.remove();
+    mountPoint.remove();
   }
 });
 
 test("a removed reminder can be recreated explicitly from the complete preserved draft", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const original: SessionReminderView = {
     reminderId: "reminder-original",
     sessionId: "session-1",
@@ -584,13 +600,15 @@ test("a removed reminder can be recreated explicitly from the complete preserved
   assert.equal(closeCalls, 1);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("draft reuse retains an untouched stored instant and time zone", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const scheduledFor = Date.UTC(2099, 4, 6, 12, 45);
   const original: SessionReminderView = {
     reminderId: "reminder-original",
@@ -627,13 +645,15 @@ test("draft reuse retains an untouched stored instant and time zone", async () =
   assert.equal(accepted && "expectedReminderId" in accepted, false);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("a concurrent recreation blocks preserved-draft creation and reload keeps focus in the dialog", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const original: SessionReminderView = {
     reminderId: "reminder-original", sessionId: "session-1", scheduledFor: Date.now() + 60_000,
     timeZone: "UTC", originalExpression: "in 1 hour", wakePolicy: "until_activity", state: "pending",
@@ -681,13 +701,15 @@ test("a concurrent recreation blocks preserved-draft creation and reload keeps f
   assert.equal(saved[0]?.expectedReminderId, "reminder-recreated");
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("a create-only race reconciles a reminder recreated without live delivery", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const original: SessionReminderView = {
     reminderId: "reminder-original", sessionId: "session-1", scheduledFor: Date.now() + 60_000,
     timeZone: "UTC", originalExpression: "in 1 hour", wakePolicy: "until_activity", state: "pending",
@@ -742,13 +764,15 @@ test("a create-only race reconciles a reminder recreated without live delivery",
   assert.equal(saved[1]?.expectedReminderId, "reminder-recreated");
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("unsupported and failed reconciliation remains visible and safely retryable", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const original: SessionReminderView = {
     reminderId: "reminder-original", sessionId: "session-1", scheduledFor: Date.now() + 60_000,
     timeZone: "UTC", originalExpression: "in 1 hour", wakePolicy: "until_activity", state: "pending",
@@ -794,13 +818,15 @@ test("unsupported and failed reconciliation remains visible and safely retryable
   assert.equal(readCalls, 3);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("a newer live update wins when it arrives during authoritative reconciliation", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const original: SessionReminderView = {
     reminderId: "reminder-original", sessionId: "session-1", scheduledFor: Date.now() + 60_000,
     timeZone: "UTC", originalExpression: "in 1 hour", wakePolicy: "until_activity", state: "pending",
@@ -839,13 +865,15 @@ test("a newer live update wins when it arrives during authoritative reconciliati
   assert.equal(accepted?.expectedReminderId, "reminder-original");
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("new reminders start empty while existing natural-language expressions remain intact", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   await act(async () => {
     root.render(<SnoozeDialog onClose={() => undefined} onSave={async () => undefined} />);
   });
@@ -873,13 +901,15 @@ test("new reminders start empty while existing natural-language expressions rema
   assert.match(container.querySelector(".snooze-preview")?.textContent ?? "", /Schedule Source: Stored Reminder/);
 
   await act(async () => { secondRoot.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("schedule suggestions expose listbox semantics and keyboard selection submits exactly once", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const saved: SetSessionReminderRequest[] = [];
   let closes = 0;
   await act(async () => {
@@ -918,13 +948,15 @@ test("schedule suggestions expose listbox semantics and keyboard selection submi
   assert.equal(closes, 1);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("Escape dismisses suggestions before the dialog and Tab leaves suggestion options out of traversal", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   let closes = 0;
   await act(async () => {
     root.render(<SnoozeDialog onClose={() => { closes++; }} onSave={async () => undefined} />);
@@ -946,13 +978,15 @@ test("Escape dismisses suggestions before the dialog and Tab leaves suggestion o
   assert.equal([...container.querySelectorAll<HTMLElement>('[role="option"]')].every((option) => option.tabIndex === -1), true);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("touch selection remains focus-safe and IME Enter never selects or submits", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const saved: SetSessionReminderRequest[] = [];
   await act(async () => {
     root.render(<SnoozeDialog onClose={() => undefined} onSave={async (request) => { saved.push(request); }} />);
@@ -977,13 +1011,15 @@ test("touch selection remains focus-safe and IME Enter never selects or submits"
   assert.equal(container.querySelector<HTMLButtonElement>('button[type="submit"]')?.disabled, false);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("presets stay distinct from text input and every invalid schedule gets an actionable explanation", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   await act(async () => {
     root.render(<SnoozeDialog onClose={() => undefined} onSave={async () => undefined} />);
   });
@@ -1018,13 +1054,15 @@ test("presets stay distinct from text input and every invalid schedule gets an a
   assert.match(preview(), /Schedule Source: Exact Date and Time/);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("Someday is capability-gated, saves without a timer, and can be edited into a timed reminder", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const saved: SetSessionReminderRequest[] = [];
   await act(async () => {
     root.render(<SnoozeDialog
@@ -1093,13 +1131,15 @@ test("Someday is capability-gated, saves without a timer, and can be edited into
   assert.match(container.querySelector(".snooze-preview")?.textContent ?? "", /Return Schedule/);
   assert.match(container.querySelector(".snooze-preview")?.textContent ?? "", /Time Zone: Not Applicable/);
   await act(async () => { firedRoot.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("a complete natural-language expression leaves Enter available to the enclosing form", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const saved: SetSessionReminderRequest[] = [];
   await act(async () => {
     root.render(<SnoozeDialog onClose={() => undefined} onSave={async (request) => { saved.push(request); }} />);
@@ -1115,13 +1155,15 @@ test("a complete natural-language expression leaves Enter available to the enclo
   assert.equal(saved[0]?.originalExpression, "in 2 hours");
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("Enter submits a complete typed schedule even when broader suggestions remain visible", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const saved: SetSessionReminderRequest[] = [];
   await act(async () => {
     root.render(<SnoozeDialog onClose={() => undefined} onSave={async (request) => { saved.push(request); }} />);
@@ -1142,5 +1184,5 @@ test("Enter submits a complete typed schedule even when broader suggestions rema
   assert.equal(saved[0]?.scheduledFor, expected?.scheduleKind === "timed" ? expected.scheduledFor : undefined);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });

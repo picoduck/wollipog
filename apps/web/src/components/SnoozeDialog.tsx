@@ -266,18 +266,17 @@ export function SnoozeDialog({
           : loadedReminder ? "Edit Reminder" : "Snooze Session"}
       onClose={onClose}
       describedBy="snooze-description"
+      tertiary={!creatingFromDraft && loadedReminder && onRemove ? <button
+        className="btn ghost"
+        type="button"
+        onClick={() => void remove()}
+        disabled={submitting}
+        aria-disabled={Boolean(conflict) || undefined}
+      >
+        {loadedReminder.state === "fired" ? "Dismiss Reminder" : "Remove Reminder"}
+      </button> : undefined}
       footer={<>
-        {!creatingFromDraft && loadedReminder && onRemove && <button
-          className="btn ghost"
-          type="button"
-          onClick={() => void remove()}
-          disabled={submitting}
-          aria-disabled={Boolean(conflict) || undefined}
-        >
-          {loadedReminder.state === "fired" ? "Dismiss Reminder" : "Remove Reminder"}
-        </button>}
-        <span className="modal-foot-spacer" />
-        <button className="btn ghost" type="button" onClick={onClose} disabled={submitting}>Cancel</button>
+        <button className="btn" type="button" onClick={onClose} disabled={submitting}>Cancel</button>
         <button
           className="btn primary"
           type="submit"

@@ -42,6 +42,7 @@ import {
 import { SETTINGS_SECTIONS, type SettingsSection, type View } from "../navigation.js";
 import type { ExperimentFlags, ExperimentId } from "../experiments.js";
 import { effortLabel, permissionModeLabel, titleCaseLabel } from "../format.js";
+import { useFeedback } from "./FeedbackProvider.js";
 
 /**
  * Settings as a ROUTE, not a dialog.
@@ -1012,6 +1013,7 @@ const SESSION_NAMING_OPTIONS: ReadonlyArray<{
 /** Organization-scoped semantic naming choice. The API projection is deliberately secret-free:
  * the panel can report whether a bearer key exists but never receives its value. */
 export function SessionNamingPanel() {
+  const { confirm } = useFeedback();
   const api = useApi();
   const activeApi = useRef(api);
   activeApi.current = api;
@@ -1198,8 +1200,14 @@ export function SessionNamingPanel() {
       }
     });
   };
-  const deleteApiKey = () => {
-    if (busy || customBusy || !window.confirm("Delete the runner-local API key? Endpoints that require it will stop working.")) return;
+  const deleteApiKey = async () => {
+    if (busy || customBusy) return;
+    if (!await confirm({
+      title: "Delete API Key",
+      message: "The API key is deleted from the selected machine, and endpoints that require it stop working. This cannot be undone.",
+      confirmLabel: "Delete API Key",
+      tone: "danger",
+    })) return;
     const requestApi = api;
     setCustomBusy(true);
     setCustomStatus(null);
@@ -1449,7 +1457,7 @@ export function SessionNamingPanel() {
               className="btn ghost sm"
               disabled={!settings.canManage || busy || customBusy || custom?.configurationSource !== "runner" ||
                 custom.online === false || !custom.apiKeyConfigured}
-              onClick={deleteApiKey}
+              onClick={() => void deleteApiKey()}
             >
               Delete API Key
             </button>

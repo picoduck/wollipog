@@ -31,14 +31,16 @@ const ipcFailure = "The remote HTTP command requires a binary request frame.";
 const client = { ...api, getIdentity: async () => { throw ipcFailure; } } as ApiClient;
 
 async function render(children: React.ReactNode, activeClient: ApiClient = client) {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   await act(async () => {
     root.render(<ApiProvider client={activeClient}>{children}</ApiProvider>);
     await Promise.resolve();
   });
-  return { container, unmount: async () => { await act(async () => root.unmount()); container.remove(); } };
+  return { container, mountPoint, unmount: async () => { await act(async () => root.unmount()); mountPoint.remove(); } };
 }
 
 test("Create Project shows a native IPC string rejection and stops loading access scopes", async () => {

@@ -81,7 +81,7 @@ export function SwitchAccountDialog({
       {...(returnFocusRef ? { returnFocusRef } : {})}
       footer={(
         <>
-          <button className="btn ghost" type="button" onClick={close} disabled={submitting}>Cancel</button>
+          <button className="btn" type="button" onClick={close} disabled={submitting}>Cancel</button>
           <button
             className="btn primary"
             type="button"

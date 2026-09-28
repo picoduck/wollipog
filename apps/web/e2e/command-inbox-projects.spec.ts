@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { dialogMotionSettled } from "./dialog-motion.js";
 
 async function controlGeometry(control: Locator) {
   return control.evaluate((element) => {
@@ -872,7 +873,7 @@ test("archiving the final session keeps its Project selected live and after relo
   await alpha.click();
   await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
   await page.getByRole("menuitem", { name: "Archive and Stop All Sessions" }).click();
-  const confirmation = page.getByRole("dialog", { name: "Archive and stop 1 session?" });
+  const confirmation = page.getByRole("dialog", { name: "Archive and Stop Sessions" });
   await confirmation.getByRole("button", { name: "Archive and Stop" }).click();
 
   await expect(alpha).toHaveAttribute("aria-selected", "true");
@@ -1033,6 +1034,8 @@ test.describe("with a touch pointer", () => {
         await page.keyboard.press("c");
 
         const dialog = page.getByRole("dialog", { name: "New Session" });
+        await expect(dialog).toBeVisible();
+        await dialogMotionSettled(page);
         const controls = [
           dialog.getByRole("button", { name: "Create Project…" }),
           dialog.getByRole("button", { name: "Add Location…" }),
@@ -1133,14 +1136,21 @@ test("New Session creates a durable Project and links its first Location inline"
   await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
   await page.getByRole("menuitem", { name: "New Session Here" }).click();
   const newSession = page.getByRole("dialog", { name: "New Session" });
-  await newSession.getByRole("button", { name: /Create Project/ }).click();
+  const createProjectButton = newSession.getByRole("button", { name: /Create Project/ });
+  await createProjectButton.click();
 
-  await expect(newSession).toBeHidden();
+  // New Session stays open under its child, under one shared dim (§7.1).
   const createProject = page.getByRole("dialog", { name: "Create Project" });
+  await expect(createProject).toBeVisible();
+  await expect(newSession).toBeVisible();
+  await expect(page.locator(".modal-backdrop")).toHaveCount(2);
+  expect(await page.locator(".modal-backdrop").evaluateAll((layers) =>
+    layers.map((layer) => getComputedStyle(layer).backgroundColor !== "rgba(0, 0, 0, 0)"))).toEqual([true, false]);
   await createProject.getByLabel("Project Name").fill("Inline Project");
   await createProject.getByRole("button", { name: "Create Project" }).click();
 
-  await expect(newSession).toBeVisible();
+  await expect(createProject).toHaveCount(0);
+  await expect(createProjectButton).toBeFocused();
   await expect(newSession.getByRole("combobox", { name: "Project" })).toHaveValue("Inline Project");
   await expect(newSession.getByText("No Project Locations", { exact: true })).toBeVisible();
   await newSession.getByRole("button", { name: /Add Location/ }).click();
@@ -1420,7 +1430,7 @@ test("an imported session can link its verified Location while moving to a manag
   await expect(gammaChoice).toContainText("Link this imported Location when moving.");
   await gammaChoice.click();
 
-  const confirmation = page.getByRole("dialog", { name: "Link Location and Move to Gamma?" });
+  const confirmation = page.getByRole("dialog", { name: "Link Location and Move Session" });
   await expect(confirmation).toContainText("registers the imported working directory as a Location");
   await expect(confirmation).toContainText("can also change how future imported sessions in this directory are filed");
   await confirmation.getByRole("button", { name: "Link Location and Move" }).click();
@@ -1456,7 +1466,7 @@ test("personal sessions require explicit confirmation before joining a team Proj
   await expect(alphaChoice).toContainText("Team Project. Linked to this exact Location.");
   await alphaChoice.click();
 
-  const confirmation = page.getByRole("dialog", { name: "Share session with Alpha?" });
+  const confirmation = page.getByRole("dialog", { name: "Share and Move Session" });
   await expect(confirmation).toContainText("lets that team read its transcript");
   await expect(confirmation).toContainText("Files and the execution Location stay unchanged.");
   await confirmation.getByRole("button", { name: "Share and Move" }).click();
@@ -1486,7 +1496,7 @@ test("older control planes with missing audience metadata fail closed before Pro
   const moveDialog = await openMoveToProjectDialog(page);
   await moveDialog.getByRole("radio", { name: /Alpha/ }).click();
 
-  const confirmation = page.getByRole("dialog", { name: "Confirm move to Alpha?" });
+  const confirmation = page.getByRole("dialog", { name: "Move Session" });
   await expect(confirmation).toContainText("does not report sharing details");
   await expect(confirmation).toContainText("may change who can read its transcript");
   await confirmation.getByRole("button", { name: "Cancel" }).click();
@@ -1709,9 +1719,9 @@ test("one exact Location can be launched from two Projects and unlinked independ
     has: page.locator('code[title="/repos/alpha"]'),
   });
   await gammaSharedLocation.getByRole("button", { name: "Remove Location" }).click();
-  const confirmation = page.getByRole("dialog", { name: "Remove Alpha?" });
+  const confirmation = page.getByRole("dialog", { name: "Remove Location" });
   await expect(confirmation).toContainText("The folder is not deleted");
-  await expect(confirmation).toContainText("other Projects using this Location are unaffected");
+  await expect(confirmation).toContainText("other Projects are unaffected");
   await confirmation.getByRole("button", { name: "Remove Location" }).click();
   await expect(gammaSharedLocation).toHaveCount(0);
   await expect.poll(async () => page.evaluate(() => {
@@ -1735,8 +1745,8 @@ test("deleting a Project explicitly retains sessions and moves them to No Projec
   await openProjectManager(page);
   await page.getByRole("button", { name: /Alpha/ }).click();
   await page.getByRole("button", { name: "Delete Project" }).click();
-  const dialog = page.getByRole("dialog", { name: "Delete Alpha?" });
-  await expect(dialog).toContainText("Sessions will move to No Project");
+  const dialog = page.getByRole("dialog", { name: "Delete Project" });
+  await expect(dialog).toContainText("its sessions move to No Project");
   await expect(dialog).toContainText("Sessions and files are not deleted");
   await dialog.getByLabel("Type Alpha to Confirm").fill("Alpha");
   await dialog.getByRole("button", { name: "Delete Project" }).click();

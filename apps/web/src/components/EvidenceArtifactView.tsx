@@ -218,7 +218,7 @@ export function EvidenceArtifactView({
             <Modal
               title={item.evidenceId}
               onClose={() => setEnlarged(false)}
-              wide
+              size="lg"
               returnFocusRef={enlargeRef}
             >
               <img className="evidence-artifact-full" src={imageUrl} alt={`Evidence: ${item.evidenceId}`} />

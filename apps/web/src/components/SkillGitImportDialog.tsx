@@ -56,7 +56,7 @@ export function SkillGitImportDialog({ onClose, onImported, source }: {
     }
   };
   const updates = preview?.candidates.filter((entry) => selected.includes(entry.path) && entry.disposition === "update") ?? [];
-  return <Modal title={source ? "Check for Skill Updates" : "Import Skills from Git"} wide onClose={close} footer={<>
+  return <Modal title={source ? "Check for Skill Updates" : "Import Skills from Git"} size="lg" onClose={close} footer={<>
     <button className="btn ghost" type="button" disabled={busy} onClick={close}>Close</button>
     {preview && <button className="btn primary" type="button" disabled={busy || !selected.length || (updates.length > 0 && !accepted)}
       onClick={() => void submit()}>{busy ? "Working…" : "Import Selected"}</button>}

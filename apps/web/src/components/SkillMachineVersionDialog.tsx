@@ -72,7 +72,7 @@ export function SkillMachineVersionDialog({ skillId, runners, initialRunnerId, o
     } catch (cause) { setPreview(null); setAccepted(false); setError((cause as Error).message); }
     finally { setBusy(false); }
   };
-  return <Modal title="Machine Versions" wide onClose={() => { if (!busy) onClose(); }} footer={<>
+  return <Modal title="Machine Versions" size="lg" onClose={() => { if (!busy) onClose(); }} footer={<>
     <button className="btn ghost" type="button" disabled={busy} onClick={onClose}>Close</button>
     <button className="btn primary" type="button" disabled={busy || !preview || !accepted} onClick={() => void save()}>Save Version Policy</button>
   </>}><div className="form skills-machine-import">

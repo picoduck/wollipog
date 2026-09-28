@@ -53,10 +53,10 @@ export function InstancesPanel() {
   const remove = async (profile: InstanceProfile) => {
     const active = profile.id === instances.activeProfile.id;
     const accepted = await confirm({
-      title: `Remove “${profile.label}”?`,
+      title: "Remove Instance",
       message: active
-        ? "This removes the saved connection and secure credential, then switches Wollipog to This Machine. Data on the remote instance is not deleted."
-        : "This removes the saved connection and secure credential. Data on the remote instance is not deleted.",
+        ? `The saved connection and credential for “${profile.label}” are removed, and Wollipog switches to This Machine. Data on the remote instance is not deleted.`
+        : `The saved connection and credential for “${profile.label}” are removed. Data on the remote instance is not deleted.`,
       confirmLabel: "Remove Instance",
       tone: "danger",
     });

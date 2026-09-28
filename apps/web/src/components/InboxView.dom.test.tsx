@@ -85,10 +85,12 @@ function setWindowFocused(focused: boolean): void {
  */
 const mountedRoots: Array<{ root: ReturnType<typeof createRoot>; container: HTMLDivElement }> = [];
 
-function mountTestRoot(): { container: HTMLDivElement; root: ReturnType<typeof createRoot> } {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+function mountTestRoot(): { container: HTMLDivElement; mountPoint: HTMLDivElement; root: ReturnType<typeof createRoot> } {
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const entry = { root, container };
   mountedRoots.push(entry);
   // The shared cleanup drains disposers newest-first and guards each one, so a teardown that throws
@@ -97,9 +99,9 @@ function mountTestRoot(): { container: HTMLDivElement; root: ReturnType<typeof c
     const at = mountedRoots.indexOf(entry);
     if (at >= 0) mountedRoots.splice(at, 1);
     await act(async () => { root.unmount(); });
-    container.remove();
+    mountPoint.remove();
   });
-  return { container, root };
+  return { container, mountPoint, root };
 }
 
 

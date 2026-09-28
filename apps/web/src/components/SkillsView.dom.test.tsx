@@ -133,9 +133,11 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
     },
   } as unknown as ApiClient;
 
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "skills-1",
@@ -255,7 +257,7 @@ test("SkillsView lists skills, opens a detail with assignments and deployment, a
   assert.match((dialog!.querySelector("textarea") as HTMLTextAreaElement).value, /^---\nname: /);
 
   await act(async () => root.unmount());
-  container.remove();
+  mountPoint.remove();
 });
 
 test("SkillsView shows Drift for an edited deployed copy and resolves it by import or confirmed restore", async () => {
@@ -320,9 +322,11 @@ test("SkillsView shows Drift for an edited deployed copy and resolves it by impo
     dismissToast: () => undefined,
   };
 
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "skills-drift", runtimeKey: "skills-drift:1", createSocket: () => socket, close() {},
@@ -377,7 +381,7 @@ test("SkillsView shows Drift for an edited deployed copy and resolves it by impo
   await act(settle);
   await act(async () => { button("Restore Library Version")!.click(); });
   await act(settle);
-  assert.deepEqual(confirmations, ["Restore the library version of “code-review”?|Restore Library Version"]);
+  assert.deepEqual(confirmations, ["Restore Library Version|Restore Library Version"]);
   assert.deepEqual(calls, [
     "preview:runner-1:code-review:agent",
     "import:review-1:true",
@@ -386,7 +390,7 @@ test("SkillsView shows Drift for an edited deployed copy and resolves it by impo
   assert.doesNotMatch(container.querySelector(".skills-machine")?.textContent ?? "", /Edited Copies/);
 
   await act(async () => root.unmount());
-  container.remove();
+  mountPoint.remove();
 });
 
 test("SkillsView lists orphaned copies per machine and resolves them by review and import or fenced discard", async () => {
@@ -451,9 +455,11 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
     dismissToast: () => undefined,
   };
 
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "skills-orphans", runtimeKey: "skills-orphans:1", createSocket: () => socket, close() {},
@@ -512,7 +518,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
 
   await act(async () => { button("Discard Copy")[0]!.click(); });
   await act(settle);
-  assert.deepEqual(confirmations, ["Discard this unidentified kept-aside copy?|Discard Copy"]);
+  assert.deepEqual(confirmations, ["Discard Copy|Discard Copy"]);
   assert.deepEqual(calls, [
     `preview:runner-1:kept_aside:${keptId}`,
     "import:review-1:false",
@@ -521,7 +527,7 @@ test("SkillsView lists orphaned copies per machine and resolves them by review a
   assert.match(container.querySelector('[aria-label="Orphaned Copies"]')?.textContent ?? "", /No orphaned copies are reported\./);
 
   await act(async () => root.unmount());
-  container.remove();
+  mountPoint.remove();
 });
 
 test("SkillsView keeps the orphaned copies entry reachable for a runner that cannot report kept-aside copies", async () => {
@@ -535,9 +541,11 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
     listSkillGroups: async () => ({ groups: [] }),
     runnerSkills: async () => older,
   } as unknown as ApiClient;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId: "skills-older", runtimeKey: "skills-older:1", createSocket: () => socket, close() {},
@@ -569,14 +577,16 @@ test("SkillsView keeps the orphaned copies entry reachable for a runner that can
     /This runner version cannot report copies a restore kept aside\. Update it to list them here\./);
 
   await act(async () => root.unmount());
-  container.remove();
+  mountPoint.remove();
 });
 
 /** Mount the Skills view against a client and deliver a one-runner snapshot. */
 async function mountSkills(client: ApiClient, instanceId: string) {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
     instanceId, runtimeKey: `${instanceId}:1`, createSocket: () => socket, close() {},
@@ -614,7 +624,7 @@ async function mountSkills(client: ApiClient, instanceId: string) {
     },
     async unmount() {
       await act(async () => root.unmount());
-      container.remove();
+      mountPoint.remove();
     },
   };
 }
@@ -718,9 +728,11 @@ test("a recommendation dismissed in the Skills view or the Inbox notice is dismi
     },
   } as unknown as ApiClient;
   const mountNotice = async () => {
-    const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-    domWindow.document.body.append(container as never);
-    const root = createRoot(container);
+    const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+    domWindow.document.body.append(mountPoint as never);
+    // Dialogs are portalled to <body>, so the test queries the body.
+    const container = domWindow.document.body as unknown as HTMLDivElement;
+    const root = createRoot(mountPoint);
     await act(async () => {
       root.render(<ApiProvider client={client}><RecommendedSkillsNotice onOpen={() => {}} /></ApiProvider>);
     });
@@ -733,7 +745,7 @@ test("a recommendation dismissed in the Skills view or the Inbox notice is dismi
         await act(async () => { button.click(); });
         await act(settle);
       },
-      async unmount() { await act(async () => root.unmount()); container.remove(); },
+      async unmount() { await act(async () => root.unmount()); mountPoint.remove(); },
     };
   };
 
@@ -838,9 +850,11 @@ test("SkillsView follows the route's selected skill, including back to no select
     const ready = useStoreSelector((state) => state.snapshotLoaded);
     return ready ? <SkillsView selectedSkillId={id} /> : null;
   }
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   await act(async () => {
     root.render(
@@ -875,7 +889,7 @@ test("SkillsView follows the route's selected skill, including back to no select
   await act(settle);
   assert.equal(container.querySelector(".skills-detail-head"), null, "a stale detail load is discarded");
   await act(async () => root.unmount());
-  container.remove();
+  mountPoint.remove();
 });
 
 test("SkillsView keeps following the selection when a mutation finishes after the user moved on", async () => {
@@ -906,9 +920,11 @@ test("SkillsView keeps following the selection when a mutation finishes after th
     const ready = useStoreSelector((state) => state.snapshotLoaded);
     return ready ? <SkillsView selectedSkillId={id} /> : null;
   }
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   await act(async () => {
     root.render(
@@ -940,5 +956,5 @@ test("SkillsView keeps following the selection when a mutation finishes after th
   await act(settle);
   assert.equal(heading(), "code-review", "the finished mutation does not bring back the skill the user left");
   await act(async () => root.unmount());
-  container.remove();
+  mountPoint.remove();
 });

@@ -269,7 +269,7 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   for (const label of ["Create Project", "Add Location", "Make Default", "Archive Sessions", "Delete Project"]) {
     assert.equal(projectsView.includes(label), true, label);
   }
-  assert.match(projectsView, /Sessions will move to No Project[\s\S]*Sessions and files are not deleted/,
+  assert.match(projectsView, /its sessions move to No Project[\s\S]*Sessions and files are not deleted/,
     "Project deletion states its non-destructive consequences");
   assert.match(inbox, /activeSplit\.count > 0[\s\S]*title: "Loading Sessions"[\s\S]*still syncing/,
     "authoritative Project counts must not momentarily render a false empty state");

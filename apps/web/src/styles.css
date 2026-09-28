@@ -587,10 +587,8 @@ pre {
   font-size: var(--text-sm);
   color: var(--code-accent);
 }
-/* Flow spacing comes from the container's gap, not from default element margins. `.modal-body`
-   joins this list together with its §7.2 body gap: it is still a plain block, so resetting its
-   children now would leave dialog paragraphs flush against the next block. */
-:where(.form, .section, .surface, .notice, .empty) > * {
+/* Flow spacing comes from the container's gap, not from default element margins (§2.4). */
+:where(.form, .section, .surface, .modal-body, .notice, .empty) > * {
   margin: 0;
 }
 /* Focus is a neutral ring (§16.1). `:where()` keeps it at zero specificity, so a component that
@@ -2213,12 +2211,12 @@ textarea {
   border: 1px solid var(--border-strong);
   border-radius: 6px;
 }
-.share-created-link { margin-top: 16px; }
+
 .share-created-link > label { display: block; margin-bottom: 6px; color: var(--text-dim); }
 .share-link-controls { display: flex; gap: 8px; }
 .share-link-controls input { flex: 1; overflow: hidden; text-overflow: ellipsis; }
 .share-status { color: var(--text-dim); overflow-wrap: anywhere; }
-.share-list { margin: 8px 0 0; padding: 0; list-style: none; }
+.share-list { padding: 0; list-style: none; }
 .share-list li {
   display: flex;
   align-items: center;
@@ -4621,7 +4619,14 @@ textarea {
   .model-settings-pop .cbar-settings-header {
     top: -8px;
     margin: -8px -8px 0;
-    padding: 8px 8px 0;
+    padding: var(--space-4) 8px 0;
+  }
+  /* The shared sheet grabber (Dialog block), centred at the top of the sticky title row. */
+  .model-settings-pop .cbar-settings-header > .sheet-grabber {
+    position: absolute;
+    top: var(--space-2);
+    left: calc(50% - 18px);
+    margin: 0;
   }
 }
 .cbar-opt {
@@ -4684,9 +4689,6 @@ textarea {
 }
 .cbar-permission-details-trigger:focus-visible {
   color: var(--text);
-}
-.permission-mode-details-dialog {
-  width: min(480px, calc(100vw - 40px));
 }
 .permission-mode-details-copy {
   display: grid;
@@ -7028,11 +7030,7 @@ button.file-head.source-path-link {
   color: var(--text-faint);
   text-transform: capitalize;
 }
-.access-dialog-danger {
-  margin-right: auto;
-}
 .access-success {
-  margin-bottom: 16px;
   padding: 12px;
   border: 1px solid color-mix(in srgb, var(--green) 30%, transparent);
   border-radius: 8px;
@@ -7044,7 +7042,6 @@ button.file-head.source-path-link {
   display: grid;
   justify-items: center;
   gap: 10px;
-  margin-bottom: 16px;
   text-align: center;
 }
 .access-pairing-qr h3 {
@@ -7092,7 +7089,6 @@ button.file-head.source-path-link {
 }
 .access-copy-primary {
   display: flex;
-  margin-bottom: 14px;
 }
 .access-manual-disclosure {
   padding-top: 12px;
@@ -7603,7 +7599,6 @@ button.file-head.source-path-link {
   line-height: 1.45;
 }
 .connection-details-note {
-  margin: 16px 0 0;
   color: var(--text-faint);
   font-size: 11.5px;
   line-height: 1.5;
@@ -7710,6 +7705,8 @@ button.file-head.source-path-link {
   border-radius: 9px;
   background: var(--border);
 }
+/* At the top of the dialog body the body's 16px gap spaces it (§7.2). */
+.agent-details-dialog .modal-body > .agent-details-grid { margin-top: 0; }
 .agent-details-grid > div {
   min-width: 0;
   padding: 10px 12px;
@@ -7726,9 +7723,6 @@ button.file-head.source-path-link {
   color: var(--text);
   font-size: 12.5px;
   overflow-wrap: anywhere;
-}
-.agent-details-section {
-  margin-top: 18px;
 }
 .agent-details-section h3 {
   margin: 0 0 5px;
@@ -8578,45 +8572,208 @@ button.file-head.source-path-link {
   .pod-add-member select { min-width: 0; max-width: none; width: 100%; }
 }
 
-/* ------------------------------- Modal ---------------------------------- */
+/* ------------------------------- Dialog ---------------------------------- */
+/* One dialog anatomy (docs/design-system.md §7). Every dialog is portalled to <body>: the backdrop
+   holds one surface (`.modal`, the card or sheet) and the surface holds the `role="dialog"` panel
+   (header, scrolling body, footer). On a phone a dialog opened over another shows its panel in the
+   same sheet, so the surface can hold more than one panel; only the newest is shown. */
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: var(--modal-backdrop);
-  backdrop-filter: blur(2px);
+  z-index: var(--z-backdrop);
   display: flex;
   align-items: center;
   justify-content: center;
-  z-index: var(--z-backdrop);
+  background: var(--modal-backdrop);
+  animation: modal-fade-in var(--dur-base) var(--ease-out);
+}
+/* Stacked dialogs share one dim (§7.1): the parent stays visible under its child. */
+.modal-backdrop ~ .modal-backdrop {
+  background: transparent;
+  animation: none;
 }
 .modal {
-  width: 520px;
-  max-width: calc(100vw - 40px);
-  max-height: calc(100vh - 60px);
-  background: var(--bg-elev);
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
   display: flex;
   flex-direction: column;
+  width: 560px;
+  max-width: calc(100vw - 48px);
+  max-height: calc(100dvh - 48px);
+  overflow: hidden;
+  background: var(--bg-elev);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--elev-3);
+  animation: modal-open var(--dur-base) var(--ease-out);
 }
-.modal-wide {
-  width: 720px;
+.modal.sm { width: 400px; }
+.modal.lg { width: 800px; }
+.modal.full {
+  width: min(1200px, 100vw - 48px);
+  height: calc(100dvh - 48px);
 }
+/* The panel's portal container: layout passes straight through it to the panel. */
+.modal-panel-host { display: contents; }
+.modal-panel {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+.modal-panel[hidden] { display: none; }
+/* 56px above its hairline: 12px padding around the 32px close button (§7.2). */
 .modal-head {
   display: flex;
+  flex: none;
   align-items: center;
-  justify-content: space-between;
-  padding: 16px 18px;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-3) var(--space-5);
   border-bottom: 1px solid var(--border);
 }
-.modal-head h2 {
+.modal-heading {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.modal-title {
   margin: 0;
-  font-size: 15px;
+  font: var(--type-title);
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+.modal-desc {
+  margin: 0;
+  font: var(--type-body);
+  color: var(--text-dim);
+}
+.modal-tone-icon {
+  display: inline-flex;
+  flex: none;
+  color: var(--red);
+}
+.modal-close,
+.modal-back { flex: none; }
+/* Back is the header's first control; it is the close button's element, moved (see Modal). */
+.modal-back {
+  order: -1;
+  margin-left: calc(-1 * var(--space-2));
 }
 .modal-body {
-  padding: 18px;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--space-4);
+  min-height: 0;
+  padding: var(--space-5);
   overflow-y: auto;
+}
+.modal-foot {
+  display: flex;
+  flex: none;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-4) var(--space-5);
+  border-top: 1px solid var(--border);
+}
+/* The destructive tertiary sits far left (§7.3). */
+.modal-foot > .modal-tertiary { margin-right: auto; }
+.confirmation-copy {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+.confirmation-copy p {
+  margin: 0;
+  color: var(--text);
+}
+/* One grabber recipe for every phone bottom sheet: dialog sheets and menus or popovers shown as
+   sheets (§7.5, §9.2). Decorative; the scrim and Cancel close the sheet. */
+.sheet-grabber { display: none; }
+@media (max-width: 760px) {
+  .sheet-grabber {
+    display: block;
+    flex: none;
+    width: 36px;
+    height: 4px;
+    margin: var(--space-2) auto 0;
+    border-radius: var(--radius-pill);
+    background: var(--border-strong);
+  }
+  .modal-backdrop { align-items: flex-end; }
+  .modal,
+  .modal.sm,
+  .modal.lg,
+  .modal.full {
+    width: 100%;
+    max-width: none;
+    height: auto;
+    max-height: 92dvh;
+    border: 0;
+    border-top: 1px solid var(--border-strong);
+    border-radius: var(--radius-lg) var(--radius-lg) 0 0;
+    animation: sheet-open var(--dur-slow) var(--ease-out);
+  }
+  /* Long forms open as a full-height sheet with a back arrow and no grabber. */
+  .modal.sheet-full {
+    height: 100dvh;
+    max-height: 100dvh;
+    border: 0;
+    border-radius: 0;
+  }
+  .modal.sheet-full .modal-head { padding-top: max(2px, env(safe-area-inset-top)); }
+  /* A dialog opened from a sheet takes over its content, sliding in from the right (§7.1). */
+  .modal-panel.pushed { animation: sheet-push var(--dur-slow) var(--ease-out); }
+  /* 48px above its hairline, which a 44px touch close button fills with 2px to spare each side. */
+  .modal-head {
+    min-height: calc(48px + 1px);
+    padding: 2px var(--space-2) 2px var(--space-4);
+    padding-left: max(var(--space-4), env(safe-area-inset-left));
+    padding-right: max(var(--space-2), env(safe-area-inset-right));
+  }
+  /* The close and back buttons keep a 44px hit area whatever their drawn size. */
+  .modal-close,
+  .modal-back { position: relative; }
+  .modal-close::after,
+  .modal-back::after {
+    content: "";
+    position: absolute;
+    inset: calc((var(--control-h) - 44px) / 2);
+  }
+  .modal-body {
+    padding-left: max(var(--space-5), env(safe-area-inset-left));
+    padding-right: max(var(--space-5), env(safe-area-inset-right));
+  }
+  /* Sticky at the bottom, inside the safe area: two equal buttons, Cancel left, primary right. */
+  .modal-foot {
+    padding: var(--space-3) var(--space-4) max(var(--space-3), env(safe-area-inset-bottom));
+    padding-left: max(var(--space-4), env(safe-area-inset-left));
+    padding-right: max(var(--space-4), env(safe-area-inset-right));
+  }
+  .modal-foot > .btn {
+    flex: 1 1 0;
+    max-width: none;
+    min-width: 0;
+    height: 48px;
+  }
+  .modal-foot > .form-error { flex-basis: 100%; }
+  /* The destructive tertiary becomes a full-width ghost danger row at the body's end. */
+  .modal-body > .modal-tertiary { display: flex; }
+  .modal-body > .modal-tertiary > .btn {
+    flex: 1 1 auto;
+    max-width: none;
+    height: 48px;
+  }
+}
+@keyframes modal-fade-in { from { opacity: 0; } }
+@keyframes modal-open { from { opacity: 0; transform: scale(0.98); } }
+@keyframes sheet-open { from { transform: translateY(100%); } }
+@keyframes sheet-push { from { transform: translateX(100%); } }
+@media (prefers-reduced-motion: reduce) {
+  .modal,
+  .modal-panel.pushed { animation: modal-fade-in var(--dur-base) var(--ease-out); }
 }
 .shortcut-intro,
 .shortcut-footnote {
@@ -8628,7 +8785,6 @@ button.file-head.source-path-link {
   display: flex;
   flex-direction: column;
   gap: 18px;
-  margin: 18px 0;
 }
 .shortcut-group h3 {
   margin: 0 0 8px;
@@ -8697,23 +8853,6 @@ button.file-head.source-path-link {
   font-size: 12px;
   text-align: center;
   white-space: nowrap;
-}
-.modal-foot {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 10px;
-  padding: 14px 18px;
-  border-top: 1px solid var(--border);
-}
-.modal-foot-spacer { flex: 1; }
-.confirmation-copy p {
-  margin: 0;
-  color: var(--text);
-  line-height: 1.55;
-}
-.confirmation-details {
-  margin-top: 14px;
 }
 .lifecycle-conflict {
   display: grid;
@@ -10184,7 +10323,6 @@ body.shell-dock-dragging * {
 .project-manager-empty.compact { min-height: 140px; padding: 14px; font-size: 12px; }
 .project-manager-empty.location-empty { min-height: 180px; border: 1px dashed var(--border); border-radius: 9px; }
 .project-manager-empty > div { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
-.project-location-dialog { width: min(840px, calc(100vw - 40px)); }
 .project-location-picker { display: grid; gap: 14px; }
 .project-location-picker > .muted { margin: 0; }
 .project-location-create-disclosure { display: grid; gap: 10px; }
@@ -10314,7 +10452,6 @@ body.shell-dock-dragging * {
   .project-name-form .btn { justify-content: center; }
   .project-location-candidate { align-items: stretch; flex-direction: column; }
   .project-location-candidate .btn { width: 100%; justify-content: center; }
-  .project-location-dialog { width: calc(100vw - 20px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)); }
   .project-location-create-fields { grid-template-columns: minmax(0, 1fr); }
   .project-location-folder,
   .project-location-machine-empty { align-items: stretch; flex-direction: column; }
@@ -11806,9 +11943,6 @@ body.shell-dock-dragging * {
 .runner-agent-sessions-action .btn-rediscover {
   flex: none;
 }
-.agent-session-dialog .modal-body {
-  min-height: 340px;
-}
 .agent-session-intro {
   margin: 0;
   color: var(--text-dim);
@@ -11890,9 +12024,6 @@ body.shell-dock-dragging * {
   gap: 4px;
 }
 
-.switch-account-picker {
-  margin: 16px 0;
-}
 .switch-account-picker > .personal-identifier-field-head {
   margin-bottom: 9px;
 }
@@ -13323,12 +13454,8 @@ body.shell-dock-dragging * {
     cursor: text;
   }
 
-  /* Dialogs and the palette use the full phone width, minus the lateral safe areas
-     (landscape notch) so their edge controls stay tappable. */
-  .modal {
-    width: calc(100vw - 20px - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
-    max-height: calc(100dvh - 20px);
-  }
+  /* The palette uses the full phone width, minus the lateral safe areas (landscape notch) so its
+     edge controls stay tappable. Dialogs are bottom sheets (the Dialog block). */
   .palette-backdrop {
     padding-top: 6dvh;
   }

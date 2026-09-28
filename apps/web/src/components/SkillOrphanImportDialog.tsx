@@ -54,8 +54,8 @@ export function SkillOrphanImportDialog({ runnerId, machineLabel, copy, onClose,
   const needsAcceptance = preview?.disposition === "update";
   const importLabel = preview?.disposition === "new" ? "Import as New Skill" : "Import as New Version";
   const name = preview?.name ?? copy.name;
-  return <Modal title="Review Orphaned Copy" wide onClose={close} footer={<>
-    <button type="button" className="btn ghost" disabled={busy} onClick={close}>Cancel</button>
+  return <Modal title="Review Orphaned Copy" size="lg" onClose={close} footer={<>
+    <button type="button" className="btn" disabled={busy} onClick={close}>Cancel</button>
     <button type="button" className="btn primary" disabled={busy || !preview?.importable || (needsAcceptance && !accepted)}
       onClick={() => void importCopy()}>{importLabel}</button>
   </>}>

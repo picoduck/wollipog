@@ -345,7 +345,7 @@ export function PairDeviceDialog({
   }
   return (
     <Modal
-      title={step === "person" ? "Who is this device for?" : "Name the device"}
+      title={step === "person" ? "Choose a Person" : "Name the Device"}
       onClose={requestClose}
       footer={step === "person"
         ? (
@@ -460,8 +460,8 @@ function TeamDialog({
   };
   const remove = async () => {
     if (!team || busy || !await confirm({
-      title: `Delete “${team.name}”?`,
-      message: "The team is removed permanently. People and paired devices are unchanged.",
+      title: "Delete Team",
+      message: `“${team.name}” is removed permanently. People and paired devices are unchanged.`,
       confirmLabel: "Delete Team",
       tone: "danger",
     })) return;
@@ -481,13 +481,13 @@ function TeamDialog({
       title={team ? `Manage ${team.name}` : "Create a Team"}
       onClose={onClose}
       describedBy="team-dialog-description"
+      tertiary={team && (
+        <button type="button" className="btn ghost danger" onClick={() => void remove()} disabled={busy}>
+          Delete Team
+        </button>
+      )}
       footer={
         <>
-          {team && (
-            <button type="button" className="btn ghost danger access-dialog-danger" onClick={() => void remove()} disabled={busy}>
-              Delete Team
-            </button>
-          )}
           <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
           <button type="button" className="btn primary" onClick={() => void save()} disabled={busy || (!team && !name.trim())}>
             {busy ? "Saving…" : team ? "Save Members" : "Create Team"}
@@ -570,8 +570,8 @@ export function PeopleDevicesPanel({
 
   const revoke = async (device: DeviceView) => {
     if (!canPair || !await confirm({
-      title: `Revoke “${device.name}”?`,
-      message: "This device loses access immediately.",
+      title: "Revoke Device",
+      message: `“${device.name}” loses access immediately. Pair it again to restore access.`,
       confirmLabel: "Revoke Device",
       tone: "danger",
     })) return;

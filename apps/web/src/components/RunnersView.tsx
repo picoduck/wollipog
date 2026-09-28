@@ -232,14 +232,14 @@ function AgentRow({
     const approving = registryAction === "approve";
     const confirmed = await confirm(approving
       ? {
-          title: "Approve this exact Registry launch?",
+          title: "Approve Exact Launch",
           message: `This may download and execute third-party code on ${runnerId}. The approval is invalidated if the Registry launch changes.`,
           details: <pre className="code-block">{a.registry.installPreview}</pre>,
           confirmLabel: "Approve Exact Launch",
           tone: "danger",
         }
       : {
-          title: "Revoke Registry approval?",
+          title: "Revoke Approval",
           message: `${a.name} v${a.registry.adapterVersion} will no longer be allowed to launch from this Registry entry.`,
           confirmLabel: "Revoke Approval",
           tone: "danger",
@@ -794,8 +794,8 @@ function MachineSettingsDialog({
         !automaticAccountSwitchSupported) return;
     if (enabled) {
       const approved = await confirm({
-        title: "Enable Automatic Account Switching?",
-        message: "Provider terms assume ordinary individual usage and prohibit circumventing rate limits. Automatically rotating between your own subscriptions can be a gray area. You are responsible for ensuring this use complies with each provider's terms.",
+        title: "Enable Automatic Switching",
+        message: "Provider terms assume ordinary individual usage and prohibit circumventing rate limits, so automatically rotating between your own subscriptions can be a gray area. You are responsible for ensuring this use complies with each provider's terms.",
         confirmLabel: "Enable Automatic Switching",
         tone: "danger",
       });
@@ -837,10 +837,10 @@ function MachineSettingsDialog({
 
   const deleteMachine = async () => {
     const approved = await confirm({
-      title: `Delete ${display.name}?`,
+      title: "Delete Machine",
       message: box
-        ? "This removes the Machine connection and permanently deletes its sessions and multi-agent runs from Wollipog. Files on the remote Machine are not deleted."
-        : "This permanently deletes the Machine, its sessions, and its multi-agent runs from Wollipog. Stop an online native runner before deleting it. Files on the Machine are not deleted.",
+        ? `The connection to ${display.name} is removed, and its sessions and multi-agent runs are permanently deleted from Wollipog. Files on the machine are not deleted.`
+        : `${display.name}, its sessions and its multi-agent runs are permanently deleted from Wollipog; files on the machine are not. Stop an online native runner before deleting it.`,
       confirmLabel: "Delete Machine",
       tone: "danger",
     });
@@ -859,8 +859,8 @@ function MachineSettingsDialog({
   const adoptLegacyData = async () => {
     if (!box || adoptingLegacyData) return;
     const approved = await confirm({
-      title: `Adopt Legacy Data for ${display.name}?`,
-      message: "Confirm that every legacy runner process using this SSH account is stopped. Wollipog will preserve the existing state and authorize one migration attempt.",
+      title: "Adopt Legacy Data",
+      message: `Confirm that every legacy runner process using this SSH account on ${display.name} is stopped. Wollipog keeps the existing state and allows one migration attempt.`,
       confirmLabel: "Adopt Legacy Data",
       tone: "danger",
     });
@@ -875,7 +875,7 @@ function MachineSettingsDialog({
         setAdoptingLegacyData(false);
         const conflict = lifecycleConflictPresentation(cause, "adopt");
         const force = await confirm({
-          title: `Interrupt Sessions and Adopt Legacy Data for ${display.name}?`,
+          title: "Interrupt Sessions and Adopt Legacy Data",
           message: conflict.message,
           details: <LifecycleConflictDetails conflict={conflict} />,
           confirmLabel: "Interrupt Sessions and Adopt Legacy Data",
@@ -896,7 +896,7 @@ function MachineSettingsDialog({
     <Modal
       title={`Manage ${display.name}`}
       onClose={onClose}
-      wide
+      size="lg"
       className="machine-settings-dialog"
       footer={<button type="button" className="btn" onClick={onClose}>Close</button>}
     >
@@ -1373,7 +1373,7 @@ export function BoxCard({
         setUpdating(false);
         const conflict = lifecycleConflictPresentation(cause, "update");
         const approved = await confirm({
-          title: `Force Update ${box.sshTarget}?`,
+          title: "Interrupt Sessions and Update",
           message: conflict.message,
           details: <LifecycleConflictDetails conflict={conflict} />,
           confirmLabel: "Interrupt Sessions and Update",
@@ -1409,7 +1409,7 @@ export function BoxCard({
         setReconnecting(false);
         const conflict = lifecycleConflictPresentation(cause, "reconnect");
         const approved = await confirm({
-          title: `Force Reconnect ${box.sshTarget}?`,
+          title: "Interrupt Sessions and Reconnect",
           message: conflict.message,
           details: <LifecycleConflictDetails conflict={conflict} />,
           confirmLabel: "Interrupt Sessions and Reconnect",

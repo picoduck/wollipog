@@ -38,8 +38,8 @@ export function SkillBuiltInReviewDialog({ skillId, skillName, onClose, onAccept
   };
   const changed = review ? review.currentVersion?.digest !== review.digest : false;
   const adopt = review?.kind === "adopt";
-  return <Modal title={adopt ? "Review Built-In Version" : "Review Built-In Update"} wide onClose={() => { if (!busy) onClose(); }} footer={<>
-    <button type="button" className="btn ghost" disabled={busy} onClick={onClose}>Cancel</button>
+  return <Modal title={adopt ? "Review Built-In Version" : "Review Built-In Update"} size="lg" onClose={() => { if (!busy) onClose(); }} footer={<>
+    <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
     <button type="button" className="btn primary" disabled={busy || !review || (changed && !accepted)} onClick={() => void accept()}>
       Accept Built-In Version
     </button>

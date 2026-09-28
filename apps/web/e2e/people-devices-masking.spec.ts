@@ -267,7 +267,7 @@ for (const formFactor of ["desktop", "phone"] as const) {
     await dialog.getByRole("button", { name: "Cancel" }).click();
 
     await page.getByRole("button", { name: "Pair Device" }).click();
-    dialog = page.getByRole("dialog", { name: "Who is this device for?" });
+    dialog = page.getByRole("dialog", { name: "Choose a Person" });
     await expect(dialog.getByRole("radiogroup", { name: "Person" }).getByRole("radio")).toHaveCount(2);
     await expect(dialog.getByRole("radio", { name: /Hidden Name 1/ })).toBeVisible();
     await expect(dialog.getByRole("radio", { name: /Hidden Name 2/ })).toBeVisible();
@@ -277,7 +277,7 @@ for (const formFactor of ["desktop", "phone"] as const) {
     await expect(dialog).toContainText(MEMBER);
     await dialog.getByRole("radio", { name: /pat@example\.org/ }).check();
     await dialog.getByRole("button", { name: "Continue" }).click();
-    dialog = page.getByRole("dialog", { name: "Name the device" });
+    dialog = page.getByRole("dialog", { name: "Name the Device" });
     await expect(dialog.getByRole("button", { name: "Show Person Name" })).toBeVisible();
     await expectNoEmailLeak(page);
     await dialog.getByRole("button", { name: "Show Person Name" }).click();
@@ -294,7 +294,7 @@ for (const formFactor of ["desktop", "phone"] as const) {
     await expect(dialog).toContainText(MEMBER);
     await dialog.getByRole("button", { name: "Done" }).click();
     await page.getByRole("button", { name: "Pair Device" }).click();
-    dialog = page.getByRole("dialog", { name: "Who is this device for?" });
+    dialog = page.getByRole("dialog", { name: "Choose a Person" });
     await expect(dialog.getByRole("button", { name: "Show Person Names" })).toBeVisible();
     await expectNoEmailLeak(page);
     await dialog.getByRole("button", { name: "Cancel" }).click();

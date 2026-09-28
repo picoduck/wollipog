@@ -250,7 +250,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
       footer={
         <>
           {error && <span className="form-error">{error}</span>}
-          <button className="btn ghost" onClick={onClose}>
+          <button className="btn" onClick={onClose}>
             Cancel
           </button>
           <button className="btn primary" onClick={submit} disabled={busy || !selectionReady || !task.trim()}>

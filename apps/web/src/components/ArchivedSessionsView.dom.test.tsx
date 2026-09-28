@@ -124,9 +124,11 @@ async function mount(
   overrides: Partial<ApiClient> = {},
   options: { initialConnection?: "online" | "unauthorized"; unarchiveAndRestart?: boolean } = {},
 ) {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   const navigated: View[] = [];
   const navigation: ViewNavigation = {
@@ -223,7 +225,7 @@ async function mount(
     },
     unmount: async () => {
       await act(async () => root.unmount());
-      container.remove();
+      mountPoint.remove();
     },
   };
 }

@@ -90,8 +90,8 @@ test("composer Stop Turn is stable, idempotent, recall-safe, and distinct from S
   const stopSession = page.getByRole("menuitem", { name: "Stop Session" });
   await expect(stopSession).toHaveAttribute("title", "Terminate the agent process and discard queued messages");
   await stopSession.click();
-  const confirmation = page.getByRole("dialog", { name: "Stop this session?" });
-  await expect(confirmation).toContainText("terminates the agent process and discards every queued message");
+  const confirmation = page.getByRole("dialog", { name: "Stop Session" });
+  await expect(confirmation).toContainText("The agent process ends and every queued message is discarded");
   await expect(confirmation.getByRole("button", { name: "Stop Session" })).toBeVisible();
 
   // Cancelling must return keyboard focus to the durable ⋯ trigger — the menu item that

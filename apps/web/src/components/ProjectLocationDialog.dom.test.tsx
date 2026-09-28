@@ -61,9 +61,11 @@ const runner: RunnerView = {
 };
 
 test("Add Location surfaces identity failures without leaving compatibility checks pending", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const client = {
     ...api,
     getIdentity: async () => { throw new Error("identity service unavailable"); },
@@ -98,14 +100,16 @@ test("Add Location surfaces identity failures without leaving compatibility chec
     assert.equal(addButton.disabled, true, "adding stays fail-closed after identity loading fails");
   } finally {
     await act(async () => { root.unmount(); });
-    container.remove();
+    mountPoint.remove();
   }
 });
 
 test("New Project onboarding offers setup generation as an unchecked explicit choice", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   try {
     await act(async () => {
       root.render(
@@ -136,6 +140,6 @@ test("New Project onboarding offers setup generation as an unchecked explicit ch
     assert.equal(checkbox.checked, true);
   } finally {
     await act(async () => { root.unmount(); });
-    container.remove();
+    mountPoint.remove();
   }
 });

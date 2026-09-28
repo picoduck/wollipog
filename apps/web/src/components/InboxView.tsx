@@ -1,6 +1,6 @@
 import { type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type ReactNode, useCallback, useDeferredValue, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { prioritizedPendingRequests, type SessionReminderView, type SessionView, type SetSessionReminderRequest, type SnoozeScheduleInput, type SourceLocation } from "@wollipog/protocol";
-import { sessionArchiveRequiresStop } from "../archive-actions.js";
+import { archiveAndStopMessage, sessionArchiveRequiresStop } from "../archive-actions.js";
 import { sessionArchiveActionRefusal, sessionCommandRefusal } from "../session-command-permissions.js";
 import {
   INBOX_COLLAPSED_THREADS_KEY,
@@ -1047,10 +1047,8 @@ export function InboxView({
       if (sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
         const retrying = session.archiveStatus === "stop_failed";
         const accepted = await confirm({
-          title: retrying ? "Retry stopping this session?" : "Archive and stop this session?",
-          message: retrying
-            ? "The previous Stop failed and runtime capacity may still be held. Retry the same archive operation?"
-            : "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
+          title: retrying ? "Retry Stop" : "Archive and Stop Session",
+          message: archiveAndStopMessage(session.title, retrying),
           confirmLabel: retrying ? "Retry Stop" : "Archive and Stop",
           tone: "danger",
         });

@@ -37,6 +37,7 @@ import {
 import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import { SegmentedControl, Select } from "./ui/ChoiceControls.js";
 import { UsageChart } from "./UsageChart.js";
+import { useFeedback } from "./FeedbackProvider.js";
 
 const RANGES = [7, 30, 90, 365] as const;
 const LEGACY_USAGE_GRANULARITIES: readonly UsageAggregationGranularity[] = ["hour", "day"];
@@ -88,6 +89,7 @@ function OfflineMachineWatcher({ onNames }: { onNames: (names: string[]) => void
 }
 
 export function UsageView() {
+  const { confirm } = useFeedback();
   const api = useApi();
   const hasStore = useHasStore();
   const [days, setDays] = useState(30);
@@ -276,8 +278,12 @@ export function UsageView() {
     if (!data) return;
     const nextHourly = Number(hourlyDays);
     const nextDaily = Number(dailyDays);
-    if ((nextHourly < data.retention.hourlyDays || nextDaily < data.retention.dailyDays) &&
-        !window.confirm("Shortening usage retention permanently removes older aggregate buckets. Continue?")) return;
+    if ((nextHourly < data.retention.hourlyDays || nextDaily < data.retention.dailyDays) && !await confirm({
+      title: "Shorten Usage Retention",
+      message: "Usage totals older than the new retention periods are permanently removed. This cannot be undone.",
+      confirmLabel: "Shorten Retention",
+      tone: "danger",
+    })) return;
     setSaving(true);
     setSavingPhase("write");
     setSaveStatus(null);

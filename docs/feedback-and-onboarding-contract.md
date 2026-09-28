@@ -10,8 +10,16 @@ health checklist.
   are serialized so two actions cannot create stacked or competing dialogs. Identical pending
   confirmation fingerprints fail closed, so a same-frame double activation cannot queue or execute
   one destructive action twice.
-- Cancel is the initial focus target. Escape and backdrop dismissal resolve `false`; the explicit
-  action alone resolves `true`. Focus returns to the connected invoking control.
+- Cancel is the initial focus target. Escape, backdrop dismissal and the phone sheet's Back resolve
+  `false`; the explicit action alone resolves `true`. Focus returns to the connected invoking control.
+- **Exception: type-to-confirm dialogs focus the name field.** A dialog that makes the user type the
+  affected resource's name (Delete Project) opens with focus in that field, not on Cancel. The user
+  must type before anything else can happen, and the confirm button stays disabled until the name
+  matches, so focus there cannot confirm by accident (docs/design-system.md §7.4).
+- A confirmation's title is the action in Title Case with no question mark ("Stop Session"), its
+  body says what happens to which named resource and whether it can be undone, and its required
+  confirm label repeats the title's verb. There is no generic "Continue" default. Destructive
+  confirmations show the warning icon and the solid danger button and have no close button.
 - Destructive copy names the affected resource and consequence. Security credentials, deletion,
   runner removal, file discard, rewind, pod close, sign-out, and third-party Registry execution
   remain confirmation-gated and are never described as reversible.

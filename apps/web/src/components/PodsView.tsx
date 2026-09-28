@@ -598,8 +598,8 @@ function PodDetailContent({ podId }: { podId: string }) {
 
   const close = async () => {
     if (!await confirmWhileAllowed(confirm, () => closeBlocked.current, {
-      title: "Close this pod?",
-      message: "Its membership remains readable, but relays and membership changes stop.",
+      title: "Close Pod",
+      message: "Relays and membership changes stop for this pod. Its membership stays readable.",
       confirmLabel: "Close Pod",
       tone: "danger",
     })) return;

@@ -160,6 +160,9 @@ export function BarMenu({
             {menuTitle && (modelSettings
               ? (
                   <div className="cbar-settings-header" role="presentation">
+                    {/* The same grabber as a dialog sheet, shown only while this menu is a phone sheet. It
+                        sits in the sticky title row so it stays put while the settings scroll. */}
+                    <div className="sheet-grabber" aria-hidden="true" />
                     <div className="cbar-settings-title">{menuTitle}</div>
                     <button
                       type="button"
@@ -583,7 +586,7 @@ export function PermissionModeDetailsDialog({ details, onClose, returnFocusRef }
   returnFocusRef: { current: HTMLElement | null };
 }) {
   return (
-    <Modal title={`${details.label} Details`} onClose={onClose} returnFocusRef={returnFocusRef} className="permission-mode-details-dialog">
+    <Modal title={`${details.label} Details`} onClose={onClose} returnFocusRef={returnFocusRef}>
       <div className="permission-mode-details-copy">
         <PermissionModeOutcome outcome={details.outcome} />
         <p>{details.description}</p>

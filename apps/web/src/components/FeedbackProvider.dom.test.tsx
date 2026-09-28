@@ -21,6 +21,7 @@ for (const [name, value] of Object.entries({
   Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
 }
 
+const document = domWindow.document as unknown as Document;
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
 let finishPendingAction: (() => void) | undefined;
 
@@ -33,18 +34,18 @@ function Harness() {
   return (
     <>
       <button data-testid="ask" onClick={async () => {
-        const answer = await feedback.confirm({ title: "Delete item?", message: "This cannot be undone.", confirmLabel: "Delete", tone: "danger" });
+        const answer = await feedback.confirm({ title: "Delete Item", message: "This cannot be undone.", confirmLabel: "Delete Item", tone: "danger" });
         if (answer) setConfirmedCount((count) => count + 1);
         setResult(String(answer));
       }}>Ask</button>
       <button data-testid="queue" onClick={async () => {
-        const first = feedback.confirm({ title: "First", message: "First request" });
-        const second = feedback.confirm({ title: "Second", message: "Second request" });
+        const first = feedback.confirm({ title: "First", message: "First request", confirmLabel: "First Action" });
+        const second = feedback.confirm({ title: "Second", message: "Second request", confirmLabel: "Second Action" });
         setResult((await Promise.all([first, second])).join(","));
       }}>Queue</button>
       <button data-testid="chain" onClick={async () => {
-        const first = await feedback.confirm({ title: "First", message: "First request" });
-        const second = first ? await feedback.confirm({ title: "Second", message: "Second request" }) : false;
+        const first = await feedback.confirm({ title: "First", message: "First request", confirmLabel: "First Action" });
+        const second = first ? await feedback.confirm({ title: "Second", message: "Second request", confirmLabel: "Second Action" }) : false;
         setResult(`${first},${second}`);
       }}>Chain</button>
       <button data-testid="undo" onClick={() => feedback.showUndo("Session archived.", () => setUndoCount((count) => count + 1))}>Archive</button>
@@ -83,7 +84,7 @@ test("confirmation is focus-safe, cancellable with Escape, and serializes queued
   const ask = container.querySelector<HTMLButtonElement>('[data-testid="ask"]')!;
   ask.focus();
   await act(async () => { ask.click(); });
-  assert.equal(container.querySelector('[role="dialog"] h2')?.textContent, "Delete item?");
+  assert.equal(document.querySelector('[role="dialog"] h2')?.textContent, "Delete Item");
   assert.equal((domWindow.document.activeElement as unknown as HTMLElement | null)?.textContent, "Cancel");
 
   await act(async () => {
@@ -94,18 +95,18 @@ test("confirmation is focus-safe, cancellable with Escape, and serializes queued
   assert.equal(domWindow.document.activeElement, ask);
 
   await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="queue"]')!.click(); });
-  assert.equal(container.querySelector('[role="dialog"] h2')?.textContent, "First");
+  assert.equal(document.querySelector('[role="dialog"] h2')?.textContent, "First");
   await act(async () => {
-    container.querySelector<HTMLButtonElement>('.modal-foot .primary')!.click();
+    document.querySelector<HTMLButtonElement>('.modal-foot .primary')!.click();
     await tick();
   });
-  assert.equal(container.querySelector('[role="dialog"] h2')?.textContent, "Second");
+  assert.equal(document.querySelector('[role="dialog"] h2')?.textContent, "Second");
   await act(async () => {
-    container.querySelector<HTMLButtonElement>('.modal-foot .btn')!.click();
+    document.querySelector<HTMLButtonElement>('.modal-foot .btn')!.click();
     await tick();
   });
   assert.equal(container.querySelector('[data-testid="result"]')?.textContent, "true,false");
-  assert.equal(container.querySelectorAll('[role="dialog"]').length, 0);
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);
 
   await act(async () => { root.unmount(); });
   container.remove();
@@ -117,12 +118,12 @@ test("a sequential confirmation keeps focus trapped and restores the original in
   chain.focus();
   await act(async () => { chain.click(); });
   await act(async () => {
-    container.querySelector<HTMLButtonElement>('.modal-foot .primary')!.click();
+    document.querySelector<HTMLButtonElement>('.modal-foot .primary')!.click();
     await tick();
   });
-  assert.equal(container.querySelector('[role="dialog"] h2')?.textContent, "Second");
+  assert.equal(document.querySelector('[role="dialog"] h2')?.textContent, "Second");
   assert.equal((domWindow.document.activeElement as unknown as HTMLElement | null)?.textContent, "Cancel");
-  await act(async () => { container.querySelector<HTMLButtonElement>('.modal-foot .btn')!.click(); await tick(); });
+  await act(async () => { document.querySelector<HTMLButtonElement>('.modal-foot .btn')!.click(); await tick(); });
   assert.equal(domWindow.document.activeElement, chain);
   await act(async () => { root.unmount(); });
   container.remove();
@@ -132,9 +133,9 @@ test("same-frame duplicate activation cannot queue or execute one confirmation t
   const { container, root } = await renderHarness();
   const ask = container.querySelector<HTMLButtonElement>('[data-testid="ask"]')!;
   await act(async () => { ask.click(); ask.click(); await tick(); });
-  assert.equal(container.querySelectorAll('[role="dialog"]').length, 1);
-  await act(async () => { container.querySelector<HTMLButtonElement>('.modal-foot .danger')!.click(); await tick(); });
-  assert.equal(container.querySelectorAll('[role="dialog"]').length, 0);
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 1);
+  await act(async () => { document.querySelector<HTMLButtonElement>('.modal-foot .danger')!.click(); await tick(); });
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 0);
   assert.equal(container.querySelector('[data-testid="confirmed-count"]')?.textContent, "1");
   await act(async () => { root.unmount(); });
   container.remove();
@@ -220,7 +221,7 @@ test("a nested confirmation owns Escape without closing its parent modal", async
     const [open, setOpen] = useState(true);
     return open ? (
       <Modal title="Parent" onClose={() => setOpen(false)}>
-        <button onClick={() => void feedback.confirm({ title: "Child", message: "Nested confirmation" })}>Confirm action</button>
+        <button onClick={() => void feedback.confirm({ title: "Child", message: "Nested confirmation", confirmLabel: "Confirm Child" })}>Confirm action</button>
       </Modal>
     ) : <output>parent closed</output>;
   }
@@ -229,14 +230,14 @@ test("a nested confirmation owns Escape without closing its parent modal", async
   const container = happyContainer as unknown as HTMLDivElement;
   const root = createRoot(container);
   await act(async () => { root.render(<FeedbackProvider><NestedHarness /></FeedbackProvider>); });
-  await act(async () => { container.querySelector<HTMLButtonElement>('.modal-body button')!.click(); });
-  assert.equal(container.querySelectorAll('[role="dialog"]').length, 2);
+  await act(async () => { document.querySelector<HTMLButtonElement>('.modal-body button')!.click(); });
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 2);
   await act(async () => {
     domWindow.document.activeElement?.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await tick();
   });
-  assert.equal(container.querySelectorAll('[role="dialog"]').length, 1);
-  assert.equal(container.querySelector('[role="dialog"] h2')?.textContent, "Parent");
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 1);
+  assert.equal(document.querySelector('[role="dialog"] h2')?.textContent, "Parent");
   await act(async () => { root.unmount(); });
   container.remove();
 });
@@ -247,8 +248,8 @@ test("provider teardown fails active and queued confirmations closed", async () 
     const feedback = useFeedback();
     return <button onClick={() => {
       void Promise.all([
-        feedback.confirm({ title: "Active", message: "One" }),
-        feedback.confirm({ title: "Queued", message: "Two" }),
+        feedback.confirm({ title: "Active", message: "One", confirmLabel: "Active Action" }),
+        feedback.confirm({ title: "Queued", message: "Two", confirmLabel: "Queued Action" }),
       ]).then((value) => { result = value; });
     }}>Open two</button>;
   }
@@ -258,7 +259,7 @@ test("provider teardown fails active and queued confirmations closed", async () 
   const root = createRoot(container);
   await act(async () => { root.render(<FeedbackProvider><PendingHarness /></FeedbackProvider>); });
   await act(async () => { container.querySelector("button")!.click(); });
-  assert.equal(container.querySelectorAll('[role="dialog"]').length, 1);
+  assert.equal(document.querySelectorAll('[role="dialog"]').length, 1);
   await act(async () => { root.unmount(); await tick(); });
   assert.deepEqual(result, [false, false]);
   container.remove();

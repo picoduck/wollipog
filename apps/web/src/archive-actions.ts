@@ -14,6 +14,15 @@ export function sessionUnarchiveRestarts(
     session.stopOperation?.status !== "stop_failed";
 }
 
+/** The body of the Archive and Stop Session confirmation (docs/design-system.md §7.4): what happens,
+ * to which session, and that it can be restored. Shared by the Sessions list and the session header. */
+export function archiveAndStopMessage(title: string | null | undefined, retrying: boolean): string {
+  const name = title ? `“${title}”` : "This session";
+  return retrying
+    ? `The previous stop of ${name} failed, so it may still be running. Retry Stop repeats the same archive.`
+    : `${name} stops now and moves to Archived Sessions, and its queued work is canceled. You can restore it, or use Snooze instead to keep it running.`;
+}
+
 export function sessionArchiveRequiresStop(
   session: Pick<ArchiveActionSession, "archiveStatus" | "status">,
   stopBeforeArchiveSupported: boolean,

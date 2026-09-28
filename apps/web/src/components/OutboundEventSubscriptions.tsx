@@ -196,12 +196,12 @@ export function OutboundEventSubscriptions({
               {subscription.state === "paused" && <button className="btn ghost sm" disabled={busy} type="button"
                 onClick={() => void mutate(() => api.resumeOutboundEventSubscription(subscription.subscriptionId))}>Resume</button>}
               <button className="btn ghost sm" disabled={busy} type="button" onClick={() => void (async () => {
-                if (await confirm({ title: "Rotate outbound signing secret?", message: "The previous secret stops working immediately and any in-flight request is aborted.", confirmLabel: "Rotate Secret", tone: "danger" })) {
+                if (await confirm({ title: "Rotate Signing Secret", message: "The subscription's previous signing secret stops working immediately, and any request in flight is aborted.", confirmLabel: "Rotate Secret", tone: "danger" })) {
                   await mutate(async () => setCredential(await api.rotateOutboundEventSubscription(subscription.subscriptionId)));
                 }
               })()}>Rotate Secret</button>
               <button className="btn ghost danger sm" disabled={busy} type="button" onClick={() => void (async () => {
-                if (await confirm({ title: "Revoke outbound subscription?", message: "Delivery stops immediately and all pending requests are dropped.", confirmLabel: "Revoke Subscription", tone: "danger" })) {
+                if (await confirm({ title: "Revoke Subscription", message: "Delivery to this subscription stops immediately, and every pending request is dropped.", confirmLabel: "Revoke Subscription", tone: "danger" })) {
                   await mutate(() => api.deleteOutboundEventSubscription(subscription.subscriptionId));
                   if (credential?.subscription.subscriptionId === subscription.subscriptionId) setCredential(null);
                 }

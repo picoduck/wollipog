@@ -94,6 +94,17 @@ test("static compact UI labels use Title Case", () => {
           report(node, name, node.initializer.text);
         }
       }
+      // A dialog title chosen by a condition is still a title (§7.2): read every branch.
+      if (ts.isJsxAttribute(node) && node.name.getText(sourceFile) === "title" && node.initializer &&
+          ts.isJsxExpression(node.initializer) && node.initializer.expression &&
+          ts.isJsxOpeningLikeElement(node.parent.parent) && node.parent.parent.tagName.getText(sourceFile) === "Modal") {
+        for (const branch of staticBranches(node.initializer.expression) ?? []) {
+          // §17.1 capitalizes a phrasal-verb particle ("Set Up This Machine"), which the minor-word
+          // list would otherwise read as a lowercase preposition.
+          report(node, "Modal title", branch.replace(/\b(Set|Sign|Log|Back) Up\b/g, "$1 up"));
+          if (branch.trim().endsWith("?")) failures.push(`${path.relative(SOURCE_ROOT, file)} Modal title is a question: ${JSON.stringify(branch)}`);
+        }
+      }
       if (
         ts.isPropertyAssignment(node) &&
         ts.isIdentifier(node.name) &&
@@ -106,5 +117,88 @@ test("static compact UI labels use Title Case", () => {
     };
     visit(sourceFile);
   }
+  assert.deepEqual(failures, [], failures.join("\n"));
+});
+
+/** Every string a title or label expression can produce; template holes read as a placeholder word. */
+function staticBranches(node: ts.Expression): string[] | null {
+  if (ts.isParenthesizedExpression(node)) return staticBranches(node.expression);
+  if (ts.isStringLiteralLike(node)) return [node.text];
+  if (ts.isTemplateExpression(node)) {
+    return [node.head.text + node.templateSpans.map((span) => `Name${span.literal.text}`).join("")];
+  }
+  if (ts.isConditionalExpression(node)) {
+    const whenTrue = staticBranches(node.whenTrue);
+    const whenFalse = staticBranches(node.whenFalse);
+    return whenTrue && whenFalse ? [...whenTrue, ...whenFalse] : null;
+  }
+  return null;
+}
+
+function optionLiterals(node: ts.Expression): ts.ObjectLiteralExpression[] {
+  if (ts.isParenthesizedExpression(node)) return optionLiterals(node.expression);
+  if (ts.isObjectLiteralExpression(node)) return [node];
+  if (ts.isConditionalExpression(node)) return [...optionLiterals(node.whenTrue), ...optionLiterals(node.whenFalse)];
+  return [];
+}
+
+/**
+ * docs/design-system.md §7.4 and §17: a confirmation's title is the action in Title Case with no question
+ * mark, and its confirm button is required and repeats the title's verb. `ConfirmationOptions` makes the
+ * label required for TypeScript; this reads every caller so the copy rule itself cannot drift.
+ */
+test("every confirmation names its action in the title and its outcome on the button", () => {
+  const failures: string[] = [];
+  let checked = 0;
+  for (const file of sourceFiles(SOURCE_ROOT)) {
+    const source = readFileSync(file, "utf8");
+    if (!source.includes("confirm")) continue;
+    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true,
+      file.endsWith(".tsx") ? ts.ScriptKind.TSX : ts.ScriptKind.TS);
+    const where = (node: ts.Node) =>
+      `${path.relative(SOURCE_ROOT, file)}:${sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1}`;
+    const visit = (node: ts.Node) => {
+      if (ts.isCallExpression(node)) {
+        const callee = node.expression.getText(sourceFile);
+        if (callee === "window.confirm") failures.push(`${where(node)} window.confirm is banned; use useFeedback().confirm`);
+        const isConfirm = callee === "confirm" || callee.endsWith(".confirm") || callee === "confirmWhileAllowed";
+        if (isConfirm && callee !== "window.confirm") {
+          for (const literal of node.arguments.flatMap(optionLiterals)) {
+            const property = (name: string) => literal.properties.find((entry): entry is ts.PropertyAssignment =>
+              ts.isPropertyAssignment(entry) && ts.isIdentifier(entry.name) && entry.name.text === name);
+            const title = property("title");
+            if (!title) continue;
+            checked += 1;
+            const label = property("confirmLabel");
+            if (!label) {
+              failures.push(`${where(literal)} confirmation has no confirmLabel`);
+              continue;
+            }
+            const titles = staticBranches(title.initializer);
+            const labels = staticBranches(label.initializer);
+            if (!titles || !labels) {
+              failures.push(`${where(literal)} confirmation title and label must be literal copy`);
+              continue;
+            }
+            for (const value of titles) {
+              if (value.trim().endsWith("?")) failures.push(`${where(title)} title ends in "?": ${JSON.stringify(value)}`);
+              if (!isTitleCase(value)) failures.push(`${where(title)} title is not Title Case: ${JSON.stringify(value)}`);
+              const verb = value.split(/\s+/)[0];
+              if (!labels.some((candidate) => candidate.split(/\s+/)[0] === verb)) {
+                failures.push(`${where(label)} no confirm label repeats the verb of ${JSON.stringify(value)}`);
+              }
+            }
+            for (const value of labels) {
+              if (/^(continue|ok|submit|yes)$/i.test(value.trim())) failures.push(`${where(label)} generic confirm label: ${JSON.stringify(value)}`);
+              if (!isTitleCase(value)) failures.push(`${where(label)} label is not Title Case: ${JSON.stringify(value)}`);
+            }
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  assert.ok(checked >= 38, `expected to read every confirmation caller, read ${checked}`);
   assert.deepEqual(failures, [], failures.join("\n"));
 });

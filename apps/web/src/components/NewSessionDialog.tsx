@@ -213,6 +213,10 @@ export function NewSessionDialog({
   const projectSelectionChangedRef = useRef(false);
   const [creatingProject, setCreatingProject] = useState(false);
   const [addingLocation, setAddingLocation] = useState(false);
+  // New Session stays open under Create Project and Add Location (§7.1): these return focus to the
+  // button inside it that opened them.
+  const createProjectButtonRef = useRef<HTMLButtonElement>(null);
+  const addLocationButtonRef = useRef<HTMLButtonElement>(null);
 
   const [agentDefaults, setAgentDefaults] = useState(() => loadAgentDefaults(instanceScope));
   const [runnerId, setRunnerId] = useState(
@@ -1200,27 +1204,28 @@ export function NewSessionDialog({
 
   return (
     <>
-    {!creatingProject && !addingLocation && <Modal
+    <Modal
       title="New Session"
       onClose={onClose}
+      phoneSheet="full"
       onKeyDown={submitOnModifiedEnter}
+      tertiary={retainedSessionId ? (
+        <button
+          ref={retainedSessionButtonRef}
+          type="button"
+          className="btn ghost"
+          onClick={() => {
+            navigate({ name: "session", id: retainedSessionId });
+            onClose();
+          }}
+        >
+          Open Retained Session
+        </button>
+      ) : undefined}
       footer={
         <>
           {error && <span className="form-error" role="alert">{error}</span>}
-          {retainedSessionId && (
-            <button
-              ref={retainedSessionButtonRef}
-              type="button"
-              className="btn ghost"
-              onClick={() => {
-                navigate({ name: "session", id: retainedSessionId });
-                onClose();
-              }}
-            >
-              Open Retained Session
-            </button>
-          )}
-          <button type="button" className="btn ghost" onClick={onClose}>
+          <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
           <button type="submit" form={formId} className="btn primary" disabled={busy || !valid}>
@@ -1275,7 +1280,7 @@ export function NewSessionDialog({
                       ? `A Project is a durable home across Locations. ${projectAudienceVisibilitySummary(selectedProject.audience)}. New session transcripts use the Project's visibility.`
                       : "A Project is a durable home for related sessions across Locations. This control plane does not report the Project's visibility."}
                 </span>
-                <button type="button" className="btn ghost new-session-project-control" onClick={() => setCreatingProject(true)}>Create Project…</button>
+                <button ref={createProjectButtonRef} type="button" className="btn ghost new-session-project-control" onClick={() => setCreatingProject(true)}>Create Project…</button>
               </div>
             </>
           )}
@@ -1338,6 +1343,7 @@ export function NewSessionDialog({
                 <span className="project-location-reason">The selected Location is unavailable. Choose another Location.</span>
               )}
               <button
+                ref={addLocationButtonRef}
                 type="button"
                 className="btn ghost new-session-project-control"
                 data-validation-target="add-location"
@@ -1961,10 +1967,11 @@ export function NewSessionDialog({
             Pick the model, effort, and your first message once the session opens.
           </p>
         </form>
-    </Modal>}
+    </Modal>
     {creatingProject && (
       <CreateProjectDialog
         accessScopeManagementSupported={accessScopeManagementSupported}
+        returnFocusRef={createProjectButtonRef}
         onClose={() => setCreatingProject(false)}
         onCreated={(project) => {
           projectSelectionChangedRef.current = true;
@@ -1984,6 +1991,7 @@ export function NewSessionDialog({
         boxes={boxes}
         canCreateLocation={projectLocationCreationSupported}
         accessScopeManagementSupported={accessScopeManagementSupported}
+        returnFocusRef={addLocationButtonRef}
         onClose={() => setAddingLocation(false)}
         onManageConnections={() => {
           setAddingLocation(false);

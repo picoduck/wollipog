@@ -108,7 +108,7 @@ test("machine cards use consistent action rows and progressively disclose deploy
   assert.match(view, /box\.legacyDataAccountStatus === "adopted"/);
   assert.match(view, /Legacy Runner Data Adopted/);
   assert.match(view, /Legacy Data Adoption in Progress/);
-  assert.match(view, /Confirm that every legacy runner process using this SSH account is stopped\./);
+  assert.match(view, /Confirm that every legacy runner process using this SSH account on \$\{display\.name\} is stopped\./);
   assert.match(view, /confirmLabel: "Adopt Legacy Data"/);
   assert.match(view, /confirmLabel: "Interrupt Sessions and Adopt Legacy Data"/);
   assert.match(view, /api\.adoptLegacyBoxData\(box\.boxId, false\)/);

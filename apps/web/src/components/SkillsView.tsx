@@ -101,9 +101,9 @@ function NewSkillDialog({ onClose, onCreate, busy }: {
   };
 
   return (
-    <Modal title="New Skill" onClose={onClose} wide footer={
+    <Modal title="New Skill" onClose={onClose} size="lg" footer={
       <>
-        <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn" onClick={onClose}>Cancel</button>
         <button type="button" className="btn primary" disabled={busy} onClick={() => void submit()}>
           {busy ? "Creating…" : "Create Skill"}
         </button>
@@ -354,8 +354,8 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
 
   const deleteSkill = async (skill: SkillSummary) => {
     const confirmed = await confirm({
-      title: `Delete “${skill.name}”?`,
-      message: "The skill, its versions, and its assignments are removed. The next sync removes it from every machine." +
+      title: "Delete Skill",
+      message: `“${skill.name}”, its versions and its assignments are removed, and the next sync removes it from every machine.` +
         (skill.builtIn ? " Later Wollipog releases do not add this built-in skill back." : ""),
       confirmLabel: "Delete Skill",
       tone: "danger",
@@ -423,18 +423,17 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
   const discardOrphan = async (runner: RunnerView, copy: OrphanedSkillCopy) => {
     const machine = machineLabels.get(runner.runnerId) ?? runner.runnerId;
     const fenced = "It is deleted only if it still matches what this page shows. If it changed, nothing is deleted.";
+    const copyName = `${copy.kind === "kept_aside" ? "kept-aside" : "edited"} copy${copy.name ? ` of “${copy.name}”` : ""}`;
     const confirmed = await confirm({
-      title: copy.name
-        ? `Discard the ${copy.kind === "kept_aside" ? "kept-aside" : "edited"} copy of “${copy.name}”?`
-        : "Discard this unidentified kept-aside copy?",
+      title: "Discard Copy",
       message: copy.kind === "kept_aside"
-        ? `The copy on ${machine} is discarded from the skill store. ${fenced}` +
+        ? `The ${copyName} on ${machine} is discarded from the skill store. ${fenced}` +
           (copy.observedDigest ? "" : " It cannot be previewed because it is not valid skill content.") +
           " The edit cannot be recovered."
         : copy.observedDigest
-          ? `The copy on ${machine} is discarded, and its links are removed like those of any skill that is no longer assigned. ` +
+          ? `The ${copyName} on ${machine} is discarded, and its links are removed like those of any skill that is no longer assigned. ` +
             `${fenced} The edit cannot be recovered.`
-          : `The copy on ${machine} cannot be read, so there is nothing to check it against. The machine moves it aside ` +
+          : `The ${copyName} on ${machine} cannot be read, so there is nothing to check it against. The machine moves it aside ` +
             "instead of deleting it and removes its links. It then appears here as a kept-aside copy, which you can discard.",
       confirmLabel: "Discard Copy",
       tone: "danger",
@@ -453,8 +452,8 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
   const restoreDrift = async (runner: RunnerView, entry: SkillDriftState) => {
     const machine = machineLabels.get(runner.runnerId) ?? runner.runnerId;
     const confirmed = await confirm({
-      title: `Restore the library version of “${entry.name}”?`,
-      message: `The edited copy on ${machine} is discarded. If the library still has version ${entry.digest.slice(0, 12)}, ` +
+      title: "Restore Library Version",
+      message: `The edited copy of “${entry.name}” on ${machine} is discarded. If the library still has version ${entry.digest.slice(0, 12)}, ` +
         "which it was deployed from, the machine rebuilds that version in its place. The machine then syncs to its " +
         "assigned version. The edit cannot be recovered.",
       confirmLabel: "Restore Library Version",
@@ -689,7 +688,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
                                 disabled={busy}
                                 onClick={() => void (async () => {
                                   const confirmed = await confirm({
-                                    title: "Remove this assignment?",
+                                    title: "Remove Assignment",
                                     message: "The next sync removes the skill from the machines this assignment covered.",
                                     confirmLabel: "Remove Assignment",
                                     tone: "danger",

@@ -100,7 +100,7 @@ for (const width of [1280, 320]) for (const theme of ["dark", "light"]) {
 
     await machine.getByRole("button", { name: "Discard Copy" }).first().click();
     const confirmation = page.getByRole("alertdialog").or(page.getByRole("dialog"));
-    await expect(confirmation).toContainText("Discard this unidentified kept-aside copy?");
+    await expect(confirmation).toContainText("The kept-aside copy on");
     await expect(confirmation).toContainText("nothing is deleted");
     await page.screenshot({ path: info.outputPath(`orphans-discard-confirm-${width}-${theme}.png`) });
     expect(await noHorizontalOverflow(page)).toBe(true);
@@ -124,6 +124,6 @@ test("an unreadable edited copy of a deleted skill explains that discarding move
   await expect(olderMachine.getByRole("button", { name: "Review and Import" })).toBeDisabled();
   await olderMachine.getByRole("button", { name: "Discard Copy" }).click();
   const confirmation = page.getByRole("alertdialog").or(page.getByRole("dialog"));
-  await expect(confirmation).toContainText("Discard the edited copy of “legacy-lint”?");
+  await expect(confirmation).toContainText("The edited copy of “legacy-lint”");
   await expect(confirmation).toContainText("appears here as a kept-aside copy");
 });

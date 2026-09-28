@@ -49,7 +49,7 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceServiceT
     finally { lock.current = false; setBusy(false); }
   };
   return <Modal title="Hand Off to Another Agent" onClose={busy ? () => {} : onClose} footer={<>
-    <button className="btn ghost" onClick={onClose} disabled={busy}>Cancel</button>
+    <button className="btn" onClick={onClose} disabled={busy}>Cancel</button>
     <button className="btn primary" onClick={() => void submit()} disabled={busy || !!reason}
       aria-describedby={refusal !== null ? "handoff-refusal" : undefined}>{busy ? "Creating…" : "Create Handoff"}</button>
   </>}>

@@ -118,9 +118,11 @@ async function mount(
   instances?: InstanceManager,
   nav: ViewNavigation = navigation,
 ) {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   sequence += 1;
   const connection: UiConnectionRuntime = {
@@ -140,7 +142,7 @@ async function mount(
       </ApiProvider>,
     );
   });
-  return { container, root, socket, unmount: async () => { await act(async () => root.unmount()); container.remove(); } };
+  return { container, mountPoint, root, socket, unmount: async () => { await act(async () => root.unmount()); mountPoint.remove(); } };
 }
 
 

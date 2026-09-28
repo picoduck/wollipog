@@ -167,12 +167,11 @@ export function AgentSessionDiscoveryDialog({
     <Modal
       title="Find Agent Sessions"
       onClose={onClose}
-      wide
-      className="agent-session-dialog"
+      size="lg"
       describedBy={selecting ? "agent-session-dialog-description" : undefined}
       footer={selecting ? (
         <>
-          <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+          <button type="button" className="btn" onClick={onClose}>Cancel</button>
           <button
             type="button"
             className="btn primary"

@@ -109,9 +109,13 @@ export function useAnchoredMenuStyle(
     update();
     window.addEventListener("resize", update);
     window.addEventListener("scroll", update, true);
+    // A dialog sheet slides in from the bottom (§7.5): a list opened while it moves is measured
+    // against a trigger that is still travelling, so place it again once the motion ends.
+    document.addEventListener("animationend", update, true);
     return () => {
       window.removeEventListener("resize", update);
       window.removeEventListener("scroll", update, true);
+      document.removeEventListener("animationend", update, true);
     };
   }, [
     open,

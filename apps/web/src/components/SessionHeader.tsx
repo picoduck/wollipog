@@ -12,6 +12,7 @@ import { RenameSessionDialog } from "./RenameSessionDialog.js";
 import { SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import {
+  archiveAndStopMessage,
   sessionArchiveActionLabel,
   sessionArchiveRequiresStop,
   sessionUnarchiveRestarts,
@@ -923,10 +924,8 @@ export function SessionHeader({
                         if (nextArchived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)) {
                           const retrying = session.archiveStatus === "stop_failed";
                           const accepted = await confirm({
-                            title: retrying ? "Retry stopping this session?" : "Archive and stop this session?",
-                            message: retrying
-                              ? "The previous Stop failed and runtime capacity may still be held. Retry the same archive operation?"
-                              : "The session will move to Archived Sessions after its runtime stops. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead.",
+                            title: retrying ? "Retry Stop" : "Archive and Stop Session",
+                            message: archiveAndStopMessage(session.title, retrying),
                             confirmLabel: retrying ? "Retry Stop" : "Archive and Stop",
                             tone: "danger",
                           });
@@ -978,7 +977,7 @@ export function SessionHeader({
                       onClick={() => {
                         closeMenu(false);
                         void (async () => {
-                          if (!await confirm({ title: "Sign out of this agent?", message: "Credentials remain on the runner host, but new sessions will require authentication.", confirmLabel: "Sign Out", tone: "danger", returnFocus: menu.triggerRef })) return;
+                          if (!await confirm({ title: "Sign Out", message: "New sessions with this agent will need to sign in again. Its credentials stay on the runner host.", confirmLabel: "Sign Out", tone: "danger", returnFocus: menu.triggerRef })) return;
                           void run(async () => {
                             setNote("Signing out…");
                             try {
@@ -1051,8 +1050,8 @@ export function SessionHeader({
                         closeMenu(false);
                         void (async () => {
                           if (!await confirm({
-                            title: "Stop this session?",
-                            message: "This terminates the agent process and discards every queued message. Use Stop Turn in the composer to interrupt only the active turn.",
+                            title: "Stop Session",
+                            message: "The agent process ends and every queued message is discarded. To interrupt only the active turn, use Stop Turn in the composer.",
                             confirmLabel: "Stop Session",
                             tone: "danger",
                             returnFocus: menu.triggerRef,
@@ -1075,7 +1074,7 @@ export function SessionHeader({
                       onClick={() => {
                         closeMenu(false);
                         void (async () => {
-                          if (!await confirm({ title: "Delete this session?", message: "This permanently removes the session and its history from the dashboard.", confirmLabel: "Delete Session", tone: "danger", returnFocus: menu.triggerRef })) return;
+                          if (!await confirm({ title: "Delete Session", message: "This session and its history are permanently removed. This cannot be undone.", confirmLabel: "Delete Session", tone: "danger", returnFocus: menu.triggerRef })) return;
                           void run(async () => {
                             try {
                               await api.deleteSession(session.id);
@@ -1188,7 +1187,7 @@ function TranscriptShareDialog({ sessionId, onClose, returnFocusRef }: {
 
   const revoke = async (share: TranscriptShareView) => {
     if (!await confirm({
-      title: "Revoke transcript share?",
+      title: "Revoke Share",
       message: `The share expiring ${new Date(share.expiresAt).toLocaleString()} will stop working immediately.`,
       confirmLabel: "Revoke Share",
       tone: "danger",

@@ -268,7 +268,7 @@ export function OnboardRunnerDialog({
     <Modal
       title={repairingExisting ? "Repair Runner Connection" : mode === "local" ? "Set Up This Machine" : "Add a Runner"}
       onClose={onClose}
-      wide
+      size="lg"
       footer={<button className="btn primary" onClick={onClose}>Done</button>}
     >
       {!info || localStatusLoading ? (

@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type ReactNode } from "react";
+import React, { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   sessionAttentionStatus,
   type ArchiveStatus,
@@ -15,7 +15,9 @@ import {
 import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "../background-delivery-status.js";
 import { statusMeta, type StatusMeta } from "../format.js";
 import type { SessionChangeStatus } from "../session-status.js";
-import { CheckIcon, CloseIcon, CopyIcon, PinIcon, WarningIcon } from "./Icons.js";
+import { CheckIcon, CopyIcon, PinIcon, WarningIcon } from "./Icons.js";
+
+export { Modal, type ModalSize } from "./Modal.js";
 
 /** A compact, non-colour-only pin signal shared by List rows and Board cards. */
 export function SessionPinIndicator({ contains = false }: { contains?: boolean }) {
@@ -32,9 +34,6 @@ export function SessionPinIndicator({ contains = false }: { contains?: boolean }
     </span>
   );
 }
-
-let nextModalLayerId = 1;
-const modalLayerStack: number[] = [];
 
 export function copyResultIsCurrent(input: {
   mounted: boolean;
@@ -632,149 +631,6 @@ export function BackgroundNotificationBadge({ state, onOpen }: {
       <span className="background-work-dot" aria-hidden="true" />
       {label}
     </span>
-  );
-}
-
-export function Modal({
-  title,
-  onClose,
-  children,
-  footer,
-  wide,
-  describedBy,
-  className,
-  returnFocusRef,
-  onKeyDown,
-}: {
-  title: string;
-  onClose: () => void;
-  children: ReactNode;
-  footer?: ReactNode;
-  wide?: boolean;
-  describedBy?: string;
-  className?: string;
-  /** Durable element to restore focus to on close. Without it the dialog restores to whatever
-   * was focused at open — which fails when the opener was a menu item removed in the same
-   * commit that opened the dialog (the menu closes as the dialog mounts). */
-  returnFocusRef?: { current: HTMLElement | null };
-  /** Optional dialog-scoped keyboard contract; runs after the shared focus trap. */
-  onKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
-}) {
-  const titleId = useId();
-  const cardRef = useRef<HTMLDivElement>(null);
-  const openerFocusRef = useRef<HTMLElement | null>(
-    typeof document !== "undefined" && document.activeElement instanceof HTMLElement ? document.activeElement : null,
-  );
-  const explicitReturnFocusRef = useRef(returnFocusRef);
-  explicitReturnFocusRef.current = returnFocusRef;
-  const layerIdRef = useRef<number | undefined>(undefined);
-  const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
-  if (layerIdRef.current == null) layerIdRef.current = nextModalLayerId++;
-
-  useEffect(() => {
-    const layerId = layerIdRef.current!;
-    modalLayerStack.push(layerId);
-    const onKey = (e: KeyboardEvent) => {
-      // Nested UI (e.g. the directory browser) claims Escape for itself via preventDefault —
-      // don't tear the whole dialog down over it.
-      if (e.key === "Escape" && !e.defaultPrevented && modalLayerStack.at(-1) === layerId) {
-        e.preventDefault();
-        e.stopImmediatePropagation();
-        onCloseRef.current();
-      }
-    };
-    window.addEventListener("keydown", onKey);
-    return () => {
-      window.removeEventListener("keydown", onKey);
-      const index = modalLayerStack.lastIndexOf(layerId);
-      if (index !== -1) modalLayerStack.splice(index, 1);
-      const explicit = explicitReturnFocusRef.current?.current;
-      const target = explicit?.isConnected ? explicit : openerFocusRef.current;
-      window.setTimeout(() => {
-        // A queued dialog can replace this one in the same commit. Do not steal focus back to
-        // the page from that newer modal; nested dialogs may still restore into their owning
-        // dialog — but only the TOPMOST one, so a dying layer can never pull focus out from
-        // under a newer dialog stacked above its opener (regression coverage).
-        const dialogs = document.querySelectorAll<HTMLElement>('[role="dialog"]');
-        const topmost = dialogs[dialogs.length - 1] ?? null;
-        if (target?.isConnected &&
-            (modalLayerStack.length === 0 || (topmost !== null && target.closest('[role="dialog"]') === topmost))) {
-          target.focus();
-          // A connected target can still refuse focus — e.g. it became disabled while the
-          // dialog's action ran. Fall through so keyboard position never lands on <body>.
-          if (document.activeElement === target) return;
-        }
-        // The opener is gone or unfocusable — a breakpoint crossing unmounted the layout that
-        // held it, or a busy state disabled it. Focus was live inside the dialog the whole
-        // time, so no layout rescue fired and none will. Without this the close drops focus on
-        // <body> and the next Tab restarts at the top of the document.
-        if (modalLayerStack.length === 0) {
-          document.getElementById("page-title")?.focus();
-          return;
-        }
-        // Restoration failed while other dialogs remain open: keep keyboard position inside
-        // the modal system and its Tab trap rather than on <body>.
-        if (document.activeElement === document.body || document.activeElement === null) {
-          topmost?.focus();
-        }
-      }, 0);
-    };
-  }, []);
-
-  // Move focus into the dialog on open so Escape/Tab work immediately — unless a field
-  // inside already claimed it (autoFocus).
-  useEffect(() => {
-    const card = cardRef.current;
-    if (card && !card.contains(document.activeElement)) card.focus();
-  }, []);
-
-  // Keep Tab cycling inside the dialog instead of escaping to the page behind it.
-  const trapTab = (e: ReactKeyboardEvent<HTMLDivElement>) => {
-    if (e.key !== "Tab") return;
-    const card = cardRef.current;
-    if (!card) return;
-    const focusables = card.querySelectorAll<HTMLElement>(
-      'button:not(:disabled), [href], input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
-    );
-    if (focusables.length === 0) return;
-    const first = focusables[0]!;
-    const last = focusables[focusables.length - 1]!;
-    if (e.shiftKey && (document.activeElement === first || document.activeElement === card)) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && document.activeElement === last) {
-      e.preventDefault();
-      first.focus();
-    }
-  };
-
-  return (
-    <div className="modal-backdrop" onMouseDown={onClose}>
-      <div
-        ref={cardRef}
-        className={`modal ${wide ? "modal-wide" : ""} ${className ?? ""}`.trim()}
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby={titleId}
-        aria-describedby={describedBy}
-        tabIndex={-1}
-        onMouseDown={(e) => e.stopPropagation()}
-        onKeyDown={(event) => {
-          trapTab(event);
-          onKeyDown?.(event);
-        }}
-      >
-        <div className="modal-head">
-          <h2 id={titleId}>{title}</h2>
-          <button className="icon-btn" onClick={onClose} aria-label="Close">
-            <CloseIcon />
-          </button>
-        </div>
-        <div className="modal-body">{children}</div>
-        {footer && <div className="modal-foot">{footer}</div>}
-      </div>
-    </div>
   );
 }
 

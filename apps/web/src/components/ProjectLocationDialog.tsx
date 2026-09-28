@@ -63,6 +63,7 @@ export function ProjectLocationDialog({
   onCreate,
   onManageConnections,
   onboarding = false,
+  returnFocusRef,
 }: {
   project: ProjectView;
   projects: readonly ProjectView[];
@@ -75,6 +76,8 @@ export function ProjectLocationDialog({
   onCreate: (location: NewProjectLocation, generateSetup: boolean) => Promise<void>;
   onManageConnections: () => void;
   onboarding?: boolean;
+  /** The control that opened this dialog, for focus to return to (a button inside New Session). */
+  returnFocusRef?: { current: HTMLElement | null };
 }) {
   const [query, setQuery] = useState("");
   const [busyKey, setBusyKey] = useState<string | null>(null);
@@ -211,7 +214,7 @@ export function ProjectLocationDialog({
   };
 
   return (
-    <Modal title={`Add Location to ${project.name}`} onClose={close} wide className="project-location-dialog">
+    <Modal title={`Add Location to ${project.name}`} onClose={close} size="lg" returnFocusRef={returnFocusRef}>
       <div className="project-location-picker">
         <p className="muted">Add an existing Location to this Project. Its other Project memberships and sessions will not change. If the folder is not registered yet, create a new Location from a connected machine.</p>
         {onboarding && (

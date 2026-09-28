@@ -290,7 +290,7 @@ test("Machine owners can remove a provider account after confirming", async ({ p
   const accounts = page.locator("details.runner-agents").filter({ hasText: "Accounts" });
   const personal = accounts.locator(".agent-row").filter({ hasText: "Personal" });
   await personal.getByRole("button", { name: "Remove" }).click();
-  const confirmation = page.getByRole("dialog", { name: "Remove Account?" });
+  const confirmation = page.getByRole("dialog", { name: "Remove Account" });
   await expect(confirmation).toContainText("deletes the credentials it stored");
   await expect(confirmation).toContainText("Personal");
   await page.screenshot({ path: "test-results/provider-accounts/remove-account-confirm.png", fullPage: true });
@@ -298,7 +298,7 @@ test("Machine owners can remove a provider account after confirming", async ({ p
   await expect(personal).toBeVisible();
 
   await personal.getByRole("button", { name: "Remove" }).click();
-  await page.getByRole("dialog", { name: "Remove Account?" }).getByRole("button", { name: "Remove Account" }).click();
+  await page.getByRole("dialog", { name: "Remove Account" }).getByRole("button", { name: "Remove Account" }).click();
   await expect(personal).toHaveCount(0);
   await expect(page.getByText("Account removed.", { exact: true })).toBeVisible();
   await expect(accounts.locator(".agent-row").filter({ hasText: "Work" })).toBeVisible();
@@ -504,7 +504,7 @@ test("Machine settings require the terms warning before enabling Automatic Accou
   })).toBeVisible();
 
   await dialog.getByRole("button", { name: "Enable Automatic Switching" }).click();
-  const warning = page.getByRole("dialog", { name: "Enable Automatic Account Switching?" });
+  const warning = page.getByRole("dialog", { name: "Enable Automatic Switching" });
   await expect(warning).toContainText("prohibit circumventing rate limits");
   await expect(warning).toContainText("You are responsible");
   await page.screenshot({
@@ -552,7 +552,7 @@ test("Machine settings save independent Claude and Codex default accounts", asyn
   await page.getByText("Accounts", { exact: true }).click();
   const personal = page.locator("details.runner-agents .agent-row").filter({ hasText: "Personal" });
   await personal.getByRole("button", { name: "Remove" }).click();
-  await page.getByRole("dialog", { name: "Remove Account?" }).getByRole("button", { name: "Remove Account" }).click();
+  await page.getByRole("dialog", { name: "Remove Account" }).getByRole("button", { name: "Remove Account" }).click();
   await page.getByRole("button", { name: "Manage" }).click();
   const reopened = page.getByRole("dialog", { name: "Manage Design Workstation" });
   const missing = reopened.locator("section.machine-settings-section").filter({ hasText: "Default Provider Accounts" });
@@ -588,8 +588,8 @@ test("Machine settings expose deletion with an explicit history warning", async 
   await expect(deleteMachine).toBeEnabled();
   await deleteMachine.click();
 
-  const confirmation = page.getByRole("dialog", { name: "Delete Design Workstation?" });
-  await expect(confirmation).toContainText("permanently deletes the Machine, its sessions, and its multi-agent runs");
+  const confirmation = page.getByRole("dialog", { name: "Delete Machine" });
+  await expect(confirmation).toContainText("its sessions and its multi-agent runs are permanently deleted");
   await confirmation.getByRole("button", { name: "Delete Machine" }).click();
   await expect(page.getByText("No Machines Connected")).toBeVisible();
 });

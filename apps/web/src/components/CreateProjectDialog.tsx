@@ -9,10 +9,13 @@ export function CreateProjectDialog({
   onClose,
   onCreated,
   accessScopeManagementSupported,
+  returnFocusRef,
 }: {
   onClose: () => void;
   onCreated: (project: ProjectView) => void;
   accessScopeManagementSupported: boolean;
+  /** The control that opened this dialog, for focus to return to (a button inside New Session). */
+  returnFocusRef?: { current: HTMLElement | null };
 }) {
   const api = useApi();
   const [name, setName] = useState("");
@@ -54,10 +57,11 @@ export function CreateProjectDialog({
     <Modal
       title="Create Project"
       onClose={close}
+      returnFocusRef={returnFocusRef}
       describedBy="create-project-description"
       footer={(
         <>
-          <button type="button" className="btn ghost" onClick={close} disabled={busy}>Cancel</button>
+          <button type="button" className="btn" onClick={close} disabled={busy}>Cancel</button>
           <button
             type="submit"
             className="btn primary"

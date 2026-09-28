@@ -8,7 +8,7 @@ test("confirmation rechecks a live action fence after the modal await", async ()
   const pending = confirmWhileAllowed(
     () => new Promise<boolean>((resolve) => { resolveConfirmation = resolve; }),
     () => blocked,
-    { title: "Close pod?", message: "Close it." },
+    { title: "Close Pod", message: "Close it.", confirmLabel: "Close Pod" },
   );
   blocked = true;
   resolveConfirmation(true);
@@ -20,7 +20,7 @@ test("confirmation never opens when the live action fence is already blocked", a
   assert.equal(await confirmWhileAllowed(
     async () => { called = true; return true; },
     () => true,
-    { title: "Close pod?", message: "Close it." },
+    { title: "Close Pod", message: "Close it.", confirmLabel: "Close Pod" },
   ), false);
   assert.equal(called, false);
 });

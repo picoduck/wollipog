@@ -172,7 +172,7 @@ export const CSS_SURFACE = {
   "-webkit-box-orient", "-webkit-font-smoothing", "-webkit-line-clamp", "-webkit-mask-image",
   "-webkit-overflow-scrolling", "accent-color", "align-content", "align-items", "align-self",
   "animation", "animation-delay", "animation-duration", "animation-iteration-count",
-  "appearance", "backdrop-filter", "background", "background-clip", "background-position",
+  "appearance", "background", "background-clip", "background-position",
   "background-size", "border", "border-bottom", "border-bottom-left-radius",
   "border-bottom-right-radius", "border-bottom-width", "border-collapse", "border-color",
   "border-inline-start", "border-inline-start-color", "border-left", "border-left-color",
@@ -207,7 +207,7 @@ export const CSS_SURFACE = {
   ],
   /** Function names appearing in declaration values. */
   functions: [
-  "attr", "blur", "brightness", "calc", "clamp", "color-mix", "conic-gradient", "counter",
+  "attr", "brightness", "calc", "clamp", "color-mix", "conic-gradient", "counter",
   "cubic-bezier", "env", "format", "inset", "linear-gradient", "max", "min", "minmax", "rect",
   "repeat", "rgb", "rgba", "rotate", "scale", "scaley", "translatex", "translatey", "url", "var",
   ],

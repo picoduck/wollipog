@@ -53,8 +53,10 @@ test("pairing reveals the one-time credential even when the follow-up refresh fa
 
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
+  const mountPoint = happyContainer as unknown as HTMLDivElement;
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   try {
     await act(async () => {
       root.render(
@@ -105,7 +107,7 @@ test("pairing reveals the one-time credential even when the follow-up refresh fa
   } finally {
     await act(async () => { root.unmount(); });
     api.pairDevice = priorPairDevice;
-    container.remove();
+    mountPoint.remove();
   }
 });
 
@@ -119,8 +121,10 @@ test("managing an email-named person keeps the stored name out of the form until
   const member = { userId: "user-2", userName: "pat@example.com", role: "operator", userStatus: "active" } as never;
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
+  const mountPoint = happyContainer as unknown as HTMLDivElement;
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const button = (text: string) => Array.from(container.querySelectorAll("button"))
     .find((candidate) => candidate.textContent === text) as unknown as HTMLButtonElement | undefined;
   const nameInput = () => Array.from(container.querySelectorAll("input"))
@@ -150,7 +154,7 @@ test("managing an email-named person keeps the stored name out of the form until
   } finally {
     await act(async () => { root.unmount(); });
     api.updateIdentityMember = priorUpdate;
-    container.remove();
+    mountPoint.remove();
   }
 });
 
@@ -165,8 +169,10 @@ test("the pairing person picker masks email-named people until one deliberate re
   } as unknown as IdentityAdministrationView;
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);
-  const container = happyContainer as unknown as HTMLDivElement;
-  const root = createRoot(container);
+  const mountPoint = happyContainer as unknown as HTMLDivElement;
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   try {
     await act(async () => {
       root.render(<PairDeviceDialog identity={emailIdentity} onClose={() => {}} onSaved={async () => {}} />);
@@ -195,6 +201,6 @@ test("the pairing person picker masks email-named people until one deliberate re
     assert.deepEqual(names(), ["Misko", "Hidden Name 1", "Hidden Name 2", "Hidden Name 3"]);
   } finally {
     await act(async () => { root.unmount(); });
-    container.remove();
+    mountPoint.remove();
   }
 });

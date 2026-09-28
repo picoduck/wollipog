@@ -40,9 +40,11 @@ const session = {
 } as SessionView;
 
 async function renderHeader(protocolVersion: number, client: ApiClient, current: SessionView = session) {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   await act(async () => {
     root.render(
       <ApiProvider client={client}>
@@ -69,7 +71,7 @@ async function renderHeader(protocolVersion: number, client: ApiClient, current:
     .find((button) => button.getAttribute("aria-label") === "More Actions");
   assert.ok(more);
   await act(async () => { more.click(); await tick(); });
-  return { container, root };
+  return { container, mountPoint, root };
 }
 
 test("Switch Account lists headroom and submits the selected account", async () => {
@@ -89,7 +91,7 @@ test("Switch Account lists headroom and submits the selected account", async () 
       return { accepted: true as const, scheduled: false };
     },
   } as ApiClient;
-  const { container, root } = await renderHeader(
+  const { container, mountPoint, root } = await renderHeader(
     RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch,
     client,
   );
@@ -106,11 +108,11 @@ test("Switch Account lists headroom and submits the selected account", async () 
   await act(async () => { submit.click(); await tick(); });
   assert.deepEqual(requests, ["personal"]);
   await act(async () => root.unmount());
-  container.remove();
+  mountPoint.remove();
 });
 
 test("an older runner exposes the action as disabled with an update requirement", async () => {
-  const { container, root } = await renderHeader(
+  const { container, mountPoint, root } = await renderHeader(
     RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch - 1,
     { ...api } as ApiClient,
   );
@@ -120,7 +122,7 @@ test("an older runner exposes the action as disabled with an update requirement"
   assert.equal(action.disabled, true);
   assert.match(action.title, /requires protocol v171/i);
   await act(async () => root.unmount());
-  container.remove();
+  mountPoint.remove();
 });
 
 test("email-shaped account labels stay masked in the header and the Switch Account picker", async () => {
@@ -137,7 +139,7 @@ test("email-shaped account labels stay masked in the header and the Switch Accou
     sessionProviderAccounts: async () => ({ accounts }),
     switchSessionProviderAccount: async () => ({ accepted: true as const, scheduled: false }),
   } as ApiClient;
-  const { container, root } = await renderHeader(
+  const { container, mountPoint, root } = await renderHeader(
     RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch,
     client,
     { ...session, providerAccountLabel: "current.me@example.com" },
@@ -175,6 +177,6 @@ test("email-shaped account labels stay masked in the header and the Switch Accou
     assert.equal(html().includes("@example."), false, "reopening the dialog starts hidden again");
   } finally {
     await act(async () => root.unmount());
-    container.remove();
+    mountPoint.remove();
   }
 });

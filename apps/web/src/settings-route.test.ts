@@ -278,7 +278,7 @@ test("a view change rescues focus too", () => {
 });
 
 test("a modal opened before a breakpoint crossing still returns focus somewhere", () => {
-  const common = readFileSync(fileURLToPath(new URL("./components/common.tsx", import.meta.url)), "utf8");
+  const common = readFileSync(fileURLToPath(new URL("./components/Modal.tsx", import.meta.url)), "utf8");
   // Focus was live INSIDE the dialog the whole time, so the layout rescue correctly declined to
   // move it — and by the time the dialog closes, `isMobile` has settled and will not fire again.
   // The captured opener is gone with the layout that held it — or connected but unfocusable
@@ -286,6 +286,6 @@ test("a modal opened before a breakpoint crossing still returns focus somewhere"
   // (regression coverage). Either way the page-title fallback keeps focus off <body>.
   assert.match(common, /target\.focus\(\);[\s\S]{0,220}if \(document\.activeElement === target\) return;/,
     "a restore to a connected target must be verified, not assumed");
-  assert.match(common, /if \(modalLayerStack\.length === 0\) \{\s*document\.getElementById\("page-title"\)\?\.focus\(\);/,
+  assert.match(common, /if \(modalLayers\.length === 0\) \{\s*document\.getElementById\("page-title"\)\?\.focus\(\);/,
     "a dialog that cannot restore to its opener must still leave focus on the page");
 });

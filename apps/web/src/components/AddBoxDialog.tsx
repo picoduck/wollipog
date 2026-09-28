@@ -66,7 +66,7 @@ export function AddBoxDialog({ onClose }: { onClose: () => void }) {
       footer={
         <>
           {error && <span className="form-error" role="alert">{error}</span>}
-          <button className="btn ghost" onClick={onClose}>
+          <button className="btn" onClick={onClose}>
             Cancel
           </button>
           <button className="btn primary" onClick={submit} disabled={!canAdd}>

@@ -3236,8 +3236,8 @@ function SessionDetailLoaded({
     async (turn: number) => {
       if (rewindRefusal !== null) return;
       if (!await confirm({
-        title: `Restore files before turn ${turn}?`,
-        message: "Files revert to the checkpoint, but the conversation does not. The agent keeps its memory of later turns.",
+        title: "Restore Files",
+        message: `Files revert to the checkpoint before turn ${turn}, but the conversation does not. The agent keeps its memory of later turns.`,
         confirmLabel: "Restore Files",
         tone: "danger",
       }) || rewindRefusalRef.current !== null) return;
@@ -3258,8 +3258,8 @@ function SessionDetailLoaded({
         ? ` ${session.driver === "pi" ? "Pi" : "Claude Code"} can fork only the latest completed conversation turn.`
         : "";
       if (!await confirm({
-        title: `Fork after turn ${turn}?`,
-        message: `A new ${provider} and isolated worktree will be created; this session stays unchanged.${providerNote}`,
+        title: "Create Fork",
+        message: `A new ${provider} and isolated worktree are created after turn ${turn}; this session stays unchanged.${providerNote}`,
         confirmLabel: "Create Fork",
       }) || forkRefusalRef.current !== null) return;
       const releaseFork = acquireSessionFork(sessionId);
@@ -3312,7 +3312,7 @@ function SessionDetailLoaded({
       return;
     }
     if (!await confirm({
-      title: `Recover this session from turn ${quarantine.recoveryTurn}?`,
+      title: "Recover Session",
       message: handoff
         ? `A new session starts a fresh provider conversation seeded with a bounded, redacted summary of the visible dialogue through turn ${quarantine.recoveryTurn}, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`
         : `A new session forks the provider conversation at turn ${quarantine.recoveryTurn}, which excludes the rejected item, in a worktree holding that checkpoint's files. This session is left untouched for inspection.`,
@@ -5563,7 +5563,14 @@ function SessionDetailLoaded({
                 if (blurredTarget === inputRef.current || blurredTarget.classList.contains("composer-idle-preview")) {
                   return;
                 }
-                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+                // A dialog opened from a composer control is portalled to <body>: React still bubbles
+                // its focus events through this box, but they are not this box losing focus.
+                if (!event.currentTarget.contains(blurredTarget)) return;
+                const next = event.relatedTarget as Node | null;
+                // Dialogs are portalled to <body>, so a dialog opened from a composer control (the
+                // permission details) takes focus outside this box. It hands focus back on close.
+                const intoDialog = next instanceof Element && next.closest(".modal-backdrop") !== null;
+                if (!event.currentTarget.contains(next) && !intoDialog) {
                   if (composerPointerTransferRef.current === null) setComposerExpanded(false);
                 }
               }}
@@ -6049,12 +6056,12 @@ function MessageActionDialog({
 
   return (
     <Modal
-      title={action.mode === "resend" ? "Edit as a new turn" : "Edit in a conversation fork"}
+      title={action.mode === "resend" ? "Edit as a New Turn" : "Edit in a Conversation Fork"}
       onClose={submitting ? () => {} : onClose}
       returnFocusRef={returnFocusRef}
       footer={(
         <>
-          <button className="btn ghost" type="button" onClick={onClose} disabled={submitting}>Cancel</button>
+          <button className="btn" type="button" onClick={onClose} disabled={submitting}>Cancel</button>
           <button
             className="btn primary"
             type="submit"
@@ -6225,10 +6232,10 @@ function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
     if (target && (audienceConfirmation || linkLocation)) {
       const accepted = await confirm({
         title: linkLocation
-          ? `Link Location and Move to ${target.name}?`
+          ? "Link Location and Move Session"
           : audienceConfirmation === "team"
-            ? `Share session with ${target.name}?`
-            : `Confirm move to ${target.name}?`,
+            ? "Share and Move Session"
+            : "Move Session",
         message: linkLocation
           ? `This registers the imported working directory as a Location in “${target.name}” without moving files. This can also change how future imported sessions in this directory are filed.${audienceConfirmation === "team" ? " The team will also be able to read the transcript." : ""}`
           : audienceConfirmation === "team"
@@ -6236,7 +6243,7 @@ function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
             : `This control plane does not report sharing details. Moving this session to “${target.name}” may change who can read its transcript. Files and the execution Location stay unchanged.`,
         confirmLabel: linkLocation
           ? "Link Location and Move"
-          : audienceConfirmation === "team" ? "Share and Move" : "Confirm Move",
+          : audienceConfirmation === "team" ? "Share and Move" : "Move Session",
       });
       if (!accepted) return;
     }
@@ -6288,7 +6295,7 @@ function MoveToProjectDialog({ session, onClose, returnFocusRef }: {
       title="Move to Project"
       onClose={() => { if (!busy) onClose(); }}
       returnFocusRef={returnFocusRef}
-      footer={<button className="btn ghost" type="button" onClick={onClose} disabled={busy}>Cancel</button>}
+      footer={<button className="btn" type="button" onClick={onClose} disabled={busy}>Cancel</button>}
     >
       <div className="project-assignment-menu project-move-list">
         <p className="muted project-assignment-note">
@@ -6392,7 +6399,7 @@ function LegacyWorkspaceMoveDialog({ session, onClose, returnFocusRef }: {
       returnFocusRef={returnFocusRef}
       footer={creating ? (
         <>
-          <button className="btn ghost" type="button" onClick={resetCreate} disabled={busy}>Cancel</button>
+          <button className="btn" type="button" onClick={resetCreate} disabled={busy}>Cancel</button>
           <button
             className="btn primary"
             type="button"
@@ -6416,7 +6423,7 @@ function LegacyWorkspaceMoveDialog({ session, onClose, returnFocusRef }: {
           >
             New Workspace…
           </button>
-          <button className="btn ghost" type="button" onClick={onClose} disabled={busy}>Cancel</button>
+          <button className="btn" type="button" onClick={onClose} disabled={busy}>Cancel</button>
         </>
       )}
     >

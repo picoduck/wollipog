@@ -158,7 +158,7 @@ export function SkillMachineImportDialog({ runners, onClose, onImported }: {
     } catch (cause) { setError((cause as Error).message); }
     finally { setBusy(false); }
   };
-  return <Modal title="Import Skill from Machine" wide onClose={close} footer={<>
+  return <Modal title="Import Skill from Machine" size="lg" onClose={close} footer={<>
     <button className="btn ghost" type="button" disabled={busy} onClick={close}>Close</button>
     <button className="btn primary" type="button" disabled={busy || !preview || (preview.disposition === "update" && !accepted)} onClick={() => void submit()}>Import Snapshot</button>
   </>}>

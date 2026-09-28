@@ -70,8 +70,8 @@ export function SkillDriftImportDialog({ runnerId, machineLabel, copy, onClose, 
     }
   };
   const needsAcceptance = preview?.disposition === "update";
-  return <Modal title="Import Edit as New Version" wide onClose={close} footer={<>
-    <button type="button" className="btn ghost" disabled={busy} onClick={close}>Cancel</button>
+  return <Modal title="Import Edit as New Version" size="lg" onClose={close} footer={<>
+    <button type="button" className="btn" disabled={busy} onClick={close}>Cancel</button>
     <button type="button" className="btn primary" disabled={busy || !preview?.importable || (needsAcceptance && !accepted)}
       onClick={() => void importEdit()}>Import Edit as New Version</button>
   </>}>

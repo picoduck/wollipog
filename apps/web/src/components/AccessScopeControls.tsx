@@ -144,7 +144,7 @@ export function AccessScopeChangeDialog({
       onClose={() => { if (!busy) onClose(); }}
       footer={(
         <>
-          <button type="button" className="btn ghost" disabled={busy} onClick={onClose}>Cancel</button>
+          <button type="button" className="btn" disabled={busy} onClick={onClose}>Cancel</button>
           <button
             type="button"
             className="btn primary"

@@ -56,7 +56,7 @@ export function NewPodDialog({ onClose }: { onClose: () => void }) {
       footer={
         <>
           {error && <span className="form-error">{error}</span>}
-          <button className="btn ghost" onClick={onClose}>Cancel</button>
+          <button className="btn" onClick={onClose}>Cancel</button>
           <button className="btn primary" disabled={busy || !title.trim() || selected.length < 2} onClick={() => void submit()}>
             {busy ? "Creating…" : `Create pod · ${selected.length} members`}
           </button>

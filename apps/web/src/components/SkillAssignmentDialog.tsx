@@ -45,7 +45,7 @@ export function AddAssignmentDialog({ skill, runners, machineLabels, busy, error
   return (
     <Modal title="Add Assignment" onClose={onClose} footer={
       <>
-        <button type="button" className="btn ghost" onClick={onClose}>Cancel</button>
+        <button type="button" className="btn" onClick={onClose}>Cancel</button>
         <button type="button" className="btn primary" disabled={busy} onClick={() => void submit()}>
           {busy ? "Adding…" : "Add Assignment"}
         </button>

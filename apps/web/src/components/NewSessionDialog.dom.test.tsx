@@ -126,7 +126,9 @@ function DialogWhenReady({ preset, onOpenTerminal }: { preset?: NewSessionPreset
 }
 
 interface Fixture {
+  /** The document body: the dialog is portalled there, out of the element React renders into. */
   container: HTMLDivElement;
+  mountPoint: HTMLDivElement;
   root: Root;
   socket: FakeSocket;
   requests: CreateSessionRequest[];
@@ -150,9 +152,10 @@ async function mountFixture(
     },
   }),
 ): Promise<Fixture> {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   const requests: CreateSessionRequest[] = [];
   const terminalOpens = { count: 0 };
@@ -185,7 +188,7 @@ async function mountFixture(
     );
   });
   await act(async () => { socket.push(snapshot(snapshotOverrides)); });
-  return { container, root, socket, requests, terminalOpens };
+  return { container, mountPoint, root, socket, requests, terminalOpens };
 }
 
 async function strictOrchestratorDefaults(): Promise<OrchestratorSettingsView> {
@@ -203,7 +206,7 @@ async function strictOrchestratorDefaults(): Promise<OrchestratorSettingsView> {
 
 async function unmountFixture(fixture: Fixture): Promise<void> {
   await act(async () => { fixture.root.unmount(); });
-  fixture.container.remove();
+  fixture.mountPoint.remove();
 }
 
 function combobox(container: HTMLDivElement, label: string): HTMLInputElement {

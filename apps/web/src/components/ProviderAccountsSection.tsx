@@ -50,10 +50,9 @@ export function ProviderAccountsSection({ runner, online }: { runner: RunnerView
 
   const remove = async (account: ProviderAccountDefinition) => {
     const approved = await confirm({
-      title: "Remove Account?",
-      message: "Wollipog stops offering this account on the Machine and deletes the credentials it stored " +
-        "for it. If a session on this Machine still uses the account, its credentials are kept so that " +
-        "session can continue. The account itself is not affected.",
+      title: "Remove Account",
+      message: "Wollipog stops offering this account on the machine and deletes the credentials it stored for it. " +
+        "A session that still uses the account keeps its credentials, and the account itself is not affected.",
       details: (
         <span className="provider-account-remove-target">
           <PersonalIdentifier value={account.label} label="Account Email" />

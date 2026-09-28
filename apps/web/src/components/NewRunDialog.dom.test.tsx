@@ -134,6 +134,7 @@ function DialogWhenReady() {
 
 interface Fixture {
   container: HTMLDivElement;
+  mountPoint: HTMLDivElement;
   root: Root;
   socket: FakeSocket;
   parallelRequests: CreateRunRequest[];
@@ -143,9 +144,11 @@ interface Fixture {
 let fixtureSequence = 0;
 
 async function mountFixture(snapshotOverrides: Partial<UiSnapshotMessage> = {}): Promise<Fixture> {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const socket = new FakeSocket();
   const parallelRequests: CreateRunRequest[] = [];
   const workflowRequests: CreateWorkflowRunRequest[] = [];
@@ -179,12 +182,12 @@ async function mountFixture(snapshotOverrides: Partial<UiSnapshotMessage> = {}):
     );
   });
   await act(async () => { socket.push(snapshot(snapshotOverrides)); });
-  return { container, root, socket, parallelRequests, workflowRequests };
+  return { container, mountPoint, root, socket, parallelRequests, workflowRequests };
 }
 
 async function unmountFixture(fixture: Fixture): Promise<void> {
   await act(async () => { fixture.root.unmount(); });
-  fixture.container.remove();
+  fixture.mountPoint.remove();
 }
 
 function selectByLabel(container: HTMLDivElement, label: string, value: string): void {

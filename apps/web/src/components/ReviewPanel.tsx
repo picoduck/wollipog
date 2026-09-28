@@ -600,7 +600,7 @@ export function ReviewPanel({
   const doDiscardFile = async (filePath: string) => {
     if (!diff?.fineDiffHash || diff.scope !== "uncommitted" || gitRefusal !== null) return;
     if (!await confirm({
-      title: "Discard file changes?",
+      title: "Discard Changes",
       message: `All staged and unstaged changes to ${filePath} will be restored to HEAD. This cannot be undone.`,
       confirmLabel: "Discard Changes",
       tone: "danger",

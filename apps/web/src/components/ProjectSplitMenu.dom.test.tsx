@@ -95,9 +95,11 @@ async function openMenu(container: HTMLElement): Promise<void> {
 }
 
 test("project split menu is fixed, keyboard-managed, and restores trigger focus", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   await act(async () => {
     root.render(
       <ApiProvider>
@@ -139,7 +141,7 @@ test("project split menu is fixed, keyboard-managed, and restores trigger focus"
   assert.equal(domWindow.document.activeElement, trigger);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("project actions preserve presets, pin state, rename, reveal, and compensated archive plumbing", async () => {
@@ -164,9 +166,11 @@ test("project actions preserve presets, pin state, rename, reveal, and compensat
       };
     },
   } as ApiClient;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   await act(async () => {
     root.render(
       <ApiProvider client={client}>
@@ -212,15 +216,15 @@ test("project actions preserve presets, pin state, rename, reveal, and compensat
 
   await openMenu(container);
   await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
-  assert.match(container.textContent ?? "", /Archive and stop 2 sessions\?/);
-  assert.match(container.textContent ?? "", /runtime capacity will be released/);
+  assert.match(container.textContent ?? "", /Archive and Stop Sessions.*All 2 sessions in/);
+  assert.match(container.textContent ?? "", /their queued work is canceled/);
   assert.match(container.textContent ?? "", /use Snooze instead/);
   await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
   assert.deepEqual(archived, [["session-1", true], ["session-2", true]]);
   assert.match(container.textContent ?? "", /1 session Stop has failed in Project One. Runtime capacity may still be held; use Retry Stop/);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("durable Project launch actions carry stable Project and Location identity", async () => {
@@ -269,9 +273,11 @@ test("durable Project launch actions carry stable Project and Location identity"
     },
   };
   const presets: NewSessionPreset[] = [];
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   await act(async () => {
     root.render(
       <FeedbackProvider>
@@ -308,7 +314,7 @@ test("durable Project launch actions carry stable Project and Location identity"
   ]);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("multi-Location Projects without a default defer Location choice to New Session", async () => {
@@ -361,9 +367,11 @@ test("multi-Location Projects without a default defer Location choice to New Ses
     },
   };
   const presets: NewSessionPreset[] = [];
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   await act(async () => {
     root.render(
       <FeedbackProvider>
@@ -395,13 +403,15 @@ test("multi-Location Projects without a default defer Location choice to New Ses
   ], "the New Session dialog must make the user choose one of the available Locations");
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("project action guards fail closed for offline, stale, and native-Windows WSL workspaces", async () => {
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const render = async (value: RunnerView) => {
     await act(async () => {
       root.render(
@@ -439,7 +449,7 @@ test("project action guards fail closed for offline, stale, and native-Windows W
   assert.match((domWindow.document.querySelector('[role="note"]') as unknown as HTMLElement).textContent ?? "", /Reveal:/);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("durable zero-session Projects keep Project actions without inferring identity from a session", async () => {
@@ -482,9 +492,11 @@ test("durable zero-session Projects keep Project actions without inferring ident
       } as never;
     },
   } as ApiClient;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   await act(async () => {
     root.render(
       <ApiProvider client={client}>
@@ -523,7 +535,7 @@ test("durable zero-session Projects keep Project actions without inferring ident
   assert.deepEqual(renamed, [["project-1", "Renamed Durable Project"]]);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });
 
 test("durable Project archive is atomic, restores only changed sessions, and honors management permission", async () => {
@@ -579,9 +591,11 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
       return session(sessionId);
     },
   } as ApiClient;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
+  const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(mountPoint as never);
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
   const render = async (canManage: boolean) => {
     await act(async () => {
       root.render(
@@ -617,8 +631,9 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
   await render(true);
   await openMenu(container);
   await act(async () => { button(container, "Archive and Stop All Sessions").click(); await tick(); });
-  assert.match(container.textContent ?? "", /Archive and stop 2 sessions\?/);
-  assert.match(container.textContent ?? "", /server applies the same stop-before-archive rule/);
+  assert.match(container.textContent ?? "", /Archive and Stop Sessions.*All 2 sessions in/);
+  // The count covers the Project sessions that are not loaded here, which the server also stops.
+  assert.match(container.textContent ?? "", /All 2 sessions in “Project One” stop and move to Archived Sessions/);
   assert.match(container.textContent ?? "", /use Snooze instead/);
   await act(async () => { button(container, "Archive and Stop").click(); await tick(); await tick(); });
   assert.deepEqual(archivedProjects, ["project-1"]);
@@ -637,5 +652,5 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
   assert.match(container.textContent ?? "", /Sessions archived from Project One\. Exact undo is unavailable/);
 
   await act(async () => { root.unmount(); });
-  container.remove();
+  mountPoint.remove();
 });

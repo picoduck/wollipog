@@ -63,7 +63,7 @@ export function RenameSessionDialog({
       {...(returnFocusRef ? { returnFocusRef } : {})}
       footer={(
         <>
-          <button className="btn ghost" type="button" onClick={close} disabled={submitting}>Cancel</button>
+          <button className="btn" type="button" onClick={close} disabled={submitting}>Cancel</button>
           <button className="btn primary" type="submit" form="rename-session-form" disabled={submitting}>
             {submitting ? "Saving…" : "Save"}
           </button>

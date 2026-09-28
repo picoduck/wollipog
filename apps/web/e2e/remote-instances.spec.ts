@@ -139,7 +139,7 @@ test("pairs, switches, edits, re-pairs, persists, and removes remote instances",
   expect(stored).not.toContain(TOKEN_B);
 
   await page.getByRole("article").filter({ hasText: "Laptop" }).getByRole("button", { name: "Remove" }).click();
-  const confirmation = page.getByRole("dialog", { name: /Remove .*Laptop/ });
+  const confirmation = page.getByRole("dialog", { name: "Remove Instance" });
   await confirmation.getByRole("button", { name: "Remove Instance" }).click();
   await expect(page.getByRole("article").filter({ hasText: "Laptop" })).toHaveCount(0);
   await expect(page.getByText("2 Instances")).toBeVisible();

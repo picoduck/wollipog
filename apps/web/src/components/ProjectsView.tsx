@@ -99,12 +99,15 @@ function DeleteProjectDialog({ project, busy, error, onClose, onDelete }: {
   };
   return (
     <Modal
-      title={`Delete ${project.name}?`}
+      title="Delete Project"
+      size="sm"
+      tone="danger"
+      closeButton={false}
       onClose={close}
       describedBy="delete-project-consequences"
       footer={(
         <>
-          <button type="button" className="btn ghost" disabled={busy} onClick={close}>Cancel</button>
+          <button type="button" className="btn" disabled={busy} onClick={close}>Cancel</button>
           <button type="button" className="btn danger" disabled={busy || confirmation !== project.name} onClick={() => void onDelete()}>
             {busy ? "Deleting…" : "Delete Project"}
           </button>
@@ -113,7 +116,7 @@ function DeleteProjectDialog({ project, busy, error, onClose, onDelete }: {
     >
       <div className="form">
         <div id="delete-project-consequences" className="danger-note">
-          Sessions will move to No Project and Locations will be unlinked. Sessions and files are not deleted, and archived sessions stay archived. The Project itself is permanently deleted.
+          “{project.name}” is permanently deleted: its sessions move to No Project and its Locations are unlinked. Sessions and files are not deleted, and archived sessions stay archived.
         </div>
         <label className="field">
           <span>Type {project.name} to Confirm</span>
@@ -237,10 +240,14 @@ export function ProjectsView({
   const archiveSessions = async () => {
     if (!selected || selected.unarchivedSessionCount === 0) return;
     const accepted = await confirm({
-      title: `${selectedStopsRuntime ? "Archive and stop" : "Archive"} ${selected.unarchivedSessionCount} session${selected.unarchivedSessionCount === 1 ? "" : "s"}?`,
+      title: selectedStopsRuntime ? "Archive and Stop Sessions" : "Archive Sessions",
       message: selectedStopsRuntime
-        ? `Sessions will move to Archived Sessions after their runtimes stop. Queued work will be canceled and runtime capacity will be released. To keep work running outside the Inbox, use Snooze instead. The “${selected.name}” Project and its Locations will remain.`
-        : `Archive every unarchived session in “${selected.name}”? The Project and its Locations will remain.`,
+        ? selected.unarchivedSessionCount === 1
+          ? `The unarchived session in “${selected.name}” stops and moves to Archived Sessions, and its queued work is canceled. The Project and its Locations remain, and you can restore the session.`
+          : `All ${selected.unarchivedSessionCount} unarchived sessions in “${selected.name}” stop and move to Archived Sessions, and their queued work is canceled. The Project and its Locations remain, and you can restore the sessions.`
+        : selected.unarchivedSessionCount === 1
+          ? `The unarchived session in “${selected.name}” moves to Archived Sessions. The Project and its Locations remain.`
+          : `All ${selected.unarchivedSessionCount} unarchived sessions in “${selected.name}” move to Archived Sessions. The Project and its Locations remain.`,
       confirmLabel: selectedStopsRuntime ? "Archive and Stop" : "Archive Sessions",
       ...(selectedStopsRuntime ? { tone: "danger" as const } : {}),
     });
@@ -259,8 +266,8 @@ export function ProjectsView({
     if (!selected) return;
     const last = selected.locations.length === 1;
     const accepted = await confirm({
-      title: `Remove ${location.name}?`,
-      message: `New sessions in this Project will no longer use ${location.path}. The folder is not deleted, existing sessions stay in this Project, and other Projects using this Location are unaffected.${last ? " This Project will remain with no Locations." : ""}`,
+      title: "Remove Location",
+      message: `New sessions in “${selected.name}” will no longer use “${location.name}” at ${location.path}. The folder is not deleted, and existing sessions and other Projects are unaffected${last ? "; this Project will have no Locations left" : ""}.`,
       confirmLabel: "Remove Location",
       tone: "danger",
     });
