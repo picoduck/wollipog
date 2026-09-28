@@ -37,7 +37,9 @@ test("account labels and controls remain readable on narrow usage cards", async 
         return range.getClientRects().length;
       })(),
     }));
-    expect(refreshSize.height).toBeGreaterThanOrEqual(44);
+    // A small button's control height with this mouse (#1799); on a touch screen it is 36px with a
+    // 44px hit area, measured in control-heights.test.ts and the touch specs.
+    expect(refreshSize.height).toBe(28);
     expect(refreshSize.textLines).toBe(1);
 
     if (width === 875) {

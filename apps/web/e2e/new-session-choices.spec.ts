@@ -23,25 +23,23 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 const REFLOW_WIDTH = 320;
 
 /**
- * Three viewports chosen to cover the touch floor's THREE activation paths, not three device sizes.
+ * Three viewports chosen to cover the touch floor and the tap-only picker, which since #1799 are
+ * two different conditions.
  *
- * `styles.css` applies the 44px floor under a comma-separated list:
- *     @media (max-width: 760px), (pointer: coarse), (hover: none)
- * so it is active if ANY of those matches. A narrow window with a mouse gets the floor just as a
- * phone does, and `useCoarsePointer()` queries that same list — so the estimator raises its budget
- * there too.
- *
- * The first version of this file had 390px and 320px both coarse, which tested the pointer path
- * twice and the width path never. Making the reflow-minimum case a FINE pointer covers the width
- * path at no extra cost, and keeps the WCAG reflow width where it belongs.
+ * `styles.css` applies the 44px floor in its one coarse-pointer block, `@media (pointer: coarse)`,
+ * and `useTouchTargetMode()` queries exactly that, so the estimator raises its budget only where the
+ * floor renders. A narrow window with a MOUSE keeps the compact rows (`floor: false`). New Session's
+ * Project and Agent pickers are still tap-only at phone widths as well as on touch
+ * (`TAP_ONLY_PICKER_MEDIA`), so the reflow-minimum case covers that width path at no extra cost, and
+ * keeps the WCAG reflow width where it belongs.
  */
 const VIEWPORTS = [
   // The reported defect: a phone, where the pointer is what activates the floor.
-  { name: "phone", width: 390, height: 780, touch: true, floor: true },
-  // The WCAG reflow minimum with a MOUSE: the floor here comes from width alone.
-  { name: "reflow-minimum", width: REFLOW_WIDTH, height: 640, touch: false, floor: true },
+  { name: "phone", width: 390, height: 780, touch: true, floor: true, tapOnly: true },
+  // The WCAG reflow minimum with a MOUSE: no touch floor, but the phone-width tap-only pickers.
+  { name: "reflow-minimum", width: REFLOW_WIDTH, height: 640, touch: false, floor: false, tapOnly: true },
   // Wide and fine-pointered: no floor at all, so the compact budget must still be used.
-  { name: "desktop", width: 1280, height: 900, touch: false, floor: false },
+  { name: "desktop", width: 1280, height: 900, touch: false, floor: false, tapOnly: false },
 ] as const;
 
 async function openDialog(page: Page, query = "") {
@@ -216,7 +214,7 @@ for (const viewport of VIEWPORTS) {
         }
       }
 
-      if (viewport.floor) {
+      if (viewport.tapOnly) {
         await expect(page.locator('.agent-select input[type="text"]')).toHaveCount(0);
         await expect(page.getByRole("button", { name: /^Agent:/ })).toBeVisible();
       } else {
@@ -239,16 +237,25 @@ for (const viewport of VIEWPORTS) {
         const box = modeOptionBoxes[index]!;
         expect(box.x).toBeGreaterThanOrEqual(modeBox.x - 1);
         expect(box.x + box.width).toBeLessThanOrEqual(modeBox.x + modeBox.width + 1);
-        if (viewport.floor) expect(box.height).toBeGreaterThanOrEqual(43);
+        if (viewport.floor) {
+          // The track is the 44px control; each option is 38px inside its 2px inset and 1px edge,
+          // and the coarse-pointer block extends the option's hit area over both (#1799).
+          expect(modeBox.height).toBeGreaterThanOrEqual(43);
+          const hitsEdges = await option.evaluate((element) => {
+            element.scrollIntoView({ block: "center" });
+            const rect = element.getBoundingClientRect();
+            const x = rect.left + rect.width / 2;
+            return [rect.top - 2.5, rect.bottom + 2.5].every((y) => element.contains(document.elementFromPoint(x, y)));
+          });
+          expect(hitsEdges, "the option's hit area reaches the track's edge").toBe(true);
+        }
       }
     });
 
     test("a two-option Select opens a list its own options fit inside", async ({ page }) => {
-      // Skipped only where the floor genuinely does not apply — wide AND fine-pointered. Keyed on
-      // `floor` rather than `touch`: an earlier version skipped by `touch` and justified it as
-      // "coarse pointer only", which is false. The media query also fires on width, so that
-      // reasoning would have silently dropped every narrow fine-pointer case.
-      test.skip(!viewport.floor, "no touch floor applies at this width and pointer");
+      // Skipped only where the floor genuinely does not apply: a fine pointer at any width, since
+      // the floor is keyed to the pointer (#1799).
+      test.skip(!viewport.floor, "no touch floor applies with this pointer");
       // AC4, against the shared primitive rather than the one control that hit the defect. Every
       // other Select in the app — the archive filter, the agent-defaults rows, the colour-scheme
       // picker — shares this arithmetic, so the guard belongs on the primitive.

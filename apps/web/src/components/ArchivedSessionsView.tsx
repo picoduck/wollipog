@@ -582,7 +582,7 @@ export function ArchivedSessionsView() {
                       {stopPending || stopFailed
                         ? <button type="button" className="btn ghost sm" disabled={busy || stopRefusal !== null} {...refusedProps(stopRefusal)} onClick={() => void retryStop(session)}>Retry Stop</button>
                         : showStop && <button type="button" className="btn ghost sm" disabled={busy || stopRefusal !== null} {...refusedProps(stopRefusal)} onClick={() => void stop(session)}>Stop</button>}
-                      {session.archived && <button type="button" className="btn danger sm" disabled={busy || deleteRefusal !== null} {...refusedProps(deleteRefusal)} onClick={() => void deleteSession(session)}>Delete</button>}
+                      {session.archived && <button type="button" className="btn ghost danger sm" disabled={busy || deleteRefusal !== null} {...refusedProps(deleteRefusal)} onClick={() => void deleteSession(session)}>Delete</button>}
                       {rowRefusal && <span className="sr-only" id={rowRefusalId}>{rowRefusal}</span>}
                     </div></td>
                   </tr>

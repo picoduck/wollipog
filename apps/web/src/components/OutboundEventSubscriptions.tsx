@@ -200,7 +200,7 @@ export function OutboundEventSubscriptions({
                   await mutate(async () => setCredential(await api.rotateOutboundEventSubscription(subscription.subscriptionId)));
                 }
               })()}>Rotate Secret</button>
-              <button className="btn danger sm" disabled={busy} type="button" onClick={() => void (async () => {
+              <button className="btn ghost danger sm" disabled={busy} type="button" onClick={() => void (async () => {
                 if (await confirm({ title: "Revoke outbound subscription?", message: "Delivery stops immediately and all pending requests are dropped.", confirmLabel: "Revoke Subscription", tone: "danger" })) {
                   await mutate(() => api.deleteOutboundEventSubscription(subscription.subscriptionId));
                   if (credential?.subscription.subscriptionId === subscription.subscriptionId) setCredential(null);

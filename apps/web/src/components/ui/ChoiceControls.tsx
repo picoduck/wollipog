@@ -731,11 +731,13 @@ export function resetSelectPreviewRegistry(): void {
  * ---------------------------------------------------------------------------------------------- */
 
 /**
- * The touch target `styles.css` gives every `.ui-select-option` under {@link TOUCH_TARGET_MEDIA}.
+ * The height `styles.css` gives every `.ui-select-option` under {@link TOUCH_TARGET_MEDIA}: the
+ * option's `min-height` is `--control-h`, which the coarse-pointer block sets to 44px.
  *
  * Duplicated from the stylesheet because CSS cannot export a number, which is exactly how the two
  * drifted: the estimator below budgeted 34px for an option the stylesheet was rendering at 44px.
- * The unit test asserts the arithmetic; the mobile E2E spec asserts the rendered list agrees.
+ * The unit test asserts the arithmetic and that this matches the stylesheet's token; the mobile
+ * E2E spec asserts the rendered list agrees.
  */
 export const TOUCH_OPTION_MIN_HEIGHT_PX = 44;
 
@@ -747,6 +749,9 @@ export const TOUCH_OPTION_MIN_HEIGHT_PX = 44;
  * here and forgot the border — 2px of the 22px it was short.
  */
 export const SELECT_LIST_CHROME_PX = 10;
+
+/** The narrowest an open Select list gets (docs/design-system.md §8.3), viewport permitting. */
+export const SELECT_LIST_MIN_WIDTH_PX = 280;
 
 /** Past this the list scrolls on purpose: the options genuinely do not fit. */
 export const SELECT_MENU_MAX_HEIGHT_PX = 320;
@@ -762,13 +767,14 @@ const COMPACT_OPTION_HEIGHT_PX = 34;
 const EXTRA_OPTION_LINE_PX = 18;
 
 /**
- * The exact condition `styles.css` applies the 44px touch floor under.
+ * The exact condition `styles.css` applies the 44px touch floor under: its one coarse-pointer block
+ * (docs/design-system.md §2.8, §15.3). Touch sizing follows the pointer, not the viewport, so a
+ * narrow desktop window keeps the compact list and a touch tablet gets the touch one.
  *
- * Kept character-for-character identical to the stylesheet's query, and built from the breakpoint
- * constant the rest of the app already shares, so a change to one is a visible change to the other.
+ * Kept character-for-character identical to the stylesheet's query; a unit test reads the
+ * stylesheet and fails when the two disagree.
  */
-export const TOUCH_TARGET_MEDIA =
-  `(max-width: ${MOBILE_BREAKPOINT_PX}px), (pointer: coarse), (hover: none)`;
+export const TOUCH_TARGET_MEDIA = "(pointer: coarse)";
 
 /**
  * The open list's height REQUEST, which the anchored-menu helper turns into a `max-height`.
@@ -816,14 +822,32 @@ export function selectMenuDesiredHeight(input: {
 /**
  * Whether the touch floor is live right now, tracked rather than sampled once.
  *
- * Rotating a tablet, docking a laptop, or merely dragging a window across 760px changes which rule
- * the stylesheet applies, and a menu whose height was budgeted under the other one is this same
- * clipping defect arriving a second way.
+ * Attaching or detaching a touch screen, or moving the window to a display with a different primary
+ * pointer, changes which rule the stylesheet applies, and a menu whose height was budgeted under
+ * the other one is this same clipping defect arriving a second way.
  */
 export function useTouchTargetMode(): boolean {
+  return useMediaMatch(TOUCH_TARGET_MEDIA);
+}
+
+/**
+ * Where a picker is tap-only (a list you open and tap) rather than a field you type into: a
+ * phone-width window as well as any touch pointer, so a narrow window keeps the picker a phone gets.
+ *
+ * A presentation choice, not a size: the touch SIZE follows the pointer alone
+ * ({@link TOUCH_TARGET_MEDIA}), and this deliberately stays on the wider condition it always had.
+ */
+export const TAP_ONLY_PICKER_MEDIA =
+  `(max-width: ${MOBILE_BREAKPOINT_PX}px), (pointer: coarse), (hover: none)`;
+
+export function useTapOnlyPicker(): boolean {
+  return useMediaMatch(TAP_ONLY_PICKER_MEDIA);
+}
+
+function useMediaMatch(query: string): boolean {
   return useSyncExternalStore(
     (onChange) => {
-      const mq = window.matchMedia(TOUCH_TARGET_MEDIA);
+      const mq = window.matchMedia(query);
       mq.addEventListener("change", onChange);
       // `resize` as well as the query, for the reason `useIsMobile` subscribes to both: an emulated
       // or automated viewport can deliver the resize before the MediaQueryList change event.
@@ -833,9 +857,9 @@ export function useTouchTargetMode(): boolean {
         window.removeEventListener("resize", onChange);
       };
     },
-    () => window.matchMedia(TOUCH_TARGET_MEDIA).matches,
-    // Server-rendered markup has no pointer to ask about. The compact budget is the safe guess —
-    // it is what the desktop stylesheet renders — and the first client layout corrects it.
+    () => window.matchMedia(query).matches,
+    // Server-rendered markup has no pointer to ask about. The compact case is the safe guess — it
+    // is what the desktop stylesheet renders — and the first client layout corrects it.
     () => false,
   );
 }
@@ -993,9 +1017,10 @@ export function Select<T extends string>({
       estimatedOptionHeight,
       coarsePointer,
     }),
-    ...(menuWidth === undefined
-      ? { matchTriggerWidth: true }
-      : { desiredWidth: menuWidth, minTriggerWidth: true }),
+    // At least as wide as the trigger and at least SELECT_LIST_MIN_WIDTH_PX, so a short trigger does
+    // not wrap its option descriptions onto five lines (§8.3). The helper still clamps to the viewport.
+    desiredWidth: Math.max(menuWidth ?? 0, SELECT_LIST_MIN_WIDTH_PX),
+    minTriggerWidth: true,
   });
 
   const openAt = (index: number) => {

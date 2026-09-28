@@ -786,311 +786,316 @@ for (const viewport of [
   { name: "360-pixel phone", width: 360 },
   { name: "390-pixel phone", width: 390 },
 ]) {
-  test(`the session bar discloses overflowed statuses on a ${viewport.name}`, async ({ page }) => {
-    await page.setViewportSize({ width: viewport.width, height: 800 });
-    await openSession(page, "git-visibility", { reviewReady: "1", sessionShell: "1" });
-    await page.evaluate(() => {
-      window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
-        backgroundWorkState: "running",
+  test.describe(`with a touch pointer on a ${viewport.name}`, () => {
+    // Its 44px menu rows are a touch size, keyed to the pointer rather than the viewport (#1799).
+    test.use({ hasTouch: true });
+
+    test(`the session bar discloses overflowed statuses on a ${viewport.name}`, async ({ page }) => {
+      await page.setViewportSize({ width: viewport.width, height: 800 });
+      await openSession(page, "git-visibility", { reviewReady: "1", sessionShell: "1" });
+      await page.evaluate(() => {
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
+          backgroundWorkState: "running",
+        });
+        window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "active-mobile-subagent");
       });
-      window.__WOLLIPOG_PROJECT_INBOX_E2E__.emitActiveSubagent("session-alpha", "active-mobile-subagent");
-    });
-    await capture(page, `narrow-${viewport.width}`);
+      await capture(page, `narrow-${viewport.width}`);
 
-    const header = page.locator(".session-detail > .detail-head");
-    const topbar = page.locator(".topbar");
-    await expect(page.locator(".topbar, .session-detail > .detail-head")).toHaveCount(2);
-    await expect(topbar.getByRole("button", { name: "Back to Inbox" })).toBeVisible();
-    await expect(topbar.getByRole("heading", { name: "Alpha Session", exact: true })).toBeVisible();
-    await expect(topbar.getByRole("button", { name: /^Open/ })).toHaveCount(0);
-    // Settings left the phone topbar for the rail's More sheet (#458). The compact geometry this
-    // test pins is now anchored on the trailing pane control instead of the gear.
-    await expect(topbar.getByRole("button", { name: "Settings" })).toHaveCount(0);
-    await expect(header.locator(".back, .detail-crumbs, .editor-select")).toHaveCount(0);
-    await expect(header.locator('[aria-label="Activity: Awaiting Prompt"]')).toHaveCount(1);
-    await expect(header.locator('[aria-label="Changes: Ready for Review"]')).toHaveCount(1);
-    await expect(header.locator('[aria-label="Changes: Uncommitted Changes"]')).toHaveCount(1);
-    const inlineBackgroundWork = header.locator(
-      '.session-header-statuses > [aria-label="Background Work: Waiting on External Job"]',
-    );
-    await expect(inlineBackgroundWork).toHaveCount(1);
-    await expect(inlineBackgroundWork).toBeVisible();
-    await expect(header.locator(
-      '.sr-only > [role="status"][aria-label="Background Work: Waiting on External Job"]',
-    )).toHaveCount(1);
-    // Workers rank with the lifecycle group, so at these widths the badge is disclosed rather than
-    // inline; the popover copy below is asserted enabled, which is where it stays reachable.
-    // A CSS locator, not a role locator: a displaced badge leaves the accessibility tree, and its
-    // presence in the row's measured set is exactly what is being asserted here.
-    const activeSubagent = header.locator('[aria-label="1 Worker Active"]');
-    await expect(activeSubagent).toHaveCount(1);
-    const activeSubagentInline = await activeSubagent.evaluate((element) => !element.hidden);
-    const overflowTrigger = header.locator(".session-status-overflow-trigger");
-    await expect(overflowTrigger).toBeVisible();
-    const hiddenCount = Number.parseInt((await overflowTrigger.textContent())?.replace("+", "") ?? "", 10);
-    expect(hiddenCount).toBeGreaterThan(0);
-    await expect(overflowTrigger).toHaveAccessibleName(`+${hiddenCount}: Show ${hiddenCount} Hidden Statuses`);
-    const metrics = await header.evaluate((element) => {
-      const rect = (node: Element) => {
-        const value = node.getBoundingClientRect();
-        return {
-          x: value.x, y: value.y, right: value.right, bottom: value.bottom,
-          width: value.width, height: value.height,
+      const header = page.locator(".session-detail > .detail-head");
+      const topbar = page.locator(".topbar");
+      await expect(page.locator(".topbar, .session-detail > .detail-head")).toHaveCount(2);
+      await expect(topbar.getByRole("button", { name: "Back to Inbox" })).toBeVisible();
+      await expect(topbar.getByRole("heading", { name: "Alpha Session", exact: true })).toBeVisible();
+      await expect(topbar.getByRole("button", { name: /^Open/ })).toHaveCount(0);
+      // Settings left the phone topbar for the rail's More sheet (#458). The compact geometry this
+      // test pins is now anchored on the trailing pane control instead of the gear.
+      await expect(topbar.getByRole("button", { name: "Settings" })).toHaveCount(0);
+      await expect(header.locator(".back, .detail-crumbs, .editor-select")).toHaveCount(0);
+      await expect(header.locator('[aria-label="Activity: Awaiting Prompt"]')).toHaveCount(1);
+      await expect(header.locator('[aria-label="Changes: Ready for Review"]')).toHaveCount(1);
+      await expect(header.locator('[aria-label="Changes: Uncommitted Changes"]')).toHaveCount(1);
+      const inlineBackgroundWork = header.locator(
+        '.session-header-statuses > [aria-label="Background Work: Waiting on External Job"]',
+      );
+      await expect(inlineBackgroundWork).toHaveCount(1);
+      await expect(inlineBackgroundWork).toBeVisible();
+      await expect(header.locator(
+        '.sr-only > [role="status"][aria-label="Background Work: Waiting on External Job"]',
+      )).toHaveCount(1);
+      // Workers rank with the lifecycle group, so at these widths the badge is disclosed rather than
+      // inline; the popover copy below is asserted enabled, which is where it stays reachable.
+      // A CSS locator, not a role locator: a displaced badge leaves the accessibility tree, and its
+      // presence in the row's measured set is exactly what is being asserted here.
+      const activeSubagent = header.locator('[aria-label="1 Worker Active"]');
+      await expect(activeSubagent).toHaveCount(1);
+      const activeSubagentInline = await activeSubagent.evaluate((element) => !element.hidden);
+      const overflowTrigger = header.locator(".session-status-overflow-trigger");
+      await expect(overflowTrigger).toBeVisible();
+      const hiddenCount = Number.parseInt((await overflowTrigger.textContent())?.replace("+", "") ?? "", 10);
+      expect(hiddenCount).toBeGreaterThan(0);
+      await expect(overflowTrigger).toHaveAccessibleName(`+${hiddenCount}: Show ${hiddenCount} Hidden Statuses`);
+      const metrics = await header.evaluate((element) => {
+        const rect = (node: Element) => {
+          const value = node.getBoundingClientRect();
+          return {
+            x: value.x, y: value.y, right: value.right, bottom: value.bottom,
+            width: value.width, height: value.height,
+          };
         };
-      };
-      const clippingPane = element.closest(".inbox-preview-pane");
-      const allBadges = [...element.querySelectorAll<HTMLElement>(
-        ".session-header-statuses .status-badge, " +
-        ".session-header-statuses > .background-work-badge",
-      )];
-      const badges = allBadges.filter((node) => !node.hidden).map((node) => ({
-        ...rect(node),
-        label: node.getAttribute("aria-label") ?? node.textContent?.trim() ?? "unknown status",
-      }));
-      const statuses = element.querySelector(".session-header-statuses") as HTMLElement;
-      const actions = element.querySelector(".detail-actions") as HTMLElement;
-      const fork = element.querySelector('[aria-label="Fork Conversation"]') as HTMLElement;
-      const share = element.querySelector('[aria-label="Share"]') as HTMLElement;
-      const overflow = element.querySelector('.session-status-overflow-trigger') as HTMLElement;
-      const moreActions = element.querySelector('[aria-label="More Actions"]') as HTMLElement;
-      const activeSubagent = element.querySelector('[aria-label="1 Worker Active"]') as HTMLElement;
-      const statusStyle = getComputedStyle(statuses);
-      const pageScrollWidth = document.documentElement.scrollWidth;
-      statuses.style.display = "none";
-      const pageScrollWidthWithoutStatuses = document.documentElement.scrollWidth;
-      statuses.style.removeProperty("display");
-      const centerTarget = (target: HTMLElement) => {
-        const box = target.getBoundingClientRect();
-        const painted = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
-        return painted === target || (painted !== null && target.contains(painted));
-      };
-      return {
-        display: getComputedStyle(element).display,
-        statuses: rect(statuses),
-        firstVisibleStatus: badges[0],
-        actions: rect(actions),
-        fork: rect(fork),
-        forkIcon: rect(element.querySelector('[aria-label="Fork Conversation"] svg')!),
-        overflow: rect(overflow),
-        share: rect(share),
-        shareIcon: rect(element.querySelector('[aria-label="Share"] svg')!),
-        moreActions: rect(moreActions),
-        moreActionsIcon: rect(element.querySelector('[aria-label="More Actions"] svg')!),
-        activeSubagent: rect(activeSubagent),
-        badges,
-        totalBadgeCount: allBadges.length,
-        badgeRows: new Set(badges.map((badge) => Math.round(badge.y))).size,
-        headerHeight: element.getBoundingClientRect().height,
-        hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
-        statusAddsPageOverflow: pageScrollWidth > pageScrollWidthWithoutStatuses,
-        statusIsClipped: Math.max(...badges.map((badge) => badge.right)) >
-          statuses.getBoundingClientRect().right,
-        statusOverflowX: statusStyle.overflowX,
-        statusFlexWrap: statusStyle.flexWrap,
-        statusMaskImage: statusStyle.maskImage || statusStyle.webkitMaskImage,
-        forkIsTopmostAtCenter: centerTarget(fork),
-        shareIsTopmostAtCenter: centerTarget(share),
-        moreActionsIsTopmostAtCenter: centerTarget(moreActions),
-        activeSubagentIsTopmostAtCenter: centerTarget(activeSubagent),
-        headerRight: element.getBoundingClientRect().right,
-        clippingRight: Math.min(
-          window.innerWidth, clippingPane?.getBoundingClientRect().right ?? window.innerWidth,
-        ),
-        paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
-      };
-    });
-    const shellMetrics = await topbar.evaluate((element) => {
-      const topbarBox = element.getBoundingClientRect();
-      const back = element.querySelector('[aria-label="Back to Inbox"]')!.getBoundingClientRect();
-      const title = element.querySelector("h1")!.getBoundingClientRect();
-      const controls = [...element.querySelectorAll(".topbar-mobile-controls button")]
-        .map((node) => node.getBoundingClientRect());
-      const trailingControl = controls.reduce((furthest, box) => box.right > furthest.right ? box : furthest);
-      const style = getComputedStyle(element.querySelector("h1")!);
-      return {
-        top: topbarBox.top,
-        bottom: topbarBox.bottom,
-        right: topbarBox.right,
-        trailingControl: {
-          width: trailingControl.width, height: trailingControl.height, right: trailingControl.right,
-        },
-        back: { width: back.width, height: back.height, right: back.right },
-        title: { x: title.x, right: title.right, width: title.width },
-        titleFontSize: Number.parseFloat(style.fontSize),
-        controlsLeft: Math.min(...controls.map((box) => box.left)),
-        furthestControlRight: Math.max(...controls.map((box) => box.right)),
-        controls: controls.map((box) => ({ width: box.width, height: box.height })),
-      };
-    });
-    const subheaderBottom = await header.evaluate((element) => element.getBoundingClientRect().bottom);
-
-    expect(metrics.display).toBe("grid");
-    expect(shellMetrics.bottom - shellMetrics.top).toBeLessThanOrEqual(40.5);
-    expect(shellMetrics.titleFontSize).toBeLessThanOrEqual(14);
-    expect(shellMetrics.back.width).toBeGreaterThanOrEqual(36);
-    expect(shellMetrics.back.height).toBeGreaterThanOrEqual(36);
-    expect(shellMetrics.trailingControl.width).toBe(metrics.share.width);
-    expect(shellMetrics.trailingControl.height).toBe(metrics.share.height);
-    expect(metrics.share.width).toBe(metrics.moreActions.width);
-    expect(metrics.share.height).toBe(metrics.moreActions.height);
-    expect(metrics.fork.width).toBe(metrics.share.width);
-    expect(metrics.fork.height).toBe(metrics.share.height);
-    expect(metrics.forkIcon.width).toBe(15);
-    expect(metrics.forkIcon.height).toBe(15);
-    expect(metrics.shareIcon.width).toBe(15);
-    expect(metrics.shareIcon.height).toBe(15);
-    expect(metrics.moreActionsIcon.width).toBe(15);
-    expect(metrics.moreActionsIcon.height).toBe(15);
-    for (const control of shellMetrics.controls) {
-      expect(control.width).toBe(shellMetrics.trailingControl.width);
-      expect(control.height).toBe(shellMetrics.trailingControl.height);
-    }
-    expect(shellMetrics.trailingControl.right).toBeCloseTo(shellMetrics.furthestControlRight, 0);
-    expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
-    expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
-    expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
-    // #784: background work rides the measured status/action line, so a running job no longer buys
-    // the header a line of its own. The topbar, that line, and the worktree identity are all of it.
-    expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(105);
-    expect(metrics.share.width).toBeGreaterThanOrEqual(36);
-    expect(metrics.share.height).toBeGreaterThanOrEqual(36);
-    expect(metrics.moreActions.width).toBeGreaterThanOrEqual(36);
-    expect(metrics.moreActions.height).toBeGreaterThanOrEqual(36);
-    expect(metrics.statuses.right).toBeLessThanOrEqual(metrics.actions.x - 6);
-    expect(metrics.headerHeight).toBeLessThanOrEqual(79);
-    expect(metrics.hasHorizontalOverflow).toBe(false);
-    expect(metrics.statusAddsPageOverflow).toBe(false);
-    expect(metrics.statusIsClipped).toBe(false);
-    expect(metrics.statusOverflowX).toBe("clip");
-    expect(metrics.statusFlexWrap).toBe("nowrap");
-    expect(metrics.statusMaskImage).toBe("none");
-    expect(metrics.forkIsTopmostAtCenter).toBe(true);
-    expect(metrics.shareIsTopmostAtCenter).toBe(true);
-    expect(metrics.moreActionsIsTopmostAtCenter).toBe(true);
-    if (activeSubagentInline) {
-      expect(metrics.activeSubagentIsTopmostAtCenter).toBe(true);
-      expect(metrics.activeSubagent.x).toBeGreaterThanOrEqual(metrics.statuses.x);
-      expect(metrics.activeSubagent.right).toBeLessThanOrEqual(metrics.statuses.right);
-    }
-    expect(metrics.overflow.right).toBeLessThanOrEqual(metrics.fork.x);
-    expect(metrics.fork.x - metrics.overflow.right).toBeCloseTo(7, 0);
-    expect(metrics.fork.right).toBeLessThanOrEqual(metrics.share.x);
-    expect(metrics.share.x - metrics.fork.right).toBeCloseTo(7, 0);
-    expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
-    expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
-    expect(metrics.totalBadgeCount).toBe(5);
-    expect(metrics.badges.length).toBe(5 - hiddenCount);
-    expect(metrics.badgeRows).toBe(1);
-    const center = (box: { y: number; height: number }) => box.y + box.height / 2;
-    expect(Math.abs(center(metrics.actions) - center(metrics.firstVisibleStatus))).toBeLessThanOrEqual(1);
-    for (let index = 0; index < metrics.badges.length; index += 1) {
-      for (let other = index + 1; other < metrics.badges.length; other += 1) {
-        const left = metrics.badges[index]!;
-        const right = metrics.badges[other]!;
-        const overlaps = left.x < right.right && left.right > right.x &&
-          left.y < right.bottom && left.bottom > right.y;
-        expect(overlaps).toBe(false);
-      }
-    }
-
-    await overflowTrigger.click();
-    const statusPopover = page.getByRole("dialog", { name: "Session Statuses" });
-    await expect(statusPopover).toBeVisible();
-    await expect(statusPopover.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
-    await expect(statusPopover.getByText("Ready for Review", { exact: true })).toBeVisible();
-    await expect(statusPopover.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
-    await expect(statusPopover.getByText("Waiting on External Job", { exact: true })).toBeVisible();
-    await expect(statusPopover.getByRole("button", { name: "1 Worker Active" })).toBeEnabled();
-    await expect(statusPopover.getByLabel("All Session Statuses")).toBeFocused();
-    const popoverGeometry = await statusPopover.evaluate((element) => {
-      const box = element.getBoundingClientRect();
-      return {
-        left: box.left,
-        right: box.right,
-        contentWrap: getComputedStyle(element.querySelector(".session-status-popover-content")!).flexWrap,
-      };
-    });
-    expect(popoverGeometry.left).toBeGreaterThanOrEqual(8);
-    expect(popoverGeometry.right).toBeLessThanOrEqual(viewport.width - 8);
-    expect(popoverGeometry.contentWrap).toBe("wrap");
-    await capture(page, `narrow-${viewport.width}-status-popover`);
-    if (viewport.width === 390) {
-      await statusPopover.getByRole("button", { name: "Background Work: Waiting on External Job" }).click();
-      await expect(page.locator("#right-panel")).toHaveAccessibleName("Background Work");
-      await expect(overflowTrigger).toBeFocused();
-      await page.getByRole("button", { name: "Close Panel" }).click();
-    } else {
-      await page.keyboard.press("Escape");
-    }
-    await expect(statusPopover).toHaveCount(0);
-    if (viewport.width !== 390) await expect(overflowTrigger).toBeFocused();
-
-    await overflowTrigger.click();
-    await page.locator(".menu-backdrop").click({ position: { x: 300, y: 700 } });
-    await expect(statusPopover).toHaveCount(0);
-    await expect(overflowTrigger).toBeFocused();
-
-    await overflowTrigger.click();
-    await header.getByRole("button", { name: "Share" }).click();
-    await expect(statusPopover).toHaveCount(0);
-    await expect(page.getByRole("menu", { name: "Session Sharing" })).toBeVisible();
-    await overflowTrigger.click();
-    await expect(page.getByRole("menu", { name: "Session Sharing" })).toHaveCount(0);
-    await expect(statusPopover).toBeVisible();
-
-    await header.getByRole("button", { name: "More Actions" }).click();
-    await expect(statusPopover).toHaveCount(0);
-    const menu = page.getByRole("menu", { name: "Session Actions" });
-    await expect(menu).toBeVisible();
-    await expect(menu.locator(".menu-label", { hasText: "Status" })).toHaveCount(0);
-    await expect(menu.locator(".session-menu-statuses")).toHaveCount(0);
-    const projectHeader = menu.locator(".session-project-menu-header");
-    await expect(projectHeader).toContainText("Project");
-    expect(await projectHeader.evaluate((element) => getComputedStyle(element).textTransform)).toBe("none");
-    await expect(menu.getByRole("menuitem", { name: "Manage Project" })).toBeVisible();
-    await expect(menu.getByRole("menuitem", { name: "Move Session…" })).toBeVisible();
-    await expect(menu.getByRole("menuitem", { name: "Copy Internal Session Link" })).toHaveCount(0);
-    for (const item of await menu.getByRole("menuitem").all()) {
-      const box = await item.boundingBox();
-      expect(box?.height).toBeGreaterThanOrEqual(44);
-    }
-    if (viewport.width === 390) {
-      await menu.getByRole("menuitem", { name: "Move Session…" }).click();
-      const moveDialog = page.getByRole("dialog", { name: "Move to Project" });
-      await expect(moveDialog).toBeVisible();
-      await moveDialog.getByRole("button", { name: "Cancel" }).click();
-      await expect(header.getByRole("button", { name: "More Actions" })).toBeFocused();
-      await header.getByRole("button", { name: "Share" }).click();
-      await expect(menu).toHaveCount(0);
-      const shareMenu = page.getByRole("menu", { name: "Session Sharing" });
-      const copyLink = shareMenu.getByRole("menuitem", { name: "Copy Internal Session Link" });
-      await expect(copyLink).toBeEnabled();
-      await copyLink.click();
-      const note = header.locator(":scope > .session-header-note");
-      await expect(note).toContainText(/session link/i);
-      await expect(header.locator(".detail-actions .detail-note")).toHaveCount(0);
-      const noteMetrics = await header.evaluate((element) => {
-        const noteBox = element.querySelector(".session-header-note")!.getBoundingClientRect();
-        const statusBox = element.querySelector(".session-header-statuses")!.getBoundingClientRect();
-        const headerBox = element.getBoundingClientRect();
+        const clippingPane = element.closest(".inbox-preview-pane");
+        const allBadges = [...element.querySelectorAll<HTMLElement>(
+          ".session-header-statuses .status-badge, " +
+          ".session-header-statuses > .background-work-badge",
+        )];
+        const badges = allBadges.filter((node) => !node.hidden).map((node) => ({
+          ...rect(node),
+          label: node.getAttribute("aria-label") ?? node.textContent?.trim() ?? "unknown status",
+        }));
+        const statuses = element.querySelector(".session-header-statuses") as HTMLElement;
+        const actions = element.querySelector(".detail-actions") as HTMLElement;
+        const fork = element.querySelector('[aria-label="Fork Conversation"]') as HTMLElement;
+        const share = element.querySelector('[aria-label="Share"]') as HTMLElement;
+        const overflow = element.querySelector('.session-status-overflow-trigger') as HTMLElement;
+        const moreActions = element.querySelector('[aria-label="More Actions"]') as HTMLElement;
+        const activeSubagent = element.querySelector('[aria-label="1 Worker Active"]') as HTMLElement;
+        const statusStyle = getComputedStyle(statuses);
+        const pageScrollWidth = document.documentElement.scrollWidth;
+        statuses.style.display = "none";
+        const pageScrollWidthWithoutStatuses = document.documentElement.scrollWidth;
+        statuses.style.removeProperty("display");
+        const centerTarget = (target: HTMLElement) => {
+          const box = target.getBoundingClientRect();
+          const painted = document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2);
+          return painted === target || (painted !== null && target.contains(painted));
+        };
         return {
-          width: noteBox.width,
-          x: noteBox.x,
-          right: noteBox.right,
-          y: noteBox.y,
-          statusBottom: statusBox.bottom,
-          headerX: headerBox.x,
-          headerRight: headerBox.right,
-          paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
+          display: getComputedStyle(element).display,
+          statuses: rect(statuses),
+          firstVisibleStatus: badges[0],
+          actions: rect(actions),
+          fork: rect(fork),
+          forkIcon: rect(element.querySelector('[aria-label="Fork Conversation"] svg')!),
+          overflow: rect(overflow),
+          share: rect(share),
+          shareIcon: rect(element.querySelector('[aria-label="Share"] svg')!),
+          moreActions: rect(moreActions),
+          moreActionsIcon: rect(element.querySelector('[aria-label="More Actions"] svg')!),
+          activeSubagent: rect(activeSubagent),
+          badges,
+          totalBadgeCount: allBadges.length,
+          badgeRows: new Set(badges.map((badge) => Math.round(badge.y))).size,
+          headerHeight: element.getBoundingClientRect().height,
           hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
+          statusAddsPageOverflow: pageScrollWidth > pageScrollWidthWithoutStatuses,
+          statusIsClipped: Math.max(...badges.map((badge) => badge.right)) >
+            statuses.getBoundingClientRect().right,
+          statusOverflowX: statusStyle.overflowX,
+          statusFlexWrap: statusStyle.flexWrap,
+          statusMaskImage: statusStyle.maskImage || statusStyle.webkitMaskImage,
+          forkIsTopmostAtCenter: centerTarget(fork),
+          shareIsTopmostAtCenter: centerTarget(share),
+          moreActionsIsTopmostAtCenter: centerTarget(moreActions),
+          activeSubagentIsTopmostAtCenter: centerTarget(activeSubagent),
+          headerRight: element.getBoundingClientRect().right,
+          clippingRight: Math.min(
+            window.innerWidth, clippingPane?.getBoundingClientRect().right ?? window.innerWidth,
+          ),
+          paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
         };
       });
-      expect(noteMetrics.width).toBeGreaterThanOrEqual(140);
-      expect(noteMetrics.x).toBeGreaterThanOrEqual(noteMetrics.headerX);
-      expect(noteMetrics.y).toBeGreaterThanOrEqual(noteMetrics.statusBottom);
-      expect(noteMetrics.right).toBeLessThanOrEqual(noteMetrics.headerRight - noteMetrics.paddingRight + 1);
-      expect(noteMetrics.hasHorizontalOverflow).toBe(false);
-    }
+      const shellMetrics = await topbar.evaluate((element) => {
+        const topbarBox = element.getBoundingClientRect();
+        const back = element.querySelector('[aria-label="Back to Inbox"]')!.getBoundingClientRect();
+        const title = element.querySelector("h1")!.getBoundingClientRect();
+        const controls = [...element.querySelectorAll(".topbar-mobile-controls button")]
+          .map((node) => node.getBoundingClientRect());
+        const trailingControl = controls.reduce((furthest, box) => box.right > furthest.right ? box : furthest);
+        const style = getComputedStyle(element.querySelector("h1")!);
+        return {
+          top: topbarBox.top,
+          bottom: topbarBox.bottom,
+          right: topbarBox.right,
+          trailingControl: {
+            width: trailingControl.width, height: trailingControl.height, right: trailingControl.right,
+          },
+          back: { width: back.width, height: back.height, right: back.right },
+          title: { x: title.x, right: title.right, width: title.width },
+          titleFontSize: Number.parseFloat(style.fontSize),
+          controlsLeft: Math.min(...controls.map((box) => box.left)),
+          furthestControlRight: Math.max(...controls.map((box) => box.right)),
+          controls: controls.map((box) => ({ width: box.width, height: box.height })),
+        };
+      });
+      const subheaderBottom = await header.evaluate((element) => element.getBoundingClientRect().bottom);
+
+      expect(metrics.display).toBe("grid");
+      expect(shellMetrics.bottom - shellMetrics.top).toBeLessThanOrEqual(40.5);
+      expect(shellMetrics.titleFontSize).toBeLessThanOrEqual(14);
+      expect(shellMetrics.back.width).toBeGreaterThanOrEqual(36);
+      expect(shellMetrics.back.height).toBeGreaterThanOrEqual(36);
+      expect(shellMetrics.trailingControl.width).toBe(metrics.share.width);
+      expect(shellMetrics.trailingControl.height).toBe(metrics.share.height);
+      expect(metrics.share.width).toBe(metrics.moreActions.width);
+      expect(metrics.share.height).toBe(metrics.moreActions.height);
+      expect(metrics.fork.width).toBe(metrics.share.width);
+      expect(metrics.fork.height).toBe(metrics.share.height);
+      expect(metrics.forkIcon.width).toBe(15);
+      expect(metrics.forkIcon.height).toBe(15);
+      expect(metrics.shareIcon.width).toBe(15);
+      expect(metrics.shareIcon.height).toBe(15);
+      expect(metrics.moreActionsIcon.width).toBe(15);
+      expect(metrics.moreActionsIcon.height).toBe(15);
+      for (const control of shellMetrics.controls) {
+        expect(control.width).toBe(shellMetrics.trailingControl.width);
+        expect(control.height).toBe(shellMetrics.trailingControl.height);
+      }
+      expect(shellMetrics.trailingControl.right).toBeCloseTo(shellMetrics.furthestControlRight, 0);
+      expect(shellMetrics.title.x).toBeGreaterThanOrEqual(shellMetrics.back.right);
+      expect(shellMetrics.title.right).toBeLessThanOrEqual(shellMetrics.controlsLeft);
+      expect(shellMetrics.title.width).toBeGreaterThanOrEqual(72);
+      // #784: background work rides the measured status/action line, so a running job no longer buys
+      // the header a line of its own. The topbar, that line, and the worktree identity are all of it.
+      expect(subheaderBottom - shellMetrics.top).toBeLessThanOrEqual(105);
+      expect(metrics.share.width).toBeGreaterThanOrEqual(36);
+      expect(metrics.share.height).toBeGreaterThanOrEqual(36);
+      expect(metrics.moreActions.width).toBeGreaterThanOrEqual(36);
+      expect(metrics.moreActions.height).toBeGreaterThanOrEqual(36);
+      expect(metrics.statuses.right).toBeLessThanOrEqual(metrics.actions.x - 6);
+      expect(metrics.headerHeight).toBeLessThanOrEqual(79);
+      expect(metrics.hasHorizontalOverflow).toBe(false);
+      expect(metrics.statusAddsPageOverflow).toBe(false);
+      expect(metrics.statusIsClipped).toBe(false);
+      expect(metrics.statusOverflowX).toBe("clip");
+      expect(metrics.statusFlexWrap).toBe("nowrap");
+      expect(metrics.statusMaskImage).toBe("none");
+      expect(metrics.forkIsTopmostAtCenter).toBe(true);
+      expect(metrics.shareIsTopmostAtCenter).toBe(true);
+      expect(metrics.moreActionsIsTopmostAtCenter).toBe(true);
+      if (activeSubagentInline) {
+        expect(metrics.activeSubagentIsTopmostAtCenter).toBe(true);
+        expect(metrics.activeSubagent.x).toBeGreaterThanOrEqual(metrics.statuses.x);
+        expect(metrics.activeSubagent.right).toBeLessThanOrEqual(metrics.statuses.right);
+      }
+      expect(metrics.overflow.right).toBeLessThanOrEqual(metrics.fork.x);
+      expect(metrics.fork.x - metrics.overflow.right).toBeCloseTo(7, 0);
+      expect(metrics.fork.right).toBeLessThanOrEqual(metrics.share.x);
+      expect(metrics.share.x - metrics.fork.right).toBeCloseTo(7, 0);
+      expect(metrics.paddingRight).toBeGreaterThanOrEqual(12);
+      expect(metrics.clippingRight - metrics.moreActions.right).toBeGreaterThanOrEqual(11.5);
+      expect(metrics.totalBadgeCount).toBe(5);
+      expect(metrics.badges.length).toBe(5 - hiddenCount);
+      expect(metrics.badgeRows).toBe(1);
+      const center = (box: { y: number; height: number }) => box.y + box.height / 2;
+      expect(Math.abs(center(metrics.actions) - center(metrics.firstVisibleStatus))).toBeLessThanOrEqual(1);
+      for (let index = 0; index < metrics.badges.length; index += 1) {
+        for (let other = index + 1; other < metrics.badges.length; other += 1) {
+          const left = metrics.badges[index]!;
+          const right = metrics.badges[other]!;
+          const overlaps = left.x < right.right && left.right > right.x &&
+            left.y < right.bottom && left.bottom > right.y;
+          expect(overlaps).toBe(false);
+        }
+      }
+
+      await overflowTrigger.click();
+      const statusPopover = page.getByRole("dialog", { name: "Session Statuses" });
+      await expect(statusPopover).toBeVisible();
+      await expect(statusPopover.getByText("Awaiting Prompt", { exact: true })).toBeVisible();
+      await expect(statusPopover.getByText("Ready for Review", { exact: true })).toBeVisible();
+      await expect(statusPopover.getByText("Uncommitted Changes", { exact: true })).toBeVisible();
+      await expect(statusPopover.getByText("Waiting on External Job", { exact: true })).toBeVisible();
+      await expect(statusPopover.getByRole("button", { name: "1 Worker Active" })).toBeEnabled();
+      await expect(statusPopover.getByLabel("All Session Statuses")).toBeFocused();
+      const popoverGeometry = await statusPopover.evaluate((element) => {
+        const box = element.getBoundingClientRect();
+        return {
+          left: box.left,
+          right: box.right,
+          contentWrap: getComputedStyle(element.querySelector(".session-status-popover-content")!).flexWrap,
+        };
+      });
+      expect(popoverGeometry.left).toBeGreaterThanOrEqual(8);
+      expect(popoverGeometry.right).toBeLessThanOrEqual(viewport.width - 8);
+      expect(popoverGeometry.contentWrap).toBe("wrap");
+      await capture(page, `narrow-${viewport.width}-status-popover`);
+      if (viewport.width === 390) {
+        await statusPopover.getByRole("button", { name: "Background Work: Waiting on External Job" }).click();
+        await expect(page.locator("#right-panel")).toHaveAccessibleName("Background Work");
+        await expect(overflowTrigger).toBeFocused();
+        await page.getByRole("button", { name: "Close Panel" }).click();
+      } else {
+        await page.keyboard.press("Escape");
+      }
+      await expect(statusPopover).toHaveCount(0);
+      if (viewport.width !== 390) await expect(overflowTrigger).toBeFocused();
+
+      await overflowTrigger.click();
+      await page.locator(".menu-backdrop").click({ position: { x: 300, y: 700 } });
+      await expect(statusPopover).toHaveCount(0);
+      await expect(overflowTrigger).toBeFocused();
+
+      await overflowTrigger.click();
+      await header.getByRole("button", { name: "Share" }).click();
+      await expect(statusPopover).toHaveCount(0);
+      await expect(page.getByRole("menu", { name: "Session Sharing" })).toBeVisible();
+      await overflowTrigger.click();
+      await expect(page.getByRole("menu", { name: "Session Sharing" })).toHaveCount(0);
+      await expect(statusPopover).toBeVisible();
+
+      await header.getByRole("button", { name: "More Actions" }).click();
+      await expect(statusPopover).toHaveCount(0);
+      const menu = page.getByRole("menu", { name: "Session Actions" });
+      await expect(menu).toBeVisible();
+      await expect(menu.locator(".menu-label", { hasText: "Status" })).toHaveCount(0);
+      await expect(menu.locator(".session-menu-statuses")).toHaveCount(0);
+      const projectHeader = menu.locator(".session-project-menu-header");
+      await expect(projectHeader).toContainText("Project");
+      expect(await projectHeader.evaluate((element) => getComputedStyle(element).textTransform)).toBe("none");
+      await expect(menu.getByRole("menuitem", { name: "Manage Project" })).toBeVisible();
+      await expect(menu.getByRole("menuitem", { name: "Move Session…" })).toBeVisible();
+      await expect(menu.getByRole("menuitem", { name: "Copy Internal Session Link" })).toHaveCount(0);
+      for (const item of await menu.getByRole("menuitem").all()) {
+        const box = await item.boundingBox();
+        expect(box?.height).toBeGreaterThanOrEqual(44);
+      }
+      if (viewport.width === 390) {
+        await menu.getByRole("menuitem", { name: "Move Session…" }).click();
+        const moveDialog = page.getByRole("dialog", { name: "Move to Project" });
+        await expect(moveDialog).toBeVisible();
+        await moveDialog.getByRole("button", { name: "Cancel" }).click();
+        await expect(header.getByRole("button", { name: "More Actions" })).toBeFocused();
+        await header.getByRole("button", { name: "Share" }).click();
+        await expect(menu).toHaveCount(0);
+        const shareMenu = page.getByRole("menu", { name: "Session Sharing" });
+        const copyLink = shareMenu.getByRole("menuitem", { name: "Copy Internal Session Link" });
+        await expect(copyLink).toBeEnabled();
+        await copyLink.click();
+        const note = header.locator(":scope > .session-header-note");
+        await expect(note).toContainText(/session link/i);
+        await expect(header.locator(".detail-actions .detail-note")).toHaveCount(0);
+        const noteMetrics = await header.evaluate((element) => {
+          const noteBox = element.querySelector(".session-header-note")!.getBoundingClientRect();
+          const statusBox = element.querySelector(".session-header-statuses")!.getBoundingClientRect();
+          const headerBox = element.getBoundingClientRect();
+          return {
+            width: noteBox.width,
+            x: noteBox.x,
+            right: noteBox.right,
+            y: noteBox.y,
+            statusBottom: statusBox.bottom,
+            headerX: headerBox.x,
+            headerRight: headerBox.right,
+            paddingRight: Number.parseFloat(getComputedStyle(element).paddingRight),
+            hasHorizontalOverflow: element.scrollWidth > element.clientWidth,
+          };
+        });
+        expect(noteMetrics.width).toBeGreaterThanOrEqual(140);
+        expect(noteMetrics.x).toBeGreaterThanOrEqual(noteMetrics.headerX);
+        expect(noteMetrics.y).toBeGreaterThanOrEqual(noteMetrics.statusBottom);
+        expect(noteMetrics.right).toBeLessThanOrEqual(noteMetrics.headerRight - noteMetrics.paddingRight + 1);
+        expect(noteMetrics.hasHorizontalOverflow).toBe(false);
+      }
+    });
   });
 }
 
@@ -1291,37 +1296,42 @@ test("unbroken 120-character session titles truncate without overlapping bar act
   expect(metrics.clippingRight - metrics.moreActionsRight).toBeGreaterThanOrEqual(11.5);
 });
 
-test("the two mobile Session bars use compact touch targets and a bounded menu near the breakpoint", async ({ page }) => {
-  await page.setViewportSize({ width: 700, height: 800 });
-  await openSession(page, "preview-follow", { sessionShell: "1" });
-  const header = page.locator(".session-detail > .detail-head");
-  const actions = header.locator(".detail-actions");
-  const backBox = await page.locator(".topbar").getByRole("button", { name: "Back to Inbox" }).boundingBox();
-  const headerBox = await header.boundingBox();
+test.describe("with a touch pointer", () => {
+  // Its 44px menu rows are a touch size, keyed to the pointer rather than the viewport (#1799).
+  test.use({ hasTouch: true });
 
-  expect(backBox?.width).toBeGreaterThanOrEqual(36);
-  expect(backBox?.height).toBeGreaterThanOrEqual(36);
-  expect(headerBox?.height).toBeLessThanOrEqual(45);
+  test("the two mobile Session bars use compact touch targets and a bounded menu near the breakpoint", async ({ page }) => {
+    await page.setViewportSize({ width: 700, height: 800 });
+    await openSession(page, "preview-follow", { sessionShell: "1" });
+    const header = page.locator(".session-detail > .detail-head");
+    const actions = header.locator(".detail-actions");
+    const backBox = await page.locator(".topbar").getByRole("button", { name: "Back to Inbox" }).boundingBox();
+    const headerBox = await header.boundingBox();
 
-  const moreActions = actions.getByRole("button", { name: "More Actions" });
-  const trailingClearance = await moreActions.evaluate((element) => {
-    const clippingPane = element.closest(".inbox-preview-pane");
-    if (!clippingPane) throw new Error("More Actions is not mounted in the clipping pane");
-    return Math.min(window.innerWidth, clippingPane.getBoundingClientRect().right)
-      - element.getBoundingClientRect().right;
+    expect(backBox?.width).toBeGreaterThanOrEqual(36);
+    expect(backBox?.height).toBeGreaterThanOrEqual(36);
+    expect(headerBox?.height).toBeLessThanOrEqual(45);
+
+    const moreActions = actions.getByRole("button", { name: "More Actions" });
+    const trailingClearance = await moreActions.evaluate((element) => {
+      const clippingPane = element.closest(".inbox-preview-pane");
+      if (!clippingPane) throw new Error("More Actions is not mounted in the clipping pane");
+      return Math.min(window.innerWidth, clippingPane.getBoundingClientRect().right)
+        - element.getBoundingClientRect().right;
+    });
+    expect(trailingClearance).toBeGreaterThanOrEqual(11.5);
+    await moreActions.click();
+    const menu = page.getByRole("menu", { name: "Session Actions" });
+    await expect(menu).toBeVisible();
+    const triggerBox = await moreActions.boundingBox();
+    const menuBox = await menu.boundingBox();
+    expect(menuBox!.y).toBeGreaterThanOrEqual(triggerBox!.y + triggerBox!.height);
+    expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(800);
+    for (const item of await menu.getByRole("menuitem").all()) {
+      const box = await item.boundingBox();
+      expect(box?.height).toBeGreaterThanOrEqual(44);
+    }
   });
-  expect(trailingClearance).toBeGreaterThanOrEqual(11.5);
-  await moreActions.click();
-  const menu = page.getByRole("menu", { name: "Session Actions" });
-  await expect(menu).toBeVisible();
-  const triggerBox = await moreActions.boundingBox();
-  const menuBox = await menu.boundingBox();
-  expect(menuBox!.y).toBeGreaterThanOrEqual(triggerBox!.y + triggerBox!.height);
-  expect(menuBox!.y + menuBox!.height).toBeLessThanOrEqual(800);
-  for (const item of await menu.getByRole("menuitem").all()) {
-    const box = await item.boundingBox();
-    expect(box?.height).toBeGreaterThanOrEqual(44);
-  }
 });
 
 test("the mobile Session name uses compact typography to reveal more of a long title", async ({ page }) => {

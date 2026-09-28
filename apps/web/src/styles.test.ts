@@ -40,11 +40,13 @@ test("the iOS focus-zoom guard is the final rule in the stylesheet", () => {
   // Scope as well as position: checking only for the composer selector would stay green if the
   // other three selectors were dropped, or if the rule were moved outside the phone media query,
   // while Automation and Usage controls silently went back to zooming on focus.
-  const lastMedia = css.lastIndexOf("@media (max-width: 760px)");
+  // Phones AND every coarse pointer (#1799): a touch tablet zooms on focus exactly as a phone does,
+  // and the coarse-pointer block is what sizes its fields.
+  const lastMedia = css.lastIndexOf("@media (max-width: 760px), (pointer: coarse)");
   assert.ok(lastMedia !== -1 && lastMedia < guard,
-    "the guard must live inside the phone-width media query");
+    "the guard must live inside the phone-width and coarse-pointer media query");
   const guardedRule = css.slice(lastMedia);
-  for (const selector of [":root select", ":root input", ":root textarea", ":root .composer-input"]) {
+  for (const selector of [":root select", ":root input", ":root textarea", ":root .ui-select-trigger", ":root .composer-input"]) {
     assert.ok(guardedRule.includes(selector),
       `the focus-zoom guard must still cover ${selector}`);
   }

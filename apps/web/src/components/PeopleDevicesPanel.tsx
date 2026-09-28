@@ -484,7 +484,7 @@ function TeamDialog({
       footer={
         <>
           {team && (
-            <button type="button" className="btn danger access-dialog-danger" onClick={() => void remove()} disabled={busy}>
+            <button type="button" className="btn ghost danger access-dialog-danger" onClick={() => void remove()} disabled={busy}>
               Delete Team
             </button>
           )}

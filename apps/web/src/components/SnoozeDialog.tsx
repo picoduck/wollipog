@@ -259,7 +259,6 @@ export function SnoozeDialog({
   return (
     <Modal
       {...(returnFocusRef ? { returnFocusRef } : {})}
-      className="snooze-dialog"
       title={creatingFromDraft
         ? "Create New Reminder"
         : reschedulingFiredReminder

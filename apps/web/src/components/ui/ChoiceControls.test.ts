@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   SELECT_LIST_CHROME_PX,
   SELECT_MENU_MAX_HEIGHT_PX,
   TOUCH_OPTION_MIN_HEIGHT_PX,
+  TOUCH_TARGET_MEDIA,
   filterSearchableComboboxOptions,
   selectMenuDesiredHeight,
 } from "./ChoiceControls.js";
@@ -85,6 +88,19 @@ test("the touch floor raises the per-option budget without lowering a taller est
   });
   assert.equal(explicitTall, 2 * 96 + SELECT_LIST_CHROME_PX,
     "a caller who budgeted MORE than the touch floor keeps its own number");
+});
+
+test("the touch constants are the stylesheet's coarse-pointer block, character for character", () => {
+  // The list budget is only right while these agree with what styles.css renders (#832). Touch
+  // sizing is keyed to the pointer (#1799): the one block that resizes --control-h, which is also
+  // the min-height every `.ui-select-option` takes.
+  const sheet = readFileSync(fileURLToPath(new URL("../../styles.css", import.meta.url)), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
+  const block = /@media ([^{]+)\{\s*:root \{[^}]*--control-h:\s*(\d+)px;/.exec(sheet);
+  assert.ok(block, "the stylesheet has a block that resizes --control-h");
+  assert.equal(block[1]!.trim(), TOUCH_TARGET_MEDIA);
+  assert.equal(Number(block[2]), TOUCH_OPTION_MIN_HEIGHT_PX);
+  assert.match(sheet, /\.ui-select-option,\s*\.ui-searchable-combobox-list \.ui-inline-listbox-option \{[^}]*min-height: var\(--control-h\);/);
 });
 
 test("a mouse pointer keeps the compact estimate", () => {

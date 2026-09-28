@@ -59,7 +59,10 @@ for (const scheme of SCHEMES) {
   // inherited from the shared `:root`. Resolving light without that fallback would report
   // "unresolvable" for every shared token and quietly shrink the test's coverage. A scheme block
   // is an override on top of that, for the same reason.
-  const dark = tokenTable(DARK_SELECTOR);
+  // Under both, the shared `:root` block: the §2.2 role tokens (`--primary-bg`, `--primary-fg`) are
+  // declared there once with `var()`, so a rule that pairs them resolves through the palette of the
+  // theme being measured. Without it `.btn.primary` would be unresolvable rather than measured.
+  const dark = new Map([...tokenTable(":root"), ...tokenTable(DARK_SELECTOR)]);
   const light = new Map([...dark, ...tokenTable(LIGHT_SELECTOR)]);
   if (scheme === "wollipog") {
     TOKENS["wollipog:dark"] = dark;

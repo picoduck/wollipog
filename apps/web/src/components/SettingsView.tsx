@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
+import React, { useCallback, useEffect, useId, useRef, useState, type ReactNode } from "react";
 import {
   PROTOCOL_VERSION,
   type AgentDriverKind,
@@ -1033,6 +1033,7 @@ export function SessionNamingPanel() {
   const [customEndpoint, setCustomEndpoint] = useState("");
   const [customModel, setCustomModel] = useState("");
   const [customTimeout, setCustomTimeout] = useState("5000");
+  const timeoutUnitId = `${useId()}-timeout-unit`;
   const [customApiKey, setCustomApiKey] = useState("");
 
   useEffect(() => {
@@ -1399,15 +1400,19 @@ export function SessionNamingPanel() {
             </label>
             <label className="field">
               <span>Timeout</span>
-              <input
-                aria-label="Timeout"
-                type="number"
-                min={250}
-                max={30000}
-                value={customTimeout}
-                disabled={!settings.canManage || busy || customBusy}
-                onChange={(event) => setCustomTimeout(event.target.value)}
-              />
+              <span className="input-affix">
+                <input
+                  aria-label="Timeout"
+                  aria-describedby={timeoutUnitId}
+                  type="number"
+                  min={250}
+                  max={30000}
+                  value={customTimeout}
+                  disabled={!settings.canManage || busy || customBusy}
+                  onChange={(event) => setCustomTimeout(event.target.value)}
+                />
+                <span className="input-affix-text" id={timeoutUnitId}>ms</span>
+              </span>
             </label>
             <label className="field session-naming-key-field">
               <span>API Key</span>

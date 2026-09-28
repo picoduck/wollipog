@@ -606,7 +606,7 @@ export function SessionApprovalBanner({
               <button
                 key={option.optionId}
                 type="button"
-                className={`btn ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
+                className={`btn ${option.kind?.startsWith("allow") ? "primary" : "ghost danger"}`}
                 disabled={busy || blocksApproval || blocksProviderLogin || responseRefusal !== null}
                 aria-describedby={refusalDescription}
                 onClick={() => void decide(option.optionId)}
@@ -652,7 +652,7 @@ export function SessionApprovalBanner({
               title={option.optionId === "auth:login" && runner?.canManage === false
                 ? "Machine owner or organization admin permission is required"
                 : option.description}
-              className={`btn ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
+              className={`btn ${option.kind?.startsWith("allow") ? "primary" : "ghost danger"}`}
               disabled={busy || (decisionNeedsRunner && !runnerOnline) ||
                 (option.optionId === "auth:login" && runner?.canManage === false) || responseRefusal !== null}
               aria-describedby={refusalDescription}
@@ -707,7 +707,7 @@ export function SessionApprovalBanner({
                 title={providerLoginBlocked
                   ? "Machine owner or organization admin permission is required"
                   : option.description}
-                className={`btn sm ${option.kind?.startsWith("allow") ? "primary" : "danger"}`}
+                className={`btn sm ${option.kind?.startsWith("allow") ? "primary" : "ghost danger"}`}
                 disabled={busy || evidenceBlocksApproval || providerLoginBlocked ||
                   (decisionNeedsRunner && !runnerOnline) || responseRefusal !== null}
                 aria-describedby={refusalDescription}

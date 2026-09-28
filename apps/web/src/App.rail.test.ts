@@ -212,7 +212,7 @@ test("Inbox project tabs stay balanced, hide overflow chrome, and reveal context
   assert.match(css, /\.inbox-toolbar\s*\{[^}]*align-items:\s*center;[^}]*padding:\s*7px 14px;/);
   assert.match(css, /\.inbox-tabs\s*\{[^}]*overflow-x:\s*auto;[^}]*overflow-y:\s*hidden;[^}]*scrollbar-width:\s*none;/);
   assert.match(css, /\.inbox-tabs::-webkit-scrollbar\s*\{\s*display:\s*none;/);
-  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-project-menu\s*\{[^}]*width:\s*44px;[\s\S]*\.inbox-project-menu-trigger\s*\{[^}]*flex:\s*0 0 44px;[^}]*min-width:\s*44px;[^}]*height:\s*44px;[\s\S]*\.inbox-tab-group\.has-menu \.inbox-tab\s*\{\s*padding-right:\s*48px;/,
+  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-project-menu\s*\{[^}]*width:\s*var\(--control-h\);[\s\S]*\.inbox-project-menu-trigger\s*\{[^}]*flex:\s*0 0 var\(--control-h\);[^}]*min-width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);[\s\S]*\.inbox-tab-group\.has-menu \.inbox-tab\s*\{\s*padding-right:\s*calc\(var\(--control-h\) \+ var\(--space-1\)\);/,
     "touch layouts reserve enough room for the always-visible Project action target");
   assert.match(css, /\.inbox-project-menu\s*\{[^}]*width:\s*34px;[^}]*linear-gradient\(90deg, transparent, var\(--bg-elev-2\) 42%\)/,
     "the hover action overlays and fades the tab's trailing text");
@@ -254,8 +254,10 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "Project management lives in the rail instead of the Project bar");
   assert.doesNotMatch(commandPalette, /views\.splice\([^;]*Manage Projects/,
     "the command palette derives its single Projects destination from the global rail vocabulary");
-  assert.match(css, /\.inbox-create-control\s*\{[^}]*width:\s*34px;[^}]*height:\s*34px;/);
-  assert.match(css, /@media \(hover: none\), \(pointer: coarse\)[\s\S]*\.inbox-create-control\s*\{[^}]*width:\s*44px;[^}]*height:\s*44px;/,
+  // #183's touch target now comes from the one coarse-pointer block (#1799): the control is sized
+  // by --control-h, which that block resizes to 44px on a touch screen at any width.
+  assert.match(css, /\.inbox-create-control\s*\{[^}]*width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);/);
+  assert.match(css, /@media \(pointer: coarse\) \{\s*:root \{[^}]*--control-h:\s*44px;/,
     "the shared creation control keeps a touch-sized target");
   assert.match(projectsView, /Projects organize related sessions\. Locations are folders on connected machines where sessions run\./);
   assert.match(projectsView, /className="muted project-detail-meta">Project ID:/);
@@ -300,14 +302,14 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "Project management uses the atomic Project-scoped Location creation API");
   assert.match(css, /\.project-location-create-toggle\s*\{[^}]*width:\s*100%;[^}]*text-align:\s*left;/,
     "the collapsed creation disclosure remains a full-width readable target");
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.project-manager-back\s*\{[^}]*min-height:\s*44px/,
-    "the mobile Projects back target remains usable without a coarse-pointer media query");
+  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.project-manager-back\s*\{[^}]*min-height:\s*var\(--control-h\)/,
+    "the mobile Projects back target is one control height, which a touch screen makes 44px");
 });
 
 test("Inbox Search is compact by default and expands for keyboard or populated use", () => {
   assert.match(inbox, /className=\{`inbox-search\$\{query \? " has-query" : ""\}`\}/);
   assert.match(inbox, /<SearchIcon size=\{15\} \/>/);
-  assert.match(css, /\.inbox-search\s*\{[^}]*width:\s*34px;[^}]*min-width:\s*34px;[^}]*height:\s*34px;/,
+  assert.match(css, /\.inbox-search\s*\{[^}]*width:\s*var\(--control-h\);[^}]*min-width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);/,
     "idle Search only occupies one icon target");
   assert.match(css, /\.inbox-search:focus-within,\s*\.inbox-search\.has-query\s*\{[^}]*width:\s*min\(250px, 28vw\);[^}]*min-width:\s*150px;/,
     "focus and a retained query both keep Search expanded");
@@ -450,10 +452,12 @@ test("the Collaboration Pod header action is one accessible plus-icon control ac
   assert.match(app, /function NewPodHeaderButton[\s\S]*className="icon-btn topbar-create"[\s\S]*title="New Collaboration Pod"[\s\S]*aria-label="New Collaboration Pod"[\s\S]*<PlusIcon/);
   assert.equal([...app.matchAll(/<NewPodHeaderButton onClick=\{onNewPod\} \/>/g)].length, 2,
     "mobile and desktop paths must reuse the same pod action");
-  assert.match(css, /\.topbar-create\.icon-btn \{[^}]*width: 32px;[^}]*height: 32px/,
+  // An `.icon-btn` is one square control height (#1799): 32px with a mouse, and 44px on a touch
+  // screen through the coarse-pointer block, so the action carries no size of its own.
+  assert.match(css, /\n\.icon-btn \{[^}]*width: var\(--control-h\);[^}]*height: var\(--control-h\)/,
     "the desktop action must remain compact");
-  assert.match(css, /\.topbar-mobile-controls \.topbar-create\.icon-btn \{[^}]*width: 44px;[^}]*height: 44px/,
-    "the phone action must retain a full touch target");
+  assert.doesNotMatch(css, /\.topbar-create\.icon-btn \{[^}]*(width|height):/,
+    "the phone action must retain a full touch target, which is the token's, not a patch");
 });
 
 test("keyboard reachability does not depend on optional viewport metadata alone", () => {

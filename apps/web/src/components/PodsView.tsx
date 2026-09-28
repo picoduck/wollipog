@@ -709,7 +709,7 @@ function PodDetailContent({ podId }: { podId: string }) {
             {busy === "orchestration-policy" ? "Saving…" : policyDirty ? "Save Policy" : "Policy Saved"}
           </button>
           {orchestrationRunning ? (
-            <button className="btn danger" disabled={Boolean(busy)} onClick={() => void stopOrchestration()}>
+            <button className="btn ghost danger" disabled={Boolean(busy)} onClick={() => void stopOrchestration()}>
               {busy === "orchestration-stop" ? "Stopping…" : "Stop Auto-Advance"}
             </button>
           ) : (

@@ -447,7 +447,7 @@ function SessionCard({
             {session.pendingApproval.options.map((o) => (
               <button
                 key={o.optionId}
-                className={`btn sm ${o.kind?.startsWith("allow") ? "primary" : "danger"}`}
+                className={`btn sm ${o.kind?.startsWith("allow") ? "primary" : "ghost danger"}`}
                 disabled={busy || !runnerOnline || respondRefusal !== null}
                 aria-describedby={respondRefusal !== null ? `card-approval-refusal-${session.id}` : undefined}
                 onClick={(e) => approve(e, o.optionId)}

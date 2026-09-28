@@ -41,7 +41,8 @@ test("evidence actions remain reachable in a short desktop panel with child requ
   for (const button of ["Approve", "Deny"]) {
     const height = await page.getByRole("button", { name: button }).evaluate((element) =>
       element.getBoundingClientRect().height);
-    expect(height).toBeGreaterThanOrEqual(44);
+    // One control height with this mouse (#1799); a touch screen makes it 44px.
+    expect(height).toBe(32);
   }
 });
 

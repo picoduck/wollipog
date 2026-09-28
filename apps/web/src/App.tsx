@@ -641,7 +641,7 @@ export function Shell() {
       {!isMobile && <EditorSelect key={view.id} sessionId={view.id} />}
       <button
         type="button"
-        className={`icon-btn${pinnedOpen ? " is-on" : ""}`}
+        className="icon-btn"
         onClick={() => setPinnedOpen((v) => !v)}
         title="Toggle Pinned Summary"
         aria-label="Toggle Pinned Summary"
@@ -651,7 +651,7 @@ export function Shell() {
       </button>
       <button
         type="button"
-        className={`icon-btn${terminalSupported && dockVisible ? " is-on" : ""}`}
+        className="icon-btn"
         onClick={() => {
           if (terminalSupported) setDockVisible((v) => !v);
           else rightPanel.show("launcher");
@@ -666,7 +666,7 @@ export function Shell() {
       </button>
       <button
         type="button"
-        className={`icon-btn${rightPanel.open ? " is-on" : ""}`}
+        className="icon-btn"
         onClick={rightPanel.toggle}
         title={rightPanel.open ? "Hide side panel" : "Show side panel"}
         aria-label={rightPanel.open ? "Hide Side Panel" : "Show Side Panel"}

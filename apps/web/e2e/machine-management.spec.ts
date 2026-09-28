@@ -6,6 +6,10 @@ const recoveryGeometry = (notice: HTMLElement) => {
   const noticeRect = notice.getBoundingClientRect();
   const messageRect = message.getBoundingClientRect();
   const buttonRect = button?.getBoundingClientRect() ?? null;
+  // The label's own extent. `scrollWidth` also counts a touch hit area, which reaches past the
+  // button on purpose and is not clipped text.
+  const label = button ? document.createRange() : null;
+  label?.selectNodeContents(button!);
   return {
     notice: { left: noticeRect.left, right: noticeRect.right, width: noticeRect.width },
     message: { left: messageRect.left, right: messageRect.right, bottom: messageRect.bottom, width: messageRect.width },
@@ -17,6 +21,7 @@ const recoveryGeometry = (notice: HTMLElement) => {
       height: buttonRect.height,
       clientWidth: button!.clientWidth,
       scrollWidth: button!.scrollWidth,
+      labelWidth: label!.getBoundingClientRect().width,
       clientHeight: button!.clientHeight,
       scrollHeight: button!.scrollHeight,
       whiteSpace: getComputedStyle(button!).whiteSpace,
@@ -370,9 +375,11 @@ test("offline recovery stays stacked and usable in a narrow card on a desktop vi
   expect(geometry.button).not.toBeNull();
   expect(geometry.button!.top).toBeGreaterThanOrEqual(geometry.message.bottom + 11);
   expect(Math.abs(geometry.button!.left - geometry.message.left)).toBeLessThanOrEqual(0.5);
-  expect(Math.abs(geometry.button!.width - geometry.message.width)).toBeLessThanOrEqual(0.5);
+  // At its own width under the message, not stretched into a bar (§3.1), and a small button's
+  // control height: 28px with this fine pointer.
+  expect(geometry.button!.width).toBeLessThanOrEqual(geometry.message.width + 0.5);
   expect(geometry.button!.right).toBeLessThanOrEqual(geometry.notice.right + 0.5);
-  expect(geometry.button!.height).toBeGreaterThanOrEqual(44);
+  expect(geometry.button!.height).toBe(28);
   expect(geometry.button!.whiteSpace).toBe("nowrap");
   expect(geometry.button!.scrollWidth).toBeLessThanOrEqual(geometry.button!.clientWidth);
   expect(geometry.button!.scrollHeight).toBeLessThanOrEqual(geometry.button!.clientHeight);
@@ -381,22 +388,36 @@ test("offline recovery stays stacked and usable in a narrow card on a desktop vi
   await expect(page.getByRole("dialog", { name: "Repair Runner Connection" })).toBeVisible();
 });
 
-test("offline recovery stays stacked and usable on a narrow mobile viewport", async ({ page }) => {
-  await page.setViewportSize({ width: 320, height: 720 });
-  await setOffline(page);
+test.describe("on a touch phone", () => {
+  // Touch sizing follows the pointer, not the viewport (#1799), so the 44px target is measured
+  // where a finger is: a coarse-pointer context.
+  test.use({ viewport: { width: 320, height: 720 }, hasTouch: true, isMobile: true });
 
-  const repair = page.getByRole("button", { name: "Repair Credentials", exact: true });
-  await expect(repair).toBeVisible();
-  const geometry = await page.locator(".connection-recovery").evaluate(recoveryGeometry);
-  expect(geometry.button).not.toBeNull();
-  expect(geometry.button!.top).toBeGreaterThanOrEqual(geometry.message.bottom + 11);
-  expect(Math.abs(geometry.button!.left - geometry.message.left)).toBeLessThanOrEqual(0.5);
-  expect(Math.abs(geometry.button!.width - geometry.message.width)).toBeLessThanOrEqual(0.5);
-  expect(geometry.button!.height).toBeGreaterThanOrEqual(44);
-  expect(geometry.button!.whiteSpace).toBe("nowrap");
-  expect(geometry.button!.scrollWidth).toBeLessThanOrEqual(geometry.button!.clientWidth);
-  expect(geometry.notice.left).toBeGreaterThanOrEqual(-0.5);
-  expect(geometry.notice.right).toBeLessThanOrEqual(320.5);
+  test("offline recovery stays stacked and usable on a narrow mobile viewport", async ({ page }) => {
+    await setOffline(page);
+    expect(await page.evaluate(() => matchMedia("(pointer: coarse)").matches)).toBe(true);
+
+    const repair = page.getByRole("button", { name: "Repair Credentials", exact: true });
+    await expect(repair).toBeVisible();
+    const geometry = await page.locator(".connection-recovery").evaluate(recoveryGeometry);
+    expect(geometry.button).not.toBeNull();
+    expect(geometry.button!.top).toBeGreaterThanOrEqual(geometry.message.bottom + 11);
+    expect(Math.abs(geometry.button!.left - geometry.message.left)).toBeLessThanOrEqual(0.5);
+    expect(geometry.button!.width).toBeLessThanOrEqual(geometry.message.width + 0.5);
+    // A small button is 36px to look at on touch and borrows 4px on each side for a 44px target.
+    expect(geometry.button!.height).toBeGreaterThanOrEqual(36);
+    const hitsEdges = await repair.evaluate((element) => {
+      element.scrollIntoView({ block: "center" });
+      const rect = element.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      return [rect.top - 3.5, rect.bottom + 3.5].every((y) => element.contains(document.elementFromPoint(x, y)));
+    });
+    expect(hitsEdges, "the 44px hit area reaches past the visible button").toBe(true);
+    expect(geometry.button!.whiteSpace).toBe("nowrap");
+    expect(geometry.button!.labelWidth).toBeLessThanOrEqual(geometry.button!.clientWidth);
+    expect(geometry.notice.left).toBeGreaterThanOrEqual(-0.5);
+    expect(geometry.notice.right).toBeLessThanOrEqual(320.5);
+  });
 });
 
 test("non-admin recovery guidance wraps inside a narrow mobile card", async ({ page }) => {

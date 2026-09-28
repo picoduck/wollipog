@@ -206,8 +206,12 @@ async function inkOf(page: Page, locator: Locator, options: InkOptions = {}): Pr
  *   knob on its own besides, because an aggregate cannot show that each sub-affordance survived.
  * - `chevron` was 12 against a measured 24 that is two symmetric 12-pixel segments, so
  *   `clip-path: inset(0 0 50% 0)` kept exactly enough. It is now 20.
+ * - #1799 shrank the switch to the design system's 32x18 track with a 12px knob (§8.4), so both
+ *   switch floors were measured again rather than scaled: the intact track paints 282–338 across
+ *   every state, and 158–212 with the knob hidden, so `track` sits at 250, between the two. The knob
+ *   alone paints 126–144, so `knob` is 80.
  */
-const INK = { track: 400, knob: 150, chevron: 20, icon: 55 } as const;
+const INK = { track: 250, knob: 80, chevron: 20, icon: 55 } as const;
 
 /**
  * Floors for the Appearance controls, set as ANTI-ERASURE bars rather than as tuned baselines.
@@ -1068,64 +1072,76 @@ test("tabbing through each section reaches every row kind", async ({ page }) => 
     .toEqual(["ui-row-nav", "ui-row-switch"]);
 });
 
-test("Agent Harness defaults are keyboard-operable, cascade by model, and keep one editor open", async ({ page }) => {
-  await useHarness(page, "dark", { section: "behavior", defaults: "agent" });
-  const defaults = page.getByRole("button", { name: /Default Models, Efforts, and Permissions/ });
-  await defaults.focus();
-  await page.keyboard.press("Enter");
-  await expect(defaults).toHaveAttribute("aria-expanded", "true");
-  const refresh = page.getByRole("button", { name: "Refresh" });
-  await expect(refresh).toBeVisible();
-  await page.setViewportSize({ width: 390, height: 844 });
-  expect((await refresh.boundingBox())?.height).toBeGreaterThanOrEqual(44);
+test.describe("with a touch pointer", () => {
+  // Its phone-width target size is a touch size, keyed to the pointer rather than the viewport (#1799).
+  test.use({ hasTouch: true });
 
-  const harnessRows = page.locator(".agent-defaults-item > .ui-row-nav");
-  const codex = harnessRows.filter({ hasText: "Codex App Server" });
-  await codex.focus();
-  await page.keyboard.press("Enter");
-  await expect(codex).toHaveAttribute("aria-expanded", "true");
-  const model = page.getByRole("button", { name: /^Codex App Server Model:/ });
-  await model.focus();
-  await page.keyboard.press("Enter");
-  const modelList = page.getByRole("listbox", { name: "Codex App Server Model" });
-  await expect(modelList).toBeFocused();
-  await page.keyboard.press("End");
-  await page.keyboard.press("Enter");
-  await expect(model).toHaveAccessibleName(/Sol/);
-  await expect(page.getByRole("button", { name: /^Codex App Server Reasoning Effort:/ }))
-    .toHaveAccessibleName(/Choose Effort/);
+  test("Agent Harness defaults are keyboard-operable, cascade by model, and keep one editor open", async ({ page }) => {
+    await useHarness(page, "dark", { section: "behavior", defaults: "agent" });
+    const defaults = page.getByRole("button", { name: /Default Models, Efforts, and Permissions/ });
+    await defaults.focus();
+    await page.keyboard.press("Enter");
+    await expect(defaults).toHaveAttribute("aria-expanded", "true");
+    const refresh = page.getByRole("button", { name: "Refresh" });
+    await expect(refresh).toBeVisible();
+    await page.setViewportSize({ width: 390, height: 844 });
+    // A small button on touch: 36px to look at, with a 44px hit area that reaches 4px past each edge.
+    expect((await refresh.boundingBox())?.height).toBeGreaterThanOrEqual(36);
+    expect(await refresh.evaluate((element) => {
+      element.scrollIntoView({ block: "center" });
+      const rect = element.getBoundingClientRect();
+      const x = rect.left + rect.width / 2;
+      return [rect.top - 3.5, rect.bottom + 3.5].every((y) => element.contains(document.elementFromPoint(x, y)));
+    }), "the Refresh hit area is 44px tall").toBe(true);
 
-  const claude = harnessRows.filter({ hasText: "Claude Code" });
-  await claude.click();
-  await expect(codex).toHaveAttribute("aria-expanded", "false");
-  await expect(claude).toHaveAttribute("aria-expanded", "true");
+    const harnessRows = page.locator(".agent-defaults-item > .ui-row-nav");
+    const codex = harnessRows.filter({ hasText: "Codex App Server" });
+    await codex.focus();
+    await page.keyboard.press("Enter");
+    await expect(codex).toHaveAttribute("aria-expanded", "true");
+    const model = page.getByRole("button", { name: /^Codex App Server Model:/ });
+    await model.focus();
+    await page.keyboard.press("Enter");
+    const modelList = page.getByRole("listbox", { name: "Codex App Server Model" });
+    await expect(modelList).toBeFocused();
+    await page.keyboard.press("End");
+    await page.keyboard.press("Enter");
+    await expect(model).toHaveAccessibleName(/Sol/);
+    await expect(page.getByRole("button", { name: /^Codex App Server Reasoning Effort:/ }))
+      .toHaveAccessibleName(/Choose Effort/);
 
-  const cancel = page.getByRole("button", { name: "Cancel" });
-  await cancel.focus();
-  await page.keyboard.press("Enter");
-  await expect(claude).toBeFocused();
-  await expect(claude).not.toHaveAttribute("aria-controls", /.+/);
+    const claude = harnessRows.filter({ hasText: "Claude Code" });
+    await claude.click();
+    await expect(codex).toHaveAttribute("aria-expanded", "false");
+    await expect(claude).toHaveAttribute("aria-expanded", "true");
 
-  await codex.click();
-  const save = page.getByRole("button", { name: "Save" });
-  await save.focus();
-  await page.keyboard.press("Enter");
-  await expect(codex).toBeFocused();
-  await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
+    const cancel = page.getByRole("button", { name: "Cancel" });
+    await cancel.focus();
+    await page.keyboard.press("Enter");
+    await expect(claude).toBeFocused();
+    await expect(claude).not.toHaveAttribute("aria-controls", /.+/);
 
-  await codex.click();
-  const reset = page.getByRole("button", { name: "Use Wollipog Default" });
-  await reset.focus();
-  await page.keyboard.press("Enter");
-  await expect(codex).toBeFocused();
-  await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
+    await codex.click();
+    const save = page.getByRole("button", { name: "Save" });
+    await save.focus();
+    await page.keyboard.press("Enter");
+    await expect(codex).toBeFocused();
+    await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
 
-  await codex.click();
-  await expect(codex).toHaveAttribute("aria-expanded", "true");
-  await page.keyboard.press("Enter");
-  await expect(codex).toBeFocused();
-  await expect(codex).toHaveAttribute("aria-expanded", "false");
-  await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
+    await codex.click();
+    const reset = page.getByRole("button", { name: "Use Wollipog Default" });
+    await reset.focus();
+    await page.keyboard.press("Enter");
+    await expect(codex).toBeFocused();
+    await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
+
+    await codex.click();
+    await expect(codex).toHaveAttribute("aria-expanded", "true");
+    await page.keyboard.press("Enter");
+    await expect(codex).toBeFocused();
+    await expect(codex).toHaveAttribute("aria-expanded", "false");
+    await expect(codex).not.toHaveAttribute("aria-controls", /.+/);
+  });
 });
 
 test("Agent Harness defaults distinguish version skew and politely explain repaired drafts", async ({ page }) => {

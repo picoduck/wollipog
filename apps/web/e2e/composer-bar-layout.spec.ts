@@ -103,55 +103,60 @@ for (const width of [320, 360, 393, 430]) {
   }
 }
 
-test("393px Orchestrator Model Settings is a focus-safe bottom sheet with every setting", async ({ page }) => {
-  await openFixture(page, 393, "orchestrator");
-  await expandComposer(page);
-  await page.screenshot({ path: `${EVIDENCE}/after-mobile-orchestrator.png` });
-  const trigger = page.getByRole("button", { name: /^Model Settings:/ });
-  await trigger.click();
-  const sheet = page.locator(".model-settings-pop");
-  await expect(sheet).toBeVisible();
-  await expect(sheet).toContainText("Model Settings");
-  const close = sheet.getByRole("menuitem", { name: "Close Model Settings" });
-  await expect(close).toBeVisible();
-  const [closeBox, titleBox] = await Promise.all([
-    close.boundingBox(),
-    sheet.getByText("Model Settings", { exact: true }).boundingBox(),
-  ]);
-  expect(closeBox).not.toBeNull();
-  expect(titleBox).not.toBeNull();
-  expect(closeBox!.width).toBeGreaterThanOrEqual(44);
-  expect(closeBox!.height).toBeGreaterThanOrEqual(44);
-  expect(closeBox!.x).toBeGreaterThanOrEqual(titleBox!.x + titleBox!.width);
-  for (const group of ["Model", "Context Window", "Reasoning Effort", "Service Tier"]) {
-    await expect(sheet.getByRole("group", { name: group })).toBeVisible();
-  }
-  const sheetBox = await sheet.boundingBox();
-  expect(sheetBox).not.toBeNull();
-  expect(sheetBox!.y + sheetBox!.height).toBeCloseTo(844, 0);
-  for (const row of await sheet.getByRole("menuitemradio").all()) {
-    expect((await row.boundingBox())!.height).toBeGreaterThanOrEqual(44);
-  }
-  await expect(sheet.getByRole("group", { name: "Model" })).toContainText("with a 1M context window");
-  await page.screenshot({ path: `${EVIDENCE}/after-mobile-model-settings.png` });
-  await sheet.evaluate((element) => { element.scrollTop = element.scrollHeight; });
-  await expect(close).toBeVisible();
-  const scrolledCloseBox = await close.boundingBox();
-  expect(scrolledCloseBox).not.toBeNull();
-  expect(scrolledCloseBox!.y).toBeCloseTo(closeBox!.y, 0);
-  await close.click();
-  await expect(sheet).toHaveCount(0);
-  await expect(trigger).toBeFocused();
+test.describe("with a touch pointer", () => {
+  // Touch sizing follows the pointer, not the viewport (#1799): the 44px sheet targets are a touch-screen size.
+  test.use({ hasTouch: true });
 
-  await trigger.click();
-  await page.locator(".model-settings-backdrop").click({ position: { x: 1, y: 1 } });
-  await expect(sheet).toHaveCount(0);
-  await expect(trigger).toBeFocused();
+  test("393px Orchestrator Model Settings is a focus-safe bottom sheet with every setting", async ({ page }) => {
+    await openFixture(page, 393, "orchestrator");
+    await expandComposer(page);
+    await page.screenshot({ path: `${EVIDENCE}/after-mobile-orchestrator.png` });
+    const trigger = page.getByRole("button", { name: /^Model Settings:/ });
+    await trigger.click();
+    const sheet = page.locator(".model-settings-pop");
+    await expect(sheet).toBeVisible();
+    await expect(sheet).toContainText("Model Settings");
+    const close = sheet.getByRole("menuitem", { name: "Close Model Settings" });
+    await expect(close).toBeVisible();
+    const [closeBox, titleBox] = await Promise.all([
+      close.boundingBox(),
+      sheet.getByText("Model Settings", { exact: true }).boundingBox(),
+    ]);
+    expect(closeBox).not.toBeNull();
+    expect(titleBox).not.toBeNull();
+    expect(closeBox!.width).toBeGreaterThanOrEqual(44);
+    expect(closeBox!.height).toBeGreaterThanOrEqual(44);
+    expect(closeBox!.x).toBeGreaterThanOrEqual(titleBox!.x + titleBox!.width);
+    for (const group of ["Model", "Context Window", "Reasoning Effort", "Service Tier"]) {
+      await expect(sheet.getByRole("group", { name: group })).toBeVisible();
+    }
+    const sheetBox = await sheet.boundingBox();
+    expect(sheetBox).not.toBeNull();
+    expect(sheetBox!.y + sheetBox!.height).toBeCloseTo(844, 0);
+    for (const row of await sheet.getByRole("menuitemradio").all()) {
+      expect((await row.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+    }
+    await expect(sheet.getByRole("group", { name: "Model" })).toContainText("with a 1M context window");
+    await page.screenshot({ path: `${EVIDENCE}/after-mobile-model-settings.png` });
+    await sheet.evaluate((element) => { element.scrollTop = element.scrollHeight; });
+    await expect(close).toBeVisible();
+    const scrolledCloseBox = await close.boundingBox();
+    expect(scrolledCloseBox).not.toBeNull();
+    expect(scrolledCloseBox!.y).toBeCloseTo(closeBox!.y, 0);
+    await close.click();
+    await expect(sheet).toHaveCount(0);
+    await expect(trigger).toBeFocused();
 
-  await trigger.click();
-  await page.keyboard.press("Escape");
-  await expect(sheet).toHaveCount(0);
-  await expect(trigger).toBeFocused();
+    await trigger.click();
+    await page.locator(".model-settings-backdrop").click({ position: { x: 1, y: 1 } });
+    await expect(sheet).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+
+    await trigger.click();
+    await page.keyboard.press("Escape");
+    await expect(sheet).toHaveCount(0);
+    await expect(trigger).toBeFocused();
+  });
 });
 
 for (const { frameWidth, plan } of [

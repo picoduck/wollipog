@@ -581,7 +581,7 @@ export function ProjectsView({
               </section>
               <section className="project-detail-section project-danger-zone" aria-labelledby="project-danger-heading">
                 <div className="project-section-heading"><div><h3 id="project-danger-heading">Danger Zone</h3><p>Deleting removes only Project metadata. Sessions and files are retained.</p></div></div>
-                <button type="button" className="btn danger" disabled={selected.canManage === false || busy !== null} onClick={() => openDialog({ kind: "delete" })}>Delete Project</button>
+                <button type="button" className="btn ghost danger" disabled={selected.canManage === false || busy !== null} onClick={() => openDialog({ kind: "delete" })}>Delete Project</button>
               </section>
             </>
           )}

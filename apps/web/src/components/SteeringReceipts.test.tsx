@@ -224,7 +224,7 @@ test("a completed Queue Again receipt is clearly settled and manually dismissibl
   assert.match(html, /Queued Again/);
   assert.match(html, /Queued for a later turn\./);
   assert.doesNotMatch(html, /Transport uncertain\./);
-  assert.match(html, /class="icon-btn steering-receipt-dismiss"/);
+  assert.match(html, /class="icon-btn sm steering-receipt-dismiss"/);
   assert.match(html, /aria-label="Dismiss"/);
   assert.doesNotMatch(html, /class="steering-receipt-actions"/,
     "a completed receipt must not reserve a full dismiss-action row");

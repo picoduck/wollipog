@@ -166,7 +166,7 @@ function SteeringReceiptCard({
     >
       {dismissible && (
         <button
-          className="icon-btn steering-receipt-dismiss"
+          className="icon-btn sm steering-receipt-dismiss"
           type="button"
           aria-label="Dismiss"
           title={actionRefusal ?? "Dismiss"}

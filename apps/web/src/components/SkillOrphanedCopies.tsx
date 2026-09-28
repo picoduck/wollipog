@@ -111,7 +111,7 @@ export function SkillOrphanedCopies({ runners, machineLabels, machineSkills, bus
                         </button>
                         <button
                           type="button"
-                          className="btn danger sm"
+                          className="btn ghost danger sm"
                           disabled={!actionable || !orphanedCopyDiscardable(copy)}
                           onClick={() => onDiscard(runner, copy)}
                         >

@@ -577,7 +577,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
                 </div>
                 <button
                   type="button"
-                  className="btn danger sm"
+                  className="btn ghost danger sm"
                   disabled={busy}
                   onClick={() => void deleteSkill(detail)}
                 >
@@ -685,7 +685,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
                             <td>
                               <button
                                 type="button"
-                                className="btn danger sm"
+                                className="btn ghost danger sm"
                                 disabled={busy}
                                 onClick={() => void (async () => {
                                   const confirmed = await confirm({
@@ -778,7 +778,7 @@ export function SkillsView({ selectedSkillId }: { selectedSkillId?: string } = {
                                   </button>
                                   <button
                                     type="button"
-                                    className="btn danger sm"
+                                    className="btn ghost danger sm"
                                     disabled={!canResolveDrift}
                                     onClick={() => void restoreDrift(runner, entry)}
                                   >

@@ -434,6 +434,23 @@
   --space-12: 48px;
   --space-16: 64px;
 
+  /* --- Control and row heights (docs/design-system.md §2.8). Every interactive element takes one
+     of these; none is sized by its padding. The fine-pointer values live here, and the one
+     coarse-pointer block near the end of this sheet resizes them for touch at any width. --- */
+  --control-h-sm: 28px;
+  --control-h: 32px;
+  --control-h-lg: 40px;
+  --row-h: 40px;
+  --row-h-2: 56px;
+  --row-h-dense: 32px;
+  --icon-sm: 14px;
+  --icon: 16px;
+  --icon-lg: 20px;
+  /* The switch track and thumb (§8.4): 32×18 with a 12px thumb, 40×24 and 18px on touch. */
+  --switch-w: 32px;
+  --switch-h: 18px;
+  --switch-thumb: 12px;
+
   /* The two mobile Session-header rows share these trailing-column metrics. The inset includes the
      physical right safe area because the interface currently has a left-to-right layout. */
   --mobile-session-action-gap: 7px;
@@ -759,7 +776,7 @@ pre {
   display: flex;
   align-items: center;
   gap: 12px;
-  min-height: 44px;
+  min-height: var(--control-h);
   padding: 0 12px;
   border-radius: var(--radius-sm);
   color: var(--text);
@@ -822,13 +839,6 @@ pre {
 }
 .topbar-mobile-controls .instance-selector-label,
 .topbar-mobile-controls .instance-selector-chevron { display: none; }
-.mobile-session-back {
-  width: 44px;
-  min-width: 44px;
-  height: 44px;
-  min-height: 44px;
-  padding: 0;
-}
 
 /* And the title yields before any control does, rather than the controls being pushed off. */
 .topbar:has(.topbar-mobile-controls) h1 {
@@ -1103,17 +1113,12 @@ pre {
   letter-spacing: 0.2px;
 }
 .topbar-create { margin-left: auto; }
-.topbar-create.icon-btn { width: 32px; height: 32px; padding: 0; }
 /* Codex-style top-right control cluster (panel toggles, editor selector). */
 .topbar-actions {
   margin-left: auto;
   display: flex;
   align-items: center;
   gap: 2px;
-}
-.icon-btn.is-on {
-  color: var(--accent);
-  background: var(--bg-elev-2);
 }
 /* Labeled session-root destination split button. */
 .editor-select {
@@ -1220,93 +1225,185 @@ pre {
 }
 
 /* ------------------------------- Buttons -------------------------------- */
+/* docs/design-system.md §3.1. A button is one control height (§2.8), never sized by its padding,
+   never wrapped and never stretched: if a row cannot fit its buttons the row overflows, the button
+   does not shrink. `max-width: max-content` is what stops a column container's stretch, or a
+   `width: 100%`, from turning a button into a full-width bar. Touch sizes come from the tokens in
+   the coarse-pointer block, not from here. */
 .btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: var(--space-2);
+  flex: none;
+  max-width: max-content;
+  height: var(--control-h);
+  padding: 0 var(--space-3);
   border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
   background: var(--bg-elev-2);
   color: var(--text);
-  padding: 8px 14px;
-  border-radius: var(--radius-sm);
+  font: var(--type-body-strong);
+  white-space: nowrap;
   cursor: pointer;
-  font-size: 13px;
-  font-weight: 500;
-  line-height: 1.2;
   transition:background var(--dur-fast) var(--ease-out), border-color var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out), box-shadow var(--dur-fast) var(--ease-out);
 }
-.btn:hover:not(:disabled) {
+.btn.sm {
+  height: var(--control-h-sm);
+  padding: 0 var(--space-2);
+  gap: var(--space-1);
+  font-size: var(--text-sm);
+}
+.btn.lg {
+  height: var(--control-h-lg);
+  padding: 0 var(--space-4);
+}
+/* Hover only where a pointer can hover, so a tap does not leave a button looking hovered. */
+@media (hover: hover) {
+  .btn:hover:not(:disabled, [aria-disabled="true"]) {
+    background: var(--bg-elev-3);
+  }
+}
+.btn:active:not(:disabled, [aria-disabled="true"]) {
   background: var(--bg-elev-3);
 }
-.btn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+/* A toggle that is on: the edge is what separates "on" from "hovered", which share a fill. */
+.btn[aria-pressed="true"] {
+  background: var(--bg-elev-3);
+  border-color: var(--control-outline);
 }
 .btn.primary {
-  background: linear-gradient(135deg, var(--primary-from), var(--primary-to));
-  border-color: var(--primary-border);
-  color: var(--on-accent);
+  background: var(--primary-bg);
+  border-color: transparent;
+  color: var(--primary-fg);
 }
-.btn.primary:hover:not(:disabled) {
-  /* Restate the full primary palette: the generic .btn:hover selector is intentionally more
-     specific than .btn.primary, so omitting background here produced dark fill + dark text. */
-  background: linear-gradient(135deg, var(--primary-hover-from), var(--primary-hover-to));
-  border-color: var(--primary-hover-border);
-  color: var(--on-primary-pressed);
-  box-shadow: 0 1px 0 var(--primary-hover-inset) inset;
+@media (hover: hover) {
+  .btn.primary:hover:not(:disabled, [aria-disabled="true"]) {
+    background: var(--primary-bg-hover);
+  }
 }
-.btn.primary:active:not(:disabled) {
-  background: linear-gradient(135deg, var(--primary-active-from), var(--primary-active-to));
-  border-color: var(--primary-active-border);
-  color: var(--on-primary-pressed);
-  box-shadow: 0 1px 2px rgb(0 0 0 / 0.2) inset;
+.btn.primary:active:not(:disabled, [aria-disabled="true"]) {
+  background: var(--primary-bg-active);
 }
+/* Solid, and only for the confirm button of a destructive confirmation (§7.4). An inline
+   destructive action is `.btn.ghost.danger` or a menu item. */
 .btn.danger {
-  background: color-mix(in srgb, var(--red) 14%, transparent);
-  border-color: color-mix(in srgb, var(--red) 40%, transparent);
-  /* --red-on-strong-tint rather than --danger-text: --danger-text is tuned for a plain surface,
-     and the pressed state's 30% fill took it to 4.02:1 in light. All three states use the same
-     value so the label does not shift hue between rest and press. */
-  color: var(--red-on-strong-tint);
+  background: var(--danger-bg);
+  border-color: transparent;
+  color: var(--danger-fg);
 }
-.btn.danger:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--red) 22%, transparent);
-  border-color: color-mix(in srgb, var(--red) 58%, transparent);
-  color: var(--red-on-strong-tint);
+@media (hover: hover) {
+  .btn.danger:hover:not(:disabled, [aria-disabled="true"]) {
+    background: var(--danger-bg-hover);
+  }
 }
-.btn.danger:active:not(:disabled) {
-  background: color-mix(in srgb, var(--red) 30%, transparent);
-  border-color: color-mix(in srgb, var(--red) 68%, transparent);
-  color: var(--red-on-strong-tint);
-  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18) inset;
+.btn.danger:active:not(:disabled, [aria-disabled="true"]) {
+  background: var(--danger-bg-hover);
 }
 .btn.ghost {
   background: transparent;
+  border-color: transparent;
+  color: var(--text-dim);
+}
+@media (hover: hover) {
+  .btn.ghost:hover:not(:disabled, [aria-disabled="true"]) {
+    background: var(--bg-elev-2);
+    color: var(--text);
+  }
+}
+.btn.ghost:active:not(:disabled, [aria-disabled="true"]) {
+  background: var(--bg-elev-2);
+  color: var(--text);
+}
+.btn.ghost.danger,
+.btn.ghost.danger:hover:not(:disabled, [aria-disabled="true"]),
+.btn.ghost.danger:active:not(:disabled, [aria-disabled="true"]) {
+  color: var(--danger-text);
+}
+/* Disabled is text only: no opacity, no hover, and the box keeps its size. A primary or danger
+   fill would hold --text-faint below legibility, so those take the secondary's resting fill.
+   `aria-disabled` is the same state for a button that stays focusable to explain itself. */
+.btn:disabled,
+.btn[aria-disabled="true"] {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+.btn.primary:disabled,
+.btn.danger:not(.ghost):disabled,
+.btn.primary[aria-disabled="true"],
+.btn.danger:not(.ghost)[aria-disabled="true"] {
+  background: var(--bg-elev-2);
+  border-color: var(--border-strong);
 }
 .btn.block {
   width: 100%;
+  max-width: none;
 }
-.btn.sm {
-  padding: 5px 10px;
-  font-size: 12px;
-}
+/* §3.1 Icon: square at a control height, transparent, with a 16px icon. A glyph icon (×, ←) takes
+   the icon size from font-size. */
 .icon-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  flex: none;
+  width: var(--control-h);
+  height: var(--control-h);
+  padding: 0;
   background: transparent;
   border: none;
+  border-radius: var(--radius-sm);
   color: var(--text-dim);
   cursor: pointer;
-  font-size: 15px;
-  padding: 6px 9px;
-  border-radius: 6px;
+  font-size: var(--icon);
   line-height: 1;
 }
-.icon-btn:hover {
+.icon-btn.sm {
+  width: var(--control-h-sm);
+  height: var(--control-h-sm);
+}
+.icon-btn.lg {
+  width: var(--control-h-lg);
+  height: var(--control-h-lg);
+}
+@media (hover: hover) {
+  .icon-btn:hover:not(:disabled, [aria-disabled="true"]) {
+    background: var(--bg-elev-2);
+    color: var(--text);
+  }
+}
+.icon-btn:active:not(:disabled, [aria-disabled="true"]) {
   background: var(--bg-elev-2);
   color: var(--text);
+}
+/* On: the toggle's fill plus an inset edge, which a square button draws inside its box. */
+.icon-btn[aria-pressed="true"] {
+  background: var(--bg-elev-3);
+  box-shadow: inset 0 0 0 1px var(--control-outline);
+  color: var(--text);
+}
+.icon-btn.primary {
+  background: var(--primary-bg);
+  color: var(--primary-fg);
+}
+@media (hover: hover) {
+  .icon-btn.primary:hover:not(:disabled, [aria-disabled="true"]) {
+    background: var(--primary-bg-hover);
+    color: var(--primary-fg);
+  }
+}
+.icon-btn.primary:active:not(:disabled, [aria-disabled="true"]) {
+  background: var(--primary-bg-active);
+  color: var(--primary-fg);
+}
+.icon-btn:disabled,
+.icon-btn[aria-disabled="true"] {
+  color: var(--text-faint);
+  cursor: not-allowed;
+}
+/* The dimmed primary keeps its icon readable: --text-faint clears 4.5:1 on --bg-elev-3. */
+.icon-btn.primary:disabled,
+.icon-btn.primary[aria-disabled="true"] {
+  background: var(--bg-elev-3);
 }
 
 /* ----------------------------- Status badges ---------------------------- */
@@ -1478,18 +1575,53 @@ button.background-work-badge:focus-visible {
   font-size: 12.5px;
   color: var(--text-faint);
 }
+/* Fields (docs/design-system.md §8.1): the sunken --field-bg, a 3:1 --control-outline edge and one
+   control height. The height is zero-specificity so a component that embeds a borderless field
+   (a search box, the composer) sizes it without having to know this rule exists. */
 select,
 input,
 textarea {
-  background: var(--bg-elev-2);
-  border: 1px solid var(--border-strong);
+  background: var(--field-bg);
+  border: 1px solid var(--control-outline);
   color: var(--text);
   border-radius: var(--radius-sm);
-  padding: 8px 10px;
-  font-size: 13px;
+  font-size: var(--text-base);
 }
+select,
+input {
+  padding: 0 var(--space-3);
+}
+:where(input:not([type="checkbox"], [type="radio"], [type="range"], [type="file"], [type="color"]), select) {
+  height: var(--control-h);
+}
+/* Input affix (§8.1): a prefix or unit suffix drawn inside the field's own edge, on its height, in
+   --text-dim. The input keeps its border, height and focus ring; its padding makes room for the
+   affix, so an affixed field is exactly as tall as a plain one. A suffix sits after the input and
+   a prefix before it; the affix is not a target (a click reaches the input under it). */
+.input-affix {
+  position: relative;
+  display: block;
+  min-width: 0;
+}
+.input-affix > input {
+  width: 100%;
+}
+.input-affix-text {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  color: var(--text-dim);
+  pointer-events: none;
+}
+.input-affix-text:first-child { inset-inline-start: var(--space-3); }
+.input-affix-text:last-child { inset-inline-end: var(--space-3); }
+.input-affix:has(> .input-affix-text:first-child) > input { padding-inline-start: calc(var(--space-3) + 1em + var(--space-1)); }
+.input-affix:has(> .input-affix-text:last-child) > input { padding-inline-end: calc(var(--space-3) + 2em + var(--space-1)); }
 /* SSH-config import picker in "Add a box" — match the dialog's text inputs. */
 textarea {
+  padding: var(--space-2) var(--space-3);
   resize: vertical;
   line-height: 1.5;
 }
@@ -1679,10 +1811,10 @@ textarea {
   padding: var(--space-2) var(--space-3);
 }
 .session-detail > .detail-head > .back {
-  width: var(--space-10);
-  min-width: var(--space-10);
-  height: var(--space-10);
-  min-height: var(--space-10);
+  width: var(--control-h-lg);
+  min-width: var(--control-h-lg);
+  height: var(--control-h-lg);
+  min-height: var(--control-h-lg);
   padding: 0;
   color: var(--text);
   border-radius: var(--radius-sm);
@@ -1830,7 +1962,7 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.session-header-action { width: 32px; height: 32px; padding: 0; }
+.session-header-action { padding: 0; }
 .session-status-overflow-trigger {
   border-color: var(--border-strong);
   color: var(--text);
@@ -1839,11 +1971,11 @@ textarea {
   letter-spacing: -0.02em;
 }
 .session-header-action:disabled {
+  color: var(--text-faint);
   cursor: not-allowed;
-  opacity: 0.5;
 }
 .session-header-action:disabled:hover {
-  color: var(--text-dim);
+  color: var(--text-faint);
   background: transparent;
 }
 .detail-actions {
@@ -1906,6 +2038,7 @@ textarea {
   overflow-y: auto;
 }
 .menu-item {
+  min-height: var(--control-h);
   text-align: left;
   background: transparent;
   border: none;
@@ -1962,11 +2095,6 @@ textarea {
   border-radius: 0 0 6px 6px;
 }
 @media (max-width: 600px) {
-  .detail-actions > .btn,
-  .menu-item,
-  .plus-item {
-    min-height: 44px;
-  }
   .detail-note {
     max-width: 160px;
   }
@@ -2078,8 +2206,6 @@ textarea {
 .share-create-row select,
 .share-created-link input {
   min-width: 0;
-  min-height: 38px;
-  padding: 7px 9px;
   color: var(--text);
   background: var(--bg-elev-1);
   border: 1px solid var(--border-strong);
@@ -2101,12 +2227,10 @@ textarea {
 }
 .share-list li span { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .share-list small { color: var(--text-dim); overflow-wrap: anywhere; }
+/* The copy button sits beside the link field, so it takes the field's control height. */
+.share-link-controls .copy-btn { min-height: var(--control-h); }
 @media (max-width: 600px) {
   .share-create-row { grid-template-columns: 1fr; }
-  .share-create-row .btn,
-  .share-create-row select,
-  .share-link-controls .copy-btn,
-  .share-list .btn { min-height: 44px; }
   .share-link-controls { flex-direction: column; }
 }
 .right-panel-resizer {
@@ -2431,7 +2555,7 @@ textarea {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  min-height: 36px;
+  min-height: var(--control-h);
   color: var(--text-dim);
   cursor: pointer;
 }
@@ -2554,9 +2678,6 @@ textarea {
   border-top: 1px solid var(--border);
   background: var(--bg-elev);
 }
-.evidence-review-actions .btn {
-  min-height: 44px;
-}
 .approval-review-surface {
   display: grid;
   grid-template-rows: auto minmax(0, 1fr) auto auto;
@@ -2634,9 +2755,12 @@ textarea {
   flex-direction: column;
   gap: 8px;
 }
+/* One line per request at its own width; an unusually long worker name is clipped, not wrapped. */
 .agents-attention > button {
+  align-self: flex-start;
+  max-width: 100%;
+  overflow: hidden;
   text-align: left;
-  overflow-wrap: anywhere;
 }
 .agents-list {
   display: flex;
@@ -3150,18 +3274,11 @@ textarea {
 
 @media (max-width: 600px) {
   .browser-address { flex-wrap: wrap; }
-  .browser-address input { flex-basis: 100%; min-height: 44px; }
-  .browser-address .btn,
-  .browser-web-actions .btn,
-  .artifact-preview-meta .btn { min-height: 44px; }
+  .browser-address input { flex-basis: 100%; }
   .browser-web-frame,
   .artifact-preview-frame { min-height: 55vh; }
   .sidechat-composer { flex-wrap: wrap; }
   .sidechat-composer textarea { flex-basis: 100%; min-height: 88px; }
-  .sidechat-composer .btn,
-  .sidechat-restart,
-  .sidechat-open-child,
-  .sidechat-insert { min-height: 44px; }
 }
 
 .detail-main {
@@ -3581,7 +3698,7 @@ textarea {
   padding-bottom: 6px;
 }
 .governance-history-row:last-child { border-bottom: none; }
-.governance-history-more { margin: 12px; width: calc(100% - 24px); }
+.governance-history-more { margin: 12px; }
 .governance-history-time {
   margin-inline-start: auto;
   color: var(--text-dim);
@@ -3791,13 +3908,9 @@ textarea {
     flex-direction: column;
   }
   .queued-edit-actions {
-    display: grid;
-    grid-auto-columns: minmax(0, 1fr);
-    grid-auto-flow: column;
-  }
-  .queued-edit-actions .btn {
-    min-height: 44px;
-    white-space: normal;
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: flex-end;
   }
 }
 
@@ -3885,12 +3998,10 @@ textarea {
     flex-direction: column;
   }
   .quarantine-actions .btn {
-    min-height: 44px;
-    white-space: normal;
     width: 100%;
   }
   .worktree-recovery-controls { grid-template-columns: minmax(0, 1fr); }
-  .worktree-recovery-controls .btn { min-height: 44px; width: 100%; }
+  .worktree-recovery-controls .btn { width: 100%; }
 }
 
 .steering-receipts {
@@ -3914,8 +4025,6 @@ textarea {
   position: absolute;
   inset-block-start: 3px;
   inset-inline-end: 3px;
-  width: 28px;
-  height: 28px;
   padding: 0;
   color: var(--text-faint);
 }
@@ -3925,7 +4034,6 @@ textarea {
   background: transparent;
   color: var(--text-faint);
   cursor: wait;
-  opacity: 0.45;
 }
 .steering-receipt[data-status="uncertain"] {
   border-color: color-mix(in srgb, var(--amber) 42%, var(--border));
@@ -4185,8 +4293,6 @@ textarea {
 @media (max-width: 600px) {
   .composer-question-waiting,
   .composer-answer-heading { align-items: stretch; flex-direction: column; }
-  .composer-question-waiting .btn,
-  .composer-answer-heading .btn { min-height: 40px; }
   .composer-answer-choices { grid-template-columns: 1fr; max-height: 128px; }
 }
 .composer-input {
@@ -4467,10 +4573,7 @@ textarea {
   font-weight: var(--weight-semibold);
 }
 .cbar-settings-close {
-  width: 32px;
-  height: 32px;
   flex: none;
-  padding: 0;
 }
 .cbar-model-option {
   display: flex;
@@ -4518,11 +4621,6 @@ textarea {
     margin: -8px -8px 0;
     padding: 8px 8px 0;
   }
-  .model-settings-pop .cbar-settings-close {
-    width: 44px;
-    height: 44px;
-  }
-  .model-settings-pop .cbar-opt { min-height: 44px; }
 }
 .cbar-opt {
   display: flex;
@@ -4530,6 +4628,7 @@ textarea {
   justify-content: space-between;
   gap: 16px;
   width: 100%;
+  min-height: var(--control-h);
   text-align: left;
   background: transparent;
   border: none;
@@ -4576,7 +4675,11 @@ textarea {
   height: 28px;
   color: var(--text-faint);
 }
-.cbar-permission-details-trigger:hover,
+@media (hover: hover) {
+  .cbar-permission-details-trigger:hover {
+    color: var(--text);
+  }
+}
 .cbar-permission-details-trigger:focus-visible {
   color: var(--text);
 }
@@ -4836,6 +4939,7 @@ textarea,
   display: flex;
   gap: 9px;
   width: 100%;
+  min-height: var(--control-h);
   text-align: left;
   background: transparent;
   border: none;
@@ -6511,7 +6615,7 @@ button.file-head.source-path-link {
   background: var(--bg-elev-2);
 }
 .connections-tabs > button {
-  min-height: 34px;
+  min-height: max(34px, var(--control-h));
   padding: 6px 12px;
   border: 0;
   border-radius: 7px;
@@ -6862,14 +6966,6 @@ button.file-head.source-path-link {
 .access-form input,
 .access-form select {
   width: 100%;
-  min-height: 38px;
-  padding: 8px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 7px;
-  background: var(--bg-elev-2);
-  color: var(--text);
-  font: inherit;
-  font-weight: 400;
 }
 .access-form label small {
   color: var(--text-faint);
@@ -6967,14 +7063,6 @@ button.file-head.source-path-link {
 }
 .access-pairing-address select {
   width: 100%;
-  min-height: 38px;
-  padding: 8px 10px;
-  border: 1px solid var(--border-strong);
-  border-radius: 7px;
-  background: var(--bg-elev-2);
-  color: var(--text);
-  font: inherit;
-  font-weight: 400;
 }
 .access-pairing-address small {
   color: var(--text-faint);
@@ -7003,15 +7091,9 @@ button.file-head.source-path-link {
   font-size: 12.5px;
   line-height: 1.45;
 }
-.access-pairing-qr .btn {
-  min-height: 38px;
-}
 .access-copy-primary {
   display: flex;
   margin-bottom: 14px;
-}
-.access-copy-primary .btn {
-  min-height: 38px;
 }
 .access-manual-disclosure {
   padding-top: 12px;
@@ -7399,8 +7481,6 @@ button.file-head.source-path-link {
 }
 .connection-recovery .btn {
   width: 100%;
-  min-height: 44px;
-  white-space: nowrap;
 }
 .update-runner.needs-update {
   border-color: color-mix(in srgb, var(--amber) 55%, transparent);
@@ -7529,13 +7609,14 @@ button.file-head.source-path-link {
   font-size: 11.5px;
   line-height: 1.5;
 }
+/* A machine-card action. It is a `.btn.sm`, so its height, padding and touch hit area come from the
+   button recipe; this keeps only the card's pill look until §2.5 makes it rectangular. */
 .btn-rediscover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
   gap: 6px;
   font-size: 12px;
-  padding: 4px 10px;
   border-radius: 999px;
   background: var(--bg-elev-3);
   border: 1px solid var(--border-strong);
@@ -7546,13 +7627,15 @@ button.file-head.source-path-link {
   flex: none; /* don't shrink below the label width */
   transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
-.btn-rediscover:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--accent) 16%, transparent);
-  color: var(--text);
+@media (hover: hover) {
+  .btn-rediscover:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--accent) 16%, transparent);
+    color: var(--text);
+  }
 }
 .btn-rediscover:disabled {
-  opacity: 0.5;
-  cursor: default;
+  color: var(--text-faint);
+  cursor: not-allowed;
 }
 .agent-list {
   display: flex;
@@ -7603,14 +7686,14 @@ button.file-head.source-path-link {
   font-variant-numeric: tabular-nums;
 }
 .agent-details-trigger {
-  width: 28px;
-  height: 28px;
   flex: none;
   padding: 5px;
   color: var(--text-faint);
 }
-.agent-details-trigger:hover {
-  background: var(--bg-elev-3);
+@media (hover: hover) {
+  .agent-details-trigger:hover {
+    background: var(--bg-elev-3);
+  }
 }
 .agent-details-summary {
   margin: 0;
@@ -7791,7 +7874,6 @@ button.file-head.source-path-link {
 
 @media (max-width: 600px) {
   .campaign-continuation-notice { align-items: stretch; flex-direction: column; }
-  .campaign-continuation-notice .btn { min-height: 44px; }
 }
 
 /* A held child is a condition to clear, not a request: warning-edged status, no controls. */
@@ -8475,6 +8557,7 @@ button.file-head.source-path-link {
   display: grid;
   gap: 2px;
   min-width: 0;
+  min-height: var(--control-h);
   margin-right: auto;
   padding: 0;
   border: 0;
@@ -8484,7 +8567,7 @@ button.file-head.source-path-link {
   cursor: pointer;
 }
 .pod-member-open > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.pod-relay-target { display: inline-flex; align-items: center; gap: 4px; color: var(--text-dim); font-size: 11px; cursor: pointer; }
+.pod-relay-target { display: inline-flex; align-items: center; gap: 4px; min-height: var(--control-h); color: var(--text-dim); font-size: 11px; cursor: pointer; }
 .pod-member-setting { display: inline-flex; align-items: center; gap: 4px; color: var(--text-dim); font-size: 10px; }
 .pod-member-setting select { min-width: 72px; max-width: 96px; padding: 4px 6px; font-size: 11px; }
 
@@ -8492,15 +8575,8 @@ button.file-head.source-path-link {
   .pod-relay-actions, .pod-relay-head { align-items: stretch; flex-direction: column; }
   .pod-orchestration-grid, .pod-orchestration-runner, .pod-reconcile-grid { grid-template-columns: 1fr; }
   .pod-reconcile-arrow { display: none; }
-  .pod-orchestration .field.compact input, .pod-orchestration .field.compact select,
-  .pod-orchestration-runner textarea, .pod-reconcile-grid select,
-  .pod-reconcile-grid .btn { min-height: 44px; }
   .pod-add-member { width: 100%; flex-direction: column; align-items: stretch; }
-  .pod-add-member select { min-width: 0; max-width: none; width: 100%; min-height: 44px; }
-  .pod-relay-actions > .btn, .pod-add-member .btn { min-height: 44px; }
-  .pod-context-entry { min-height: 44px; }
-  .pod-member-open, .pod-member-setting select, .pod-relay-target,
-  .pod-member-head > .btn { min-height: 44px; }
+  .pod-add-member select { min-width: 0; max-width: none; width: 100%; }
 }
 
 /* ------------------------------- Modal ---------------------------------- */
@@ -8807,7 +8883,6 @@ button.file-head.source-path-link {
   line-height: 1.4;
 }
 .snooze-conflict strong { color: var(--text); }
-.snooze-dialog .btn[aria-disabled="true"] { cursor: not-allowed; opacity: 0.55; }
 .snooze-policy { margin-top: var(--space-1); }
 .snooze-preview {
   display: grid;
@@ -9010,10 +9085,12 @@ button.file-head.source-path-link {
 button.agent-pick {
   background: transparent;
 }
-/* New Session picks one agent from a shared list; the provider icon adorns its responsive owner. */
-.btn.sm.new-session-project-control {
-  /* Segoe UI's visible ink sits high inside its line box. Preserve the compact desktop control's
-     total padding while moving that line box one pixel toward the optical centre. */
+/* New Session picks one agent from a shared list; the provider icon adorns its responsive owner.
+   Create Project… and Add Location… share their field row with the pickers, so they are the same
+   control height (§3.2) rather than small buttons. */
+.btn.new-session-project-control {
+  /* Segoe UI's visible ink sits high inside its line box. Keep the control's total padding while
+     moving that line box one pixel toward the optical centre. */
   padding-block: 6px 4px;
 }
 .agent-select {
@@ -9038,10 +9115,6 @@ button.agent-pick {
 }
 .agent-select .agent-icon {
   flex: none;
-}
-@media (max-width: 760px), (pointer: coarse), (hover: none) {
-  .btn.sm.new-session-project-control { min-height: 44px; }
-  .btn.sm.new-session-project-control { padding-block: 14px 12px; }
 }
 .agent-meta {
   margin-top: 4px;
@@ -9315,7 +9388,7 @@ button.agent-pick {
     height: 44px;
     margin: -22px 0 0 -22px;
   }
-  .personal-identifier-toggle.with-text { min-height: 44px; }
+  .personal-identifier-toggle.with-text { min-height: var(--control-h); }
 }
 
 /* ---- Onboarding dialog ---- */
@@ -9480,26 +9553,45 @@ button.agent-pick {
 .hint.warn {
   color: var(--amber);
 }
+/* Legacy segmented control (onboarding). On the §2.8 track height and never wrapped; #1803 merges it
+   into the shared segmented primitive. Its options are LAN addresses, so a long list scrolls
+   sideways instead of wrapping. The edge is an inset shadow rather than a border because the
+   scroller clips at its padding box, and the coarse-pointer hit area has to reach the track's edge. */
 .seg {
   display: inline-flex;
-  gap: 4px;
+  align-items: stretch;
+  height: var(--control-h);
+  max-width: 100%;
+  overflow-x: auto;
+  scrollbar-width: none;
+  gap: 2px;
   background: var(--bg);
-  border: 1px solid var(--border);
+  border: 0;
+  box-shadow: inset 0 0 0 1px var(--border);
   border-radius: var(--radius-sm);
-  padding: 4px;
-  flex-wrap: wrap;
+  padding: 2px;
 }
 .seg-btn {
+  display: inline-flex;
+  align-items: center;
+  flex: none;
   border: 0;
   background: transparent;
   color: var(--text-dim);
-  border-radius: 6px;
-  padding: 5px 12px;
+  border-radius: var(--radius-xs);
+  padding: 0 12px;
   font-size: 12.5px;
+  white-space: nowrap;
   cursor: pointer;
 }
-.seg-btn:hover {
-  color: var(--text);
+@media (hover: hover) {
+  .seg-btn:hover {
+    color: var(--text);
+  }
+}
+.seg-btn:disabled {
+  color: var(--text-faint);
+  cursor: not-allowed;
 }
 .seg-btn.active {
   background: var(--bg-elev-3);
@@ -9682,7 +9774,7 @@ button.agent-pick {
 .source-editor-select {
   min-width: 0;
   max-width: 150px;
-  height: 28px;
+  height: var(--control-h-sm);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg);
@@ -9781,6 +9873,7 @@ button.agent-pick {
   border-color: var(--accent);
 }
 .shell-tab > button {
+  min-height: var(--control-h);
   border: 0;
   background: transparent;
   color: var(--text);
@@ -9917,11 +10010,6 @@ body.shell-dock-dragging * {
   .shell-dock-head {
     flex-wrap: wrap;
     gap: 6px;
-  }
-  .shell-search,
-  .shell-dock-head > button,
-  .shell-tab > button {
-    min-height: 44px;
   }
 }
 
@@ -10217,7 +10305,7 @@ body.shell-dock-dragging * {
   .project-manager-list.has-selection { display: none; }
   .project-manager-detail { display: none; padding: 14px; }
   .project-manager-detail.is-open { display: block; }
-  .project-manager-back { display: inline-flex; min-height: 44px; align-items: center; margin: 0 0 14px; padding: 0; border: 0; color: var(--accent); background: transparent; cursor: pointer; }
+  .project-manager-back { display: inline-flex; min-height: var(--control-h); align-items: center; margin: 0 0 14px; padding: 0; border: 0; color: var(--accent); background: transparent; cursor: pointer; }
   .project-detail-heading,
   .project-section-heading { align-items: stretch; flex-direction: column; }
   .project-name-form { align-items: stretch; flex-direction: column; }
@@ -10233,13 +10321,9 @@ body.shell-dock-dragging * {
   .project-location-create-actions .btn,
   .project-location-machine-empty .btn { width: 100%; justify-content: center; }
 }
+/* A project row on touch. Its location buttons and back link take the control tokens. */
 @media (hover: none), (pointer: coarse) {
-  .project-manager-item,
-.project-manager-back,
-.project-location-actions .btn,
-.project-location-candidate .btn,
-.project-location-create-toggle,
-.project-location-create .btn { min-height: 44px; }
+  .project-manager-item { min-height: 44px; }
 }
 
 /* Command Inbox --------------------------------------------------------- */
@@ -10306,8 +10390,8 @@ body.shell-dock-dragging * {
 }
 .inbox-create-control {
   display: inline-flex;
-  width: 34px;
-  height: 34px;
+  width: var(--control-h);
+  height: var(--control-h);
   flex: none;
   align-items: center;
   justify-content: center;
@@ -10409,19 +10493,19 @@ body.shell-dock-dragging * {
 }
 @media (hover: none), (pointer: coarse) {
   .inbox-tab-group,
-  .inbox-tab { min-height: 44px; }
+  .inbox-tab { min-height: var(--control-h); }
   .inbox-project-menu {
-    width: 44px;
+    width: var(--control-h);
     opacity: 1;
   }
   .inbox-project-menu-trigger {
-    flex: 0 0 44px;
-    width: 44px;
-    min-width: 44px;
-    height: 44px;
+    flex: 0 0 var(--control-h);
+    width: var(--control-h);
+    min-width: var(--control-h);
+    height: var(--control-h);
     pointer-events: auto;
   }
-  .inbox-tab-group.has-menu .inbox-tab { padding-right: 48px; }
+  .inbox-tab-group.has-menu .inbox-tab { padding-right: calc(var(--control-h) + var(--space-1)); }
 }
 .inbox-project-menu-pop .menu-item.danger { color: var(--danger-text); }
 .inbox-project-location-status {
@@ -10433,9 +10517,9 @@ body.shell-dock-dragging * {
 }
 .inbox-search {
   display: flex;
-  width: 34px;
-  min-width: 34px;
-  height: 34px;
+  width: var(--control-h);
+  min-width: var(--control-h);
+  height: var(--control-h);
   align-items: center;
   gap: 6px;
   overflow: hidden;
@@ -10485,12 +10569,6 @@ body.shell-dock-dragging * {
 }
 .inbox-search:focus-within .inbox-search-key,
 .inbox-search.has-query .inbox-search-key { display: inline-block; }
-@media (hover: none), (pointer: coarse) {
-  .inbox-create-control { width: 44px; height: 44px; }
-  .inbox-search { width: 44px; min-width: 44px; height: 44px; }
-  .inbox-search:focus-within,
-  .inbox-search.has-query { width: min(250px, 28vw); min-width: 150px; }
-}
 .inbox-list {
   min-height: 0;
   flex: 1;
@@ -11220,14 +11298,23 @@ body.shell-dock-dragging * {
   flex-wrap: wrap;
 }
 /* Scope segmented control (Uncommitted | Branch | Last turn). */
+/* The options fill the whole track, so on a coarse pointer they are real 44px targets with no
+   borrowed hit area. The edge is an inset shadow rather than a border so it does not take 2px of
+   that height, and the phone rule below can scroll the track without clipping an option. */
 .scope-seg {
   display: inline-flex;
-  border: 1px solid var(--border);
+  align-items: stretch;
+  height: var(--control-h);
+  border: 0;
+  box-shadow: inset 0 0 0 1px var(--border);
   border-radius: var(--radius-sm);
   overflow: hidden;
   background: var(--bg);
 }
 .scope-opt {
+  display: inline-flex;
+  align-items: center;
+  white-space: nowrap;
   border: 0;
   border-right: 1px solid var(--border);
   background: transparent;
@@ -11239,9 +11326,11 @@ body.shell-dock-dragging * {
 .scope-opt:last-child {
   border-right: 0;
 }
-.scope-opt:hover:not(:disabled):not(.is-active) {
-  background: var(--bg-elev-2);
-  color: var(--text);
+@media (hover: hover) {
+  .scope-opt:hover:not(:disabled):not(.is-active) {
+    background: var(--bg-elev-2);
+    color: var(--text);
+  }
 }
 .scope-opt.is-active {
   background: var(--accent);
@@ -12864,7 +12953,6 @@ body.shell-dock-dragging * {
     width: 15px;
     height: 15px;
   }
-  .topbar-mobile-controls .topbar-create.icon-btn { width: 44px; height: 44px; }
   .main-body {
     padding: 12px calc(12px + env(safe-area-inset-right, 0px)) calc(14px + env(safe-area-inset-bottom, 0px))
       calc(12px + env(safe-area-inset-left, 0px));
@@ -12875,7 +12963,6 @@ body.shell-dock-dragging * {
   .connections-tabs > button {
     flex: 1;
     min-width: 0;
-    min-height: 44px;
     padding-inline: 7px;
   }
   .access-page {
@@ -12900,7 +12987,6 @@ body.shell-dock-dragging * {
   .access-task-button,
   .access-row-action {
     width: 100%;
-    min-height: 44px;
   }
   .access-row {
     gap: 10px;
@@ -12918,14 +13004,10 @@ body.shell-dock-dragging * {
   .connections-toolbar .toolbar-actions .btn,
   .connection-access-error .btn {
     width: 100%;
-    min-height: 44px;
   }
   .runner-grid {
     grid-template-columns: minmax(0, 1fr);
     gap: 12px;
-  }
-  .instance-selector-trigger {
-    min-height: 44px;
   }
   .instance-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -12937,9 +13019,6 @@ body.shell-dock-dragging * {
   .instance-meta {
     grid-template-columns: minmax(0, 1fr);
   }
-  .instance-card-actions .btn {
-    min-height: 44px;
-  }
   .runner-card {
     padding: 14px;
   }
@@ -12949,9 +13028,6 @@ body.shell-dock-dragging * {
   }
   .runner-head-right {
     width: 100%;
-  }
-  .runner-head-right .btn-rediscover {
-    min-height: 44px;
   }
   .runner-meta {
     grid-template-columns: 1fr 1fr;
@@ -13087,9 +13163,6 @@ body.shell-dock-dragging * {
   .session-detail > .detail-head > .detail-actions .menu-pop {
     max-height: calc(100dvh - 128px - env(safe-area-inset-bottom, 0px));
   }
-  .session-detail > .detail-head > .detail-actions .menu-item {
-    min-height: 44px;
-  }
   .detail-scroll {
     padding: 12px 0;
   }
@@ -13147,7 +13220,6 @@ body.shell-dock-dragging * {
     display: none;
   }
   .background-work-group-head { align-items: center; }
-  .background-work-group-head .btn { min-height: 40px; }
 
   /* Approvals: keep the decision buttons on their own tappable row. */
   .approval-bar {
@@ -13159,9 +13231,6 @@ body.shell-dock-dragging * {
   }
   .approval-actions {
     flex-wrap: wrap;
-  }
-  .approval-actions .btn {
-    min-height: 38px;
   }
   /* Request review is one full-height page on phones. The page itself owns scrolling so evidence
      rows, request metadata, and actions never compete through nested touch scrollers. */
@@ -13183,15 +13252,6 @@ body.shell-dock-dragging * {
   .request-panel-list {
     border-bottom: 1px solid var(--border);
   }
-  .request-panel-row,
-  .request-panel-detail-head .btn,
-  .evidence-review-item-main .btn,
-  .evidence-reviewed-control,
-  .evidence-review-actions .btn,
-  .approval-review-actions .btn,
-  .tl-perm-review {
-    min-height: 44px;
-  }
   .request-panel-detail-head {
     align-items: stretch;
     flex-direction: column;
@@ -13199,9 +13259,6 @@ body.shell-dock-dragging * {
   .tl-request-card {
     align-items: stretch;
     flex-wrap: wrap;
-  }
-  .tl-request-card .btn {
-    min-height: 44px;
   }
   .evidence-review-surface {
     display: block;
@@ -13520,7 +13577,6 @@ body.shell-dock-dragging * {
   .skills-view { padding: 14px; }
   .skills-layout { grid-template-columns: minmax(0, 1fr); }
   .skills-heading { align-items: stretch; flex-direction: column; }
-  .skills-heading .btn { min-height: 44px; }
 }
 
 /* --------------------------- Durable automations -------------------------- */
@@ -13543,7 +13599,7 @@ body.shell-dock-dragging * {
 }
 .automation-card-heading { margin: 0; }
 .automation-card-toggle {
-  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; width: 100%;
+  display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; width: 100%; min-height: var(--row-h);
   padding: 0; border: 0; background: transparent; color: inherit; font: inherit; text-align: left; cursor: pointer;
 }
 .automation-card-toggle:hover .automation-card-name { color: var(--text); }
@@ -13558,9 +13614,9 @@ body.shell-dock-dragging * {
 .automation-form-grid > label { display: grid; gap: 6px; color: var(--text-dim); font-size: 12px; font-weight: 600; }
 .automation-form-grid > .automation-field { display: grid; gap: 6px; }
 .automation-form-grid > .automation-field .field-label { margin-bottom: 0; font-weight: 600; }
+/* The shared field recipe (§8.1) supplies the height, fill, edge and padding. */
 .automation-form-grid input, .automation-form-grid select, .automation-form-grid textarea {
-  width: 100%; min-width: 0; min-height: 44px; color: var(--text); background: var(--bg-elev-2);
-  border: 1px solid var(--border); border-radius: 7px; padding: 9px 10px; font-size: 13px;
+  width: 100%; min-width: 0;
 }
 .automation-form-grid textarea { resize: vertical; min-height: 96px; }
 .automation-span { grid-column: 1 / -1; }
@@ -13781,7 +13837,7 @@ body.shell-dock-dragging * {
 .subscription-source { padding: 14px; min-width: 0; }
 .subscription-source > header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .subscription-source > header > div { flex: 1 1 16rem; min-width: 0; }
-.subscription-source > header > .btn { min-height: 44px; white-space: nowrap; }
+.subscription-source > header > .btn { white-space: nowrap; }
 .subscription-source h4 { margin: 0; }
 .subscription-source header p, .subscription-source footer { margin: 4px 0 0; color: var(--text-dim); font-size: var(--text-xs); }
 .subscription-source .subscription-account { overflow-wrap: anywhere; }
@@ -13921,30 +13977,26 @@ body.shell-dock-dragging * {
 .usage-retention h3 { margin: 0; }
 .usage-retention p { margin: 5px 0 0; font-size: 12px; }
 .usage-retention label { display: grid; gap: 6px; color: var(--text-dim); font-size: 12px; font-weight: 600; }
-.usage-retention input { min-height: 38px; width: 100%; color: var(--text); background: var(--bg-elev-2); border: 1px solid var(--border); border-radius: 7px; padding: 7px 9px; font: inherit; }
+.usage-retention input { width: 100%; }
 .usage-save-status { grid-column: 1 / -1; color: var(--text-dim); font-size: 12px; }
 .usage-privacy { margin: 14px 0 0; font-size: 11px; }
 
 @media (max-width: 700px) {
   .automations-view { padding: 14px; }
   .automation-heading { align-items: stretch; flex-direction: column; }
-  .automation-heading .btn { min-height: 44px; }
   .automation-form-grid, .automation-facts { grid-template-columns: minmax(0, 1fr); }
   .automation-span { grid-column: auto; }
   .automation-editor, .automation-card { padding: 14px; }
-  .automation-editor-head .icon-btn, .automation-editor-actions .btn { min-width: 44px; min-height: 44px; }
-  .automation-checks label, .automation-enable { min-height: 44px; padding: 4px 0; }
-  .automation-card-toggle { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; min-height: 44px; }
+  .automation-checks label, .automation-enable { padding: 4px 0; }
+  .automation-card-toggle { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; }
   .automation-card-meta { flex-wrap: wrap; }
-  .automation-card-actions .btn { min-height: 44px; flex: 1 1 90px; }
+  .automation-card-actions .btn { flex: 1 1 90px; }
   .usage-view { padding: 14px; }
   .usage-toolbar { flex-direction: column; align-items: stretch; }
   .usage-breakdowns { grid-template-columns: minmax(0, 1fr); }
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
-  .usage-retention .btn { min-height: 44px; }
   .subscription-source-grid { grid-template-columns: minmax(0, 1fr); }
   .subscription-usage-heading { align-items: stretch; flex-direction: column; }
-  .subscription-usage-heading .btn { min-height: 44px; }
   .subscription-bucket { grid-template-columns: minmax(0, 1fr); gap: 4px; }
 }
 
@@ -13972,9 +14024,12 @@ body.shell-dock-dragging * {
   align-items: center;
   gap: var(--space-3);
   width: 100%;
-  /* The density axis: a row is where a density setting should be felt. The minimum height is
-     declared ONLY under the comfortable selector — see below — so the default is unchanged by
-     construction rather than by choosing a value that matches. */
+  /* A settings row is itself the control (the switch, the navigation), so it is at least one
+     control height: 44px on a touch screen through the coarse-pointer block. Its padding and
+     content already make it taller on a mouse, so the compact default does not move. The density
+     axis — a row is where a density setting should be felt — still raises the minimum only under
+     the comfortable selector below. */
+  min-height: var(--control-h);
   padding: var(--row-pad-y) var(--row-pad-x);
   border: 1px solid transparent;
   border-radius: var(--radius-md);
@@ -14056,10 +14111,11 @@ body.shell-dock-dragging * {
   border: 1px solid var(--control-outline);
 }
 
-/* role="switch" promises an on/off control, so draw one. */
+/* role="switch" promises an on/off control, so draw one. Sized by the --switch-* tokens, which the
+   coarse-pointer block resizes; the thumb's travel follows. */
 .ui-switch {
-  width: 38px;
-  height: 22px;
+  width: var(--switch-w);
+  height: var(--switch-h);
   flex: none;
   position: relative;
   border: 1px solid var(--control-outline);
@@ -14072,14 +14128,24 @@ body.shell-dock-dragging * {
   position: absolute;
   top: 2px;
   left: 2px;
-  width: 16px;
-  height: 16px;
+  width: var(--switch-thumb);
+  height: var(--switch-thumb);
   border-radius: var(--radius-pill);
   background: var(--text-dim);
   transition: transform var(--dur-base) var(--ease-spring), background-color var(--dur-base) var(--ease-out);
 }
 .ui-row-switch[aria-checked="true"] .ui-switch { background: var(--accent); border-color: var(--accent); }
-.ui-row-switch[aria-checked="true"] .ui-switch::after { transform: translateX(16px); background: var(--on-accent); }
+/* Travel: the track's inner width less the thumb and its 2px inset on both sides. */
+.ui-row-switch[aria-checked="true"] .ui-switch::after {
+  transform: translateX(calc(var(--switch-w) - 2px - var(--switch-thumb) - 4px));
+  background: var(--on-accent);
+}
+/* A disabled switch keeps its size and reads in --text-faint rather than fading the whole row. */
+.ui-row-switch.is-disabled { opacity: 1; cursor: not-allowed; }
+.ui-row-switch.is-disabled .ui-row-title { color: var(--text-faint); }
+/* On or off, a disabled track is the neutral off fill; the thumb's position still says which. */
+.ui-row-switch.is-disabled .ui-switch { border-color: var(--text-faint); background: var(--bg-elev-3); }
+.ui-row-switch.is-disabled .ui-switch::after { background: var(--text-faint); }
 
 /* A toggle whose request is in flight keeps showing its last confirmed value; the pending state
    is carried by opacity plus aria-busy, never by moving the knob to a value that is not true yet.
@@ -14106,7 +14172,6 @@ body.shell-dock-dragging * {
 }
 .orchestrator-number-row input,
 .orchestrator-policy-control input {
-  min-height: 38px;
   width: 100%;
   color: var(--text);
   background: var(--bg-elev-2);
@@ -14150,11 +14215,6 @@ body.shell-dock-dragging * {
   .orchestrator-settings-actions, .orchestrator-policy-unavailable { align-items: stretch; flex-direction: column; }
   .active-campaign-policy dl > div { grid-template-columns: minmax(0, 1fr); }
   .active-campaign-policy dd { align-items: flex-start; text-align: left; }
-  .orchestrator-settings-actions .btn, .orchestrator-policy-unavailable .btn { min-height: 44px; }
-}
-
-@media (hover: none), (pointer: coarse) {
-  .ui-row { min-height: 44px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -14260,8 +14320,12 @@ body.shell-dock-dragging * {
  * AA on it in both themes rather than being eyeballed, which is what §27 found wrong with the
  * seventeen bespoke versions.
  * ---------------------------------------------------------------------------------------------- */
+/* The track is one control height (§2.8, §10.2); its options fill it inside the 2px inset and never
+   wrap. The neutral selected knob and the merge with `.seg` and `.scope-seg` belong to #1803. */
 .ui-seg {
   display: inline-flex;
+  align-items: stretch;
+  height: var(--control-h);
   gap: 2px;
   padding: 2px;
   border: 1px solid var(--control-outline);
@@ -14269,7 +14333,14 @@ body.shell-dock-dragging * {
   background: var(--bg-elev);
 }
 .ui-seg-option {
-  padding: 5px 11px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* A short option ("All", "7d") is at least one control height wide, so its touch target is 44px
+     both ways; the coarse-pointer block gives it the 44px height. */
+  min-width: var(--control-h);
+  padding: 0 11px;
+  white-space: nowrap;
   border: 1px solid transparent;
   border-radius: var(--radius-xs);
   background: transparent;
@@ -14279,7 +14350,13 @@ body.shell-dock-dragging * {
   cursor: pointer;
   transition: background var(--dur-fast) var(--ease-out), color var(--dur-fast) var(--ease-out);
 }
-.ui-seg-option:hover:not(.is-disabled) { color: var(--text); background: var(--bg-elev-2); }
+@media (hover: hover) {
+  .ui-seg-option:hover:not(.is-disabled) { color: var(--text); background: var(--bg-elev-2); }
+}
+/* A group whose options are all unavailable, each for its own reason, prints the reason under the
+   label; that track grows rather than clipping the sentence. */
+.ui-seg:has(.ui-seg-option-reason) { height: auto; }
+.ui-seg-option:has(.ui-seg-option-reason) { flex-direction: column; white-space: normal; }
 .ui-seg-option.is-selected {
   border-color: var(--accent);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
@@ -14356,7 +14433,7 @@ body.shell-dock-dragging * {
   background: color-mix(in srgb, var(--accent) 20%, var(--bg-elev-3));
   color: var(--accent-on-tint);
 }
-.ui-seg-option.is-disabled { color: var(--text-dim); cursor: not-allowed; }
+.ui-seg-option.is-disabled { color: var(--text-faint); cursor: not-allowed; }
 .ui-select-option.is-active,
 .ui-searchable-combobox-list .ui-inline-listbox-option.is-active { background: var(--bg-elev-3); }
 .ui-select-option.is-disabled,
@@ -14369,24 +14446,6 @@ body.shell-dock-dragging * {
 .ui-select-empty { margin: 0; padding: var(--space-3); color: var(--text-dim); font-size: var(--text-sm); }
 .ui-select-trigger[aria-disabled="true"] { cursor: not-allowed; color: var(--text-dim); }
 
-/* Phase 2's touch rule: every interactive row clears 44px on a phone. A segmented option is 27px
-   tall at rest, which is a comfortable pointer target and an uncomfortable thumb one. */
-/* The touch minimum is about the POINTER, not the viewport.
-   Keyed on width alone, a 1024px coarse-pointer tablet got none of it — and the bespoke controls
-   these primitives replaced did have coarse-pointer rules, so migrating a screen shrank its
-   targets from 44px to about 27px there. Width stays in the query as well, because a narrow window
-   on a laptop is still where a finger is likely.
-   Inline size too: a 44px-tall "All" or "7d" is still a 30px-wide target, and half of the
-   guideline is not the guideline. */
-@media (max-width: 760px), (pointer: coarse), (hover: none) {
-  .ui-seg-option,
-  .ui-select-trigger,
-  .ui-select-option,
-  .ui-searchable-combobox-input,
-  .ui-searchable-combobox-list .ui-inline-listbox-option { min-height: 44px; }
-  .ui-seg-option { min-width: 44px; }
-  .ui-choice-card { min-height: 44px; }
-}
 /* A group that fills its row rather than sitting at its content width, which is what the button
    rows these replaced did on a phone. Opt-in, because a segmented control in a toolbar should not
    stretch. */
@@ -14419,6 +14478,7 @@ body.shell-dock-dragging * {
   align-items: flex-start;
   gap: var(--space-3);
   width: 100%;
+  min-height: var(--row-h);
   padding: var(--space-3);
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
@@ -14482,13 +14542,19 @@ body.shell-dock-dragging * {
 
 .ui-select,
 .ui-searchable-combobox { position: relative; display: inline-block; }
+/* Inside a field the picker fills the column like the text input beside it (§8.3). */
+.field .ui-select,
+.field .ui-searchable-combobox { display: block; width: 100%; min-width: 0; }
+/* The field recipe (§8.1): one control height, --field-bg and the 3:1 edge. The trigger fills its
+   wrapper, which is content-sized outside a field and full-width inside one. */
 .ui-select-trigger,
 .ui-searchable-combobox-input {
-  min-width: 160px;
-  padding: 6px 10px;
-  border: 1px solid var(--border);
+  width: 100%;
+  height: var(--control-h);
+  padding: 0 var(--space-3);
+  border: 1px solid var(--control-outline);
   border-radius: var(--radius-sm);
-  background: var(--bg-elev);
+  background: var(--field-bg);
   color: var(--text);
   font-size: var(--text-base);
 }
@@ -14496,11 +14562,15 @@ body.shell-dock-dragging * {
   display: flex;
   align-items: center;
   gap: var(--space-2);
+  white-space: nowrap;
   cursor: pointer;
 }
-.ui-select-trigger:hover { border-color: var(--border-strong); }
-.ui-searchable-combobox-input { width: 100%; cursor: text; }
-.ui-searchable-combobox-input:hover { border-color: var(--border-strong); }
+/* Hover steps the edge up from --control-outline; --border-strong would have faded it. */
+@media (hover: hover) {
+  .ui-select-trigger:hover,
+  .ui-searchable-combobox-input:hover { border-color: var(--text-dim); }
+}
+.ui-searchable-combobox-input { cursor: text; }
 .ui-searchable-combobox-input[aria-disabled="true"] { cursor: not-allowed; color: var(--text-dim); }
 .ui-select-value { flex: 1; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .ui-select-value.is-placeholder { color: var(--text-dim); }
@@ -14519,12 +14589,15 @@ body.shell-dock-dragging * {
   background: var(--bg-elev-2);
   box-shadow: var(--elev-2);
 }
+/* A list option is a menu row: --control-h at least, 44px on a coarse pointer, which is the height
+   ChoiceControls.tsx budgets the open list with (TOUCH_OPTION_MIN_HEIGHT_PX). */
 .ui-select-option,
 .ui-searchable-combobox-list .ui-inline-listbox-option {
   display: flex;
   align-items: center;
   gap: var(--space-2);
   width: 100%;
+  min-height: var(--control-h);
   padding: 6px 8px;
   border: none;
   border-radius: var(--radius-xs);
@@ -14554,6 +14627,7 @@ body.shell-dock-dragging * {
   align-self: flex-start;
 }
 .settings-section-link {
+  min-height: var(--control-h);
   padding: 8px 10px;
   border-radius: var(--radius-sm);
   color: var(--text-dim);
@@ -14681,8 +14755,6 @@ body.shell-dock-dragging * {
   .agent-defaults-editor { grid-template-columns: minmax(0, 1fr); }
   .agent-defaults-actions { grid-column: auto; }
   .agent-defaults-actions .agent-defaults-action-spacer { display: none; }
-  .agent-defaults-actions .btn,
-  .agent-defaults-toolbar .btn { min-height: 44px; }
 }
 
 .session-naming-editor {
@@ -14718,7 +14790,7 @@ body.shell-dock-dragging * {
 @media (max-width: 760px) {
   .settings-view { flex-direction: column; gap: var(--space-4); padding: var(--space-4); }
   .settings-sections { width: 100%; flex-direction: row; overflow-x: auto; position: static; }
-  .settings-section-link { min-height: 44px; display: flex; align-items: center; white-space: nowrap; }
+  .settings-section-link { display: flex; align-items: center; white-space: nowrap; }
 }
 
 
@@ -14887,8 +14959,74 @@ body.shell-dock-dragging * {
 @media (max-width: 760px) {
   .archive-view { padding: 12px; }
   .archive-filters { grid-template-columns: 1fr; }
-  .archive-filters .btn { min-height: 44px; }
   .archive-pagination { justify-content: space-between; }
+}
+
+/* ------------------------- Coarse-pointer sizes --------------------------
+   docs/design-system.md §2.8 and §15.3: the ONE place touch sizing lives. It is keyed to the
+   pointer, not the viewport, so a touch tablet at 834px gets 44px targets and a narrow desktop
+   window with a mouse keeps 32px controls. Every control reads its height from the tokens, so
+   resizing them here is what makes buttons, icon buttons, fields, select triggers and segmented
+   tracks 44px on touch. The hit areas below are drawn once, here; components never add their
+   own copies, and never add a per-selector touch height.
+
+   ChoiceControls.tsx mirrors this condition (TOUCH_TARGET_MEDIA) and the --control-h value
+   (TOUCH_OPTION_MIN_HEIGHT_PX) to budget the select list's height; change them together.
+
+   Placed after every control rule it resizes, so equal-specificity overrides win on order. */
+@media (pointer: coarse) {
+  :root {
+    --control-h: 44px;
+    --control-h-lg: 48px;
+    --control-h-sm: 36px;
+    --row-h: 48px;
+    --row-h-2: 64px;
+    --row-h-dense: 44px;
+    --switch-w: 40px;
+    --switch-h: 24px;
+    --switch-thumb: 18px;
+  }
+  /* Small buttons and clickable chips stay 36px to look, and borrow 4px on every side for a 44px
+     target. Neighbours must sit at least 8px away for that to work (§2.8).
+     An absolutely positioned box is placed from its parent's PADDING edge, so a control with a
+     1px border reaches one pixel further to borrow the same 4px past its visible edge. */
+  :where(.btn.sm, .icon-btn.sm, button.chip) { position: relative; }
+  :is(.btn.sm, .icon-btn.sm, button.chip)::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
+  }
+  :is(.btn.sm, button.chip)::after { inset: -5px; }
+  /* A segmented option cannot borrow from its neighbours, so it borrows the track's inset and edge
+     instead: 38px option + 2px inset + 1px edge on each side = 44px, plus the option's own 1px
+     border for the padding-edge reason above. `.scope-seg` options already fill their track, and
+     the legacy `.seg` (borderless options) draws its edge inside its 2px inset. */
+  .ui-seg-option,
+  .seg-btn { position: relative; }
+  .ui-seg-option::after {
+    content: "";
+    position: absolute;
+    inset: -4px 0;
+  }
+  .seg-btn::after {
+    content: "";
+    position: absolute;
+    inset: -2px 0;
+  }
+  /* The switch (40×24 here, through its tokens): the thumb is ::after, so the 44×44 hit area is
+     ::before. */
+  .ui-switch::before {
+    content: "";
+    position: absolute;
+    inset: -11px -3px;
+  }
+  /* An inline link gets a 44px band centred on its line. */
+  .link { position: relative; }
+  .link::after {
+    content: "";
+    position: absolute;
+    inset: calc(50% - 22px) -4px;
+  }
 }
 
 /* --- COLOUR SCHEMES, GENERATED --- */
@@ -15502,11 +15640,16 @@ body.shell-dock-dragging * {
         order because they appear later in the file.
    Living at the very end resolves the ties in this rule's favour. Keep it last; anything added
    below it can silently reintroduce the zoom.
+
+   Phones and every coarse pointer (a touch tablet is as prone to the zoom as a phone), matching
+   the coarse-pointer block. The Select trigger is a button, but it shows a field's value at a
+   field's size, so it takes the same size as the fields beside it.
    --------------------------------------------------------------------------- */
-@media (max-width: 760px) {
+@media (max-width: 760px), (pointer: coarse) {
   :root select,
   :root input,
   :root textarea,
+  :root .ui-select-trigger,
   :root .composer-input {
     font-size: 16px;
   }

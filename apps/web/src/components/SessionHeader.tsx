@@ -1269,7 +1269,7 @@ function TranscriptShareDialog({ sessionId, onClose, returnFocusRef }: {
                 <small>Created {new Date(share.createdAt).toLocaleString()} · expires {new Date(share.expiresAt).toLocaleString()}</small>
               </span>
               {share.status === "active" && (
-                <button className="btn danger sm" type="button" disabled={busy} onClick={() => void revoke(share)} aria-label={`Revoke share expiring ${new Date(share.expiresAt).toLocaleString()}`}>
+                <button className="btn ghost danger sm" type="button" disabled={busy} onClick={() => void revoke(share)} aria-label={`Revoke share expiring ${new Date(share.expiresAt).toLocaleString()}`}>
                   Revoke
                 </button>
               )}

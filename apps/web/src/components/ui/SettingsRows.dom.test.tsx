@@ -7,7 +7,7 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { parse } from "postcss";
 import { NavRow, SegmentedRow, SelectRow, SwitchRow } from "./SettingsRows.js";
-import { SELECT_LIST_CHROME_PX, resetSelectPreviewRegistry } from "./ChoiceControls.js";
+import { SELECT_LIST_CHROME_PX, SELECT_LIST_MIN_WIDTH_PX, resetSelectPreviewRegistry } from "./ChoiceControls.js";
 import { AppearancePanel } from "../SettingsView.js";
 import { ThemeProvider, useTheme } from "../ThemeProvider.js";
 import {
@@ -266,36 +266,48 @@ test("the scheme list requests readable content dimensions while preserving trig
   }
 });
 
-test("an explicit menu width never makes the list narrower than its trigger", async () => {
+async function openListWidth(trigger: { left: number; width: number }, menuWidth?: number): Promise<string> {
   const { container, cleanup } = await render(
     <SelectRow
       title="Colour Scheme"
       options={SCHEMES_FIXTURE}
       value="wollipog"
       onChange={() => undefined}
-      menuWidth={180}
+      {...(menuWidth === undefined ? {} : { menuWidth })}
     />,
   );
   try {
-    const trigger = container.querySelector(".ui-select-trigger") as unknown as HTMLButtonElement;
-    trigger.getBoundingClientRect = () => ({
+    const button = container.querySelector(".ui-select-trigger") as unknown as HTMLButtonElement;
+    button.getBoundingClientRect = () => ({
       top: 180,
-      right: 820,
+      right: trigger.left + trigger.width,
       bottom: 216,
-      left: 600,
-      width: 220,
+      left: trigger.left,
+      width: trigger.width,
       height: 36,
-      x: 600,
+      x: trigger.left,
       y: 180,
       toJSON: () => ({}),
     });
-    await act(async () => { trigger.click(); });
+    await act(async () => { button.click(); });
     const list = container.querySelector<HTMLElement>('[role="listbox"]');
     assert.ok(list);
-    assert.equal(list.style.width, "220px");
+    return list.style.width;
   } finally {
     await cleanup();
   }
+}
+
+test("an explicit menu width never makes the list narrower than its trigger", async () => {
+  assert.equal(await openListWidth({ left: 480, width: 340 }, 180), "340px");
+});
+
+test("a Select list opens at least 280px wide, even under a short trigger (§8.3)", async () => {
+  // A 160px trigger used to open a 160px list, which wrapped option descriptions onto five lines.
+  assert.equal(SELECT_LIST_MIN_WIDTH_PX, 280);
+  assert.equal(await openListWidth({ left: 600, width: 160 }), "280px");
+  assert.equal(await openListWidth({ left: 600, width: 160 }, 180), "280px",
+    "an explicit width below the floor is raised to it");
 });
 
 test("checked state is exposed structurally, not just by colour", async () => {
@@ -1063,8 +1075,12 @@ function ruleOf(selector: string): Map<string, string> {
   return declared;
 }
 
-const positive = (value: string | undefined) =>
-  value !== undefined && /^[\d.]+px$/.test(value) && Number.parseFloat(value) > 0;
+/** A px size, or a `var()` naming a root token that holds one (the switch is sized by tokens). */
+const positive = (value: string | undefined): boolean => {
+  const token = value === undefined ? undefined : /^var\((--[\w-]+)\)$/.exec(value)?.[1];
+  if (token) return positive(ruleOf(":root").get(token));
+  return value !== undefined && /^[\d.]+px$/.test(value) && Number.parseFloat(value) > 0;
+};
 
 /**
  * Nothing in the rule may make it invisible.
@@ -1131,10 +1147,24 @@ test("each affordance has real geometry in the stylesheet, not just a class name
 
   // Checked state must move the knob a real distance, not merely recolour it — colour alone is not
   // an accessible state indicator.
+  // The travel is computed from the --switch-* tokens, so it is evaluated with each set of values
+  // the stylesheet declares for them: the fine-pointer track and the coarse-pointer one.
   const checkedKnob = ruleOf('.ui-row-switch[aria-checked="true"] .ui-switch::after');
-  const shift = /translateX\((-?[\d.]+)px\)/.exec(checkedKnob.get("transform") ?? "");
-  assert.ok(shift && Math.abs(Number.parseFloat(shift[1]!)) >= 8,
-    "the knob must visibly travel when the switch is on");
+  const travel = /translateX\((.+)\)$/.exec(checkedKnob.get("transform") ?? "")?.[1] ?? "";
+  const rootScopes: Map<string, string>[] = [];
+  parse(sheet).walkRules((rule) => {
+    if (rule.selector.trim() !== ":root") return;
+    const scope = new Map<string, string>();
+    rule.walkDecls((decl) => { scope.set(decl.prop, decl.value.trim()); });
+    if (scope.has("--switch-w")) rootScopes.push(scope);
+  });
+  assert.equal(rootScopes.length, 2, "the switch is sized for a fine and a coarse pointer");
+  for (const scope of rootScopes) {
+    const px = travel.replace(/var\((--[\w-]+)\)/g, (_, name: string) => scope.get(name) ?? "NaN");
+    const terms = /^calc\((.+)\)$/.exec(px)?.[1]?.split(/\s+-\s+/).map((term) => Number.parseFloat(term)) ?? [];
+    const shift = terms.length > 0 ? terms.slice(1).reduce((left, right) => left - right, terms[0]!) : Number.NaN;
+    assert.ok(shift >= 8, `the knob must visibly travel when the switch is on (travel ${px})`);
+  }
 
 });
 

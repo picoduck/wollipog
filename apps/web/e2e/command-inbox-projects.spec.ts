@@ -1016,66 +1016,71 @@ test("C defaults New Session to the active single-Project Inbox tab", async ({ p
     .getByRole("radio", { name: /\/repos\/alpha$/ })).toHaveAttribute("aria-checked", "true");
 });
 
-test("New Session control labels retain centred, unclipped browser geometry", async ({ page }) => {
-  for (const theme of ["dark", "light"] as const) {
-    for (const viewport of [
-      { name: "mobile", width: 390, height: 844, touchMinimum: true },
-      { name: "desktop", width: 1280, height: 900, touchMinimum: false },
-    ] as const) {
-      await page.setViewportSize(viewport);
-      await page.goto("/command-inbox-projects-e2e.html");
-      await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
-      await page.getByRole("tab", { name: /Alpha/ }).click();
-      await page.keyboard.press("c");
+test.describe("with a touch pointer", () => {
+  // The mobile 44px minimum is a touch size, keyed to the pointer rather than the viewport (#1799).
+  test.use({ hasTouch: true });
 
-      const dialog = page.getByRole("dialog", { name: "New Session" });
-      const controls = [
-        dialog.getByRole("button", { name: "Create Project…" }),
-        dialog.getByRole("button", { name: "Add Location…" }),
-        dialog.locator('.agent-select [aria-haspopup="listbox"]'),
-      ];
-      const geometry = await Promise.all(controls.map(controlGeometry));
+  test("New Session control labels retain centred, unclipped browser geometry", async ({ page }) => {
+    for (const theme of ["dark", "light"] as const) {
+      for (const viewport of [
+        { name: "mobile", width: 390, height: 844, touchMinimum: true },
+        { name: "desktop", width: 1280, height: 900, touchMinimum: false },
+      ] as const) {
+        await page.setViewportSize(viewport);
+        await page.goto("/command-inbox-projects-e2e.html");
+        await page.evaluate((value) => document.documentElement.setAttribute("data-theme", value), theme);
+        await page.getByRole("tab", { name: /Alpha/ }).click();
+        await page.keyboard.press("c");
 
-      for (const [index, control] of geometry.entries()) {
-        expect(control.paddingTop - control.paddingBottom,
-          `${viewport.name} ${theme} controls centre their line box`).toBe(index < 2 ? 2 : 0);
-        expect(control.scrollHeight, `${viewport.name} ${theme} control text is not vertically clipped`)
-          .toBeLessThanOrEqual(control.clientHeight);
-        expect(control.scrollWidth, `${viewport.name} ${theme} control text is not horizontally clipped`)
-          .toBeLessThanOrEqual(control.clientWidth);
-      }
-      expect(geometry[0]!.height).toBeCloseTo(geometry[1]!.height, 5);
-      if (viewport.touchMinimum) {
-        for (const control of geometry) expect(control.height).toBeGreaterThanOrEqual(44);
-        expect(Math.max(...geometry.map(({ height }) => height)) - Math.min(...geometry.map(({ height }) => height)))
-          .toBeLessThan(0.5);
+        const dialog = page.getByRole("dialog", { name: "New Session" });
+        const controls = [
+          dialog.getByRole("button", { name: "Create Project…" }),
+          dialog.getByRole("button", { name: "Add Location…" }),
+          dialog.locator('.agent-select [aria-haspopup="listbox"]'),
+        ];
+        const geometry = await Promise.all(controls.map(controlGeometry));
+
+        for (const [index, control] of geometry.entries()) {
+          expect(control.paddingTop - control.paddingBottom,
+            `${viewport.name} ${theme} controls centre their line box`).toBe(index < 2 ? 2 : 0);
+          expect(control.scrollHeight, `${viewport.name} ${theme} control text is not vertically clipped`)
+            .toBeLessThanOrEqual(control.clientHeight);
+          expect(control.scrollWidth, `${viewport.name} ${theme} control text is not horizontally clipped`)
+            .toBeLessThanOrEqual(control.clientWidth);
+        }
+        expect(geometry[0]!.height).toBeCloseTo(geometry[1]!.height, 5);
+        if (viewport.touchMinimum) {
+          for (const control of geometry) expect(control.height).toBeGreaterThanOrEqual(44);
+          expect(Math.max(...geometry.map(({ height }) => height)) - Math.min(...geometry.map(({ height }) => height)))
+            .toBeLessThan(0.5);
+        }
       }
     }
-  }
 
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/command-inbox-projects-e2e.html?longAgent=1");
-  await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
-  await page.getByRole("tab", { name: /Alpha/ }).click();
-  await page.keyboard.press("c");
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/command-inbox-projects-e2e.html?longAgent=1");
+    await page.evaluate(() => document.documentElement.setAttribute("data-theme", "light"));
+    await page.getByRole("tab", { name: /Alpha/ }).click();
+    await page.keyboard.press("c");
 
-  const dialog = page.getByRole("dialog", { name: "New Session" });
-  const controls = [
-    dialog.getByRole("button", { name: "Create Project…" }),
-    dialog.getByRole("button", { name: "Add Location…" }),
-    dialog.locator('.agent-select [aria-haspopup="listbox"]'),
-  ];
-  await expect(dialog.getByRole("button", { name: /^Agent:/ })).toHaveAccessibleName(
-    /Áccented Agent With Descenders ģyq — Extended Name/,
-  );
-  await page.addStyleTag({
-    content: ".new-session-project-control, .ui-select-trigger { font-size: 24px !important; }",
+    const dialog = page.getByRole("dialog", { name: "New Session" });
+    const controls = [
+      dialog.getByRole("button", { name: "Create Project…" }),
+      dialog.getByRole("button", { name: "Add Location…" }),
+      dialog.locator('.agent-select [aria-haspopup="listbox"]'),
+    ];
+    await expect(dialog.getByRole("button", { name: /^Agent:/ })).toHaveAccessibleName(
+      /Áccented Agent With Descenders ģyq — Extended Name/,
+    );
+    await page.addStyleTag({
+      content: ".new-session-project-control, .ui-select-trigger { font-size: 24px !important; }",
+    });
+    const enlargedGeometry = await Promise.all(controls.map(controlGeometry));
+    for (const control of enlargedGeometry) {
+      expect(control.height).toBeGreaterThanOrEqual(44);
+      expect(control.scrollHeight, "enlarged control text is not vertically clipped").toBeLessThanOrEqual(control.clientHeight);
+    }
   });
-  const enlargedGeometry = await Promise.all(controls.map(controlGeometry));
-  for (const control of enlargedGeometry) {
-    expect(control.height).toBeGreaterThanOrEqual(44);
-    expect(control.scrollHeight, "enlarged control text is not vertically clipped").toBeLessThanOrEqual(control.clientHeight);
-  }
 });
 
 test("multi-Location Projects without a default require an explicit Location", async ({ page }) => {
@@ -1611,25 +1616,30 @@ test("Project management creates, hides, reloads, and reveals durable empty Proj
   await expect(page.getByText("Shown in Inbox", { exact: true })).toBeVisible();
 });
 
-test("Project management remains usable as a focused list and detail flow on mobile", async ({ page }) => {
-  await openProjectManager(page);
-  await page.setViewportSize({ width: 390, height: 844 });
-  await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
-  const back = page.getByRole("button", { name: "Back to Projects" });
-  await expect(back).toBeVisible();
-  const box = await back.boundingBox();
-  expect(box).not.toBeNull();
-  expect(box!.height).toBeGreaterThanOrEqual(44);
-  await back.click();
-  const alpha = page.getByRole("button", { name: /Alpha/ });
-  await expect(alpha).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Alpha" })).toBeHidden();
-  await alpha.click();
-  await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
-  await expect(back).toBeVisible();
-  await back.click();
-  await expect(alpha).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Alpha" })).toBeHidden();
+test.describe("with a touch pointer", () => {
+  // The 44px back target is a touch size, keyed to the pointer rather than the viewport (#1799).
+  test.use({ hasTouch: true });
+
+  test("Project management remains usable as a focused list and detail flow on mobile", async ({ page }) => {
+    await openProjectManager(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
+    const back = page.getByRole("button", { name: "Back to Projects" });
+    await expect(back).toBeVisible();
+    const box = await back.boundingBox();
+    expect(box).not.toBeNull();
+    expect(box!.height).toBeGreaterThanOrEqual(44);
+    await back.click();
+    const alpha = page.getByRole("button", { name: /Alpha/ });
+    await expect(alpha).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Alpha" })).toBeHidden();
+    await alpha.click();
+    await expect(page.getByRole("heading", { name: "Alpha" })).toBeVisible();
+    await expect(back).toBeVisible();
+    await back.click();
+    await expect(alpha).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Alpha" })).toBeHidden();
+  });
 });
 
 test("one exact Location can be launched from two Projects and unlinked independently", async ({ page }) => {

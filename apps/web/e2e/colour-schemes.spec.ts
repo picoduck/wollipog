@@ -1324,12 +1324,12 @@ test("compact renders exactly what the merge base rendered", async ({ page }) =>
   });
   expect(computed).toEqual({
     rowPadding: "11px 12px",
-    // These two differ because the ELEMENTS differ, not because the rules do: neither declares a
-    // minimum height, and Chromium computes `auto` for one and `0px` for the other by their box
-    // type. Both are the merge base's values, which is the property being locked — the numbers here
-    // were read from the browser rather than chosen, after an earlier version of this expectation
-    // guessed `auto` for both and failed on the guess.
-    rowMinHeight: "auto",
+    // The settings row has declared one control height as its floor since #1799 (32px with this
+    // mouse, 44px on touch). A compact row's padding and text are taller than that, so it still
+    // renders as the merge base did; only the computed floor moved from `auto`. The Sessions row
+    // declares none, and Chromium computes `0px` for it by its box type — read from the browser
+    // rather than chosen, after an earlier version of this expectation guessed and failed.
+    rowMinHeight: "32px",
     inboxPadding: "9px 11px",
     inboxMinHeight: "0px",
     listGap: "6px",

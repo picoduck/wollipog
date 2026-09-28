@@ -176,6 +176,83 @@ function readDemands(cssPath) {
 }
 
 /**
+ * The design-system role tokens a rule may pair instead of palette names (docs/design-system.md
+ * §2.2): `--primary-fg` on `--primary-bg`, `--text` on `--field-bg`. A scheme block declares only
+ * palette names, so each role is followed through the stylesheet's own `var()` declarations — the
+ * shared `:root` block, then the Wollipog block for the theme being derived — to the palette token
+ * it stands for. Read, not restated, for the reason `readDemands` gives.
+ */
+function readRoleAliases(cssPath) {
+  const source = readFileSync(cssPath, "utf8").replace(/\/\*[\s\S]*?\*\//g, " ");
+  const aliases = { shared: new Map(), dark: new Map(), light: new Map() };
+  for (const [, selector, body] of source.matchAll(/([^{}]*)\{([^{}]*)\}/g)) {
+    const selectors = selector.split(",").map((part) => part.trim());
+    const scope = selectors.includes(":root") && selectors.length === 1 ? "shared"
+      : selectors.includes(':root[data-theme="dark"]') ? "dark"
+      : selectors.includes(':root[data-theme="light"]') ? "light"
+      : null;
+    if (!scope) continue;
+    for (const [, name, value] of body.matchAll(/(--[\w-]+)\s*:\s*([^;]+)/g)) aliases[scope].set(name, value.trim());
+  }
+  return aliases;
+}
+
+/**
+ * The Wollipog values every generated scheme inherits rather than derives (§2.2). A role that ends
+ * at one of these literals is not the solver's to move; `colour-schemes.test.ts` measures those
+ * pairs in every scheme instead. Any other role that ends at a literal fails closed.
+ */
+const INHERITED_BY_SCHEMES = new Set(["--danger-bg", "--danger-bg-hover", "--danger-fg", "--count-warning-fg"]);
+
+/**
+ * The primary's ink on the primary's fills. `rederiveDependents` builds every primary stop by
+ * carrying it until `--on-accent` clears 4.5:1 on it, so these pairs hold by construction, as they
+ * did while the primary was a gradient the demand reader could not parse. The solver would instead
+ * move the shared ink to suit all the stops at once, which a light palette cannot do, so it leaves
+ * these to the construction and only verifies them.
+ */
+const PRIMARY_STOPS = /^--primary-(hover-|active-)?from$/;
+
+/**
+ * The demands with every role resolved to the palette token `map` declares for `theme`, split into
+ * those the solver satisfies and those it only verifies.
+ */
+function resolveRoleDemands(demands, map, aliases, theme, label) {
+  const resolve = (name) => {
+    let current = name;
+    for (let hop = 0; hop < 8; hop += 1) {
+      if (current in map) return current;
+      const value = aliases[theme].get(current) ?? aliases.shared.get(current);
+      const next = value && /^var\((--[\w-]+)\)$/.exec(value)?.[1];
+      if (next) {
+        current = next;
+        continue;
+      }
+      if (value && INHERITED_BY_SCHEMES.has(current)) return null;
+      return current;
+    }
+    throw new Error(`${label}: ${name} does not resolve to a palette token`);
+  };
+  const solve = new Map();
+  const constructed = new Map();
+  for (const [inkName, list] of demands) {
+    const ink = resolve(inkName);
+    if (ink === null) continue;
+    for (const entry of list) {
+      const hue = resolve(entry.hue);
+      const base = entry.base === undefined ? undefined : resolve(entry.base);
+      if (hue === null || base === null) continue;
+      const next = { ...entry, hue, ...(base === undefined ? {} : { base }) };
+      const target = ink === "--on-accent" && PRIMARY_STOPS.test(hue) ? constructed : solve;
+      const into = target.get(ink) ?? [];
+      if (!into.some((d) => d.hue === next.hue && d.strength === next.strength && d.base === next.base)) into.push(next);
+      target.set(ink, into);
+    }
+  }
+  return { solve, constructed };
+}
+
+/**
  * A scheme's anchors, per theme.
  *
  * `bg`, `surface`, `text` and `accent` come from the published palette; the semantic six do too
@@ -498,7 +575,7 @@ function tokens(a, theme) {
  * the reason someone chose the scheme — the FILL's hue moves instead: a tint that a scheme's own
  * text cannot sit on is a wrong tint, not wrong text.
  */
-function satisfyDemands(map, demands, anchors, label = "?") {
+function satisfyDemands(map, demands, anchors, label = "?", constructed = new Map()) {
   // To a FIXED POINT. Satisfying one demand moves a token that another demand's tint is built
   // from, so a single pass leaves the second demand measured against a surface that no longer
   // exists — which is how sixteen pairs survived the first version of this loop.
@@ -511,6 +588,8 @@ function satisfyDemands(map, demands, anchors, label = "?") {
       // unmet — and the loop then called that convergence. Stability is only the stopping
       // condition; the postcondition is checked separately and is what decides we are done.
       assertDemandsMet(map, demands, label);
+      // Pairs the solver does not move are still measured against the final map.
+      assertDemandsMet(map, constructed, label);
       return map;
     }
     previous = current;
@@ -733,14 +812,19 @@ let css = `\n${BEGIN}\n/* ------------------------------------------------------
  * re-derives them and fails if a committed value drifts from the rule that produced it.
  * ---------------------------------------------------------------------------------------------- */\n`;
 
-const DEMANDS = readDemands(process.argv[2] === "--emit" ? STYLES : process.argv[2] ?? STYLES);
+const SOURCE_CSS = process.argv[2] === "--emit" ? STYLES : process.argv[2] ?? STYLES;
+const DEMANDS = readDemands(SOURCE_CSS);
+const ROLE_ALIASES = readRoleAliases(SOURCE_CSS);
 const ANCHORS = new Set(["--text"]);
 
 for (const [name, themes] of Object.entries(SCHEMES)) {
   css += `\n/* ${LABELS[name]} */\n`;
   for (const theme of ["dark", "light"]) {
     css += `:root[data-scheme="${name}"][data-theme="${theme}"] {\n`;
-    for (const [token, value] of Object.entries(satisfyDemands(tokens(themes[theme], theme), DEMANDS, ANCHORS, `${name}/${theme}`))) {
+    const label = `${name}/${theme}`;
+    const map = tokens(themes[theme], theme);
+    const { solve, constructed } = resolveRoleDemands(DEMANDS, map, ROLE_ALIASES, theme, label);
+    for (const [token, value] of Object.entries(satisfyDemands(map, solve, ANCHORS, label, constructed))) {
       css += `  ${token}: ${value};\n`;
     }
     css += "}\n";

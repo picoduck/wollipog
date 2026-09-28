@@ -102,10 +102,10 @@ export function SkillGroupsDialog({ runners, machineLabels, onClose, onChanged }
             <p>{describeAssignmentScope(rule, id => machineLabels.get(id))} · {describeAgentSelector(rule.agentSelector, runners.find(runner => runner.runnerId === rule.runnerId)?.agents ?? [])}</p>
             <label className="field"><span>Invocation</span><Select<SkillInvocationPolicy> label="Group Invocation" value={rule.invocation} disabled={busy || !accepted} options={[{ value: "agent", label: invocationLabel("agent") }, { value: "manual", label: invocationLabel("manual") }]} onChange={invocation => void mutate(() => api.updateSkillGroupAssignment(selected.id, rule.id, { invocation }))} /></label>
             <div className="skills-section-heading"><button className="btn sm" type="button" disabled={busy || !accepted} onClick={() => void mutate(() => api.updateSkillGroupAssignment(selected.id, rule.id, { enabled: !rule.enabled }))}>{rule.enabled ? "Disable Assignment" : "Enable Assignment"}</button>
-              <button className="btn danger sm" type="button" disabled={busy || !accepted} onClick={() => void mutate(() => api.deleteSkillGroupAssignment(selected.id, rule.id))}>Delete Assignment</button></div>
+              <button className="btn ghost danger sm" type="button" disabled={busy || !accepted} onClick={() => void mutate(() => api.deleteSkillGroupAssignment(selected.id, rule.id))}>Delete Assignment</button></div>
           </article>)}
         </section>}
-        <button className="btn danger" type="button" disabled={busy || !accepted} onClick={() => void mutate(async () => { await api.deleteSkillGroup(selected.id); setSelectedId(""); })}>Delete Group and Its Assignments</button>
+        <button className="btn ghost danger" type="button" disabled={busy || !accepted} onClick={() => void mutate(async () => { await api.deleteSkillGroup(selected.id); setSelectedId(""); })}>Delete Group and Its Assignments</button>
       </>}
     </div>
   </Modal>;

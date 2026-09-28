@@ -82,7 +82,7 @@ import {
   SegmentedControl,
   Select,
   type SearchableComboboxOption,
-  useTouchTargetMode,
+  useTapOnlyPicker,
 } from "./ui/ChoiceControls.js";
 
 const AUTOMATIC_ORCHESTRATOR_VALUE = "__automatic__";
@@ -312,7 +312,7 @@ export function NewSessionDialog({
   const formId = `${generatedFormId}-new-session`;
   const projectInputId = `${generatedFormId}-project`;
   const agentInputId = `${generatedFormId}-agent`;
-  const touchChoicePicker = useTouchTargetMode();
+  const touchChoicePicker = useTapOnlyPicker();
   const initialProjectAutoFocusRef = useRef(projectsSupported && !touchChoicePicker);
   useLayoutEffect(() => {
     // React's autoFocus runs when the editable Project owner mounts. Consume that one-time claim
@@ -1275,7 +1275,7 @@ export function NewSessionDialog({
                       ? `A Project is a durable home across Locations. ${projectAudienceVisibilitySummary(selectedProject.audience)}. New session transcripts use the Project's visibility.`
                       : "A Project is a durable home for related sessions across Locations. This control plane does not report the Project's visibility."}
                 </span>
-                <button type="button" className="btn ghost sm new-session-project-control" onClick={() => setCreatingProject(true)}>Create Project…</button>
+                <button type="button" className="btn ghost new-session-project-control" onClick={() => setCreatingProject(true)}>Create Project…</button>
               </div>
             </>
           )}
@@ -1339,7 +1339,7 @@ export function NewSessionDialog({
               )}
               <button
                 type="button"
-                className="btn ghost sm new-session-project-control"
+                className="btn ghost new-session-project-control"
                 data-validation-target="add-location"
                 disabled={selectedProject.canManage === false}
                 title={selectedProject.canManage === false ? "Project management permission is required" : undefined}

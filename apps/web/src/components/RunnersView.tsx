@@ -269,7 +269,7 @@ function AgentRow({
         {a.version && <span className="agent-ver">v{a.version}</span>}
         <button
           type="button"
-          className="icon-btn agent-details-trigger"
+          className="icon-btn sm agent-details-trigger"
           onClick={() => setShowDetails(true)}
           title="View Agent Details"
           aria-label={`View ${displayName} Details`}
@@ -523,7 +523,7 @@ function RunnerDetails({ runner, online }: { runner: RunnerView; online: boolean
               <p>Continue a session that was started outside Wollipog on this machine.</p>
               <button
                 type="button"
-                className="btn-rediscover"
+                className="btn sm btn-rediscover"
                 onClick={() => setFindingSessions(true)}
                 disabled={!externalSessionsSupported}
                 title={externalSessionsSupported ? "Choose an agent and scan its external sessions" : unsupported}
@@ -1132,7 +1132,7 @@ function MachineSettingsDialog({
             </div>
             <button
               type="button"
-              className={`btn automatic-account-switch-button ${automaticAccountSwitching ? "danger" : "primary"}`}
+              className={`btn automatic-account-switch-button ${automaticAccountSwitching ? "ghost danger" : "primary"}`}
               disabled={!automaticAccountSwitchSupported || runner.canManage !== true ||
                 savingAutomaticAccountSwitching}
               onClick={() => void setAutomaticAccountSwitch(!automaticAccountSwitching)}
@@ -1256,7 +1256,7 @@ function MachineSettingsDialog({
             </p>
             <button
               type="button"
-              className="btn danger"
+              className="btn ghost danger"
               disabled={adoptingLegacyData || box.legacyDataAdoption?.status === "pending"}
               onClick={() => void adoptLegacyData()}
             >
@@ -1269,7 +1269,7 @@ function MachineSettingsDialog({
         <p>Deleting a Machine removes its sessions and run history from Wollipog. Files on the Machine remain in place.</p>
         <button
           type="button"
-          className="btn danger"
+          className="btn ghost danger"
           disabled={deleting || onlineNativeRunner}
           title={onlineNativeRunner ? "Stop this native runner before deleting the Machine" : undefined}
           onClick={() => void deleteMachine()}
@@ -1439,13 +1439,13 @@ export function BoxCard({
         <span className="os-badge">SSH</span>
         {harnessStatusCurrent && runner.agents.some((agent) => agent.update?.status === "update_available") &&
           (canManage || runner.canManage === true) && (
-          <button type="button" className="btn-rediscover needs-update" onClick={() => setShowMachineSettings(true)}>
+          <button type="button" className="btn sm btn-rediscover needs-update" onClick={() => setShowMachineSettings(true)}>
             <span>New Harness Release · View Settings</span>
           </button>
         )}
         {canManage && needsUpdate && !inProgress && (
           <button
-            className="btn-rediscover update-runner needs-update"
+            className="btn sm btn-rediscover update-runner needs-update"
             onClick={() => void updateRunner()}
             disabled={updating || inProgress}
             title={outdatedBoxHint()}
@@ -1457,7 +1457,7 @@ export function BoxCard({
         {canManage && (
           <>
             <button
-              className="btn-rediscover"
+              className="btn sm btn-rediscover"
               onClick={() => void reconnect()}
               disabled={inProgress || reconnecting}
               title="Reconnect this machine"
@@ -1468,7 +1468,7 @@ export function BoxCard({
           </>
         )}
         {(canManage || runner?.canManage === true) && (
-          <button className="btn-rediscover" onClick={() => setShowMachineSettings(true)} title="Manage this Machine">
+          <button className="btn sm btn-rediscover" onClick={() => setShowMachineSettings(true)} title="Manage this Machine">
             <SettingsIcon />
             <span>Manage</span>
           </button>
@@ -1560,12 +1560,12 @@ export function NativeRunnerCard({
         <span className={`os-badge os-${runner.os}`}>{osLabel(runner.os)}</span>
         {runner.status === "online" && runner.agents.some((agent) => agent.update?.status === "update_available") &&
           (canManage || runner.canManage === true) && (
-          <button type="button" className="btn-rediscover needs-update" onClick={() => onManage(runner.runnerId)}>
+          <button type="button" className="btn sm btn-rediscover needs-update" onClick={() => onManage(runner.runnerId)}>
             <span>New Harness Release · View Settings</span>
           </button>
         )}
         {canManage && <button
-          className="btn-rediscover"
+          className="btn sm btn-rediscover"
           disabled={runner.status !== "online" || busy}
           onClick={() => void onRediscover(runner.runnerId)}
           title="Re-probe this host for installed agents"
@@ -1575,7 +1575,7 @@ export function NativeRunnerCard({
         </button>}
         {(canManage || runner.canManage === true) && (
           <button
-            className="btn-rediscover"
+            className="btn sm btn-rediscover"
             onClick={() => onManage(runner.runnerId)}
             title="Manage this Machine"
           >
