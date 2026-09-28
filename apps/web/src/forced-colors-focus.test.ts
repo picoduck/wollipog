@@ -35,12 +35,15 @@ const css = readFileSync(join(WEB, "src/styles.css"), "utf8");
  */
 const KNOWN_GOOD_OUTLINE = /^2px solid (var\(--accent\)|var\(--text\)|transparent)$/;
 
+/** A reason that holds only while the rule stays above the global `:focus-visible` ring; a test pins that order. */
+const BEFORE_RING = "declared before the global :focus-visible ring at equal specificity, so the ring still wins";
+
 /** Every rule that sets an outline some other way, with the reason focus stays visible in forced colors. */
 const REVIEWED: ReadonlyMap<string, string> = new Map([
   // Text entry: forced colors keeps the caret, which marks focus in a field.
   ["select, input, textarea { outline: none }", "element selectors (0,0,1) lose to the later global :focus-visible ring, so these fields keep it"],
-  [".composer-input { outline: none }", "declared before the global :focus-visible ring at equal specificity, so the ring still wins"],
-  [".composer-answer-input { outline: none }", "declared before the global :focus-visible ring at equal specificity, so the ring still wins"],
+  [".composer-input { outline: none }", BEFORE_RING],
+  [".composer-answer-input { outline: none }", BEFORE_RING],
   [".palette-input { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
   [".project-manager-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
   [".inbox-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
@@ -50,7 +53,7 @@ const REVIEWED: ReadonlyMap<string, string> = new Map([
   [".shell-input:focus { outline: none; border-color: var(--accent) }", "a text input: forced colors keeps the caret, which marks focus"],
   // Programmatic targets and rings drawn elsewhere.
   [".agent-session-agent-step:focus, .agent-session-results-step:focus { outline: none }", "tabIndex={-1} programmatic focus targets, never a keyboard stop"],
-  [".session-status-popover-content { outline: none }", "declared before the global :focus-visible ring at equal specificity, so the ring still wins"],
+  [".session-status-popover-content { outline: none }", BEFORE_RING],
   [".inbox-list { outline: none }", "the list pane's :has(> .inbox-list:focus-visible)::after border marks focus, and forced colors keeps borders"],
   [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", "the list and preview panes' :has()::after borders mark focus; in the app SessionDetail renders only inside the preview pane"],
   ["@media (pointer: coarse) .inbox-thread-toggle:focus-visible { outline: none }", "the same block outlines the toggle's inner span with the known-good ring instead"],
@@ -114,17 +117,32 @@ function knownGood(decl: Declaration): boolean {
   return decl.prop === "outline" && KNOWN_GOOD_OUTLINE.test(value);
 }
 
-/** `context selector { declarations }` for every rule that sets an outline other than a known-good ring, sorted. */
-export function outlineInventory(source: string): string[] {
+/** Stands for the top-level `:focus-visible` rule in `outlineEntries`, so an entry's position against it can be checked. */
+export const GLOBAL_RING = "<global :focus-visible ring>";
+
+/** The inventory in source order, with GLOBAL_RING where each top-level `:focus-visible` rule sits. */
+export function outlineEntries(source: string): string[] {
   const entries: string[] = [];
   postcss.parse(source).walkRules((rule) => {
+    if (rule.parent?.type === "root" && rule.selector.trim() === ":focus-visible") entries.push(GLOBAL_RING);
     const decls = rule.nodes.filter((node): node is Declaration => node.type === "decl");
     const outline = decls.filter(setsOutline);
     if (outline.every(knownGood)) return;
     const recorded = /:focus/i.test(rule.selector) ? decls : outline;
     entries.push(`${contextOf(rule)}${selectorMembers(rule.selector).join(", ")} { ${recorded.map(normalise).join("; ")} }`);
   });
-  return entries.sort();
+  return entries;
+}
+
+/** `context selector { declarations }` for every rule that sets an outline other than a known-good ring, sorted. */
+export function outlineInventory(source: string): string[] {
+  return outlineEntries(source).filter((entry) => entry !== GLOBAL_RING).sort();
+}
+
+/** Entries that are declared before `ring` in `entries`, among the given keys; the rest have moved past it. */
+export function entriesAfterRing(entries: readonly string[], keys: Iterable<string>): string[] {
+  const ring = entries.indexOf(GLOBAL_RING);
+  return [...keys].filter((key) => ring < 0 || entries.lastIndexOf(key) > ring);
 }
 
 test("every rule that sets an outline outside the known-good rings has been reviewed for forced colors", () => {
@@ -132,6 +150,25 @@ test("every rule that sets an outline outside the known-good rings has been revi
     "a rule that sets an outline other than `2px solid` in --accent, --text or transparent was added, changed or " +
     "removed. Forced colors discards backgrounds and shadows, so check keyboard focus still shows a ring in a " +
     "contrast theme (prefer `outline: 2px solid transparent` to `outline: none`), then update REVIEWED with the reason");
+});
+
+test("entries that rely on source order stay above the one global :focus-visible ring", () => {
+  const entries = outlineEntries(css);
+  assert.equal(entries.filter((entry) => entry === GLOBAL_RING).length, 1, "exactly one top-level :focus-visible rule");
+  const beforeRing = [...REVIEWED].filter(([, reason]) => reason === BEFORE_RING).map(([key]) => key);
+  assert.equal(beforeRing.length, 3);
+  assert.deepEqual(entriesAfterRing(entries, beforeRing), [],
+    "a rule whose reason is that the global ring is declared after it has moved below that ring, so its outline now wins");
+});
+
+test("entriesAfterRing notices an entry moving past the ring", () => {
+  const rule = ".r { outline: none }";
+  const ring = ":focus-visible { outline: 2px solid var(--accent); }";
+  assert.deepEqual(entriesAfterRing(outlineEntries(`${rule} ${ring}`), [rule]), []);
+  assert.deepEqual(entriesAfterRing(outlineEntries(`${ring} ${rule}`), [rule]), [rule]);
+  assert.deepEqual(entriesAfterRing(outlineEntries(`${rule} ${ring} ${rule}`), [rule]), [rule]);
+  assert.deepEqual(entriesAfterRing(outlineEntries(rule), [rule]), [rule]);
+  assert.deepEqual(outlineInventory(`${ring} ${rule}`), [rule]);
 });
 
 test("every reviewed entry says why focus stays visible", () => {
