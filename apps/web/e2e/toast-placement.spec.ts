@@ -118,3 +118,25 @@ test("a toast clears the software keyboard where only the visual viewport shrink
   const after = await box(page, ".toast-region > .toast");
   expect(after.bottom).toBeLessThanOrEqual(844 - 300);
 });
+
+test("a toast over a dialog clears the dialog's footer where they share a column", async ({ page }) => {
+  // Toasts sit above dialogs. A desktop dialog's footer floats above the bottom edge, so it is not
+  // docked chrome, but a toast in the same column would still cover its buttons.
+  await page.setViewportSize({ width: 1000, height: 760 });
+  await page.goto(SHELL);
+  await page.waitForFunction(() => Boolean(window.__WOLLIPOG_TOASTS_E2E__));
+  await page.getByRole("tab", { name: /Alpha/ }).click();
+  await page.getByRole("button", { name: "Project Actions for Alpha" }).click();
+  await page.getByRole("menuitem", { name: "New Session Here" }).click();
+  await expect(page.getByRole("dialog", { name: "New Session" })).toBeVisible();
+  await show(page, "Copied link to clipboard.", { durationMs: 0 });
+  await expect(page.locator(".toast-region > .toast")).toBeVisible();
+  const foot = await box(page, ".modal-foot");
+  const toast = await box(page, ".toast-region > .toast");
+  // The case under test: the footer sits in the lower half, clear of the bottom edge, in the
+  // toast's column.
+  expect(foot.top).toBeGreaterThan(760 / 2);
+  expect(foot.bottom).toBeLessThan(760 - 2);
+  expect(foot.right).toBeGreaterThan(toast.left);
+  await expect.poll(async () => foot.top - (await box(page, ".toast-region > .toast")).bottom).toBeGreaterThanOrEqual(0);
+});

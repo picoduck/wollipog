@@ -126,3 +126,22 @@ test("a board whose snapshot has not loaded says Loading, and a disconnected one
     container.remove();
   }
 });
+
+test("a state inside a live region does not announce a second time", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<State variant="loading" live={false}>Loading sessions…</State>));
+    const quiet = container.querySelector(".state")!;
+    assert.equal(quiet.getAttribute("role"), null);
+    assert.equal(quiet.getAttribute("aria-live"), null);
+    await act(async () => root.render(<State variant="loading">Loading sessions…</State>));
+    const live = container.querySelector(".state")!;
+    assert.equal(live.getAttribute("role"), "status");
+    assert.equal(live.getAttribute("aria-live"), "polite");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});

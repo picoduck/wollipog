@@ -361,3 +361,49 @@ test("a dismissed in-flight undo still reports failure, while teardown suppresse
   assert.equal(container.textContent, "");
   container.remove();
 });
+
+test("dismissing the focused toast does not leave the rest of the stack paused", async () => {
+  const originalNow = Date.now;
+  let now = 2_000_000;
+  const timers: Array<{ id: number; at: number; run: () => void }> = [];
+  let nextId = 1;
+  const realSet = domWindow.setTimeout;
+  const realClear = domWindow.clearTimeout;
+  Date.now = () => now;
+  domWindow.setTimeout = ((run: () => void, delay = 0) => {
+    const id = nextId++;
+    timers.push({ id, at: now + delay, run });
+    return id;
+  }) as never;
+  domWindow.clearTimeout = ((id: number) => {
+    const index = timers.findIndex((timer) => timer.id === id);
+    if (index >= 0) timers.splice(index, 1);
+  }) as never;
+  const advance = async (ms: number) => {
+    now += ms;
+    for (const timer of [...timers].filter((candidate) => candidate.at <= now)) {
+      timers.splice(timers.indexOf(timer), 1);
+      await act(async () => { timer.run(); });
+    }
+  };
+  const { container, root } = await renderHarness();
+  try {
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="info"]')!.click(); });
+    await act(async () => { container.querySelector<HTMLButtonElement>('[data-testid="info"]')!.click(); });
+    assert.equal(container.querySelectorAll(".toast").length, 2);
+    // A keyboard user focuses the newest toast's close button, which pauses the stack, and presses
+    // it. The button is removed while focused, so the region never receives a blur.
+    const close = container.querySelector<HTMLButtonElement>('.toast-region > .toast [aria-label="Dismiss Notification"]')!;
+    await act(async () => { close.focus(); });
+    await act(async () => { close.click(); });
+    assert.equal(container.querySelectorAll(".toast").length, 1);
+    await advance(5_000);
+    assert.equal(container.querySelectorAll(".toast").length, 0, "the remaining info toast still dismisses itself");
+  } finally {
+    Date.now = originalNow;
+    domWindow.setTimeout = realSet;
+    domWindow.clearTimeout = realClear;
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});

@@ -111,6 +111,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
    * focusing the stack pauses every timer; leaving it resumes each with what it had left. */
   const toastTimers = useRef(new Map<number, { timer: number | null; deadline: number; remaining: number }>());
   const toastsPaused = useRef(false);
+  const toastRegion = useRef<HTMLDivElement | null>(null);
   const toastActionsInFlight = useRef(new Set<number>());
 
   const clearToastTimer = useCallback((id: number) => {
@@ -299,6 +300,16 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   }, [olderToasts.length]);
   useToastClearance(toasts.length > 0);
 
+  // Dismissing the focused toast removes the element that held focus, and a removed element fires
+  // no blur, so the pause it started would never end. After every change to the stack, resume
+  // unless the pointer or focus is still inside it.
+  useEffect(() => {
+    const region = toastRegion.current;
+    if (!toastsPaused.current || !region) return;
+    if (region.contains(document.activeElement) || region.matches(":hover")) return;
+    resumeToastTimers();
+  }, [toasts, moreOpen, resumeToastTimers]);
+
   const renderToast = (toast: ToastEntry) => (
     <div
       className={`toast ${toast.tone === "success" ? "t-success"
@@ -334,6 +345,7 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       {children}
       {active && <ConfirmationDialog request={active} onSettle={settleConfirmation} />}
       <div
+        ref={toastRegion}
         className="toast-region"
         aria-label="Notifications"
         aria-live="polite"
@@ -373,8 +385,10 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
  * chrome stacks (a phone session's composer sits on its tab bar), so the measurement walks up from
  * the bottom of the app through every visible candidate whose bottom edge touches the stack so far.
  * A candidate taller than half the app is skipped: the desktop rail spans the full height and sits
- * beside the stack, not under it. Measured only while a toast is showing, on resize and on a short
- * interval, because the docked chrome changes with navigation and the software keyboard.
+ * beside the stack, not under it. A dialog footer in the lower half also counts when it shares the
+ * toast column, even if it floats above the bottom edge (a full-height desktop dialog ends 24px up):
+ * toasts sit above dialogs, so they would otherwise cover its buttons. Measured only while a toast
+ * is showing, whenever the docked chrome mounts, unmounts or resizes.
  */
 function useToastClearance(active: boolean) {
   useEffect(() => {
@@ -393,6 +407,13 @@ function useToastClearance(active: boolean) {
       let stackTop = bottom;
       for (const box of boxes) {
         if (Math.abs(box.bottom - stackTop) > 2) continue;
+        stackTop = Math.min(stackTop, box.top);
+      }
+      const column = document.querySelector(".toast-region")?.getBoundingClientRect();
+      for (const foot of document.querySelectorAll<HTMLElement>(".modal-foot")) {
+        const box = foot.getBoundingClientRect();
+        if (box.width === 0 || box.height === 0 || box.top < bottom / 2) continue;
+        if (column && (box.right <= column.left || box.left >= column.right)) continue;
         stackTop = Math.min(stackTop, box.top);
       }
       root.style.setProperty("--toast-clear", `${Math.ceil(bottom - stackTop)}px`);

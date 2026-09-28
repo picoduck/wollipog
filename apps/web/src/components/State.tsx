@@ -56,6 +56,8 @@ export interface StateProps {
   compact?: boolean;
   /** Render the title as a heading at this level, for a state that replaced a real heading. */
   headingLevel?: 2 | 3 | 4;
+  /** False when an ancestor is already the live region, so the message is announced once. */
+  live?: boolean;
   className?: string;
 }
 
@@ -71,6 +73,7 @@ export function State({
   actions,
   compact = false,
   headingLevel,
+  live: announce = true,
   className,
 }: StateProps) {
   if (variant === "error") {
@@ -95,8 +98,8 @@ export function State({
         compact ? "compact" : "",
         className ?? "",
       ].filter(Boolean).join(" ")}
-      role={live || variant === "no-results" ? "status" : undefined}
-      aria-live={live ? "polite" : undefined}
+      role={announce && (live || variant === "no-results") ? "status" : undefined}
+      aria-live={announce && live ? "polite" : undefined}
     >
       {variant === "loading" && <Spinner decorative />}
       {icon && variant !== "loading" && <span className="state-icon" aria-hidden="true">{icon}</span>}

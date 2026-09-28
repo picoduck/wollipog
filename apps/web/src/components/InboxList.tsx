@@ -138,14 +138,15 @@ export const InboxList = forwardRef<HTMLDivElement, {
   if (entries.length === 0) {
     return (
       // The focus target for the list zone stays this container; what it says follows the §12 order,
-      // so a list that has not loaded, or has lost its connection, never claims to be empty.
+      // so a list that has not loaded, or has lost its connection, never claims to be empty. This
+      // container is the one live region, so the State inside it does not announce again.
       <div className="inbox-zero" role="status" tabIndex={-1}>
         {snapshot.offline ? (
-          <State variant="offline" compact>Reconnecting…</State>
+          <State variant="offline" compact live={false}>Reconnecting…</State>
         ) : snapshot.loading ? (
-          <State variant="loading" compact>Loading sessions…</State>
+          <State variant="loading" compact live={false}>Loading sessions…</State>
         ) : filtered ? (
-          <State variant="no-results" compact title="No Matching Sessions">Try a different search.</State>
+          <State variant="no-results" compact live={false} title="No Matching Sessions">Try a different search.</State>
         ) : (
           <State
             compact
