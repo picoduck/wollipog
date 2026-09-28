@@ -31,29 +31,30 @@ const css = readFileSync(join(WEB, "src/styles.css"), "utf8");
 
 /**
  * The known-good rings. A transparent outline is the idiomatic forced-colors answer: it paints
- * nothing normally, and forced colors repaints it in a system colour.
+ * nothing normally, and forced colors repaints it in a system colour. `--focus-width` is 2px and
+ * `--focus` is `--text` (tokens.test.ts pins both), so the design system's ring is the same ring.
  */
-const KNOWN_GOOD_OUTLINE = /^2px solid (var\(--accent\)|var\(--text\)|transparent)$/;
-
-/** A reason that holds only while the rule stays above the global `:focus-visible` ring; a test pins that order. */
-const BEFORE_RING = "declared before the global :focus-visible ring at equal specificity, so the ring still wins";
+const KNOWN_GOOD_OUTLINE =
+  /^(2px|var\(--focus-width\)) solid (var\(--accent\)|var\(--text\)|var\(--focus\)|transparent)$/;
 
 /** Every rule that sets an outline some other way, with the reason focus stays visible in forced colors. */
 const REVIEWED: ReadonlyMap<string, string> = new Map([
   // Text entry: forced colors keeps the caret, which marks focus in a field.
-  ["select, input, textarea { outline: none }", "element selectors (0,0,1) lose to the later global :focus-visible ring, so these fields keep it"],
-  [".composer-input { outline: none }", BEFORE_RING],
-  [".composer-answer-input { outline: none }", BEFORE_RING],
+  [".composer-input { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
+  [".composer-answer-input { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
   [".palette-input { outline: none }", "a text field: forced colors keeps the caret, which marks focus"],
   [".project-manager-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
   [".inbox-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
   [".archive-search input { outline: 0 }", "a text field: forced colors keeps the caret, which marks focus"],
-  [".ws-create-name:focus { outline: none; border-color: var(--accent) }", "a text input: forced colors keeps the caret, which marks focus"],
-  [".shell-search:focus { outline: none; border-color: var(--accent) }", "a text input: forced colors keeps the caret, which marks focus"],
-  [".shell-input:focus { outline: none; border-color: var(--accent) }", "a text input: forced colors keeps the caret, which marks focus"],
+  [".ws-create-name:focus { outline: none; border-color: var(--focus) }", "a text input: forced colors keeps the caret, which marks focus"],
+  [".shell-search:focus { outline: none; border-color: var(--focus) }", "a text input: forced colors keeps the caret, which marks focus"],
+  [".shell-input:focus { outline: none; border-color: var(--focus) }", "a text input: forced colors keeps the caret, which marks focus"],
+  [":where( input:not([type=\"checkbox\"], [type=\"radio\"], [type=\"range\"], [type=\"file\"], [type=\"color\"]), textarea, select, .ui-select-trigger, .ui-searchable-combobox-input ):focus-visible { border-color: var(--focus); outline: 1px solid var(--focus); outline-offset: 0 }",
+    "a 1px outline, which forced colors repaints in a system colour; text fields also keep the caret"],
   // Programmatic targets and rings drawn elsewhere.
   [".agent-session-agent-step:focus, .agent-session-results-step:focus { outline: none }", "tabIndex={-1} programmatic focus targets, never a keyboard stop"],
-  [".session-status-popover-content { outline: none }", BEFORE_RING],
+  [":where([tabindex=\"-1\"]:not( a[href], button, input, select, textarea, summary, [role=\"button\"], [role=\"checkbox\"], [role=\"link\"], [role=\"menuitem\"], [role=\"menuitemcheckbox\"], [role=\"menuitemradio\"], [role=\"option\"], [role=\"radio\"], [role=\"switch\"], [role=\"tab\"], [role=\"treeitem\"], [role=\"combobox\"], [role=\"grid\"], [role=\"listbox\"], [role=\"menu\"], [role=\"menubar\"], [role=\"radiogroup\"], [role=\"searchbox\"], [role=\"slider\"], [role=\"spinbutton\"], [role=\"tablist\"], [role=\"textbox\"], [role=\"tree\"], [role=\"treegrid\"] )):focus { outline: none }",
+    "tabIndex={-1} programmatic targets only (page title, dialog card, panel headings, scrollers): controls, widget roles and F6 landing targets are excluded or restored after it"],
   [".inbox-list { outline: none }", "the list pane's :has(> .inbox-list:focus-visible)::after border marks focus, and forced colors keeps borders"],
   [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", "the list and preview panes' :has()::after borders mark focus; in the app SessionDetail renders only inside the preview pane"],
   ["@media (pointer: coarse) .inbox-thread-toggle:focus-visible { outline: none }", "the same @media block rings the toggle's inner span with the known-good ring instead"],
@@ -77,7 +78,7 @@ const CUES: ReadonlyMap<string, string> = new Map([
   [".inbox-list { outline: none }", PANE_BORDER],
   [".inbox-list:focus-visible, .detail-scroll:focus-visible { outline: none }", PANE_BORDER],
   ["@media (pointer: coarse) .inbox-thread-toggle:focus-visible { outline: none }",
-    "@media (pointer: coarse) .inbox-thread-toggle:focus-visible > span { outline: 2px solid var(--accent); outline-offset: 0 }"],
+    "@media (pointer: coarse) .inbox-thread-toggle:focus-visible > span { outline: var(--focus-width) solid var(--focus); outline-offset: 0 }"],
 ]);
 
 /** Split a selector list without treating commas inside :is(), :has(), attributes or strings as members. */
@@ -122,7 +123,7 @@ function setsOutline(decl: Declaration): boolean {
 const normalise = (decl: Declaration) => `${decl.prop}: ${decl.value.trim().replace(/\s+/g, " ")}${decl.important ? " !important" : ""}`;
 
 /** Offsets that keep the ring on or beside its element; a larger one can move it out of sight. */
-const KNOWN_GOOD_OFFSET = /^-?[0-3](px)?$/;
+const KNOWN_GOOD_OFFSET = /^(-?[0-3](px)?|var\(--focus-offset\)|calc\(-1 \* var\(--focus-width\)\))$/;
 
 /** An outline declaration that can only draw one of the known-good rings or nudge it. */
 function knownGood(decl: Declaration): boolean {
@@ -132,14 +133,16 @@ function knownGood(decl: Declaration): boolean {
   return decl.prop === "outline" && KNOWN_GOOD_OUTLINE.test(value);
 }
 
-/** Stands for the top-level `:focus-visible` rule in `outlineEntries`, so an entry's position against it can be checked. */
+/** Stands for the top-level global ring in `outlineEntries`, so an entry's position against it can be checked. */
 export const GLOBAL_RING = "<global :focus-visible ring>";
+/** The global ring's selector: the design system's zero-specificity `:where(:focus-visible)`, or the older bare form. */
+const GLOBAL_RING_SELECTORS = new Set([":focus-visible", ":where(:focus-visible)"]);
 
 /** The inventory in source order, with GLOBAL_RING where each top-level `:focus-visible` rule sits. */
 export function outlineEntries(source: string): string[] {
   const entries: string[] = [];
   postcss.parse(source).walkRules((rule) => {
-    if (rule.parent?.type === "root" && rule.selector.trim() === ":focus-visible") entries.push(GLOBAL_RING);
+    if (rule.parent?.type === "root" && GLOBAL_RING_SELECTORS.has(rule.selector.trim())) entries.push(GLOBAL_RING);
     const decls = rule.nodes.filter((node): node is Declaration => node.type === "decl");
     const outline = decls.filter(setsOutline);
     if (outline.every(knownGood)) return;
@@ -177,13 +180,17 @@ test("every rule that sets an outline outside the known-good rings has been revi
     "contrast theme (prefer `outline: 2px solid transparent` to `outline: none`), then update REVIEWED with the reason");
 });
 
-test("entries that rely on source order stay above the one global :focus-visible ring", () => {
+test("the one global ring is zero-specificity, so no reviewed reason depends on source order against it", () => {
   const entries = outlineEntries(css);
-  assert.equal(entries.filter((entry) => entry === GLOBAL_RING).length, 1, "exactly one top-level :focus-visible rule");
-  const beforeRing = [...REVIEWED].filter(([, reason]) => reason === BEFORE_RING).map(([key]) => key);
-  assert.equal(beforeRing.length, 3);
-  assert.deepEqual(entriesAfterRing(entries, beforeRing), [],
-    "a rule whose reason is that the global ring is declared after it has moved below that ring, so its outline now wins");
+  assert.equal(entries.filter((entry) => entry === GLOBAL_RING).length, 1, "exactly one top-level global ring");
+  // Any author outline on a focusable element beats `:where(:focus-visible)`, whatever its position.
+  // A reason that said "the global ring still wins" would therefore be false; none may say it.
+  assert.throws(() => { postcss.parse(css).walkRules((rule) => {
+    if (rule.parent?.type === "root" && rule.selector.trim() === ":where(:focus-visible)") throw new Error("found");
+  }); }, /found/, "the global ring must be the zero-specificity :where(:focus-visible) rule");
+  for (const [key, reason] of REVIEWED) {
+    assert.doesNotMatch(reason, /global :focus-visible ring (still )?wins|lose to the later global/, key);
+  }
 });
 
 test("entriesAfterRing notices an entry moving past the ring", () => {

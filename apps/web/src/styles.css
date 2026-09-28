@@ -1945,10 +1945,12 @@ textarea {
   gap: 5px;
   padding: 4px 10px 6px;
   border-radius: var(--radius-sm);
-  outline: none;
 }
+/* The shadow is the ring; the transparent outline replaces the global one and paints nothing, but
+   forced colors drops the shadow and repaints the outline, so focus stays visible there. */
 .session-status-popover-content:focus-visible {
   box-shadow: 0 0 0 2px var(--accent);
+  outline: 2px solid transparent;
 }
 .session-status-popover-content .session-status-indicators,
 .session-status-popover-content .change-status-indicators {
