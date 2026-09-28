@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const offlineBanner = readFileSync(new URL("./components/OfflineBanner.tsx", import.meta.url), "utf8");
+const feedbackProvider = readFileSync(new URL("./components/FeedbackProvider.tsx", import.meta.url), "utf8");
 const rail = readFileSync(new URL("./components/Rail.tsx", import.meta.url), "utf8");
 const inbox = readFileSync(new URL("./components/InboxView.tsx", import.meta.url), "utf8");
 const inboxCreateMenu = readFileSync(new URL("./components/InboxCreateMenu.tsx", import.meta.url), "utf8");
@@ -363,9 +364,11 @@ test("the software keyboard shrinks the layout viewport, not just the visual one
 test("an open More sheet suppresses the toast stack", () => {
   // The merged suppression named .menu-pop and .instance-selector-pop, and the More sheet was
   // neither, so persistent toasts still covered and intercepted taps on its lower destinations.
-  // The sheet is now the shared menu surface (#1803), which the one menu guard covers.
+  // The sheet is now the shared menu surface (#1803), whose open state hides the stack (#1990).
   assert.match(rail, /<MenuSurface/, "the More sheet is the shared menu surface");
-  const rule = /body:has\(> \.menu\) \.toast-region/.test(css);
+  assert.match(feedbackProvider, /const menuOpen = useMenuOpen\(\);/, "the stack follows the menu primitive's open state");
+  assert.match(feedbackProvider, /hiddenByMenu \? "toast-region under-menu"/, "and marks itself hidden from it");
+  const rule = /\.toast-region\.under-menu\s*\{[^}]*visibility: hidden;/.test(css);
   assert.ok(rule, "the More sheet must suppress toasts like every other open menu");
 });
 
@@ -523,8 +526,11 @@ test("keyboard reachability does not depend on optional viewport metadata alone"
 test("More-sheet toast suppression covers the whole rail breakpoint", () => {
   // The rail and its sheet are active to 760px; the suppression sat in a 600px block, so at 667px
   // the toast stack still covered the sheet's lower destinations.
-  const block = /@media \(max-width: 760px\) \{[^@]*?body:has\(> \.menu\) \.toast-region[^{]*\{[^}]*\}/s.test(css);
+  const block = /@media \(max-width: 760px\) \{[^@]*?\.toast-region\.under-menu[^{]*\{[^}]*\}/s.test(css);
   assert.ok(block, "suppression must apply through 760px, not just the phone breakpoint");
+  // The class is set from the same 760px flag, so the hide and the timer pause cover one width.
+  assert.match(feedbackProvider, /const hiddenByMenu = isPhone && menuOpen;/);
+  assert.match(feedbackProvider, /const isPhone = useIsMobile\(\);/);
 });
 
 test("crossing the breakpoint always closes More", () => {

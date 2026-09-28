@@ -8810,11 +8810,11 @@ button.file-head.source-path-link {
 
   /* On a phone the stack and an open menu sheet compete for the same screen, and there is no free edge
      to move the stack to. So while a menu is open the stack is hidden outright rather than moved.
-     Nothing is dismissed or lost; the toasts reappear the moment the menu closes. visibility (not
-     display) keeps the cards in the accessibility tree and preserves the region's layout, and
-     pointer-events guarantees they cannot intercept a tap aimed at the menu beneath them. */
-  body:has(> .menu) .toast-region,
-  body:has(> .popover) .toast-region {
+     FeedbackProvider sets `under-menu` from the menu primitive's open state and pauses every timer
+     for as long, so nothing is dismissed or lost and each toast reappears with the time it had left.
+     visibility (not display) keeps the cards in the accessibility tree and preserves the region's
+     layout, and pointer-events guarantees they cannot intercept a tap aimed at the menu beneath. */
+  .toast-region.under-menu {
     visibility: hidden;
     pointer-events: none;
   }

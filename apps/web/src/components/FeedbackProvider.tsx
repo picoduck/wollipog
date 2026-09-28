@@ -4,6 +4,7 @@ import React, {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -11,6 +12,7 @@ import React, {
 } from "react";
 import { Modal } from "./common.js";
 import { CloseIcon } from "./Icons.js";
+import { useMenuOpen } from "./Menu.js";
 import { ToneIcon } from "./Notice.js";
 import { useIsMobile } from "./useIsMobile.js";
 
@@ -108,9 +110,10 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<ToastEntry[]>([]);
   const nextToastId = useRef(1);
   /** Each auto-dismissing toast's pending timer and the time it still has left. Hovering or
-   * focusing the stack pauses every timer; leaving it resumes each with what it had left. */
+   * focusing the stack pauses every timer, and so does a phone menu hiding it; once no reason is
+   * left, each resumes with what it had left. */
   const toastTimers = useRef(new Map<number, { timer: number | null; deadline: number; remaining: number }>());
-  const toastsPaused = useRef(false);
+  const toastPauses = useRef(new Set<"interaction" | "hidden">());
   const toastRegion = useRef<HTMLDivElement | null>(null);
   const toastActionsInFlight = useRef(new Set<number>());
 
@@ -128,13 +131,14 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
 
   const armToastTimer = useCallback((id: number, remaining: number) => {
     const deadline = Date.now() + remaining;
-    const timer = toastsPaused.current ? null : window.setTimeout(() => dismissToast(id), remaining);
+    const timer = toastPauses.current.size > 0 ? null : window.setTimeout(() => dismissToast(id), remaining);
     toastTimers.current.set(id, { timer, deadline, remaining });
   }, [dismissToast]);
 
-  const pauseToastTimers = useCallback(() => {
-    if (toastsPaused.current) return;
-    toastsPaused.current = true;
+  const pauseToastTimers = useCallback((reason: "interaction" | "hidden" = "interaction") => {
+    const alreadyPaused = toastPauses.current.size > 0;
+    toastPauses.current.add(reason);
+    if (alreadyPaused) return;
     const now = Date.now();
     for (const entry of toastTimers.current.values()) {
       if (entry.timer != null) window.clearTimeout(entry.timer);
@@ -143,9 +147,8 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const resumeToastTimers = useCallback(() => {
-    if (!toastsPaused.current) return;
-    toastsPaused.current = false;
+  const resumeToastTimers = useCallback((reason: "interaction" | "hidden" = "interaction") => {
+    if (!toastPauses.current.delete(reason) || toastPauses.current.size > 0) return;
     for (const [id, entry] of toastTimers.current) armToastTimer(id, entry.remaining);
   }, [armToastTimer]);
 
@@ -305,10 +308,20 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   // unless the pointer or focus is still inside it.
   useEffect(() => {
     const region = toastRegion.current;
-    if (!toastsPaused.current || !region) return;
+    if (!toastPauses.current.has("interaction") || !region) return;
     if (region.contains(document.activeElement) || region.matches(":hover")) return;
-    resumeToastTimers();
+    resumeToastTimers("interaction");
   }, [toasts, moreOpen, resumeToastTimers]);
+
+  // On a phone an open menu or popover hides the stack (§13.1), so nothing may expire unseen: every
+  // timer pauses while a menu is open and resumes with the time it had left once it closes.
+  const menuOpen = useMenuOpen();
+  const hiddenByMenu = isPhone && menuOpen;
+  useLayoutEffect(() => {
+    if (!hiddenByMenu) return;
+    pauseToastTimers("hidden");
+    return () => resumeToastTimers("hidden");
+  }, [hiddenByMenu, pauseToastTimers, resumeToastTimers]);
 
   const renderToast = (toast: ToastEntry) => (
     <div
@@ -346,19 +359,19 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       {active && <ConfirmationDialog request={active} onSettle={settleConfirmation} />}
       <div
         ref={toastRegion}
-        className="toast-region"
+        className={hiddenByMenu ? "toast-region under-menu" : "toast-region"}
         aria-label="Notifications"
         aria-live="polite"
         aria-relevant="additions text"
-        onMouseEnter={pauseToastTimers}
+        onMouseEnter={() => pauseToastTimers("interaction")}
         onMouseLeave={(event) => {
-          if (!event.currentTarget.contains(document.activeElement)) resumeToastTimers();
+          if (!event.currentTarget.contains(document.activeElement)) resumeToastTimers("interaction");
         }}
-        onFocus={pauseToastTimers}
+        onFocus={() => pauseToastTimers("interaction")}
         onBlur={(event) => {
           const next = event.relatedTarget as Node | null;
           if (!next || !event.currentTarget.contains(next)) {
-            if (!event.currentTarget.matches(":hover")) resumeToastTimers();
+            if (!event.currentTarget.matches(":hover")) resumeToastTimers("interaction");
           }
         }}
       >

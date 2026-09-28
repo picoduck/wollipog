@@ -175,6 +175,11 @@ test("the slash palette stays below the mobile right panel", () => {
  * Selector's menu; top-anchored, it covers the editor menu that opens from the topbar. While a
  * menu is open the stack is therefore hidden outright.
  *
+ * The hide is keyed on the menu primitive's open state, not on menu class names (#1990):
+ * FeedbackProvider marks the region `under-menu` from the same signal that pauses its timers, so
+ * the stack can never be hidden while its toasts keep expiring. FeedbackProvider.dom.test.tsx pins
+ * that menus and popovers alike set it.
+ *
  * Read from the AST rather than by regex. The first-match regex this replaced found the rule by
  * text and could not see a later rule re-showing the region, which is the whole failure mode this
  * suite was rewritten to eliminate — and it survived that rewrite.
@@ -182,17 +187,14 @@ test("the slash palette stays below the mobile right panel", () => {
 test("an open menu suppresses the phone toast stack entirely", () => {
   const guards: Rule[] = [];
   parse(css).walkRules((rule) => {
-    if (rule.selectors.some((selector) => /body:has\(> \.(menu|popover)\)/.test(selector) &&
-      selector.includes(".toast-region"))) guards.push(rule);
+    if (rule.selectors.some((selector) => selector.includes(".toast-region.under-menu"))) guards.push(rule);
+    assert.ok(!rule.selectors.some((selector) => /:has\(> \.(menu|popover)\)/.test(selector) &&
+      selector.includes(".toast-region")), "the hide follows the menu's open state, not its class names");
   });
   assert.ok(guards.length > 0, "an open menu must suppress the phone toast stack");
-
-  // Every menu and popover is the shared portalled surface (#1803), a direct child of <body>, and
-  // a bottom sheet on a phone, so one guard covers the instance selector, the More sheet and the
-  // composer menus alike.
-  for (const kind of ["menu", "popover"]) {
-    assert.ok(guards.some((rule) => rule.selectors.some((selector) => selector.includes(kind))),
-      `.${kind} must suppress the toast stack too`);
+  for (const rule of guards) {
+    assert.match((rule.parent as { params?: string } | undefined)?.params ?? "", /max-width: 760px/,
+      "only a phone hides the stack; on desktop it stays beside the open menu");
   }
 
   // Exhaustive over every guard rule: one re-showing the region undoes the others.

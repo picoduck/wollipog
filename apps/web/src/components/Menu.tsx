@@ -2,6 +2,7 @@ import React, {
   useId,
   useLayoutEffect,
   useState,
+  useSyncExternalStore,
   type ButtonHTMLAttributes,
   type CSSProperties,
   type HTMLAttributes,
@@ -32,6 +33,31 @@ const MENU_MAX_HEIGHT = 480;
 const VIEWPORT_MARGIN = 8;
 /** Below this, a side is too short to scroll in, and the menu is fitted to the viewport instead. */
 const MIN_SIDE_HEIGHT = 160;
+
+/**
+ * Whether any menu or popover is open, counted by the one container that renders them all. The
+ * toast stack reads it to step aside on a phone (§13.1), so it follows the behavior rather than a
+ * list of menu class names.
+ */
+let openMenuCount = 0;
+const openMenuListeners = new Set<() => void>();
+
+function setMenuOpen(delta: 1 | -1): void {
+  openMenuCount += delta;
+  for (const listener of [...openMenuListeners]) listener();
+}
+
+function subscribeMenuOpen(listener: () => void): () => void {
+  openMenuListeners.add(listener);
+  return () => {
+    openMenuListeners.delete(listener);
+  };
+}
+
+/** True while at least one MenuSurface is mounted. */
+export function useMenuOpen(): boolean {
+  return useSyncExternalStore(subscribeMenuOpen, () => openMenuCount > 0, () => false);
+}
 
 type Placement = Pick<CSSProperties, "top" | "bottom" | "left" | "maxHeight" | "maxWidth">;
 
@@ -191,6 +217,10 @@ export function MenuSurface({
   const fixedWidth = sheet || width === undefined
     ? undefined
     : width === "trigger" ? anchor.trigger?.current?.getBoundingClientRect().width : width;
+  useLayoutEffect(() => {
+    setMenuOpen(1);
+    return () => setMenuOpen(-1);
+  }, []);
   return createPortal(
     <>
       <div className="menu-backdrop" aria-hidden="true" onClick={onDismiss} />
