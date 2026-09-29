@@ -1022,7 +1022,7 @@ test("a rewritten hook command in any file-form settings copy disables the guard
     const fallback = preparedSettings(prepared.args);
     assert.equal(guardEntries(fallback).length, 0, `${copy}: the driver mediates without the guard`);
     assert.ok(fallback.hooks?.PostToolUse);
-    assert.match(prepared.guardReason ?? "", /settings documents were modified after provisioning/u);
+    assert.match(prepared.guardReason ?? "", /settings do not match the provisioned guarded documents/u);
   }
 }));
 

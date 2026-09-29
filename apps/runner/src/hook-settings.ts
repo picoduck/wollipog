@@ -1846,7 +1846,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
       ...(!settingsSetTrusted
         ? {
           guardReason: expectedFileGuard
-            ? "the file-form guard settings documents were modified after provisioning"
+            ? "the file-form guard settings do not match the provisioned guarded documents"
             : "the file-form guard settings have no runner-held identity in this process",
         }
         : {}),

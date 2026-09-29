@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
@@ -8,8 +8,11 @@ import { test } from "node:test";
 import type { SessionEventPayload } from "@wollipog/protocol";
 import {
   claudeHookCircuitPath,
+  claudeHookProtectionsPath,
   claudeHookTokenPath,
+  removeClaudeHookFiles,
   writeClaudeHookSettings,
+  writeClaudeSettingsSet,
   writeHookCircuitState,
 } from "../hook-settings.js";
 import {
@@ -1174,6 +1177,71 @@ test("persistent config changes restart and resume instead of mutating live argv
   assert.equal(await second, "end_turn");
   driver.dispose();
 });
+
+for (const transition of ["guard invalidation", "manager circuit hold"] as const) {
+  test(`persistent file-form ${transition} restarts even when settings path and permission mode stay the same`, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "claude-hook-fingerprint-"));
+    const sessionId = "sess_persistent_hooks";
+    const file = join(dir, `${sessionId}.settings.json`);
+    const protections = [{ worktreePath: baseOpts.cwd, repoPath: "/repo" }];
+    const launch = { command: "node", args: ["--policy-hook"] };
+    writeClaudeSettingsSet(file, {
+      sessionId, launch, cpHttpUrl: "http://127.0.0.1:4317", tokenFile: claudeHookTokenPath(file),
+    }, {
+      launch: { command: "node", args: ["--managed-worktree-guard"] },
+      protectionsFile: claudeHookProtectionsPath(file), protections,
+    });
+    const children: any[] = [];
+    const launches: any[] = [];
+    const driver = new ClaudeCodeDriver({
+      ...baseOpts,
+      args: ["--settings", file],
+      env: { [CLAUDE_PERSISTENT_FLAG]: "1" },
+      config: { permissionMode: "plan" },
+      managedWorktreeProtections: () => protections,
+    }, noopCb, {
+      spawn: (opts: any) => {
+        launches.push(opts);
+        const child = fakeProcess();
+        children.push(child);
+        return child;
+      },
+      kill: () => {},
+    } as any);
+    try {
+      const first = driver.prompt("one");
+      await nextTask();
+      children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+      assert.equal(await first, "end_turn");
+      assert.equal((driver as any).launchedManagedWorktreeGuardActive, true);
+      if (transition === "guard invalidation") rmSync(claudeHookProtectionsPath(file));
+      else writeHookCircuitState(claudeHookCircuitPath(file), { consecutiveFailures: 3, open: true, openedAt: Date.now() });
+
+      const second = driver.prompt("two");
+      await nextTask();
+      assert.equal(children[0].stdin.writableEnded, true, "old snapshotted hooks must be retired");
+      assert.equal(launches.length, 1, "the replacement waits for old-process close");
+      children[0].emit("close", 0);
+      await nextTask();
+      assert.equal(launches.length, 2);
+      assert.ok(launches[1].args.includes("--resume"));
+      assert.equal(launches[0].args[launches[0].args.indexOf("--settings") + 1], file);
+      assert.equal(launches[1].args[launches[1].args.indexOf("--settings") + 1], file);
+      assert.ok(launches[0].args.includes("plan"));
+      assert.ok(launches[1].args.includes("plan"));
+      assert.equal((driver as any).launchedManagedWorktreeGuardActive, transition !== "guard invalidation");
+      const settings = JSON.parse(readFileSync(file, "utf8"));
+      assert.equal(Boolean(settings.hooks.PostToolUse), transition === "guard invalidation");
+      children[1].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+      assert.equal(await second, "end_turn");
+    } finally {
+      driver.dispose({ forceImmediate: true });
+      for (const child of children) child.emit("close", 0);
+      removeClaudeHookFiles(sessionId, dir);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+}
 
 test("a config change with pending work delivers the prompt and defers the restart", async () => {
   const child = fakeProcess();

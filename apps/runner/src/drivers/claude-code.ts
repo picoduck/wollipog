@@ -644,6 +644,7 @@ export class ClaudeCodeDriver implements Driver {
   /** Established by the last `preparedBaseArgs()`: the managed-worktree guard hook is in the
    * settings file this spawn launches with, so the runner does NOT have to mediate the mode. */
   private managedWorktreeGuardActive = false;
+  private managerHooksActive = false;
   private managedWorktreeGuardReason: string | null = null;
   /** Runner-owned hook state directory for this spawn; the provider must not touch it. */
   private managedWorktreeGuardStateDirectory = "";
@@ -1372,6 +1373,10 @@ export class ClaudeCodeDriver implements Driver {
       effort: cfg.effort ?? null,
       permissionMode,
       args: preparedArgs,
+      // File-form settings keep their path when hook presence changes between turns. Their
+      // contents are captured at process start, so unchanged argv alone cannot justify reuse.
+      guardActive: this.managedWorktreeGuardActive,
+      managerActive: this.managerHooksActive,
     });
 
     if (this.child && this.persistentFingerprint !== fingerprint) {
@@ -2405,6 +2410,7 @@ export class ClaudeCodeDriver implements Driver {
     const prepared = prepareClaudeHookArgs(this.opts.args);
     this.preparedHookEnv = prepared.env ?? {};
     this.managedWorktreeGuardActive = prepared.guardActive;
+    this.managerHooksActive = prepared.managerActive;
     this.managedWorktreeGuardStateDirectory = prepared.guardStateDirectory ?? "";
     if (prepared.guardReason && prepared.guardReason !== this.managedWorktreeGuardReason) {
       this.cb.onStderr(`Claude managed-worktree guard inactive: ${prepared.guardReason}; using runner mediation.`);
