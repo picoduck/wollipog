@@ -110,14 +110,11 @@ test("missing-upstream discovery exercises every production Git gate before the 
 
     let ineligible = 0;
     assert.equal(await discover({ onIneligible: () => { ineligible++; } }), null,
-      "a never-pushed branch is ineligible");
-    assert.equal(ineligible, 1, "missing branch configuration is an authoritative ineligible state");
-    assert.equal(forgeCalls.length, 0);
+      "a never-pushed branch with no merged PR stays protected");
+    assert.equal(ineligible, 0, "a missing upstream still permits exact forge verification");
+    assert.equal(forgeCalls.length, 1);
 
-    execFileSync("git", ["-C", repo, "push", "-u", "origin", branch]);
-    assert.equal(await discover(), null, "a live upstream is ineligible");
-    assert.equal(forgeCalls.length, 0);
-
+    execFileSync("git", ["-C", repo, "push", "origin", "HEAD"]);
     execFileSync("git", ["-C", repo, "push", "origin", "--delete", branch]);
     const head = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
     const exact = {
@@ -126,7 +123,23 @@ test("missing-upstream discovery exercises every production Git gate before the 
       headRefOid: head,
       headRefName: branch,
     };
+    forgeOutput = JSON.stringify([{ ...exact, headRefOid: "b".repeat(40) }]);
+    assert.equal(await discover(), null, "a same-name PR with an unrelated head cannot prove delivery");
     forgeOutput = JSON.stringify([exact]);
+    assert.equal(execFileSync("git", ["-C", repo, "config", "--get", "--default", "", `branch.${branch}.remote`], { encoding: "utf8" }).trim(), "");
+    assert.deepEqual(await discover(), {
+      url: exact.url,
+      state: "merged",
+      headOid: head,
+      provider: "github",
+      kind: "pull_request",
+    }, "a pushed branch without -u is recovered only by exact merged-head proof");
+
+    execFileSync("git", ["-C", repo, "push", "-u", "origin", branch]);
+    assert.equal(await discover(), null, "a live upstream is ineligible");
+    assert.equal(forgeCalls.length, 3);
+
+    execFileSync("git", ["-C", repo, "push", "origin", "--delete", branch]);
     assert.deepEqual(await discover(), {
       url: exact.url,
       state: "merged",
@@ -134,17 +147,17 @@ test("missing-upstream discovery exercises every production Git gate before the 
       provider: "github",
       kind: "pull_request",
     });
-    assert.equal(forgeCalls.length, 1);
-    assert.equal(forgeCalls[0]?.command, "gh");
-    assert.deepEqual(forgeCalls[0]?.args, [
+    assert.equal(forgeCalls.length, 4);
+    assert.equal(forgeCalls[3]?.command, "gh");
+    assert.deepEqual(forgeCalls[3]?.args, [
       "pr", "list", "--head", branch, "--state", "merged", "--limit", "100",
       "--json", "url,state,headRefOid,headRefName",
     ]);
-    assert.equal(forgeCalls[0]?.timeoutMs, 30_000, "a stuck forge has a fixed deadline");
+    assert.equal(forgeCalls[3]?.timeoutMs, 30_000, "a stuck forge has a fixed deadline");
 
     assert.equal(await discover({ onForgeAttempt: () => false }), null,
       "the reconciliation governor can stop before spawning the forge");
-    assert.equal(forgeCalls.length, 1);
+    assert.equal(forgeCalls.length, 4);
 
     for (const rejected of [
       [{ ...exact, headRefName: "fix/other" }],
@@ -3718,7 +3731,9 @@ test("merged PR worktrees remain discardable after their remote branches are del
       discoveredExplicit.worktree,
       unmergedMissingUpstream.worktree,
     ]) {
-      execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
+      execFileSync("git", ["-C", worktree.path, "push",
+        ...([discoveredAutomatic.worktree, discoveredExplicit.worktree].includes(worktree) ? [] : ["-u"]),
+        "origin", worktree.branch]);
       if (![legacyMerged.worktree, discoveredAutomatic.worktree, discoveredExplicit.worktree,
         unmergedMissingUpstream.worktree].includes(worktree)) {
         await manager.linkWorktreePullRequest(
@@ -3755,28 +3770,24 @@ test("merged PR worktrees remain discardable after their remote branches are del
       };
     };
     (manager as unknown as {
-      discoverMergedWorktreePullRequest: (
-        path: string,
-        branch: string,
-      ) => Promise<{
-        url: string;
-        state: "merged";
-        headOid: string;
-        provider: "github";
-        kind: "pull_request";
-      } | null>;
-    }).discoverMergedWorktreePullRequest = async (path, branch) => {
+      discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+    }).discoverMergedWorktreePullRequest = async (path, branch, options) => {
       discoveryCalls.set(path, (discoveryCalls.get(path) ?? 0) + 1);
       const isDiscoverable = path === discoveredAutomatic.worktree.path ||
         (enableExplicitDiscovery && path === discoveredExplicit.worktree.path);
       if (!isDiscoverable) return null;
-      return {
-        url: `https://github.com/picoduck/wollipog/pull/${path === discoveredAutomatic.worktree.path ? "714" : "715"}`,
-        state: "merged",
-        headOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
-        provider: "github",
-        kind: "pull_request",
-      };
+      return mergedWorktreePullRequestForBranch(path, branch, {
+        ...options,
+        runForgeCommand: async () => ({
+          stdout: JSON.stringify([{
+            url: `https://github.com/picoduck/wollipog/pull/${path === discoveredAutomatic.worktree.path ? "714" : "715"}`,
+            state: "MERGED",
+            headRefOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+            headRefName: branch,
+          }]),
+          stderr: "",
+        }),
+      });
     };
 
     const activeEntries = (manager as unknown as { active: Map<string, unknown> }).active;
@@ -4752,28 +4763,41 @@ test("replay refreshes a merged-head proof the launching deferral was journaled 
       baseRef: "HEAD", branch: "fix/deferred-diverged",
     });
     for (const worktree of [merged.worktree, unmerged.worktree, diverged.worktree]) {
-      execFileSync("git", ["-C", worktree.path, "push", "-u", "origin", worktree.branch]);
+      execFileSync("git", ["-C", worktree.path, "push",
+        ...(worktree === merged.worktree ? [] : ["-u"]), "origin", worktree.branch]);
       execFileSync("git", ["-C", worktree.path, "push", "origin", "--delete", worktree.branch]);
-      execFileSync("git", ["-C", worktree.path, "switch", "-c", `${worktree.branch}-actual`]);
+      if (worktree !== merged.worktree) {
+        execFileSync("git", ["-C", worktree.path, "switch", "-c", `${worktree.branch}-actual`]);
+      }
     }
     let discoveryEnabled = false;
     const discoveryCalls = new Map<string, number>();
     const discoveryBranches = new Map<string, string>();
     (manager as unknown as {
-      discoverMergedWorktreePullRequest: (path: string, branch: string) => Promise<{
-        url: string; state: "merged"; headOid: string; provider: "github"; kind: "pull_request";
-      } | null>;
-    }).discoverMergedWorktreePullRequest = async (path, branch) => {
+      discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+    }).discoverMergedWorktreePullRequest = async (path, branch, options) => {
       discoveryCalls.set(path, (discoveryCalls.get(path) ?? 0) + 1);
       discoveryBranches.set(path, branch);
       if (!discoveryEnabled || path === unmerged.worktree.path) return null;
+      if (path === merged.worktree.path) {
+        return mergedWorktreePullRequestForBranch(path, branch, {
+          ...options,
+          runForgeCommand: async () => ({
+            stdout: JSON.stringify([{
+              url: "https://github.com/picoduck/wollipog/pull/810",
+              state: "MERGED",
+              headRefOid: execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+              headRefName: branch,
+            }]),
+            stderr: "",
+          }),
+        });
+      }
       return {
-        url: `https://github.com/picoduck/wollipog/pull/${path === merged.worktree.path ? "810" : "811"}`,
+        url: "https://github.com/picoduck/wollipog/pull/811",
         state: "merged",
         // The diverged worktree's forge head names a commit this branch never reached.
-        headOid: path === merged.worktree.path
-          ? execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim()
-          : "b".repeat(40),
+        headOid: "b".repeat(40),
         provider: "github",
         kind: "pull_request",
       };
@@ -4824,7 +4848,7 @@ test("replay refreshes a merged-head proof the launching deferral was journaled 
       "the removed worktree leaves no inventory row behind");
     await waitForCondition(() => discoveryCalls.size === 3,
       "replay did not consult the forge for the proof each deferral lacks");
-    assert.equal(discoveryBranches.get(merged.worktree.path), `${merged.worktree.branch}-actual`,
+    assert.equal(discoveryBranches.get(merged.worktree.path), merged.worktree.branch,
       "replay discovers merge proof for the branch Git actually has checked out");
 
     const replay = manager as unknown as {

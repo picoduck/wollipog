@@ -1549,9 +1549,9 @@ export async function worktreePullRequestState(
   }
 }
 
-/** Recover the merged change-request link for a branch pushed by an external workflow. Discovery
- * is deliberately limited to a configured same-name remote upstream whose tracking ref vanished;
- * a branch that was never pushed must not gain deletion permission from an unrelated PR. */
+/** Recover the merged change-request link for a branch pushed by an external workflow. A missing
+ * upstream is eligible only for exact local-head proof from a merged same-name PR; partial or
+ * differently named upstream configuration is not evidence for this branch. */
 export async function mergedWorktreePullRequestForBranch(
   worktreePath: string,
   branch: string,
@@ -1570,16 +1570,18 @@ export async function mergedWorktreePullRequestForBranch(
       ["config", "--get", "--default", "", `branch.${branch}.merge`],
       preflightTimeoutMs,
     )).trim();
-    if (!remote || remote === "." || merge !== `refs/heads/${branch}`) {
-      options.onIneligible?.();
-      return null;
-    }
-    try {
-      await command(context, worktreePath, ["rev-parse", "--verify", `${branch}@{upstream}`], preflightTimeoutMs);
-      options.onIneligible?.();
-      return null;
-    } catch {
-      // A configured upstream whose ref disappeared is the only state eligible for forge recovery.
+    if (remote || merge) {
+      if (!remote || remote === "." || merge !== `refs/heads/${branch}`) {
+        options.onIneligible?.();
+        return null;
+      }
+      try {
+        await command(context, worktreePath, ["rev-parse", "--verify", `${branch}@{upstream}`], preflightTimeoutMs);
+        options.onIneligible?.();
+        return null;
+      } catch {
+        // A configured upstream whose tracking ref vanished also needs exact forge proof.
+      }
     }
     const head = (await command(
       context, worktreePath, ["rev-parse", "--verify", "HEAD"], preflightTimeoutMs,
