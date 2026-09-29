@@ -199,6 +199,13 @@ pub(crate) struct DesktopUpdater {
     /// This gesture's own warning latch. Shared with the close guard's, deferring an install
     /// ("Install Later") would have authorized the next window close without a warning, and the reverse.
     warned_at: Mutex<Option<Instant>>,
+    /// Set when a held install asked the dashboard to confirm (#2065), and spent by Restart Anyway.
+    ///
+    /// Without it a confirmation was only good while `warned_at` was inside the close guard's grace
+    /// period, so a dialog left open longer was held and asked again. Like the close guard's
+    /// `confirmation_requested` (#1965), it answers the question however long the dialog was open,
+    /// and only a held install can ask it.
+    confirmation_requested: AtomicBool,
     /// Set by the Windows exit hook once it has stopped the managed processes, so a failed installer
     /// launch knows the app it returns to has none.
     services_stopped: AtomicBool,
@@ -266,16 +273,38 @@ fn forget_unconfirmed_warning(latch: &Mutex<Option<Instant>>, confirmed: bool) {
     }
 }
 
-/// Ask the close guard's question under this gesture's own latch. `Some(outcome)` holds.
+/// Record that a held install has asked the dashboard to confirm, for Restart Anyway to spend.
+fn request_install_confirmation(updater: &DesktopUpdater) {
+    updater
+        .confirmation_requested
+        .store(true, Ordering::Relaxed);
+}
+
+/// Whether this request is the Restart Anyway a held install asked for, spending that request.
+///
+/// Only a confirmed request spends it, so a plain "Install and Restart" from either surface is asked
+/// afresh and leaves an open dialog's answer in place. A confirmed request with nothing to spend
+/// goes through `hold_for_work` as before.
+fn take_install_confirmation(updater: &DesktopUpdater, confirmed: bool) -> bool {
+    confirmed
+        && updater
+            .confirmation_requested
+            .swap(false, Ordering::Relaxed)
+}
+
+/// Ask the close guard's question under this gesture's own latch. `Some(outcome)` holds, and asks
+/// the dashboard to confirm.
 async fn hold_for_work(
     app: &tauri::AppHandle,
     confirmed: bool,
 ) -> Result<Option<InstallOutcome>, String> {
     let task_app = app.clone();
     tokio::task::spawn_blocking(move || {
-        let latch = &task_app.state::<DesktopUpdater>().warned_at;
-        forget_unconfirmed_warning(latch, confirmed);
-        crate::exit_hold_for_work(&task_app, latch).map(|work| InstallOutcome::HeldForWork {
+        let updater = task_app.state::<DesktopUpdater>();
+        forget_unconfirmed_warning(&updater.warned_at, confirmed);
+        let work = crate::exit_hold_for_work(&task_app, &updater.warned_at)?;
+        request_install_confirmation(&updater);
+        Some(InstallOutcome::HeldForWork {
             sessions: work.count,
             session_ids: work.session_ids,
         })
@@ -347,13 +376,15 @@ pub(crate) async fn set_automatic_update_checks(
 /// only good for a moment, and a download can take minutes. A held attempt keeps the verified
 /// package, so confirming does not download it again.
 ///
-/// `confirmed` is the "Restart Anyway" answer to this gesture's own warning, given within its grace
-/// period. Anything else is asked afresh.
+/// `confirmed` is the "Restart Anyway" answer to this gesture's own warning. It installs without
+/// asking again when a held install asked for it (#2065), however long the dialog was open, and
+/// spends that request. Anything else is asked afresh, except that a confirmation with no request to
+/// spend still rides the warning within its grace period, as it always has.
 ///
 /// The question is asked again after macOS or the AppImage has replaced the files, because work can
-/// start while they are being replaced. When the first answer was a confirmation the latch still
-/// covers it; when there was no work the first time, new work is warned about like any other, and
-/// confirming then only restarts.
+/// start while they are being replaced. A spent request or the latch covers a confirmation; when
+/// there was no work the first time, new work is warned about like any other, and confirming then
+/// only restarts.
 #[tauri::command]
 pub(crate) async fn install_desktop_update(
     app: tauri::AppHandle,
@@ -392,8 +423,13 @@ pub(crate) async fn install_desktop_update(
         }
     }
 
-    if let Some(held) = hold_for_work(&app, confirmed).await? {
-        return Ok(held);
+    // Spent only here, once the package is in hand: a failed check or download leaves the dialog
+    // open with its question still answerable.
+    let answered = take_install_confirmation(&updater, confirmed);
+    if !answered {
+        if let Some(held) = hold_for_work(&app, confirmed).await? {
+            return Ok(held);
+        }
     }
 
     if !installed {
@@ -416,10 +452,13 @@ pub(crate) async fn install_desktop_update(
             bytes: Vec::new(),
             installed: true,
         });
-        // Confirmed or not, the latch now says what this request was told: a confirmation still
-        // covers it, and an unconfirmed request that found no work has nothing in it.
-        if let Some(held) = hold_for_work(&app, true).await? {
-            return Ok(held);
+        // A spent request answered this whole request. Otherwise the latch says what it was told: a
+        // confirmation still covers it, and an unconfirmed request that found no work has nothing
+        // in it.
+        if !answered {
+            if let Some(held) = hold_for_work(&app, true).await? {
+                return Ok(held);
+            }
         }
     }
 
@@ -562,6 +601,50 @@ mod tests {
         assert!(
             latch.lock().unwrap().is_none(),
             "a plain install request is asked afresh, never waved through by another's warning"
+        );
+    }
+
+    #[test]
+    fn restart_anyway_installs_however_long_the_dialog_was_open() {
+        // #2065. The held install warned more than the grace period ago, so the latch alone would
+        // hold the confirmation again and ask the same question twice.
+        let updater = DesktopUpdater::default();
+        let warned = Instant::now()
+            .checked_sub(crate::CLOSE_WARNING_GRACE + Duration::from_secs(1))
+            .expect("the monotonic clock has run past one grace period");
+        *updater.warned_at.lock().unwrap() = Some(warned);
+        request_install_confirmation(&updater);
+        assert!(!crate::warning_still_authorizes(
+            *updater.warned_at.lock().unwrap(),
+            Instant::now(),
+            crate::CLOSE_WARNING_GRACE
+        ));
+        assert!(
+            take_install_confirmation(&updater, true),
+            "Restart Anyway answers the question the held install asked"
+        );
+        assert!(
+            !take_install_confirmation(&updater, true),
+            "a second confirmation finds nothing to spend"
+        );
+    }
+
+    #[test]
+    fn only_a_confirmation_spends_a_held_install_request() {
+        let updater = DesktopUpdater::default();
+        assert!(
+            !take_install_confirmation(&updater, true),
+            "a confirmation no held install asked for is held as before"
+        );
+
+        request_install_confirmation(&updater);
+        assert!(
+            !take_install_confirmation(&updater, false),
+            "a plain Install and Restart is asked afresh"
+        );
+        assert!(
+            take_install_confirmation(&updater, true),
+            "and leaves the open dialog's answer to its Restart Anyway"
         );
     }
 

@@ -220,7 +220,8 @@ for (const from of ["toast", "settings"] as const) {
 }
 
 test("a confirmed install the shell holds again asks again, with what the shell says now", async () => {
-  // The shell's warning lasts 30 seconds. A dialog left open longer is held once more.
+  // The shell spends the request a held install made (#2065), so this is a confirmation it had no
+  // held install left to answer for — a retry after a failed install, past the warning's grace period.
   const s = shell(async () => ({ outcome: "heldForWork", sessions: 1, sessionIds: ["s_migration"] }));
   await mount(<Settings s={s} />);
   await startInstall("settings");

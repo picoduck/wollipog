@@ -127,9 +127,10 @@ export interface HeldUpdateRequest {
  *
  * The working sessions are named the way the quit confirmation names them (#1965): the shell sends
  * ids, and titles come from the loaded local instance. Restart Anyway installs with the dialog open
- * and busy; a failure stays in the dialog. A shell that holds even the confirmed install (the
- * warning outlived its grace period, or new work started) is asked about again, with what it says
- * now. Resolves false for Install Later, which leaves the update available in Settings.
+ * and busy; a failure stays in the dialog. The shell installs the confirmation a held install asked
+ * for however long the dialog was open (#2065); one that holds a confirmed install anyway (it had no
+ * held install left to answer) is asked about again, with what it says now. Resolves false for
+ * Install Later, which leaves the update available in Settings.
  */
 export async function confirmHeldUpdate({ confirm, version, held, install, links = closeGuardLinks }: HeldUpdateRequest): Promise<boolean> {
   let asking = held;

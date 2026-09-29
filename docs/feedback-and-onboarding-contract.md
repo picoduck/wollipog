@@ -35,8 +35,9 @@ health checklist.
   progress stops), the sessions the loaded local instance can name as detail rows with the rest
   counted, and Install Later (the cancel and initial focus) beside Restart Anyway. Restart Anyway
   sends the one confirmed install with the dialog open and the button busy; it cannot be withdrawn
-  once sent, a failure stays in the dialog, and a shell that holds the confirmed install again is
-  asked about again with its new answer. Install Later, Escape and the scrim send nothing, and
+  once sent, and a failure stays in the dialog. The shell installs that confirmation however long the
+  dialog was open, spending the request its held install made; a shell that holds a confirmed install
+  anyway, having no held install left to answer, is asked about again with its new answer. Install Later, Escape and the scrim send nothing, and
   Settings › About keeps offering Install and Restart. There is no held-update toast, notice or
   banner.
 

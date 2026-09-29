@@ -64,7 +64,7 @@ test("the webview cannot reach the updater plugin around the exit guard", () => 
   // `install_desktop_update` holds a restart, so the webview must be granted none of them.
   assert.doesNotMatch(capabilities, /updater:/u);
   // Under the updater's OWN latch: a deferred install must not authorize a later window close.
-  assert.match(updates, /let latch = &task_app\.state::<DesktopUpdater>\(\)\.warned_at;\s*forget_unconfirmed_warning\(latch, confirmed\);\s*crate::exit_hold_for_work\(&task_app, latch\)/u);
+  assert.match(updates, /let updater = task_app\.state::<DesktopUpdater>\(\);\s*forget_unconfirmed_warning\(&updater\.warned_at, confirmed\);\s*let work = crate::exit_hold_for_work\(&task_app, &updater\.warned_at\)/u);
   assert.match(lib, /let guard = app\.state::<CloseGuard>\(\);\s*let Some\(work\) = exit_hold_for_work\(app, &guard\.warned_at\)/u);
 });
 
