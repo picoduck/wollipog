@@ -1022,7 +1022,7 @@ test("a rewritten hook command in any file-form settings copy disables the guard
     const fallback = preparedSettings(prepared.args);
     assert.equal(guardEntries(fallback).length, 0, `${copy}: the driver mediates without the guard`);
     assert.ok(fallback.hooks?.PostToolUse);
-    assert.match(prepared.guardReason ?? "", /settings do not match the provisioned guarded documents/u);
+    assert.match(prepared.guardReason ?? "", /settings documents were modified after provisioning/u);
   }
 }));
 
@@ -1488,7 +1488,9 @@ for (const enabled of [true, false]) {
           assert.ok(fallback.hooks?.[event]?.[0]?.hooks[0]?.args.includes(event));
         }
         assert.equal(fallback.env?.MANAGER_TOKEN_FILE, claudeHookTokenPath(file));
-        assert.deepEqual(prepareClaudeHookArgs(launch.args).args, prepared.args);
+        const respawn = prepareClaudeHookArgs(launch.args);
+        assert.deepEqual(respawn.args, prepared.args);
+        assert.match(respawn.guardReason ?? "", /runner-held manager-only fallback/u);
       } else {
         assert.deepEqual(prepared.args, []);
       }

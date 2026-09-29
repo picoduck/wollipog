@@ -1837,6 +1837,12 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
     // manager command from any disk document may reach the spawn. Guard trust stays false, so
     // the driver still mediates; the manager's independent circuit continues choosing its hooks.
     const managerOnly = fileSettingsDocuments.get(resolve(file))?.managerOnly;
+    let alreadyManagerOnly = false;
+    if (managerOnly) {
+      try {
+        alreadyManagerOnly = readFileSync(file, "utf8") === managerOnly;
+      } catch { /* A missing or unreadable live document is not the runner-authored fallback. */ }
+    }
     return {
       ...prepareRunnerSettingsArgs(args, index, file, {
         combined: managerOnly ?? "",
@@ -1846,7 +1852,9 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
       ...(!settingsSetTrusted
         ? {
           guardReason: expectedFileGuard
-            ? "the file-form guard settings do not match the provisioned guarded documents"
+            ? alreadyManagerOnly
+              ? "the file-form guard settings contain the runner-held manager-only fallback"
+              : "the file-form guard settings documents were modified after provisioning"
             : "the file-form guard settings have no runner-held identity in this process",
         }
         : {}),
