@@ -354,15 +354,38 @@ function initialModel(): FixtureModel {
       status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
     });
   }
-  if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handoff") {
+  if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handoff" ||
+      SCENARIO === "session-notices") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
       status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
       model: "gpt-5", effort: "high",
       historyQuarantine: {
         reason: "oversized_tool_call", detectedAt: 1,
         recoveryTurn: 1, recovery: SCENARIO === "history-quarantine-handoff" ? "handoff" : "fork",
-        ...(SCENARIO === "history-quarantine" ? { retainedPrompt: true } : {}),
+        ...(SCENARIO === "history-quarantine-handoff" ? {} : { retainedPrompt: true }),
       },
+    });
+  }
+  if (SCENARIO === "session-notices") {
+    // Three problem states at once (#1966): the slot shows the quarantine, the rest behind +2 More.
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      providerAccountId: "acct-personal",
+      providerAccountLabel: "Personal",
+      providerAccountSwitchFailure: {
+        providerAccountId: "acct-work",
+        providerAccountLabel: "work@example.com",
+        reason: "the provider conversation cannot be resumed under another account",
+        detectedAt: 2,
+      },
+      worktrees: [{
+        id: "wt-checkpoint", path: "/repos/alpha/checkpoint", branch: "agent/alpha", baseRef: "origin/main",
+        baseCommit: "a".repeat(40), source: "created",
+        setup: {
+          status: "failed", configHash: "b".repeat(64), attemptId: "attempt-1", environmentKeys: [], copies: [],
+          steps: [{ name: "Install Dependencies", status: "failed", optional: false, startedAt: 1, durationMs: 902, error: "exited with 1" }],
+          error: "Install Dependencies exited with 1",
+        },
+      }],
     });
   }
   if (SCENARIO === "composer-restart") {
@@ -535,7 +558,7 @@ const steeringResolutionRequests: Array<{
 let deferredSteeringResolutionCount = 0;
 const pendingSteeringResolutionSettlements = new Map<string, () => void>();
 const sessionEvents = new Map<string, SessionEvent[]>();
-if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handoff") {
+if (SCENARIO === "history-quarantine" || SCENARIO === "history-quarantine-handoff" || SCENARIO === "session-notices") {
   sessionEvents.set("session-alpha", [
     { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Summarize the release notes.", final: true } },
     { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "Summarized the release notes.", final: true } },

@@ -16,8 +16,13 @@ for (const width of [1280, 390]) for (const theme of ["dark", "light"]) {
 
     const banner = page.locator('[aria-label="Conversation Quarantined"]');
     await expect(banner).toContainText("Conversation Quarantined");
-    await expect(banner).toContainText("cannot repair it");
+    await expect(banner).toContainText("new messages can’t be sent here");
+    await expect(banner).not.toContainText("turn 1");
+    await banner.getByRole("button", { name: "Show Details" }).click();
     await expect(banner).toContainText("turn 1");
+    // The provider's own bounded account of the rejection, in a mono well.
+    await expect(banner.locator(".code-well")).toContainText("history position 675");
+    await expect(banner).not.toContainText("/compact");
     await expect(page.locator(".composer-input")).toBeDisabled();
     await expect(page.locator(".composer-input")).toHaveAttribute("placeholder", /quarantined/i);
     await expect(page.locator(".status", { hasText: "Quarantined" })).toBeVisible();

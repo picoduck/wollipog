@@ -503,7 +503,8 @@ Rules
   removes full-width "bar" buttons.
   One exception: in a request notice inside a narrow card (under 360px wide, such as a
   board card), Approve and Deny may stretch as an **equal pair** that fills the row, matching the
-  phone sheet footer rule (§7.5). Only that pair, never a single button.
+  phone sheet footer rule (§7.5). Only that pair, never a single button. The session notice slot's
+  resolving action below 760px is the other exception (§13.2).
 - Labels are verb plus object in Title Case: "New Skill", "Import from Git…", "Delete Skill". The
   ellipsis means "opens a dialog or menu that asks for more input before anything happens" (§17).
 - A leading `+` icon marks create actions; no other decorative icons in text buttons unless the
@@ -1474,11 +1475,32 @@ the same notice with Reload and Copy Error Details, top-left in the content area
 | Surface | `color-mix(tone 7%, var(--bg-elev))`, 1px `color-mix(tone 32%, transparent)` (a low tint keeps amber from turning olive on slate), `--radius-md`, padding 12px 16px. No left stripe. |
 | Icon | 16px tone icon at the title's first line. |
 | Title | Optional, `--type-body-strong`, Title Case. |
-| Body | `--type-body`, 1–2 sentences, sentence case. Everything else behind "Show Details". |
-| Actions | `.btn.sm` row under the body, left-aligned; the resolving action first (primary only if it is the page's main next step). |
+| Title row | With a title, trailing controls (the slot's "+N More", then the dismiss button) sit in the title row only, so the body and the actions use the full width. |
+| Body | `--type-body`, 1–2 sentences, sentence case. Everything else behind "Show Details" (`Notice`'s `details`): a `.btn.sm.ghost` toggle at the end of the action row that reads "Hide Details" while open; the details are not in the DOM until it opens. |
+| Actions | `.btn.sm` row under the body, left-aligned; the resolving action first (primary only if it is the page's main next step). An action a person cannot take now keeps a visible reason line in the body ("Build Box is offline.", a Viewer's refusal) that the button references with `aria-describedby`, never only a `title`. |
 | Compact | One line: icon + sentence + one `.btn.sm` trailing, 40px. For inline field-group and composer notices. |
 | Placement | Directly where the problem is: above the composer for session state, above the footer for submit errors, at the top of a section for section state. Aligned to that column's edges. |
 | Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error, a held update), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts, the status strip and queued rows are not notices and do not share this slot. This is the bottom-edge counterpart of the one-bar rule for the top of the session. A pending request (the request dock below) takes this slot ahead of every notice. |
+
+**Session notice slot.** `SessionNoticeSlot` (`apps/web/src/components/SessionNoticeSlot.tsx`) is that
+slot: the first child of the composer column, on the composer's width and gutters. It takes a list of
+session conditions `{ key, severity: "danger" | "warning" | "info", rank, title, render }` and shows
+exactly one: the most severe, then the lowest rank.
+
+- Ranks live in one table, `SESSION_NOTICE_RANK`: worktree missing 1, conversation quarantined 2,
+  worktree setup failed 3, account switch failed 4, skills unavailable 8, setup suggestion 9. A new
+  entry adds its rank there.
+- The others are a `.btn.sm.ghost` "+N More" in the shown notice's title row. It opens a menu (§9.1)
+  of their tone icons and one-line titles; choosing one shows it until the set of conditions changes,
+  and focus moves to the new notice's "+N More".
+- `render` returns one `Notice` and passes the slot's `trailing` to it. Info conditions are
+  dismissible per session (the slot passes `onDismiss`); danger and warning ones are not, except where
+  the condition has its own dismissal (a failed account switch, which lets the person send with the
+  session's configured account).
+- Every session notice above the composer is an entry of this slot: the Composer epic's composer
+  errors, attachment notes and queued-message errors join it rather than building a second slot.
+- Below 760px the action row is one row: the resolving action fills it (the one exception to "buttons
+  never stretch", §3.1) and a disclosure toggle such as Show Details keeps its own width.
 
 Replaces `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`,
 `.campaign-continuation-notice`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`,

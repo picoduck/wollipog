@@ -1,4 +1,4 @@
-import { useEffect, useId, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useState, type ReactNode } from "react";
 import { Notice } from "./Notice.js";
 import type { SessionView } from "@wollipog/protocol";
 import { Select } from "./ui/ChoiceControls.js";
@@ -19,12 +19,18 @@ function replacementBranch(expectedBranch: string): string {
 export function WorktreeRecoveryCard({
   session,
   runnerOnline,
+  offlineReason = "The runner is offline.",
   creation = null,
   onCreate,
   onSelect,
+  trailing,
 }: {
   session: SessionView;
   runnerOnline: boolean;
+  /** The visible reason both actions are unavailable while the runner is offline, naming its Machine. */
+  offlineReason?: string;
+  /** The session notice slot's "+N More", in the title row. */
+  trailing?: ReactNode;
   /** Replacement-create progress. It outlives this component's own in-flight action so a reloaded
    * page shows a create that is still running, and names the phase a failed create stopped in. */
   creation?: RecoveryWorktreeCreation | null;
@@ -96,14 +102,15 @@ export function WorktreeRecoveryCard({
   };
 
   return (
-    <Notice as="section" tone="danger" ariaLabel="Worktree Recovery Required" title="Worktree Recovery Required">
+    <Notice as="section" tone="danger" ariaLabel="Worktree Recovery Required" title="Worktree Recovery Required"
+      trailing={trailing}>
         <p id={detailId}>{recovery.detail}</p>
         <p id={retainedId}>
           This worktree cannot start another turn. Messages marked <strong>Not Sent</strong>
           {" "}can be retried after this session has a verified worktree.
         </p>
         {refusal !== null && <p id={refusalId}>{refusal}</p>}
-        {!runnerOnline && <p id={offlineId} className="notice-error">The runner is offline.</p>}
+        {!runnerOnline && <p id={offlineId} className="notice-error">{offlineReason}</p>}
         {error && <p className="notice-error" role="alert">{error}</p>}
         {creationFailure && (
           <p id={creationFailedId} className="notice-error" role="alert">

@@ -123,7 +123,7 @@ async function clickSetupRetry(
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     const banner = container.querySelector('[aria-label="Worktree Setup Failed"]') as HTMLElement | null;
     assert.ok(banner);
-    assert.match(banner.textContent ?? "", /retained/u);
+    assert.match(banner.textContent ?? "", /The worktree was kept\./u);
     assert.match(banner.textContent ?? "", /Install Dependencies exited with 1/u);
     const button = banner.querySelector("button") as HTMLButtonElement;
     assert.equal(button.textContent, "Retry Setup");

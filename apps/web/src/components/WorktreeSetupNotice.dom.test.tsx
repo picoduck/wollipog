@@ -22,7 +22,8 @@ test("setup notice uses Title Case actions, an external help link, and no nested
     await act(async () => root.render(<WorktreeSetupNotice onGenerate={() => {}} onDismiss={() => {}} />));
     assert.equal(container.querySelector("aside")?.getAttribute("aria-label"), "Set Up This Project");
     assert.deepEqual([...container.querySelectorAll("button")].map((button) => button.textContent || button.getAttribute("aria-label")),
-      ["Generate", "Dismiss Setup Notice"]);
+      // The dismiss button sits in the title row (§13.2), ahead of the body and its actions.
+      ["Dismiss Setup Notice", "Generate"]);
     assert.equal(container.querySelector("a")?.textContent, "Learn More");
     assertNoDomNode(container.querySelector("button button, button a, a button"));
     assert.match(container.textContent ?? "", /Nothing runs, stages, or commits/u);

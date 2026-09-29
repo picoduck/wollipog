@@ -51,8 +51,10 @@ import { useApi } from "../api-context.js";
 import { SessionSkillsUnavailableNotice } from "./SkillsUnavailableNotice.js";
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
-import { accountLabelText } from "../personal-identifiers.js";
-import { PersonalIdentifier } from "./PersonalIdentifier.js";
+import { accountLabelText, isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
+import { SESSION_NOTICE_RANK, SessionNoticeSlot, type SessionNoticeEntry } from "./SessionNoticeSlot.js";
+import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
+import { BusyButton } from "./ui/BusyButton.js";
 import { agentHarnessIdentityLabel } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
 import { integrationIsolationDisclosure, ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE } from "../session-preset-defaults.js";
@@ -2759,6 +2761,9 @@ function SessionDetailLoaded({
   const [dismissedAccountSwitchFailureKey, setDismissedAccountSwitchFailureKey] = useState<string | null>(null);
   const accountSwitchFailure = accountSwitchFailureKey !== dismissedAccountSwitchFailureKey
     ? session.providerAccountSwitchFailure : undefined;
+  // The failed switch's notice opens the same dialog as More Actions → Switch Account….
+  const [switchAccountOpen, setSwitchAccountOpen] = useState(false);
+  const switchAccountButtonRef = useRef<HTMLButtonElement | null>(null);
   // A person the server refuses a prompt (a Viewer) gets a read-only composer that says why.
   const promptRefusal = sessionCommandRefusal(session, "prompt");
   // Why the composer cannot send a new message now. Edit & Resend states the same reason.
@@ -3657,6 +3662,150 @@ function SessionDetailLoaded({
 
   // Friendly machine label (hostname + local/SSH) instead of the raw random box runner id.
   const runnerDisp = runnerDisplay(runner, box, session.runnerId);
+
+  // The session's problem states, shown one at a time in the notice slot above the composer
+  // (#1966). An action a person cannot take now says why in a visible line it is described by.
+  const runnerOfflineReason = runnerOnline ? null : `${runnerDisp.name || "This machine"} is offline.`;
+  const accountSwitchApplicable = sessionAccountSwitchApplicable(session);
+  const accountSwitchSupported = runnerSupportsProtocol(runner?.protocolVersion, "sessionProviderAccountSwitch");
+  const sessionNotices: SessionNoticeEntry[] = [];
+  if (worktreeRecovery) {
+    sessionNotices.push({
+      key: `worktree-missing:${worktreeRecovery.recoveryId}`,
+      severity: "danger",
+      rank: SESSION_NOTICE_RANK.worktreeMissing,
+      title: "Worktree Recovery Required",
+      render: ({ trailing }) => (
+        <WorktreeRecoveryCard
+          session={session}
+          runnerOnline={runnerOnline}
+          offlineReason={runnerOfflineReason ?? undefined}
+          creation={recoveryCreation}
+          onCreate={createRecoveryWorktree}
+          onSelect={selectRecoveryWorktree}
+          trailing={trailing}
+        />
+      ),
+    });
+  }
+  if (historyQuarantine) {
+    const quarantine = historyQuarantine;
+    const recoverable = quarantine.recoveryTurn !== undefined;
+    const recoverReason = forkRefusal ?? runnerOfflineReason;
+    sessionNotices.push({
+      key: "history-quarantine",
+      severity: "danger",
+      rank: SESSION_NOTICE_RANK.historyQuarantine,
+      title: "Conversation Quarantined",
+      render: ({ trailing }) => (
+        <Notice tone="danger" role="status" ariaLabel="Conversation Quarantined" title="Conversation Quarantined"
+          trailing={trailing}
+          actions={recoverable && (
+            <button
+              type="button"
+              className="btn primary sm"
+              disabled={busy || recoverReason !== null}
+              title={recoverReason ?? undefined}
+              aria-describedby={recoverReason !== null ? "history-quarantine-recovery-refusal" : undefined}
+              onClick={() => void onRecoverQuarantinedConversation()}
+            >
+              Recover Session
+            </button>
+          )}
+          details={(
+            <>
+              <p>
+                {recoverable
+                  ? `Recovering continues from the checkpoint after turn ${quarantine.recoveryTurn} in a new session with the same files. This session stays here, unchanged, for inspection.`
+                  : "There is no earlier checkpoint to recover from. Start a new session to continue the work; the files in this session's worktree are unchanged."}
+                {recoverable && quarantine.retainedPrompt
+                  ? " Your unsent message moves to the recovered session's composer."
+                  : ""}
+              </p>
+              <div className="code-well"><code>{providerHistoryRejection(items) ?? quarantine.reason}</code></div>
+            </>
+          )}>
+          <p>The provider rejects something stored in this conversation, so new messages can&rsquo;t be sent here.</p>
+          {recoverable && recoverReason !== null && (
+            <p className="notice-meta" id="history-quarantine-recovery-refusal">{recoverReason}</p>
+          )}
+        </Notice>
+      ),
+    });
+  }
+  if (failedSetupWorktree) {
+    const setupError = failedSetupWorktree.setup?.error?.trim();
+    const retryReason = worktreeSetupRefusal ?? runnerOfflineReason;
+    sessionNotices.push({
+      key: `worktree-setup-failed:${failedSetupWorktree.path}`,
+      severity: "danger",
+      rank: SESSION_NOTICE_RANK.worktreeSetupFailed,
+      title: "Worktree Setup Failed",
+      render: ({ trailing }) => (
+        <Notice tone="danger" role="status" ariaLabel="Worktree Setup Failed" title="Worktree Setup Failed"
+          trailing={trailing}
+          actions={(
+            <BusyButton
+              className="btn primary sm"
+              busy={setupRetryPending}
+              progress="Retrying the worktree setup…"
+              disabled={retryReason !== null}
+              title={retryReason ?? undefined}
+              aria-describedby={retryReason !== null ? "worktree-setup-retry-refusal" : undefined}
+              onClick={() => void retryWorktreeSetup()}
+            >
+              Retry Setup
+            </BusyButton>
+          )}>
+          <p>{setupError ? asSentence(setupError) : "A required setup step failed."} The worktree was kept.</p>
+          {retryReason !== null && <p className="notice-meta" id="worktree-setup-retry-refusal">{retryReason}</p>}
+        </Notice>
+      ),
+    });
+  }
+  if (accountSwitchFailure) {
+    const failure = accountSwitchFailure;
+    // A personal identifier is never inlined, masked or not: the sentence names the account by role.
+    const account = isPersonalIdentifier(failure.providerAccountLabel)
+      ? "the selected account"
+      : failure.providerAccountLabel;
+    const switchReason = !accountSwitchSupported
+      ? runnerCapabilityRequirement(runner?.protocolVersion, "sessionProviderAccountSwitch", "Session account switching")
+      : runnerOfflineReason;
+    sessionNotices.push({
+      key: `account-switch-failed:${accountSwitchFailureKey}`,
+      severity: "warning",
+      rank: SESSION_NOTICE_RANK.accountSwitchFailed,
+      title: "Account Switch Failed",
+      render: ({ trailing }) => (
+        <Notice tone="warning" role="status" ariaLabel="Account Switch Failed" title="Account Switch Failed"
+          trailing={trailing}
+          dismissLabel="Dismiss Notice"
+          onDismiss={() => setDismissedAccountSwitchFailureKey(accountSwitchFailureKey)}
+          actions={accountSwitchApplicable && (
+            <button
+              ref={switchAccountButtonRef}
+              type="button"
+              className="btn primary sm"
+              disabled={switchReason !== null}
+              title={switchReason ?? undefined}
+              aria-describedby={switchReason !== null ? "account-switch-refusal" : undefined}
+              onClick={() => setSwitchAccountOpen(true)}
+            >
+              Switch Account…
+            </button>
+          )}>
+          <p>
+            Wollipog couldn&rsquo;t continue with {account}.
+            {" "}{asSentence(redactPersonalIdentifiers(failure.reason, "the selected account"))}
+          </p>
+          {accountSwitchApplicable && switchReason !== null && (
+            <p className="notice-meta" id="account-switch-refusal">{switchReason}</p>
+          )}
+        </Notice>
+      ),
+    });
+  }
 
   // "Agent is working" state (items 1 + 2): true the instant a send is optimistically pending
   // (before status flips) and for the whole turn while the runner reports running/starting.
@@ -5219,6 +5368,19 @@ function SessionDetailLoaded({
               onFocusCapture={() => setActivePane("composer")}
               onPointerDownCapture={() => setActivePane("composer")}
             >
+            {/* The one notice slot (§13.2): the most severe session condition, the rest behind
+                "+N More". Session notices are entries of it, never banners of their own. */}
+            <SessionNoticeSlot sessionId={session.id} entries={sessionNotices} />
+            {switchAccountOpen && (
+              <SwitchAccountDialog
+                session={session}
+                onClose={() => setSwitchAccountOpen(false)}
+                onSwitched={(scheduled) => showToast(scheduled
+                  ? "Account switch scheduled for the next turn boundary."
+                  : "Account switched.")}
+                returnFocusRef={switchAccountButtonRef}
+              />
+            )}
             <span className="sr-only" role="status" aria-live="polite" aria-atomic="true">
               {retitleFeedback?.state === "running"
                 ? "Renaming Session."
@@ -5227,80 +5389,6 @@ function SessionDetailLoaded({
                   : ""}
             </span>
             {error && <Notice tone="danger" compact role="alert">{error}</Notice>}
-            {worktreeRecovery && (
-              <WorktreeRecoveryCard
-                session={session}
-                runnerOnline={runnerOnline}
-                creation={recoveryCreation}
-                onCreate={createRecoveryWorktree}
-                onSelect={selectRecoveryWorktree}
-              />
-            )}
-            {failedSetupWorktree && (
-              <Notice tone="danger" role="status" ariaLabel="Worktree Setup Failed" title="Worktree Setup Failed" actions={(
-                  <button
-                    type="button"
-                    className="btn primary sm"
-                    disabled={setupRetryPending || !runnerOnline || worktreeSetupRefusal !== null}
-                    title={worktreeSetupRefusal ?? (runnerOnline ? undefined : "Runner is offline.")}
-                    aria-describedby={worktreeSetupRefusal !== null ? "worktree-setup-retry-refusal" : undefined}
-                    onClick={() => void retryWorktreeSetup()}
-                  >
-                    {setupRetryPending ? "Retrying Setup…" : "Retry Setup"}
-                  </button>
-                )}>
-                <p>
-                  {failedSetupWorktree.setup?.error ?? "A required setup step failed."}
-                  {" "}The worktree was retained. Retry resumes at the failed required step.
-                </p>
-                {worktreeSetupRefusal !== null && <p id="worktree-setup-retry-refusal">{worktreeSetupRefusal}</p>}
-              </Notice>
-            )}
-            {historyQuarantine && (
-              <Notice tone="danger" role="status" ariaLabel="Conversation Quarantined" title="Conversation Quarantined"
-                actions={historyQuarantine.recoveryTurn !== undefined && (
-                  <button
-                    type="button"
-                    className="btn primary sm"
-                    disabled={busy || !runnerOnline || forkRefusal !== null}
-                    title={forkRefusal ?? (runnerOnline ? undefined : "Runner is offline.")}
-                    aria-describedby={forkRefusal !== null ? "history-quarantine-recovery-refusal" : undefined}
-                    onClick={() => void onRecoverQuarantinedConversation()}
-                  >
-                    Recover Session
-                  </button>
-                )}>
-                  <p>
-                    The agent provider rejects an item stored in this conversation&rsquo;s own history, so
-                    prompts fail before the model runs. Sending again or <code>/compact</code> cannot
-                    repair it — both resend the same history.
-                  </p>
-                  <p>
-                    {historyQuarantine.recoveryTurn === undefined
-                      ? "There is no earlier checkpoint to recover from. Your files are unchanged in this session's worktree; start a new session to continue the work."
-                      : `Recovering continues from the checkpoint after turn ${historyQuarantine.recoveryTurn} in a new session with the same files. This session stays here, unchanged, for inspection.`}
-                    {historyQuarantine.retainedPrompt ? " Your last message was kept unsent and moves to the recovered session's composer." : ""}
-                  </p>
-                  {historyQuarantine.recoveryTurn !== undefined && forkRefusal !== null && (
-                    <p id="history-quarantine-recovery-refusal">{forkRefusal}</p>
-                  )}
-              </Notice>
-            )}
-            {accountSwitchFailure && (
-              <Notice tone="danger" role="status" ariaLabel="Account Switch Failed" title="Account Switch Failed"
-                dismissLabel="Dismiss Notice" onDismiss={() => setDismissedAccountSwitchFailureKey(accountSwitchFailureKey)}>
-                  <p>
-                    Wollipog could not resume this conversation with{" "}
-                    <PersonalIdentifier value={accountSwitchFailure.providerAccountLabel} label="Account Email" />.
-                    {" "}{accountSwitchFailure.reason}
-                  </p>
-                  <p>
-                    The session is parked. Use <strong>Switch Account…</strong> in More Actions to
-                    choose an account with usage headroom. You can also dismiss this notice to send
-                    a new message with the session&rsquo;s configured account.
-                  </p>
-              </Notice>
-            )}
             {retitleFeedback && (
               <div
                 ref={retitleReceiptRef}
@@ -7354,6 +7442,27 @@ export function EarlierActivityControl({
       </button>
     </div>
   );
+}
+
+/** A runner-written fragment ("Install Dependencies exited with 1", "the provider conversation
+ * cannot be resumed…") as a sentence of its own: capitalized, with closing punctuation. */
+function asSentence(text: string): string {
+  const trimmed = text.trim();
+  if (!trimmed) return trimmed;
+  const capitalized = trimmed[0]!.toUpperCase() + trimmed.slice(1);
+  return /[.!?…]$/u.test(capitalized) ? capitalized : `${capitalized}.`;
+}
+
+/** The runner's bounded, content-free account of the provider's rejection
+ * (apps/runner/src/drivers/poisoned-provider-history.ts), from the latest transcript error that
+ * carries it, when the loaded history holds one. */
+const PROVIDER_HISTORY_REJECTION = "The agent provider rejected this conversation's stored history";
+function providerHistoryRejection(items: readonly TimelineItem[]): string | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    const item = items[index]!;
+    if (item.kind === "error" && item.message.startsWith(PROVIDER_HISTORY_REJECTION)) return item.message;
+  }
+  return undefined;
 }
 
 function TranscriptLoadNotice({

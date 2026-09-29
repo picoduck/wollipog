@@ -15,6 +15,13 @@ function usageSummary(account: SessionProviderAccountOption): string {
   }).join(" · ");
 }
 
+/** Whether Switch Account… applies: the session is bound to an account of a provider that can
+ * continue its conversation under another one. */
+export function sessionAccountSwitchApplicable(session: Pick<SessionView, "providerAccountId" | "driver">): boolean {
+  return Boolean(session.providerAccountId) &&
+    (session.driver === "claude-code" || session.driver === "codex" || session.driver === "codex-app-server");
+}
+
 export function SwitchAccountDialog({
   session,
   onClose,

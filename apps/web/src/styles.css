@@ -1673,6 +1673,24 @@ button.status { cursor: pointer; }
   overflow-wrap: anywhere;
 }
 .notice-title { font: var(--type-body-strong); }
+/* A titled notice keeps its trailing controls ("+N More", dismiss) in the title row, so the body
+   and the actions below it use the full width (§13.2). */
+.notice.with-head { grid-template-columns: auto minmax(0, 1fr); }
+.notice-head {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.notice-head > .notice-title { flex: 1 1 auto; min-width: 0; }
+.notice-trailing {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: var(--space-1);
+}
+/* A 28px control in a 20px title line: the row keeps the title's height. */
+.notice-head > .notice-trailing { margin-top: calc(var(--space-1) * -1); margin-bottom: calc(var(--space-1) * -1); }
 .notice-body { min-width: 0; }
 .notice-body > p { margin: 0; }
 .notice-body > p + p { margin-top: var(--space-1); }
@@ -1681,6 +1699,9 @@ button.status { cursor: pointer; }
 /* Raw detail stays behind a disclosure: one sentence in the notice, the rest on request (§13.2). */
 .notice-details > summary { color: var(--text-dim); cursor: pointer; }
 .notice-details[open] > summary { margin-bottom: var(--space-1); }
+/* Opened by the action row's Show Details. */
+.notice-details-body { display: grid; gap: var(--space-2); min-width: 0; margin-top: var(--space-1); }
+.notice-details-body > p { margin: 0; }
 /* A render failure stands in for the view it replaced, at the top left of the content area. */
 .notice.view-error { max-width: 560px; margin: var(--space-6); }
 /* Under a crashed route's page header, the page already supplies the gutter and the header's gap. */
@@ -1701,6 +1722,7 @@ button.status { cursor: pointer; }
   margin-top: var(--space-1);
 }
 .notice-dismiss { margin: calc(var(--space-1) * -1) calc(var(--space-2) * -1) 0 0; }
+.notice-head .notice-dismiss { margin: 0 calc(var(--space-2) * -1) 0 0; }
 /* One line for field-group and composer notices: icon, sentence, one trailing action. */
 .notice.compact {
   align-items: center;
@@ -4841,8 +4863,19 @@ textarea {
   }
 }
 
-/* The composer's notices (quarantine, recovery, a failed send) stack above the input. */
+/* A failed send sits above the input. */
 .composer > .notice { margin-bottom: var(--space-2); }
+/* The one session notice slot (§13.2, #1966): the composer column's first child, on its width and
+   gutters. It holds one notice; the rest of the session's conditions are its "+N More" menu. */
+.session-notice-slot { margin-bottom: var(--space-2); }
+.session-notice-tone { display: inline-flex; color: var(--tone); }
+.session-notice-more { font-variant-numeric: tabular-nums; }
+@media (max-width: 760px) {
+  /* One action row: the resolving action fills it, a disclosure toggle keeps its own width. */
+  .session-notice-slot .notice-actions { flex-wrap: nowrap; }
+  .session-notice-slot .notice-actions > .btn:first-child:not(.notice-details-toggle) { flex: 1 1 auto; max-width: none; }
+  .session-notice-slot .notice-actions > .notice-details-toggle { flex: none; }
+}
 .worktree-recovery-controls {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -4887,7 +4920,7 @@ textarea {
 .worktree-recovery-progress progress::-webkit-progress-bar { background: transparent; }
 .worktree-recovery-progress progress::-webkit-progress-value { background: var(--warning); }
 .worktree-recovery-progress progress::-moz-progress-bar { background: var(--warning); }
-@media (max-width: 600px) {
+@media (max-width: 760px) {
   .worktree-recovery-controls { grid-template-columns: minmax(0, 1fr); }
   .worktree-recovery-controls .btn { width: 100%; }
 }

@@ -10,7 +10,7 @@ import {
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { RenameSessionDialog } from "./RenameSessionDialog.js";
-import { SwitchAccountDialog } from "./SwitchAccountDialog.js";
+import { sessionAccountSwitchApplicable, SwitchAccountDialog } from "./SwitchAccountDialog.js";
 import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import {
   archiveAndStopMessage,
@@ -239,9 +239,7 @@ export function SessionHeader({
     runnerProtocolVersion,
     "sessionProviderAccountSwitch",
   );
-  const accountSwitchApplicable = Boolean(session.providerAccountId) &&
-    (session.driver === "claude-code" || session.driver === "codex" ||
-      session.driver === "codex-app-server");
+  const accountSwitchApplicable = sessionAccountSwitchApplicable(session);
   const dashboardOrigin = instancePublicOrigin(instances);
   const internalSessionUrl = dashboardOrigin
     ? absoluteViewUrl(dashboardOrigin, { name: "session", id: session.id })

@@ -1,4 +1,4 @@
-import React, { type ReactNode } from "react";
+import React, { useId, useState, type ReactNode } from "react";
 import { CloseIcon, ErrorIcon, InfoIcon, SuccessIcon, WarningIcon } from "./Icons.js";
 
 export type NoticeTone = "info" | "success" | "warning" | "danger" | "neutral";
@@ -19,6 +19,13 @@ export interface NoticeProps {
   children?: ReactNode;
   /** A left-aligned row of `.btn.sm` actions, the resolving action first. */
   actions?: ReactNode;
+  /** Everything longer than the body's one or two sentences. It stays behind a Show Details toggle
+   * at the end of the action row and is not in the DOM until the person opens it (§13.2). */
+  details?: ReactNode;
+  /** Controls in the title row, before the dismiss button: the session notice slot's "+N More".
+   * In a titled notice these and the dismiss button sit in the title row only, so the body and the
+   * actions use the notice's full width. */
+  trailing?: ReactNode;
   /** Adds an icon dismiss button with this handler. */
   onDismiss?: () => void;
   dismissLabel?: string;
@@ -51,6 +58,8 @@ export function Notice({
   title,
   children,
   actions,
+  details,
+  trailing,
   onDismiss,
   dismissLabel = "Dismiss",
   dismissDisabled = false,
@@ -69,6 +78,18 @@ export function Notice({
   noticeRef,
 }: NoticeProps) {
   const Tag = Element as "div";
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsId = `notice-details-${useId().replace(/:/g, "")}`;
+  const hasDetails = details != null && details !== false;
+  const dismiss = onDismiss && (
+    <button type="button" className="icon-btn sm notice-dismiss" aria-label={dismissLabel} title={dismissLabel}
+      disabled={dismissDisabled} onClick={onDismiss}>
+      <CloseIcon />
+    </button>
+  );
+  // A titled notice carries its trailing controls in the title row; an untitled one keeps them in
+  // their own column beside the body.
+  const head = Boolean(title);
   return (
     <Tag
       ref={noticeRef as React.Ref<HTMLDivElement>}
@@ -82,6 +103,7 @@ export function Notice({
                 : "t-info",
         compact ? "compact" : "",
         pageBanner ? "page-banner" : "",
+        head ? "with-head" : "",
         className ?? "",
       ].filter(Boolean).join(" ")}
       role={role}
@@ -94,16 +116,32 @@ export function Notice({
     >
       <span className="notice-icon" aria-hidden="true"><ToneIcon tone={tone} /></span>
       <div className="notice-content">
-        {title && <strong className="notice-title">{title}</strong>}
+        {head && (
+          <div className="notice-head">
+            <strong className="notice-title">{title}</strong>
+            {(trailing || dismiss) && <div className="notice-trailing">{trailing}{dismiss}</div>}
+          </div>
+        )}
         {children != null && children !== false && <div className="notice-body">{children}</div>}
-        {actions && <div className="notice-actions">{actions}</div>}
+        {(actions || hasDetails) && (
+          <div className="notice-actions">
+            {actions}
+            {hasDetails && (
+              <button
+                type="button"
+                className="btn sm ghost notice-details-toggle"
+                aria-expanded={detailsOpen}
+                aria-controls={detailsOpen ? detailsId : undefined}
+                onClick={() => setDetailsOpen((open) => !open)}
+              >
+                {detailsOpen ? "Hide Details" : "Show Details"}
+              </button>
+            )}
+          </div>
+        )}
+        {hasDetails && detailsOpen && <div className="notice-details-body" id={detailsId}>{details}</div>}
       </div>
-      {onDismiss && (
-        <button type="button" className="icon-btn sm notice-dismiss" aria-label={dismissLabel} title={dismissLabel}
-          disabled={dismissDisabled} onClick={onDismiss}>
-          <CloseIcon />
-        </button>
-      )}
+      {!head && (trailing || dismiss) && <div className="notice-trailing">{trailing}{dismiss}</div>}
     </Tag>
   );
 }

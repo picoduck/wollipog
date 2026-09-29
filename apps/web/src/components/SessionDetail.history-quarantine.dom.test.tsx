@@ -191,13 +191,29 @@ test("a quarantined session closes the composer and explains why retrying cannot
 
     const banner = fixture.banner();
     assert.ok(banner, "the quarantine is explained where the user would otherwise type");
-    assert.match(banner.textContent ?? "", /cannot repair/i);
-    assert.match(banner.textContent ?? "", /\/compact/);
-    assert.match(banner.textContent ?? "", /turn 2/);
-    assert.match(banner.textContent ?? "", /kept unsent/i);
+    // One sentence and the resolving action; the rest waits behind Show Details (#1966).
+    assert.equal(banner.querySelector(".notice-body")?.textContent,
+      "The provider rejects something stored in this conversation, so new messages can’t be sent here.");
+    assert.doesNotMatch(banner.textContent ?? "", /turn 2|unsent/i);
     const action = banner.querySelector("button") as HTMLButtonElement | null;
     assert.ok(action, "recovery is offered as an explicit action");
     assert.equal(action.textContent, "Recover Session");
+
+    const toggle = [...banner.querySelectorAll("button")].find((button) => button.textContent === "Show Details")!;
+    assert.equal(toggle.getAttribute("aria-expanded"), "false");
+    await act(async () => { toggle.click(); });
+    assert.equal(toggle.getAttribute("aria-expanded"), "true");
+    assert.equal(toggle.textContent, "Hide Details");
+    const details = fixture.container.querySelector(`#${toggle.getAttribute("aria-controls")}`);
+    assert.ok(details, "Show Details opens the recovery explanation");
+    assert.match(details.textContent ?? "", /checkpoint after turn 2/);
+    assert.match(details.textContent ?? "", /stays here, unchanged, for inspection/);
+    assert.match(details.textContent ?? "", /unsent message moves to the recovered session/);
+    assert.equal(details.querySelector(".code-well code")?.textContent, "oversized_tool_call",
+      "without the provider's transcript error loaded, the well names the recorded cause");
+    // `/compact` cannot repair the history, and the transcript's own error row says so; the notice
+    // does not repeat the provider mechanism.
+    assert.doesNotMatch(fixture.container.textContent ?? "", /\/compact/);
   } finally {
     await fixture.unmount();
   }
@@ -318,8 +334,12 @@ test("a quarantine with no safe checkpoint offers no recovery it cannot perform"
   try {
     const banner = fixture.banner();
     assert.ok(banner);
-    assertNoDomNode(banner.querySelector("button"), "no action is offered without a checkpoint");
+    assert.deepEqual([...banner.querySelectorAll("button")].map((button) => button.textContent), ["Show Details"],
+      "no recovery is offered without a checkpoint");
+    await act(async () => { (banner.querySelector(".notice-details-toggle") as HTMLButtonElement).click(); });
     assert.match(banner.textContent ?? "", /no earlier checkpoint/i);
+    assert.match(banner.textContent ?? "", /start a new session/i);
+    assert.match(banner.textContent ?? "", /files in this session's worktree are unchanged/i);
     assert.equal(fixture.composer()?.disabled, true);
   } finally {
     await fixture.unmount();
@@ -356,7 +376,8 @@ test("a Viewer reads the quarantine but cannot recover it: nothing is confirmed 
     const describedBy = action.getAttribute("aria-describedby");
     assert.ok(describedBy, "the refusal is announced with the action");
     assert.equal(fixture.container.querySelector(`#${describedBy}`)?.textContent, reason);
-    assert.match(banner.textContent ?? "", /read-only/, "the reason is visible in the banner");
+    assert.match(banner.querySelector(".notice-body")?.textContent ?? "", /read-only/,
+      "the reason is visible in the banner, not behind Show Details");
     await act(async () => { action.click(); });
     await flushAsyncWork(5);
     assert.deepEqual(calls, []);
