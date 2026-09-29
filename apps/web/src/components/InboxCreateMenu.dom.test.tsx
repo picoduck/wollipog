@@ -57,7 +57,10 @@ test("Inbox creation offers both workflows with menu-button keyboard and focus b
 
     await act(async () => { trigger.click(); });
     const items = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
-    assert.deepEqual(items.map((item) => item.textContent?.trim()), ["New Session", "New Project"]);
+    assert.deepEqual(items.map((item) => item.querySelector(".menu-text")?.textContent), ["New Session", "New Project"]);
+    // New Session has a global binding, so its trailing slot carries the shared keycap (§11.5).
+    assert.equal(items[0]!.querySelector(".menu-trail kbd")?.textContent, "C");
+    assertNoDomNode(items[1]!.querySelector("kbd"), "New Project has no binding, so no keycap");
     assert.equal(domWindow.document.activeElement, items[0], "opening by click focuses the first choice");
 
     await act(async () => { items[0]!.click(); });

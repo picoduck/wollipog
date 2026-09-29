@@ -174,7 +174,7 @@ export const CSS_SURFACE = {
   "animation", "animation-delay", "animation-duration", "animation-iteration-count",
   "appearance", "background", "background-clip", "background-position",
   "background-size", "border", "border-bottom", "border-bottom-left-radius",
-  "border-bottom-right-radius", "border-bottom-width", "border-collapse", "border-color",
+  "border-bottom-right-radius", "border-collapse", "border-color",
   "border-inline-start", "border-inline-start-color", "border-left",
   "border-radius", "border-right", "border-style", "border-top", "border-top-color",
   "border-top-left-radius", "border-top-right-radius", "bottom", "box-shadow", "box-sizing",

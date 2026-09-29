@@ -982,7 +982,9 @@ test("unified Inbox creation opens both existing workflows with the active Proje
 
   await create.click();
   const choices = page.getByRole("menu", { name: "Create" });
-  await expect(choices.getByRole("menuitem").allTextContents()).resolves.toEqual(["New Session", "New Project"]);
+  await expect(choices.getByRole("menuitem").locator(".menu-text").allTextContents()).resolves.toEqual(["New Session", "New Project"]);
+  // New Session's global binding rides in the trailing slot as the shared keycap (§11.5).
+  await expect(choices.getByRole("menuitem", { name: "New Session", exact: true }).locator(".menu-trail kbd")).toHaveText("C");
   await choices.getByRole("menuitem", { name: "New Session", exact: true }).click();
   const sessionDialog = page.getByRole("dialog", { name: "New Session" });
   const project = sessionDialog.getByRole("combobox", { name: "Project" });

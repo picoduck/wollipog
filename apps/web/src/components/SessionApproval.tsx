@@ -714,7 +714,7 @@ export function SessionApprovalBanner({
                 onClick={() => void decide(option.optionId)}
               >
                 {option.name}
-                {keyHint && <kbd className="inbox-key-hint">{keyHint}</kbd>}
+                {keyHint && <kbd>{keyHint}</kbd>}
               </button>
             );
           })}
@@ -985,7 +985,7 @@ export function SessionQuestionBanner({
             disabled={busy !== null || !responsesAvailable}
             onClick={() => void dismiss()}
           >
-            {busy === "dismiss" ? "Dismissing…" : recoveryRequired ? "Dismiss and Continue" : "Dismiss"} {showKeyHints && busy === null && <kbd className="inbox-key-hint">D</kbd>}
+            {busy === "dismiss" ? "Dismissing…" : recoveryRequired ? "Dismiss and Continue" : "Dismiss"} {showKeyHints && busy === null && <kbd>D</kbd>}
           </button>
           {responseStyle === "interactive" && questions.length > 0 && !recoveryRequiresDismiss && (
             <button

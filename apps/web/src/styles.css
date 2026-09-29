@@ -585,6 +585,24 @@ pre {
   font-size: var(--text-sm);
   color: var(--code-accent);
 }
+/* The keycap (§11.5): one recipe for inline hints, menus and the Keyboard Shortcuts reference. A
+   surface may place a keycap, but never sizes it or sets its font or border. */
+kbd {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  box-sizing: border-box;
+  height: 18px;
+  min-width: 18px;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elev-2);
+  color: var(--text-dim);
+  font: 500 var(--text-xs)/16px var(--font-mono);
+  white-space: nowrap;
+}
 /* Flow spacing comes from the container's gap, not from default element margins (§2.4). */
 :where(.form, .section, .surface, .modal-body, .notice, .state) > * {
   margin: 0;
@@ -4007,12 +4025,6 @@ textarea {
 }
 .rp-kbd {
   margin-left: auto;
-  font-size: 11px;
-  color: var(--text-faint);
-  background: var(--bg);
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  padding: 2px 6px;
 }
 .rp-subtitle {
   margin-left: 8px;
@@ -8940,7 +8952,6 @@ button.file-head.source-path-link {
   }
   /* Sheet rows read at the phone's reading size, like the dialog sheet's body. */
   .menu-item { font-size: var(--text-md); }
-  .menu-item kbd { display: none; }
   /* A section label that only repeats the sheet's title row is dropped. */
   .menu-label.repeats-title { display: none; }
   /* Long forms open as a full-height sheet with a back arrow and no grabber. */
@@ -9067,22 +9078,6 @@ button.file-head.source-path-link {
   font-weight: 600;
   letter-spacing: 0.2px;
   text-transform: uppercase;
-}
-.shortcut-row kbd,
-.rp-kbd {
-  font-family: "Cascadia Code", "Consolas", ui-monospace, monospace;
-}
-.shortcut-row kbd {
-  min-width: 52px;
-  padding: 4px 8px;
-  border: 1px solid var(--border-strong);
-  border-bottom-width: 2px;
-  border-radius: 6px;
-  background: var(--bg-elev-2);
-  color: var(--text);
-  font-size: 12px;
-  text-align: center;
-  white-space: nowrap;
 }
 .lifecycle-conflict {
   display: grid;
@@ -10687,20 +10682,10 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
   background: transparent;
   cursor: pointer;
-  font: inherit;
-  font-size: 10px;
+  font: var(--type-small);
 }
 .inbox-shortcut-rail button:hover:not(:disabled) { color: var(--text); background: var(--bg-elev-2); }
 .inbox-shortcut-rail button:disabled { opacity: .45; cursor: wait; }
-.inbox-shortcut-rail kbd,
-.inbox-key-hint {
-  padding: 1px 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: 3px;
-  color: var(--text-faint);
-  background: var(--bg);
-  font: 9px "Cascadia Code", Consolas, monospace;
-}
 .inbox-row-shell {
   position: relative;
   margin: 4px 0;
@@ -11196,7 +11181,6 @@ body.shell-dock-dragging * {
 
 @media (max-width: 760px) {
   .inbox-list-pane > .toolbar { align-items: stretch; flex-direction: column-reverse; padding: var(--space-2) var(--space-2) 0; }
-  .inbox-zero kbd { display: none; }
   .inbox-toolbar-actions { width: 100%; }
   .inbox-search { width: 100%; min-width: 0; flex: 1; margin-bottom: 0; }
   .inbox-search input { width: auto; flex: 1; opacity: 1; pointer-events: auto; }
@@ -12219,20 +12203,10 @@ body.shell-dock-dragging * {
   align-items: center;
   gap: 4px;
   color: var(--text-dim);
-  font: inherit;
-  font-size: var(--text-xs);
+  font: var(--type-small);
   white-space: nowrap;
 }
 .shortcut-hint-label { white-space: nowrap; }
-.shortcut-hint kbd,
-.follow-tail-kbd {
-  padding: 1px 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
-  color: var(--text-faint);
-  background: var(--bg);
-  font: 9px "Cascadia Code", Consolas, monospace;
-}
 /* The resume keycap lives INSIDE the follow-state control, after its "Follow Live Output"
    action text; the control's tooltip carries the chord for assistive tech. */
 .follow-tail-kbd {
@@ -12247,6 +12221,15 @@ body.shell-dock-dragging * {
   cursor: pointer;
 }
 .shortcut-hint-button:hover { color: var(--text); background: var(--bg-elev-2); }
+/* Keycaps are for a keyboard, so a touch pointer hides them and the hints they label, at any width.
+   The Keyboard Shortcuts reference keeps its keycaps: it is where someone with a hardware keyboard
+   on a touch device looks them up. After the hint rules, so their `display` does not win. */
+@media (pointer: coarse) {
+  kbd:not(.shortcut-list kbd),
+  .shortcut-hint {
+    display: none;
+  }
+}
 
 /* --------- Trust surface: approval context + structured question card ---------- */
 
@@ -14521,15 +14504,6 @@ body.shell-dock-dragging * {
 .rail-order-icon { display: inline-flex; color: var(--text-dim); }
 .rail-order-title { flex: 1; min-width: 0; font-size: var(--text-sm); }
 .rail-order-state { display: inline-flex; align-items: center; gap: 8px; }
-.rail-order-state kbd {
-  min-width: 18px;
-  padding: 1px 5px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-xs);
-  font: 11px "Cascadia Code", Consolas, monospace;
-  text-align: center;
-  color: var(--text-dim);
-}
 .rail-order-note { font-size: var(--text-xs); color: var(--text-faint); }
 .rail-order-controls { display: inline-flex; align-items: center; gap: 4px; }
 .rail-order-required { font-size: var(--text-xs); color: var(--text-faint); padding: 0 6px; }

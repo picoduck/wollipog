@@ -4879,7 +4879,7 @@ function SessionDetailLoaded({
             </div>
           </div>
           <button type="button" className="btn ghost sm" onClick={onExpand} aria-label="Expand Session" title="Expand Session (Enter)">
-            Expand <kbd className="inbox-key-hint">Enter</kbd>
+            Expand <kbd>Enter</kbd>
           </button>
         </header>
         <SessionSkillsUnavailableNotice

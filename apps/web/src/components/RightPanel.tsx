@@ -581,7 +581,7 @@ function LauncherRow({
     <button type="button" className="rp-row" disabled={disabled} title={disabled ? hint : undefined} onClick={onClick}>
       <span className="rp-row-icon">{icon}</span>
       <span>{label}</span>
-      {kbd && <span className="rp-kbd">{kbd}</span>}
+      {kbd && <kbd className="rp-kbd">{kbd}</kbd>}
     </button>
   );
 }

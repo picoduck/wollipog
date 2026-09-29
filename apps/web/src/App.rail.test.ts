@@ -144,8 +144,8 @@ test("live-follow status owns a reserved transcript strip with a compact centere
     "no flexible tracks may push the pager hints toward the strip edges");
   assert.match(css, /\.follow-tail-chip\s*\{[^}]*flex:\s*none;[^}]*position:\s*static;[^}]*white-space:\s*nowrap;/,
     "the live-follow control must participate in the strip layout instead of covering transcript content");
-  assert.match(css, /\.shortcut-hint kbd,\s*\.follow-tail-kbd\s*\{[^}]*border:\s*1px solid var\(--border-strong\);[^}]*border-radius:\s*var\(--radius-xs\);[^}]*font:\s*9px "Cascadia Code", Consolas, monospace;/,
-    "the in-control resume keycap shares the Reply keycap treatment");
+  assert.doesNotMatch(css.match(/\.follow-tail-kbd\s*\{[^}]*\}/)?.[0] ?? "", /font|border|padding|background/,
+    "the in-control resume keycap is a <kbd>, so it takes the one keycap recipe and only places itself");
   assert.doesNotMatch(detail, /Preview Next|Preview Previous/);
   assert.doesNotMatch(sessionHeader, /ContextWindowMeter|formatTokens|formatCost/,
     "expanded usage belongs with the composer controls rather than the session header");

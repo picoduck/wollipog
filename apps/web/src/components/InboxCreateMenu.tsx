@@ -1,4 +1,5 @@
 import React, { useState } from "react";
+import { shortcutDisplay } from "../shortcuts.js";
 import { PlusIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSurface } from "./Menu.js";
@@ -44,7 +45,9 @@ export function InboxCreateMenu({
           onDismiss={() => menu.close(true)}
           onKeyDown={menu.onMenuKeyDown}
         >
-          <MenuItem onClick={() => choose(onNewSession)}>New Session</MenuItem>
+          <MenuItem trail={<kbd>{shortcutDisplay("new-session")}</kbd>} onClick={() => choose(onNewSession)}>
+            New Session
+          </MenuItem>
           <MenuItem
             disabled={!onNewProject}
             description={onNewProject ? undefined : "New Project is unavailable on this connection."}

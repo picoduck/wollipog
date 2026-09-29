@@ -132,7 +132,7 @@ correct in every scheme and theme without regeneration.
 | `--control-outline` | `#6b8299` | `#727c86` | **Every input, select, checkbox and switch boundary, the selected segment knob, and the edge of a toggle that is on** (3:1, WCAG 1.4.11). |
 | `--text` | `#e6edf3` | `#17212b` | Primary text. |
 | `--text-dim` | `#9aa9b8` | `#4f5d6a` | Secondary text: descriptions, helper, labels in tables. |
-| `--text-faint` | `#8a98a4` | `#606973` | Tertiary: counts, timestamps, keycaps, placeholders. Never for sentences. |
+| `--text-faint` | `#8a98a4` | `#606973` | Tertiary: counts, timestamps, placeholders. Never for sentences. |
 | `--text-dim-on-tint` | `#aebac6` | `#495663` | Existing token: dim text on a 12–16% wash (neutral status badge text). |
 | `--accent` | `#45d6cc` | `#055d56` | Selection indicator, active nav, tab underline, checked controls, links. |
 | `--primary-from` | `#2fbcb2` | `#06736a` | Primary button fill (flat). |
@@ -1298,8 +1298,11 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
 ### 11.5 Keycap
 
 `kbd`: `--font-mono` 11px, 18px tall, min-width 18px, padding 0 4px, 1px `--border-strong`,
-`--radius-xs`, `--bg-elev-2`, `--text-dim`. One recipe for hints, menus and the shortcut reference.
-Hidden on coarse pointers.
+`--radius-xs`, `--bg-elev-2`, `--text-dim`. One recipe for hints, menus and the shortcut reference:
+it is the element rule, so a surface places a keycap but never sizes it or sets its font or border.
+A hint's label beside it is `--type-small` in `--text-dim`. A menu item with a binding shows the
+keycap in its trailing slot (§9.1).
+Hidden on coarse pointers (`@media (pointer: coarse)`), never by viewport width.
 
 ### 11.6 Meter
 
