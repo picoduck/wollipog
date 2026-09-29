@@ -2220,11 +2220,13 @@ button.status { cursor: pointer; }
    On a phone it stays anchored to its field rather than becoming a sheet: the anchor's inline
    placement wins over the sheet's, and this rule restates the container the sheet rules replace.
    It has no stylesheet corner (`top`/`left` auto) and no entrance animation: it appears where its
-   field is, already in place, as the list always has. */
+   field is, already in place, as the list always has. It takes its field's font rather than the
+   menu's, as it always has, so a list reads like the form it belongs to. */
 .menu.listbox {
   top: auto;
   left: auto;
   display: block;
+  font: inherit;
   min-width: 0;
   max-width: none;
   max-height: none;

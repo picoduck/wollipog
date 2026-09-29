@@ -344,9 +344,12 @@ test.describe("responsive Project and Agent controls", () => {
   });
 
   test("a short Project list grows to its wrapped descriptions instead of scrolling", async ({ page }) => {
-    // At 390px "No Project"'s description wraps to two lines. The list's height request counted it
-    // as one, so a two-option list scrolled to show its last line and clipped it at the bottom edge.
+    // At 390px, in the app font, "No Project"'s description wraps to two lines. The list's height
+    // request counted it as one, so a two-option list scrolled to show its last line and clipped it
+    // at the bottom edge. The harness pins Arial for its screenshot baselines, which does not wrap
+    // here, so this test renders in the app font the product uses.
     await openDialog(page);
+    await page.addStyleTag({ content: "html body { font-family: var(--font-ui); }" });
     await page.getByRole("button", { name: /^Project:/ }).click();
     const list = page.getByRole("listbox", { name: "Project" });
     await expect(list.getByRole("option")).toHaveCount(2);
