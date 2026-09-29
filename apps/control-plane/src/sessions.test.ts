@@ -1209,7 +1209,19 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.equal(completion.data?.child.archiveStatus, "stop_pending");
     assert.equal(completion.data?.campaign.children.cleanupPending, 1,
       "Stop and Archive remains active until lifecycle and worktree cleanup are proven");
+    hub.requestHandler = (message) => {
+      assert.equal(message.type, "session_worktree");
+      assert.equal(message.requireDelivered, true);
+      return { type: "session_worktree_result", requestId: message.requestId,
+        sessionId: child.data!.id, operation: "discard", ok: false,
+        error: "worktree retained: the worktree has uncommitted changes" };
+    };
     svc.onSessionStatus(child.data.id, "stopped");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(db.campaignProjection(parent.id)?.cleanupWorktrees, [{
+      sessionId: child.data.id, path: `/worktrees/${child.data.id}`, status: "refused",
+      reason: "the worktree has uncommitted changes",
+    }]);
     assert.notEqual(db.campaignProjection(parent.id)?.status, "verified_complete",
       "a stopped child with a retained worktree is not campaign-complete");
     db.raw().prepare("UPDATE sessions SET archived=1, worktree_path=NULL, worktrees='[]' WHERE id=?")
