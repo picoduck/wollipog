@@ -13,21 +13,25 @@ interface DomAbsenceCandidate {
 /** Attributes that identify an element well enough to find it again from a failure message. */
 const IDENTIFYING_ATTRIBUTES = ["role", "data-testid", "aria-label", "name", "type"] as const;
 const MAX_CLASSES = 3;
+const MAX_NAME = 40;
 const MAX_TEXT = 80;
 
 function truncate(text: string, limit: number): string {
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
 }
 
-/** A selector-shaped description of the node — tag, id, a few classes and identifying attributes. */
+/**
+ * A selector-shaped description of the node — tag, id, a few classes and identifying attributes.
+ * Every part is truncated, so the description stays short whatever the element carries.
+ */
 export function describeDomNode(node: DomAbsenceCandidate): string {
-  const tag = node.nodeName.toLowerCase();
+  const tag = truncate(node.nodeName.toLowerCase(), MAX_NAME);
   const attribute = (name: string) => node.getAttribute?.(name) ?? null;
   let selector = tag;
   const id = attribute("id");
-  if (id) selector += `#${id}`;
+  if (id) selector += `#${truncate(id, MAX_NAME)}`;
   const classes = (attribute("class") ?? "").split(/\s+/u).filter(Boolean);
-  selector += classes.slice(0, MAX_CLASSES).map((name) => `.${name}`).join("");
+  selector += classes.slice(0, MAX_CLASSES).map((name) => `.${truncate(name, MAX_NAME)}`).join("");
   if (classes.length > MAX_CLASSES) selector += "…";
   for (const name of IDENTIFYING_ATTRIBUTES) {
     const value = attribute(name);

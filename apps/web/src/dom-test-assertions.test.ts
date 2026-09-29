@@ -122,7 +122,7 @@ test("only null passes, exactly as assert.equal(found, null) did", () => {
   });
 });
 
-test("the element description stays short on long text and many classes", () => {
+test("the element description stays short whatever the element carries", () => {
   const domWindow = new Window();
   try {
     const button = domWindow.document.createElement("button");
@@ -135,6 +135,17 @@ test("the element description stays short on long text and many classes", () => 
     assert.ok(description.startsWith('button#retry.a.b.c…[data-testid="retry-button"][aria-label="Retry"] with text "'),
       description);
     assert.ok(description.length < 200, `bounded, got ${description.length} characters`);
+
+    // Every part is bounded, not just the text: a long id, class or attribute value would otherwise
+    // rebuild the oversized message this helper exists to avoid.
+    const huge = "y".repeat(100_000);
+    const noisy = domWindow.document.createElement("div");
+    noisy.id = huge;
+    noisy.className = `${huge} ${huge} ${huge} ${huge}`;
+    for (const name of ["role", "data-testid", "aria-label", "name", "type"]) noisy.setAttribute(name, huge);
+    noisy.textContent = huge;
+    const noisyDescription = describeDomNode(noisy);
+    assert.ok(noisyDescription.length < 1000, `bounded, got ${noisyDescription.length} characters`);
     assert.equal(describeDomNode(domWindow.document.createTextNode("  ")), "#text");
   } finally {
     domWindow.close();
