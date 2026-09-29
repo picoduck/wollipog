@@ -21,6 +21,7 @@ import {
   Eye as LucideEye,
   EyeOff as LucideEyeOff,
   FileDiff as LucideFileDiff,
+  FlaskConical as LucideFlaskConical,
   Folder as LucideFolder,
   FolderKanban as LucideFolderKanban,
   GitBranch as LucideGitBranch,
@@ -529,4 +530,8 @@ export function ExternalLinkIcon(props: IconProps) {
 
 export function WrenchIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideWrench} {...props} />;
+}
+
+export function ExperimentIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFlaskConical} {...props} />;
 }

@@ -91,6 +91,7 @@ exports.
 | `JobsIcon` | Lucide | `ListChecks` | Background job list with per-job state. |
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
 | `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion. |
+| `ExperimentIcon` | Lucide | `FlaskConical` | An experimental feature, on the page a turned-off experiment's route shows. |
 
 The Visual Studio Code mark comes from Microsoft's
 [official SVG asset bundle](https://code.visualstudio.com/assets/branding/visual-studio-code-icons.zip)

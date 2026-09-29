@@ -1845,6 +1845,32 @@ button.status { cursor: pointer; }
   margin-top: var(--space-12);
 }
 .notice.state-error.compact-state { margin-top: var(--space-6); }
+/* Opened by the actions' Show Details, below them at the state's measure. */
+.state-details { justify-self: stretch; min-width: 0; margin-top: var(--space-2); }
+/* The shell itself crashed: no header or rail to sit under, so the state takes the window and the
+   page's gutter, top-left like every other state. */
+.app-crash {
+  box-sizing: border-box;
+  min-height: 100dvh;
+  padding: env(safe-area-inset-top, 0px) max(var(--page-gutter), env(safe-area-inset-right, 0px)) var(--space-16) max(var(--page-gutter), env(safe-area-inset-left, 0px));
+  background: var(--bg);
+}
+/* A crashed page or a turned-off experiment is the whole page's next step, so on a phone its
+   actions stack at full width and are 44px tall even under a mouse, like a sheet's footer (§7.5).
+   The height comes from the tokens, as in `.worktree-missing-sheet`, never a per-button patch. */
+@media (max-width: 760px) {
+  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions) {
+    --control-h: 44px;
+    --control-h-sm: 44px;
+    flex-direction: column;
+    align-items: stretch;
+    justify-self: stretch;
+  }
+  /* The phone exception to "buttons never stretch" (§3.1), as in the session notice slot. */
+  :is(.notice.view-error .notice-actions, .state.experiment-off .actions, .app-crash .state .actions) > .btn {
+    max-width: none;
+  }
+}
 
 /* ---------------------------------- Rows ----------------------------------
    One row recipe for lists (docs/design-system.md §5.2). Height comes from the row tokens, never

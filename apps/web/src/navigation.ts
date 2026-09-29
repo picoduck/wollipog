@@ -115,6 +115,16 @@ export function viewTitle(view: View): string {
 }
 
 /**
+ * The view as the subject of a sentence ("Automations Couldn't Be Shown"). A destination reads as
+ * its page title; one item of a kind reads as "This Session", since "Session Couldn't Be Shown"
+ * names a type rather than the thing on screen.
+ */
+export function viewSubjectName(view: View): string {
+  if (view.name === "session" || view.name === "run" || view.name === "pod") return `This ${viewTitle(view)}`;
+  return viewTitle(view);
+}
+
+/**
  * Destinations the palette offers that the rail does not render as its own item.
  *
  * Settings is reachable by a dedicated gear rather than a rail row, so it is absent from

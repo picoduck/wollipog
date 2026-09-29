@@ -29,7 +29,7 @@ import {
 } from "../rail-preferences.js";
 import { useRailPreferences } from "../use-rail-preferences.js";
 import { useInstanceScope } from "../instance-scope.js";
-import { experimentForViewName } from "../experiments.js";
+import { EXPERIMENT_COPY, experimentForViewName } from "../experiments.js";
 import { useExperiments } from "../use-experiments.js";
 import { GLOBAL_VIEW_ITEMS } from "../navigation.js";
 import { NavRow, SegmentedRow, SelectRow, StaticRow, SwitchRow } from "./ui/SettingsRows.js";
@@ -1509,13 +1509,13 @@ export function ExperimentalPanel({
   return (
     <SettingsGroup title="Untested Features">
       <SwitchRow
-        title="Multi-Agent Runs"
+        title={EXPERIMENT_COPY.multiAgent.name}
         description="Runs and workflow graphs that coordinate several agents. Off hides Multi-Agent from navigation and search on this device."
         checked={flags.multiAgent}
         onClick={() => onToggle("multiAgent", !flags.multiAgent)}
       />
       <SwitchRow
-        title="Collaboration Pods"
+        title={EXPERIMENT_COPY.pods.name}
         description="Shared-context groups of sessions. Off hides Pods from navigation and search on this device."
         checked={flags.pods}
         onClick={() => onToggle("pods", !flags.pods)}

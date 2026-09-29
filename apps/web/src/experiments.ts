@@ -3,7 +3,7 @@ import {
   saveInstanceStorageValue,
   LOCAL_INSTANCE_SCOPE,
 } from "./instance-storage.js";
-import type { View } from "./navigation.js";
+import { GLOBAL_VIEW_ITEMS, type GlobalViewName, type View } from "./navigation.js";
 
 /**
  * Experimental-feature flags: per device, per control-plane instance, client-side only.
@@ -52,10 +52,34 @@ export function parseExperimentFlags(raw: string | null): ExperimentFlags {
   };
 }
 
-/** One vocabulary for the settings rows and the disabled-route notice, so they cannot drift. */
-export const EXPERIMENT_TITLES: Record<ExperimentId, string> = {
-  multiAgent: "Multi-Agent Runs",
-  pods: "Collaboration Pods",
+export interface ExperimentCopy {
+  /** The destination's name, read from the navigation registry so a rename there reaches here. */
+  readonly name: string;
+  /** The whole Title Case title of the page a turned-off route shows. Written per experiment,
+   * because the verb has to agree with the name ("Runs Are", never "Runs Is"). */
+  readonly offTitle: string;
+  /** Why the page is hidden and what turning it on changes, in sentence case. */
+  readonly offBody: string;
+}
+
+const destinationTitle = (name: GlobalViewName): string =>
+  GLOBAL_VIEW_ITEMS.find((item) => item.name === name)!.title;
+
+const multiAgentName = destinationTitle("runs");
+const podsName = destinationTitle("pods");
+
+/** One vocabulary for the settings rows and the turned-off route, so they cannot drift. */
+export const EXPERIMENT_COPY: Record<ExperimentId, ExperimentCopy> = {
+  multiAgent: {
+    name: multiAgentName,
+    offTitle: `${multiAgentName} Are Turned Off`,
+    offBody: `This experiment is off on this device. Turning it on adds ${multiAgentName} to the navigation.`,
+  },
+  pods: {
+    name: podsName,
+    offTitle: `${podsName} Are Turned Off`,
+    offBody: `This experiment is off on this device. Turning it on adds ${podsName} to the navigation.`,
+  },
 };
 
 /**

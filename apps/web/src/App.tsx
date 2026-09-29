@@ -1,5 +1,5 @@
 import { QuestionPoliciesPanel } from "./components/QuestionPoliciesPanel.js";
-import { State } from "./components/State.js";
+import { ExperimentGate } from "./components/ExperimentGate.js";
 import {
   useCallback,
   useEffect,
@@ -76,7 +76,7 @@ import { Notice } from "./components/Notice.js";
 import { OfflineBanner } from "./components/OfflineBanner.js";
 import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
-import { viewPath, viewTitle } from "./navigation.js";
+import { viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { useInstanceScope } from "./instance-scope.js";
 import { sessionsDestination } from "./sessions-view-mode.js";
 import { railViewForDigit, visibleRailViews } from "./rail-preferences.js";
@@ -106,7 +106,6 @@ import {
   useNotifySetting,
 } from "./components/SettingsView.js";
 import { OrchestratorSettingsPanel } from "./components/OrchestratorSettingsPanel.js";
-import { EXPERIMENT_TITLES, experimentForViewName, type ExperimentId } from "./experiments.js";
 import { useExperiments } from "./use-experiments.js";
 import {
   isTauriRuntime,
@@ -149,7 +148,7 @@ function BrowserApp() {
     <FeedbackProvider>
       <DesktopExternalLinkRouter />
       <InstanceRuntimeHost runtime={runtime} disposeOnUnmount>
-        <ErrorBoundary label="App">
+        <ErrorBoundary scope="app">
           <Shell />
         </ErrorBoundary>
       </InstanceRuntimeHost>
@@ -169,7 +168,7 @@ function DesktopApp() {
       <DesktopCloseGuard />
       {/* #1646. Above the instance boundary for the same reason: its toast outlives a switch. */}
       <DesktopUpdateNotifier />
-      <ErrorBoundary label="App">
+      <ErrorBoundary scope="app">
         <InstanceProvider>
           <DesktopInstanceBoundary />
         </InstanceProvider>
@@ -284,12 +283,7 @@ export function Shell() {
   const stalledSessionIds = useStoreSelector((s) => s.stalledSessionIds);
   const stalledRevision = useStoreSelector((s) => s.stalledRevision);
   const experiments = useExperiments();
-  // A route into a feature this device has switched off renders the explanation instead of the
-  // feature: removing the branch entirely would make a bookmarked /runs a silent Inbox redirect.
-  const disabledExperimentView = (() => {
-    const experiment = experimentForViewName(view.name);
-    return experiment !== null && !experiments.flags[experiment] ? experiment : null;
-  })();
+  const openExperimentalSettings = () => navigate({ name: "settings", section: "experimental" });
   const activeSession = view.name === "session" ? sessions.get(view.id) : undefined;
   const activeRunnerProtocol = activeSession ? runners.get(activeSession.runnerId)?.protocolVersion : undefined;
   const terminalSupported = runnerSupportsProtocol(activeRunnerProtocol, "sessionShells");
@@ -730,7 +724,7 @@ export function Shell() {
         <div className={`main-body${view.name === "inbox" || view.name === "session" || view.name === "board" ? " inbox-main-body" : ""}`}>
           <PageChromeProvider appBarControl={appBarControl}>
           <ErrorBoundary
-            label="View"
+            name={viewSubjectName(view)}
             resetKey={viewPath(view)}
             // The Session's own bar owns its title (the phone top bar sits outside this boundary).
             pageTitle={view.name === "session" ? undefined : viewTitle(view)}
@@ -763,17 +757,18 @@ export function Shell() {
             </div>
           )}
           {view.name === "runners" && <RunnersView />}
-          {disabledExperimentView && (
-            <div className="page">
-              <PageHeader title={viewTitle(view)} />
-              <ExperimentDisabledNotice
-                experiment={disabledExperimentView}
-                onOpenSettings={() => navigate({ name: "settings", section: "experimental" })}
-              />
-            </div>
+          {/* A route into a feature this device has switched off keeps its page and says so:
+              removing the branch entirely would make a bookmarked /runs a silent Inbox redirect. */}
+          {(view.name === "runs" || view.name === "run") && (
+            <ExperimentGate experiment="multiAgent" pageTitle={viewTitle(view)} onOpenSettings={openExperimentalSettings}>
+              {view.name === "runs" ? <RunsView onNewRun={() => setDialog({ kind: "run" })} /> : <RunDetail runId={view.id} />}
+            </ExperimentGate>
           )}
-          {view.name === "runs" && !disabledExperimentView && <RunsView onNewRun={() => setDialog({ kind: "run" })} />}
-          {view.name === "pods" && !disabledExperimentView && <PodsView onNewPod={() => setDialog({ kind: "pod" })} />}
+          {(view.name === "pods" || view.name === "pod") && (
+            <ExperimentGate experiment="pods" pageTitle={viewTitle(view)} onOpenSettings={openExperimentalSettings}>
+              {view.name === "pods" ? <PodsView onNewPod={() => setDialog({ kind: "pod" })} /> : <PodDetail podId={view.id} />}
+            </ExperimentGate>
+          )}
           {view.name === "automations" && <AutomationsView />}
           {view.name === "skills" && <SkillsView selectedSkillId={view.id} />}
           {view.name === "usage" && <UsageView />}
@@ -841,8 +836,6 @@ export function Shell() {
               onNewSession={(preset) => setDialog({ kind: "session", preset })}
             />
           )}
-          {view.name === "run" && !disabledExperimentView && <RunDetail runId={view.id} />}
-          {view.name === "pod" && !disabledExperimentView && <PodDetail podId={view.id} />}
           </ErrorBoundary>
           </PageChromeProvider>
         </div>
@@ -950,34 +943,6 @@ export function Header({
         <div className="topbar-actions">{sessionActions}</div>
       )}
     </header>
-  );
-}
-
-/**
- * What a direct route into a switched-off experiment renders.
- *
- * The route still parses — a bookmark must not silently become the Inbox — but the feature's
- * views stay unmounted, and the page says which switch governs it and where that switch lives.
- */
-function ExperimentDisabledNotice({
-  experiment,
-  onOpenSettings,
-}: {
-  experiment: ExperimentId;
-  onOpenSettings: () => void;
-}) {
-  return (
-    <State
-      headingLevel={2}
-      title={`${EXPERIMENT_TITLES[experiment]} Is Turned Off`}
-      actions={
-        <button type="button" className="btn primary" onClick={onOpenSettings}>
-          Open Experimental Settings
-        </button>
-      }
-    >
-      This experimental feature is hidden on this device.
-    </State>
   );
 }
 

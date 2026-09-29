@@ -240,18 +240,18 @@ test("a detail bar keeps the phone app bar's instance switcher, and Tab leaves â
   }
 });
 
-test("a crashed route keeps its page title above the error card", async () => {
+test("a crashed route keeps its page title above the error notice", async () => {
   function Broken(): React.ReactNode {
     throw new Error("render failed");
   }
   const priorError = console.error;
   console.error = () => undefined;
-  const view = await mount(<ErrorBoundary label="View" pageTitle="Automations"><Broken /></ErrorBoundary>);
+  const view = await mount(<ErrorBoundary name="Automations" pageTitle="Automations"><Broken /></ErrorBoundary>);
   try {
     const title = view.container.querySelector("h1");
     assert.equal(title?.id, "page-title");
     assert.equal(title?.textContent, "Automations");
-    assert.match(view.container.querySelector('[role="alert"]')?.textContent ?? "", /render failed/);
+    assert.equal(view.container.querySelector('[role="alert"] .notice-title')?.textContent, "Automations Couldn't Be Shown");
   } finally {
     await view.unmount();
     console.error = priorError;

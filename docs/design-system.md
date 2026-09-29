@@ -1439,6 +1439,20 @@ A danger Notice (§13.2) in place of the content: title "Couldn't Load Skills", 
 terms, **Retry** as the action, raw detail behind "Show Details" in mono. Render-error boundary uses
 the same notice with Reload and Copy Error Details, top-left in the content area.
 
+- **A crashed view** (`ErrorBoundary`) is titled with the destination's name, "Automations Couldn't
+  Be Shown" ("This Session" inside a session), over "Part of this page failed to display. Nothing was
+  changed." Its actions are **Reload Page** (primary) and **Copy Error Details**; Show Details opens a
+  code well with the error message and the first three component frames, which is also what Copy
+  copies. There is no Try Again: re-rendering the same data crashes the same way. The route's page
+  header stays above it, and navigating elsewhere clears it.
+- **A crashed shell** has no header or rail to sit under: a full-window `State`, "Wollipog Couldn't
+  Show This Screen", with **Reload Wollipog**, Copy Error Details and the same details.
+- **A turned-off experiment's route** is not an error: it keeps its page header, and below it an
+  empty-style `State` with a flask icon, "{Name} Are Turned Off", a sentence on why it is hidden and
+  what turning it on adds, **Turn On** (primary, the same switch as Settings › Experimental; the
+  feature mounts in place) and Open Experimental Settings.
+- Below 760px the actions of all three stack at full width and are 44px tall.
+
 ### 12.5 Offline
 
 - A single global banner (§13.3). Per-view data states show a neutral "Reconnecting…" line with the

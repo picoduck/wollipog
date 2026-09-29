@@ -1,4 +1,4 @@
-import React, { type ReactNode } from "react";
+import React, { useId, useState, type ReactNode } from "react";
 import { useOptionalStoreSelector } from "../store.js";
 import { Notice } from "./Notice.js";
 import { Spinner } from "./common.js";
@@ -56,8 +56,12 @@ export interface StateProps {
   actions?: ReactNode;
   /** 24px from the top instead of 48px, for states inside panels (§21.4). */
   compact?: boolean;
-  /** Render the title as a heading at this level, for a state that replaced a real heading. */
-  headingLevel?: 2 | 3 | 4;
+  /** Render the title as a heading at this level, for a state that replaced a real heading. A
+   * state that stands in for the whole window, with no page header above it, takes level 1. */
+  headingLevel?: 1 | 2 | 3 | 4;
+  /** Raw detail behind a Show Details toggle at the end of the actions, as in `Notice`: not in the
+   * DOM until the person opens it. */
+  details?: ReactNode;
   /** False when an ancestor is already the live region, so the message is announced once. */
   live?: boolean;
   className?: string;
@@ -75,9 +79,12 @@ export function State({
   actions,
   compact = false,
   headingLevel,
+  details,
   live: announce = true,
   className,
 }: StateProps) {
+  const [detailsOpen, setDetailsOpen] = useState(false);
+  const detailsId = `state-details-${useId().replace(/:/g, "")}`;
   if (variant === "error") {
     // §12.4: an error is a danger notice in place of the content, with its recovery as the action.
     return (
@@ -87,7 +94,8 @@ export function State({
       </Notice>
     );
   }
-  const Title = (headingLevel ? `h${headingLevel}` : "p") as "p" | "h2" | "h3" | "h4";
+  const Title = (headingLevel ? `h${headingLevel}` : "p") as "p" | "h1" | "h2" | "h3" | "h4";
+  const hasDetails = details != null && details !== false;
   const live = variant === "loading" || variant === "offline";
   return (
     <div
@@ -107,7 +115,23 @@ export function State({
       {icon && variant !== "loading" && <span className="state-icon" aria-hidden="true">{icon}</span>}
       {title && <Title className="state-title">{title}</Title>}
       {children != null && children !== false && <div className="state-body">{children}</div>}
-      {actions && <div className="actions">{actions}</div>}
+      {(actions || hasDetails) && (
+        <div className="actions">
+          {actions}
+          {hasDetails && (
+            <button
+              type="button"
+              className="btn ghost"
+              aria-expanded={detailsOpen}
+              aria-controls={detailsOpen ? detailsId : undefined}
+              onClick={() => setDetailsOpen((open) => !open)}
+            >
+              {detailsOpen ? "Hide Details" : "Show Details"}
+            </button>
+          )}
+        </div>
+      )}
+      {hasDetails && detailsOpen && <div className="state-details" id={detailsId}>{details}</div>}
     </div>
   );
 }

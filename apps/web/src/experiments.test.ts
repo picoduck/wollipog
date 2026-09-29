@@ -4,7 +4,7 @@ import { beforeEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
   DEFAULT_EXPERIMENT_FLAGS,
-  EXPERIMENT_TITLES,
+  EXPERIMENT_COPY,
   EXPERIMENTS_STORAGE_KEY,
   experimentForViewName,
   getExperimentFlags,
@@ -106,12 +106,23 @@ test("the list and detail views of a feature gate together", () => {
   }
 });
 
-test("every gated global destination has a settings row title", () => {
+test("every gated global destination takes its experiment's name from the navigation registry", () => {
   for (const item of GLOBAL_VIEW_ITEMS) {
     const experiment = experimentForViewName(item.name);
     if (experiment !== null) {
-      assert.ok(EXPERIMENT_TITLES[experiment], `${item.name} needs a name the settings row can use`);
+      // One name for the rail's page title, the settings row and the turned-off page, so the
+      // Pods rename (#1945) lands everywhere by editing the registry alone.
+      assert.equal(EXPERIMENT_COPY[experiment].name, item.title, item.name);
     }
+  }
+});
+
+test("a turned-off experiment's title agrees with its plural name and is written whole", () => {
+  assert.equal(EXPERIMENT_COPY.multiAgent.offTitle, "Multi-Agent Runs Are Turned Off");
+  assert.equal(EXPERIMENT_COPY.pods.offTitle, `${EXPERIMENT_COPY.pods.name} Are Turned Off`);
+  for (const [id, copy] of Object.entries(EXPERIMENT_COPY)) {
+    assert.doesNotMatch(copy.offTitle, /\bIs Turned Off\b/u, `${id}: every experiment name is plural`);
+    assert.match(copy.offBody, new RegExp(`^This experiment is off on this device\\. Turning it on adds ${copy.name} to the navigation\\.$`, "u"), id);
   }
 });
 
@@ -134,11 +145,13 @@ test("every surface that exposes a gated feature consults the flags", () => {
       "the palette must filter destinations, or search reaches what the rail hides"],
     ["./App.tsx", /visibleRailViews\(railPreferences, experiments\.flags\)/,
       "the numbered shortcuts must consult the flags through the visible rail order, or a hidden view stays one keypress away"],
-    ["./App.tsx", /disabledExperimentView/,
-      "a direct route into a hidden feature must render the notice, not the feature"],
+    ["./App.tsx", /<ExperimentGate experiment="multiAgent"/,
+      "a direct route into hidden Multi-Agent Runs must render the turned-off page, not the feature"],
+    ["./App.tsx", /<ExperimentGate experiment="pods"/,
+      "a direct route into hidden Pods must render the turned-off page, not the feature"],
     // The create action moved from the top bar into the Runs page header (#1801), so it renders
     // exactly when the page does.
-    ["./App.tsx", /view\.name === "runs" && !disabledExperimentView && <RunsView/,
+    ["./App.tsx", /<ExperimentGate experiment="multiAgent"[^>]*>\s*\{view\.name === "runs" \? <RunsView /,
       "the page header's create button is a creation surface and gates with its view"],
     ["./components/RunsView.tsx", /<PageHeader title="Multi-Agent Runs" primary=\{\{ label: "New Multi-Agent Run"/,
       "the Runs create action belongs to the gated Runs page"],
