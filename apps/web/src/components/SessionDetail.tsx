@@ -3702,12 +3702,12 @@ function SessionDetailLoaded({
       key: `worktree-missing:${worktreeRecovery.recoveryId}`,
       severity: "danger",
       rank: SESSION_NOTICE_RANK.worktreeMissing,
-      title: "Worktree Recovery Required",
+      title: "Worktree Missing",
       render: ({ trailing }) => (
         <WorktreeRecoveryCard
           session={session}
           runnerOnline={runnerOnline}
-          offlineReason={runnerOfflineReason ?? undefined}
+          machineName={runnerDisp.name || undefined}
           creation={recoveryCreation}
           selecting={recoverySelectPending}
           selectError={recoverySelectError?.recoveryId === worktreeRecovery.recoveryId ? recoverySelectError.message : null}

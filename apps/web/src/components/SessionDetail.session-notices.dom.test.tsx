@@ -371,18 +371,30 @@ test("a worktree selection still running keeps recovery refused after showing an
     await act(async () => { item.click(); });
     await flush();
   };
-  const actions = () => [...fixture.container.querySelectorAll(".worktree-recovery-controls button.btn")] as HTMLButtonElement[];
+  const actions = () => [...fixture.container.querySelectorAll(".worktree-missing-row button.btn")] as HTMLButtonElement[];
+  const unavailable = (button: HTMLButtonElement) => button.disabled || button.getAttribute("aria-disabled") === "true";
+  const useExisting = async () => {
+    const radio = [...fixture.container.querySelectorAll('[role="radio"]')]
+      .find((candidate) => candidate.textContent === "Use Existing") as HTMLButtonElement;
+    await act(async () => { radio.click(); });
+  };
   try {
     await flush(5);
-    await act(async () => { actions().find((button) => button.textContent === "Select Worktree")!.click(); });
+    await useExisting();
+    await act(async () => { actions().find((button) => button.textContent === "Use Worktree")!.click(); });
     assert.deepEqual(selections, ["/repos/demo/other"]);
     await choose("Conversation Quarantined");
-    await choose("Worktree Recovery Required");
-    assert.ok(actions().every((button) => button.disabled), "no second selection or create while the first runs");
-    assert.ok(actions().some((button) => button.textContent === "Selecting…"));
+    await choose("Worktree Missing");
+    assert.equal(actions().find((button) => button.textContent === "Use Worktree")?.getAttribute("aria-busy"), "true",
+      "the notice comes back on the chosen path, still showing the running selection");
+    assert.ok(actions().every(unavailable), "no second selection while the first runs");
+    const radios = [...fixture.container.querySelectorAll('[role="radio"]')] as HTMLButtonElement[];
+    await act(async () => { radios.find((radio) => radio.textContent === "Create New")!.click(); });
+    assert.ok(actions().every(unavailable), "and no create either");
+    await useExisting();
     await act(async () => { settle!(); });
     await flush();
-    assert.ok(actions().every((button) => !button.disabled), "the actions return once the selection settles");
+    assert.ok(actions().every((button) => !unavailable(button)), "the actions return once the selection settles");
   } finally {
     await fixture.unmount();
   }
@@ -411,17 +423,24 @@ test("a worktree selection that fails while another notice shows still says why"
     await act(async () => { item.click(); });
     await flush();
   };
-  const actions = () => [...fixture.container.querySelectorAll(".worktree-recovery-controls button.btn")] as HTMLButtonElement[];
+  const actions = () => [...fixture.container.querySelectorAll(".worktree-missing-row button.btn")] as HTMLButtonElement[];
+  const unavailable = (button: HTMLButtonElement) => button.disabled || button.getAttribute("aria-disabled") === "true";
+  const useExisting = async () => {
+    const radio = [...fixture.container.querySelectorAll('[role="radio"]')]
+      .find((candidate) => candidate.textContent === "Use Existing") as HTMLButtonElement;
+    await act(async () => { radio.click(); });
+  };
   try {
     await flush(5);
-    await act(async () => { actions().find((button) => button.textContent === "Select Worktree")!.click(); });
+    await useExisting();
+    await act(async () => { actions().find((button) => button.textContent === "Use Worktree")!.click(); });
     await choose("Conversation Quarantined");
     await act(async () => { fail!(new Error("That worktree is not linked to this session.")); });
     await flush();
-    await choose("Worktree Recovery Required");
+    await choose("Worktree Missing");
     const alert = fixture.container.querySelector('.session-notice-slot [role="alert"]');
     assert.equal(alert?.textContent, "That worktree is not linked to this session.");
-    assert.ok(actions().every((button) => !button.disabled), "the person can try again");
+    assert.ok(actions().every((button) => !unavailable(button)), "the person can try again");
 
     // A later incident starts without the earlier failure.
     await fixture.update({
@@ -447,10 +466,14 @@ test("a missing worktree ranks first and renders the recovery card in the slot",
   try {
     assert.equal(fixture.notices().length, 1);
     const card = fixture.notices()[0]!;
-    assert.equal(card.getAttribute("aria-label"), "Worktree Recovery Required");
+    assert.equal(card.getAttribute("aria-label"), "Worktree Missing");
     assert.ok(fixture.button("+1 More"));
-    for (const action of card.querySelectorAll(".worktree-recovery-controls button.btn")) {
-      assert.ok(describedText(fixture.container, action as HTMLElement).includes("Build Box is offline."));
+    const offline = "Build Box is offline, so the worktree can't be recovered until it reconnects.";
+    assert.match(card.textContent ?? "", new RegExp(offline.replace(/\./gu, "\\.")), "the reason names the machine");
+    const actions = [...card.querySelectorAll(".worktree-missing-row button.btn")];
+    assert.equal(actions.length, 1);
+    for (const action of actions) {
+      assert.ok(describedText(fixture.container, action as HTMLElement).includes(offline));
     }
   } finally {
     await fixture.unmount();

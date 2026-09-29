@@ -87,7 +87,6 @@ const BASELINE: Readonly<Record<string, number>> = {
   "components/SnoozeDialog.tsx": 1,
   "components/SwitchAccountDialog.tsx": 1,
   "components/UsageView.tsx": 4,
-  "components/WorktreeRecoveryCard.tsx": 3,
 };
 
 function sourceFiles(dir: string, out: string[] = []): string[] {

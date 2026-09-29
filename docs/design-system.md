@@ -1355,6 +1355,9 @@ its measured transcript-pane width; its control's tooltip still names the chord.
 
 - 6px tall, `--radius-pill`, track `--bg-elev-3`; the fill is a child `<span>` whose width is set
   inline, in `--text-dim`. A level is not forward progress, so it is not teal (§2.2).
+- `.meter.is-progress` is normal forward progress through known steps (a replacement worktree being
+  created, §13.2), so its fill is `--accent` (§2.2). A label beside it names the phase and step
+  ("Running Setup, Step 3 of 4"); progress is never drawn in a warning tone.
 - `.meter.t-warning` and `.meter.t-danger` fill with the tone when the level needs attention (the
   context window when full).
 - The element carries `role="progressbar"` with `aria-valuemin`, `aria-valuemax`, `aria-valuenow`

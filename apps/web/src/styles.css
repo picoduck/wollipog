@@ -2587,6 +2587,7 @@ button.status { cursor: pointer; }
    A level against a known capacity: the context window, a subscription window, a budget
    (docs/design-system.md §11.6). A level is not forward progress, so the fill is neutral rather
    than teal; a tone class (`.t-warning`, `.t-danger`) colors it when the level needs attention.
+   `.is-progress` is forward progress through known steps, filled with the accent.
    The fill's width is set inline, and the element carries role="progressbar" and its values. */
 .meter {
   display: block;
@@ -2603,6 +2604,7 @@ button.status { cursor: pointer; }
   background: var(--text-dim);
 }
 .meter:is(.t-warning, .t-danger) > span { background: var(--tone); }
+.meter.is-progress > span { background: var(--accent); }
 
 /* -------------------------------- Code well --------------------------------
    A read-only command, build or identifier beside its copy button (docs/design-system.md §11.7).
@@ -4876,53 +4878,51 @@ textarea {
   .session-notice-slot .notice-actions > .btn:first-child:not(.notice-details-toggle) { flex: 1 1 auto; max-width: none; }
   .session-notice-slot .notice-actions > .notice-details-toggle { flex: none; }
 }
-.worktree-recovery-controls {
+/* Worktree Missing (#1976): the session notice slot's rank-1 danger notice. One question, Create New
+   or Use Existing, answered in one row whose fields and button share the control height and line
+   up on the field bottoms (§8.1, §10.2). Below 760px the notice keeps its sentence, its status line
+   and one Recover Worktree… button, and the form opens as a bottom sheet (§7.5). */
+.worktree-missing-form {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
+  justify-items: start;
+  gap: var(--space-3);
+  margin-top: var(--space-2);
 }
-.worktree-recovery-controls fieldset {
+.worktree-missing-row {
   display: grid;
-  gap: 7px;
-  min-width: 0;
-  margin: 0;
-  padding: 9px;
-  border: 1px solid color-mix(in srgb, var(--warning) 45%, var(--border));
-  border-radius: var(--radius-sm);
-}
-.worktree-recovery-controls legend { padding: 0 4px; font-weight: 600; }
-.worktree-recovery-controls label { display: grid; gap: 3px; min-width: 0; }
-.worktree-recovery-controls label > span { color: var(--text-dim); font-size: var(--text-xs); }
-.worktree-recovery-controls input,
-.worktree-recovery-controls .ui-select { width: 100%; min-width: 0; }
-.worktree-recovery-controls .btn { justify-self: start; }
-.worktree-recovery-progress {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 4px 8px;
-  align-items: baseline;
-  margin-top: 6px;
-  font-size: var(--text-xs);
-}
-.worktree-recovery-progress-phase { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
-.worktree-recovery-progress-step { color: var(--text-dim); white-space: nowrap; }
-.worktree-recovery-progress progress {
-  grid-column: 1 / -1;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  align-items: end;
+  gap: var(--space-3);
   width: 100%;
-  height: 4px;
-  appearance: none;
-  border: 0;
-  border-radius: var(--radius-pill);
-  overflow: hidden;
-  background: color-mix(in srgb, var(--warning) 20%, var(--border));
-  accent-color: var(--warning);
 }
-.worktree-recovery-progress progress::-webkit-progress-bar { background: transparent; }
-.worktree-recovery-progress progress::-webkit-progress-value { background: var(--warning); }
-.worktree-recovery-progress progress::-moz-progress-bar { background: var(--warning); }
-@media (max-width: 760px) {
-  .worktree-recovery-controls { grid-template-columns: minmax(0, 1fr); }
-  .worktree-recovery-controls .btn { width: 100%; }
+.worktree-missing-row > .field { min-width: 0; }
+.worktree-missing-row.existing > .worktree-missing-picker { grid-column: 1 / 3; }
+.worktree-missing :is(.field input, .field .ui-select) { width: 100%; min-width: 0; }
+.worktree-missing-progress {
+  display: grid;
+  gap: var(--space-1);
+  margin-top: var(--space-2);
+}
+.worktree-missing-progress-label { color: var(--text-dim); font: var(--type-small); }
+.worktree-missing-failure {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-1);
+}
+.worktree-missing-failure > p { margin: 0; }
+.worktree-missing-output {
+  justify-self: stretch;
+  max-height: calc(var(--control-h) * 6);
+  overflow: auto;
+}
+.worktree-missing-empty { margin: 0; color: var(--text-dim); }
+/* The sheet's fields and worktree rows are 44px even under a mouse, like the touch sizes a phone
+   gets anyway (§7.5); a coarse pointer's own sizes are already at least that. */
+@media (max-width: 760px) and (not (pointer: coarse)) {
+  .worktree-missing-sheet {
+    --control-h: 44px;
+    --row-h: 44px;
+  }
 }
 
 .steering-receipts {

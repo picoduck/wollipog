@@ -37,6 +37,8 @@ function useMediaQuery(query: string): boolean {
       };
     },
     () => window.matchMedia(query).matches,
+    // A server render has no viewport; it renders the desktop layout.
+    () => false,
   );
 }
 

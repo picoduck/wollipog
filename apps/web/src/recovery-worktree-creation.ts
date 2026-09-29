@@ -30,15 +30,16 @@ export function worktreeCreationPhase(phase: SessionWorktreeProgressPhase): { la
 export type RecoveryWorktreeCreation =
   /** Reading whether a create is already running before offering a new one. */
   | { status: "checking" }
-  | { status: "creating"; phase?: SessionWorktreeProgressPhase }
-  | { status: "failed"; error: string; phase?: SessionWorktreeProgressPhase };
+  /** `setupStep` is the running setup step's name, when the control plane reports one (#1348). */
+  | { status: "creating"; phase?: SessionWorktreeProgressPhase; setupStep?: string }
+  | { status: "failed"; error: string; phase?: SessionWorktreeProgressPhase; setupStep?: string };
 
 type Coordinates = { branch: string; baseRef?: string };
 type Api = Pick<ApiClient, "createSessionWorktreeWithProgress" | "sessionWorktreeOperations" | "session">;
 type Step =
   | { kind: "progress"; operation: Extract<SessionWorktreeCreateOperationView, { status: "in_progress" }> }
   | { kind: "completed"; session?: SessionView }
-  | { kind: "failed"; id?: string; error: string; phase?: SessionWorktreeProgressPhase };
+  | { kind: "failed"; id?: string; error: string; phase?: SessionWorktreeProgressPhase; setupStep?: string };
 
 const POLL_INTERVAL_MS = 1_000;
 /** Transient-failure budget for the reconciling read: roughly 1 + 2 + 4 seconds, then give up. */
@@ -48,13 +49,21 @@ const ENDED_WITHOUT_RESULT = "Replacement worktree creation ended without a resu
 
 const defaultSleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
+/** The failed create's phase and setup step, each only when reported. */
+function failedAt(operation: Extract<SessionWorktreeCreateOperationView, { status: "failed" }>) {
+  return {
+    ...(operation.phase ? { phase: operation.phase } : {}),
+    ...(operation.setupStep?.name ? { setupStep: operation.setupStep.name } : {}),
+  };
+}
+
 /** A failed create answers 409 with the terminal operation, which names the phase it stopped in. */
 function failureStep(cause: unknown): Step {
   const operation = cause instanceof ApiError
     ? cause.details?.operation as SessionWorktreeCreateOperationView | undefined
     : undefined;
   if (operation?.status === "failed") {
-    return { kind: "failed", id: operation.id, error: operation.error, ...(operation.phase ? { phase: operation.phase } : {}) };
+    return { kind: "failed", id: operation.id, error: operation.error, ...failedAt(operation) };
   }
   return { kind: "failed", error: (cause as Error).message };
 }
@@ -62,7 +71,7 @@ function failureStep(cause: unknown): Step {
 function operationStep(operation: SessionWorktreeCreateOperationView | undefined, session?: SessionView): Step {
   if (!operation || operation.status === "completed") return { kind: "completed", ...(session ? { session } : {}) };
   if (operation.status === "in_progress") return { kind: "progress", operation };
-  return { kind: "failed", id: operation.id, error: operation.error, ...(operation.phase ? { phase: operation.phase } : {}) };
+  return { kind: "failed", id: operation.id, error: operation.error, ...failedAt(operation) };
 }
 
 /** Fastify's unmatched-route 404, as opposed to this route refusing an unknown session. */
@@ -128,12 +137,20 @@ export function useRecoveryWorktreeCreation({
     let step = first;
     let observeByRead = true;
     let lastPhase: SessionWorktreeProgressPhase | undefined;
+    let lastStep: string | undefined;
     while (step.kind === "progress") {
       // Every await below can resolve after this run was abandoned; never publish its progress.
       if (!live()) return;
       const { operation } = step;
+      // A step belongs to its phase: a later phase without one clears the earlier phase's step.
+      if (operation.phase && operation.phase !== lastPhase) lastStep = undefined;
       lastPhase = operation.phase ?? lastPhase;
-      setCreation({ status: "creating", ...(lastPhase ? { phase: lastPhase } : {}) });
+      lastStep = operation.setupStep?.name ?? lastStep;
+      setCreation({
+        status: "creating",
+        ...(lastPhase ? { phase: lastPhase } : {}),
+        ...(lastStep ? { setupStep: lastStep } : {}),
+      });
       await sleep(POLL_INTERVAL_MS);
       if (!live()) return;
       if (!observeByRead) {
@@ -150,7 +167,12 @@ export function useRecoveryWorktreeCreation({
           if (!live()) return;
           if (current.worktreeRecovery && current.worktreeRecovery.recoveryId === recoveryIdRef.current) {
             onSession(current);
-            step = { kind: "failed", error: ENDED_WITHOUT_RESULT, ...(lastPhase ? { phase: lastPhase } : {}) };
+            step = {
+              kind: "failed",
+              error: ENDED_WITHOUT_RESULT,
+              ...(lastPhase ? { phase: lastPhase } : {}),
+              ...(lastStep ? { setupStep: lastStep } : {}),
+            };
           } else {
             step = { kind: "completed", session: current };
           }
@@ -179,10 +201,13 @@ export function useRecoveryWorktreeCreation({
       return;
     }
     if (step.kind === "failed") {
+      // A failure that names its own phase names its own step too; otherwise the last one seen.
+      const setupStep = step.phase ? step.setupStep : step.setupStep ?? lastStep;
       setCreation({
         status: "failed",
         error: step.error,
         ...(step.phase ?? lastPhase ? { phase: step.phase ?? lastPhase } : {}),
+        ...(setupStep ? { setupStep } : {}),
       });
     }
   }, [api, onSession, post, sessionId, setCreation, sleep]);
@@ -260,7 +285,7 @@ export function useRecoveryWorktreeCreation({
         const failed = [...operations].reverse().find((operation) => operation.status === "failed");
         if (failed?.status === "failed") {
           shownTerminalRef.current.add(failed.id);
-          setCreation({ status: "failed", error: failed.error, ...(failed.phase ? { phase: failed.phase } : {}) });
+          setCreation({ status: "failed", error: failed.error, ...failedAt(failed) });
         }
         return;
       }

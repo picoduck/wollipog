@@ -8436,11 +8436,26 @@ export type SessionWorktreeProgressPhase =
  * A progress-aware session worktree create as the control plane reports it over HTTP. `phase` is
  * the runner's last reported phase; on failure it names where creation stopped. Control planes
  * predating the failing phase omit it on `failed`.
+ *
+ * `setupStep` names the repository setup step running (or the one that failed) during the setup
+ * phase. It is reserved for #1348 and nothing sends it yet; a client shows it when present and
+ * keeps the phase-only label otherwise. Step names only: never command output or environment.
  */
 export type SessionWorktreeCreateOperationView =
-  | { id: string; status: "in_progress"; phase?: SessionWorktreeProgressPhase }
+  | { id: string; status: "in_progress"; phase?: SessionWorktreeProgressPhase; setupStep?: SessionWorktreeSetupStepRef }
   | { id: string; status: "completed" }
-  | { id: string; status: "failed"; error: string; phase?: SessionWorktreeProgressPhase };
+  | {
+    id: string;
+    status: "failed";
+    error: string;
+    phase?: SessionWorktreeProgressPhase;
+    setupStep?: SessionWorktreeSetupStepRef;
+  };
+
+/** The setup step a worktree create is on, by its repository-declared name (#1348). */
+export interface SessionWorktreeSetupStepRef {
+  name: string;
+}
 
 /** A create listed by `GET /api/sessions/:id/worktrees/operations`: running, or terminal and not
  * yet consumed. Completion carries no snapshot here; the session record already holds the result. */

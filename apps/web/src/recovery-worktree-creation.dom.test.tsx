@@ -13,6 +13,9 @@ import { ApiError } from "./api.js";
 import { assertNoDomNode } from "./dom-test-assertions.js";
 import { installDomTestCleanup } from "./dom-test-cleanup.js";
 import { WorktreeRecoveryCard } from "./components/WorktreeRecoveryCard.js";
+
+/** Unavailable either way a button can be: `disabled`, or busy and refusing clicks (#1949). */
+const unavailable = (button: HTMLButtonElement) => button.disabled || button.getAttribute("aria-disabled") === "true";
 import { useRecoveryWorktreeCreation } from "./recovery-worktree-creation.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -152,12 +155,20 @@ async function render(
     container,
     root,
     replaceSession: (session: SessionView) => flushAct(() => replaceSession(session)),
-    progress: () => q('[aria-label="Replacement Worktree Progress"]')?.textContent ?? null,
+    progress: () => q(".worktree-missing-progress-label")?.textContent ?? null,
     createButton: () => [...container.querySelectorAll("button")]
-      .find((button) => /Creat|Checking/u.test(button.textContent ?? "")) as HTMLButtonElement,
+      .find((button) => /^(Create Replacement|Try Again)$/u.test(button.textContent ?? "")) as HTMLButtonElement,
+    /** What the busy button announces: the visible label stays the same while it runs (#1949). */
+    busyStatus: () => q('.worktree-missing-row [role="status"].sr-only')?.textContent ?? null,
     alert: () => q('[id^="worktree-recovery-create-failed-"]')?.textContent ?? null,
+    /** The raw error, which the notice shows only behind Show Output. */
+    async output() {
+      const toggle = [...container.querySelectorAll("button")].find((button) => button.textContent === "Show Output");
+      if (toggle) await act(async () => toggle.click());
+      return q(".worktree-missing-output")?.textContent ?? null;
+    },
     status: () => q('[data-testid="status"]')?.textContent,
-    card: () => q('[aria-label="Worktree Recovery Required"]'),
+    card: () => q('[aria-label="Worktree Missing"]'),
     async clickCreate() {
       await act(async () => {
         this.createButton().click();
@@ -181,15 +192,15 @@ test("a progress-aware create reports each phase, then settles the recovered ses
   const view = await render(api, clock.sleep);
   try {
     await view.clickCreate();
-    assert.equal(view.createButton().textContent, "Creating…");
-    assert.equal(view.createButton().disabled, true);
+    assert.equal(view.createButton().getAttribute("aria-busy"), "true");
+    assert.equal(unavailable(view.createButton()), true);
     assert.equal(view.progress(), null, "no phase is claimed before the runner reports one");
 
     await clock.tick();
-    assert.equal(view.progress(), "Fetching RemoteStep 1 of 4");
+    assert.equal(view.progress(), "Fetching Remote, Step 1 of 4");
     await clock.tick();
-    assert.equal(view.progress(), "Running SetupStep 3 of 4");
-    assert.equal(view.createButton().disabled, true);
+    assert.equal(view.progress(), "Running Setup, Step 3 of 4");
+    assert.equal(unavailable(view.createButton()), true);
 
     await clock.tick();
     assert.equal(view.status(), "idle", "completion loads the session the control plane settled");
@@ -226,17 +237,18 @@ test("a failed create names the failing phase and leaves the retained prompt Not
     await view.clickCreate();
     await clock.tick();
     await clock.tick();
-    assert.equal(view.alert(), "Creation Failed: Running Setup runner request timed out");
-    assert.match(view.card()?.textContent ?? "", /Messages marked Not Sent/u);
+    assert.equal(view.alert(), "Creating the worktree stopped at step 3, Running Setup.");
+    assert.equal(await view.output(), "runner request timed out", "the raw error waits behind Show Output");
+    assert.match(view.card()?.textContent ?? "", /messages marked Not Sent/u);
     assert.equal(view.progress(), null);
-    assert.equal(view.createButton().disabled, false, "the failure stays actionable");
-    assert.equal(view.createButton().textContent, "Create Replacement");
+    assert.equal(unavailable(view.createButton()), false, "the failure stays actionable");
+    assert.equal(view.createButton().textContent, "Try Again");
     assert.match(view.createButton().getAttribute("aria-describedby") ?? "", /worktree-recovery-create-failed-/u);
 
     await view.clickCreate();
     assert.equal(calls.posts.length, 3, "a retry is not answered by the stale failure");
     assert.equal(view.alert(), null);
-    assert.equal(view.createButton().textContent, "Creating…");
+    assert.equal(view.createButton().getAttribute("aria-busy"), "true");
   } finally {
     await act(async () => view.root.unmount());
   }
@@ -253,11 +265,11 @@ test("a reloaded page rejoins a running create and keeps it non-actionable", asy
   });
   const view = await render(api, clock.sleep);
   try {
-    assert.equal(view.progress(), "Creating WorktreeStep 2 of 4");
-    assert.equal(view.createButton().textContent, "Creating…");
-    assert.equal(view.createButton().disabled, true);
+    assert.equal(view.progress(), "Creating Worktree, Step 2 of 4");
+    assert.equal(view.createButton().getAttribute("aria-busy"), "true");
+    assert.equal(unavailable(view.createButton()), true);
     await clock.tick();
-    assert.equal(view.progress(), "Activating WorktreeStep 4 of 4");
+    assert.equal(view.progress(), "Activating Worktree, Step 4 of 4");
     await clock.tick();
     assertNoDomNode(view.card());
     assert.equal(calls.posts.length, 0, "rejoining never issues a create");
@@ -275,8 +287,9 @@ test("a reloaded page shows an unconsumed failure with its phase", async () => {
   });
   const view = await render(api, manualClock().sleep);
   try {
-    assert.equal(view.alert(), "Creation Failed: Fetching Remote could not read from remote");
-    assert.equal(view.createButton().disabled, false);
+    assert.equal(view.alert(), "Creating the worktree stopped at step 1, Fetching Remote.");
+    assert.equal(await view.output(), "could not read from remote");
+    assert.equal(unavailable(view.createButton()), false);
   } finally {
     await act(async () => view.root.unmount());
   }
@@ -299,7 +312,7 @@ test("an older control plane without progress keeps the plain Creating… state"
   try {
     assert.equal(view.alert(), null, "a missing operations route is not an error");
     await view.clickCreate();
-    assert.equal(view.createButton().textContent, "Creating…");
+    assert.equal(view.createButton().getAttribute("aria-busy"), "true");
     assert.equal(view.progress(), null);
     await act(async () => {
       release();
@@ -329,7 +342,7 @@ test("a progress-aware control plane without the operations route is followed by
     await clock.tick();
     assert.equal(calls.reads, 2, "the missing route is detected once, then no longer read");
     await clock.tick();
-    assert.equal(view.progress(), "Fetching RemoteStep 1 of 4");
+    assert.equal(view.progress(), "Fetching Remote, Step 1 of 4");
     await clock.tick();
     assertNoDomNode(view.card());
     assert.equal(calls.posts.length, 3);
@@ -350,8 +363,9 @@ test("a create that vanishes while the incident remains is reported, not silentl
   try {
     await view.clickCreate();
     await clock.tick();
-    assert.match(view.alert() ?? "", /^Creation Failed: Fetching Remote Replacement worktree creation ended without a result/u);
-    assert.match(view.card()?.textContent ?? "", /Messages marked Not Sent/u);
+    assert.equal(view.alert(), "Creating the worktree stopped at step 1, Fetching Remote.");
+    assert.match(await view.output() ?? "", /^Replacement worktree creation ended without a result/u);
+    assert.match(view.card()?.textContent ?? "", /messages marked Not Sent/u);
   } finally {
     await act(async () => view.root.unmount());
   }
@@ -368,16 +382,17 @@ test("the card offers no create until it has checked for one already running", a
   });
   const view = await render(api, clock.sleep);
   try {
-    assert.equal(view.createButton().textContent, "Checking…");
-    assert.equal(view.createButton().disabled, true,
+    assert.equal(view.createButton().getAttribute("aria-busy"), "true");
+    assert.match(view.busyStatus() ?? "", /^Checking/u);
+    assert.equal(unavailable(view.createButton()), true,
       "a reloaded page must not propose default coordinates while an edited create may be running");
     await flushAct(() => pending.resolve([
       { id: "op1", status: "in_progress", phase: "materializing", branch: "fix/edited", baseRef: "origin/release", recoveryId: RECOVERY_ID },
     ]));
-    assert.equal(view.progress(), "Creating WorktreeStep 2 of 4");
-    assert.equal(view.createButton().disabled, true);
+    assert.equal(view.progress(), "Creating Worktree, Step 2 of 4");
+    assert.equal(unavailable(view.createButton()), true);
     await clock.tick();
-    assert.equal(view.progress(), "Running SetupStep 3 of 4");
+    assert.equal(view.progress(), "Running Setup, Step 3 of 4");
     assert.equal(calls.posts.length, 0);
   } finally {
     await act(async () => view.root.unmount());
@@ -394,9 +409,9 @@ test("a transient check failure is retried before the form is offered", async ()
   });
   const view = await render(api, clock.sleep);
   try {
-    assert.equal(view.createButton().disabled, true, "one failed read does not unlock creation");
+    assert.equal(unavailable(view.createButton()), true, "one failed read does not unlock creation");
     await clock.tick();
-    assert.equal(view.progress(), "Fetching RemoteStep 1 of 4");
+    assert.equal(view.progress(), "Fetching Remote, Step 1 of 4");
     assert.equal(calls.posts.length, 0);
   } finally {
     await act(async () => view.root.unmount());
@@ -410,10 +425,10 @@ test("a check that keeps failing gives the form back after a bounded retry", asy
   try {
     await clock.tick();
     await clock.tick();
-    assert.equal(view.createButton().disabled, true);
+    assert.equal(unavailable(view.createButton()), true);
     await clock.tick();
     assert.equal(calls.reads, 4);
-    assert.equal(view.createButton().disabled, false);
+    assert.equal(unavailable(view.createButton()), false);
     assert.equal(view.createButton().textContent, "Create Replacement");
   } finally {
     await act(async () => view.root.unmount());
@@ -447,12 +462,12 @@ test("a poll answering after a new incident cannot republish the old create's pr
     const next = recoverySession();
     next.worktreeRecovery = { ...next.worktreeRecovery!, recoveryId: "worktree-recovery:next" };
     await view.replaceSession(next);
-    assert.equal(view.createButton().disabled, false, "the new incident found nothing running");
+    assert.equal(unavailable(view.createButton()), false, "the new incident found nothing running");
     await flushAct(() => late.resolve([
       { id: "op1", status: "in_progress", phase: "running_setup", branch: "fix/missing-recovery" },
     ]));
     assert.equal(view.progress(), null);
-    assert.equal(view.createButton().disabled, false, "a stale poll must not lock the new incident's card");
+    assert.equal(unavailable(view.createButton()), false, "a stale poll must not lock the new incident's card");
   } finally {
     await act(async () => view.root.unmount());
   }
@@ -467,8 +482,9 @@ test("the very first render already withholds both actions until the incident is
   }
   // Server rendering runs no effects, so this is exactly what a click could hit before they flush.
   const markup = renderToStaticMarkup(<FirstRender />);
-  assert.match(markup, /<button[^>]*disabled=""[^>]*>Checking…<\/button>/u);
-  assert.match(markup, /<button[^>]*disabled=""[^>]*>Select Worktree<\/button>/u);
+  assert.match(markup, /<button[^>]*aria-busy="true"[^>]*aria-disabled="true"[^>]*>(?:<span[^>]*><\/span>)?Create Replacement<\/button>/u);
+  assert.match(markup, /Checking for a replacement already being created…/u);
+  assert.doesNotMatch(markup, /<input(?![^>]*disabled="")[^>]*>/u, "no field takes input while the card checks");
 });
 
 test("creates from an earlier recovery incident neither hide nor impersonate this one", async () => {
@@ -487,7 +503,8 @@ test("creates from an earlier recovery incident neither hide nor impersonate thi
   const view = await render(api, manualClock().sleep);
   try {
     assert.equal(calls.sessions, 0, "an earlier incident's completion does not stand in for this one");
-    assert.equal(view.alert(), "Creation Failed: Running Setup setup exited 1");
+    assert.equal(view.alert(), "Creating the worktree stopped at step 3, Running Setup.");
+    assert.equal(await view.output(), "setup exited 1");
   } finally {
     await act(async () => view.root.unmount());
   }
@@ -503,7 +520,7 @@ test("only an earlier incident's failure leaves this incident's form clean", asy
   const view = await render(api, manualClock().sleep);
   try {
     assert.equal(view.alert(), null);
-    assert.equal(view.createButton().disabled, false);
+    assert.equal(unavailable(view.createButton()), false);
   } finally {
     await act(async () => view.root.unmount());
   }
@@ -520,7 +537,7 @@ test("a direct switch from a failed incident renders the new one as checking bef
   });
   const view = await render(api, manualClock().sleep, renders);
   try {
-    assert.match(view.alert() ?? "", /setup exited 1/u);
+    assert.match(await view.output() ?? "", /setup exited 1/u);
     const nextSession = recoverySession();
     nextSession.worktreeRecovery = { ...nextSession.worktreeRecovery!, recoveryId: next };
     await view.replaceSession(nextSession);
@@ -528,7 +545,7 @@ test("a direct switch from a failed incident renders the new one as checking bef
     assert.equal(firstForNext?.creation, "checking",
       "the prior incident's failure must not re-enable actions before the new incident is read");
     assert.equal(view.alert(), null);
-    assert.equal(view.createButton().disabled, false, "once read, the new incident offers the form");
+    assert.equal(unavailable(view.createButton()), false, "once read, the new incident offers the form");
   } finally {
     await act(async () => view.root.unmount());
   }
@@ -551,12 +568,64 @@ test("a retry never starts a fresh create once the incident resolved during its 
   });
   const view = await render(api, manualClock().sleep);
   try {
-    assert.match(view.alert() ?? "", /setup exited 1/u);
+    assert.match(await view.output() ?? "", /setup exited 1/u);
     await view.clickCreate();
     // Another tab selects a worktree; the incident resolves before the stale failure is answered.
     await view.replaceSession(recoveredSession());
     await flushAct(() => stale.resolve({}));
     assert.equal(calls.posts.length, 1, "no second create after the incident resolved");
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+test("a reported setup step names the running command and the one a failed create stopped on (#1348)", async () => {
+  const clock = manualClock();
+  const { api } = fakeApi({
+    reads: [
+      [],
+      [{ id: "op1", status: "in_progress", phase: "running_setup", setupStep: { name: "pnpm install" }, branch: "fix/missing-recovery" }],
+      // A later phase without a step does not keep the earlier phase's step.
+      [{ id: "op1", status: "in_progress", phase: "activating", branch: "fix/missing-recovery" }],
+      [{
+        id: "op1", status: "failed", phase: "running_setup", setupStep: { name: "pnpm build" },
+        error: "setup exited 1", branch: "fix/missing-recovery",
+      }],
+    ],
+    posts: [{ operation: { id: "op1", status: "in_progress" } }],
+  });
+  const view = await render(api, clock.sleep);
+  try {
+    await view.clickCreate();
+    await clock.tick();
+    assert.equal(view.progress(), "Running Setup (pnpm install), Step 3 of 4");
+    assert.equal(view.container.querySelector(".worktree-missing-progress-label code")?.textContent, "pnpm install");
+    await clock.tick();
+    assert.equal(view.progress(), "Activating Worktree, Step 4 of 4");
+    await clock.tick();
+    assert.equal(view.alert(), "Creating the worktree stopped at step 3, Running Setup (pnpm build).");
+    assert.equal(view.container.querySelector('[id^="worktree-recovery-create-failed-"] code')?.textContent, "pnpm build");
+  } finally {
+    await act(async () => view.root.unmount());
+  }
+});
+
+test("without a reported step the label stays phase-only, as older runners report it (#1348)", async () => {
+  const clock = manualClock();
+  const { api } = fakeApi({
+    reads: [[], [{ id: "op1", status: "in_progress", phase: "running_setup", branch: "fix/missing-recovery" }]],
+    posts: [{ operation: { id: "op1", status: "in_progress" } }],
+  });
+  const view = await render(api, clock.sleep);
+  try {
+    await view.clickCreate();
+    await clock.tick();
+    assert.equal(view.progress(), "Running Setup, Step 3 of 4");
+    const meter = view.container.querySelector('[role="progressbar"]')!;
+    assert.ok(meter.classList.contains("meter") && meter.classList.contains("is-progress"),
+      "forward progress is the accent meter, not a warning bar");
+    assert.equal(meter.getAttribute("aria-valuenow"), "3");
+    assert.equal(meter.getAttribute("aria-valuemax"), "4");
   } finally {
     await act(async () => view.root.unmount());
   }

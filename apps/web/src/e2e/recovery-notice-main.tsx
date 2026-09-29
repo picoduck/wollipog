@@ -26,8 +26,16 @@ import "../styles.css";
  * `?live=1` adds a live tail event during the first prepend. With `?worktree-recovery=1`,
  * `?create-progress=complete|fail` answers replacement creation as a progress-aware control plane
  * whose phases advance every `?phase-ms=<ms>`; the operation lives in sessionStorage so a reload
- * rejoins it. Without it the fixture answers like an older, synchronous control plane. */
+ * rejoins it. Without it the fixture answers like an older, synchronous control plane.
+ * `?setup-step=1` has the setup phase name its step, as #1348 control planes report it;
+ * `?offline=1` disconnects the fixture's Machine, `?machine=<name>` names it,
+ * `?extra-worktrees=<n>` links n more worktrees to the session, and
+ * `?theme=light|dark` picks the theme. */
 const params = new URLSearchParams(window.location.search);
+// Only when asked, so the geometry specs keep the page they were measured on.
+if (params.has("theme")) {
+  document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
+}
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const frameHeight = Number(params.get("height") ?? "600");
 const frameWidth = Number(params.get("width") ?? "900");
@@ -43,15 +51,19 @@ const settled = params.get("settled") === "1";
 const worktreeRecoveryFixture = params.get("worktree-recovery") === "1";
 const createProgress = params.get("create-progress");
 const phaseMs = Number(params.get("phase-ms") ?? "400");
+const reportSetupStep = params.get("setup-step") === "1";
+const machineOffline = params.get("offline") === "1";
+const extraWorktrees = Number(params.get("extra-worktrees") ?? "0");
 
 const SESSION_ID = "recovery-e2e-session";
 
 const runner = {
   runnerId: "runner-1",
   hostname: "runner-host",
+  ...(params.get("machine") ? { displayName: params.get("machine")! } : {}),
   os: "linux",
   version: "1",
-  status: "online",
+  status: machineOffline ? "offline" : "online",
   agents: [{
     id: "codex",
     name: "Codex",
@@ -119,7 +131,13 @@ const session: SessionView = {
       branch: "fix/recovered-worktree",
       baseRef: "origin/main",
       source: "created" as const,
-    }],
+    }, ...Array.from({ length: extraWorktrees }, (_, index) => ({
+      id: `extra-${index + 1}`,
+      path: `/repos/wollipog/worktrees/extra-${index + 1}`,
+      branch: `fix/extra-worktree-${index + 1}`,
+      baseRef: "origin/main",
+      source: "created" as const,
+    }))],
     pendingPrompts: [{
       commandId: "prompt-worktree-recovery",
       text: "Please continue with the queued refactor and use the attached design reference.",
@@ -213,14 +231,18 @@ function fixtureOperation(): SessionWorktreeCreateOperationSummary | null {
   const coordinates = { branch, ...(baseRef ? { baseRef } : {}), recoveryId: "worktree-recovery:e2e" };
   const index = Math.floor((Date.now() - startedAt) / phaseMs);
   const failAt = FIXTURE_PHASES.indexOf("running_setup");
+  const setupStep = reportSetupStep ? { setupStep: { name: "pnpm install" } } : {};
   if (createProgress === "fail" && index > failAt) {
     return {
-      id: "fixture-create", status: "failed", phase: "running_setup",
+      id: "fixture-create", status: "failed", phase: "running_setup", ...setupStep,
       error: "Setup step \"pnpm install\" exited with code 1.", ...coordinates,
     };
   }
   if (index >= FIXTURE_PHASES.length) return { id: "fixture-create", status: "completed", ...coordinates };
-  return { id: "fixture-create", status: "in_progress", phase: FIXTURE_PHASES[index]!, ...coordinates };
+  const phase = FIXTURE_PHASES[index]!;
+  return {
+    id: "fixture-create", status: "in_progress", phase, ...(phase === "running_setup" ? setupStep : {}), ...coordinates,
+  };
 }
 
 function recoveredByCreate(input: { branch: string; baseRef?: string }) {
