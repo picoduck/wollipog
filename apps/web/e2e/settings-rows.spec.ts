@@ -1201,7 +1201,7 @@ test("Agent Harness defaults distinguish version skew and politely explain repai
 /**
  * The Appearance controls, which the row registry above cannot describe.
  *
- * Theme, Color Scheme and Density were ten rows carrying one option each; they are three rows
+ * Theme, Colour Scheme and Density were ten rows carrying one option each; they are three rows
  * carrying a whole control each. The registry's model — the row IS the control, and one child
  * selector is its affordance — does not fit that, so these get the machinery pointed at them
  * directly rather than a special case threaded through every helper above.

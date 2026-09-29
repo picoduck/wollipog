@@ -174,7 +174,7 @@ test("the row kinds are distinguishable in their inert state", async () => {
 });
 
 test("a settings panel is one row per setting, not one row per option", async () => {
-  // The defect this change exists to remove: Theme, Color Scheme and Density were three groups of
+  // The defect this change exists to remove: Theme, Colour Scheme and Density were three groups of
   // full-width rows carrying one option each — ten rows and three headings for three settings.
   const { container, cleanup } = await render(
     <AppearancePanel
@@ -1022,7 +1022,7 @@ test("a disabled segmented row says who took it away", async () => {
 
 test("the picker's trigger names the setting AND its current value", async () => {
   // `aria-label` naming only the setting was the defect the primitive already fixed: the control
-  // read as "Color Scheme" whether it said Dracula or nothing at all. A row whose closed state
+  // read as "Colour Scheme" whether it said Dracula or nothing at all. A row whose closed state
   // does not state its value can only be opened, not read.
   const { container, cleanup } = await render(
     <SelectRow title="Color Scheme" options={SCHEMES_FIXTURE} value="dracula" onChange={() => undefined} />,
