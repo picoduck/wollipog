@@ -1514,8 +1514,11 @@ function stopAndArchiveCampaignFixture() {
   return { db, svc, hub, parent, spawn, report, verify };
 }
 
-test("Stop and Archive retires the original worktree but retains provider-owned and unsafe worktrees as cleanup-pending", async () => {
+test("Stop and Archive retires the original worktree but retains provider-owned and unsafe worktrees as cleanup-pending", async (context) => {
   const { db, svc, hub, parent, spawn, report, verify } = stopAndArchiveCampaignFixture();
+  // A temporary forge failure schedules a five-minute retry. Keep that timer owned by this test
+  // so it cannot wake after the fixture's database has closed.
+  context.mock.timers.enable({ apis: ["setTimeout"] });
   try {
     const child = spawn(parent.id, "Deliver one issue");
     const path = (name: string) => `/worktrees/${child}/${name}`;
@@ -1579,6 +1582,7 @@ test("Stop and Archive retires the original worktree but retains provider-owned 
     assert.equal(db.campaignProjection(parent.id)?.children.cleanupPending, 1);
     assert.deepEqual(db.getSession(child)?.worktrees?.map((item) => item.id), ["dirty", "unpushed", "forge"]);
   } finally {
+    context.mock.timers.reset();
     db.close();
   }
 });
