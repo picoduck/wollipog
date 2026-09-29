@@ -3455,20 +3455,27 @@ function SessionDetailLoaded({
   const failedSetupWorktree = session.worktrees?.find((worktree) => worktree.setup?.status === "failed");
   const { creation: recoveryCreation, create: createRecoveryWorktreeWithProgress } =
     useRecoveryWorktreeCreation({ api, session, onSession: loadSession });
+  // Held here rather than in the card: the notice slot unmounts the card while another notice shows,
+  // and a selection still running must keep both recovery actions refused when it comes back, and
+  // one that failed meanwhile must still say why.
+  const [recoverySelectPending, setRecoverySelectPending] = useState(false);
+  const [recoverySelectError, setRecoverySelectError] = useState<string | null>(null);
   const createRecoveryWorktree = useCallback(async (input: { branch: string; baseRef?: string }) => {
     setError(null);
+    setRecoverySelectError(null);
     await createRecoveryWorktreeWithProgress(input);
   }, [createRecoveryWorktreeWithProgress]);
-  // Held here rather than in the card: the notice slot unmounts the card while another notice shows,
-  // and a selection still running must keep both recovery actions refused when it comes back.
-  const [recoverySelectPending, setRecoverySelectPending] = useState(false);
   const selectRecoveryWorktree = useCallback(async (path: string) => {
     const generation = viewGenerationRef.current;
     setError(null);
+    setRecoverySelectError(null);
     setRecoverySelectPending(true);
     try {
       const result = await api.selectSessionWorktree(session.id, path);
       if (viewGenerationRef.current === generation) loadSession(result.session);
+    } catch (cause) {
+      if (viewGenerationRef.current === generation) setRecoverySelectError((cause as Error).message);
+      throw cause;
     } finally {
       setRecoverySelectPending(false);
     }
@@ -3690,6 +3697,7 @@ function SessionDetailLoaded({
           offlineReason={runnerOfflineReason ?? undefined}
           creation={recoveryCreation}
           selecting={recoverySelectPending}
+          selectError={recoverySelectError}
           onCreate={createRecoveryWorktree}
           onSelect={selectRecoveryWorktree}
           trailing={trailing}

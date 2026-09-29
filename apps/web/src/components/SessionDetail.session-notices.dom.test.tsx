@@ -388,6 +388,45 @@ test("a worktree selection still running keeps recovery refused after showing an
   }
 });
 
+test("a worktree selection that fails while another notice shows still says why", async () => {
+  let fail: ((error: Error) => void) | undefined;
+  const session = sessionView({
+    historyQuarantine: quarantine,
+    worktreeRecovery: {
+      recoveryId: "recovery-select-fail", detectedAt: 3, selectedPath: worktreePath, expectedBranch: "agent/setup",
+      detail: "The selected worktree is missing.",
+    },
+    worktrees: [{ id: "other", path: "/repos/demo/other", branch: "agent/other", source: "created" }],
+  });
+  const fixture = await mount(session, {
+    client: {
+      sessionWorktreeOperations: async () => ({ operations: [] }),
+      selectSessionWorktree: () => new Promise((_resolve, reject) => { fail = reject; }),
+    } as unknown as Partial<ApiClient>,
+  });
+  const choose = async (title: string) => {
+    await act(async () => { (fixture.container.querySelector(".session-notice-more") as HTMLButtonElement).click(); });
+    const item = ([...domWindow.document.querySelectorAll('[role="menuitem"]')] as unknown as HTMLButtonElement[])
+      .find((candidate) => candidate.textContent === title)!;
+    await act(async () => { item.click(); });
+    await flush();
+  };
+  const actions = () => [...fixture.container.querySelectorAll(".worktree-recovery-controls button.btn")] as HTMLButtonElement[];
+  try {
+    await flush(5);
+    await act(async () => { actions().find((button) => button.textContent === "Select Worktree")!.click(); });
+    await choose("Conversation Quarantined");
+    await act(async () => { fail!(new Error("That worktree is not linked to this session.")); });
+    await flush();
+    await choose("Worktree Recovery Required");
+    const alert = fixture.container.querySelector('.session-notice-slot [role="alert"]');
+    assert.equal(alert?.textContent, "That worktree is not linked to this session.");
+    assert.ok(actions().every((button) => !button.disabled), "the person can try again");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a missing worktree ranks first and renders the recovery card in the slot", async () => {
   const fixture = await mount(sessionView({
     historyQuarantine: quarantine,

@@ -27,6 +27,7 @@ export function WorktreeRecoveryCard({
   offlineReason = "The runner is offline.",
   creation = null,
   selecting = false,
+  selectError = null,
   onCreate,
   onSelect,
   trailing,
@@ -34,6 +35,9 @@ export function WorktreeRecoveryCard({
   /** A worktree selection is still running. Like `creation`, it outlives this card, which the
    * session notice slot unmounts while another notice shows. */
   selecting?: boolean;
+  /** Why the last worktree selection failed, kept by the caller so a card mounted after the failure
+   * still shows it. */
+  selectError?: string | null;
   session: SessionView;
   runnerOnline: boolean;
   /** The visible reason both actions are unavailable while the runner is offline, naming its Machine. */
@@ -137,7 +141,7 @@ export function WorktreeRecoveryCard({
         </p>
         {refusal !== null && <p id={refusalId}>{refusal}</p>}
         {!runnerOnline && <p id={offlineId} className="notice-error">{offlineReason}</p>}
-        {error && <p className="notice-error" role="alert">{error}</p>}
+        {(error ?? selectError) && <p className="notice-error" role="alert">{error ?? selectError}</p>}
         {creationFailure && (
           <p id={creationFailedId} className="notice-error" role="alert">
             <strong>{failedPhase ? `Creation Failed: ${failedPhase.label}` : "Creation Failed"}</strong>
