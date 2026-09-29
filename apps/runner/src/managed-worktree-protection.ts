@@ -528,6 +528,21 @@ function moveOption(value: string): { targetDirectory: boolean; consumesNext: bo
   };
 }
 
+/** PowerShell mover parameters can appear in either order and accept unambiguous prefixes. */
+function powershellMoveParameter(
+  value: string,
+  executable: string,
+): { source: boolean; attached: string | null } | null {
+  if (!value.startsWith("-") || value.startsWith("--")) return null;
+  const colon = value.indexOf(":");
+  const name = value.slice(1, colon < 0 ? undefined : colon).toLowerCase();
+  if (!name) return null;
+  const source = ["path", "literalpath"].some((parameter) => parameter.startsWith(name));
+  const destination = (executable === "rename-item" ? "newname" : "destination").startsWith(name);
+  if (!source && !destination) return null;
+  return { source, attached: colon < 0 ? null : value.slice(colon + 1) };
+}
+
 function executableName(value: string): string {
   return value.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase().replace(/\.exe$/u, "") ?? "";
 }
@@ -1365,10 +1380,12 @@ function commandVerdict(
   if (executable === "gio" && word(words[0], cwd, environment) === "trash") {
     return strongest(removerVerdicts(words.slice(1), cwd, environment, protections));
   }
-  if (["mv", "move", "rename-item"].includes(executable)) {
+  if (["mv", "move", "move-item", "rename-item"].includes(executable)) {
     let targetDirectory = false;
+    let namedDestination = false;
     let optionsEnded = false;
     const operands: ShellToken[] = [];
+    const namedSources: ShellToken[] = [];
     for (let index = 0; index < words.length; index += 1) {
       const token = words[index];
       if (token == null) continue;
@@ -1379,6 +1396,15 @@ function commandVerdict(
         break;
       }
       if (value?.startsWith("-")) {
+        const parameter = powershellMoveParameter(value, executable);
+        if (parameter) {
+          const argument = parameter.attached == null ? words[++index] : parameter.attached;
+          if (argument != null) {
+            if (parameter.source) namedSources.push(argument);
+            else namedDestination = true;
+          }
+          continue;
+        }
         const option = moveOption(value);
         if (option.targetDirectory) targetDirectory = true;
         if (option.consumesNext) index += 1;
@@ -1388,7 +1414,7 @@ function commandVerdict(
     }
     // The last operand is where the files LAND unless `-t` named that directory already. Moving
     // something into a protected worktree is ordinary work; moving the worktree away is not.
-    const sources = targetDirectory ? operands : operands.slice(0, -1);
+    const sources = [...namedSources, ...(targetDirectory || namedDestination ? operands : operands.slice(0, -1))];
     return strongest(sources.map((source) =>
       operandVerdict(source, cwd, environment, protections, false, optionsEnded)));
   }
