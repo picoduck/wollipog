@@ -94,6 +94,37 @@ test("raw Git and filesystem retirement forms are refused with managed-discard g
   }
 });
 
+test("env accepts assignment names that are not shell identifiers before a destructive command", () => {
+  for (const command of [
+    "env A-B=x rm -rf .",
+    "env A.B=x rm -rf .",
+    "env -S'A-B=x rm -rf .'",
+    "env -S'A.B=x rm -rf .'",
+    "env --split-string='A-B=x rm -rf .'",
+    "env --unset=PATH A-B=x rm -rf .",
+    "env --chdir=/tmp A.B=x rm -rf .",
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), MANAGED_WORKTREE_REFUSAL,
+      command);
+  }
+});
+
+test("env options with equals signs remain options, while shell assignments still require identifiers", () => {
+  for (const command of [
+    "env --split-string='rm -rf .'",
+    "env --unset=PATH rm -rf .",
+    `env --chdir=/tmp rm -rf ${protectedPath}`,
+  ]) {
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), MANAGED_WORKTREE_REFUSAL,
+      command);
+  }
+  for (const command of ["A-B=x rm -rf .", "A.B=x rm -rf ."]) {
+    assert.equal(commandTargetsManagedWorktree(command, protectedPath, protection), null, command);
+  }
+  assert.equal(commandTargetsManagedWorktree("A_B=x rm -rf .", protectedPath, protection),
+    MANAGED_WORKTREE_REFUSAL);
+});
+
 test("direct writes to linked-worktree registration files are refused before redirection can run", () => {
   for (const command of [
     "printf corrupt > /projects/repo/.git/worktrees/managed/gitdir",

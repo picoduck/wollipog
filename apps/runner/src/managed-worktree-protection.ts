@@ -659,7 +659,9 @@ function commandWords(
         const value = word(tokens[index], cwd, environment) ?? plainWordText(tokens[index])!;
         // Like a prefix assignment, this builds the environment of the command `env` runs; it is
         // not in effect while the shell expands the words of this very command.
-        if (/^[A-Za-z_][A-Za-z0-9_]*=/u.test(value)) {
+        // `env` accepts any nonempty name without `=` or NUL, unlike the shell prefix above.
+        // Keep option-looking words out: long options can carry their own `=` values.
+        if (!value.startsWith("-") && /^[^=\0]+=/u.test(value)) {
           const equals = value.indexOf("=");
           childEnvironment.set(value.slice(0, equals), value.slice(equals + 1));
           index += 1;
