@@ -3741,11 +3741,13 @@ export class SessionManager {
       (worktree.pullRequest?.state === "merged" && !recordedMergedHead)
       ? worktree.pullRequest
       : undefined;
+    let forgeStateUnavailable = false;
     if (options.refreshMergedHead !== false && stalePullRequest) {
       const verified = await this.resolveWorktreePullRequestState(
         worktree.path, stalePullRequest.url,
         { context: meta.context, provider: stalePullRequest.provider },
       );
+      forgeStateUnavailable = verified === null;
       const latest = this.store.readMeta(sessionId);
       if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
       const current = this.attributedWorktrees(latest)
@@ -3780,7 +3782,9 @@ export class SessionManager {
     }
     if (options.trigger === "archive_retirement" && worktree.pullRequest &&
         !verifiedMergedHeadOid(worktree.pullRequest)) {
-      return { removed: false, reason: "the linked pull request is not verified as merged" };
+      return { removed: false, reason: forgeStateUnavailable
+        ? "forge state is temporarily unavailable"
+        : "the linked pull request is not verified as merged" };
     }
     const selectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (selectedIsLaunching) {
@@ -14016,11 +14020,13 @@ export class SessionManager {
    * forge response carrying a head, the linkage is re-read after every await so a replaced pull
    * request cannot be blessed, and a forge that cannot answer simply leaves the record as it was.
    * Callers hold the session's worktree lane; the helpers below stay inside it. */
-  private async refreshDeferredMergedHead(record: WorktreeCleanupRecord): Promise<void> {
-    if (record.verifiedMergedHead) return;
+  private async refreshDeferredMergedHead(
+    record: WorktreeCleanupRecord,
+  ): Promise<"merged" | "unmerged" | "unavailable"> {
+    if (record.verifiedMergedHead) return "merged";
     const backoffKey = this.deferredMergedHeadKey(record);
     const retryAt = this.deferredMergedHeadRetryAt.get(backoffKey);
-    if (retryAt !== undefined && retryAt > this.worktreePullRequestDiscoveryNow()) return;
+    if (retryAt !== undefined && retryAt > this.worktreePullRequestDiscoveryNow()) return "unavailable";
     const locate = (meta: SessionMeta | null | undefined) => meta
       ? this.attributedWorktrees(meta).find((item) =>
         item.id === record.worktreeId && sameWorktreePath(meta.context, item.path, record.worktreePath) &&
@@ -14034,40 +14040,62 @@ export class SessionManager {
     };
     let meta = this.store.readMeta(record.sessionId);
     let worktree = locate(meta);
-    if (!meta || !worktree || worktree.source === "attached") return;
+    if (!meta || !worktree || worktree.source === "attached") return "unavailable";
     if (!worktree.pullRequest) {
       await this.discoverUnlinkedMergedWorktree(record.sessionId, record.worktreePath);
       meta = this.store.readMeta(record.sessionId);
       worktree = locate(meta);
-      if (!meta || !worktree || worktree.source === "attached") return;
+      if (!meta || !worktree || worktree.source === "attached") return "unavailable";
     }
     const linked = worktree.pullRequest;
-    if (!linked || (linked.state !== "open" && linked.state !== "merged")) return backOff();
+    if (!linked) {
+      backOff();
+      return "unavailable";
+    }
+    if (linked.state !== "open" && linked.state !== "merged") {
+      backOff();
+      return "unmerged";
+    }
     if (linked.state === "open" || !verifiedMergedHeadOid(linked)) {
       const verified = await this.resolveWorktreePullRequestState(
         worktree.path,
         linked.url,
         { context: meta.context, provider: linked.provider },
       );
-      if (verified?.state !== "merged" || !verified.headOid) return backOff();
+      if (!verified) {
+        backOff();
+        return "unavailable";
+      }
+      if (verified.state !== "merged") {
+        backOff();
+        return "unmerged";
+      }
+      if (!verified.headOid) {
+        backOff();
+        return "unavailable";
+      }
       const latest = this.store.readMeta(record.sessionId);
       const current = locate(latest);
       if (!latest || !current || current.source === "attached" ||
-          current.pullRequest?.state !== linked.state || current.pullRequest.url !== linked.url) return;
+          current.pullRequest?.state !== linked.state || current.pullRequest.url !== linked.url) return "unavailable";
       const worktrees = this.attributedWorktrees(latest).map((item) =>
         sameWorktreePath(latest.context, item.path, record.worktreePath)
           ? { ...item, pullRequest: { ...current.pullRequest!, state: "merged" as const, headOid: verified.headOid } }
           : item);
       const updated = this.store.patchMeta(record.sessionId, { worktrees });
-      if (!updated) return;
+      if (!updated) return "unavailable";
       this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
       worktree = locate(updated);
     }
     const head = verifiedMergedHeadOid(worktree?.pullRequest);
-    if (!head) return backOff();
+    if (!head) {
+      backOff();
+      return "unavailable";
+    }
     this.deferredMergedHeadRetryAt.delete(backoffKey);
     record.verifiedMergedHead = head;
     this.cleanupJournal.add(record);
+    return "merged";
   }
 
   /** Exactly the cleanup journal's own record identity, so the backoff entry is dropped by the
@@ -14115,12 +14143,13 @@ export class SessionManager {
       };
       if (worktreeFenced()) return logFenced();
       if (!record.worktreeRemovedAt) {
-        await this.refreshDeferredMergedHead(record);
+        const forgeState = await this.refreshDeferredMergedHead(record);
         if (worktreeFenced()) return logFenced();
         const current = this.store.readMeta(record.sessionId);
         const linked = current && this.attributedWorktrees(current).find((item) =>
           item.id === record.worktreeId && sameWorktreePath(current.context, item.path, record.worktreePath));
         if (record.trigger === "archive_retirement" && linked?.pullRequest && !record.verifiedMergedHead) {
+          if (forgeState === "unavailable") return;
           if (this.removeWorktreeCleanupRecord(record, true)) {
             this.send({ type: "session_worktree_retirement_refused", sessionId: record.sessionId,
               worktreeId: record.worktreeId ?? "", path: record.worktreePath,

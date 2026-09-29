@@ -608,6 +608,45 @@ test("archive retirement requires delivery beyond a push while preserving dirty 
   }
 });
 
+test("archive retirement retries unavailable forge proof but refuses a confirmed open pull request", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-archive-forge-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_archive_forge", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "archive forge",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const created = await manager.requestWorktree("s_archive_forge", { baseRef: "HEAD", branch: "fix/open-pr" });
+    const current = store.readMeta("s_archive_forge")!;
+    store.patchMeta("s_archive_forge", { worktrees: current.worktrees?.map((item) =>
+      item.id === created.worktree.id
+        ? { ...item, pullRequest: { url: "https://github.com/picoduck/wollipog/pull/1730",
+          provider: "github" as const, state: "open" as const } }
+        : item) });
+    const internals = manager as unknown as {
+      resolveWorktreePullRequestState: () => Promise<{ state: "open" } | null>;
+    };
+    internals.resolveWorktreePullRequestState = async () => null;
+    await assert.rejects(manager.discardWorktree("s_archive_forge", created.worktree.path,
+      { requireDelivered: true }), /forge state is temporarily unavailable/);
+    internals.resolveWorktreePullRequestState = async () => ({ state: "open" });
+    await assert.rejects(manager.discardWorktree("s_archive_forge", created.worktree.path,
+      { requireDelivered: true }), /the linked pull request is not verified as merged/);
+    assert.equal(existsSync(created.worktree.path), true);
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().length, 0);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("safe discard removes only a clean fully-pushed runner-owned worktree", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-safe-discard-"));
   const dataDir = join(root, "data");
@@ -7374,6 +7413,7 @@ test("an idempotent retry applies the default branch the remote just advertised"
 test("a running session discards its own finished worktrees despite the per-session provider lease", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-own-lease-discard-"));
   const dataDir = join(root, "data");
+  const sent: RunnerToControlPlane[] = [];
   let manager: SessionManager | undefined;
   try {
     const { repo } = initRepoWithOrigin(root);
@@ -7386,7 +7426,7 @@ test("a running session discards its own finished worktrees despite the per-sess
       config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
       seq: 0, createdAt: 1, updatedAt: 1,
     });
-    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    manager = new SessionManager((message) => sent.push(message), () => {}, store, "runner", undefined, undefined, dataDir);
     const finished = await manager.requestWorktree("s_own_lease", { baseRef: "HEAD", branch: "fix/finished" });
     const current = await manager.requestWorktree("s_own_lease", { baseRef: "HEAD", branch: "fix/current" });
     const third = await manager.requestWorktree("s_own_lease", { baseRef: "HEAD", branch: "fix/third" });
@@ -7488,6 +7528,29 @@ test("a running session discards its own finished worktrees despite the per-sess
     await assert.rejects(manager.discardWorktree("s_own_lease", fifth.worktree.path), /leased by another runner process/);
     store.releaseWorktreeLease("s_own_lease", "sibling-runner:provider");
     assert.equal(existsSync(fifth.worktree.path), true);
+
+    const unsafe = await manager.requestWorktree("s_own_lease", { baseRef: "HEAD", branch: "fix/unsafe-after-provider" });
+    execFileSync("git", ["-C", unsafe.worktree.path, "push", "-u", "origin", unsafe.worktree.branch]);
+    assert.equal(store.acquireWorktreeLease("s_own_lease", providerOwner), true);
+    const unsafeEntry = { sessionId: "s_own_lease", context: { kind: "native" }, cwd: unsafe.worktree.path,
+      worktree: { path: unsafe.worktree.path, branch: unsafe.worktree.branch },
+      worktreeLeaseOwner: providerOwner, queue: [], client: { dispose: () => {} } };
+    activeEntries.set("s_own_lease", unsafeEntry);
+    const deferredUnsafe = await manager.discardWorktree("s_own_lease", unsafe.worktree.path,
+      { requireDelivered: true });
+    assert.deepEqual(deferredUnsafe.retirement, { status: "deferred", reason: "provider_active" });
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().find((item) =>
+      item.worktreeId === unsafe.worktree.id)?.trigger, "archive_retirement");
+    writeFileSync(join(unsafe.worktree.path, "local.txt"), "keep\n");
+    assert.equal((manager as unknown as {
+      deleteActiveSession: (sessionId: string, expected: unknown) => boolean;
+    }).deleteActiveSession("s_own_lease", unsafeEntry), true);
+    await waitForCondition(() => new WorktreeCleanupJournal(dataDir).list().every((item) =>
+      item.worktreeId !== unsafe.worktree.id), "terminal safety refusal did not clear deferred intent");
+    assert.equal(existsSync(unsafe.worktree.path), true);
+    assert.deepEqual(sent.filter((message) => message.type === "session_worktree_retirement_refused" &&
+      message.path === unsafe.worktree.path).map((message) => message.reason),
+    ["the worktree has uncommitted changes"]);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
