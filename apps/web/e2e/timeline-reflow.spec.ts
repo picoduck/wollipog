@@ -495,9 +495,11 @@ type PaintedTailHost = typeof window & { __paintedTailSampler?: PaintedTailSampl
  * sampling task, so the sample reads a list-root size that no frame painted; the next frame
  * re-pins it before paint. Instead, record the geometry after every animation-frame and
  * ResizeObserver callback, and again after the microtasks each callback queued (MutationObserver
- * deliveries and React commits). Script cannot run between the last of those and paint, so the
- * final record of a frame is its painted geometry. The next frame's first animation callback seals
- * it. Install before the fixture loads so the application's own observers are wrapped.
+ * deliveries and React commits). Those microtasks can queue further microtasks, so the record
+ * repeats across a chain of microtask hops, following continuations up to that depth. Otherwise
+ * script cannot run between the last record and paint, so the final record of a frame is its
+ * painted geometry. The next frame's first animation callback seals it. Install before the fixture
+ * loads so the application's own observers are wrapped.
  */
 async function installPaintedTailSampler(page: Page) {
   await page.addInitScript(() => {
@@ -512,9 +514,16 @@ async function installPaintedTailSampler(page: Page) {
         following: reader.dataset.followTailState === "following",
       };
     };
+    const microtaskHops = 16;
     const recordAfterCallback = () => {
       record();
-      queueMicrotask(record);
+      let hops = microtaskHops;
+      const hop = () => {
+        record();
+        hops -= 1;
+        if (hops > 0) queueMicrotask(hop);
+      };
+      queueMicrotask(hop);
     };
     const nativeRequestAnimationFrame = window.requestAnimationFrame.bind(window);
     window.requestAnimationFrame = (callback) => nativeRequestAnimationFrame((time) => {
@@ -545,7 +554,9 @@ async function installPaintedTailSampler(page: Page) {
 
 /**
  * Streams chunks as tasks, the way live output arrives, and returns every frame painted from the
- * first chunk until well after the follow-tail settle window of the last one.
+ * first chunk until well after the follow-tail settle window of the last one. Sampling ends only
+ * once every chunk has actually streamed, so a runner whose timers lag behind its frames still
+ * measures all of them.
  */
 async function recordPaintedTailGrowth(page: Page, control: string, growths: number, framesPerGrowth = 3) {
   return page.evaluate(({ controlId, growthCount, spacing }) => new Promise<{
@@ -559,20 +570,25 @@ async function recordPaintedTailGrowth(page: Page, control: string, growths: num
     sampler.latest = null;
     sampler.active = true;
     let frame = 0;
-    let dispatched = 0;
-    const totalFrames = growthCount * spacing + 16;
+    let scheduled = 0;
+    let streamed = 0;
+    let settleFrames = 0;
     const tick = () => {
       frame += 1;
-      if (dispatched < growthCount && frame % spacing === 1) {
-        dispatched += 1;
-        setTimeout(() => button.click(), 0);
+      if (scheduled < growthCount && frame % spacing === 1) {
+        scheduled += 1;
+        setTimeout(() => {
+          button.click();
+          streamed += 1;
+        }, 0);
       }
-      if (frame < totalFrames) {
+      if (streamed === growthCount) settleFrames += 1;
+      if (settleFrames < 16 && frame < 600) {
         requestAnimationFrame(tick);
         return;
       }
       sampler.active = false;
-      resolve({ growths: dispatched, frames: sampler.frames });
+      resolve({ growths: streamed, frames: sampler.frames });
     };
     requestAnimationFrame(tick);
   }), { controlId: control, growthCount: growths, spacing: framesPerGrowth });
@@ -1472,65 +1488,103 @@ async function expectEveryPaintedFramePinned(page: Page, control: string) {
 }
 
 for (const { control, growth } of tailGrowthControls) {
-  test(`following live output keeps every painted frame pinned while ${growth} grows @production`, async ({ page }) => {
+  test(`following live output keeps every painted frame pinned while ${growth} grows`, async ({ page }) => {
     await expectEveryPaintedFramePinned(page, control);
   });
 }
 
-test.describe("a tail notice left for the next frame", () => {
-  // This negative control deliberately paints a following reader off its tail, which the
-  // loop-error guard exists to reject; the test asserts that rejection itself instead.
+type DeepObserverFault = "grow-tail" | "chained-scroll";
+
+/**
+ * Injects one fault from inside the observer delivery of a sentinel nested deeper than any
+ * transcript row, then returns the frames painted around it.
+ *
+ * - `grow-tail` grows the tail row during that delivery. The row is shallower than the sentinel, so
+ *   Chromium defers every notice of the growth to the next frame and reports a loop error; neither
+ *   TanStack nor the follow-tail observer can respond before the frame paints.
+ * - `chained-scroll` moves the reader off its tail two microtask hops after the callback and puts it
+ *   back in the next frame's animation callbacks, so only a sampler that follows microtask
+ *   continuations sees the one frame painted in between.
+ */
+async function recordDeepObserverFault(page: Page, fault: DeepObserverFault) {
+  return page.evaluate((kind) => new Promise<PaintedTailFrame[]>((resolve) => {
+    const sampler = (window as PaintedTailHost).__paintedTailSampler!;
+    const reader = document.querySelector<HTMLElement>("[data-testid='reader']")!;
+    const tail = document.querySelector<HTMLElement>("[data-virtual-key='item:agent_message:400']")!;
+    let sentinel: HTMLElement = document.body;
+    for (let depth = 0; depth < 40; depth += 1) {
+      const child = document.createElement("div");
+      sentinel.append(child);
+      sentinel = child;
+    }
+    sentinel.style.height = "1px";
+    let armed = false;
+    new ResizeObserver(() => {
+      if (!armed) return;
+      armed = false;
+      if (kind === "grow-tail") {
+        tail.style.paddingBottom = "160px";
+        return;
+      }
+      queueMicrotask(() => queueMicrotask(() => {
+        reader.scrollTop -= 24;
+        requestAnimationFrame(() => {
+          reader.scrollTop = reader.scrollHeight;
+        });
+      }));
+    }).observe(sentinel);
+    sampler.frames = [];
+    sampler.latest = null;
+    sampler.active = true;
+    let frame = 0;
+    const tick = () => {
+      frame += 1;
+      if (frame === 2) {
+        setTimeout(() => {
+          armed = true;
+          sentinel.style.height = "2px";
+        }, 0);
+      }
+      if (frame < 24) {
+        requestAnimationFrame(tick);
+        return;
+      }
+      sampler.active = false;
+      resolve(sampler.frames);
+    };
+    requestAnimationFrame(tick);
+  }), fault);
+}
+
+test.describe("the painted-frame checks can fail", () => {
+  // These negative controls deliberately paint a following reader off its tail, which the
+  // loop-error guard exists to reject; they assert the guard's record themselves instead.
   test.use({ resizeObserverLoopGuard: false });
 
-  test("paints off the tail, and both the painted-frame sampler and the loop-error guard report it", async ({ page }) => {
+  async function openLiveReply(page: Page) {
     const reader = await openFollowedTail(page);
     await page.getByTestId("stream-live-reply").click();
-    const row = page.locator("[data-virtual-key='item:agent_message:400']");
-    await expect(row).toHaveCount(1);
+    await expect(page.locator("[data-virtual-key='item:agent_message:400']")).toHaveCount(1);
     await waitForStableReaderGeometry(page);
     await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(1);
+    return reader;
+  }
 
-    const sampled = await page.evaluate(() => new Promise<PaintedTailFrame[]>((resolve) => {
-      const sampler = (window as PaintedTailHost).__paintedTailSampler!;
-      const tail = document.querySelector<HTMLElement>("[data-virtual-key='item:agent_message:400']")!;
-      // A sentinel nested deeper than any transcript row. Growing the tail row from the sentinel's
-      // observer resizes a shallower element during that delivery, so Chromium defers every notice
-      // of the growth to the next frame, and neither TanStack nor the follow-tail observer can
-      // respond before this frame paints.
-      let sentinel: HTMLElement = document.body;
-      for (let depth = 0; depth < 40; depth += 1) {
-        const child = document.createElement("div");
-        sentinel.append(child);
-        sentinel = child;
-      }
-      sentinel.style.height = "1px";
-      let armed = false;
-      new ResizeObserver(() => {
-        if (!armed) return;
-        armed = false;
-        tail.style.paddingBottom = "160px";
-      }).observe(sentinel);
-      sampler.frames = [];
-      sampler.latest = null;
-      sampler.active = true;
-      let frame = 0;
-      const tick = () => {
-        frame += 1;
-        if (frame === 2) {
-          setTimeout(() => {
-            armed = true;
-            sentinel.style.height = "2px";
-          }, 0);
-        }
-        if (frame < 24) {
-          requestAnimationFrame(tick);
-          return;
-        }
-        sampler.active = false;
-        resolve(sampler.frames);
-      };
-      requestAnimationFrame(tick);
-    }));
+  test("a scroll queued behind an observer callback's microtasks is still sampled as painted", async ({ page }) => {
+    await openLiveReply(page);
+
+    const sampled = await recordDeepObserverFault(page, "chained-scroll");
+
+    expect(sampled.every((frame) => frame.following)).toBe(true);
+    expect(sampled.filter((frame) => frame.distance > 1).length, "the sampler must see the unpinned paint")
+      .toBe(1);
+    await expect.poll(() => distanceFromTail(page)).toBeLessThanOrEqual(1);
+  });
+
+  test("a tail notice left for the next frame paints off the tail, and the sampler and loop-error guard report it", async ({ page }) => {
+    const reader = await openLiveReply(page);
+
+    const sampled = await recordDeepObserverFault(page, "grow-tail");
 
     expect(sampled.every((frame) => frame.following)).toBe(true);
     expect(sampled.filter((frame) => frame.distance > 1).length, "the sampler must see the unpinned paint")
