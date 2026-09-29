@@ -48,7 +48,7 @@ import {
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import { SessionSkillsUnavailableNotice } from "./SkillsUnavailableNotice.js";
+import { SkillsUnavailableNotice, skillsUnavailableSentence, useSessionSkillsUnavailable, useSkillsNoticeDismissal } from "./SkillsUnavailableNotice.js";
 import { isPartialHistory, isRebuiltEventsArray, useStoreActions, useStoreSelector } from "../store.js";
 import { relativeTime, shortenPath, titleCaseLabel } from "../format.js";
 import { accountLabelText, isPersonalIdentifier, redactPersonalIdentifiers } from "../personal-identifiers.js";
@@ -152,7 +152,7 @@ import { CampaignHeldChildren, type CampaignHeldChild } from "./CampaignHeldChil
 import { ComposerQuestionResponse } from "./ComposerQuestionResponse.js";
 import { useGovernanceAudit, useGovernanceTimeline } from "./useGovernanceAudit.js";
 import { SessionHeader } from "./SessionHeader.js";
-import { WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
+import { useWorktreeSetupSuggestion, WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
 import { WorktreeRecoveryCard } from "./WorktreeRecoveryCard.js";
 import { useRecoveryWorktreeCreation } from "../recovery-worktree-creation.js";
 import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
@@ -991,8 +991,18 @@ function SessionDetailLoaded({
   const [handoffTurn, setHandoffTurn] = useState<number | null>(null);
   const [restartPending, setRestartPending] = useState(false);
   const [setupRetryPending, setSetupRetryPending] = useState(false);
-  const [setupGeneratePending, setSetupGeneratePending] = useState(false);
-  const [setupGenerateError, setSetupGenerateError] = useState<string | null>(null);
+  const setupSuggestion = useWorktreeSetupSuggestion(
+    showWorktreeSetupNotice && session.projectId ? session as SessionView & { projectId: string } : undefined,
+    () => openSourceLocation({ path: ".wollipog.json" }),
+  );
+  // Only the expanded session shows the condition (the slot and the Pinned Summary), so a preview
+  // does not read the Machine's assignments.
+  const skillsUnavailable = useSessionSkillsUnavailable({
+    runnerId: session.runnerId,
+    agentId: session.agentId,
+    adapter: mode === "expanded" ? session.executionTarget?.adapter : undefined,
+  });
+  const [skillsNoticeDismissed, dismissSkillsNotice] = useSkillsNoticeDismissal(session.id);
   const [steeringBusy, setSteeringBusy] = useState(false);
   const [queuedEditBusy, setQueuedEditBusy] = useState(false);
   const [queuedEdit, setQueuedEdit] = useState<QueuedPromptEditState | null>(null);
@@ -3826,6 +3836,42 @@ function SessionDetailLoaded({
       ),
     });
   }
+  // Nothing waits on the person for these two (#1977), so they are info: below every problem, and
+  // dismissible. The skills dismissal is kept on this device for the session; the setup suggestion's
+  // is the Project's, on the server.
+  if (skillsUnavailable && !skillsNoticeDismissed) {
+    const skills = skillsUnavailable;
+    sessionNotices.push({
+      key: "skills-unavailable",
+      severity: "info",
+      rank: SESSION_NOTICE_RANK.skillsUnavailable,
+      title: "Skills Unavailable",
+      render: ({ trailing, onDismiss }) => (
+        <SkillsUnavailableNotice machine={runnerDisp.name} adapter={skills.adapter} skillNames={skills.skillNames}
+          trailing={trailing}
+          onDismiss={() => {
+            dismissSkillsNotice();
+            onDismiss?.();
+          }}
+          onOpenSkills={() => navigate({ name: "skills" })} />
+      ),
+    });
+  }
+  if (showWorktreeSetupNotice && session.projectId) {
+    const projectName = projects.get(session.projectId)?.name ?? "This Project";
+    sessionNotices.push({
+      key: `setup-suggestion:${session.projectId}`,
+      severity: "info",
+      rank: SESSION_NOTICE_RANK.setupSuggestion,
+      title: `Set Up ${projectName}`,
+      render: ({ trailing }) => (
+        <WorktreeSetupNotice compact projectName={projectName} trailing={trailing}
+          generating={setupSuggestion.generating} dismissing={setupSuggestion.dismissing} error={setupSuggestion.error}
+          generateRefusal={setupSuggestion.generateRefusal}
+          onGenerate={setupSuggestion.generate} onDismiss={setupSuggestion.dismiss} />
+      ),
+    });
+  }
 
   // "Agent is working" state (items 1 + 2): true the instant a send is optimistically pending
   // (before status flips) and for the whole turn while the runner reports running/starting.
@@ -4951,25 +4997,6 @@ function SessionDetailLoaded({
           // focus-rescue anchor there; the mobile layout keeps the app bar and its own anchor.
           titleId={!isMobile ? "page-title" : undefined}
         />
-        {showWorktreeSetupNotice && session.projectId && (
-          <WorktreeSetupNotice busy={setupGeneratePending} error={setupGenerateError}
-            generateRefusal={worktreeSetupRefusal} onDismiss={() => {
-            setSetupGeneratePending(true);
-            setSetupGenerateError(null);
-            void api.dismissWorktreeSetupNotice(session.projectId!).catch((error) => {
-              setSetupGenerateError((error as Error).message);
-            }).finally(() => setSetupGeneratePending(false));
-          }} onGenerate={() => {
-            if (worktreeSetupRefusal !== null) return;
-            setSetupGeneratePending(true);
-            setSetupGenerateError(null);
-            void api.generateWorktreeSetup(session.id)
-              .then(() => api.dismissWorktreeSetupNotice(session.projectId!))
-              .then(() => openSourceLocation({ path: ".wollipog.json" }))
-              .catch((error) => setSetupGenerateError((error as Error).message))
-              .finally(() => setSetupGeneratePending(false));
-          }} />
-        )}
         {session.orchestratorCampaign?.continuation && (
           <CampaignContinuationNotice
             continuation={session.orchestratorCampaign.continuation}
@@ -4988,11 +5015,6 @@ function SessionDetailLoaded({
             onOpenChild={(childSessionId) => navigate({ name: "session", id: childSessionId })}
           />
         )}
-        <SessionSkillsUnavailableNotice
-          runnerId={session.runnerId}
-          agentId={session.agentId}
-          adapter={session.executionTarget?.adapter}
-        />
         {activeWorktreeSetupConfig?.status === "invalid" && (
           <Notice tone="danger" role="alert" title="Invalid Worktree Setup Configuration">
             <code>{activeWorktreeSetupConfig.error}</code>
@@ -5051,11 +5073,6 @@ function SessionDetailLoaded({
             Expand <kbd>Enter</kbd>
           </button>
         </header>
-        <SessionSkillsUnavailableNotice
-          runnerId={session.runnerId}
-          agentId={session.agentId}
-          adapter={session.executionTarget?.adapter}
-        />
         </>
       )}
 
@@ -5115,6 +5132,9 @@ function SessionDetailLoaded({
                 onOpenReview={() => rightPanel.show("review")}
                 onOpenBackgroundWork={() => rightPanel.show("background")}
                 onOpenSourceLocation={openSourceLocation}
+                skillsUnavailableReason={skillsUnavailable
+                  ? skillsUnavailableSentence(runnerDisp.name, skillsUnavailable.adapter, null)
+                  : null}
               />
             )}
             <div

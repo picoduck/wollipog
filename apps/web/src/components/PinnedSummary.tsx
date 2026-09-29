@@ -19,7 +19,7 @@ import {
 import type { GitStatus, GitSummary } from "./useGitStatus.js";
 import { GitPinnedSection } from "./GitVisibility.js";
 import { AgentIcon } from "./AgentIcon.js";
-import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, TuningIcon } from "./Icons.js";
+import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, SkillsIcon, TuningIcon } from "./Icons.js";
 import { BackgroundDeliveryBadge, BackgroundNotificationBadge, Spinner } from "./common.js";
 import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
 import { effectiveModelEffortForDisplay, resolveCaps, resolveEffectiveCaps } from "../caps.js";
@@ -45,6 +45,7 @@ export function PinnedSummary({
   onOpenReview,
   onOpenBackgroundWork,
   onOpenSourceLocation,
+  skillsUnavailableReason = null,
 }: {
   session: SessionView;
   git: GitStatus;
@@ -55,6 +56,9 @@ export function PinnedSummary({
   onOpenReview: () => void;
   onOpenBackgroundWork?: () => void;
   onOpenSourceLocation: (location: SourceLocation) => void;
+  /** Set while the session's target lacks the Machine's assigned skills (#1977): the fact the
+   * dismissible session notice states, kept here after it is dismissed. */
+  skillsUnavailableReason?: string | null;
 }) {
   const { navigate } = useStoreActions();
   const runners = useStoreSelector((s) => s.runners);
@@ -184,6 +188,15 @@ export function PinnedSummary({
             <FolderOutlineIcon className="ps-icon" size={14} />
             <span>Workspace</span>
             <span className="ps-right ps-detail">{session.workspaceName}</span>
+          </div>
+        )}
+
+        {skillsUnavailableReason && (
+          <div className="ps-row is-static has-note">
+            <SkillsIcon className="ps-icon" size={14} />
+            <span>Skills</span>
+            <span className="ps-right ps-detail">Not Available</span>
+            <span className="ps-note">{skillsUnavailableReason}</span>
           </div>
         )}
 

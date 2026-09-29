@@ -88,7 +88,7 @@ option, or a row grows and pushes its neighbour. The test for one must make the 
 which text wraps depends on the face.
 
 Not every harness page renders in the app font. `settings-rows-e2e.html`,
-`skills-unavailable-e2e.html` and `new-session-choices-e2e.html` pin Arial, so their screenshot
+`skills-unavailable-e2e.html`, `project-notices-e2e.html` and `new-session-choices-e2e.html` pin Arial, so their screenshot
 baselines and text-heavy measurements do not follow each machine's system UI font. Arial is narrow
 and hides wraps the product shows.
 

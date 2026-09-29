@@ -1730,9 +1730,8 @@ button.status { cursor: pointer; }
 /* A setting row's reason or failure sits under its description, clear of the words above it. */
 .ui-row-desc > .notice { margin-top: var(--space-2); }
 .agent-defaults-list > .toolbar > .notice { flex: 1 1 auto; }
-/* Session-level notices sit in the session column under its bar; list-row notices in their cell. */
+/* Session-level notices sit in the session column under its bar. */
 .session-detail > .notice { margin: var(--space-2) var(--space-3); }
-.inbox-row-setup-cell > .notice { margin: var(--space-1) var(--space-2) var(--space-2); }
 .notice-actions {
   display: flex;
   flex-wrap: wrap;
@@ -4435,6 +4434,14 @@ textarea {
 .ps-right {
   margin-left: auto;
   flex: none;
+}
+/* A fact with a one-line reason under it, aligned with the label rather than the icon. */
+.ps-row.has-note { flex-wrap: wrap; row-gap: var(--space-1); }
+.ps-note {
+  flex-basis: 100%;
+  padding-left: var(--space-6);
+  color: var(--text-dim);
+  font: var(--type-small);
 }
 .ps-add {
   color: var(--green);
@@ -8268,8 +8275,9 @@ button.file-head.source-path-link {
   background: var(--bg-elev);
 }
 
-/* The Inbox's recommendation sits in the list pane, inset like the provider sign-ins above it. */
-.inbox-list-pane > .notice { margin: 0 var(--space-3) var(--space-3); }
+/* The Inbox's recommendation and a Project's setup suggestion sit in the list pane, inset on every
+   side; the list below brings its own top padding. */
+.inbox-list-pane > .notice { margin: var(--space-3) var(--space-3) 0; }
 
 .recommended-skills-notice-list {
   display: flex;
@@ -10660,7 +10668,6 @@ body.shell-dock-dragging * {
   pointer-events: none;
 }
 .inbox-row-primary-cell { display: block; min-width: 0; }
-.inbox-row-setup-cell { display: block; min-width: 0; }
 /* ---- Threads (#896): a parent and its children as one unit, the children indented under a spine.
    Every row is still ONE card: a collapsed parent's children leave the row list rather than hiding
    inside a taller row, so the virtualizer's per-shape estimate still holds for every row. ---- */

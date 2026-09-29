@@ -13,6 +13,9 @@ export function ToneIcon({ tone }: { tone: NoticeTone }) {
 
 export interface NoticeProps {
   tone?: NoticeTone;
+  /** Replaces the tone icon where a subject icon says more, as the wrench does for a setup
+   * suggestion. Only for a neutral or info notice: a warning or danger keeps its tone icon. */
+  icon?: ReactNode;
   /** Optional Title Case title, above a sentence-case body. */
   title?: ReactNode;
   /** The body: one or two sentences in sentence case. */
@@ -55,6 +58,7 @@ export interface NoticeProps {
  */
 export function Notice({
   tone = "info",
+  icon,
   title,
   children,
   actions,
@@ -114,7 +118,7 @@ export function Notice({
       tabIndex={tabIndex}
       data-state={dataState}
     >
-      <span className="notice-icon" aria-hidden="true"><ToneIcon tone={tone} /></span>
+      <span className="notice-icon" aria-hidden="true">{icon ?? <ToneIcon tone={tone} />}</span>
       <div className="notice-content">
         {head && (
           <div className="notice-head">

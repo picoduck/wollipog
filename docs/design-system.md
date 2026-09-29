@@ -1504,6 +1504,11 @@ exactly one: the most severe, then the lowest rank.
   session's configured account).
 - Every session notice above the composer is an entry of this slot: the Composer epic's composer
   errors, attachment notes and queued-message errors join it rather than building a second slot.
+- A condition nothing waits on is info, compact and dismissible: skills that a container or cloud
+  session cannot use (the dismissal is kept per session on the device, and the Pinned Summary keeps
+  a Skills: Not Available row) and the Project setup suggestion (dismissed for the Project on the
+  server). A suggestion about a Project rather than one session also shows once above that
+  Project's Sessions tab, never inside a list row.
 - Below 760px the action row is one row: the resolving action fills it (the one exception to "buttons
   never stretch", §3.1) and a disclosure toggle such as Show Details keeps its own width.
 

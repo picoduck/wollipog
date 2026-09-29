@@ -6,7 +6,7 @@ Setup is always trust-gated. Wollipog hashes the exact configuration bytes and s
 
 ## Generate a Starter
 
-Use **Generate** in the first worktree session, use **Generate Starter Config** for a Project Location, or run this inside a Git checkout:
+Use **Generate Setup File** in the **Set Up {Project}** suggestion (above the Sessions list on that Project's tab, and in the notice slot of the Project's first worktree session), use **Generate Starter Config** for a Project Location, or run this inside a Git checkout:
 
 ```sh
 wollipog init

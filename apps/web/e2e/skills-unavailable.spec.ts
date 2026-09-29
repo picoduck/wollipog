@@ -3,7 +3,8 @@ import { expect, test, type Page } from "@playwright/test";
 /**
  * #1695: container and cloud targets mount only the workspace, so the Machine's managed skills are
  * absent there. The session says so, the New Session dialog stops claiming otherwise, and host
- * sessions are unchanged.
+ * sessions are unchanged. #1977 moved the session's notice into the notice slot as a dismissible
+ * info condition.
  */
 
 const UNAVAILABLE = /Managed skills from this Machine are unavailable on container and cloud targets/u;
@@ -14,13 +15,16 @@ async function openSession(page: Page, target: "host" | "container" | "cloud") {
 }
 
 for (const target of ["container", "cloud"] as const) {
-  test(`a ${target} session shows its assigned skills as unavailable`, async ({ page }) => {
+  test(`a ${target} session shows its assigned skills as unavailable in the notice slot`, async ({ page }) => {
     await page.setViewportSize({ width: 900, height: 600 });
     await openSession(page, target);
-    const notice = page.getByRole("status", { name: "Skills Unavailable on This Target" });
+    const notice = page.locator(".session-notice-slot").getByRole("status", { name: "Skills Unavailable" });
     await expect(notice).toBeVisible();
-    await expect(notice).toContainText(UNAVAILABLE);
-    await expect(notice).toContainText("2 Assigned Skills: release-notes, review-pr");
+    await expect(notice).toContainText(
+      `Skills from runner-1 aren’t available in ${target} sessions, so release-notes and review-pr can’t be used here.`,
+    );
+    await expect(notice.getByRole("button", { name: "Open Agent Skills" })).toBeVisible();
+    await expect(notice.getByRole("button", { name: "Dismiss Notice" })).toBeVisible();
     const frame = await page.locator("#frame").boundingBox();
     const box = await notice.boundingBox();
     expect(box && frame && box.x >= frame.x && box.x + box.width <= frame.x + frame.width).toBe(true);
@@ -31,7 +35,7 @@ for (const target of ["container", "cloud"] as const) {
 test("a host session neither requests skills nor shows the notice", async ({ page }) => {
   await page.setViewportSize({ width: 900, height: 600 });
   await openSession(page, "host");
-  await expect(page.getByRole("status", { name: "Skills Unavailable on This Target" })).toHaveCount(0);
+  await expect(page.getByRole("status", { name: "Skills Unavailable" })).toHaveCount(0);
   expect(await page.evaluate(() => document.body.dataset.runnerSkillsRequests)).toBeUndefined();
   await page.screenshot({ path: "test-results/skills-unavailable/session-host.png" });
 });
@@ -39,7 +43,7 @@ test("a host session neither requests skills nor shows the notice", async ({ pag
 test("a phone-width container session keeps the notice inside the pane", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 780 });
   await page.goto("/skills-unavailable-e2e.html?target=container&width=390&height=780");
-  const notice = page.getByRole("status", { name: "Skills Unavailable on This Target" });
+  const notice = page.getByRole("status", { name: "Skills Unavailable" });
   await expect(notice).toBeVisible();
   const box = await notice.boundingBox();
   expect(box && box.x >= 0 && box.x + box.width <= 390).toBe(true);

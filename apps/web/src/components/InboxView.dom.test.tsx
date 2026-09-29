@@ -4,13 +4,14 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type {
-  ControlPlaneToUi,
-  ProjectView,
-  SessionReminderView,
-  SessionView,
-  SetSessionReminderRequest,
-  UiSnapshotMessage,
+import {
+  PROTOCOL_VERSION,
+  type ControlPlaneToUi,
+  type ProjectView,
+  type SessionReminderView,
+  type SessionView,
+  type SetSessionReminderRequest,
+  type UiSnapshotMessage,
 } from "@wollipog/protocol";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
@@ -2160,6 +2161,94 @@ test("the Inbox lists recommended built-in skills above the sessions in list and
   assert.equal(link.textContent, "using-wollipog");
   await act(async () => { link.click(); });
   assert.deepEqual(pushed.at(-1), { name: "skills", id: "skill-using" });
+});
+
+test("the setup suggestion is one notice above an eligible Project's list, never in a row, and absent on All (#1977)", async () => {
+  mobileViewport = false;
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-setup-suggestion",
+    runtimeKey: "inbox-setup-suggestion:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  const project = (id: string, name: string): ProjectView => ({
+    id, name, hidden: false, locations: [], activeSessionCount: 0, unarchivedSessionCount: 2, totalSessionCount: 2,
+    createdAt: 1, updatedAt: 1,
+  });
+  const withWorktree = (id: string, projectId: string, createdAt: number, setup: "absent" | "valid") => session(id, 100 - createdAt, {
+    projectId, createdAt, useWorktree: true, worktreePath: `/worktrees/${id}`,
+    worktrees: [{
+      id: `worktree-${id}`, path: `/worktrees/${id}`, branch: `agent/${id}`, source: "created",
+      setupConfig: setup === "absent" ? { status: "absent" } : { status: "valid", hash: "a" },
+    }],
+  });
+  await act(async () => {
+    root.render(
+      <ApiProvider client={api}>
+        <StoreProvider connection={connection} navigation={navigation}>
+          <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} pinnedOpen={false} />
+        </StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: {
+        sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
+        worktreeSetupConfig: true,
+      },
+      runners: [{
+        runnerId: "runner-1", hostname: "build-box", os: "linux", version: "1", status: "online", agents: [],
+        workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: PROTOCOL_VERSION,
+      }],
+      boxes: [],
+      sessions: [
+        withWorktree("pay-1", "payments", 1, "absent"),
+        withWorktree("pay-2", "payments", 2, "absent"),
+        withWorktree("docs-1", "docs", 3, "valid"),
+        withWorktree("docs-2", "docs", 4, "valid"),
+      ],
+      projects: [project("payments", "Payments Service"), project("docs", "Docs Site")],
+      worktreeSetupNoticeDismissals: [],
+      runs: [],
+      pods: [],
+    });
+  });
+  const setupNotices = () => [...container.querySelectorAll('[aria-label^="Set Up"]')];
+  const openTab = async (name: string) => {
+    const tab = [...container.querySelectorAll<HTMLElement>(".inbox-tabs .tab")].find((candidate) => candidate.textContent?.includes(name));
+    assert.ok(tab, `missing the ${name} tab`);
+    await act(async () => { tab.click(); });
+  };
+  const assertNoRowHoldsANotice = () => {
+    const rows = [...container.querySelectorAll('[role="row"]')];
+    assert.ok(rows.length > 0, "rows are rendered");
+    for (const row of rows) {
+      assert.equal(row.querySelectorAll('[role="gridcell"]').length, 1, "a row is one cell, with no setup card under it");
+      assertNoDomNode(row.querySelector(".notice"));
+    }
+  };
+
+  assert.deepEqual(setupNotices(), [], "the All tab shows no setup suggestion");
+  assertNoRowHoldsANotice();
+
+  await openTab("Payments Service");
+  const notices = setupNotices();
+  assert.equal(notices.length, 1, "exactly one notice for the Project");
+  assert.equal(notices[0]!.getAttribute("aria-label"), "Set Up Payments Service");
+  assert.equal(notices[0]!.querySelector(".notice-title")?.textContent, "Set Up Payments Service");
+  assert.equal(Boolean(notices[0]!.compareDocumentPosition(container.querySelector(".inbox-list")!) & 4), true,
+    "the notice sits above the session list");
+  assertNoRowHoldsANotice();
+
+  await openTab("Docs Site");
+  assert.deepEqual(setupNotices(), [], "a Project with a setup file shows none");
+
+  await openTab("All");
+  assert.deepEqual(setupNotices(), []);
 });
 
 test("every mounted root is torn down before the next test starts", () => {

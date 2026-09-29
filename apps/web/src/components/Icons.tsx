@@ -17,6 +17,7 @@ import {
   CornerUpLeft as LucideCornerUpLeft,
   Ellipsis as LucideEllipsis,
   EllipsisVertical as LucideEllipsisVertical,
+  ExternalLink as LucideExternalLink,
   Eye as LucideEye,
   EyeOff as LucideEyeOff,
   FileDiff as LucideFileDiff,
@@ -61,6 +62,7 @@ import {
   UsersRound as LucideUsersRound,
   WandSparkles as LucideWandSparkles,
   Workflow as LucideWorkflow,
+  Wrench as LucideWrench,
   X as LucideX,
   Zap as LucideZap,
   type LucideIcon,
@@ -519,4 +521,12 @@ export function DiffIcon(props: IconProps) {
 
 export function JobsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideListChecks} {...props} />;
+}
+
+export function ExternalLinkIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideExternalLink} {...props} />;
+}
+
+export function WrenchIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideWrench} {...props} />;
 }

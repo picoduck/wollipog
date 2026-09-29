@@ -1,5 +1,5 @@
 import { sessionAttentionStatus, type SessionReminderView, type SessionView } from "@wollipog/protocol";
-import { memo, useState } from "react";
+import { memo } from "react";
 import { useLongPress } from "./interactions.js";
 import { isHeartbeatBusy, type SessionActivity } from "../activity.js";
 import { relativeTime } from "../format.js";
@@ -22,9 +22,6 @@ import {
 import { StatusBadge } from "./StatusBadge.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { inboxThreadChildrenLabel, type InboxThreadChildren } from "../inbox.js";
-import { useApi } from "../api-context.js";
-import { WorktreeSetupNotice } from "./WorktreeSetupNotice.js";
-import { sessionCommandRefusal } from "../session-command-permissions.js";
 
 export interface InboxRowProps {
   optionId: string;
@@ -73,34 +70,6 @@ export interface InboxRowProps {
   onToggleThread?: (sessionId: string) => void;
   /** Right-click, long-press, or keyboard context menu for this row's session (#154). */
   onSessionMenu: (sessionId: string, anchor: { x: number; y: number }) => void;
-  showWorktreeSetupNotice?: boolean;
-  onWorktreeSetupGenerated?: (sessionId: string) => void;
-}
-
-function ConnectedWorktreeSetupNotice({ session, onGenerated }: {
-  session: SessionView & { projectId: string };
-  onGenerated: (sessionId: string) => void;
-}) {
-  const api = useApi();
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const generateRefusal = sessionCommandRefusal(session, "worktreeSetup");
-  return <WorktreeSetupNotice busy={busy} error={error} generateRefusal={generateRefusal} onDismiss={() => {
-    setBusy(true);
-    setError(null);
-    void api.dismissWorktreeSetupNotice(session.projectId).catch((cause) => {
-      setError((cause as Error).message);
-    }).finally(() => setBusy(false));
-  }} onGenerate={() => {
-    if (generateRefusal !== null) return;
-    setBusy(true);
-    setError(null);
-    void api.generateWorktreeSetup(session.id)
-      .then(() => api.dismissWorktreeSetupNotice(session.projectId))
-      .then(() => onGenerated(session.id))
-      .catch((cause) => setError((cause as Error).message))
-      .finally(() => setBusy(false));
-  }} />;
 }
 
 function InboxRowInner({
@@ -125,8 +94,6 @@ function InboxRowInner({
   onExpand,
   onToggleThread,
   onSessionMenu,
-  showWorktreeSetupNotice = false,
-  onWorktreeSetupGenerated,
 }: InboxRowProps) {
   const longPress = useLongPress(({ x, y }) => onSessionMenu(session.id, { x, y }));
   // A surface without a store (a harness page) cannot see the runner, so it keeps the conservative
@@ -352,12 +319,6 @@ function InboxRowInner({
           </span>
         </button>
       </div>
-      {showWorktreeSetupNotice && session.projectId && (
-        <div role="gridcell" className="inbox-row-setup-cell">
-          <ConnectedWorktreeSetupNotice session={session as SessionView & { projectId: string }}
-            onGenerated={onWorktreeSetupGenerated ?? onExpand} />
-        </div>
-      )}
     </div>
   );
 }

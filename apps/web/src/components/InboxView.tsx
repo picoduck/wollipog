@@ -63,6 +63,7 @@ import { SegmentedControl } from "./ui/ChoiceControls.js";
 import { worktreeSetupNoticeSessionIds } from "../worktree-setup-notice.js";
 import { ProviderLoginCard } from "./ProviderLoginCard.js";
 import { RecommendedSkillsNotice } from "./RecommendedSkillsNotice.js";
+import { ProjectSetupSuggestion } from "./WorktreeSetupNotice.js";
 
 const PROJECT_PIN_KEY = "wollipog.projects.pinned";
 const SEEN_DWELL_MS = 1_500;
@@ -1247,6 +1248,16 @@ export function InboxView({
   const ratio = dragRatio ?? inbox.splitRatio;
   const activeProjectId = activeSplit?.project?.kind === "durable" ? activeSplit.project.project.id : undefined;
   const activeDurableProject = activeSplit?.project?.kind === "durable" ? activeSplit.project.project : null;
+  // The setup suggestion is per Project (#1977): one notice above the list on that Project's tab,
+  // none on All, and never inside a row.
+  const activeSetupSession = useMemo(() => {
+    if (!activeProjectId) return undefined;
+    for (const sessionId of setupNoticeSessionIds) {
+      const candidate = sessions.get(sessionId);
+      if (candidate?.projectId === activeProjectId) return candidate as SessionView & { projectId: string };
+    }
+    return undefined;
+  }, [activeProjectId, sessions, setupNoticeSessionIds]);
   const activeAvailableLocations = activeDurableProject?.locations.filter((location) => location.availability === "available") ?? [];
   const updateDragRatio = (clientY: number) => {
     const rect = viewRef.current?.getBoundingClientRect();
@@ -1437,6 +1448,10 @@ export function InboxView({
           </section>
         )}
         <RecommendedSkillsNotice onOpen={(skillId) => navigate({ name: "skills", id: skillId })} />
+        {activeSetupSession && activeDurableProject && (
+          <ProjectSetupSuggestion key={activeSetupSession.id} session={activeSetupSession}
+            projectName={activeDurableProject.name} onGenerated={openGeneratedWorktreeSetup} />
+        )}
         {boardMode ? (
           <Board
             sessions={boardSessions}
@@ -1460,7 +1475,6 @@ export function InboxView({
           pinnedSessionIds={pinnedSessions}
           pinnedAncestorSessionIds={pinnedAncestorSessionIds}
           stalledSessionIds={stalledSessionIds}
-          worktreeSetupNoticeSessionIds={setupNoticeSessionIds}
           runningCount={activityCounts.running}
           queuedCount={activityCounts.queued}
           startingCount={activityCounts.starting}
@@ -1508,7 +1522,6 @@ export function InboxView({
           onNewSession={() => onNewSession?.(activeNewSessionPreset)}
           onSelect={handleSelect}
           onExpand={expand}
-          onWorktreeSetupGenerated={openGeneratedWorktreeSetup}
           onToggleThread={toggleThread}
           onScrollPosition={(scrollTop) => inboxScrollPositions.set(instanceScope, scrollTop)}
           onPointerTargetChange={handlePointerTargetChange}
