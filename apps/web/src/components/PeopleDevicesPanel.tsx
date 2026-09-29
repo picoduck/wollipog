@@ -599,7 +599,7 @@ export function PeopleDevicesPanel({
           </p>
         </div>
         <span className="access-context">
-          <PersonalIdentifier value={identity.context.userName} label="Your Name" /> · {identity.context.role}
+          <PersonalIdentifier value={identity.context.userName} label="Your Name" lead="Signed in as" /> · {identity.context.role}
         </span>
       </div>
       {error && <div className="connection-access-error" role="alert">{error}</div>}
@@ -626,7 +626,7 @@ export function PeopleDevicesPanel({
             return (
               <div className="access-row" key={member.userId}>
                 <div className="access-row-main">
-                  <strong><PersonalIdentifier value={member.userName} label="Person Name" /></strong>
+                  <strong><PersonalIdentifier value={member.userName} label="Person Name" lead="Name" /></strong>
                   <span className="access-row-meta">
                     <StatusBadge tone="neutral" noDot label={titleCaseLabel(member.role)} />
                     <StatusBadge meta={statusMeta("member", member.userStatus)} />
@@ -683,7 +683,7 @@ export function PeopleDevicesPanel({
               <div className="access-row" key={device.deviceId}>
                 <div className="access-row-main">
                   <strong>{device.name}</strong>
-                  <span><PersonalIdentifier value={device.userName} label="Person Name" /> · {titleCaseLabel(device.role)}</span>
+                  <span><PersonalIdentifier value={device.userName} label="Person Name" lead="Person" /> · {titleCaseLabel(device.role)}</span>
                   <small>
                     Paired {relativeTime(device.createdAt)}
                     {device.lastSeenAt == null ? " · never used" : ` · last seen ${relativeTime(device.lastSeenAt)}`}

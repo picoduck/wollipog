@@ -60,3 +60,31 @@ export function assertNoDomNode(found: DomAbsenceCandidate | null | undefined, m
   const description = found === undefined ? "undefined rather than null" : describeDomNode(found);
   assert.fail(message ? `${message}: found ${description}` : `expected no element, found ${description}`);
 }
+
+/** The parts of a DOM node `textBefore` walks, typed structurally for the same reason as above. */
+interface DomTextNode {
+  nodeType: number;
+  textContent: string | null;
+  childNodes: ArrayLike<DomTextNode>;
+}
+
+/**
+ * The text a reader meets before `node` inside `container`, whitespace collapsed and trimmed. A
+ * masked identifier must follow a visible label or name (#1954); this is how a test reads it.
+ */
+export function textBefore(container: DomTextNode, node: DomTextNode): string {
+  let text = "";
+  let found = false;
+  const walk = (current: DomTextNode) => {
+    if (found) return;
+    if (current === node) {
+      found = true;
+      return;
+    }
+    if (current.nodeType === 3) text += current.textContent ?? "";
+    for (const child of Array.from(current.childNodes)) walk(child);
+  };
+  walk(container);
+  assert.ok(found, "the node is inside the container");
+  return text.replace(/\s+/gu, " ").trim();
+}

@@ -1567,7 +1567,7 @@ export function NewSessionDialog({
                 <label className="new-session-field-label">Account</label>
                 {providerAccounts.some((account) => isPersonalIdentifier(account.label)) && (
                   <PersonalIdentifierRevealButton
-                    label="Account Emails"
+                    label="Emails"
                     revealed={accountIdentifiersRevealed}
                     onToggle={toggleAccountIdentifiers}
                     withText

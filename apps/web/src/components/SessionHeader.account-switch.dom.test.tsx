@@ -165,7 +165,7 @@ test("email-shaped account labels stay masked in the header and the Switch Accou
     const titles = [...domWindow.document.querySelectorAll(".choice-row-title")].map((node) => node.textContent);
     assert.deepEqual(titles, ["Hidden Account 1", "Hidden Account 2"]);
 
-    const revealAll = buttonNamed("Show Account Emails");
+    const revealAll = buttonNamed("Show Emails");
     assert.ok(revealAll, "the picker offers one deliberate reveal");
     await act(async () => { revealAll.click(); });
     assert.deepEqual(

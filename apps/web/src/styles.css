@@ -2663,8 +2663,9 @@ button.status { cursor: pointer; }
 /* ------------------------- Masked personal identifier -------------------------
    An email or other personal identifier, masked until the person reveals it (docs/design-system.md
    §11.8). PersonalIdentifier.tsx owns the logic: while masked the value is not in the DOM at all.
-   The reveal control is compact so it fits a tag or a field label; on touch it borrows a 44px hit
-   area around the same glyph, so the row it sits in keeps its height. */
+   The mask says what it hides — a mail icon and "Email Hidden" in a subtle dashed chip — and the
+   revealed value keeps the same icon at the same inset, so revealing moves only the text. The
+   reveal control is a square `.icon-btn.sm`, which borrows a 44px hit area on touch. */
 .pid {
   display: inline-flex;
   align-items: center;
@@ -2672,29 +2673,31 @@ button.status { cursor: pointer; }
   max-width: 100%;
   vertical-align: middle;
 }
-.pid-value { min-width: 0; overflow-wrap: anywhere; }
-.pid-mask { letter-spacing: 1px; color: var(--text-dim); user-select: none; }
-.pid-toggle {
+.pid-lead { flex: none; color: var(--text-dim); font-weight: 400; }
+.pid-mask,
+.pid-shown {
   display: inline-flex;
-  flex: none;
   align-items: center;
-  justify-content: center;
   gap: var(--space-1);
-  min-width: 22px;
-  height: 22px;
+  min-width: 0;
   padding: 0 var(--space-1);
-  border: 1px solid transparent;
+  border: 1px dashed transparent;
   border-radius: var(--radius-xs);
-  background: transparent;
-  color: var(--text-dim);
-  font: inherit;
-  cursor: pointer;
 }
-.pid-toggle.with-text { padding: 0 var(--space-2); border-color: var(--border); font-size: var(--text-sm); }
-.pid-toggle:hover { color: var(--text); background: var(--bg-elev-3); }
-.pid-toggle:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 1px; }
-/* Inside a compact tag the control keeps the tag's height and only borrows its padding box. */
-.tag .pid-toggle { min-width: 16px; height: 16px; margin-top: -2px; margin-bottom: -2px; padding: 0 var(--space-0-5); }
+.pid-mask {
+  flex: none;
+  border-color: var(--border-strong);
+  color: var(--text-dim);
+  font-weight: 400;
+  white-space: nowrap;
+  user-select: none;
+}
+:is(.pid-mask, .pid-shown) > .app-icon { color: var(--text-dim); }
+.pid-value { min-width: 0; overflow-wrap: anywhere; }
+/* Inside a compact tag the chip drops its frame and the control keeps the tag's height, borrowing
+   the rest of its hit area. */
+.tag :is(.pid-mask, .pid-shown) { padding: 0; border: 0; }
+.tag .pid-toggle { width: 16px; height: 16px; margin-top: -2px; margin-bottom: -2px; }
 /* A field label with the reveal control for the values the field hides (a picker's options). */
 .pid-field-head {
   display: flex;
@@ -2705,17 +2708,8 @@ button.status { cursor: pointer; }
 }
 .pid-field-head > .pid-toggle { margin-inline-start: auto; }
 @media (pointer: coarse) {
-  .pid-toggle { position: relative; }
-  .pid-toggle::after {
-    content: "";
-    position: absolute;
-    top: 50%;
-    left: 50%;
-    width: 44px;
-    height: 44px;
-    margin: -22px 0 0 -22px;
-  }
-  .pid-toggle.with-text { min-height: var(--control-h); }
+  /* Outranks the shared small-control rule, which would borrow only 4px around a 16px glyph. */
+  .tag .pid-toggle.icon-btn::after { inset: -14px; }
 }
 
 /* ---------------------------------- Stale ----------------------------------
@@ -7463,6 +7457,11 @@ button.file-head.source-path-link {
 .access-row-main small {
   color: var(--text-faint);
 }
+/* A masked name keeps its reveal control's focus ring unclipped; the value wraps instead. */
+.access-row-main strong:has(> .pid) {
+  overflow: visible;
+  white-space: normal;
+}
 .access-row-meta,
 .access-heading-line {
   display: flex;
@@ -7934,8 +7933,10 @@ button.file-head.source-path-link {
 .auth-recovery-account-error {
   margin: 0;
 }
+/* Its natural width first, so a long revealed email moves the status tag to the next line rather
+   than breaking mid-word beside it. */
 .auth-recovery-account-label {
-  flex: 1;
+  flex: 1 1 auto;
   min-width: 0;
   font-weight: 600;
   overflow-wrap: anywhere;

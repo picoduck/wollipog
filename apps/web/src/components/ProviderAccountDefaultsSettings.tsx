@@ -46,7 +46,7 @@ export function ProviderAccountDefaultsSettings({ runner }: { runner: RunnerView
       <p>Choose the account used for new native host sessions when no account is specified. Existing sessions keep their accounts.</p>
       {accounts.some((account) => isPersonalIdentifier(account.label)) && (
         <PersonalIdentifierRevealButton
-          label="Account Emails"
+          label="Emails"
           revealed={revealed}
           onToggle={toggleReveal}
           withText

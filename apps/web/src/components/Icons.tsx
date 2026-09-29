@@ -37,6 +37,7 @@ import {
   List as LucideList,
   ListChecks as LucideListChecks,
   Lock as LucideLock,
+  Mail as LucideMail,
   MessageCircleQuestion as LucideMessageCircleQuestion,
   Mic as LucideMic,
   Monitor as LucideMonitor,
@@ -261,6 +262,10 @@ export function KeyboardIcon(props: IconProps) {
 
 export function LockIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideLock} {...props} />;
+}
+
+export function MailIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideMail} {...props} />;
 }
 
 export function EyeIcon(props: IconProps) {

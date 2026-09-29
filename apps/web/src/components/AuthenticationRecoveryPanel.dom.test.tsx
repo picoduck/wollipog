@@ -14,6 +14,7 @@ import {
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { AuthenticationRecoveryPanel, authenticationRecoveryPanelApplies } from "./AuthenticationRecoveryPanel.js";
+import { textBefore } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/session/session-auth" });
 for (const [name, value] of Object.entries({
@@ -235,6 +236,19 @@ test("email-shaped account labels stay masked and are named by distinct hidden o
     }
     assert.ok(view.button("Use Hidden Account 1"));
     assert.ok(view.button("Check and Use Hidden Account 2"));
+
+    // #1954: no mask stands alone. Each says what it hides and follows a visible label.
+    const masks = [...view.container.querySelectorAll(".pid-mask")];
+    assert.ok(masks.every((mask) => mask.textContent === "Email Hidden"));
+    const reported = view.container.querySelector(".auth-recovery-email")!;
+    assert.equal(textBefore(reported, reported.querySelector(".pid-mask")!), "Claude Code reports");
+    const configured = [...view.container.querySelectorAll(".auth-recovery-identity > div")]
+      .find((row) => row.querySelector("dt")?.textContent === "Configured Account")!;
+    assert.equal(textBefore(configured, configured.querySelector(".pid-mask")!), "Configured Account");
+    const rows = [...view.container.querySelectorAll(".auth-recovery-account")];
+    assert.equal(rows.length, 2);
+    for (const row of rows) assert.equal(textBefore(row, row.querySelector(".pid-mask")!), "Account");
+    assert.equal(masks.length, 4, "the reported email, the configured label, and both other accounts");
   } finally {
     await view.cleanup();
   }

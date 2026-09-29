@@ -7,7 +7,7 @@ import { Window } from "happy-dom";
 import type { SubscriptionUsageResponse, UsageAggregationGranularity, UsageAggregationResponse } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { assertNoDomNode } from "../dom-test-assertions.js";
+import { assertNoDomNode, textBefore } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { bucketLabel } from "../usage-view-model.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
@@ -777,6 +777,58 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   });
   assert.equal(refreshes, 2);
   assert.deepEqual(refreshTargets[1], { runnerId: "runner-1", providerAccountId: "work" });
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("a subscription row's masked account says what it hides after an Account label (#1954)", async () => {
+  const now = Date.now();
+  const source = (id: string, providerAccountId: string | undefined, accountLabel: string) => ({
+    sourceId: id.repeat(32),
+    runnerId: "runner-1",
+    agentId: "codex",
+    provider: "codex" as const,
+    ...(providerAccountId ? { providerAccountId } : {}),
+    accountLabel,
+    state: "available" as const,
+    fetchedAt: now,
+    freshness: "fresh" as const,
+    runnerStatus: "online" as const,
+    runnerName: "Build Machine",
+    agentName: "Codex",
+    buckets: [],
+    spendControls: [],
+  });
+  const client = {
+    ...api,
+    usage: async () => response([]),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    // A bound account named with an email, and an unbound source whose label is the provider's report.
+    subscriptionUsage: async () => ({
+      staleAfterMs: 600_000,
+      generatedAt: now,
+      sources: [source("a", "work", "work.person@example.test"), source("b", undefined, "reported@example.test")],
+    }) as SubscriptionUsageResponse,
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+  });
+  await act(async () => {
+    await settleLoad();
+    await Promise.resolve();
+  });
+  const rows = [...container.querySelectorAll(".subscription-account")];
+  assert.equal(rows.length, 2);
+  assert.equal(container.innerHTML.includes("@example.test"), false);
+  for (const row of rows) {
+    const mask = row.querySelector(".pid-mask")!;
+    assert.equal(mask.textContent, "Email Hidden");
+    assert.equal(textBefore(row, mask), "Account:");
+  }
   await act(async () => root.unmount());
   container.remove();
 });

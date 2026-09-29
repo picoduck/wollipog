@@ -222,6 +222,7 @@ export function AuthenticationRecoveryPanel({
                     className="auth-recovery-account-label"
                     value={account.label}
                     label="Account Email"
+                    lead="Account"
                   />
                   <span className={`atag ${account.availability === "sign_in_required" ? "broken" : "discovered"}`}>
                     {AVAILABILITY_LABEL[account.availability]}
@@ -336,7 +337,15 @@ function ProviderIdentity({
     : null;
   return (
     <span className="auth-recovery-email">
-      {message ?? <PersonalIdentifier value={value.email!} label="Current Account Email" sensitive />}
+      {message ?? (
+        <PersonalIdentifier
+          value={value.email!}
+          label="Current Account Email"
+          sensitive
+          kind="email"
+          lead={`${provider} reports`}
+        />
+      )}
       {checked}
     </span>
   );

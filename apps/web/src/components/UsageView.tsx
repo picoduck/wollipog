@@ -450,6 +450,7 @@ export function UsageView() {
                         <PersonalIdentifier
                           value={source.accountLabel}
                           label="Account Email"
+                          kind="email"
                           {...(source.providerAccountId ? {} : { sensitive: true })}
                         />
                       </p>

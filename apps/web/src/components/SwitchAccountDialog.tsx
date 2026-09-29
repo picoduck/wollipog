@@ -119,7 +119,7 @@ export function SwitchAccountDialog({
             <span className="field-label">Account</span>
             {accounts.some((account) => isPersonalIdentifier(account.label)) && (
               <PersonalIdentifierRevealButton
-                label="Account Emails"
+                label="Emails"
                 revealed={identifiersRevealed}
                 onToggle={toggleIdentifiers}
                 controls={pickerId}

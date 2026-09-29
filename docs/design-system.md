@@ -1384,10 +1384,21 @@ of `.code-well` and `.copy-field`.
 merge of `.pid` and `.masked-field`. `PersonalIdentifier.tsx` keeps the logic: while masked, the
 value is not in the DOM.
 
-- `.pid` is inline; the value is `.pid-value`, the mask `.pid-mask` (`--text-dim`, not selectable),
-  and the reveal control `.pid-toggle`: 22px, an Eye icon, `--radius-xs`, with the action as text
-  (`.pid-toggle.with-text`) where there is room. On touch it borrows a 44px hit area around the same
-  glyph, so a tag keeps its height.
+- `.pid` is inline. The mask `.pid-mask` says what it hides: a 14px `Mail` icon and the words
+  **Email Hidden** (a `Lock` icon and **Hidden** for any other `kind`) in a subtle dashed chip
+  (`--border-strong`, `--radius-xs`, `--text-dim`, not selectable). The words are the accessible
+  text; no part of the value — length, domain or first letter — is ever a hint.
+- Revealed, `.pid-shown` keeps the same icon at the same inset around the value `.pid-value`, so the
+  row moves only by the text.
+- A masked value is `kind: "email"` when it is masked for being email-shaped. A value masked by
+  provenance alone (`sensitive`) is **Hidden** unless the caller knows it is an email.
+- The reveal control `.pid-toggle` is a square `.icon-btn.sm` (28px, a 44px hit area on touch) with
+  the normal focus ring and the Eye icon; its name is "Show …" or "Hide …" and the value's label. In a
+  picker's field head it is a `.btn.sm.ghost` with the Eye icon and the action as text ("Show
+  Emails"). Inside a compact `.tag` the chip drops its frame and the control keeps the tag's height.
+- A mask never stands alone: a visible label comes before it — the field's own label, "Account:",
+  or the component's `lead` ("Account", "Name", "Claude Code reports"), which appears only when the
+  value is masked, so an alias still reads as the account's configured name.
 - A field label with a reveal control for the values its picker hides is `.pid-field-head`.
 - Replaces `.personal-identifier`, `.personal-identifier-value`, `.personal-identifier-mask`,
   `.personal-identifier-toggle` and `.personal-identifier-field-head`.

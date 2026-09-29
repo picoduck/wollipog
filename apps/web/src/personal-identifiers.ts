@@ -23,9 +23,6 @@
 const EMAIL_ADDRESS = /(?:"[^"\n]*"|[^\s@<>()[\]\\,;:"]+)@[^\s@<>()[\]\\,;:"']+\.[^\s@<>()[\]\\,;:"'.]+/u;
 const EMAIL_ADDRESSES = new RegExp(EMAIL_ADDRESS.source, "gu");
 
-/** Fixed-length so the mask never discloses the hidden value's length. */
-export const MASKED_IDENTIFIER = "••••••••";
-
 /** Safe stand-in for a hidden account label inside sentences, tooltips, and notifications. */
 export const HIDDEN_ACCOUNT = "Hidden Account";
 

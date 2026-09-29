@@ -7,6 +7,7 @@ import { ApiError } from "./api.js";
 import { archiveAndStopMessage } from "./archive-actions.js";
 import { closeWarning } from "./components/DesktopCloseGuard.js";
 import { heldUpdateMessage } from "./desktop-updates.js";
+import { HIDDEN_IDENTIFIER_TEXT } from "./components/PersonalIdentifier.js";
 import { lifecycleConflictPresentation } from "./components/RunnersView.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
@@ -172,6 +173,43 @@ test("static compact UI labels use Title Case", () => {
     visit(sourceFile);
   }
   assert.deepEqual(failures, [], failures.join("\n"));
+});
+
+test("a masked identifier's words and every reveal control's name are Title Case (#1954)", () => {
+  assert.deepEqual(Object.values(HIDDEN_IDENTIFIER_TEXT), ["Email Hidden", "Hidden"]);
+  for (const text of Object.values(HIDDEN_IDENTIFIER_TEXT)) assert.ok(isTitleCase(text), text);
+  // A reveal control's name is "Show" or "Hide" and the label its caller passes.
+  const REVEALS = new Set(["PersonalIdentifier", "PersonalIdentifierRevealButton"]);
+  const names: string[] = [];
+  const failures: string[] = [];
+  for (const file of sourceFiles(SOURCE_ROOT)) {
+    const source = readFileSync(file, "utf8");
+    // The component forwards its own `label`; its callers supply the copy.
+    if (!source.includes("<PersonalIdentifier") || file.endsWith(`${path.sep}PersonalIdentifier.tsx`)) continue;
+    const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    const visit = (node: ts.Node) => {
+      if (ts.isJsxOpeningLikeElement(node) && REVEALS.has(node.tagName.getText(sourceFile))) {
+        const label = node.attributes.properties.find((property): property is ts.JsxAttribute =>
+          ts.isJsxAttribute(property) && property.name.getText(sourceFile) === "label");
+        const where = `${path.relative(SOURCE_ROOT, file)}:${sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1}`;
+        if (!label?.initializer || !ts.isStringLiteral(label.initializer)) {
+          failures.push(`${where} reveal label is not literal copy`);
+        } else {
+          for (const action of ["Show", "Hide"]) {
+            const name = `${action} ${label.initializer.text}`;
+            names.push(name);
+            if (!isTitleCase(name)) failures.push(`${where} ${JSON.stringify(name)}`);
+          }
+        }
+      }
+      ts.forEachChild(node, visit);
+    };
+    visit(sourceFile);
+  }
+  assert.deepEqual(failures, [], failures.join("\n"));
+  for (const name of ["Show Emails", "Hide Emails", "Show Account Email", "Hide Account Email"]) {
+    assert.ok(names.includes(name), `${name} is one of the scanned reveal names`);
+  }
 });
 
 test("consent checkbox labels are sentences, and every other checkbox label is Title Case", () => {

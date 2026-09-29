@@ -83,11 +83,11 @@ for (const viewport of [
     await page.screenshot({ path: `test-results/personal-identifiers/new-session-masked-${viewport.name}.png` });
 
     // Keyboard reveal and hide: the control names the action, never the value.
-    const reveal = page.getByRole("button", { name: "Show Account Emails" });
+    const reveal = page.getByRole("button", { name: "Show Emails" });
     await reveal.focus();
     await page.keyboard.press("Enter");
     await expect(account).toHaveAccessibleName(/Account: work\.me@example\.com/);
-    const hide = page.getByRole("button", { name: "Hide Account Emails" });
+    const hide = page.getByRole("button", { name: "Hide Emails" });
     await expect(hide).toBeFocused();
     await page.screenshot({ path: `test-results/personal-identifiers/new-session-revealed-${viewport.name}.png` });
     await page.keyboard.press("Space");

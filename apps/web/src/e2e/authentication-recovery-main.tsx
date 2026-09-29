@@ -21,11 +21,13 @@ import "../styles.css";
 /** Real-browser SessionDetail with a Claude Code Authentication Required card (#1649).
  * `?scenario=email` (default) reports a provider email, `no-email` reports none, `older` is a
  * pre-v180 runner, `readonly` is a viewer who cannot manage the Machine, and `refused` makes the
- * runner refuse the chosen account as signed out. `?theme=light|dark`, `?width=`, `?height=`. */
+ * runner refuse the chosen account as signed out. `?emailLabels=1` names two of the other accounts
+ * with an email, as people often do. `?theme=light|dark`, `?width=`, `?height=`. */
 const params = new URLSearchParams(window.location.search);
 const scenario = params.get("scenario") ?? "email";
 const frameWidth = Number(params.get("width") ?? "1100");
 const frameHeight = Number(params.get("height") ?? "760");
+const emailLabels = params.get("emailLabels") === "1";
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 
 declare global {
@@ -68,8 +70,8 @@ const runner = {
     : RUNNER_CAPABILITY_MIN_PROTOCOL.providerAuthenticationAccountRecovery,
   providerAccounts: [
     { id: "claude-work", label: "Work Subscription", provider: "claude", authStatus: "authenticated" },
-    { id: "claude-personal", label: "Personal Max", provider: "claude", authStatus: "authenticated" },
-    { id: "claude-team", label: "Team Pilot", provider: "claude", authStatus: "unauthenticated" },
+    { id: "claude-personal", label: emailLabels ? "jordan.personal@example.net" : "Personal Max", provider: "claude", authStatus: "authenticated" },
+    { id: "claude-team", label: emailLabels ? "team.pilot@example.org" : "Team Pilot", provider: "claude", authStatus: "unauthenticated" },
     { id: "claude-lab", label: "Lab Sandbox", provider: "claude", authStatus: "unknown" },
   ],
   providerLogins: [],
