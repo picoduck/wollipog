@@ -169,8 +169,15 @@ pub(crate) struct DesktopUpdateStatus {
 pub(crate) enum InstallOutcome {
     /// Nothing newer was published after all.
     Current,
-    /// Work is in flight. Nothing was installed; the user was warned and may try again.
-    HeldForWork { sessions: usize },
+    /// Work is in flight. Nothing was installed; the user was warned and may try again. `sessions`
+    /// is 0 when the control plane could not say. `session_ids` names the sessions it could (#1975),
+    /// as the close event does: ids only, so the dashboard's confirmation takes their titles from the
+    /// local instance it has loaded.
+    HeldForWork {
+        sessions: usize,
+        #[serde(rename = "sessionIds")]
+        session_ids: Vec<String>,
+    },
     /// Installed. The app is restarting (Windows: the installer has taken over).
     Restarting,
 }
@@ -190,7 +197,7 @@ pub(crate) struct DesktopUpdater {
     /// Held for a whole install attempt so two clicks cannot download or install twice.
     pending: tokio::sync::Mutex<Option<PendingUpdate>>,
     /// This gesture's own warning latch. Shared with the close guard's, deferring an install
-    /// ("Not Now") would have authorized the next window close without a warning, and the reverse.
+    /// ("Install Later") would have authorized the next window close without a warning, and the reverse.
     warned_at: Mutex<Option<Instant>>,
     /// Set by the Windows exit hook once it has stopped the managed processes, so a failed installer
     /// launch knows the app it returns to has none.
@@ -252,20 +259,26 @@ fn record_check(app: &tauri::AppHandle, update: Option<&Update>) -> UpdateCheck 
 ///
 /// The latch alone let any install request within the grace period through: a second, concurrent
 /// request from the other surface (Settings and the toast), or a plain "Install and Restart" right
-/// after "Not Now", restarted over live work without anyone choosing "Install Anyway".
+/// after "Install Later", restarted over live work without anyone choosing "Restart Anyway".
 fn forget_unconfirmed_warning(latch: &Mutex<Option<Instant>>, confirmed: bool) {
     if !confirmed {
         *latch.lock().unwrap() = None;
     }
 }
 
-/// Ask the close guard's question under this gesture's own latch. `Some(sessions)` holds.
-async fn hold_for_work(app: &tauri::AppHandle, confirmed: bool) -> Result<Option<usize>, String> {
+/// Ask the close guard's question under this gesture's own latch. `Some(outcome)` holds.
+async fn hold_for_work(
+    app: &tauri::AppHandle,
+    confirmed: bool,
+) -> Result<Option<InstallOutcome>, String> {
     let task_app = app.clone();
     tokio::task::spawn_blocking(move || {
         let latch = &task_app.state::<DesktopUpdater>().warned_at;
         forget_unconfirmed_warning(latch, confirmed);
-        crate::exit_hold_for_work(&task_app, latch).map(|work| work.count)
+        crate::exit_hold_for_work(&task_app, latch).map(|work| InstallOutcome::HeldForWork {
+            sessions: work.count,
+            session_ids: work.session_ids,
+        })
     })
     .await
     .map_err(|error| format!("Could not check for running work: {error}"))
@@ -334,7 +347,7 @@ pub(crate) async fn set_automatic_update_checks(
 /// only good for a moment, and a download can take minutes. A held attempt keeps the verified
 /// package, so confirming does not download it again.
 ///
-/// `confirmed` is the "Install Anyway" answer to this gesture's own warning, given within its grace
+/// `confirmed` is the "Restart Anyway" answer to this gesture's own warning, given within its grace
 /// period. Anything else is asked afresh.
 ///
 /// The question is asked again after macOS or the AppImage has replaced the files, because work can
@@ -379,8 +392,8 @@ pub(crate) async fn install_desktop_update(
         }
     }
 
-    if let Some(sessions) = hold_for_work(&app, confirmed).await? {
-        return Ok(InstallOutcome::HeldForWork { sessions });
+    if let Some(held) = hold_for_work(&app, confirmed).await? {
+        return Ok(held);
     }
 
     if !installed {
@@ -405,8 +418,8 @@ pub(crate) async fn install_desktop_update(
         });
         // Confirmed or not, the latch now says what this request was told: a confirmation still
         // covers it, and an unconfirmed request that found no work has nothing in it.
-        if let Some(sessions) = hold_for_work(&app, true).await? {
-            return Ok(InstallOutcome::HeldForWork { sessions });
+        if let Some(held) = hold_for_work(&app, true).await? {
+            return Ok(held);
         }
     }
 
@@ -543,12 +556,28 @@ mod tests {
         forget_unconfirmed_warning(&latch, true);
         assert!(
             latch.lock().unwrap().is_some(),
-            "Install Anyway keeps its warning"
+            "Restart Anyway keeps its warning"
         );
         forget_unconfirmed_warning(&latch, false);
         assert!(
             latch.lock().unwrap().is_none(),
             "a plain install request is asked afresh, never waved through by another's warning"
+        );
+    }
+
+    #[test]
+    fn a_held_install_names_the_working_sessions_by_id() {
+        let held = InstallOutcome::HeldForWork {
+            sessions: 3,
+            session_ids: vec!["s_one".into(), "s_two".into()],
+        };
+        assert_eq!(
+            serde_json::to_value(&held).unwrap(),
+            serde_json::json!({"outcome": "heldForWork", "sessions": 3, "sessionIds": ["s_one", "s_two"]})
+        );
+        assert_eq!(
+            serde_json::to_value(InstallOutcome::Restarting).unwrap(),
+            serde_json::json!({"outcome": "restarting"})
         );
     }
 

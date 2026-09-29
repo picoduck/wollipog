@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { FeedbackContext, type ToastOptions } from "./FeedbackProvider.js";
+import { FeedbackContext, type ConfirmationOptions, type ToastOptions } from "./FeedbackProvider.js";
 import { DesktopUpdateNotifier } from "./DesktopUpdateNotifier.js";
 import type { DesktopUpdateCheck, DesktopUpdateOutcome, DesktopUpdateRuntime, DesktopUpdateStatus } from "../desktop-updates.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
@@ -48,6 +48,7 @@ function harness({
 } = {}) {
   const calls: Array<{ command: string; args?: Record<string, unknown> }> = [];
   const toasts: Array<{ message: string } & ToastOptions> = [];
+  const confirmations: ConfirmationOptions[] = [];
   const desktop: DesktopUpdateRuntime = {
     isTauri: () => isTauri,
     invoke: async <T,>(command: string, args?: Record<string, unknown>) => {
@@ -58,7 +59,7 @@ function harness({
       return undefined as T;
     },
   };
-  return { calls, toasts, desktop };
+  return { calls, toasts, confirmations, desktop };
 }
 
 async function mount(h: ReturnType<typeof harness>) {
@@ -66,7 +67,12 @@ async function mount(h: ReturnType<typeof harness>) {
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   const feedback = {
-    confirm: async () => false,
+    // Records the question and answers Restart Anyway, running the confirmation's action.
+    confirm: async (options: ConfirmationOptions) => {
+      h.confirmations.push(options);
+      await options.onConfirm?.(new AbortController().signal);
+      return true;
+    },
     showToast: (message: string, options: ToastOptions = {}) => {
       h.toasts.push({ message, ...options });
       return h.toasts.length;
@@ -91,34 +97,39 @@ test("a newer release is announced once, as an automatic check, with an install 
   const { unmount } = await mount(h);
   assert.deepEqual(h.calls[0], { command: "check_for_desktop_update", args: { automatic: true } });
   assert.equal(h.toasts.length, 1);
-  assert.equal(h.toasts[0]!.message, "Wollipog 0.28.0 is available.");
+  assert.equal(h.toasts[0]!.message, "Wollipog 0.28.0 is ready to install.");
+  assert.equal(h.toasts[0]!.tone, "info");
+  assert.equal(h.toasts[0]!.detail, "Restarting takes a few seconds. You can also install it later from Settings.");
+  assert.deepEqual(h.toasts[0]!.link, { label: "What's New", href: available.releaseUrl });
   assert.equal(h.toasts[0]!.durationMs, 0, "an update notice waits for the user");
   assert.equal(h.toasts[0]!.action?.label, "Install and Restart");
   await unmount();
 });
 
-test("installing while work is in flight turns into the warning, and its action confirms", async () => {
-  const h = harness({ installs: [{ outcome: "heldForWork", sessions: 2 }, { outcome: "restarting" }] });
+test("installing while work is in flight asks with the held-update confirmation, never a toast", async () => {
+  const h = harness({ installs: [{ outcome: "heldForWork", sessions: 2, sessionIds: ["s_one", "s_two"] }, { outcome: "current" }] });
   const { unmount } = await mount(h);
   await act(async () => { await h.toasts[0]!.action!.run(); });
-  assert.equal(h.toasts.length, 2);
-  assert.equal(h.toasts[1]!.message, "2 sessions still have work running. Installing restarts Wollipog and will stop them.");
-  assert.equal(h.toasts[1]!.tone, "error");
-  assert.equal(h.toasts[1]!.durationMs, 0);
-  assert.equal(h.toasts[1]!.action?.label, "Install Anyway");
-  await act(async () => { await h.toasts[1]!.action!.run(); });
-  // Only the warning's own action is a confirmation; the first click is asked afresh.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
+  assert.equal(h.toasts.length, 1, "a decision is never a toast (§13.1)");
+  assert.equal(h.confirmations.length, 1);
+  assert.equal(h.confirmations[0]!.title, "Restart to Install Update");
+  assert.equal(h.confirmations[0]!.cancelLabel, "Install Later");
+  assert.equal(h.confirmations[0]!.confirmLabel, "Restart Anyway");
+  assert.equal(h.confirmations[0]!.tone, "danger");
+  // Only the confirmation is a confirmation; the toast's click is asked afresh.
   assert.deepEqual(
     h.calls.filter(({ command }) => command === "install_desktop_update").map(({ args }) => args),
     [{ confirmed: false }, { confirmed: true }],
   );
-  assert.equal(h.toasts.length, 2, "a confirmed install restarts; it does not warn again");
   await unmount();
 });
 
 test("a package-manager install is pointed at the release page instead", async () => {
   const h = harness({ mode: "releasePage" });
   const { unmount } = await mount(h);
+  assert.equal(h.toasts[0]!.message, "Wollipog 0.28.0 is available.");
+  assert.equal(h.toasts[0]!.detail, "You can also open it later from Settings.", "nothing restarts in this mode");
   assert.equal(h.toasts[0]!.action?.label, "Open Release Page");
   await act(async () => { await h.toasts[0]!.action!.run(); });
   assert.deepEqual(h.calls.at(-1), { command: "open_external_url", args: { url: available.releaseUrl } });

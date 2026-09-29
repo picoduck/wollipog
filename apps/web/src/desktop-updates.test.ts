@@ -8,7 +8,7 @@ import {
   installDesktopUpdate,
   openReleasePage,
   readDesktopUpdateStatus,
-  updateWarning,
+  updateToastMessage,
   writeAutomaticUpdateChecks,
   type DesktopUpdateRuntime,
 } from "./desktop-updates.js";
@@ -76,12 +76,11 @@ test("the shell's serialized shapes are the ones this file reads", () => {
   // serde renames in updates.rs, spelled as the dashboard's discriminants.
   assert.match(updates, /#\[serde\(tag = "mode", rename_all = "camelCase"\)\]\s*pub\(crate\) enum InstallMode \{\s*InPlace,\s*ReleasePage \{ reason: String \},/u);
   assert.match(updates, /#\[serde\(tag = "state", rename_all = "camelCase"\)\]\s*pub\(crate\) enum UpdateCheck \{\s*Current \{/u);
-  assert.match(updates, /#\[serde\(tag = "outcome", rename_all = "camelCase"\)\]\s*pub\(crate\) enum InstallOutcome \{[\s\S]*Current,[\s\S]*HeldForWork \{ sessions: usize \},[\s\S]*Restarting,/u);
+  assert.match(updates, /#\[serde\(tag = "outcome", rename_all = "camelCase"\)\]\s*pub\(crate\) enum InstallOutcome \{[\s\S]*Current,[\s\S]*HeldForWork \{\s*sessions: usize,\s*#\[serde\(rename = "sessionIds"\)\]\s*session_ids: Vec<String>,\s*\},[\s\S]*Restarting,/u);
   assert.match(updates, /#\[serde\(rename = "checkedAt"\)\]/u);
 });
 
-test("the install warning counts sessions and never invents one", () => {
-  assert.equal(updateWarning(0), "Agent work may still be running. Installing restarts Wollipog and will stop it.");
-  assert.equal(updateWarning(1), "1 session still has work running. Installing restarts Wollipog and will stop it.");
-  assert.equal(updateWarning(3), "3 sessions still have work running. Installing restarts Wollipog and will stop them.");
+test("the update toast says an in-place update is ready, and a package update only available", () => {
+  assert.equal(updateToastMessage("0.29.0", { mode: "inPlace" }), "Wollipog 0.29.0 is ready to install.");
+  assert.equal(updateToastMessage("0.29.0", { mode: "releasePage", reason: "A .deb package." }), "Wollipog 0.29.0 is available.");
 });

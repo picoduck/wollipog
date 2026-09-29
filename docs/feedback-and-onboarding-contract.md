@@ -27,6 +27,18 @@ health checklist.
   after the await; pod close, for example, cannot cross a newly-started reconciliation.
 - A missing provider fails closed: confirmation resolves `false`. Provider teardown resolves every
   active or queued request `false` and clears feedback timers.
+- **A desktop update held for running work is one confirmation.** Installing an update restarts
+  Wollipog, which stops agent turns, so the shell holds an unconfirmed install while work is in flight
+  and answers with the working sessions' ids. The update toast and Settings › About then open the same
+  dialog through one helper (`confirmHeldUpdate`): the danger-toned title "Restart to Install
+  Update", a body naming the version and how many sessions stop (or, with no count, that any turn in
+  progress stops), the sessions the loaded local instance can name as detail rows with the rest
+  counted, and Install Later (the cancel and initial focus) beside Restart Anyway. Restart Anyway
+  sends the one confirmed install with the dialog open and the button busy; it cannot be withdrawn
+  once sent, a failure stays in the dialog, and a shell that holds the confirmed install again is
+  asked about again with its new answer. Install Later, Escape and the scrim send nothing, and
+  Settings › About keeps offering Install and Restart. There is no held-update toast, notice or
+  banner.
 
 ## Toast and undo lifecycle
 

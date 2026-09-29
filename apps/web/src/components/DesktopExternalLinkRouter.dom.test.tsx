@@ -167,41 +167,123 @@ test("internal links and browser builds retain ordinary navigation behavior", as
   }
 });
 
-test("native opener failures become persistent actionable errors", async () => {
+type ToastAction = { label: string; run: () => Promise<void> };
+
+/** Replace the clipboard for one test; returns what was written and a restore. */
+function fakeClipboard(writeText: (text: string) => Promise<void>) {
+  const written: string[] = [];
+  const previous = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { await writeText(text); written.push(text); } },
+  });
+  return {
+    written,
+    restore: () => {
+      if (previous) Object.defineProperty(domWindow.navigator, "clipboard", previous);
+      else delete (domWindow.navigator as unknown as Record<string, unknown>).clipboard;
+    },
+  };
+}
+
+/** The native text goes to the console, never the screen. */
+function captureWarnings() {
+  const warnings: unknown[][] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args); };
+  return { warnings, restore: () => { console.warn = original; } };
+}
+
+test("a link the browser refuses shows the URL and Copy Link, and keeps the native error off the screen", async () => {
   const h = harness();
-  h.rejectWith = "No browser is configured";
+  h.rejectWith = "The system browser could not open this link: No browser is configured";
+  const console_ = captureWarnings();
+  const clipboard = fakeClipboard(async () => undefined);
   const { unmount } = await mount(h);
-  const link = anchor("https://example.com/docs");
+  const url = "https://example.com/docs?page=2#install";
+  const link = anchor(url);
   activate(link);
   await act(async () => { await Promise.resolve(); });
 
-  assert.equal(h.calls.length, 1);
-  assert.equal(h.toasts.length, 1);
-  assert.match(h.toasts[0]!.message, /Could not open link: No browser is configured/);
-  assert.equal(h.toasts[0]!.options.tone, "error");
-  assert.equal(h.toasts[0]!.options.durationMs, 0);
-  assert.equal((h.toasts[0]!.options.action as { label: string; progress: string }).label, "Retry");
-  assert.equal((h.toasts[0]!.options.action as { label: string; progress: string }).progress, "Opening the link again…");
+  try {
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.toasts.length, 1);
+    const [toast] = h.toasts;
+    assert.equal(toast!.message, "Couldn't open the link in your browser.");
+    assert.equal(toast!.options.tone, "error");
+    assert.equal(toast!.options.durationMs, undefined, "an error persists until dismissed (#1802)");
+    assert.equal(toast!.options.detail, url);
+    assert.equal(toast!.options.detailStyle, "mono");
+    assert.doesNotMatch(JSON.stringify(toast), /No browser is configured/, "the native text never reaches the toast");
+    assert.match(String(console_.warnings[0]?.[1]), /No browser is configured/);
+    const action = toast!.options.action as ToastAction;
+    assert.equal(action.label, "Copy Link", "there is no Retry");
 
-  link.remove();
-  await unmount();
+    await act(async () => { await action.run(); });
+    assert.deepEqual(clipboard.written, [url], "Copy Link copies the exact URL");
+    assert.equal(h.toasts.at(-1)!.message, "Link copied.");
+  } finally {
+    console_.restore();
+    clipboard.restore();
+    link.remove();
+    await unmount();
+  }
 });
 
-test("native policy rejections are transient and never offer a futile retry", async () => {
+test("a link the policy blocks is a warning with the URL and Copy Link, and no Retry", async () => {
   const h = harness();
-  h.rejectWith = `${EXTERNAL_URL_POLICY_ERROR_PREFIX}Wollipog can open only HTTP and HTTPS links.`;
+  h.rejectWith = `${EXTERNAL_URL_POLICY_ERROR_PREFIX}Wollipog can open only HTTP and HTTPS links in your system browser; file links are blocked.`;
+  const console_ = captureWarnings();
   const { unmount } = await mount(h);
-  const link = anchor("mailto:person@example.com");
+  const url = "file:///tmp/report.txt";
+  const link = anchor(url);
   activate(link);
   await act(async () => { await Promise.resolve(); });
 
-  assert.equal(h.calls.length, 1, "the native trust boundary still makes the policy decision");
-  assert.equal(h.toasts.length, 1);
-  assert.equal(h.toasts[0]!.message, "Wollipog can open only HTTP and HTTPS links.");
-  assert.equal(h.toasts[0]!.options.tone, "error");
-  assert.equal(h.toasts[0]!.options.durationMs, undefined);
-  assert.equal(h.toasts[0]!.options.action, undefined);
+  try {
+    assert.equal(h.calls.length, 1, "the native trust boundary still makes the policy decision");
+    assert.equal(h.toasts.length, 1);
+    const [toast] = h.toasts;
+    assert.equal(toast!.message, "Wollipog only opens web links in your browser.");
+    assert.equal(toast!.options.tone, "warning");
+    assert.equal(toast!.options.detail, url);
+    assert.equal(toast!.options.detailStyle, "mono");
+    assert.equal((toast!.options.action as ToastAction).label, "Copy Link");
+    assert.doesNotMatch(JSON.stringify(toast), /file links are blocked/);
+    assert.match(String(console_.warnings[0]?.[1]), /file links are blocked/);
+  } finally {
+    console_.restore();
+    link.remove();
+    await unmount();
+  }
+});
 
-  link.remove();
-  await unmount();
+test("a copy the clipboard refuses leaves the URL on screen to select, without a Retry", async () => {
+  const h = harness();
+  h.rejectWith = "The system browser could not open this link: refused";
+  const console_ = captureWarnings();
+  const clipboard = fakeClipboard(async () => { throw new Error("NotAllowedError: denied"); });
+  const execCommand = Object.getOwnPropertyDescriptor(domWindow.document, "execCommand");
+  Object.defineProperty(domWindow.document, "execCommand", { configurable: true, value: () => false });
+  const { unmount } = await mount(h);
+  const url = "https://example.com/docs";
+  const link = anchor(url);
+  activate(link);
+  await act(async () => { await Promise.resolve(); });
+
+  try {
+    await act(async () => { await (h.toasts[0]!.options.action as ToastAction).run(); });
+    const last = h.toasts.at(-1)!;
+    assert.equal(last.message, "Couldn't copy the link. Select it and copy it instead.");
+    assert.equal(last.options.detail, url);
+    assert.equal(last.options.action, undefined);
+    assert.doesNotMatch(JSON.stringify(last), /NotAllowedError/);
+  } finally {
+    if (execCommand) Object.defineProperty(domWindow.document, "execCommand", execCommand);
+    else delete (domWindow.document as unknown as Record<string, unknown>).execCommand;
+    console_.restore();
+    clipboard.restore();
+    link.remove();
+    await unmount();
+  }
 });

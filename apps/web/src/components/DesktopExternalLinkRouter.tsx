@@ -46,6 +46,29 @@ function errorDetail(cause: unknown): string {
   return "The system browser did not accept the link.";
 }
 
+/** Copy `text`, falling back to a selected field where the Clipboard API is refused. */
+async function copyText(text: string): Promise<boolean> {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const field = document.createElement("textarea");
+    field.value = text;
+    field.readOnly = true;
+    field.style.position = "fixed";
+    field.style.opacity = "0";
+    document.body.appendChild(field);
+    field.select();
+    try {
+      return document.execCommand("copy");
+    } catch {
+      return false;
+    } finally {
+      field.remove();
+    }
+  }
+}
+
 /** Route intentional anchors through the narrow native opener. Renders nothing in every runtime. */
 export function DesktopExternalLinkRouter({ desktop = shell }: { desktop?: ExternalLinkDesktop } = {}) {
   const { showToast } = useFeedback();
@@ -67,19 +90,27 @@ export function DesktopExternalLinkRouter({ desktop = shell }: { desktop?: Exter
         await desktop.invoke("open_external_url", { url });
       };
       void open().catch((cause) => {
+        // The shell's sentence is for a developer, so it goes to the console. The person gets what
+        // happened and the URL itself, which Copy Link always turns into a way forward; a browser
+        // that refused a link once usually refuses it again, so there is no Retry (#1975).
         const detail = errorDetail(cause);
-        if (detail.startsWith(EXTERNAL_URL_POLICY_ERROR_PREFIX)) {
-          showToast(detail.slice(EXTERNAL_URL_POLICY_ERROR_PREFIX.length), { tone: "error" });
-          return;
-        }
-        showToast(`Could not open link: ${detail}`, {
-          tone: "error",
-          durationMs: 0,
+        const blocked = detail.startsWith(EXTERNAL_URL_POLICY_ERROR_PREFIX);
+        console.warn("[desktop] could not open a link:", blocked ? detail.slice(EXTERNAL_URL_POLICY_ERROR_PREFIX.length) : detail);
+        showToast(blocked ? "Wollipog only opens web links in your browser." : "Couldn't open the link in your browser.", {
+          tone: blocked ? "warning" : "error",
+          detail: url,
+          detailStyle: "mono",
           action: {
-            label: "Retry",
-            progress: "Opening the link again…",
-            run: open,
-            failureLabel: "Could not open link",
+            label: "Copy Link",
+            progress: "Copying the link…",
+            run: async () => {
+              if (await copyText(url)) {
+                showToast("Link copied.", { tone: "success" });
+                return;
+              }
+              // The URL stays on screen to select by hand.
+              showToast("Couldn't copy the link. Select it and copy it instead.", { tone: "error", detail: url, detailStyle: "mono" });
+            },
           },
         });
       });

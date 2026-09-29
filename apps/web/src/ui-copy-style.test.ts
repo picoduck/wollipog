@@ -6,6 +6,7 @@ import ts from "typescript";
 import { ApiError } from "./api.js";
 import { archiveAndStopMessage } from "./archive-actions.js";
 import { closeWarning } from "./components/DesktopCloseGuard.js";
+import { heldUpdateMessage } from "./desktop-updates.js";
 import { lifecycleConflictPresentation } from "./components/RunnersView.js";
 
 const SOURCE_ROOT = path.resolve("apps/web/src");
@@ -246,7 +247,7 @@ const MAX_BODY_BRANCHES = 256;
  * Confirmation bodies built by a helper the static reader cannot follow. Each one has its own
  * sentence check below; a new unreadable body fails until it is listed here and tested.
  */
-const COMPUTED_BODIES = [/^archiveAndStopMessage\(/, /^conflict\.message$/, /^closeWarning\(/];
+const COMPUTED_BODIES = [/^archiveAndStopMessage\(/, /^conflict\.message$/, /^closeWarning\(/, /^heldUpdateMessage\(/];
 
 /**
  * Every text a confirmation body can produce: conditions, template holes and `+` concatenation are
@@ -452,8 +453,9 @@ test("confirmation bodies built by a helper are one or two sentences too", () =>
     ...(["update", "reconnect", "adopt"] as const).flatMap((action) => [undefined, 1, 3].map((count) =>
       lifecycleConflictPresentation(new ApiError("conflict", 409, "conflict", count === undefined ? {} : { activeSessionCount: count }), action).message)),
     ...[0, 1, 3].map((count) => closeWarning(count)),
+    ...["0.29.0", null].flatMap((version) => [0, 1, 3].map((count) => heldUpdateMessage(version, count))),
   ];
-  assert.equal(bodies.length, 16);
+  assert.equal(bodies.length, 22);
   for (const body of bodies) assert.ok(sentenceCount(body) <= 2, JSON.stringify(body));
 });
 

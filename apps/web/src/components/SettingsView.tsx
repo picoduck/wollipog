@@ -13,7 +13,7 @@ import {
 import { useApi } from "../api-context.js";
 import { notifier } from "../notify.js";
 import { tailnetAccessDescription, type TailnetAccessSetting } from "../tailnet-access.js";
-import { availableUpdateMessage, updateWarning, type DesktopUpdateSetting } from "../desktop-updates.js";
+import { availableUpdateMessage, type DesktopUpdateSetting } from "../desktop-updates.js";
 import { type PushSetting } from "../push.js";
 import { ArrowDownIcon, ArrowUpIcon, KeyboardIcon } from "./Icons.js";
 import { VIEW_ICONS } from "./Rail.js";
@@ -1640,7 +1640,8 @@ function formatCheckedAt(checkedAt: number): string {
  * #1646. What the shell last learned about published releases, and the one action that fits it.
  *
  * Installing restarts the app, so a first attempt while work is in flight is held by the shell and
- * turned into a warning here; "Install Anyway" is the confirmation, and anything else defers.
+ * becomes the Restart to Install Update confirmation the update toast opens too (#1975). Nothing
+ * here shows the hold: Install Later leaves this row offering Install and Restart as it was.
  */
 function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
   const { status } = update;
@@ -1664,19 +1665,6 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
   let description: ReactNode;
   if (!status.checksAllowed) {
     description = "Update checks are turned off for this installation by WOLLIPOG_DISABLE_UPDATE_CHECK.";
-  } else if (update.heldSessions !== null) {
-    description = (
-      <Notice tone="warning" actions={(
-        <>
-          <button type="button" className="btn sm" disabled={busy} onClick={() => update.install(true)}>
-            {update.installing ? "Installing…" : "Install Anyway"}
-          </button>
-          <button type="button" className="btn ghost sm" disabled={busy} onClick={update.dismissHold}>Not Now</button>
-        </>
-      )}>
-        <span role="alert">{updateWarning(update.heldSessions)}</span>
-      </Notice>
-    );
   } else if (update.installing) {
     description = "Downloading and verifying the update. Wollipog restarts when it is installed.";
   } else if (lastCheck?.state === "available") {
@@ -1684,7 +1672,7 @@ function DesktopUpdateRows({ update }: { update: DesktopUpdateSetting }) {
       <>
         {availableUpdateMessage(lastCheck.version)} Installing restarts Wollipog, which stops its local
         control plane and runner.{" "}
-        <button type="button" className="btn sm" onClick={() => update.install(false)}>Install and Restart</button>{" "}
+        <button type="button" className="btn sm" onClick={update.install}>Install and Restart</button>{" "}
         {check("Check Again")}
       </>
     ) : (

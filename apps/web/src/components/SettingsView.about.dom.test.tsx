@@ -78,11 +78,9 @@ function setting(overrides: Partial<DesktopUpdateSetting> = {}): DesktopUpdateSe
     checking: false,
     installing: false,
     savingAutomatic: false,
-    heldSessions: null,
     error: null,
     check: () => clicks.push("check"),
-    install: (confirmed) => clicks.push(confirmed ? "install-confirmed" : "install"),
-    dismissHold: () => clicks.push("dismiss"),
+    install: () => clicks.push("install"),
     openRelease: () => clicks.push("open"),
     toggleAutomatic: () => clicks.push("automatic"),
     ...overrides,
@@ -153,20 +151,6 @@ test("an available release installs in place, or points at its page when it cann
   assert.equal(view.button("Install and Restart"), undefined, "a package-manager install is never replaced in place");
   await act(async () => view.button("Open Release Page")!.click());
   assert.deepEqual(update.clicks, ["open"]);
-  await view.unmount();
-});
-
-test("a held install warns like closing does, and deferring is a choice", async () => {
-  const update = setting({
-    status: status({ lastCheck: { state: "available", version: "0.28.0", releaseUrl: "https://example.test", checkedAt: 1 } }),
-    heldSessions: 1,
-  });
-  const view = await render(update);
-  const alert = view.container.querySelector('[role="alert"]');
-  assert.equal(alert?.textContent, "1 session still has work running. Installing restarts Wollipog and will stop it.");
-  await act(async () => view.button("Not Now")!.click());
-  await act(async () => view.button("Install Anyway")!.click());
-  assert.deepEqual(update.clicks, ["dismiss", "install-confirmed"]);
   await view.unmount();
 });
 

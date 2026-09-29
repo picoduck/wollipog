@@ -1,6 +1,9 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { closeDetailRows, heldClose } from "./components/DesktopCloseGuard.js";
+import { useFeedback, type ConfirmationOptions } from "./components/FeedbackProvider.js";
+import { closeGuardLinks, type CloseGuardLinks } from "./desktop-close-guard.js";
 
 /**
  * #1646 — the dashboard's side of in-place desktop updates.
@@ -28,10 +31,13 @@ export interface DesktopUpdateStatus {
   lastCheck: DesktopUpdateCheck | null;
 }
 
+/** Work is in flight; nothing was installed. `sessions` is 0 when the shell could not count, and
+ * `sessionIds` names the sessions it could (#1975). An older shell sends no ids. */
+export type HeldDesktopUpdate = { outcome: "heldForWork"; sessions: number; sessionIds?: string[] };
+
 export type DesktopUpdateOutcome =
   | { outcome: "current" }
-  /** Work is in flight; nothing was installed. `sessions` is 0 when the shell could not count. */
-  | { outcome: "heldForWork"; sessions: number }
+  | HeldDesktopUpdate
   | { outcome: "restarting" };
 
 /** Emitted by the shell with the `DesktopUpdateCheck` whenever any check finishes. */
@@ -64,7 +70,7 @@ export function checkForDesktopUpdate(
 }
 
 /**
- * `confirmed` is the "Install Anyway" answer to the shell's work-in-flight warning. Every other
+ * `confirmed` is the "Restart Anyway" answer to the shell's work-in-flight warning. Every other
  * request is asked afresh, so a second surface's click is never taken as the confirmation.
  */
 export function installDesktopUpdate(confirmed: boolean, desktop: DesktopUpdateRuntime = runtime): Promise<DesktopUpdateOutcome> {
@@ -79,16 +85,80 @@ export function openReleasePage(url: string, desktop: DesktopUpdateRuntime = run
   return desktop.invoke<void>("open_external_url", { url });
 }
 
-/** The install button's warning. Same rule as the close warning, different gesture. */
-export function updateWarning(sessions: number): string {
-  if (sessions <= 0) return "Agent work may still be running. Installing restarts Wollipog and will stop it.";
-  return sessions === 1
-    ? "1 session still has work running. Installing restarts Wollipog and will stop it."
-    : `${sessions} sessions still have work running. Installing restarts Wollipog and will stop them.`;
-}
-
 export function availableUpdateMessage(version: string): string {
   return `Wollipog ${version} is available.`;
+}
+
+/** The update toast's sentence: an in-place install is ready now, a package install is only out. */
+export function updateToastMessage(version: string, install: DesktopUpdateInstall): string {
+  return install.mode === "inPlace" ? `Wollipog ${version} is ready to install.` : availableUpdateMessage(version);
+}
+
+/**
+ * The held-update confirmation's body. Same rule as the close confirmation's: a count of 0 is the
+ * shell saying it could not check, and never becomes an invented number.
+ */
+export function heldUpdateMessage(version: string | null, sessions: number): string {
+  const installing = version ? `Installing Wollipog ${version}` : "Installing the update";
+  const stops = sessions <= 0
+    ? "restarts the app and stops any turn that is still in progress."
+    : sessions === 1
+      ? "restarts the app, which stops 1 session that is still working."
+      : `restarts the app, which stops ${sessions} sessions that are still working.`;
+  return `${installing} ${stops} You can install later from Settings.`;
+}
+
+export interface HeldUpdateRequest {
+  confirm: (options: ConfirmationOptions) => Promise<boolean>;
+  /** The version being installed, when the caller knows it. */
+  version: string | null;
+  /** The shell's answer to the unconfirmed install. */
+  held: HeldDesktopUpdate;
+  /** Install with the confirmation. The caller's own bookkeeping goes here. */
+  install: () => Promise<DesktopUpdateOutcome>;
+  /** Where the working sessions' titles come from; the local instance's, while it is open. */
+  links?: CloseGuardLinks;
+}
+
+/**
+ * Ask whether to restart over running work (#1975, docs/design-system.md §7.4). The one confirmation
+ * both the update toast and Settings › About open, so the decision has one title and one set of
+ * buttons wherever it starts.
+ *
+ * The working sessions are named the way the quit confirmation names them (#1965): the shell sends
+ * ids, and titles come from the loaded local instance. Restart Anyway installs with the dialog open
+ * and busy; a failure stays in the dialog. A shell that holds even the confirmed install (the
+ * warning outlived its grace period, or new work started) is asked about again, with what it says
+ * now. Resolves false for Install Later, which leaves the update available in Settings.
+ */
+export async function confirmHeldUpdate({ confirm, version, held, install, links = closeGuardLinks }: HeldUpdateRequest): Promise<boolean> {
+  let asking = held;
+  for (;;) {
+    const answer: { heldAgain?: HeldDesktopUpdate } = {};
+    const work = heldClose({ count: asking.sessions, sessionIds: asking.sessionIds });
+    const { rows, overflow } = closeDetailRows(work, links);
+    const confirmed = await confirm({
+      title: "Restart to Install Update",
+      message: heldUpdateMessage(version, work.count),
+      detailRows: rows,
+      detailRowsOverflow: overflow,
+      confirmLabel: "Restart Anyway",
+      cancelLabel: "Install Later",
+      tone: "danger",
+      progress: "Installing the update…",
+      // Once the shell is installing there is nothing to withdraw.
+      cancelWhileRunning: false,
+      onConfirm: async () => {
+        const outcome = await install();
+        if (outcome.outcome === "heldForWork") answer.heldAgain = outcome;
+        // The app is going away; the button stays busy until it does.
+        else if (outcome.outcome === "restarting") await new Promise<never>(() => undefined);
+      },
+    });
+    if (!confirmed) return false;
+    if (!answer.heldAgain) return true;
+    asking = answer.heldAgain;
+  }
 }
 
 export function errorMessage(cause: unknown): string {
@@ -103,13 +173,11 @@ export interface DesktopUpdateSetting {
   checking: boolean;
   installing: boolean;
   savingAutomatic: boolean;
-  /** Set when the last install attempt was held because work is in flight. */
-  heldSessions: number | null;
   error: string | null;
   check: () => void;
-  /** `confirmed` only for "Install Anyway". */
-  install: (confirmed?: boolean) => void;
-  dismissHold: () => void;
+  /** Install and Restart. A hold for running work opens the held-update confirmation, which is the
+   * only thing that confirms. */
+  install: () => void;
   openRelease: () => void;
   toggleAutomatic: () => void;
 }
@@ -120,14 +188,17 @@ export interface DesktopUpdateSetting {
  * Reads the shell's status once, which includes the last check the background notifier made, so
  * opening Settings does not ask GitHub again. Checking is a click.
  */
-export function useDesktopUpdateSetting(desktop: DesktopUpdateRuntime = runtime): DesktopUpdateSetting {
+export function useDesktopUpdateSetting(
+  desktop: DesktopUpdateRuntime = runtime,
+  links: CloseGuardLinks = closeGuardLinks,
+): DesktopUpdateSetting {
+  const { confirm } = useFeedback();
   const inDesktop = useMemo(() => desktop.isTauri(), [desktop]);
   const [status, setStatus] = useState<DesktopUpdateStatus | null>(null);
   const [loading, setLoading] = useState(inDesktop);
   const [checking, setChecking] = useState(false);
   const [installing, setInstalling] = useState(false);
   const [savingAutomatic, setSavingAutomatic] = useState(false);
-  const [heldSessions, setHeldSessions] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
@@ -161,33 +232,53 @@ export function useDesktopUpdateSetting(desktop: DesktopUpdateRuntime = runtime)
     if (!status || checking || installing) return;
     setChecking(true);
     setError(null);
-    setHeldSessions(null);
     checkForDesktopUpdate(false, desktop)
       .then((lastCheck) => setStatus((current) => (current ? { ...current, lastCheck } : current)))
       .catch((cause) => setError(errorMessage(cause)))
       .finally(() => setChecking(false));
   }, [checking, desktop, installing, status]);
 
-  const install = useCallback((confirmed = false) => {
+  const install = useCallback(() => {
     if (!status || installing || checking) return;
+    const version = status.lastCheck?.state === "available" ? status.lastCheck.version : null;
+    const settle = (result: DesktopUpdateOutcome) => {
+      if (result.outcome === "current") {
+        setStatus((current) => (current ? { ...current, lastCheck: { state: "current", checkedAt: Date.now() } } : current));
+      }
+      // "restarting": the shell is going away; leave the busy state up until it does.
+      if (result.outcome !== "restarting") setInstalling(false);
+    };
     setInstalling(true);
     setError(null);
-    installDesktopUpdate(confirmed, desktop)
+    installDesktopUpdate(false, desktop)
       .then((result) => {
-        if (result.outcome === "heldForWork") {
-          setHeldSessions(result.sessions);
-        } else if (result.outcome === "current") {
-          setHeldSessions(null);
-          setStatus((current) => (current ? { ...current, lastCheck: { state: "current", checkedAt: Date.now() } } : current));
-        }
-        // "restarting": the shell is going away; leave the busy state up until it does.
-        if (result.outcome !== "restarting") setInstalling(false);
+        settle(result);
+        if (result.outcome !== "heldForWork") return;
+        // Install Later leaves this row as it was: nothing here remembers the hold.
+        void confirmHeldUpdate({
+          confirm,
+          version,
+          held: result,
+          links,
+          install: async () => {
+            setInstalling(true);
+            try {
+              const outcome = await installDesktopUpdate(true, desktop);
+              settle(outcome);
+              return outcome;
+            } catch (cause) {
+              // Shown in the confirmation, which stays open to try again or install later.
+              setInstalling(false);
+              throw cause;
+            }
+          },
+        });
       })
       .catch((cause) => {
         setError(errorMessage(cause));
         setInstalling(false);
       });
-  }, [checking, desktop, installing, status]);
+  }, [checking, confirm, desktop, installing, links, status]);
 
   const openRelease = useCallback(() => {
     const url = status?.lastCheck?.state === "available" ? status.lastCheck.releaseUrl : status?.releasesUrl;
@@ -205,8 +296,6 @@ export function useDesktopUpdateSetting(desktop: DesktopUpdateRuntime = runtime)
       .finally(() => setSavingAutomatic(false));
   }, [desktop, savingAutomatic, status]);
 
-  const dismissHold = useCallback(() => setHeldSessions(null), []);
-
   return {
     desktop: inDesktop,
     status,
@@ -214,11 +303,9 @@ export function useDesktopUpdateSetting(desktop: DesktopUpdateRuntime = runtime)
     checking,
     installing,
     savingAutomatic,
-    heldSessions,
     error,
     check,
     install,
-    dismissHold,
     openRelease,
     toggleAutomatic,
   };

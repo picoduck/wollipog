@@ -1476,8 +1476,10 @@ the same notice with Reload and Copy Error Details, top-left in the content area
 - Container recipe of a menu (`--bg-elev`, `--border-strong`, `--radius-md`, `--elev-2`). No colored
   left stripe. Tone is carried by a 16px icon in the tone color (Info, CircleCheck, TriangleAlert,
   CircleAlert).
-- Message `--type-body`; optional detail line `--type-small` `--text-dim`. Title Case only in the
-  action ("Undo", "Retry Undo", "Open Session").
+- Message `--type-body`; optional detail line `--type-small` `--text-dim`, set in `--font-mono` for
+  text the person may copy, such as a URL (`detailStyle: "mono"`), and wrapping so all of it shows.
+  An optional link under it (`link`, "What's New") opens in the system browser on desktop. Title Case
+  only in the action and the link ("Undo", "Retry Undo", "Open Session", "What's New").
 - One `.btn.sm.ghost` action (44px coarse) and a Lucide `X` close.
 - Info and success dismiss after 5s (paused on hover or focus); errors persist. Maximum 3 visible,
   newest on top; older ones collapse into "+2 More".
@@ -1485,7 +1487,19 @@ the same notice with Reload and Copy Error Details, top-left in the content area
   state change) gets a toast.
 - A decision is never a toast. When the desktop app holds a quit because sessions are still working,
   it asks with the Quit Wollipog confirmation (§7.4): the working sessions as detail rows, Keep Open
-  (the cancel, initial focus), Show Sessions and Quit Anyway.
+  (the cancel, initial focus), Show Sessions and Quit Anyway. A desktop update held for the same
+  reason asks with Restart to Install Update, wherever the install started (the update toast or
+  Settings › About): the working sessions as detail rows, Install Later (the cancel, initial focus)
+  and Restart Anyway. Install Later leaves the update on offer in Settings › About.
+- A desktop update is an info toast: "Wollipog 0.29.0 is ready to install." (or "…is available."
+  when it installs from the release page), a detail line saying it can be installed later from
+  Settings, a What's New link, and one action, Install and Restart or Open Release Page. Dismissing it
+  is "later".
+- A link the desktop app could not open says so and gives the URL instead of the shell's error: an
+  error toast "Couldn't open the link in your browser." or, for a link the policy blocks, a warning
+  toast "Wollipog only opens web links in your browser.", each with the URL as a mono detail line and
+  Copy Link. The shell's own text goes to the console. There is no Retry: a browser that refused a link
+  once usually refuses it again.
 
 ### 13.2 Notice (Inline, One Primitive for Every Banner and Callout)
 
@@ -1508,7 +1522,7 @@ the same notice with Reload and Copy Error Details, top-left in the content area
 | Actions | `.btn.sm` row under the body, left-aligned; the resolving action first (primary only if it is the page's main next step). An action a person cannot take now keeps a visible reason line in the body ("Build Box is offline.", a Viewer's refusal) that the button references with `aria-describedby`, never only a `title`. |
 | Compact | One line: icon + sentence + one `.btn.sm` trailing, 40px. For inline field-group and composer notices. |
 | Placement | Directly where the problem is: above the composer for session state, above the footer for submit errors, at the top of a section for section state. Aligned to that column's edges. |
-| Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error, a held update), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts, the status strip and queued rows are not notices and do not share this slot. This is the bottom-edge counterpart of the one-bar rule for the top of the session. A pending request (the request dock below) takes this slot ahead of every notice. |
+| Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts, the status strip and queued rows are not notices and do not share this slot. This is the bottom-edge counterpart of the one-bar rule for the top of the session. A pending request (the request dock below) takes this slot ahead of every notice. |
 
 **Session notice slot.** `SessionNoticeSlot` (`apps/web/src/components/SessionNoticeSlot.tsx`) is that
 slot: the first child of the composer column, on the composer's width and gutters. It takes a list of
@@ -1568,8 +1582,9 @@ follows these rules so it never crowds out the conversation it asks about:
 ### 13.3 Page Banner
 
 A Notice variant spanning the top of the main area (under the rail's top, above the page header):
-36px, no radius, no side borders, bottom hairline in the tone. For offline, pairing and update-held
-states only. It pushes content down with a `--dur-base` height transition.
+36px, no radius, no side borders, bottom hairline in the tone. For offline and pairing states only.
+It pushes content down with a `--dur-base` height transition. A held desktop update is a decision,
+so it is the Restart to Install Update confirmation (§13.1), never a banner or a notice.
 
 ---
 

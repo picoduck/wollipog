@@ -116,6 +116,12 @@ export interface ToastOptions {
   tone?: "info" | "success" | "warning" | "error";
   /** An optional second line under the message, in the secondary text colour. */
   detail?: string;
+  /** `mono` sets the detail line in the monospace face, for text the person may copy, such as a
+   * URL. It wraps anywhere, so the whole of it stays visible. */
+  detailStyle?: "mono";
+  /** A link under the message, such as What's New. Title Case. On desktop it opens in the system
+   * browser like every external link. */
+  link?: { label: string; href: string };
   /** Milliseconds before an info or success toast dismisses itself; 0 keeps it until dismissed.
    * Warnings and errors persist unless a duration is given (§13.1). */
   durationMs?: number;
@@ -402,7 +408,10 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
       </span>
       <div className="toast-copy">
         <span className="toast-message">{toast.message}</span>
-        {toast.detail && <span className="toast-detail">{toast.detail}</span>}
+        {toast.detail && <span className={toast.detailStyle === "mono" ? "toast-detail mono" : "toast-detail"}>{toast.detail}</span>}
+        {toast.link && (
+          <a className="toast-link" href={toast.link.href} target="_blank" rel="noreferrer">{toast.link.label}</a>
+        )}
       </div>
       <div className="toast-actions">
         {toast.action && (

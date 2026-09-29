@@ -185,7 +185,7 @@ const harnessDefaultsApi = createApiClient(harnessDefaultsTransport);
  * #1646's desktop update states, injected the way the shell's hook would report them. Absent, the
  * About panel renders as it does in a browser.
  */
-const UPDATE_STATES = ["current", "available", "release-page", "held", "disabled", "unchecked"] as const;
+const UPDATE_STATES = ["current", "available", "release-page", "disabled", "unchecked"] as const;
 type UpdateState = (typeof UPDATE_STATES)[number];
 
 function updateFixture(state: UpdateState | null): DesktopUpdateSetting | undefined {
@@ -215,11 +215,9 @@ function updateFixture(state: UpdateState | null): DesktopUpdateSetting | undefi
     checking: false,
     installing: false,
     savingAutomatic: false,
-    heldSessions: state === "held" ? 2 : null,
     error: null,
     check: () => undefined,
     install: () => undefined,
-    dismissHold: () => undefined,
     openRelease: () => undefined,
     toggleAutomatic: () => undefined,
   };

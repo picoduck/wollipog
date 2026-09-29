@@ -1,15 +1,16 @@
 import { useEffect } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import {
-  availableUpdateMessage,
   checkForDesktopUpdate,
+  confirmHeldUpdate,
   errorMessage,
   installDesktopUpdate,
   openReleasePage,
   readDesktopUpdateStatus,
-  updateWarning,
+  updateToastMessage,
   type DesktopUpdateRuntime,
 } from "../desktop-updates.js";
+import { closeGuardLinks, type CloseGuardLinks } from "../desktop-close-guard.js";
 import { useFeedback, type ToastOptions } from "./FeedbackProvider.js";
 
 /** Long enough after launch that the check never competes with starting the control plane. */
@@ -26,29 +27,34 @@ const shell: DesktopUpdateRuntime = { isTauri, invoke };
  * the shell's "automatic" one, so it does nothing when the user or the installation turned it off.
  * A failed background check is silent; Settings → About shows the error on a manual check.
  *
- * Installing from here goes through the shell's exit guard like the Settings button does: a held
- * attempt becomes a warning toast whose action is the confirmation.
+ * The toast is information with one action (§13.1); dismissing it is "later", and Settings → About
+ * still offers the version. Installing from here goes through the shell's exit guard like the
+ * Settings button does: a held attempt opens the same Restart to Install Update confirmation (#1975).
  */
 export function DesktopUpdateNotifier({
   desktop = shell,
+  links = closeGuardLinks,
   firstCheckDelayMs = FIRST_CHECK_DELAY_MS,
   recheckIntervalMs = RECHECK_INTERVAL_MS,
-}: { desktop?: DesktopUpdateRuntime; firstCheckDelayMs?: number; recheckIntervalMs?: number } = {}) {
-  const { showToast } = useFeedback();
+}: {
+  desktop?: DesktopUpdateRuntime;
+  /** Where the held-update confirmation finds the working sessions' titles. */
+  links?: CloseGuardLinks;
+  firstCheckDelayMs?: number;
+  recheckIntervalMs?: number;
+} = {}) {
+  const { confirm, showToast } = useFeedback();
 
   useEffect(() => {
     if (!desktop.isTauri()) return;
     let disposed = false;
     let announced: string | null = null;
 
-    const install = async (confirmed = false): Promise<void> => {
-      const result = await installDesktopUpdate(confirmed, desktop);
+    const install = async (version: string): Promise<void> => {
+      const result = await installDesktopUpdate(false, desktop);
       if (disposed || result.outcome !== "heldForWork") return;
-      showToast(updateWarning(result.sessions), {
-        tone: "error",
-        durationMs: 0,
-        action: { label: "Install Anyway", progress: "Installing the update…", run: () => install(true), failureLabel: "Update failed", retryLabel: "Retry Install" },
-      });
+      // Not awaited: the toast's action is done, and the confirmation takes the decision from here.
+      void confirmHeldUpdate({ confirm, version, held: result, links, install: () => installDesktopUpdate(true, desktop) });
     };
 
     const check = async () => {
@@ -58,10 +64,19 @@ export function DesktopUpdateNotifier({
         const status = await readDesktopUpdateStatus(desktop);
         if (disposed || !status) return;
         announced = result.version;
-        const action: ToastOptions["action"] = status.install.mode === "inPlace"
-          ? { label: "Install and Restart", progress: "Installing the update…", run: () => install(), failureLabel: "Update failed", retryLabel: "Retry Install" }
+        const inPlace = status.install.mode === "inPlace";
+        const action: ToastOptions["action"] = inPlace
+          ? { label: "Install and Restart", progress: "Installing the update…", run: () => install(result.version), failureLabel: "Update failed", retryLabel: "Retry Install" }
           : { label: "Open Release Page", run: () => openReleasePage(result.releaseUrl, desktop) };
-        showToast(availableUpdateMessage(result.version), { durationMs: 0, action });
+        showToast(updateToastMessage(result.version, status.install), {
+          tone: "info",
+          durationMs: 0,
+          detail: inPlace
+            ? "Restarting takes a few seconds. You can also install it later from Settings."
+            : "You can also open it later from Settings.",
+          link: { label: "What's New", href: result.releaseUrl },
+          action,
+        });
       } catch (cause) {
         // Offline, rate-limited, or blocked: a background check has no one to tell.
         console.debug("[desktop] update check failed:", errorMessage(cause));
@@ -75,7 +90,7 @@ export function DesktopUpdateNotifier({
       window.clearTimeout(first);
       window.clearInterval(repeat);
     };
-  }, [desktop, firstCheckDelayMs, recheckIntervalMs, showToast]);
+  }, [confirm, desktop, firstCheckDelayMs, links, recheckIntervalMs, showToast]);
 
   return null;
 }
