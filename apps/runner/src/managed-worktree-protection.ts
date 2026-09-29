@@ -656,7 +656,18 @@ function commandWords(
       while (plainWordText(tokens[index]) !== null) {
         // `env` reads its ARGV, so an assignment that arrived through an expansion
         // (`env "$ASSIGNMENT" sh -c ...`) is an assignment to it like any other.
-        const value = word(tokens[index], cwd, environment) ?? plainWordText(tokens[index])!;
+        const raw = plainWordText(tokens[index])!;
+        const resolved = word(tokens[index], cwd, environment);
+        // A variable may be quoted (one argv word) or unquoted (several fields), and
+        // shell-quote does not preserve which. Do not let the whole value masquerade as
+        // one `env` assignment when the split reading could contain a command.
+        if (raw.includes("\0")) {
+          const fields = resolved === null ? null : expansionFields(raw, resolved, cwd, environment);
+          if (fields === null || fields.length !== 1 || fields[0] !== resolved) {
+            throw new UnclassifiableCommandError("env argument has ambiguous field splitting");
+          }
+        }
+        const value = resolved ?? raw;
         // Like a prefix assignment, this builds the environment of the command `env` runs; it is
         // not in effect while the shell expands the words of this very command.
         // `env` accepts any nonempty name without `=` or NUL, unlike the shell prefix above.

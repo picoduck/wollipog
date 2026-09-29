@@ -109,6 +109,14 @@ test("env accepts assignment names that are not shell identifiers before a destr
   }
 });
 
+test("env does not swallow a destructive command from a split assignment expansion", () => {
+  assert.equal(commandTargetsManagedWorktree(
+    `C='rm -rf ${protectedPath} x'; env $C=y`, protectedPath, protection,
+  ), MANAGED_WORKTREE_REFUSAL);
+  assert.equal(commandTargetsManagedWorktree("env $C=y", protectedPath, protection,
+    { C: `rm -rf ${protectedPath} x` }), MANAGED_WORKTREE_REFUSAL);
+});
+
 test("env options with equals signs remain options, while shell assignments still require identifiers", () => {
   for (const command of [
     "env --split-string='rm -rf .'",
