@@ -3459,7 +3459,9 @@ function SessionDetailLoaded({
   // and a selection still running must keep both recovery actions refused when it comes back, and
   // one that failed meanwhile must still say why.
   const [recoverySelectPending, setRecoverySelectPending] = useState(false);
-  const [recoverySelectError, setRecoverySelectError] = useState<string | null>(null);
+  // Tied to its incident: a later recovery starts without an earlier one's failure.
+  const [recoverySelectError, setRecoverySelectError] =
+    useState<{ recoveryId: string | undefined; message: string } | null>(null);
   const createRecoveryWorktree = useCallback(async (input: { branch: string; baseRef?: string }) => {
     setError(null);
     setRecoverySelectError(null);
@@ -3467,6 +3469,7 @@ function SessionDetailLoaded({
   }, [createRecoveryWorktreeWithProgress]);
   const selectRecoveryWorktree = useCallback(async (path: string) => {
     const generation = viewGenerationRef.current;
+    const recoveryId = session.worktreeRecovery?.recoveryId;
     setError(null);
     setRecoverySelectError(null);
     setRecoverySelectPending(true);
@@ -3474,12 +3477,12 @@ function SessionDetailLoaded({
       const result = await api.selectSessionWorktree(session.id, path);
       if (viewGenerationRef.current === generation) loadSession(result.session);
     } catch (cause) {
-      if (viewGenerationRef.current === generation) setRecoverySelectError((cause as Error).message);
+      if (viewGenerationRef.current === generation) setRecoverySelectError({ recoveryId, message: (cause as Error).message });
       throw cause;
     } finally {
       setRecoverySelectPending(false);
     }
-  }, [api, loadSession, session.id]);
+  }, [api, loadSession, session.id, session.worktreeRecovery?.recoveryId]);
   const retryWorktreeSetup = useCallback(async () => {
     if (!failedSetupWorktree || setupRetryPending || !runnerOnline || worktreeSetupRefusal !== null) return;
     const generation = viewGenerationRef.current;
@@ -3697,7 +3700,7 @@ function SessionDetailLoaded({
           offlineReason={runnerOfflineReason ?? undefined}
           creation={recoveryCreation}
           selecting={recoverySelectPending}
-          selectError={recoverySelectError}
+          selectError={recoverySelectError?.recoveryId === worktreeRecovery.recoveryId ? recoverySelectError.message : null}
           onCreate={createRecoveryWorktree}
           onSelect={selectRecoveryWorktree}
           trailing={trailing}

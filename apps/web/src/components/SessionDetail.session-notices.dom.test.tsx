@@ -422,6 +422,15 @@ test("a worktree selection that fails while another notice shows still says why"
     const alert = fixture.container.querySelector('.session-notice-slot [role="alert"]');
     assert.equal(alert?.textContent, "That worktree is not linked to this session.");
     assert.ok(actions().every((button) => !button.disabled), "the person can try again");
+
+    // A later incident starts without the earlier failure.
+    await fixture.update({
+      ...session,
+      updatedAt: 2,
+      worktreeRecovery: { ...session.worktreeRecovery!, recoveryId: "recovery-select-fail-2", detectedAt: 4 },
+    });
+    assertNoDomNode(fixture.container.querySelector('.session-notice-slot [role="alert"]'),
+      "the new recovery shows no failure from the old one");
   } finally {
     await fixture.unmount();
   }
