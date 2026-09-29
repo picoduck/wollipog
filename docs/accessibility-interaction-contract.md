@@ -11,6 +11,9 @@ these contracts rather than inventing another popover or segmented-control behav
   layer and restores the trigger; Tab closes without stealing the browser's next focus target.
 - Menu items use `menuitem`, `menuitemcheckbox`, or `menuitemradio`. A panel containing inputs or
   other form controls is a labelled dialog-style popover, never a menu.
+- A dialog-style popover opens onto its first enabled control, except on a coarse pointer when that
+  control is an `input`, `select`, or `textarea`: focus then lands on the panel itself (a
+  `tabIndex={-1}` dialog), so opening it does not summon the software keyboard.
 - Async actions restore focus only after their busy state clears so focus is not returned to a
   disabled trigger.
 
