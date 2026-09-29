@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { execFileSync } from "@wollipog/test-support/bounded-child-process";
+import { execFileSync, spawnSync } from "@wollipog/test-support/bounded-child-process";
 import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
@@ -17,6 +17,99 @@ import {
 } from "./agent-control-relay.js";
 import { runWollipogCli, runWollipogInit } from "./wollipog-cli.js";
 import { expandCommandAlias, resolveHelp } from "./wollipog-help.js";
+
+test("MCP stays connected beyond the credential deadline and recovers typed decisions after acknowledgment", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-mcp-readiness-"));
+  try {
+    const script = `
+      import assert from 'node:assert/strict';
+      import { mock } from 'node:test';
+      import { PassThrough } from 'node:stream';
+      import { rmSync, writeFileSync } from 'node:fs';
+      import { createHash } from 'node:crypto';
+      import { runAgentControlMcp } from ${JSON.stringify(new URL("./wollipog-cli.ts", import.meta.url).href)};
+      const [tokenFile, readyFile] = process.argv.slice(1);
+      const input = new PassThrough();
+      const output = new PassThrough();
+      Object.defineProperty(process, 'stdin', { value: input });
+      Object.defineProperty(process, 'stdout', { value: output });
+      const responses = new Map();
+      output.on('data', chunk => {
+        for (const line of chunk.toString().trim().split('\\n')) {
+          const response = JSON.parse(line);
+          responses.set(response.id, response);
+        }
+      });
+      const calls = [];
+      globalThis.fetch = async (url, init) => {
+        calls.push({ url, headers: init.headers });
+        return { ok: true, status: 200, text: async () => JSON.stringify({ decision: { occurrenceId: 'decision_1', state: 'approved' } }) };
+      };
+      const env = {
+        WOLLIPOG_CONTROL_PLANE_URL: 'http://cp', WOLLIPOG_SESSION_ID: 's_test',
+        WOLLIPOG_SESSION_TOKEN_FILE: tokenFile, WOLLIPOG_SESSION_CREDENTIAL_READY_FILE: readyFile,
+      };
+      writeFileSync(tokenFile, 'first-test-token');
+      mock.timers.enable({ apis: ['Date', 'setTimeout'] });
+      const serving = runAgentControlMcp(env);
+      mock.timers.tick(11_000);
+      await serving;
+      const rpc = async (id, method, params) => {
+        input.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\\n');
+        await new Promise(resolve => setImmediate(resolve));
+        assert.ok(responses.has(id), 'server must answer ' + method);
+        return responses.get(id).result;
+      };
+      const call = id => rpc(id, 'tools/call', { name: 'get_workflow_decision', arguments: { occurrenceId: 'decision_1' } });
+      assert.ok((await rpc(1, 'initialize')).capabilities.tools);
+      assert.ok((await rpc(2, 'tools/list')).tools.some(tool => tool.name === 'get_workflow_decision'));
+      assert.deepEqual(await rpc(3, 'ping'), {});
+      const pending = await call(4);
+      assert.equal(pending.isError, true);
+      assert.match(pending.content[0].text, /credential.*retry/i);
+      assert.equal(calls.length, 0, 'unacknowledged credentials must never reach the control plane');
+      const acknowledge = token => writeFileSync(readyFile, createHash('sha256').update(token).digest('hex'));
+      acknowledge('wrong-test-token');
+      assert.equal((await call(5)).isError, true);
+      assert.equal(calls.length, 0);
+      acknowledge('first-test-token');
+      assert.equal((await call(6)).isError, undefined);
+      assert.equal(calls[0].headers.authorization, 'Bearer first-test-token');
+      assert.equal(calls[0].headers[${JSON.stringify(WOLLIPOG_AGENT_ACTOR_SESSION_HEADER)}], 's_test');
+      writeFileSync(tokenFile, 'second-test-token');
+      assert.equal((await call(7)).isError, true, 'old fence cannot authorize a rotated credential');
+      assert.equal(calls.length, 1);
+      acknowledge('second-test-token');
+      assert.equal((await call(8)).isError, undefined);
+      assert.equal(calls[1].headers.authorization, 'Bearer second-test-token');
+      rmSync(readyFile);
+      assert.equal((await call(9)).isError, true, 're-registration removes the fence even for an unchanged token');
+      assert.equal(calls.length, 2);
+      acknowledge('second-test-token');
+      assert.equal((await call(10)).isError, undefined);
+      rmSync(tokenFile);
+      assert.equal((await call(11)).isError, true, 'temporarily missing credential is retryable');
+      assert.equal(calls.length, 3);
+      writeFileSync(tokenFile, 'second-test-token');
+      assert.equal((await call(12)).isError, undefined);
+      assert.equal(calls.length, 4);
+      assert.ok([...responses.values()].every(response => !JSON.stringify(response).includes('test-token')));
+      mock.timers.reset();
+    `;
+    const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script,
+      join(root, "token"), join(root, "ready")], { encoding: "utf8", timeout: 20_000 });
+    assert.equal(child.status, 0, child.stderr);
+    const events = child.stderr.split("\n").filter((line) => line.startsWith("{")).map((line) => JSON.parse(line));
+    assert.deepEqual(events.map((entry) => entry.event), [
+      "mcp_credential_pending", "mcp_credential_ready", "mcp_credential_pending", "mcp_credential_ready",
+      "mcp_credential_pending", "mcp_credential_ready", "mcp_credential_pending", "mcp_credential_ready",
+    ]);
+    assert.ok(events.every((entry) => entry.sessionId === "s_test" && entry.entryPoint === "mcp"));
+    assert.ok(!child.stderr.includes("test-token"));
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 async function captureCli(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
   let stdout = "";

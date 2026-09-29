@@ -35,17 +35,22 @@ function readToken(env: NodeJS.ProcessEnv, tokenFile?: string): string {
   return env.WOLLIPOG_TOKEN ?? "";
 }
 
-async function waitForCredentialReady(env: NodeJS.ProcessEnv, token: string): Promise<string | null> {
+function credentialReady(env: NodeJS.ProcessEnv, token: string): boolean {
   const file = env.WOLLIPOG_SESSION_CREDENTIAL_READY_FILE;
-  if (!env.WOLLIPOG_SESSION_ID || !file) return null;
+  if (!env.WOLLIPOG_SESSION_ID || !file) return true;
   const expected = createHash("sha256").update(token).digest("hex");
+  try {
+    return readFileSync(file, "utf8").trim() === expected;
+  } catch {
+    // Missing, unreadable, or superseded fences must never authorize a request.
+    return false;
+  }
+}
+
+async function waitForCredentialReady(env: NodeJS.ProcessEnv, token: string): Promise<string | null> {
   const deadline = Date.now() + 10_000;
   do {
-    try {
-      if (readFileSync(file, "utf8").trim() === expected) return null;
-    } catch {
-      /* The runner writes the acknowledgement marker atomically. */
-    }
+    if (credentialReady(env, token)) return null;
     await new Promise((resolve) => setTimeout(resolve, 50));
   } while (Date.now() < deadline);
   return "session credential was not acknowledged by the control plane within 10 seconds";
@@ -592,10 +597,32 @@ export async function runAgentControlMcp(env: NodeJS.ProcessEnv): Promise<void> 
     console.error("[wollipog-mcp] session URL, id, and runner relay or token file are required");
     process.exit(1);
   }
-  const readinessError = token ? await waitForCredentialReady(env, token) : null;
-  if (readinessError) {
-    console.error(`[wollipog-mcp] ${readinessError}`);
-    process.exit(1);
+  if (!relayEndpoint) {
+    const transportFetch = fetchImpl;
+    let unavailable = false;
+    // MCP initialization, discovery, and ping are local. Keep the stdio connection alive
+    // while re-registration is pending, and check the current credential on every HTTP
+    // request so the same MCP process can recover after a runner reconnect or rotation.
+    fetchImpl = async (url, init) => {
+      let currentToken = "";
+      try {
+        currentToken = readToken(env);
+      } catch {
+        // Provisioning may temporarily replace the token file; retry without leaking paths.
+      }
+      if (!currentToken || !credentialReady(env, currentToken)) {
+        if (!unavailable) console.error(JSON.stringify({
+          event: "mcp_credential_pending", sessionId: selfSessionId, entryPoint: "mcp",
+        }));
+        unavailable = true;
+        throw new Error("session credential is awaiting control-plane acknowledgment; retry this tool call after the runner reconnects");
+      }
+      if (unavailable) console.error(JSON.stringify({
+        event: "mcp_credential_ready", sessionId: selfSessionId, entryPoint: "mcp",
+      }));
+      unavailable = false;
+      return transportFetch(url, { ...init, headers: { ...init?.headers, authorization: `Bearer ${currentToken}` } });
+    };
   }
   const deps: McpDeps = {
     fetch: fetchImpl,
