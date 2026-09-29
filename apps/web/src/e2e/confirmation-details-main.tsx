@@ -61,11 +61,12 @@ function Confirm({ surface }: { surface: string }) {
       });
     void request.then((value) => setOutcome(String(value)));
   }, [confirm, surface]);
+  // Read by the spec, kept out of the captured page.
   return (
-    <>
+    <div className="sr-only">
       <output data-testid="outcome">{outcome}</output>
       <output data-testid="shown">{shown}</output>
-    </>
+    </div>
   );
 }
 
