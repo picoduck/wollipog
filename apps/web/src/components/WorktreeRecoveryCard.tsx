@@ -129,6 +129,12 @@ export function WorktreeRecoveryCard({
     // the in-flight action guard even when they re-materialize the worktrees array.
   }, [recovery?.recoveryId]);
 
+  // Wider than a phone the form is inline, so the sheet closes rather than reopening by itself when
+  // the window narrows again.
+  useEffect(() => {
+    if (!phone) setSheetOpen(false);
+  }, [phone]);
+
   if (!recovery) return null;
   const creating = action === "create" || creation?.status === "creating";
   // While the card checks for a create already running, offering another could start a second one.

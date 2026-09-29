@@ -460,6 +460,23 @@ test("on a phone Cancel closes the sheet, and after a failure the button reads T
   });
 });
 
+test("a sheet open when the window widens past a phone does not reopen when it narrows again", async () => {
+  await onPhone(async () => {
+    const view = await renderCard();
+    try {
+      await act(async () => button(card(view.container), "Recover Worktree…").click());
+      assert.ok(sheet());
+      await act(async () => { domWindow.happyDOM.setViewport({ width: 1440, height: 900 }); });
+      assertNoDomNode(sheet(), "the inline form replaces the sheet");
+      assert.ok(button(view.container, "Create Replacement"));
+      await act(async () => { domWindow.happyDOM.setViewport({ width: 390, height: 844 }); });
+      assertNoDomNode(sheet(), "the sheet stays closed until the person opens it again");
+    } finally {
+      await view.unmount();
+    }
+  });
+});
+
 test("on a phone, offline keeps Recover Worktree… disabled and described by the named machine", async () => {
   await onPhone(async () => {
     const view = await renderCard({ runnerOnline: false, machineName: "Build Box" });
