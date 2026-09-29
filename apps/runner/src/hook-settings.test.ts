@@ -9,7 +9,6 @@ import {
   applyClaudeHookCapability,
   claudeHookCircuitPath,
   claudeHookGuardPath,
-  claudeHookManagerPath,
   claudeHookProtectionsPath,
   claudeHookRunnerConfigDir,
   claudeHookReadyPath,
@@ -1514,7 +1513,7 @@ test("a distrusted guard's manager fallback uses runner-held commands even after
   const fallback = preparedSettings(prepared.args);
   assert.equal(guardEntries(fallback).length, 0);
   assert.deepEqual(fallback.hooks?.PostToolUse, original.hooks.PostToolUse);
-  writeFileSync(claudeHookManagerPath(file), JSON.stringify({ hooks: { PostToolUse: [{ hooks: [{ command: "/bin/true" }] }] } }));
+  writeFileSync(file, JSON.stringify({ hooks: { PostToolUse: [{ hooks: [{ command: "/bin/true" }] }] } }));
   assert.deepEqual(preparedSettings(prepareClaudeHookArgs(launch.args).args).hooks?.PostToolUse, original.hooks.PostToolUse,
     "each respawn republishes its manager copy from runner-held bytes");
 }));
@@ -1574,19 +1573,20 @@ function preparedSettings(args: string[]): ReturnType<typeof settingsOf>["live"]
   return JSON.parse(value.startsWith("{") ? value : readFileSync(value, "utf8"));
 }
 
-test("a file-form manager fallback stays compatible with Windows command quoting and is cleaned up", () => temp((dir) => {
+test("a file-form manager fallback keeps the sandbox-exposed path and Windows-compatible arguments", () => temp((dir) => {
   const launch = provisionGuarded(dir);
   const { file } = settingsOf(dir);
   rmSync(claudeHookProtectionsPath(file));
   const prepared = prepareClaudeHookArgs(launch.args);
   assert.equal(prepared.managerActive, true);
   assert.equal(prepared.guardActive, false);
-  assert.deepEqual(prepared.args, ["--settings", claudeHookManagerPath(file)]);
+  assert.deepEqual(prepared.args, launch.args, "Seatbelt already exposes this exact settings path");
   for (const arg of prepared.args) assert.doesNotThrow(() => winQuoteArg(arg));
-  if (process.platform !== "win32") assert.equal(statSync(claudeHookManagerPath(file)).mode & 0o777, 0o600);
+  if (process.platform !== "win32") assert.equal(statSync(file).mode & 0o777, 0o600);
   assert.equal(guardEntries(preparedSettings(prepared.args)).length, 0);
+  assert.equal(prepareClaudeHookArgs(launch.args).guardActive, false, "publishing the fallback does not restore guard trust");
   removeClaudeHookFiles("sess_hook_1", dir);
-  assert.equal(existsSync(claudeHookManagerPath(file)), false);
+  assert.equal(existsSync(file), false);
 }));
 
 test("an unwritable manager fallback drops its hooks without claiming a circuit reprobe", () => temp((dir) => {
@@ -1594,7 +1594,8 @@ test("an unwritable manager fallback drops its hooks without claiming a circuit 
   const { file } = settingsOf(dir);
   rmSync(claudeHookProtectionsPath(file));
   // A directory at the destination cannot be replaced by a protected settings file.
-  mkdirSync(claudeHookManagerPath(file));
+  rmSync(file);
+  mkdirSync(file);
   writeHookCircuitState(claudeHookCircuitPath(file), { consecutiveFailures: 3, open: true, openedAt: 100 });
   const prepared = prepareClaudeHookArgs(launch.args, 30_101);
   assert.deepEqual(prepared.args, []);

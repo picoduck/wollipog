@@ -95,8 +95,6 @@ const TOKEN_SUFFIX = ".token";
 const READY_SUFFIX = ".ready";
 /** Guard-only copy of the settings, used whenever the manager hooks must not run (circuit open). */
 const GUARD_SUFFIX = ".guard.json";
-/** Manager-only copy published from runner-held bytes when the guard is distrusted. */
-const MANAGER_SUFFIX = ".manager.json";
 const POLICY_HOOK_CREDENTIAL_PREFIX = "wollipogh_";
 const POLICY_HOOK_CREDENTIAL = /^(?:wollipogh_|mamh_)[A-Za-z0-9_-]{43}$/u;
 export const CLAUDE_HOOK_CIRCUIT_COOLDOWN_MS = 30_000;
@@ -223,12 +221,6 @@ export function claudeHookGuardPath(settingsFile: string): string {
   return settingsFile.endsWith(SETTINGS_SUFFIX)
     ? `${settingsFile.slice(0, -SETTINGS_SUFFIX.length)}${GUARD_SUFFIX}`
     : `${settingsFile}${GUARD_SUFFIX}`;
-}
-
-export function claudeHookManagerPath(settingsFile: string): string {
-  return settingsFile.endsWith(SETTINGS_SUFFIX)
-    ? `${settingsFile.slice(0, -SETTINGS_SUFFIX.length)}${MANAGER_SUFFIX}`
-    : `${settingsFile}${MANAGER_SUFFIX}`;
 }
 
 /** Live protected-worktree set consulted by the managed-worktree guard before every Bash call. */
@@ -466,7 +458,7 @@ export function sweepClaudeHookFiles(configDir = defaultHookConfigDir()): number
   for (const entry of readdirSync(configDir, { withFileTypes: true })) {
     if (!entry.isFile() ||
         ![SETTINGS_SUFFIX, TEMPLATE_SUFFIX, CIRCUIT_SUFFIX, CIRCUIT_LOCK_SUFFIX, TOKEN_SUFFIX, READY_SUFFIX,
-          GUARD_SUFFIX, MANAGER_SUFFIX, MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX]
+          GUARD_SUFFIX, MANAGED_WORKTREE_GUARD_PROTECTIONS_SUFFIX]
           .some((suffix) => entry.name.endsWith(suffix))) continue;
     rmSync(join(configDir, entry.name), { force: true });
     removed++;
@@ -494,7 +486,6 @@ export function removeClaudeHookFiles(sessionId: string, configDir = defaultHook
       claudeHookTokenPath(settings),
       claudeHookReadyPath(settings),
       claudeHookGuardPath(settings),
-      claudeHookManagerPath(settings),
       claudeHookProtectionsPath(settings),
     ]) {
       rmSync(file, { force: true });
@@ -1851,7 +1842,7 @@ export function prepareClaudeHookArgs(args: string[], now = Date.now()): Prepare
         combined: managerOnly ?? "",
         guardOnly: null,
         managerOnly: managerOnly ?? null,
-      }, now, claudeHookManagerPath(file)),
+      }, now, file),
       ...(!settingsSetTrusted
         ? {
           guardReason: expectedFileGuard
