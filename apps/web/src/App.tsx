@@ -76,7 +76,7 @@ import { FeedbackProvider } from "./components/FeedbackProvider.js";
 import { Modal } from "./components/common.js";
 import { Notice } from "./components/Notice.js";
 import { OfflineBanner } from "./components/OfflineBanner.js";
-import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon, WarningTriangleIcon } from "./components/Icons.js";
+import { ChevronLeftIcon, DockBottomIcon, KeyboardIcon, LockIcon, PanelRightIcon, PinnedPanelIcon, PlusIcon } from "./components/Icons.js";
 import { NavRow, SwitchRow } from "./components/ui/SettingsRows.js";
 import { backLabel, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { useInstanceScope } from "./instance-scope.js";
@@ -682,7 +682,7 @@ export function Shell() {
         aria-label="Toggle Pinned Summary"
         aria-pressed={pinnedOpen}
       >
-        <PinnedPanelIcon size={15} />
+        <PinnedPanelIcon size={16} />
       </button>
       <button
         type="button"
@@ -697,7 +697,7 @@ export function Shell() {
         }
         aria-pressed={terminalSupported && dockVisible}
       >
-        <DockBottomIcon size={15} />
+        <DockBottomIcon size={16} />
       </button>
       <button
         type="button"
@@ -707,7 +707,7 @@ export function Shell() {
         aria-label={rightPanel.open ? "Hide Side Panel" : "Show Side Panel"}
         aria-pressed={rightPanel.open}
       >
-        <PanelRightIcon size={15} />
+        <PanelRightIcon size={16} />
       </button>
     </>
   ) : null;
@@ -956,7 +956,7 @@ export function Header({
             title="Back to sessions"
             aria-label={backLabel("inbox")}
           >
-            <ChevronLeftIcon size={18} />
+            <ChevronLeftIcon size={20} />
           </button>
           <h1 id="page-title" tabIndex={-1} title={sessionTitle}>{sessionTitle ?? title}</h1>
         </>

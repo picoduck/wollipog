@@ -451,7 +451,7 @@ export function ArchivedSessionsView() {
         <label className={`archive-search${queryInput ? " has-query" : ""}`}>
           <span>Search Sessions and Transcripts</span>
           <div>
-            <SearchIcon size={15} aria-hidden="true" />
+            <SearchIcon size={16} aria-hidden="true" />
             <input
               type="search"
               value={queryInput}

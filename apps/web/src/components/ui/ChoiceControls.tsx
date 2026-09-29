@@ -106,7 +106,7 @@ function ChoiceMark({ type, className, ...input }: {
     <span className={`${type === "checkbox" ? "checkbox-mark" : "radio-mark"}${className ? ` ${className}` : ""}`}>
       <input type={type} {...input} />
       {type === "checkbox"
-        ? <CheckIcon size={12} className="checkbox-check" />
+        ? <CheckIcon size={14} className="checkbox-check" />
         : <span className="radio-dot" aria-hidden="true" />}
     </span>
   );
@@ -1508,7 +1508,7 @@ export function Select<T extends string>({
               <small className="ui-select-option-reason">{option.disabledReason}</small>
             )}
           </span>
-          {option.value === value && <CheckIcon size={13} />}
+          {option.value === value && <CheckIcon size={14} />}
         </button>
       ))}
       {showCreate && createOption && (

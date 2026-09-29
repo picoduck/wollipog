@@ -192,7 +192,7 @@ import {
 } from "../conversation-steering.js";
 import { SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts } from "./SessionCommandReceipts.js";
-import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderSolidIcon, ImageIcon, InfoIcon, MicIcon, MoreVerticalIcon, PlusIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
+import { ArrowUpIcon, ChevronLeftIcon, EditIcon, FolderIcon, ImageIcon, InfoIcon, MicIcon, MoreVerticalIcon, PlusIcon, RefreshIcon, StopTurnIcon } from "./Icons.js";
 import {
   DURABLE_COMMAND_ATTACHMENT_NOTICE,
   buildComposerCommandRegistry,
@@ -594,7 +594,7 @@ export function SessionDetail(props: SessionDetailProps) {
               title="Back to sessions"
               aria-label={backLabel("inbox")}
             >
-              <ChevronLeftIcon size={22} />
+              <ChevronLeftIcon size={20} />
             </button>
             <div className="detail-crumbs">
               <h1
@@ -6714,7 +6714,7 @@ function LegacyWorkspaceChip({ session }: { session: SessionView }) {
         aria-expanded={open}
         aria-controls={menu.menuId}
       >
-        <FolderSolidIcon className="cctx-icon" size={13} />
+        <FolderIcon className="cctx-icon" size={14} />
         {session.workspaceName ?? "No Workspace"}
         <span className="cctx-caret" aria-hidden="true">
           ▾
@@ -7332,7 +7332,7 @@ function GuardrailHelp({ label, hint }: { label: string; hint: string }) {
         title={`About ${label}`}
         onClick={popover.toggle}
       >
-        <InfoIcon size={13} />
+        <InfoIcon size={14} />
       </button>
       {popover.open && (
         <span className="plus-budget-help-popover" id={popoverId} role="note" style={popover.style}>{hint}</span>

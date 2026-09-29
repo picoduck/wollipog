@@ -270,7 +270,7 @@ export function NavigationRailPanel() {
                 : null;
           return (
             <li className={`rail-order-row${hidden || experimentOff ? " is-inactive" : ""}`} key={name}>
-              <span className="rail-order-icon" aria-hidden="true"><Icon size={18} /></span>
+              <span className="rail-order-icon" aria-hidden="true"><Icon size={16} /></span>
               <span className="rail-order-title">{item.name}</span>
               <span className="rail-order-state">
                 {digit !== undefined && <kbd aria-label={`Shortcut ${digit}`}>{digit}</kbd>}
@@ -346,7 +346,7 @@ export function KeyboardPanel({
       <NavRow
         title="Keyboard Shortcuts"
         description={shortcutLabel}
-        icon={<KeyboardIcon size={15} />}
+        icon={<KeyboardIcon size={16} />}
         disabled={disabled}
         // Resolved from the DOM rather than a ref, as the dialog version did: the reference dialog
         // returns focus here, and this row is the thing to return it to.

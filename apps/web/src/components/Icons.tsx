@@ -24,6 +24,7 @@ import {
   FlaskConical as LucideFlaskConical,
   Folder as LucideFolder,
   FolderKanban as LucideFolderKanban,
+  Gauge as LucideGauge,
   GitBranch as LucideGitBranch,
   GitCommitVertical as LucideGitCommitVertical,
   GitFork as LucideGitFork,
@@ -45,6 +46,7 @@ import {
   NotebookText as LucideNotebookText,
   PanelBottom as LucidePanelBottom,
   PanelRight as LucidePanelRight,
+  PictureInPicture2 as LucidePictureInPicture2,
   Pencil as LucidePencil,
   Pin as LucidePin,
   Plus as LucidePlus,
@@ -74,8 +76,40 @@ export type IconProps = SVGProps<SVGSVGElement> & { size?: number };
 
 type LibraryIconProps = IconProps & { glyph: LucideIcon };
 
+/**
+ * The interface icon scale (docs/design-system.md §18): 14 beside small text, 16 by default, 20 for
+ * prominent toolbar icons, and 24 for empty-state tiles and the phone tab bar.
+ */
+export const ICON_SIZES: readonly number[] = [14, 16, 20, 24];
+
+/**
+ * Sizes off the scale that are owned elsewhere, each with its reason. Product and vendor marks do not
+ * render through LibraryIcon, so they need no entry here.
+ */
+const OFF_SCALE_OWNERS: ReadonlyMap<number, string> = new Map([
+  [26, "the desktop rail's glyph size, which the App Shell epic's rail unit (#1958) owns"],
+]);
+
+// Vite supplies import.meta.env in the browser; the Node test runner has no Vite transform, so it
+// falls back to NODE_ENV there, where tests run as development.
+const viteEnv = (import.meta as ImportMeta & { env?: { DEV?: boolean } }).env;
+const nodeEnv = (globalThis as { process?: { env?: Record<string, string | undefined> } }).process?.env;
+const WARN_OFF_SCALE = viteEnv ? viteEnv.DEV === true : nodeEnv?.NODE_ENV !== "production";
+const warnedSizes = new Set<number>();
+
+/** Warn once per size, in development only, when an icon is drawn off the §18 scale. */
+function warnIfOffScale(size: number): void {
+  if (!WARN_OFF_SCALE || ICON_SIZES.includes(size) || OFF_SCALE_OWNERS.has(size) || warnedSizes.has(size)) return;
+  warnedSizes.add(size);
+  console.warn(
+    `An icon was drawn at ${size}px, which is off the icon scale (${ICON_SIZES.join(", ")}). ` +
+    "Use the nearest allowed size (docs/design-system.md §18).",
+  );
+}
+
 /** Keep Lucide glyphs on Wollipog's size, stroke, class, and accessibility contract. */
 function LibraryIcon({ glyph: Glyph, size = 16, className, children: _children, ...props }: LibraryIconProps) {
+  warnIfOffScale(size);
   return (
     <Glyph
       size={size}
@@ -151,7 +185,7 @@ export function AutomationsIcon(props: IconProps) {
 }
 
 export function ServiceTierIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideZap} {...props} />;
+  return <LibraryIcon glyph={LucideGauge} {...props} />;
 }
 
 export function SkillsIcon(props: IconProps) {
@@ -276,12 +310,8 @@ export function EyeOffIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideEyeOff} {...props} />;
 }
 
-export function WarningTriangleIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideTriangleAlert} {...props} />;
-}
-
 export function PinnedPanelIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideList} {...props} />;
+  return <LibraryIcon glyph={LucidePictureInPicture2} {...props} />;
 }
 
 export function DockBottomIcon(props: IconProps) {
@@ -301,10 +331,6 @@ export function GlobeIcon(props: IconProps) {
 }
 
 export function FolderIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideFolder} {...props} />;
-}
-
-export function FolderOutlineIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFolder} {...props} />;
 }
 
@@ -488,13 +514,12 @@ export function GitHubIcon({ size = 16, className, ...props }: IconProps) {
   );
 }
 
-/** Filled to preserve the 13px folder mark's intentional visual weight. */
+/**
+ * The rail's archived destination, filled. The rail's glyphs belong to #1958, which replaces this;
+ * whichever of #1958 and #1955 lands second deletes the export.
+ */
 export function FolderSolidIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFolder} fill="currentColor" stroke="none" {...props} />;
-}
-
-export function GearIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideSettings} {...props} />;
 }
 
 export function NotesIcon(props: IconProps) {

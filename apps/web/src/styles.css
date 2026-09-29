@@ -9587,6 +9587,17 @@ button.file-head.source-path-link {
   border-color: var(--border-strong);
   color: var(--text);
 }
+/* The labeled form: a leading icon, then every label it can show stacked in one cell with only the
+   current one visible, so "Copied" and "Copy Failed" never change the button's width. */
+.copy-btn.copy-btn-labeled {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-1);
+}
+.copy-btn-labels { display: inline-grid; }
+.copy-btn-labels > span { grid-area: 1 / 1; text-align: start; }
+.copy-btn-labels > span:not([data-shown]) { visibility: hidden; }
 .copy-btn.icon-only-copy {
   display: inline-flex;
   width: 30px;
@@ -9597,10 +9608,6 @@ button.file-head.source-path-link {
   justify-content: center;
   margin-left: 0;
   padding: 5px;
-}
-.copy-btn.icon-only-copy svg {
-  width: 15px;
-  height: 15px;
 }
 .copy-btn.icon-only-copy.copy-status-copied {
   border-color: color-mix(in srgb, var(--positive-text) 55%, var(--border));
@@ -10930,14 +10937,17 @@ body.shell-dock-dragging * {
   color: var(--text-dim);
   background: transparent;
 }
+/* A pinned session inside the thread: a dot on the badge's edge. A second pin glyph would have to be
+   drawn at 7px, off the icon scale (docs/design-system.md §18). */
 .inbox-pin-contained-mark {
   position: absolute;
-  right: -3px;
-  bottom: -3px;
-  padding: 1px;
+  right: -2px;
+  bottom: -2px;
+  width: 7px;
+  height: 7px;
+  border: 1px solid var(--bg-elev-2);
   border-radius: var(--radius-pill);
-  color: var(--text);
-  background: var(--bg-elev-2);
+  background: var(--accent);
 }
 .inbox-unread-badge {
   flex: none;

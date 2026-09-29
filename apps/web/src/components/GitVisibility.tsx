@@ -1,7 +1,7 @@
 import { useId, useState } from "react";
 import type { GitPresentation, GitPresentationRow } from "../pinned-summary.js";
 import { deriveGitHeadline } from "../pinned-summary.js";
-import { BranchIcon, ChainIcon, DialIcon, WarningTriangleIcon } from "./Icons.js";
+import { BranchIcon, ChainIcon, DialIcon, WarningIcon } from "./Icons.js";
 
 function rowText(row: GitPresentationRow): string {
   return row.detail ? `${row.label} ${row.detail}` : row.label;
@@ -14,7 +14,7 @@ function GitRow({
   row: GitPresentationRow;
   icon?: "branch" | "worktree" | "warning";
 }) {
-  const Icon = icon === "worktree" ? ChainIcon : icon === "warning" ? WarningTriangleIcon : BranchIcon;
+  const Icon = icon === "worktree" ? ChainIcon : icon === "warning" ? WarningIcon : BranchIcon;
   return (
     <div
       className={`ps-row is-static ps-git-row${row.tone === "warning" ? " is-warning" : ""}`}

@@ -11,6 +11,29 @@ equivalent. New exceptions require a rationale in this inventory and an ownershi
 Removal candidates should be deleted with all consumers rather than left as unused compatibility
 exports.
 
+## One Glyph per Meaning
+
+Each export renders its own Lucide glyph, and each meaning has one export (docs/design-system.md
+§18). The only shared glyph is `FolderSolidIcon`, listed below with the unit that retires it. The
+ownership test in `apps/web/src/icons.test.ts` fails when two rows map to the same glyph without
+that exception.
+
+## Sizes
+
+`LibraryIcon` draws at 14, 16, 20 or 24px (`ICON_SIZES` in `Icons.tsx`): 14 beside small text, 16 by
+default, 20 for prominent toolbar icons, and 24 for empty-state tiles and the phone tab bar. Any other
+size logs a warning in development. The desktop rail's 26px glyphs are the one recorded exception,
+owned by the App Shell rail unit (#1958); product and vendor marks (`AgentIcon` and the custom
+exceptions below) keep their own sizes. A unit test fails when a production component passes an
+icon a literal size off the scale.
+
+## Text Glyphs
+
+Characters such as ×, ✕, ✓, ▸, ▾, ↻ and → render in the text font rather than as icons.
+`apps/web/src/text-glyph-ratchet.test.ts` records every production site that still uses one, with
+the area epic that removes it, and fails when a new site appears. Legitimate text, such as a
+keycap's display key or a multiplication sign in a label, is exempted there by name with a reason.
+
 ## Export Inventory
 
 | Export | Decision | Mapping or Exception | Rationale |
@@ -25,7 +48,7 @@ exports.
 | `RunsIcon` | Lucide | `Workflow` | Generic workflow runs. |
 | `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
-| `ServiceTierIcon` | Lucide | `Zap` | Fast service-tier setting. |
+| `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |
 | `SkillsIcon` | Lucide | `WandSparkles` | Reusable agent capability. |
 | `UsageIcon` | Lucide | `ChartNoAxesColumn` | Usage metrics. |
 | `ChevronDownIcon` | Lucide | `ChevronDown` | Directional disclosure. |
@@ -56,14 +79,12 @@ exports.
 | `MailIcon` | Lucide | `Mail` | A masked or revealed email address. |
 | `EyeIcon` | Lucide | `Eye` | Reveal a masked personal identifier. |
 | `EyeOffIcon` | Lucide | `EyeOff` | Hide a revealed personal identifier. |
-| `WarningTriangleIcon` | Lucide | `TriangleAlert` | Generic warning banner. |
-| `PinnedPanelIcon` | Lucide | `List` | Pinned summary list. |
+| `PinnedPanelIcon` | Lucide | `PictureInPicture2` | The Pinned Summary card floating over the transcript; distinct from the list layout and the side panel. |
 | `DockBottomIcon` | Lucide | `PanelBottom` | Bottom dock placement. |
 | `PanelRightIcon` | Lucide | `PanelRight` | Right panel placement. |
 | `CommandLineIcon` | Lucide | `SquareTerminal` | Command-line destination. |
 | `GlobeIcon` | Lucide | `Globe` | Remote host. |
 | `FolderIcon` | Lucide | `Folder` | Generic directory. |
-| `FolderOutlineIcon` | Lucide | `Folder` | Directory-list folder; stable alias. |
 | `FolderUpIcon` | Lucide | `CornerUpLeft` | Navigate to the parent directory. |
 | `HelpIcon` | Lucide | `MessageCircleQuestion` | Contextual help. |
 | `MicIcon` | Lucide | `Mic` | Dictation action. |
@@ -80,8 +101,7 @@ exports.
 | `StopTurnIcon` | Lucide | `Square` | Filled and optically scaled to preserve its send-arrow balance. |
 | `TuningIcon` | Lucide | `SlidersHorizontal` | Model or effort tuning. |
 | `GitHubIcon` | Custom Exception | `GitHub Mark` | Official brand mark with a 16-unit solid geometry. |
-| `FolderSolidIcon` | Lucide | `Folder` | Generic folder, intentionally filled at 13px. |
-| `GearIcon` | Lucide | `Settings` | Stable alias for the settings trigger. |
+| `FolderSolidIcon` | Lucide | `Folder` | The rail's archived destination, filled; a documented duplicate of `FolderIcon`'s glyph until the rail unit (#1958) replaces it. Whichever of #1958 and #1955 lands second deletes this export. |
 | `NotesIcon` | Lucide | `NotebookText` | Notes summary. |
 | `ComputerIcon` | Lucide | `Monitor` | Local computer. |
 | `BranchIcon` | Lucide | `GitBranch` | Git branch. |
@@ -114,8 +134,8 @@ The manifest declares `lucide-react` and `pnpm-lock.yaml` pins the resolved rele
 
 1. keep all imports named and centralized in `Icons.tsx`;
 2. run the full unit suite, typecheck, production build, and icon tree-shaking contract;
-3. compare representative navigation, action, status, file, and panel icons at 13px, 14px, 16px,
-   20px, 26px, and 28px where those sizes are used;
+3. compare representative navigation, action, status, file, and panel icons at 14px, 16px, 20px
+   and 24px, and the rail at its 26px;
 4. review light and dark themes at desktop and phone widths; and
 5. exercise interactive, disabled, selected, warning, and status styling without changing visible
    labels or accessible control names.

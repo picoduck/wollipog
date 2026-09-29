@@ -19,7 +19,7 @@ import {
 import type { GitStatus, GitSummary } from "./useGitStatus.js";
 import { GitPinnedSection } from "./GitVisibility.js";
 import { AgentIcon } from "./AgentIcon.js";
-import { BranchIcon, ComputerIcon, DialIcon, FolderOutlineIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, SkillsIcon, TuningIcon } from "./Icons.js";
+import { BranchIcon, ComputerIcon, DialIcon, FolderIcon, GitHubIcon, GlobeIcon, NotesIcon, PullRequestIcon, SkillsIcon, TuningIcon } from "./Icons.js";
 import { BackgroundDeliveryBadge, BackgroundNotificationBadge, Spinner } from "./common.js";
 import { effortLabel, relativeTime, resolvedModelLabel } from "../format.js";
 import { effectiveModelEffortForDisplay, resolveCaps, resolveEffectiveCaps } from "../caps.js";
@@ -185,7 +185,7 @@ export function PinnedSummary({
         {/* The Workspace is the directory-on-machine fact — environment, not identity. */}
         {session.workspaceName && (
           <div className="ps-row is-static">
-            <FolderOutlineIcon className="ps-icon" size={14} />
+            <FolderIcon className="ps-icon" size={14} />
             <span>Workspace</span>
             <span className="ps-right ps-detail">{session.workspaceName}</span>
           </div>

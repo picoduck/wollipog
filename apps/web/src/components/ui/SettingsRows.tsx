@@ -276,7 +276,7 @@ export function NavRow({
     >
       <span className="ui-row-icon" aria-hidden="true">{icon}</span>
       <RowBody title={title} description={description} />
-      <span className="ui-row-chevron" aria-hidden="true"><ChevronRightIcon size={15} /></span>
+      <span className="ui-row-chevron" aria-hidden="true"><ChevronRightIcon size={16} /></span>
     </button>
   );
 }

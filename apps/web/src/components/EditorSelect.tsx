@@ -168,7 +168,7 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
         title={offline ? "Runner is offline." : availabilityLabel}
         aria-label={availabilityLabel}
       >
-        <DestinationIcon destination={chosen} size={15} />
+        <DestinationIcon destination={chosen} size={16} />
         <span className="editor-main-label">Open</span>
       </button>
       <button
@@ -184,7 +184,7 @@ export function EditorSelect({ sessionId }: { sessionId: string }) {
         aria-expanded={open}
         aria-controls={menu.menuId}
       >
-        <ChevronDownIcon size={13} />
+        <ChevronDownIcon size={14} />
       </button>
       {open && (
         <MenuSurface

@@ -10,6 +10,7 @@ import {
   BackgroundWorkBadge,
   ActiveSubagentsBadge,
   AttentionBadge,
+  COPY_RESULT_MS,
   CopyButton,
   ChangeStatusBadge,
   SessionStatusIndicators,
@@ -70,6 +71,87 @@ test("icon-only copy controls show visible failure feedback", async () => {
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();
+  }
+});
+
+/** Renders a labeled copy button, capturing its result timer instead of letting it run. */
+async function renderLabeledCopyButton(writeText: () => Promise<void>) {
+  const timers: { run: () => void; ms: number }[] = [];
+  const originalSetTimeout = domWindow.setTimeout;
+  domWindow.setTimeout = ((run: () => void, ms: number) => {
+    timers.push({ run, ms });
+    return timers.length;
+  }) as unknown as typeof domWindow.setTimeout;
+  Object.defineProperty(domWindow.navigator, "clipboard", { configurable: true, value: { writeText } });
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<CopyButton text="wollipog runner start" label="Copy Command" />);
+  });
+  const button = () => container.querySelector("button")!;
+  const shown = () => [...button().querySelectorAll(".copy-btn-labels > [data-shown]")].map((label) => label.textContent);
+  const press = () => act(async () => {
+    button().click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const cleanup = async () => {
+    domWindow.setTimeout = originalSetTimeout;
+    await act(async () => { root.unmount(); });
+    container.remove();
+  };
+  return { container, button, shown, press, timers, cleanup };
+}
+
+test("a labeled copy button confirms with a check icon and \"Copied\", then returns to its label", async () => {
+  const view = await renderLabeledCopyButton(async () => {});
+  try {
+    assert.deepEqual(view.shown(), ["Copy Command"]);
+    assert.ok(view.button().querySelector("svg.lucide-copy"), "the idle button leads with the copy icon");
+    await view.press();
+    assert.deepEqual(view.shown(), ["Copied"]);
+    assert.ok(view.button().firstElementChild?.matches("svg.lucide-check.copy-status-icon-copied"),
+      "the leading icon becomes the check");
+    assert.equal(view.button().textContent?.includes("✓"), false, "the confirmation is an icon, not a text glyph");
+    assert.equal(view.button().getAttribute("aria-label"), "Copy Command", "the name stays the action");
+    assert.equal(view.container.querySelector("[aria-live=polite]")?.textContent, "Copied to clipboard");
+    assert.equal(view.timers.at(-1)?.ms, COPY_RESULT_MS);
+    assert.equal(COPY_RESULT_MS, 2000);
+    await act(async () => { view.timers.at(-1)!.run(); });
+    assert.deepEqual(view.shown(), ["Copy Command"]);
+    assert.ok(view.button().querySelector("svg.lucide-copy"));
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("a labeled copy button reports a failure with an error icon and \"Copy Failed\"", async () => {
+  // The fallback path refuses too, as it does where no copy is possible.
+  const document = domWindow.document as unknown as { execCommand?: (command: string) => boolean };
+  const originalExecCommand = document.execCommand;
+  document.execCommand = () => false;
+  const view = await renderLabeledCopyButton(async () => { throw new Error("blocked"); });
+  try {
+    await view.press();
+    assert.deepEqual(view.shown(), ["Copy Failed"]);
+    assert.ok(view.button().firstElementChild?.matches("svg.lucide-circle-alert.copy-status-icon-failed"));
+    assert.equal(view.container.querySelector("[aria-live=polite]")?.textContent, "Copy failed");
+  } finally {
+    document.execCommand = originalExecCommand;
+    await view.cleanup();
+  }
+});
+
+test("a labeled copy button always holds every label it can show, so its width cannot change", async () => {
+  const view = await renderLabeledCopyButton(async () => {});
+  try {
+    const labels = () => [...view.button().querySelectorAll(".copy-btn-labels > span")].map((label) => label.textContent);
+    assert.deepEqual(labels(), ["Copy Command", "Copied", "Copy Failed"]);
+    await view.press();
+    assert.deepEqual(labels(), ["Copy Command", "Copied", "Copy Failed"]);
+  } finally {
+    await view.cleanup();
   }
 });
 

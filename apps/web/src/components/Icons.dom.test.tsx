@@ -4,10 +4,17 @@ import { Window } from "happy-dom";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import {
+  AutomationsIcon,
+  CheckIcon,
   CursorEditorIcon,
   DevinDesktopIcon,
   GitHubIcon,
   GridIcon,
+  ICON_SIZES,
+  ListIcon,
+  PanelRightIcon,
+  PinnedPanelIcon,
+  ServiceTierIcon,
   ShieldIcon,
   StopTurnIcon,
   VisualStudioCodeIcon,
@@ -38,13 +45,50 @@ test("a rendered Lucide icon preserves the complete shared SVG contract", () => 
   assert.ok(svg.classList.contains("sample"));
 });
 
-test("the adapter renders every commonly used icon size without changing the viewBox", () => {
-  for (const size of [13, 14, 16, 20, 26, 28]) {
+/** Renders `icon` and returns the development warnings it logged. */
+function warningsWhileRendering(icon: React.ReactElement): string[] {
+  const warnings: string[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => { warnings.push(args.map(String).join(" ")); };
+  try {
+    renderToStaticMarkup(icon);
+  } finally {
+    console.warn = original;
+  }
+  return warnings;
+}
+
+test("the adapter renders every size on the icon scale without changing the viewBox or warning", () => {
+  assert.deepEqual(ICON_SIZES, [14, 16, 20, 24]);
+  for (const size of ICON_SIZES) {
     const svg = renderedSvg(renderToStaticMarkup(<GridIcon size={size} />));
     assert.equal(svg.getAttribute("width"), String(size));
     assert.equal(svg.getAttribute("height"), String(size));
     assert.equal(svg.getAttribute("viewBox"), "0 0 24 24");
+    assert.deepEqual(warningsWhileRendering(<GridIcon size={size} />), []);
   }
+});
+
+test("an icon drawn off the scale warns in development, once per size, and still renders", () => {
+  const warnings = warningsWhileRendering(<GridIcon size={15} />);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0]!, /15px.*off the icon scale \(14, 16, 20, 24\)/);
+  assert.deepEqual(warningsWhileRendering(<CheckIcon size={15} />), [], "the same size warns once");
+  const svg = renderedSvg(renderToStaticMarkup(<GridIcon size={15} />));
+  assert.equal(svg.getAttribute("width"), "15");
+});
+
+test("the rail's recorded 26px size does not warn, and the default size is on the scale", () => {
+  assert.deepEqual(warningsWhileRendering(<GridIcon size={26} />), []);
+  assert.deepEqual(warningsWhileRendering(<GridIcon />), []);
+});
+
+test("the Fast service tier and Automations no longer share a glyph", () => {
+  const tier = renderToStaticMarkup(<ServiceTierIcon />);
+  assert.notEqual(tier, renderToStaticMarkup(<AutomationsIcon />));
+  assert.match(tier, /lucide-gauge\b/);
+  assert.notEqual(renderToStaticMarkup(<PinnedPanelIcon />), renderToStaticMarkup(<ListIcon />));
+  assert.notEqual(renderToStaticMarkup(<PinnedPanelIcon />), renderToStaticMarkup(<PanelRightIcon />));
 });
 
 test("explicit accessibility and styling overrides remain available", () => {

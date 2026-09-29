@@ -1372,13 +1372,13 @@ export function InboxView({
               options={[
                 {
                   value: "list",
-                  label: <SessionsToolbarOption icon={<ListIcon size={17} />} label="List" />,
+                  label: <SessionsToolbarOption icon={<ListIcon size={16} />} label="List" />,
                   ariaLabel: "List",
                   title: "List",
                 },
                 {
                   value: "board",
-                  label: <SessionsToolbarOption icon={<BoardIcon size={17} />} label="Board" />,
+                  label: <SessionsToolbarOption icon={<BoardIcon size={16} />} label="Board" />,
                   ariaLabel: "Board",
                   title: "Board",
                 },
@@ -1397,13 +1397,13 @@ export function InboxView({
                 options={[
                   {
                     value: "ordinary",
-                    label: <SessionsToolbarOption icon={<DialIcon size={17} />} label="Active" count={activeCount} />,
+                    label: <SessionsToolbarOption icon={<DialIcon size={16} />} label="Active" count={activeCount} />,
                     ariaLabel: `Active, ${activeCount} ${activeCount === 1 ? "Session" : "Sessions"}`,
                     title: "Active",
                   },
                   {
                     value: "snoozed",
-                    label: <SessionsToolbarOption icon={<SnoozedIcon size={17} />} label="Snoozed" count={snoozedCount} />,
+                    label: <SessionsToolbarOption icon={<SnoozedIcon size={16} />} label="Snoozed" count={snoozedCount} />,
                     ariaLabel: `Snoozed, ${snoozedCount} ${snoozedCount === 1 ? "Session" : "Sessions"}`,
                     title: "Snoozed",
                   },
@@ -1417,7 +1417,7 @@ export function InboxView({
             />
             <label className={`inbox-search${query ? " has-query" : ""}`}>
               <span className="sr-only">Search Sessions</span>
-              <SearchIcon size={15} />
+              <SearchIcon size={16} />
               <input
                 value={query}
                 onChange={(event) => changeQuery(event.target.value)}

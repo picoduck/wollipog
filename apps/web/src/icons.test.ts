@@ -3,6 +3,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import ts from "typescript";
 
 const SRC = fileURLToPath(new URL(".", import.meta.url));
 const ROOT = fileURLToPath(new URL("../../..", import.meta.url));
@@ -141,6 +142,84 @@ test("every exported icon is inventoried and follows its documented ownership de
         `${row.name} is documented as custom and must not hide a library mapping`);
     }
   }
+});
+
+/**
+ * Exports that may render another export's glyph, each with the export it duplicates. A shared glyph
+ * reads as a shared meaning (docs/design-system.md §18), so this list only ever shrinks.
+ */
+const SHARED_GLYPHS: Readonly<Record<string, string>> = {
+  // The rail's archived destination, filled; #1958 replaces it, and whichever of #1958 and #1955
+  // lands second deletes the export.
+  FolderSolidIcon: "FolderIcon",
+};
+
+test("no two icon exports render the same Lucide glyph except the documented exceptions", () => {
+  const docs = readFileSync(INVENTORY_PATH, "utf8");
+  const byGlyph = new Map<string, string[]>();
+  for (const match of docs.matchAll(/^\| `(\w+Icon)` \| Lucide \| `([^`]+)` \|/gm)) {
+    byGlyph.set(match[2]!, [...(byGlyph.get(match[2]!) ?? []), match[1]!]);
+  }
+  const shared = [...byGlyph].filter(([, names]) => names.length > 1)
+    .flatMap(([, names]) => names.slice(1).map((name) => `${name} → ${names[0]}`)).sort();
+  assert.deepEqual(shared, Object.entries(SHARED_GLYPHS).map(([name, of]) => `${name} → ${of}`).sort(),
+    "give each meaning its own glyph, or delete the alias and use the existing export");
+});
+
+test("the retired icon aliases stay deleted", () => {
+  const source = readFileSync(ICONS_PATH, "utf8");
+  for (const name of ["WarningTriangleIcon", "GearIcon", "FolderOutlineIcon"]) {
+    assert.doesNotMatch(source, new RegExp(`export function ${name}\\(`), `${name} was merged into one export per meaning`);
+  }
+});
+
+/**
+ * Components whose `size` is not an interface icon size: product and vendor marks keep their own
+ * geometry, and the rail's glyph size belongs to the App Shell rail unit (#1958).
+ */
+const SIZE_EXEMPT_TAGS = new Set(["AgentIcon", "CursorEditorIcon", "DevinDesktopIcon", "GitHubIcon", "VisualStudioCodeIcon", "ZedEditorIcon"]);
+const SIZE_EXEMPT_FILES = new Set(["components/Rail.tsx"]);
+
+/** Every `<…Icon size={N}>` whose literal N is off the §18 scale, as `file:line <Tag size={N}>`. */
+export function offScaleIconSizes(source: string, file: string): string[] {
+  const out: string[] = [];
+  const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const visit = (node: ts.Node): void => {
+    if ((ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) && /Icon$/.test(node.tagName.getText())
+      && !SIZE_EXEMPT_TAGS.has(node.tagName.getText())) {
+      for (const attribute of node.attributes.properties) {
+        if (!ts.isJsxAttribute(attribute) || attribute.name.getText() !== "size" || !attribute.initializer) continue;
+        const literals: number[] = [];
+        const collect = (child: ts.Node): void => {
+          if (ts.isNumericLiteral(child)) literals.push(Number(child.text));
+          ts.forEachChild(child, collect);
+        };
+        collect(attribute.initializer);
+        for (const size of literals.filter((value) => ![14, 16, 20, 24].includes(value))) {
+          const line = sourceFile.getLineAndCharacterOfPosition(attribute.getStart()).line + 1;
+          out.push(`${file}:${line} <${node.tagName.getText()} size={${size}}>`);
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return out;
+}
+
+test("no production component passes an icon a literal size off the 14, 16, 20 and 24 scale", () => {
+  const offenders = sourceFiles(SRC)
+    .filter((path) => path.endsWith(".tsx") && !SIZE_EXEMPT_FILES.has(relativeSource(path)) && !relativeSource(path).startsWith("e2e/"))
+    .flatMap((path) => offScaleIconSizes(readFileSync(path, "utf8"), relativeSource(path)));
+  assert.deepEqual(offenders, [], "use the nearest size on the scale: 14 beside small text, 16 by default, 20 for prominent toolbar icons");
+});
+
+test("the off-scale size scan reads literals, ternaries and wrapper icons, and skips brand marks", () => {
+  assert.deepEqual(offScaleIconSizes("<GridIcon size={15} />", "a.tsx"), ["a.tsx:1 <GridIcon size={15}>"]);
+  assert.deepEqual(offScaleIconSizes("<Icon size={compact ? 13 : 16} />", "a.tsx"), ["a.tsx:1 <Icon size={13}>"]);
+  assert.deepEqual(offScaleIconSizes("<DestinationIcon destination={d} size={18}></DestinationIcon>", "a.tsx"),
+    ["a.tsx:1 <DestinationIcon size={18}>"]);
+  assert.deepEqual(offScaleIconSizes("<GridIcon size={16} /><AgentIcon driver={d} size={13} /><QRCodeSVG size={208} />", "a.tsx"), []);
 });
 
 test("the documented icon bundle ceiling matches the contract and no measured figure can drift", () => {

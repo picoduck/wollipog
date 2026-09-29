@@ -346,7 +346,7 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
 
 test("Inbox Search is compact by default and expands for keyboard or populated use", () => {
   assert.match(inbox, /className=\{`inbox-search\$\{query \? " has-query" : ""\}`\}/);
-  assert.match(inbox, /<SearchIcon size=\{15\} \/>/);
+  assert.match(inbox, /<SearchIcon size=\{16\} \/>/);
   assert.match(css, /\.inbox-search\s*\{[^}]*width:\s*var\(--control-h\);[^}]*min-width:\s*var\(--control-h\);[^}]*height:\s*var\(--control-h\);/,
     "idle Search only occupies one icon target");
   assert.match(css, /\.inbox-search:focus-within,\s*\.inbox-search\.has-query\s*\{[^}]*width:\s*min\(250px, 28vw\);[^}]*min-width:\s*150px;/,

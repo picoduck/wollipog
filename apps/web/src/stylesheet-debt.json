@@ -1203,7 +1203,6 @@
     "|.inbox-activity-footer|padding|8px",
     "|.inbox-list|padding|10px",
     "|.inbox-list|padding|7px",
-    "|.inbox-pin-contained-mark|padding|1px",
     "|.inbox-provider-logins|padding|10px",
     "|.inbox-provider-logins|padding|12px",
     "|.inbox-row-pr-pill|padding|6px",

@@ -18,7 +18,7 @@ import { statusMeta, type StatusMeta } from "../status-meta.js";
 import type { SessionChangeStatus } from "../session-status.js";
 import { reminderBadgeDescription, reminderBadgeLabel, type SnoozedAttentionReason } from "../session-reminders.js";
 import { useOptionalStoreSelector } from "../store.js";
-import { CheckIcon, CopyIcon, PinIcon, WarningIcon } from "./Icons.js";
+import { CheckIcon, CopyIcon, ErrorIcon, PinIcon } from "./Icons.js";
 import { StatusBadge, StatusCount } from "./StatusBadge.js";
 
 export { Modal, type ModalSize } from "./Modal.js";
@@ -33,8 +33,8 @@ export function SessionPinIndicator({ contains = false }: { contains?: boolean }
       aria-label={label}
       title={label}
     >
-      <PinIcon size={12} />
-      {contains && <PinIcon size={7} className="inbox-pin-contained-mark" />}
+      <PinIcon size={14} />
+      {contains && <span className="inbox-pin-contained-mark" />}
     </span>
   );
 }
@@ -49,7 +49,16 @@ export function copyResultIsCurrent(input: {
   return input.mounted && input.request === input.currentRequest && input.copiedText === input.currentText;
 }
 
-/** Copy-to-clipboard button with brief "Copied!" feedback. */
+/** How long a copy result stays on the button before it returns to its label. */
+export const COPY_RESULT_MS = 2000;
+
+/**
+ * Copy-to-clipboard button. For about two seconds after a copy, its leading icon becomes a check and
+ * its label "Copied" (or an error icon and "Copy Failed"), announced politely as well.
+ *
+ * The labeled form stacks all three labels in one grid cell and shows one, so the button is always as
+ * wide as its longest label and does not change width when the result appears.
+ */
 export function CopyButton({
   text,
   label = "Copy",
@@ -141,26 +150,33 @@ export function CopyButton({
     resetTimerRef.current = window.setTimeout(() => {
       setStatus("idle");
       resetTimerRef.current = null;
-    }, 1500);
+    }, COPY_RESULT_MS);
     onResult?.(ok);
   };
+  const icon = status === "copied" ? <CheckIcon size={iconOnly ? 16 : 14} className="copy-status-icon-copied" />
+    : status === "failed" ? <ErrorIcon size={iconOnly ? 16 : 14} className="copy-status-icon-failed" />
+      : <CopyIcon size={iconOnly ? 16 : 14} />;
+  const labels = [["idle", label], ["copied", "Copied"], ["failed", "Copy Failed"]] as const;
   return (
     <>
       <button
         ref={buttonRef}
         type="button"
-        className={`${className}${iconOnly && status !== "idle" ? ` copy-status-${status}` : ""}`}
+        className={`${className}${iconOnly ? "" : " copy-btn-labeled"}${status !== "idle" ? ` copy-status-${status}` : ""}`}
         onClick={copy}
         title={ariaLabel ?? "Copy to Clipboard"}
         aria-label={ariaLabel ?? label}
         aria-describedby={describedBy}
         role={role}
       >
-        {iconOnly ? (
-          status === "copied" ? <CheckIcon className="copy-status-icon-copied" />
-            : status === "failed" ? <WarningIcon className="copy-status-icon-failed" />
-              : <CopyIcon />
-        ) : status === "copied" ? "✓ Copied" : status === "failed" ? "Copy failed" : label}
+        {icon}
+        {!iconOnly && (
+          <span className="copy-btn-labels">
+            {labels.map(([shows, text]) => (
+              <span key={shows} data-shown={status === shows || undefined}>{text}</span>
+            ))}
+          </span>
+        )}
       </button>
       <span className="sr-only" aria-live="polite">
         {status === "copied" ? "Copied to clipboard" : status === "failed" ? "Copy failed" : ""}

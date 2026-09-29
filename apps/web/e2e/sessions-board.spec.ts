@@ -394,8 +394,8 @@ test("pin indicators keep their shape and card geometry across viewports, densit
           const context = `${width}/${density}/${scheme}/${theme}`;
           expect(geometry.pinWidth, context).toBe(18);
           expect(geometry.pinHeight, context).toBe(18);
-          expect(geometry.iconWidth, context).toBe(12);
-          expect(geometry.iconHeight, context).toBe(12);
+          expect(geometry.iconWidth, context).toBe(14);
+          expect(geometry.iconHeight, context).toBe(14);
           expect(geometry.overlapsSignal, context).toBe(false);
           expect(Math.abs(geometry.rowHeight - peerHeight), `${context}: pin does not change row height`).toBeLessThanOrEqual(0.5);
         }

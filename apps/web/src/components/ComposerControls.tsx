@@ -632,7 +632,7 @@ function PermissionModeChoice({
         title={`${label} Details`}
         onClick={(event) => onDetails(details, event.currentTarget)}
       >
-        <InfoIcon size={15} />
+        <InfoIcon size={16} />
       </button>
     </div>
   );

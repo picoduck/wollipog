@@ -5,7 +5,7 @@ import {
   type DirectoryEntry,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { FolderOutlineIcon, FolderUpIcon } from "./Icons.js";
+import { FolderIcon, FolderUpIcon } from "./Icons.js";
 import { Spinner } from "./common.js";
 
 interface Listing {
@@ -127,7 +127,7 @@ export function DirectoryPicker({
         {listing?.entries.map((e) => (
           <button type="button" key={e.path} className="dir-entry" onClick={() => setPath(e.path)} title={e.path}>
             <span className="dir-icon">
-              <FolderOutlineIcon size={13} />
+              <FolderIcon size={14} />
             </span>
             <span className="dir-name">{e.name}</span>
           </button>
@@ -153,6 +153,6 @@ export function DirectoryPicker({
 
 function UpIcon() {
   return (
-    <FolderUpIcon size={13} />
+    <FolderUpIcon size={14} />
   );
 }

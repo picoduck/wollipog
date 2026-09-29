@@ -4,13 +4,13 @@ import { GLOBAL_VIEW_ITEMS, viewPath, type GlobalViewName } from "../navigation.
 import {
   AutomationsIcon,
   ConnectionsIcon,
-  GearIcon,
   InboxIcon,
   FolderSolidIcon,
   MoreHorizontalIcon,
   PodsIcon,
   ProjectsIcon,
   RunsIcon,
+  SettingsIcon,
   SkillsIcon,
   UsageIcon,
 } from "./Icons.js";
@@ -317,7 +317,7 @@ export function Rail({
                   className={`menu-item${settingsSelected ? " is-active" : ""}`}
                   {...sheetItemProps({ name: "settings" }, settingsSelected)}
                 >
-                  <span className="menu-icon" aria-hidden="true"><GearIcon size={16} /></span>
+                  <span className="menu-icon" aria-hidden="true"><SettingsIcon size={16} /></span>
                   <span className="menu-body"><span className="menu-text">Settings</span></span>
                 </a>
               </MenuSurface>

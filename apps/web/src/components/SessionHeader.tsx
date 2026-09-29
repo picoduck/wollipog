@@ -503,7 +503,7 @@ export function SessionHeader({
       {!isMobile && (
         <>
           <button className="icon-btn back" onClick={onBack} title="Back to sessions" aria-label={backLabel("inbox")}>
-            <ChevronLeftIcon size={22} />
+            <ChevronLeftIcon size={20} />
           </button>
           <div className="detail-crumbs">
             {projectCrumb && (
