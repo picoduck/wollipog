@@ -3038,22 +3038,24 @@ export class SessionManager {
   private async discoverUnlinkedMergedWorktree(
     sessionId: string,
     path: string,
-  ): Promise<void> {
+  ): Promise<{ forgeUnavailable: boolean }> {
     const initial = this.store.readMeta(sessionId);
-    if (!initial) return;
+    if (!initial) return { forgeUnavailable: false };
     const worktree = this.attributedWorktrees(initial)
       .find((item) => sameWorktreePath(initial.context, item.path, path));
-    if (!worktree || worktree.source === "attached" || worktree.pullRequest) return;
+    if (!worktree || worktree.source === "attached" || worktree.pullRequest) return { forgeUnavailable: false };
     const checkedOutBranch = await this.readWorktreeBranch(worktree.path, { context: initial.context });
-    if (!checkedOutBranch) return;
+    if (!checkedOutBranch) return { forgeUnavailable: false };
+    let forgeUnavailable = false;
     const discovered = await this.discoverMergedWorktreePullRequest(
       worktree.path,
       checkedOutBranch,
-      { context: initial.context },
+      { context: initial.context, onForgeUnavailable: () => { forgeUnavailable = true; } },
     );
-    if (!discovered) return;
+    if (!discovered) return { forgeUnavailable };
     this.worktreePullRequestDiscoveryRetryAt.delete(JSON.stringify([sessionId, worktree.path]));
     this.persistDiscoveredMergedWorktree(sessionId, path, worktree.branch, discovered);
+    return { forgeUnavailable: false };
   }
 
   /** Probe a rotating, bounded candidate slice outside the session mutation lanes. Only the short
@@ -3724,8 +3726,9 @@ export class SessionManager {
     if (initiallySelectedIsLaunching) {
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
     }
+    let unlinkedForgeUnavailable = false;
     if (options.refreshMergedHead !== false && !worktree.pullRequest) {
-      await this.discoverUnlinkedMergedWorktree(sessionId, worktree.path);
+      unlinkedForgeUnavailable = (await this.discoverUnlinkedMergedWorktree(sessionId, worktree.path)).forgeUnavailable;
       const latest = this.store.readMeta(sessionId);
       if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
       const current = this.attributedWorktrees(latest)
@@ -3871,6 +3874,10 @@ export class SessionManager {
         // retain the journal so startup can finish the interrupted explicit operation.
         if (!cleanup.processTerminationStartedAt) {
           this.removeWorktreeCleanupRecord(cleanup, true);
+        }
+        if (options.trigger === "archive_retirement" && unlinkedForgeUnavailable &&
+            (result.reason === "no_upstream" || result.reason === "not_delivered")) {
+          return { removed: false, reason: "forge state is temporarily unavailable" };
         }
         if (result.reason === "branch_changed") {
           return {
@@ -14041,16 +14048,18 @@ export class SessionManager {
     let meta = this.store.readMeta(record.sessionId);
     let worktree = locate(meta);
     if (!meta || !worktree || worktree.source === "attached") return "unavailable";
+    let unlinkedForgeUnavailable = false;
     if (!worktree.pullRequest) {
-      await this.discoverUnlinkedMergedWorktree(record.sessionId, record.worktreePath);
+      unlinkedForgeUnavailable = (await this.discoverUnlinkedMergedWorktree(
+        record.sessionId, record.worktreePath)).forgeUnavailable;
       meta = this.store.readMeta(record.sessionId);
       worktree = locate(meta);
       if (!meta || !worktree || worktree.source === "attached") return "unavailable";
     }
     const linked = worktree.pullRequest;
     if (!linked) {
-      backOff();
-      return "unavailable";
+      if (!unlinkedForgeUnavailable) backOff();
+      return unlinkedForgeUnavailable ? "unavailable" : "unmerged";
     }
     if (linked.state !== "open" && linked.state !== "merged") {
       backOff();
@@ -14142,8 +14151,9 @@ export class SessionManager {
         this.log(`worktree cleanup for ${boundedSessionIdForLog(record.sessionId)} deferred while a provider turn or launch uses the worktree`);
       };
       if (worktreeFenced()) return logFenced();
+      let forgeState: "merged" | "unmerged" | "unavailable" = "unavailable";
       if (!record.worktreeRemovedAt) {
-        const forgeState = await this.refreshDeferredMergedHead(record);
+        forgeState = await this.refreshDeferredMergedHead(record);
         if (worktreeFenced()) return logFenced();
         const current = this.store.readMeta(record.sessionId);
         const linked = current && this.attributedWorktrees(current).find((item) =>
@@ -14178,6 +14188,8 @@ export class SessionManager {
             this.store.readMeta(record.sessionId) ?? meta,
           );
           if (!removal.removed) {
+            if (record.trigger === "archive_retirement" && forgeState === "unavailable" &&
+                (removal.reason === "no_upstream" || removal.reason === "not_delivered")) return;
             if (record.trigger === "archive_retirement" && removal.reason !== "unavailable") {
               const reason = removal.reason === "branch_changed"
                 ? `the worktree is checked out on branch ${JSON.stringify(removal.checkedOutBranch)}, not its registered branch`

@@ -647,6 +647,61 @@ test("archive retirement retries unavailable forge proof but refuses a confirmed
   }
 });
 
+test("archive retirement keeps an unlinked no-upstream worktree pending through forge outage and provider exit", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-archive-unlinked-forge-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_archive_unlinked", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "archive unlinked",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const created = await manager.requestWorktree("s_archive_unlinked", { baseRef: "HEAD", branch: "fix/squashed" });
+    writeFileSync(join(created.worktree.path, "change.txt"), "squashed elsewhere\n");
+    execFileSync("git", ["-C", created.worktree.path, "add", "change.txt"]);
+    execFileSync("git", ["-C", created.worktree.path, "commit", "-m", "branch head"]);
+    const internals = manager as unknown as {
+      discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+      active: Map<string, unknown>;
+      deleteActiveSession: (sessionId: string, expected: unknown) => boolean;
+    };
+    let discoveryCalls = 0;
+    internals.discoverMergedWorktreePullRequest = async (_path, _branch, options) => {
+      discoveryCalls += 1;
+      options.onForgeUnavailable?.();
+      return null;
+    };
+    await assert.rejects(manager.discardWorktree("s_archive_unlinked", created.worktree.path,
+      { requireDelivered: true }), /forge state is temporarily unavailable/);
+    assert.equal(existsSync(created.worktree.path), true);
+
+    const providerOwner = "runner:provider:archive-unlinked";
+    assert.equal(store.acquireWorktreeLease("s_archive_unlinked", providerOwner), true);
+    const activeEntry = { sessionId: "s_archive_unlinked", context: { kind: "native" },
+      cwd: created.worktree.path, worktree: created.worktree, worktreeLeaseOwner: providerOwner,
+      queue: [], client: { dispose: () => {} } };
+    internals.active.set("s_archive_unlinked", activeEntry);
+    assert.deepEqual((await manager.discardWorktree("s_archive_unlinked", created.worktree.path,
+      { requireDelivered: true })).retirement, { status: "deferred", reason: "provider_active" });
+    assert.equal(internals.deleteActiveSession("s_archive_unlinked", activeEntry), true);
+    await waitForCondition(() => discoveryCalls >= 3,
+      "deferred replay did not recheck the temporarily unavailable forge");
+    assert.equal(new WorktreeCleanupJournal(dataDir).list().some((item) =>
+      item.worktreeId === created.worktree.id), true,
+    "forge outage must retain the durable archive intent for retry");
+    assert.equal(existsSync(created.worktree.path), true);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("safe discard removes only a clean fully-pushed runner-owned worktree", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-safe-discard-"));
   const dataDir = join(root, "data");
