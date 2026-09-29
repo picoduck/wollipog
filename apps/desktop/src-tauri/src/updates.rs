@@ -265,7 +265,7 @@ async fn hold_for_work(app: &tauri::AppHandle, confirmed: bool) -> Result<Option
     tokio::task::spawn_blocking(move || {
         let latch = &task_app.state::<DesktopUpdater>().warned_at;
         forget_unconfirmed_warning(latch, confirmed);
-        crate::exit_hold_for_work(&task_app, latch)
+        crate::exit_hold_for_work(&task_app, latch).map(|work| work.count)
     })
     .await
     .map_err(|error| format!("Could not check for running work: {error}"))

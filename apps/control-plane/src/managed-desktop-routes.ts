@@ -17,11 +17,17 @@ export const MANAGED_EXIT_RISK_PATH = "/internal/desktop/exit-risk";
 export const MANAGED_PROVISION_PATH = "/internal/desktop/runner-credential";
 
 interface ManagedSessionProjection {
+  id: string;
   runnerId: string;
   status: string;
   pendingApproval: unknown;
 }
 
+/**
+ * What the desktop shell needs to decide whether quitting stops work, and nothing more. `id` lets the
+ * close confirmation name the sessions from titles the window already holds (#1965); titles and
+ * other user content never cross this route.
+ */
 export function managedDesktopSessionsForRunner<T extends ManagedSessionProjection>(
   listSessions: (options: { includeArchived: true }) => readonly T[],
   runnerId: string,
@@ -29,6 +35,7 @@ export function managedDesktopSessionsForRunner<T extends ManagedSessionProjecti
   return listSessions({ includeArchived: true })
     .filter((session) => session.runnerId === runnerId)
     .map((session) => ({
+      id: session.id,
       runnerId: session.runnerId,
       status: session.status,
       pendingApproval: session.pendingApproval === null ? null : true,

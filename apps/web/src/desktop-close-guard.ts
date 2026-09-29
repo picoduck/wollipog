@@ -41,3 +41,55 @@ export const WORK_IN_FLIGHT: Readonly<Record<SessionStatus, boolean>> = {
 /** The statuses the shell must treat as work in flight. */
 export const WORK_IN_FLIGHT_STATUSES: readonly SessionStatus[] =
   (Object.keys(WORK_IN_FLIGHT) as SessionStatus[]).filter((status) => WORK_IN_FLIGHT[status]);
+
+/** A session the close confirmation can name: its title and status from the loaded local instance. */
+export interface CloseGuardSession {
+  title: string;
+  status: SessionStatus;
+}
+
+/**
+ * What the close confirmation can learn about, and do with, the local instance (#1965).
+ *
+ * The guard is mounted above the instance boundary, so it cannot read the store or the instance
+ * manager itself. The parts of the app that hold them provide these while they are mounted, and a
+ * missing part is simply absent: with no local instance open there are no titles, and the
+ * confirmation shows its count sentence alone.
+ */
+export interface CloseGuardLinkParts {
+  /** A loaded session of the LOCAL instance, or null. Provided only while that instance is open in
+   * the window, so a title is never guessed from another instance. */
+  session?: (id: string) => CloseGuardSession | null;
+  /** Open Sessions for the local instance, switching to it if another is open. */
+  showSessions?: () => void;
+}
+
+export interface CloseGuardLinks {
+  /** Provide some parts until the returned function is called. A later provider wins while it lasts. */
+  provide(parts: CloseGuardLinkParts): () => void;
+  current(): CloseGuardLinkParts;
+}
+
+export function createCloseGuardLinks(): CloseGuardLinks {
+  const providers: CloseGuardLinkParts[] = [];
+  return {
+    provide(parts) {
+      providers.push(parts);
+      return () => {
+        const index = providers.indexOf(parts);
+        if (index >= 0) providers.splice(index, 1);
+      };
+    },
+    current() {
+      const merged: CloseGuardLinkParts = {};
+      for (const parts of providers) {
+        if (parts.session) merged.session = parts.session;
+        if (parts.showSessions) merged.showSessions = parts.showSessions;
+      }
+      return merged;
+    },
+  };
+}
+
+/** The app's links, provided by the local instance's store and the desktop instance manager. */
+export const closeGuardLinks = createCloseGuardLinks();

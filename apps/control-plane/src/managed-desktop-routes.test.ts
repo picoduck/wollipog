@@ -52,12 +52,29 @@ test("the managed projection requests archived sessions and keeps an archived ru
   const sessions = managedDesktopSessionsForRunner((options) => {
     calls.push(options);
     return [
-      { runnerId, status: "running", pendingApproval: null, archivedAt: 123 },
-      { runnerId: "another-runner", status: "running", pendingApproval: null, archivedAt: 456 },
+      { id: "s_side_chat", title: "Side chat", runnerId, status: "running", pendingApproval: null, archivedAt: 123 },
+      { id: "s_elsewhere", title: "Elsewhere", runnerId: "another-runner", status: "running", pendingApproval: null, archivedAt: 456 },
     ];
   }, runnerId);
   assert.deepEqual(calls, [{ includeArchived: true }]);
-  assert.deepEqual(sessions, [{ runnerId, status: "running", pendingApproval: null }]);
+  assert.deepEqual(sessions, [{ id: "s_side_chat", runnerId, status: "running", pendingApproval: null }]);
+});
+
+test("the managed projection names each session by id and never carries its title", () => {
+  // #1965. The close confirmation resolves titles from the sessions the window already holds, so
+  // the shell needs ids; titles are user content and stay off this route.
+  const sessions = managedDesktopSessionsForRunner(() => [
+    {
+      id: "s_one",
+      title: "Fix the invoice rounding bug",
+      runnerId,
+      status: "input_required",
+      pendingApproval: { id: "approval", prompt: "Allow the migration?" },
+    },
+  ], runnerId);
+  assert.deepEqual(sessions, [{ id: "s_one", runnerId, status: "input_required", pendingApproval: true }]);
+  assert.equal("title" in sessions[0]!, false, "the projection does not carry a title");
+  assert.doesNotMatch(JSON.stringify(sessions), /Fix the invoice rounding bug|Allow the migration/);
 });
 
 test("exit-risk is loopback-only, rejects Bearer and wrong proofs, and signs exact response bytes", async (t) => {
@@ -66,6 +83,7 @@ test("exit-risk is loopback-only, rejects Bearer and wrong proofs, and signs exa
   registerManagedDesktopRoutes(app, identity, {
     trustedLoopback: (req) => req.ip === "127.0.0.1",
     sessionsForRunner: (id) => [{
+      id: "s_running",
       runnerId: id,
       status: "running",
       pendingApproval: null,
@@ -86,7 +104,7 @@ test("exit-risk is loopback-only, rejects Bearer and wrong proofs, and signs exa
     managedDesktopMac(identity, EXIT_RISK_RESPONSE_DOMAIN, challenge, good.rawPayload),
   );
   assert.deepEqual(good.json(), {
-    sessions: [{ runnerId, status: "running", pendingApproval: null }],
+    sessions: [{ id: "s_running", runnerId, status: "running", pendingApproval: null }],
   });
 
   const remote = await app.inject({

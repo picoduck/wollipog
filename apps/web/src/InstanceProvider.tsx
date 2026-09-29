@@ -38,6 +38,9 @@ import {
   type InstanceStatus,
 } from "./instances-context.js";
 import { viewFromPath, type View } from "./navigation.js";
+import { closeGuardLinks as appCloseGuardLinks, type CloseGuardLinks } from "./desktop-close-guard.js";
+import { LOCAL_INSTANCE_SCOPE } from "./instance-storage.js";
+import { sessionsDestination } from "./sessions-view-mode.js";
 import { browserRandomUUID } from "./browser-crypto.js";
 import {
   clearAllDurableQueuedEditRecoveries,
@@ -136,6 +139,8 @@ export interface InstanceProviderProps {
   desktop?: ProviderDesktopRuntime;
   createLocalRuntime?: () => InstanceRuntime;
   createRemoteRuntime?: (profileId: string, desktop: ProviderDesktopRuntime) => Promise<InstanceRuntime>;
+  /** Where Show Sessions is provided to the desktop close confirmation. */
+  closeGuardLinks?: CloseGuardLinks;
 }
 
 export function InstanceProvider({
@@ -143,6 +148,7 @@ export function InstanceProvider({
   desktop = nativeDesktop,
   createLocalRuntime = localRuntime,
   createRemoteRuntime = nativeRemoteRuntime,
+  closeGuardLinks = appCloseGuardLinks,
 }: InstanceProviderProps) {
   const [state, setState] = useState<ProviderState>({
     registry: EMPTY_REGISTRY,
@@ -511,6 +517,12 @@ export function InstanceProvider({
     }
     window.dispatchEvent(new PopStateEvent("popstate"));
   }, [switchTo]);
+
+  // #1965. The desktop close confirmation's Show Sessions opens the LOCAL instance's Sessions,
+  // whichever instance is open, because local work is what quitting stops.
+  useEffect(() => closeGuardLinks.provide({
+    showSessions: () => activateProfileRoute(LOCAL_PROFILE.id, sessionsDestination(LOCAL_INSTANCE_SCOPE)),
+  }), [activateProfileRoute, closeGuardLinks]);
 
   const navigation = useMemo(
     () => new DesktopInstanceNavigation(

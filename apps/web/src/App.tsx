@@ -43,6 +43,7 @@ import { ShellDock } from "./components/ShellDock.js";
 import { useRightPanelState, type RightPanelState } from "./components/RightPanel.js";
 import { EditorSelect } from "./components/EditorSelect.js";
 import { DesktopCloseGuard } from "./components/DesktopCloseGuard.js";
+import { closeGuardLinks } from "./desktop-close-guard.js";
 import { DesktopUpdateNotifier } from "./components/DesktopUpdateNotifier.js";
 import { useDesktopUpdateSetting } from "./desktop-updates.js";
 import { DesktopExternalLinkRouter } from "./components/DesktopExternalLinkRouter.js";
@@ -66,6 +67,7 @@ import {
 } from "./shortcuts.js";
 import { COLOR_SCHEMES, DENSITY_OPTIONS, THEME_OPTIONS, type ThemePreference } from "./theme.js";
 import {
+  LOCAL_INSTANCE_SCOPE,
   loadBrowserStorageValue,
   removeBrowserStorageValue,
   saveBrowserStorageValue,
@@ -187,11 +189,34 @@ function DesktopInstanceBoundary() {
         runtime={instances.runtime}
         navigation={instances.navigation}
       >
+        <CloseGuardSessionSource />
         <Shell />
       </InstanceRuntimeHost>
     );
   }
   return <InstanceRecoveryShell />;
+}
+
+/**
+ * Lets the desktop close confirmation name the working sessions it is asked about (#1965), from the
+ * local instance's loaded sessions, and only while the local instance is the one open. Another
+ * instance's sessions never stand in for local ones: the shell's ids are local ids.
+ */
+function CloseGuardSessionSource() {
+  const scope = useInstanceScope();
+  const sessions = useStoreSelector((s) => s.sessions);
+  const latest = useRef(sessions);
+  latest.current = sessions;
+  useEffect(() => {
+    if (scope !== LOCAL_INSTANCE_SCOPE) return undefined;
+    return closeGuardLinks.provide({
+      session: (id) => {
+        const session = latest.current.get(id);
+        return session ? { title: session.title, status: session.status } : null;
+      },
+    });
+  }, [scope]);
+  return null;
 }
 
 function InstanceRecoveryShell() {

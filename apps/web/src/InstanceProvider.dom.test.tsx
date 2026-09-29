@@ -9,6 +9,7 @@ import { useInstances, type InstanceManager } from "./instances-context.js";
 import { instanceViewPath } from "./instance-navigation.js";
 import type { InstanceRuntime } from "./instance-runtime.js";
 import type { InstanceRegistrySnapshot } from "./desktop-instances.js";
+import { createCloseGuardLinks } from "./desktop-close-guard.js";
 
 const domWindow = new Window({ url: "https://tauri.localhost/" });
 for (const [name, value] of Object.entries({
@@ -625,4 +626,52 @@ test("a rejected active removal exits the spinner with a retryable restored prof
   assert.equal(manager.phase, "ready");
   await act(async () => { root.unmount(); });
   container.remove();
+});
+
+test("the close confirmation's Show Sessions opens the local instance's Sessions, from any instance", async () => {
+  // #1965. Quitting stops LOCAL work, so Show Sessions goes to This Machine even with a remote open.
+  let manager!: InstanceManager;
+  const closes: string[] = [];
+  const links = createCloseGuardLinks();
+  const desktop = {
+    isTauri: () => true,
+    async invoke<T>(command: string, args?: Record<string, unknown> | Uint8Array): Promise<T> {
+      if (command === "instance_registry") return registry(profiles[1]!.id) as T;
+      if (command === "set_active_instance") return registry((args as Record<string, string>).profileId) as T;
+      throw new Error(`unexpected ${command}`);
+    },
+    channel<T>() { return { onmessage: (_event: T) => {} }; },
+  };
+  function Probe() {
+    manager = useInstances();
+    return null;
+  }
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(
+      <InstanceProvider
+        desktop={desktop}
+        createLocalRuntime={() => runtime("local", closes)}
+        createRemoteRuntime={async (profileId) => runtime(profileId, closes)}
+        closeGuardLinks={links}
+      >
+        <Probe />
+      </InstanceProvider>,
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+  });
+  assert.equal(manager.activeProfile.id, profiles[1]!.id);
+  assert.equal(links.current().session, undefined, "the instance manager never offers titles");
+
+  await act(async () => { links.current().showSessions!(); await Promise.resolve(); await Promise.resolve(); });
+  assert.equal(manager.activeProfile.id, "local");
+  assert.equal(manager.phase, "ready");
+  assert.equal(domWindow.location.pathname, instanceViewPath("local", { name: "inbox" }));
+
+  await act(async () => { root.unmount(); });
+  container.remove();
+  assert.equal(links.current().showSessions, undefined, "an unmounted provider offers nothing");
 });

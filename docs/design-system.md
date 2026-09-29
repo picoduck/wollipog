@@ -1480,8 +1480,9 @@ the same notice with Reload and Copy Error Details, top-left in the content area
   newest on top; older ones collapse into "+2 More".
 - Redundant toasts are removed: nothing that the UI already shows (an attached file chip, a visible
   state change) gets a toast.
-- A decision is never a toast (the desktop close guard becomes a confirmation with Keep Open / Quit
-  Anyway).
+- A decision is never a toast. When the desktop app holds a quit because sessions are still working,
+  it asks with the Quit Wollipog confirmation (§7.4): the working sessions as detail rows, Keep Open
+  (the cancel, initial focus), Show Sessions and Quit Anyway.
 
 ### 13.2 Notice (Inline, One Primitive for Every Banner and Callout)
 

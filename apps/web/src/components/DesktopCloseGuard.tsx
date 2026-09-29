@@ -1,54 +1,126 @@
-import { useEffect } from "react";
-import { isTauri } from "@tauri-apps/api/core";
+import { useEffect, useRef } from "react";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { useFeedback } from "./FeedbackProvider.js";
+import { statusMeta } from "../status-meta.js";
+import { closeGuardLinks, type CloseGuardLinks } from "../desktop-close-guard.js";
+import { useFeedback, type ConfirmationDetailRow } from "./FeedbackProvider.js";
 
 /** The event the shell emits when it holds a close back. */
 export const CLOSE_WOULD_STOP_WORK = "wollipog://close-would-stop-work";
+
+/** The shell command behind Quit Anyway: it exits without holding the close a second time. */
+export const QUIT_AFTER_CONFIRMATION = "quit_after_confirmation";
 
 export interface CloseGuardShell {
   isTauri(): boolean;
   /** Subscribe to a shell event; resolves to its unsubscribe. */
   listen(event: string, handler: (payload: unknown) => void): Promise<() => void>;
+  /** Quit Wollipog without asking again. */
+  quit(): Promise<void>;
 }
 
 /** The real shell. Injected as a prop so the component is testable without a Tauri webview. */
 const shell: CloseGuardShell = {
   isTauri,
   listen: (event, handler) => listen(event, (received) => handler(received.payload)),
+  quit: () => invoke<void>(QUIT_AFTER_CONFIRMATION),
 };
 
-/**
- * "3 sessions still have work running." — and a count of zero means the shell could not get one.
- *
- * The shell holds the close when the control plane is up but unanswerable, because a needless
- * warning costs a keypress and a missed one costs an agent turn. It has no number to report then,
- * and inventing one would be worse than saying so.
- */
-export function closeWarning(count: number): string {
-  if (count <= 0) return "Agent work may still be running. Closing again will stop it.";
-  return count === 1
-    ? "1 session still has work running. Closing again will stop it."
-    : `${count} sessions still have work running. Closing again will stop them.`;
+/** What the shell said when it held the close: how many sessions have a turn open, and which. */
+export interface HeldClose {
+  /** 0 when the shell could not get a count. */
+  count: number;
+  sessionIds: string[];
 }
 
 /**
- * §23.1 — closing the desktop window kills in-flight agent work, so warn once before it does.
+ * Read the shell's payload: `{ count, sessionIds }`, or the bare count an older shell sends. Anything
+ * else is a count the shell could not give, which is what 0 already means.
+ */
+export function heldClose(payload: unknown): HeldClose {
+  const countOf = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? Math.max(0, Math.floor(value)) : 0;
+  if (typeof payload === "number") return { count: countOf(payload), sessionIds: [] };
+  if (!payload || typeof payload !== "object") return { count: 0, sessionIds: [] };
+  const { count, sessionIds } = payload as { count?: unknown; sessionIds?: unknown };
+  return {
+    count: countOf(count),
+    sessionIds: Array.isArray(sessionIds) ? sessionIds.filter((id): id is string => typeof id === "string" && id.length > 0) : [],
+  };
+}
+
+/**
+ * The confirmation's body: "2 sessions are still working. …" — and a count of zero means the shell
+ * could not get one.
+ *
+ * The shell holds the close when the control plane is up but unanswerable, because a needless
+ * question costs a keypress and a missed one costs an agent turn. It has no number to report then,
+ * and inventing one would be worse than saying so.
+ */
+export function closeWarning(count: number): string {
+  if (count <= 0) return "Wollipog couldn't check whether agents are still working. Quitting stops any turn that is in progress.";
+  return count === 1
+    ? "1 session is still working. Quitting stops its current turn; you can continue it after you reopen Wollipog."
+    : `${count} sessions are still working. Quitting stops their current turns; you can continue them after you reopen Wollipog.`;
+}
+
+/**
+ * The working sessions the local instance can name, and how many it cannot. With none named, the
+ * count sentence stands alone rather than above an "and 2 more" that names nothing.
+ */
+export function closeDetailRows(held: HeldClose, links: CloseGuardLinks): { rows: ConfirmationDetailRow[]; overflow: number } {
+  const { session } = links.current();
+  if (held.count <= 0 || !session) return { rows: [], overflow: 0 };
+  const rows: ConfirmationDetailRow[] = [];
+  for (const id of new Set(held.sessionIds)) {
+    const known = session(id);
+    if (known) rows.push({ label: known.title || "Untitled Session", status: statusMeta("session", known.status) });
+  }
+  if (rows.length === 0) return { rows: [], overflow: 0 };
+  return { rows, overflow: Math.max(0, held.count - rows.length) };
+}
+
+/**
+ * §23.1 — quitting the desktop app kills in-flight agent work, so ask once before it does (#1965).
  *
  * The shell decides: at close time it asks the local control plane what is in flight, because that
- * is what exit destroys. This turns the shell's warning into something the user can read.
+ * is what exit destroys, and holds the close. This turns that into a decision: Keep Open, Show
+ * Sessions, or Quit Anyway, which quits through a command the shell does not hold a second time.
+ * Closing the window again while this is open still quits — the shell's own escape hatch, for a
+ * webview that cannot answer.
  *
- * Renders nothing, and does nothing at all in a browser.
+ * Renders nothing itself, and does nothing at all in a browser.
  */
-export function DesktopCloseGuard({ desktop = shell }: { desktop?: CloseGuardShell } = {}) {
-  const { showToast } = useFeedback();
+export function DesktopCloseGuard({ desktop = shell, links = closeGuardLinks }: {
+  desktop?: CloseGuardShell;
+  links?: CloseGuardLinks;
+} = {}) {
+  const { confirm } = useFeedback();
+  /** One question at a time: a close held again while it is open is already being asked about. */
+  const asking = useRef(false);
 
   useEffect(() => {
     if (!desktop.isTauri()) return;
     let disposed = false;
     let stop: (() => void) | undefined;
     void desktop.listen(CLOSE_WOULD_STOP_WORK, (payload) => {
-      showToast(closeWarning(typeof payload === "number" ? payload : 0), { tone: "error", durationMs: 0 });
+      if (asking.current) return;
+      asking.current = true;
+      const held = heldClose(payload);
+      const { rows, overflow } = closeDetailRows(held, links);
+      const { showSessions } = links.current();
+      void confirm({
+        title: "Quit Wollipog",
+        message: closeWarning(held.count),
+        detailRows: rows,
+        detailRowsOverflow: overflow,
+        confirmLabel: "Quit Anyway",
+        cancelLabel: "Keep Open",
+        ...(showSessions ? { secondaryAction: { label: "Show Sessions", run: showSessions } } : {}),
+        tone: "danger",
+        onConfirm: () => desktop.quit(),
+        progress: "Quitting Wollipog…",
+        cancelWhileRunning: false,
+      }).finally(() => { asking.current = false; });
     }).then((unlisten) => {
       // `listen` can resolve after an unmount; drop the subscription rather than leak it.
       if (disposed) unlisten();
@@ -57,7 +129,7 @@ export function DesktopCloseGuard({ desktop = shell }: { desktop?: CloseGuardShe
       // An older shell emits nothing, so there is nothing to listen for and nothing to repair.
     });
     return () => { disposed = true; stop?.(); };
-  }, [desktop, showToast]);
+  }, [confirm, desktop, links]);
 
   return null;
 }

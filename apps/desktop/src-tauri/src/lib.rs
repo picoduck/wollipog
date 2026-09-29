@@ -629,14 +629,37 @@ const SETTLED_STATUSES: [&str; 4] = ["idle", "completed", "failed", "stopped"];
 const CLOSE_WOULD_STOP_WORK_EVENT: &str = "wollipog://close-would-stop-work";
 
 /// What the shell knows about work that closing would destroy.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 enum ExitRisk {
     /// Nothing to lose — no control plane, or it says nothing is in flight.
     None,
-    /// This many sessions have a turn open.
-    Sessions(usize),
+    /// These sessions have a turn open.
+    Sessions(WorkInFlight),
     /// The control plane is up but could not be asked. Treated as risk, deliberately.
     Unknown,
+}
+
+/// The sessions with a turn open, as the close event's payload: `{"count":2,"sessionIds":[…]}`.
+///
+/// The count is authoritative and the ids are a hint (#1965): the dashboard names the sessions it can
+/// resolve from the local instance it has loaded, and counts the rest. A row without a usable id is
+/// still counted, so an older control plane that sends no ids warns exactly as before. `count` is 0
+/// when the control plane could not say.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkInFlight {
+    count: usize,
+    session_ids: Vec<String>,
+}
+
+/// A session id the webview can look up, or None. Ids are the control plane's own and never shown,
+/// so this only refuses what cannot be one, rather than pinning today's format.
+fn session_id_of(session: &serde_json::Value) -> Option<String> {
+    session
+        .get("id")
+        .and_then(|value| value.as_str())
+        .filter(|id| !id.is_empty() && id.len() <= 128 && !id.chars().any(char::is_control))
+        .map(str::to_string)
 }
 
 /// How long a warning authorizes the close that follows it.
@@ -660,6 +683,15 @@ fn take_exit_authorization(guard: &CloseGuard) -> bool {
     guard.exit_authorized.swap(false, Ordering::Relaxed)
 }
 
+/// Leave the authorization for the `ExitRequested` a decided gesture causes.
+///
+/// A permitted window close and Quit Anyway in the close confirmation (#1965) both decide the exit
+/// they cause, so both leave the same one-decision authorization, which `take_exit_authorization`
+/// consumes. One function, so the two gestures cannot drift into different latches.
+fn authorize_exit(guard: &CloseGuard) {
+    guard.exit_authorized.store(true, Ordering::Relaxed);
+}
+
 /// Whether an `ExitRequested` should be guarded, given the authorization a window close left behind.
 fn should_guard_exit(authorized_by_window_close: bool) -> bool {
     !authorized_by_window_close
@@ -671,13 +703,13 @@ fn should_guard_exit(authorized_by_window_close: bool) -> bool {
 /// keypress, and a missed one costs an agent turn. The escape hatch is that a close following a
 /// recent warning ALWAYS exits — see `warning_still_authorizes`, which scopes that to the attempt
 /// rather than to the process, so a false warning cannot disarm the guard for good.
-fn should_hold_close(risk: ExitRisk, already_warned: bool) -> bool {
+fn should_hold_close(risk: &ExitRisk, already_warned: bool) -> bool {
     if already_warned {
         return false;
     }
     match risk {
         ExitRisk::None => false,
-        ExitRisk::Sessions(count) => count > 0,
+        ExitRisk::Sessions(work) => work.count > 0,
         ExitRisk::Unknown => true,
     }
 }
@@ -753,7 +785,11 @@ fn local_work_in_flight(app: &tauri::AppHandle) -> ExitRisk {
 /// Archived sessions included: archiving does not stop a session, and a side chat is created
 /// archived. Other runners' sessions excluded: they survive this process exiting.
 fn risk_for_runner(sessions: &[serde_json::Value], runner_id: &str) -> ExitRisk {
-    let mut count = 0usize;
+    let mut work = WorkInFlight::default();
+    let mut in_flight = |session: &serde_json::Value| {
+        work.count += 1;
+        work.session_ids.extend(session_id_of(session));
+    };
     for session in sessions {
         match session.get("runnerId").and_then(|value| value.as_str()) {
             Some(owner) if owner == runner_id => {}
@@ -766,18 +802,18 @@ fn risk_for_runner(sessions: &[serde_json::Value], runner_id: &str) -> ExitRisk 
             .get("pendingApproval")
             .is_some_and(|value| !value.is_null())
         {
-            count += 1;
+            in_flight(session);
             continue;
         }
         match session.get("status").and_then(|value| value.as_str()) {
-            Some(status) if WORK_IN_FLIGHT_STATUSES.contains(&status) => count += 1,
+            Some(status) if WORK_IN_FLIGHT_STATUSES.contains(&status) => in_flight(session),
             Some(status) if SETTLED_STATUSES.contains(&status) => {}
             // A status this build does not know, or no status at all. Refusing to guess is the
             // whole reason `Unknown` exists.
             _ => return ExitRisk::Unknown,
         }
     }
-    ExitRisk::Sessions(count)
+    ExitRisk::Sessions(work)
 }
 
 /// Decide, warn, and latch — in one place, under one lock.
@@ -789,12 +825,12 @@ fn risk_for_runner(sessions: &[serde_json::Value], runner_id: &str) -> ExitRisk 
 ///
 /// Returns true when the caller should PREVENT the close.
 fn hold_close_for_work(app: &tauri::AppHandle) -> bool {
-    let Some(count) = exit_hold_for_work(app, &app.state::<CloseGuard>().warned_at) else {
+    let Some(work) = exit_hold_for_work(app, &app.state::<CloseGuard>().warned_at) else {
         return false;
     };
     // Best effort: if no webview can show this, the user presses close again and exits.
     for window in app.webview_windows().values() {
-        let _ = window.emit(CLOSE_WOULD_STOP_WORK_EVENT, count);
+        let _ = window.emit(CLOSE_WOULD_STOP_WORK_EVENT, &work);
     }
     true
 }
@@ -807,9 +843,12 @@ fn hold_close_for_work(app: &tauri::AppHandle) -> bool {
 /// next window close through unwarned. Its caller renders its own warning, because "closing again
 /// will stop it" is the wrong sentence for an install button.
 ///
-/// `Some(count)` when the exit should be held: the number of sessions with work in flight, or 0
-/// when the control plane could not say.
-fn exit_hold_for_work(app: &tauri::AppHandle, latch: &Mutex<Option<Instant>>) -> Option<usize> {
+/// `Some(work)` when the exit should be held: the sessions with work in flight, or a count of 0 when
+/// the control plane could not say.
+fn exit_hold_for_work(
+    app: &tauri::AppHandle,
+    latch: &Mutex<Option<Instant>>,
+) -> Option<WorkInFlight> {
     // Checked, released, then re-checked. Holding the lock across the query would make the SECOND
     // close wait on a control-plane round trip whose answer it does not need — the warning already
     // decided it. Releasing and re-taking costs a second check, which is what the re-check is for.
@@ -817,7 +856,7 @@ fn exit_hold_for_work(app: &tauri::AppHandle, latch: &Mutex<Option<Instant>>) ->
         return None;
     }
     let risk = local_work_in_flight(app);
-    if !should_hold_close(risk, false) {
+    if !should_hold_close(&risk, false) {
         return None;
     }
     let mut warned_at = latch.lock().unwrap();
@@ -829,9 +868,9 @@ fn exit_hold_for_work(app: &tauri::AppHandle, latch: &Mutex<Option<Instant>>) ->
     drop(warned_at);
 
     Some(match risk {
-        ExitRisk::Sessions(count) => count,
-        // The dashboard says "work may still be running" for an unknown count; it never invents one.
-        ExitRisk::Unknown | ExitRisk::None => 0,
+        ExitRisk::Sessions(work) => work,
+        // The dashboard says it could not check for an unknown count; it never invents one.
+        ExitRisk::Unknown | ExitRisk::None => WorkInFlight::default(),
     })
 }
 
@@ -3507,13 +3546,36 @@ fn is_restart_request(code: Option<i32>) -> bool {
     code == Some(tauri::RESTART_EXIT_CODE)
 }
 
+/// Quit Anyway in the desktop close confirmation (#1965).
+///
+/// The confirmation is the decision a held close asks for, so this quits the way a second close
+/// does: it leaves the same one-decision authorization, which `handle_run_event` consumes instead of
+/// asking `hold_close_for_work` again — however long the dialog was open, and so however stale the
+/// warning's grace period. It takes no arguments and does nothing a second window close cannot.
+#[tauri::command]
+fn quit_after_confirmation(app: tauri::AppHandle) {
+    quit_after_confirmation_with(&app.state::<CloseGuard>(), || app.exit(0));
+}
+
+/// The command's body, apart from the `AppHandle` a unit test cannot build. The authorization is left
+/// BEFORE the exit is requested, so the `ExitRequested` it raises always finds it.
+fn quit_after_confirmation_with(guard: &CloseGuard, exit: impl FnOnce()) {
+    authorize_exit(guard);
+    exit();
+}
+
+/// Whether an `ExitRequested` is held: only when no decided gesture authorized it, and only then is
+/// `hold` — `hold_close_for_work` — asked at all.
+fn exit_is_held(guard: &CloseGuard, hold: impl FnOnce() -> bool) -> bool {
+    should_guard_exit(take_exit_authorization(guard)) && hold()
+}
+
 fn handle_run_event(app: &tauri::AppHandle, event: RunEvent) {
     if let RunEvent::ExitRequested { api, code, .. } = &event {
         if is_restart_request(*code) {
             return;
         }
-        let authorized = take_exit_authorization(&app.state::<CloseGuard>());
-        if should_guard_exit(authorized) && hold_close_for_work(app) {
+        if exit_is_held(&app.state::<CloseGuard>(), || hold_close_for_work(app)) {
             api.prevent_exit();
         }
     }
@@ -3602,7 +3664,8 @@ pub fn run() {
             desktop_update_status,
             check_for_desktop_update,
             install_desktop_update,
-            set_automatic_update_checks
+            set_automatic_update_checks,
+            quit_after_confirmation
         ])
         .on_window_event(|window, event| {
             // §23.1. `RunEvent::Exit` kills the sidecar and the local runner, so closing the window
@@ -3615,9 +3678,7 @@ pub fn run() {
                 } else {
                     // This close was allowed. The `ExitRequested` it causes is the same gesture and
                     // must not be re-decided, or a race could strand a windowless process.
-                    app.state::<CloseGuard>()
-                        .exit_authorized
-                        .store(true, Ordering::Relaxed);
+                    authorize_exit(&app.state::<CloseGuard>());
                 }
             }
         })
@@ -4671,25 +4732,32 @@ mod tests {
         assert!(!CLOSE_WOULD_STOP_WORK_EVENT.is_empty());
     }
 
+    fn in_flight(count: usize, ids: &[&str]) -> ExitRisk {
+        ExitRisk::Sessions(WorkInFlight {
+            count,
+            session_ids: ids.iter().map(|id| id.to_string()).collect(),
+        })
+    }
+
     #[test]
     fn a_close_is_held_only_while_work_is_at_risk_and_only_once() {
         assert!(
-            should_hold_close(ExitRisk::Sessions(1), false),
+            should_hold_close(&in_flight(1, &[]), false),
             "work in flight: hold"
         );
         assert!(
-            !should_hold_close(ExitRisk::Sessions(1), true),
+            !should_hold_close(&in_flight(1, &[]), true),
             "a second close always exits"
         );
         assert!(
-            !should_hold_close(ExitRisk::Sessions(0), false),
+            !should_hold_close(&in_flight(0, &[]), false),
             "nothing running, nothing to warn about"
         );
         assert!(
-            !should_hold_close(ExitRisk::None, false),
+            !should_hold_close(&ExitRisk::None, false),
             "no control plane, so nothing for exit to kill"
         );
-        assert!(!should_hold_close(ExitRisk::None, true));
+        assert!(!should_hold_close(&ExitRisk::None, true));
     }
 
     #[test]
@@ -4697,9 +4765,9 @@ mod tests {
         // The costs are not symmetric: a needless warning costs one keypress, a missed one costs an
         // agent turn. So "up but unanswerable" holds, while "not running at all" does not — there
         // is genuinely nothing for exit to destroy in that case.
-        assert!(should_hold_close(ExitRisk::Unknown, false));
+        assert!(should_hold_close(&ExitRisk::Unknown, false));
         assert!(
-            !should_hold_close(ExitRisk::Unknown, true),
+            !should_hold_close(&ExitRisk::Unknown, true),
             "and it still cannot trap the user"
         );
     }
@@ -5069,6 +5137,73 @@ mod tests {
     }
 
     #[test]
+    fn quit_anyway_exits_through_the_one_decision_a_second_close_leaves() {
+        // #1965. Quit Anyway is the decision a held close asks for, so its exit must not be held
+        // again — not even after the warning's grace period, which a dialog left open outlasts.
+        let guard = CloseGuard::default();
+        let mut exits = 0;
+        quit_after_confirmation_with(&guard, || {
+            assert!(
+                guard.exit_authorized.load(Ordering::Relaxed),
+                "the exit is requested only once its authorization is in place"
+            );
+            exits += 1;
+        });
+        assert_eq!(exits, 1);
+
+        let mut asked = false;
+        assert!(
+            !exit_is_held(&guard, || {
+                asked = true;
+                true
+            }),
+            "the exit Quit Anyway requests is not held"
+        );
+        assert!(!asked, "and hold_close_for_work is never asked about it");
+
+        // Consumed, exactly as the exit a permitted second close causes consumes its authorization:
+        // the next quit is a new gesture and is asked about again.
+        assert!(exit_is_held(&guard, || true));
+
+        // The same latch a permitted window close leaves, consumed the same way.
+        let second_close = CloseGuard::default();
+        authorize_exit(&second_close);
+        assert!(!exit_is_held(&second_close, || true));
+        assert!(exit_is_held(&second_close, || true));
+    }
+
+    #[test]
+    fn the_close_event_names_the_sessions_it_counted() {
+        // #1965. The dashboard names the working sessions it can resolve and counts the rest, so the
+        // payload carries both — and a row with no usable id is still counted, not dropped.
+        let sessions: Vec<serde_json::Value> = serde_json::from_str(
+            r#"[
+                {"id":"s_one","runnerId":"ours","status":"running"},
+                {"runnerId":"ours","status":"queued"},
+                {"id":"","runnerId":"ours","status":"starting"},
+                {"id":7,"runnerId":"ours","status":"input_required"},
+                {"id":"s_two","runnerId":"ours","status":"idle","pendingApproval":true},
+                {"id":"s_idle","runnerId":"ours","status":"idle"}
+            ]"#,
+        )
+        .unwrap();
+        let ExitRisk::Sessions(work) = risk_for_runner(&sessions, "ours") else {
+            panic!("every row was classified");
+        };
+        assert_eq!(work.count, 5);
+        assert_eq!(
+            serde_json::to_value(&work).unwrap(),
+            serde_json::json!({"count": 5, "sessionIds": ["s_one", "s_two"]}),
+            "the payload shape the dashboard reads"
+        );
+        assert_eq!(
+            serde_json::to_value(WorkInFlight::default()).unwrap(),
+            serde_json::json!({"count": 0, "sessionIds": []}),
+            "a count the control plane could not give is 0, never an invented number"
+        );
+    }
+
+    #[test]
     fn only_a_restart_skips_the_exit_guard() {
         // #1646: the updater decides its restart under its own latch. A quit — any other code, or
         // none — is still guarded, so a Cmd+Q during an install cannot pass unwarned.
@@ -5095,11 +5230,14 @@ mod tests {
             ]"#,
         )
         .unwrap();
-        assert_eq!(risk_for_runner(&sessions, "ours"), ExitRisk::Sessions(4),
+        assert_eq!(risk_for_runner(&sessions, "ours"), in_flight(4, &["a", "h", "d", "e"]),
             "a, d (archived is still running), e (approval pending) and h (a turn open, waiting on a person)");
-        assert_eq!(risk_for_runner(&sessions, "theirs"), ExitRisk::Sessions(2));
-        assert_eq!(risk_for_runner(&sessions, "nobody"), ExitRisk::Sessions(0));
-        assert_eq!(risk_for_runner(&[], "ours"), ExitRisk::Sessions(0));
+        assert_eq!(
+            risk_for_runner(&sessions, "theirs"),
+            in_flight(2, &["b", "f"])
+        );
+        assert_eq!(risk_for_runner(&sessions, "nobody"), in_flight(0, &[]));
+        assert_eq!(risk_for_runner(&[], "ours"), in_flight(0, &[]));
     }
 
     #[test]
@@ -5125,7 +5263,7 @@ mod tests {
         );
         assert_eq!(
             risk_from_response("HTTP/1.1 200 OK", r#"{"sessions":[]}"#, "ours"),
-            ExitRisk::Sessions(0),
+            in_flight(0, &[]),
         );
         assert_eq!(
             risk_from_response("", r#"{"sessions":[]}"#, "ours"),
@@ -5154,7 +5292,7 @@ mod tests {
         let elsewhere: Vec<serde_json::Value> =
             serde_json::from_str(r#"[{"id":"a","runnerId":"theirs","status":"compacting"}]"#)
                 .unwrap();
-        assert_eq!(risk_for_runner(&elsewhere, "ours"), ExitRisk::Sessions(0));
+        assert_eq!(risk_for_runner(&elsewhere, "ours"), in_flight(0, &[]));
     }
 
     #[test]
@@ -5170,7 +5308,7 @@ mod tests {
     fn an_answered_response_reports_what_it_counted() {
         assert_eq!(
             risk_from_response("HTTP/1.1 200 OK", r#"{"sessions":[]}"#, "ours"),
-            ExitRisk::Sessions(0),
+            in_flight(0, &[]),
         );
         assert_eq!(
             risk_from_response(
@@ -5178,7 +5316,7 @@ mod tests {
                 r#"{"sessions":[{"runnerId":"ours","status":"running"},{"runnerId":"ours","status":"idle"}]}"#,
                 "ours",
             ),
-            ExitRisk::Sessions(1),
+            in_flight(1, &[]),
         );
     }
 

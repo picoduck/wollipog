@@ -3,8 +3,8 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { SessionStatus } from "@wollipog/protocol";
-import { WORK_IN_FLIGHT, WORK_IN_FLIGHT_STATUSES } from "./desktop-close-guard.js";
-import { CLOSE_WOULD_STOP_WORK } from "./components/DesktopCloseGuard.js";
+import { createCloseGuardLinks, WORK_IN_FLIGHT, WORK_IN_FLIGHT_STATUSES } from "./desktop-close-guard.js";
+import { CLOSE_WOULD_STOP_WORK, QUIT_AFTER_CONFIRMATION } from "./components/DesktopCloseGuard.js";
 
 /**
  * The two things §23.1 needs the dashboard and the shell to agree about.
@@ -90,4 +90,38 @@ test("the Rust shell and TypeScript control plane agree on managed paths and hea
     assert.ok(typeScriptValue, `the TypeScript control plane no longer declares ${name}`);
     assert.equal(rustValue, typeScriptValue, `${name} drifted across the managed protocol`);
   }
+});
+
+test("the dashboard invokes the quit command the shell registers", () => {
+  // #1965. Quit Anyway invokes a command by name; a misspelling is a button that does nothing. The
+  // shell must both define it and register it with the invoke handler.
+  assert.match(rust, new RegExp(`#\\[tauri::command\\]\\s*fn ${QUIT_AFTER_CONFIRMATION}\\(app: tauri::AppHandle\\)`),
+    "the shell no longer defines the quit command as a no-argument command");
+  const handlers = /generate_handler!\[([^\]]*)\]/.exec(rust)?.[1] ?? "";
+  assert.ok(handlers.split(",").map((name) => name.trim()).includes(QUIT_AFTER_CONFIRMATION),
+    "the shell defines the quit command but does not register it");
+});
+
+test("the guard's links merge what each part of the app provides, for as long as it provides it", () => {
+  const links = createCloseGuardLinks();
+  assert.deepEqual(links.current(), {});
+  const showSessions = () => undefined;
+  const stopShowing = links.provide({ showSessions });
+  const first = () => ({ title: "First", status: "running" as const });
+  const stopFirst = links.provide({ session: first });
+  assert.equal(links.current().showSessions, showSessions);
+  assert.equal(links.current().session, first);
+
+  // A runtime replaced by the next one of the same instance can overlap it for a render.
+  const second = () => null;
+  const stopSecond = links.provide({ session: second });
+  assert.equal(links.current().session, second, "the later provider wins while it lasts");
+  stopFirst();
+  assert.equal(links.current().session, second, "and an earlier one leaving does not take it away");
+  stopSecond();
+  assert.equal(links.current().session, undefined);
+  assert.equal(links.current().showSessions, showSessions);
+  stopShowing();
+  stopShowing();
+  assert.deepEqual(links.current(), {}, "withdrawing twice is harmless");
 });
