@@ -57,7 +57,7 @@ export async function handleShellOpenCommand(
   if (registered) dependencies.registerPending(message.shellId);
   try {
     if (dependencies.consumeCancellation(message.shellId)) {
-      fail("shell open was cancelled");
+      fail("shell open was canceled");
       return;
     }
 
@@ -69,7 +69,7 @@ export async function handleShellOpenCommand(
       if (message.fenceStart === true) {
         const started = await dependencies.waitForSessionStart(message.sessionId);
         if (started !== true) {
-          fail("session launch failed or was cancelled");
+          fail("session launch failed or was canceled");
           return;
         }
       }
@@ -78,7 +78,7 @@ export async function handleShellOpenCommand(
         return;
       }
       if (dependencies.consumeCancellation(message.shellId)) {
-        fail("shell open was cancelled");
+        fail("shell open was canceled");
         return;
       }
     }
@@ -110,7 +110,7 @@ export async function handleShellOpenCommand(
         throw new Error("session is being deleted");
       }
       if (dependencies.consumeCancellation(message.shellId)) {
-        throw new Error("shell open was cancelled");
+        throw new Error("shell open was canceled");
       }
       if (message.kind === "agent_tui") {
         const current = await dependencies.resolveTarget(message.sessionId);

@@ -513,7 +513,7 @@ export class AcpClient {
     let retry = false;
     for (;;) {
       const selected = await this.chooseAuthMethod(this.negotiation?.authMethods ?? [], retry);
-      if (!selected) throw new Error("ACP authentication was cancelled");
+      if (!selected) throw new Error("ACP authentication was canceled");
       try {
         const request: AuthenticateRequest = { methodId: selected.id };
         await this.peer.request("authenticate", request);

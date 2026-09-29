@@ -3884,7 +3884,7 @@ test("provider-controlled diagnostics are bounded before reaching stderr", async
     threadId: "thread-diagnostic",
     message: "Extended schema",
   }, "object-mode"), { action: "cancel", content: null, _meta: null });
-  assert.equal(h.stderr.at(-1), "unsupported or malformed Codex MCP elicitation mode=[object] — cancelling it");
+  assert.equal(h.stderr.at(-1), "unsupported or malformed Codex MCP elicitation mode=[object] — canceling it");
 
   assert.equal(h.driver.resolvePermission("parked", "accept"), true);
   assert.deepEqual(await parkedApproval, { decision: "accept" });

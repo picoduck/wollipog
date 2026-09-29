@@ -9776,7 +9776,7 @@ for (const terminal of ["failed", "uncertain"] as const) {
       sessionId: id,
       state: terminal,
       revision: 4,
-      error: "provider cancelled",
+      error: "provider canceled",
       code: "COMMAND_CANCELLED",
       userEventSeq: transcript.seq,
       now,
@@ -9860,11 +9860,11 @@ test("pending prompt cancel loses safely once the send boundary is crossed", () 
     sessionId: id,
     state: "failed",
     revision: 3,
-    error: "queued command was cancelled",
+    error: "queued command was canceled",
     code: "COMMAND_CANCELLED",
   }), true);
   assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.state, "failed");
-  assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.error, "queued command was cancelled");
+  assert.equal(db.getSession(id)?.pendingPrompts?.[0]?.error, "queued command was canceled");
 });
 
 test("durable queued prompts accept revision-zero failures and stop retrying after terminal status", () => {

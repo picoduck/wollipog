@@ -279,7 +279,7 @@ function terminalQueueEntry(state: "failed" | "uncertain"): SessionView["queued"
     steerable: false,
     steerDisabledReason: "Durable delivery did not complete.",
     durableDeliveryState: state,
-    durableDeliveryError: "provider cancelled",
+    durableDeliveryError: "provider canceled",
   }];
 }
 
@@ -294,7 +294,7 @@ function terminalPendingPrompt(
     state,
     revision: 4,
     attemptCount: 4,
-    error: "provider cancelled",
+    error: "provider canceled",
     errorCode: "COMMAND_CANCELLED",
     ...(userEventSeq === undefined ? {} : { userEventSeq }),
     createdAt: 1,

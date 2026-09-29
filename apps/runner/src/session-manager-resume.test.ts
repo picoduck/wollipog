@@ -2991,7 +2991,7 @@ test("cancelling resume during deferred launch preparation releases its lock", a
 
     assert.deepEqual(
       failures,
-      [["session resume was cancelled before provider startup", "COMMAND_CANCELLED"]],
+      [["session resume was canceled before provider startup", "COMMAND_CANCELLED"]],
     );
     assert.equal((h.manager as any).admitted.size, 0);
     assert.equal(h.launches.length, 0);
@@ -3026,7 +3026,7 @@ test("cancelling Restart during deferred launch preparation releases its lock", 
 
     assert.deepEqual(
       failures,
-      [["session launch was cancelled before provider startup", "COMMAND_CANCELLED"]],
+      [["session launch was canceled before provider startup", "COMMAND_CANCELLED"]],
     );
     assert.equal((h.manager as any).admitted.size, 0);
     assert.equal(h.launches.length, 0);
@@ -3183,7 +3183,7 @@ test("admission-retained durable prompts expose their command id and cancel befo
     h.manager.removeQueuedPrompt("resume-session", "prompt-stable-b");
     assert.deepEqual(transitions, [
       "queued",
-      "failed:COMMAND_CANCELLED:queued command was cancelled",
+      "failed:COMMAND_CANCELLED:queued command was canceled",
     ]);
     assert.deepEqual(
       h.sent.filter((message) => message.type === "session_queue").at(-1)?.queue,
@@ -3345,7 +3345,7 @@ test("cancelling a capacity-queued resume releases its lock and terminalizes its
 
     assert.deepEqual(
       failures,
-      [["session resume was cancelled before runner admission", "COMMAND_CANCELLED"]],
+      [["session resume was canceled before runner admission", "COMMAND_CANCELLED"]],
     );
     assert.deepEqual([...internals.admitted], ["capacity-blocker"]);
     assert.equal(h.store.acquireLock("resume-session", "third-runner"), true);
@@ -3376,7 +3376,7 @@ test("cancelling an immediately admitted resume releases its pre-provider lock",
 
     assert.deepEqual(
       failures,
-      [["session resume was cancelled before provider startup", "COMMAND_CANCELLED"]],
+      [["session resume was canceled before provider startup", "COMMAND_CANCELLED"]],
     );
     assert.equal((h.manager as any).admitted.size, 0);
     assert.equal(h.launches.length, 0);
@@ -3549,7 +3549,7 @@ test("cancelling a capacity-queued app-server Restart releases its resumable-thr
     assert.equal(await restart, false);
     assert.deepEqual(
       failures,
-      [["session launch was cancelled before runner admission", "COMMAND_CANCELLED"]],
+      [["session launch was canceled before runner admission", "COMMAND_CANCELLED"]],
     );
     assert.deepEqual([...internals.admitted], ["capacity-blocker"]);
     assert.equal(
@@ -3580,7 +3580,7 @@ test("cancelling an immediately admitted app-server Restart releases its pre-pro
 
     assert.deepEqual(
       failures,
-      [["session launch was cancelled before provider startup", "COMMAND_CANCELLED"]],
+      [["session launch was canceled before provider startup", "COMMAND_CANCELLED"]],
     );
     assert.equal((h.manager as any).admitted.size, 0);
     assert.equal(h.launches.length, 0);

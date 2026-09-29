@@ -59,9 +59,9 @@ export function createNativeApiTransport(options: NativeApiTransportOptions): Ap
     publicOrigin: options.publicOrigin,
     async request(path, init = {}) {
       if (closed) throw abortError("The instance connection is closed.");
-      if (init.signal?.aborted) throw abortError("The remote request was cancelled.");
+      if (init.signal?.aborted) throw abortError("The remote request was canceled.");
       const body = await requestBody(init.body);
-      if (closed || init.signal?.aborted) throw abortError("The remote request was cancelled.");
+      if (closed || init.signal?.aborted) throw abortError("The remote request was canceled.");
       const headers = new Headers(init.headers);
       const method = (init.method ?? "GET").toUpperCase();
       if (!NATIVE_API_METHODS.has(method as "GET" | "POST" | "PUT" | "PATCH" | "DELETE")) {
@@ -87,7 +87,7 @@ export function createNativeApiTransport(options: NativeApiTransportOptions): Ap
           runtimeKey: options.runtimeKey,
           requestId,
         }).catch(() => {});
-        rejectAbort(abortError("The remote request was cancelled."));
+        rejectAbort(abortError("The remote request was canceled."));
       };
       const cancelled = new Promise<never>((_, reject) => {
         rejectAbort = reject;
@@ -104,7 +104,7 @@ export function createNativeApiTransport(options: NativeApiTransportOptions): Ap
         lifetime.signal.removeEventListener("abort", abort);
         init.signal?.removeEventListener("abort", abort);
       }
-      if (closed || init.signal?.aborted) throw abortError("The remote request was cancelled.");
+      if (closed || init.signal?.aborted) throw abortError("The remote request was canceled.");
       const { meta, body: responseBody } = decodeNativeHttpResponse(raw);
       const noBody = meta.status === 204 || meta.status === 205 || meta.status === 304;
       const responseBuffer = responseBody.buffer.slice(

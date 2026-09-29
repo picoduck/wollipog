@@ -32,9 +32,9 @@ const failedReceipt: QueuedPromptView = {
   id: "cmd-failed",
   text: "a message whose delivery failed",
   steerable: false,
-  steerDisabledReason: "provider cancelled",
+  steerDisabledReason: "provider canceled",
   durableDeliveryState: "failed",
-  durableDeliveryError: "provider cancelled",
+  durableDeliveryError: "provider canceled",
 };
 const uncertainReceipt: QueuedPromptView = { ...failedReceipt, id: "cmd-uncertain", durableDeliveryState: "uncertain" };
 const liveEntry: QueuedPromptView = { id: "queue-live", text: "still waiting", steerable: true, liveQueueObserved: true };

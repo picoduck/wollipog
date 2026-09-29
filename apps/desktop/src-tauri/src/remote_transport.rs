@@ -985,7 +985,7 @@ pub(crate) async fn remote_http_request(
     headers.insert(AUTHORIZATION, bearer(&lease.secret)?);
     let mut cancel = lease.cancel.subscribe();
     if *cancel.borrow() {
-        return Err("The remote instance request was cancelled.".into());
+        return Err("The remote instance request was canceled.".into());
     }
     let (request_key, request_nonce, mut request_cancel) =
         transport.reserve_request(&meta.runtime_key, &meta.request_id)?;
@@ -997,8 +997,8 @@ pub(crate) async fn remote_http_request(
             .body(body);
         let response = tokio::select! {
             result = request.send() => result.map_err(|_| "The remote instance request failed.".to_string())?,
-            _ = wait_for_cancel(&mut cancel) => return Err("The remote instance request was cancelled.".into()),
-            _ = wait_for_cancel(&mut request_cancel) => return Err("The remote instance request was cancelled.".into()),
+            _ = wait_for_cancel(&mut cancel) => return Err("The remote instance request was canceled.".into()),
+            _ = wait_for_cancel(&mut request_cancel) => return Err("The remote instance request was canceled.".into()),
         };
         let status = response.status();
         let status_text = status.canonical_reason().unwrap_or("").to_string();
@@ -1016,8 +1016,8 @@ pub(crate) async fn remote_http_request(
             .collect::<Vec<_>>();
         let body = tokio::select! {
             result = bounded_response(response, MAX_RESPONSE_BODY_BYTES) => result?,
-            _ = wait_for_cancel(&mut cancel) => return Err("The remote instance request was cancelled.".into()),
-            _ = wait_for_cancel(&mut request_cancel) => return Err("The remote instance request was cancelled.".into()),
+            _ = wait_for_cancel(&mut cancel) => return Err("The remote instance request was canceled.".into()),
+            _ = wait_for_cancel(&mut request_cancel) => return Err("The remote instance request was canceled.".into()),
         };
         if contains_secret(&body, &lease.secret)
             || headers.iter().any(|(name, value)| {

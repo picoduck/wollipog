@@ -105,7 +105,7 @@ test("a cancellation already queued before the start fence prevents Agent TUI sp
   await handleShellOpenCommand(command("agent_tui", true), state.dependencies);
   assert.equal(state.opens, 0);
   assert.equal(cancellationChecks, 1);
-  assert.match(state.replies[0]?.error ?? "", /cancelled/);
+  assert.match(state.replies[0]?.error ?? "", /canceled/);
 });
 
 test("Agent TUI deletion is checked before and immediately after the start fence", async () => {
@@ -205,7 +205,7 @@ test("a cancellation at the synchronous Agent TUI spawn boundary prevents open",
   await handleShellOpenCommand(command("agent_tui"), state.dependencies);
   assert.equal(cancellationChecks, 3);
   assert.equal(state.opens, 0);
-  assert.match(state.replies[0]?.error ?? "", /cancelled/);
+  assert.match(state.replies[0]?.error ?? "", /canceled/);
 });
 
 test("a close arriving while Agent TUI waits prevents the delayed spawn", async () => {
@@ -229,7 +229,7 @@ test("a close arriving while Agent TUI waits prevents the delayed spawn", async 
   releaseStart(true);
   await opening;
   assert.equal(state.opens, 0);
-  assert.match(state.replies[0]?.error ?? "", /cancelled/);
+  assert.match(state.replies[0]?.error ?? "", /canceled/);
 });
 
 test("a slow Agent TUI start remains cancellable after the unknown-close TTL", async () => {
@@ -249,7 +249,7 @@ test("a slow Agent TUI start remains cancellable after the unknown-close TTL", a
   releaseStart(true);
   await opening;
   assert.equal(state.opens, 0);
-  assert.match(state.replies[0]?.error ?? "", /cancelled/);
+  assert.match(state.replies[0]?.error ?? "", /canceled/);
 });
 
 test("delete after the fence settles is rechecked before Agent TUI spawn", async () => {

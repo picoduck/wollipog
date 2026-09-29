@@ -14,7 +14,7 @@ test("only provider text that names a passing condition earns another launch att
 
   // A verdict on the work, a bad command, or a dead account is not worth the window a retry costs.
   assert.equal(isTransientProviderError("provider refusal"), false);
-  assert.equal(isTransientProviderError("provider cancelled"), false);
+  assert.equal(isTransientProviderError("provider canceled"), false);
   assert.equal(isTransientProviderError("I can't help with that."), false);
   assert.equal(isTransientProviderError("Invalid API key; authentication is required"), false);
   assert.equal(isTransientProviderError("Your credit balance is too low to run this request"), false);

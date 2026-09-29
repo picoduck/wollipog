@@ -415,7 +415,7 @@ test("authentication can be cancelled inline without invoking an agent method", 
   );
   try {
     await client.initialize();
-    await assert.rejects(client.newSession(cwd), /authentication was cancelled/);
+    await assert.rejects(client.newSession(cwd), /authentication was canceled/);
   } finally {
     client.dispose();
     await new Promise<void>((resolve) => setTimeout(resolve, 250));
@@ -465,7 +465,7 @@ test("capability-gated logout refreshes readiness and makes the next session aut
     assert.match(await client.newSession(cwd), /^mock_/);
     await client.logout();
     assert.deepEqual(statuses, ["authenticated", "unauthenticated"]);
-    await assert.rejects(client.newSession(cwd), /authentication was cancelled/);
+    await assert.rejects(client.newSession(cwd), /authentication was canceled/);
     assert.equal(authRequest, 2);
   } finally {
     client.dispose();

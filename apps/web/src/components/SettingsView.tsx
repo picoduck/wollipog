@@ -208,7 +208,7 @@ export function AppearancePanel({
           choose dark. A listbox rather than pills because five names need their descriptions and
           their swatches to choose between, which a pill cannot carry. */}
       <SelectRow
-        title="Colour Scheme"
+        title="Color Scheme"
         description="Applies to both the light and the dark theme."
         options={schemes.map((option) => ({
           ...option,

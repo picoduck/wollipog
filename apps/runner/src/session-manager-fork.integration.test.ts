@@ -131,7 +131,7 @@ for (const sourceDriver of ["codex-app-server", "claude-code"] as const) {
       const cancelled = manager.forkConversation(source.sessionId, "s_cancelled_handoff", 1, "Cancelled", false, request);
       await manager.delete("s_cancelled_handoff");
       const cancelledResult = await cancelled;
-      assert.equal(cancelledResult.ok, false); assert.match(cancelledResult.error!, /cancelled/);
+      assert.equal(cancelledResult.ok, false); assert.match(cancelledResult.error!, /canceled/);
       assert.equal(store.has("s_cancelled_handoff"), false);
       assert.doesNotMatch(git(repo, ["worktree", "list", "--porcelain"]), /s_cancelled_handoff/);
       assert.equal(launches, 0, "rejected and cancelled handoffs cannot initialize providers");

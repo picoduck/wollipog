@@ -1022,5 +1022,5 @@ test("a durable failure receipt carries the provider's reason, not just its stop
   assert.equal(providerStopError("refusal", { lastTurnError: () => null }), "provider refusal");
   // Drivers without the channel, and stop reasons the provider did not explain, are unchanged.
   assert.equal(providerStopError("refusal", {}), "provider refusal");
-  assert.equal(providerStopError("cancelled", { lastTurnError: () => oauth }), "provider cancelled");
+  assert.equal(providerStopError("cancelled", { lastTurnError: () => oauth }), "provider canceled");
 });

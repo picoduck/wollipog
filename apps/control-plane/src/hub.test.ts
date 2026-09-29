@@ -668,7 +668,7 @@ test("a live runner queue overlay keeps undismissed terminal receipts, deduplica
       sessionId: session.id,
       state,
       revision: 4,
-      error: "provider cancelled",
+      error: "provider canceled",
       code: "COMMAND_CANCELLED",
       ...(userEventSeq === undefined ? {} : { userEventSeq }),
       now: 10,

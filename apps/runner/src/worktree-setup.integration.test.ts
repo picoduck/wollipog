@@ -418,11 +418,11 @@ test("cancelling a setup retry leaves the interrupted step retryable", async (t)
     /required worktree setup failed/u,
   );
   const worktreePath = store.readMeta("s_retry_cancel")?.worktrees?.find((item) => item.branch === "fix/retry-cancel")?.path;
-  await assert.rejects(manager.retryWorktreeSetup("s_retry_cancel", worktreePath!), /cancelled/u);
+  await assert.rejects(manager.retryWorktreeSetup("s_retry_cancel", worktreePath!), /canceled/u);
   const cancelledState = store.readMeta("s_retry_cancel")?.worktrees?.find((item) => item.path === worktreePath)?.setup;
   assert.equal(cancelledState?.status, "failed");
   assert.equal(cancelledState?.steps[0]?.status, "failed");
-  assert.match(cancelledState?.error ?? "", /cancelled/u);
+  assert.match(cancelledState?.error ?? "", /canceled/u);
   const completed = await manager.retryWorktreeSetup("s_retry_cancel", worktreePath!);
   assert.equal(completed.worktree.setup?.status, "completed");
   assert.equal(readFileSync(join(worktreePath!, ".retry-complete"), "utf8"), "yes");

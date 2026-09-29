@@ -128,15 +128,15 @@ function questionTool(pi) {
       if (!ctx.hasUI) return text("Structured user input is unavailable in this Pi mode.");
       const answers = {};
       for (const question of params.questions) {
-        if (signal?.aborted) return text("The user-input request was cancelled.");
+        if (signal?.aborted) return text("The user-input request was canceled.");
         const labels = question.options.map((option) => option.label);
         const other = "Type Another Answer";
         const selected = await ctx.ui.select(question.question, [...labels, other], { signal });
-        if (selected === undefined) return text("The user-input request was cancelled.");
+        if (selected === undefined) return text("The user-input request was canceled.");
         let answer = selected;
         if (selected === other) {
           answer = await ctx.ui.input(question.question, "Enter another answer", { signal });
-          if (answer === undefined) return text("The user-input request was cancelled.");
+          if (answer === undefined) return text("The user-input request was canceled.");
         }
         answers[question.id] = { answers: [answer] };
       }
@@ -274,7 +274,7 @@ export default function (pi) {
           description: tool.description,
           parameters: tool.inputSchema,
           async execute(_id, params, signal) {
-            if (signal?.aborted) return text("The tool call was cancelled.");
+            if (signal?.aborted) return text("The tool call was canceled.");
             const result = await send("tools/call", { name: tool.name, arguments: params },
               { timeoutMs: null, signal });
             const content = Array.isArray(result?.content)

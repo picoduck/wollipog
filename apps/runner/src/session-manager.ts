@@ -640,10 +640,12 @@ type ProviderReplacementResult =
 /** A stop reason alone never says why the provider produced nothing. When the driver captured the
  * provider's own account of an error turn, carry it into the durable receipt: the control plane
  * records it as the automation's error, and it is the only thing that tells a transient
- * credential-refresh failure apart from a real refusal. */
+ * credential-refresh failure apart from a real refusal. The receipt text is shown to people, so the
+ * wire stop reason `cancelled` reads in US English (§17.2); the wire value itself is unchanged. */
 export function providerStopError(stop: StopReason, client: Pick<Driver, "lastTurnError">): string {
   const detail = stop === "refusal" ? client.lastTurnError?.()?.trim() : undefined;
-  return detail ? `provider ${stop}: ${detail}` : `provider ${stop}`;
+  const reason = stop === "cancelled" ? "canceled" : stop;
+  return detail ? `provider ${reason}: ${detail}` : `provider ${reason}`;
 }
 
 function canResumeSession(meta: SessionMeta): boolean {
@@ -2168,10 +2170,10 @@ export class SessionManager {
             ...step,
             status: "failed",
             durationMs: completedAt - step.startedAt,
-            error: "Worktree setup was cancelled. Retry Setup to continue.",
+            error: "Worktree setup was canceled. Retry Setup to continue.",
           } : step),
           completedAt,
-          error: "Worktree setup was cancelled. Retry Setup to continue.",
+          error: "Worktree setup was canceled. Retry Setup to continue.",
         });
       }
       return result;
@@ -2585,7 +2587,7 @@ export class SessionManager {
         // rather than replaced by a local read that `git fetch` never updates.
         if (advertised) canonical.defaultBranch = advertised.branch;
         const setup = await this.prepareWorktreeSetup(meta, canonical, report);
-        if (setup === "cancelled") throw new Error("worktree setup was cancelled");
+        if (setup === "cancelled") throw new Error("worktree setup was canceled");
         if (setup === "invalid") throw new Error(canonical.setupConfig?.status === "invalid"
           ? `invalid worktree setup configuration: ${canonical.setupConfig.error}`
           : "invalid worktree setup configuration");
@@ -2609,7 +2611,7 @@ export class SessionManager {
       };
       try {
         const setup = await this.prepareWorktreeSetup(meta, worktree, report, meta.sessionId, true);
-        if (setup === "cancelled") throw new Error("worktree setup was cancelled");
+        if (setup === "cancelled") throw new Error("worktree setup was canceled");
         if (setup === "invalid") {
           if (worktree.setupConfig?.status === "invalid") {
             this.persistWorktreeSetupConfigStatus(
@@ -2678,7 +2680,7 @@ export class SessionManager {
         throw worktreeBranchChanged("worktree branch changed before setup retry", worktree.path, worktree.branch, verified.branch);
       }
       const setup = await this.prepareWorktreeSetup(meta, worktree);
-      if (setup === "cancelled") throw new Error("worktree setup was cancelled");
+      if (setup === "cancelled") throw new Error("worktree setup was canceled");
       if (setup === "invalid") throw new Error(worktree.setupConfig?.status === "invalid"
         ? `invalid worktree setup configuration: ${worktree.setupConfig.error}`
         : "invalid worktree setup configuration");
@@ -2849,7 +2851,7 @@ export class SessionManager {
         throw new Error("worktree setup is incomplete; retry it before selection");
       }
       const setup = await this.prepareWorktreeSetup(meta, selected);
-      if (setup === "cancelled") throw new Error("worktree setup was cancelled");
+      if (setup === "cancelled") throw new Error("worktree setup was canceled");
       if (setup === "invalid") throw new Error(selected.setupConfig?.status === "invalid"
         ? `invalid worktree setup configuration: ${selected.setupConfig.error}`
         : "invalid worktree setup configuration");
@@ -5426,7 +5428,7 @@ export class SessionManager {
       durable?.failed(
         this.launchWasSuperseded(spec.sessionId, launchGeneration)
           ? "session launch was superseded by a replacement"
-          : "session launch was cancelled before provider startup",
+          : "session launch was canceled before provider startup",
         "COMMAND_CANCELLED",
       );
       return false;
@@ -5728,7 +5730,7 @@ export class SessionManager {
       durable?.failed(
         superseded
           ? "session launch was superseded by a replacement"
-          : "session launch was cancelled before provider startup",
+          : "session launch was canceled before provider startup",
         "COMMAND_CANCELLED",
       );
       return false;
@@ -5796,7 +5798,7 @@ export class SessionManager {
         if (!this.launchGenerations.has(spec.sessionId) && this.store.has(spec.sessionId)) {
           this.store.patchMeta(spec.sessionId, { worktreePending: false });
         }
-        durable?.failed("session launch was cancelled before worktree preparation", "COMMAND_CANCELLED");
+        durable?.failed("session launch was canceled before worktree preparation", "COMMAND_CANCELLED");
         return false;
       }
       try {
@@ -6014,7 +6016,7 @@ export class SessionManager {
       durable?.failed(
         superseded
           ? "session launch was superseded by a replacement"
-          : "session launch was cancelled before provider startup",
+          : "session launch was canceled before provider startup",
         "COMMAND_CANCELLED",
       );
       return false;
@@ -6093,7 +6095,7 @@ export class SessionManager {
       durable?.failed(
         superseded
           ? "session launch was superseded by a replacement"
-          : "session launch was cancelled before provider startup",
+          : "session launch was canceled before provider startup",
         "COMMAND_CANCELLED",
       );
       return false;
@@ -6117,7 +6119,7 @@ export class SessionManager {
         durable?.failed(
           superseded
             ? "session launch was superseded by a replacement"
-            : "session launch was cancelled before runner admission",
+            : "session launch was canceled before runner admission",
           "COMMAND_CANCELLED",
         );
         return false;
@@ -6144,7 +6146,7 @@ export class SessionManager {
       durable?.failed(
         superseded
           ? "session launch was superseded by a replacement"
-          : "session launch was cancelled before runner admission",
+          : "session launch was canceled before runner admission",
         "COMMAND_CANCELLED",
       );
       return false;
@@ -6155,7 +6157,7 @@ export class SessionManager {
       durable?.failed(
         superseded
           ? "session launch was superseded by a replacement"
-          : "session launch was cancelled before provider startup",
+          : "session launch was canceled before provider startup",
         "COMMAND_CANCELLED",
       );
       return false;
@@ -6212,7 +6214,7 @@ export class SessionManager {
       const worktreeRecovery = unverified ? this.store.readMeta(spec.sessionId)?.worktreeRecovery : undefined;
       durable?.failed(
         cancelled
-          ? "session launch was cancelled before provider startup"
+          ? "session launch was canceled before provider startup"
           : worktreeRecovery
             ? `${worktreeRecovery.detail}; this message was not sent`
             : "agent session could not be launched",
@@ -6766,7 +6768,7 @@ export class SessionManager {
     // provider violates that ordering, do not pretend the configured active-work ceiling held.
     this.emitEvent(sessionId, {
       kind: "error",
-      message: "authoritative background work began outside the available Active Turn Capacity and was cancelled",
+      message: "authoritative background work began outside the available Active Turn Capacity and was canceled",
     });
     try {
       entry.client.cancel();
@@ -9302,7 +9304,7 @@ export class SessionManager {
       return;
     }
     if (operation.cancelRequested) {
-      source.durable?.failed("queued command was cancelled during steering promotion", "COMMAND_CANCELLED");
+      source.durable?.failed("queued command was canceled during steering promotion", "COMMAND_CANCELLED");
       operation.source = undefined;
       if (entry) this.emitQueue(operation.request.sessionId);
       return;
@@ -10017,7 +10019,7 @@ export class SessionManager {
     if (entry && !fromPreLaunch) entry.queue = retained;
     else if (retained.length) this.preLaunchQueues.set(sessionId, retained);
     else this.preLaunchQueues.delete(sessionId);
-    this.cancelQueued(removed, "queued command was cancelled");
+    this.cancelQueued(removed, "queued command was canceled");
     if (retained.length !== before) {
       if (entry && !fromPreLaunch && retained.length === 0 && !entry.running && this.cancelActiveTurnWait(sessionId) &&
           this.store.readMeta(sessionId)?.status === "queued") {
@@ -10354,7 +10356,7 @@ export class SessionManager {
       }
       if (resumeId) this.releaseResumeLock(sessionId, launchGeneration);
       finishPreLaunch(false);
-      durable?.failed("session resume was cancelled before runner admission", "COMMAND_CANCELLED");
+      durable?.failed("session resume was canceled before runner admission", "COMMAND_CANCELLED");
       return;
     }
     if (!this.launchIsCurrent(sessionId, launchGeneration)) {
@@ -10365,7 +10367,7 @@ export class SessionManager {
       durable?.failed(
         superseded
           ? "session resume was superseded by a replacement"
-          : "session resume was cancelled before provider startup",
+          : "session resume was canceled before provider startup",
         "COMMAND_CANCELLED",
       );
       return;
@@ -10389,7 +10391,7 @@ export class SessionManager {
       durable?.failed(
         superseded
           ? "session resume was superseded by a replacement"
-          : "session resume was cancelled before provider startup",
+          : "session resume was canceled before provider startup",
         "COMMAND_CANCELLED",
       );
       return;
@@ -10597,7 +10599,7 @@ export class SessionManager {
             if (entry.interruptRequested && entry.holdQueuedPromptsAfterInterrupt) {
               this.emitEvent(sessionId, { kind: "turn_interrupted" });
               this.emitStatus(sessionId, "idle");
-              this.failQueuedPrompt(next, "provider cancelled", "COMMAND_CANCELLED", true);
+              this.failQueuedPrompt(next, "provider canceled", "COMMAND_CANCELLED", true);
               entry.activeTurnId = undefined;
               this.settleTurnInterruption(sessionId, entry);
               // Leave this drain generation before dispatching another entry. The loop-tail
@@ -12156,7 +12158,7 @@ export class SessionManager {
     if (entry.cancelRequested) {
       entry.cancelRequested = false;
       this.emitStatus(sessionId, "stopped");
-      durable?.failed("command was cancelled before provider submission", "COMMAND_CANCELLED");
+      durable?.failed("command was canceled before provider submission", "COMMAND_CANCELLED");
       return;
     }
     if (entry.interruptRequested) {
@@ -12471,7 +12473,7 @@ export class SessionManager {
     if (entry.cancelRequested) {
       entry.cancelRequested = false;
       await this.rollbackPreparedCommandCheckpoint(sessionId, entry, checkpoint);
-      lifecycle.failed("command was cancelled before provider submission", "COMMAND_CANCELLED");
+      lifecycle.failed("command was canceled before provider submission", "COMMAND_CANCELLED");
       this.emitStatus(sessionId, "stopped");
       return;
     }
@@ -12830,11 +12832,11 @@ export class SessionManager {
         const worktreeOptions = { context: source.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash };
         if (!point.baseCommit) throw new Error("checkpoint has no historical commit base");
         worktree = await createWorktreeFromTree(source.repoPath, targetSessionId, point.tree, point.baseCommit, worktreeOptions);
-        if (this.deleting.has(targetSessionId) || this.deleted.has(targetSessionId) || this.store.isDeleted(targetSessionId) || !this.store.has(sourceSessionId)) throw new Error("handoff was cancelled");
+        if (this.deleting.has(targetSessionId) || this.deleted.has(targetSessionId) || this.store.isDeleted(targetSessionId) || !this.store.has(sourceSessionId)) throw new Error("handoff was canceled");
         const ownership = this.checkpointRefOwnership.claim({ sessionId: targetSessionId, repoPath: source.repoPath,
           context: source.context, ...(this.runnerOwnerHash ? { ownerHash: this.runnerOwnerHash } : {}) });
         await this.reclaimStaleCheckpointRefOwnership(ownership);
-        if (this.deleted.has(targetSessionId) || this.store.isDeleted(targetSessionId)) throw new Error("handoff was cancelled");
+        if (this.deleted.has(targetSessionId) || this.store.isDeleted(targetSessionId)) throw new Error("handoff was canceled");
         const now = Date.now();
         const target: SessionMeta = {
           sessionId: targetSessionId, agentId: handoff.agent.id, agentVersion: handoff.agent.version,
@@ -12863,7 +12865,7 @@ export class SessionManager {
         this.store.appendEvent(targetSessionId, { kind: "conversation_forked", sourceSessionId, turn,
           handoff: { sourceAgent: source.agentId ?? source.driver, destinationAgent: handoff.agent.id, disclosure: handoffDraft.disclosure } }, now);
         const setup = await this.prepareWorktreeSetup(target, targetWorktree, undefined, sourceSessionId, true);
-        if (setup === "cancelled") throw new Error("worktree setup was cancelled");
+        if (setup === "cancelled") throw new Error("worktree setup was canceled");
         if (setup === "none") {
           target.worktrees = undefined;
           this.store.patchMeta(targetSessionId, { worktrees: undefined });
@@ -13171,7 +13173,7 @@ export class SessionManager {
       this.store.appendEvent(targetSessionId, { kind: "conversation_forked", sourceSessionId, turn }, now);
       const targetWorktree = this.attributedWorktreeForPath(target, worktree.path)!;
       const setup = await this.prepareWorktreeSetup(target, targetWorktree, undefined, sourceSessionId, true);
-      if (setup === "cancelled") throw new Error("worktree setup was cancelled");
+      if (setup === "cancelled") throw new Error("worktree setup was canceled");
       if (setup === "none") {
         target.worktrees = undefined;
         this.store.patchMeta(targetSessionId, { worktrees: undefined });
@@ -13266,7 +13268,7 @@ export class SessionManager {
     this.releaseAdmissionIfInactive(sessionId);
     const entry = this.active.get(sessionId);
     if (!entry) {
-      this.rejectPreLaunchQueue(sessionId, "session cancelled before runner admission");
+      this.rejectPreLaunchQueue(sessionId, "session canceled before runner admission");
       if (cancelledPreparation || cancelledWait || cancelledAdmittedStart) {
         this.emitStatus(
           sessionId,
@@ -16501,7 +16503,7 @@ export class SessionManager {
       if (!sharedRunnerTurn && !this.activeTurnAdmission.acquire(this.activeTurnRequest(sessionId))) {
         this.emitEvent(sessionId, {
           kind: "error",
-          message: "provider-initiated work exceeded Active Turn Capacity and was cancelled",
+          message: "provider-initiated work exceeded Active Turn Capacity and was canceled",
         });
         try {
           client.cancel();
@@ -17461,7 +17463,7 @@ export class SessionManager {
     if (!controller || !block || requestId !== providerAuthenticationRequestId(block)) return;
     if (optionId === "auth:cancel" || optionId === null) {
       controller.cancel(block.credentialScopeId);
-      this.emitProviderAuthenticationCard(meta, block, "The runner-owned sign-in was cancelled. No prompt was retried.");
+      this.emitProviderAuthenticationCard(meta, block, "The runner-owned sign-in was canceled. No prompt was retried.");
       return;
     }
     if (!["auth:login", "auth:revalidate", "auth:accept-current"].includes(optionId) ||
@@ -17486,7 +17488,7 @@ export class SessionManager {
           block = { ...block, loginOperationId: undefined };
           this.store.patchMeta(sessionId, { providerAuthBlock: block });
           this.emitProviderAuthenticationCard(meta, block, login === "cancelled"
-            ? "The runner-owned sign-in was cancelled."
+            ? "The runner-owned sign-in was canceled."
             : "The provider-native sign-in did not complete. Use the exact-context terminal command, then recheck.");
           return;
         }
@@ -17521,7 +17523,7 @@ export class SessionManager {
         return;
       }
       if (!await this.waitForAuthenticationTurnSettlement(sessionId)) {
-        this.emitProviderAuthenticationCard(meta, block, "The cancelled provider turn is still settling. Recheck in a moment.");
+        this.emitProviderAuthenticationCard(meta, block, "The canceled provider turn is still settling. Recheck in a moment.");
         return;
       }
       await this.completeProviderAuthentication(

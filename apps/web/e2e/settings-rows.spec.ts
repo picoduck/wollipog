@@ -1201,7 +1201,7 @@ test("Agent Harness defaults distinguish version skew and politely explain repai
 /**
  * The Appearance controls, which the row registry above cannot describe.
  *
- * Theme, Colour Scheme and Density were ten rows carrying one option each; they are three rows
+ * Theme, Color Scheme and Density were ten rows carrying one option each; they are three rows
  * carrying a whole control each. The registry's model — the row IS the control, and one child
  * selector is its affordance — does not fit that, so these get the machinery pointed at them
  * directly rather than a special case threaded through every helper above.
@@ -1216,7 +1216,7 @@ test.describe("the appearance controls", () => {
   const seg = (page: Page, name: string) => page.getByRole("radiogroup", { name });
   const pill = (page: Page, group: string, name: string) =>
     seg(page, group).getByRole("radio", { name });
-  const trigger = (page: Page) => page.getByRole("button", { name: /^Colour Scheme:/ });
+  const trigger = (page: Page) => page.getByRole("button", { name: /^Color Scheme:/ });
 
   for (const theme of THEMES) {
     test(`every option is visible before it is chosen in ${theme}`, async ({ page }) => {
@@ -1334,7 +1334,7 @@ test.describe("the appearance controls", () => {
     await useHarness(page, "dark", { section: "appearance" });
     await expect(page.locator(".settings-panel .ui-row")).toHaveCount(3);
     await expect(page.locator(".settings-panel .settings-group")).toHaveCount(1);
-    await expect(page.locator(".settings-panel .ui-row-title")).toHaveText(["Theme", "Colour Scheme", "Density"]);
+    await expect(page.locator(".settings-panel .ui-row-title")).toHaveText(["Theme", "Color Scheme", "Density"]);
   });
 
   test("the closed controls share an edge and the open scheme list fits readable content", async ({ page }) => {
@@ -1349,7 +1349,7 @@ test.describe("the appearance controls", () => {
     }
 
     await trigger(page).click();
-    const list = page.getByRole("listbox", { name: "Colour Scheme" });
+    const list = page.getByRole("listbox", { name: "Color Scheme" });
     await expect(list).toBeVisible();
     const geometry = await list.evaluate((element) => {
       const listRect = element.getBoundingClientRect();
@@ -1435,7 +1435,7 @@ test.describe("the appearance controls", () => {
     await page.setViewportSize({ width: 360, height: 240 });
     await useHarness(page, "dark", { section: "appearance", copy: "long" });
     await trigger(page).click();
-    const list = page.getByRole("listbox", { name: "Colour Scheme" });
+    const list = page.getByRole("listbox", { name: "Color Scheme" });
     await expect(list).toBeVisible();
     const geometry = await list.evaluate((element) => {
       const rect = element.getBoundingClientRect();
@@ -1470,7 +1470,7 @@ test.describe("the appearance controls", () => {
       });
 
       await trigger(page).click();
-      const list = page.getByRole("listbox", { name: "Colour Scheme" });
+      const list = page.getByRole("listbox", { name: "Color Scheme" });
       await expect(list).toBeVisible();
       await page.mouse.move(0, 0);
       await expect(page).toHaveScreenshot(`colour-schemes-${theme}.png`, {
@@ -1486,7 +1486,7 @@ test.describe("the appearance controls", () => {
     await expect(trigger(page)).toHaveAttribute("aria-expanded", "false");
 
     await trigger(page).click();
-    const list = page.getByRole("listbox", { name: "Colour Scheme" });
+    const list = page.getByRole("listbox", { name: "Color Scheme" });
     await expect(list).toBeVisible();
     await expect(trigger(page)).toHaveAttribute("aria-expanded", "true");
     const options = list.getByRole("option");
@@ -1514,7 +1514,7 @@ test.describe("the appearance controls", () => {
       await trigger(page).click();
       // The list takes focus on a frame, so pressing a key before it lands sends the arrow to the
       // trigger — which reopens at the committed value and never moves the highlight.
-      await expect(page.getByRole("listbox", { name: "Colour Scheme" })).toBeFocused();
+      await expect(page.getByRole("listbox", { name: "Color Scheme" })).toBeFocused();
       await page.keyboard.press("ArrowDown");
     };
     expect(await applied()).toBe("wollipog");
@@ -1528,7 +1528,7 @@ test.describe("the appearance controls", () => {
     await browse();
     await page.keyboard.press("Enter");
     expect(await applied(), "and a commit keeps it").toBe("github");
-    await expect(trigger(page)).toHaveAttribute("aria-label", "Colour Scheme: GitHub");
+    await expect(trigger(page)).toHaveAttribute("aria-label", "Color Scheme: GitHub");
   });
 
   test("tabbing through Appearance reaches every control, and the pills cost one stop", async ({ page }) => {

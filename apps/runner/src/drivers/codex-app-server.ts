@@ -1519,7 +1519,7 @@ export class CodexAppServerDriver implements Driver {
     else if (!owner) this.declinePendingRequests("replaced", true);
     if (owner && ["completed", "failed", "interrupted"].includes(this.subagentLifecycleByThread.get(params.threadId) ?? "")) return null;
     if (this.pendingApprovals.size + this.pendingQuestions.size >= 128) {
-      this.cb.onStderr("Too many concurrent provider requests; the new request was cancelled.");
+      this.cb.onStderr("Too many concurrent provider requests; the new request was canceled.");
       return null;
     }
     if (owner) this.attentionOwners.set(requestId, owner);
@@ -1615,7 +1615,7 @@ export class CodexAppServerDriver implements Driver {
           const serverName = boundedString(params?.serverName, MAX_QUESTION_HEADER);
           const url = boundedString(params?.url, MAX_QUESTION_TEXT);
           if (!message || !serverName || !url) {
-            this.cb.onStderr("Codex MCP URL elicitation was malformed — cancelling it");
+            this.cb.onStderr("Codex MCP URL elicitation was malformed — canceling it");
             return resolve(mcpElicitationResponse("cancel"));
           }
           const ownership = this.prepareAttention(params, id);
@@ -1638,7 +1638,7 @@ export class CodexAppServerDriver implements Driver {
         }
         const normalized = normalizeMcpFormElicitation(params);
         if (!normalized) {
-          this.cb.onStderr(`unsupported or malformed Codex MCP elicitation mode=${diagnosticValue(params?.mode)} — cancelling it`);
+          this.cb.onStderr(`unsupported or malformed Codex MCP elicitation mode=${diagnosticValue(params?.mode)} — canceling it`);
           return resolve(mcpElicitationResponse("cancel"));
         }
         const ownership = this.prepareAttention(params, id);

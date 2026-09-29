@@ -128,7 +128,7 @@ test("the row kinds are distinguishable in their inert state", async () => {
   const { container, cleanup } = await render(
     <>
       <SegmentedRow title="Theme" options={THEMES_FIXTURE} value="system" onChange={() => undefined} />
-      <SelectRow title="Colour Scheme" options={SCHEMES_FIXTURE} value="wollipog" onChange={() => undefined} />
+      <SelectRow title="Color Scheme" options={SCHEMES_FIXTURE} value="wollipog" onChange={() => undefined} />
       <SwitchRow title="Desktop Alerts" description="Approvals and finished turns" checked={false} onClick={() => undefined} />
       <NavRow title="Keyboard Shortcuts" description="Reference" onClick={() => undefined} />
     </>,
@@ -174,7 +174,7 @@ test("the row kinds are distinguishable in their inert state", async () => {
 });
 
 test("a settings panel is one row per setting, not one row per option", async () => {
-  // The defect this change exists to remove: Theme, Colour Scheme and Density were three groups of
+  // The defect this change exists to remove: Theme, Color Scheme and Density were three groups of
   // full-width rows carrying one option each — ten rows and three headings for three settings.
   const { container, cleanup } = await render(
     <AppearancePanel
@@ -195,7 +195,7 @@ test("a settings panel is one row per setting, not one row per option", async ()
     const rows = [...container.querySelectorAll(".ui-row")];
     assert.equal(rows.length, 3, "Appearance is three settings, so it is three rows");
     assert.deepEqual(rows.map((row) => row.querySelector(".ui-row-title")?.textContent),
-      ["Theme", "Colour Scheme", "Density"]);
+      ["Theme", "Color Scheme", "Density"]);
     assert.ok(rows.every((row) => row.querySelector(":scope > .ui-row-choice-control")),
       "all three controls occupy the same trailing alignment slot");
     assert.equal(container.querySelectorAll(".settings-group").length, 1,
@@ -249,7 +249,7 @@ test("the scheme list requests readable content dimensions while preserving trig
       toJSON: () => ({}),
     });
     await act(async () => { trigger.click(); });
-    const list = container.querySelector<HTMLElement>('[role="listbox"][aria-label="Colour Scheme"]');
+    const list = container.querySelector<HTMLElement>('[role="listbox"][aria-label="Color Scheme"]');
     assert.ok(list);
     assert.equal(list.querySelectorAll('[role="option"]').length, 5);
     assert.equal(list.style.left, "600px", "the open list keeps the trigger's start edge");
@@ -270,7 +270,7 @@ test("the scheme list requests readable content dimensions while preserving trig
 async function openListWidth(trigger: { left: number; width: number }, menuWidth?: number): Promise<string> {
   const { container, cleanup } = await render(
     <SelectRow
-      title="Colour Scheme"
+      title="Color Scheme"
       options={SCHEMES_FIXTURE}
       value="wollipog"
       onChange={() => undefined}
@@ -384,7 +384,7 @@ function SchemeHarness({ preview, commits }: { preview: (value: string | null) =
   const [value, setValue] = React.useState("wollipog");
   return (
     <SelectRow
-      title="Colour Scheme"
+      title="Color Scheme"
       options={SCHEMES_FIXTURE}
       value={value}
       onChange={(next) => { commits.push(next); setValue(next); }}
@@ -448,7 +448,7 @@ test("Escape closes the picker without committing, and puts the palette back", a
     assertNoDomNode(container.ownerDocument.querySelector('[role="listbox"]'));
     // The trigger still says what it always said, which is the visible half of "nothing happened".
     assert.match(container.querySelector(".ui-select-trigger")!.getAttribute("aria-label") ?? "",
-      /Colour Scheme: Wollipog/);
+      /Color Scheme: Wollipog/);
   } finally {
     await cleanup();
   }
@@ -657,7 +657,7 @@ function TwoPickers({ showFirst, showSecond, first, second, commits }: {
   return (
     <>
       {showFirst && (
-        <SelectRow title="Colour Scheme" options={SCHEMES_FIXTURE} value="wollipog"
+        <SelectRow title="Color Scheme" options={SCHEMES_FIXTURE} value="wollipog"
           onChange={() => undefined} onPreview={first} />
       )}
       {showSecond && (
@@ -876,7 +876,7 @@ test("a picker whose preview callback is taken away still gives the palette back
   const show = async (withPreview: boolean) => {
     await act(async () => {
       root.render(
-        <SelectRow title="Colour Scheme" options={SCHEMES_FIXTURE} value="wollipog" onChange={() => undefined}
+        <SelectRow title="Color Scheme" options={SCHEMES_FIXTURE} value="wollipog" onChange={() => undefined}
           onPreview={withPreview ? (value) => seen.push(value) : undefined} />,
       );
     });
@@ -922,7 +922,7 @@ test("a picker with nothing to preview stays out of the channel entirely", async
   const seen: (string | null)[] = [];
   const { container, cleanup } = await render(
     <>
-      <SelectRow title="Colour Scheme" options={SCHEMES_FIXTURE} value="wollipog"
+      <SelectRow title="Color Scheme" options={SCHEMES_FIXTURE} value="wollipog"
         onChange={() => undefined} onPreview={(value) => seen.push(value)} />
       <SelectRow title="Accent Colour" options={SCHEMES_FIXTURE} value="wollipog" onChange={() => undefined} />
     </>,
@@ -1022,14 +1022,14 @@ test("a disabled segmented row says who took it away", async () => {
 
 test("the picker's trigger names the setting AND its current value", async () => {
   // `aria-label` naming only the setting was the defect the primitive already fixed: the control
-  // read as "Colour Scheme" whether it said Dracula or nothing at all. A row whose closed state
+  // read as "Color Scheme" whether it said Dracula or nothing at all. A row whose closed state
   // does not state its value can only be opened, not read.
   const { container, cleanup } = await render(
-    <SelectRow title="Colour Scheme" options={SCHEMES_FIXTURE} value="dracula" onChange={() => undefined} />,
+    <SelectRow title="Color Scheme" options={SCHEMES_FIXTURE} value="dracula" onChange={() => undefined} />,
   );
   try {
     const trigger = container.querySelector(".ui-select-trigger")!;
-    assert.equal(trigger.getAttribute("aria-label"), "Colour Scheme: Dracula");
+    assert.equal(trigger.getAttribute("aria-label"), "Color Scheme: Dracula");
     assert.equal(container.querySelector(".ui-select-value")?.textContent, "Dracula");
     assert.ok(trigger.querySelector(".ui-swatch"), "and shows the palette it is naming");
   } finally {
