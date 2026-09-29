@@ -107,6 +107,28 @@ test.describe("with a fine pointer at 1440px", () => {
     expect(sizes, "every row's keycap is the same size").toEqual(["11px 18"]);
   });
 
+  test("an enlarged text size keeps the Sessions footer's keycaps inside its fixed height", async ({ page }) => {
+    // The footer is 34px with overflow hidden; the keycap box is px like every control, so only its
+    // text grows with the reader's text size and the shortcut buttons are never clipped.
+    await page.goto(PREVIEW);
+    await page.addStyleTag({ content: "html { font-size: 32px; }" });
+    const footer = page.locator(".inbox-activity-footer");
+    const buttons = page.locator(".inbox-shortcut-rail button");
+    await expect(buttons.first().locator("kbd")).toBeVisible();
+    const geometry = await footer.evaluate((element) => {
+      const box = element.getBoundingClientRect();
+      return [...element.querySelectorAll(".inbox-shortcut-rail button, .inbox-shortcut-rail kbd")].map((child) => {
+        const rect = child.getBoundingClientRect();
+        return { top: rect.top - box.top, bottom: box.bottom - rect.bottom };
+      });
+    });
+    expect(geometry.length).toBeGreaterThan(1);
+    for (const { top, bottom } of geometry) {
+      expect(top, "inside the footer's top edge").toBeGreaterThanOrEqual(0);
+      expect(bottom, "inside the footer's bottom edge").toBeGreaterThanOrEqual(0);
+    }
+  });
+
   test("a menu item with a binding carries the keycap in its trailing slot", async ({ page }) => {
     const item = await openCreateMenu(page);
     await expectKeycap(page, item.locator(".menu-trail kbd"), "New Session menu item");

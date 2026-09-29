@@ -1297,8 +1297,7 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
 
 ### 11.5 Keycap
 
-`kbd`: `--font-mono` 11px, 18px tall (1.125rem, so the box grows with the text), min-width 18px,
-padding 0 4px, 1px `--border-strong`,
+`kbd`: `--font-mono` 11px, 18px tall, min-width 18px, padding 0 4px, 1px `--border-strong`,
 `--radius-xs`, `--bg-elev-2`, `--text-dim`. One recipe for hints, menus and the shortcut reference:
 it is the element rule, so a surface places a keycap but never sizes it or sets its font or border.
 A hint's label beside it is `--type-small` in `--text-dim`. A menu item with a binding shows the

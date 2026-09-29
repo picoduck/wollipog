@@ -586,22 +586,22 @@ pre {
   color: var(--code-accent);
 }
 /* The keycap (§11.5): one recipe for inline hints, menus and the Keyboard Shortcuts reference. A
-   surface may place a keycap, but never sizes it or sets its font or border. The box is in rem like
-   its text (18px at the default root), so an enlarged text size never spills past its border. */
+   surface may place a keycap, but never sizes it or sets its font or border. Like every control, the
+   box is px and the text is rem: fixed-height hosts such as the 34px Sessions footer rely on it. */
 kbd {
   display: inline-flex;
   flex: none;
   align-items: center;
   justify-content: center;
   box-sizing: border-box;
-  height: 1.125rem;
-  min-width: 1.125rem;
+  height: 18px;
+  min-width: 18px;
   padding: 0 var(--space-1);
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-xs);
   background: var(--bg-elev-2);
   color: var(--text-dim);
-  font: 500 var(--text-xs)/1 var(--font-mono);
+  font: 500 var(--text-xs)/16px var(--font-mono);
   white-space: nowrap;
 }
 /* Flow spacing comes from the container's gap, not from default element margins (§2.4). */
