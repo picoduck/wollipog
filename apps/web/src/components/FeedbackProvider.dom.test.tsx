@@ -481,6 +481,49 @@ test("a secondary action is a ghost button before Cancel that runs, closes and r
   await cleanup();
 });
 
+test("a double click on the secondary action runs it once", async () => {
+  const { open, outcomes, footButtons } = await renderConfirmationService();
+  let shown = 0;
+  const index = await open({
+    title: "Quit Wollipog",
+    message: "Quitting stops the sessions running on this computer.",
+    confirmLabel: "Quit Wollipog",
+    secondaryAction: { label: "Show Sessions", run: () => { shown += 1; } },
+    tone: "danger",
+  });
+  const secondary = footButtons()[0]!;
+  // Both clicks land in one batch, before React removes the dialog.
+  await act(async () => { secondary.click(); secondary.click(); await tick(); });
+  assert.equal(shown, 1);
+  assert.equal(outcomes[index], false);
+});
+
+test("crossing to a phone while the secondary action has focus hands focus to the cancel button", async () => {
+  const previousWidth = domWindow.innerWidth;
+  try {
+    const { open, footButtons, activeText } = await renderConfirmationService();
+    await open({
+      title: "Quit Wollipog",
+      message: "Quitting stops the sessions running on this computer.",
+      confirmLabel: "Quit Wollipog",
+      cancelLabel: "Keep Open",
+      secondaryAction: { label: "Show Sessions", run: () => undefined },
+      tone: "danger",
+    });
+    await act(async () => { footButtons()[0]!.focus(); });
+    assert.equal(activeText(), "Show Sessions");
+    await act(async () => {
+      domWindow.happyDOM.setViewport({ width: 390, height: 844 });
+      domWindow.dispatchEvent(new domWindow.Event("resize"));
+      await tick();
+    });
+    assert.deepEqual(footButtons().map((button) => button.textContent), ["Keep Open", "Quit Wollipog"]);
+    assert.equal(activeText(), "Keep Open", "focus stays inside the dialog");
+  } finally {
+    domWindow.happyDOM.setViewport({ width: previousWidth, height: 768 });
+  }
+});
+
 test("on a phone a confirmation leaves out its secondary action, so the footer holds two buttons", async () => {
   const previousWidth = domWindow.innerWidth;
   domWindow.happyDOM.setViewport({ width: 390, height: 844 });

@@ -567,12 +567,28 @@ function ConfirmationDialog({ request, onSettle }: {
     inFlight.current = null;
     onSettle(false);
   };
+  /** Set once the secondary action has run: a second click in the same batch, before the dialog
+   * unmounts, must not run it again. */
+  const secondaryRan = useRef(false);
   const runSecondary = () => {
-    if (running || !request.secondaryAction) return;
+    if (running || secondaryRan.current || !request.secondaryAction) return;
+    secondaryRan.current = true;
     const { run } = request.secondaryAction;
     onSettle(false);
     run();
   };
+  // Crossing to a phone removes the secondary action (§7.5). A removed button takes focus with it
+  // to the page behind the dialog, so if it was the last thing focused and focus has fallen to the
+  // page, the safe choice takes it. Only a move to another element clears the flag: whether a
+  // removed element fires blur differs between browsers.
+  const secondaryFocused = useRef(false);
+  const cancelButton = useRef<HTMLButtonElement>(null);
+  useLayoutEffect(() => {
+    if (!isPhone || !secondaryFocused.current) return;
+    secondaryFocused.current = false;
+    const active = document.activeElement;
+    if (active === null || active === document.body) cancelButton.current?.focus();
+  }, [isPhone]);
   const confirm = async () => {
     if (!request.onConfirm) {
       onSettle(true);
@@ -610,12 +626,14 @@ function ConfirmationDialog({ request, onSettle }: {
         <>
           {/* A phone sheet's footer holds two buttons (§7.5), so the extra action is desktop-only. */}
           {request.secondaryAction && !isPhone && (
-            <button className="btn ghost" type="button" disabled={running} onClick={runSecondary}>
+            <button className="btn ghost" type="button" disabled={running} onClick={runSecondary}
+              onFocus={() => { secondaryFocused.current = true; }}
+              onBlur={(event) => { if (event.relatedTarget) secondaryFocused.current = false; }}>
               {request.secondaryAction.label}
             </button>
           )}
           {/* A destructive confirmation opens on its safe choice; any other opens on its primary (§7.4). */}
-          <button className="btn" type="button" autoFocus={danger} disabled={cancelLocked} onClick={cancel}>
+          <button ref={cancelButton} className="btn" type="button" autoFocus={danger} disabled={cancelLocked} onClick={cancel}>
             {request.cancelLabel ?? "Cancel"}
           </button>
           <BusyButton className={`btn ${danger ? "danger" : "primary"}`} autoFocus={!danger} busy={running}

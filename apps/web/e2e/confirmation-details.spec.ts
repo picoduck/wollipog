@@ -77,6 +77,15 @@ test.describe("desktop", () => {
     await expect(page.getByTestId("outcome")).toHaveText("false");
   });
 
+  test("narrowing to a phone while the secondary action has focus keeps focus in the dialog", async ({ page }) => {
+    await page.goto("/confirmation-details-e2e.html?surface=secondary");
+    const dialog = page.getByRole("dialog", { name: "Quit Wollipog" });
+    await dialog.getByRole("button", { name: "Show Sessions" }).focus();
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(dialog.getByRole("button", { name: "Show Sessions" })).toHaveCount(0);
+    await expect(dialog.getByRole("button", { name: "Keep Open" })).toBeFocused();
+  });
+
   test("Escape and the scrim choose the named cancel button", async ({ page }) => {
     await page.goto("/confirmation-details-e2e.html?surface=secondary");
     await expect(page.getByRole("dialog", { name: "Quit Wollipog" })).toBeVisible();
