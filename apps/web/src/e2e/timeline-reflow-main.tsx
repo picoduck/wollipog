@@ -163,6 +163,7 @@ function Fixture() {
   const [noticeExpanded, setNoticeExpanded] = useState(false);
   const [headStreamTicks, setHeadStreamTicks] = useState(0);
   const [tailStreamTicks, setTailStreamTicks] = useState(0);
+  const [liveReplyTicks, setLiveReplyTicks] = useState(0);
   const [historyEpoch, setHistoryEpoch] = useState(0);
   const [sessionId, setSessionId] = useState("alpha");
   const [historyPrepend, setHistoryPrepend] = useState<Record<string, number>>({ alpha: 0, beta: 0 });
@@ -229,12 +230,20 @@ function Fixture() {
         options: [],
       }],
     })) : [];
-    const complete = [...prefix, ...historicalQuestions, ...current, ...revealItems];
+    // A reply that starts streaming below the current tail: its row top stays inside the viewport
+    // while it grows, so TanStack does not compensate scrollTop for its growth.
+    const liveReply: TimelineItem[] = liveReplyTicks > 0 ? [{
+      kind: "agent_message",
+      id: 400,
+      text: `Live reply. ${sentence.repeat(liveReplyTicks)}`,
+      createdAt: Date.now(),
+    }] : [];
+    const complete = [...prefix, ...historicalQuestions, ...current, ...liveReply, ...revealItems];
     return currentHistoryLimit == null ? complete : complete.slice(0, currentHistoryLimit);
-  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, overflowFixtureEnabled, questionHistoryFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
+  }, [currentHistoryLimit, currentHistoryPrepend, currentHistoryReplacement, headStreamTicks, liveReplyTicks, overflowFixtureEnabled, questionHistoryFixtureEnabled, revealFixtureEnabled, sessionId, tailStreamTicks]);
   const followTail = useFollowTail({
     scrollRef: followTailEnabled ? scrollRef : disabledFollowScrollRef,
-    contentRevision: `${sessionId}:${currentHistoryPrepend}:${currentHistoryReplacement}:${currentHistoryLimit ?? "all"}:${headStreamTicks}:${tailStreamTicks}`,
+    contentRevision: `${sessionId}:${currentHistoryPrepend}:${currentHistoryReplacement}:${currentHistoryLimit ?? "all"}:${headStreamTicks}:${tailStreamTicks}:${liveReplyTicks}`,
     sessionId,
     persistenceScope: "timeline-reflow-e2e",
   });
@@ -383,6 +392,7 @@ function Fixture() {
         </label>
         <button type="button" data-testid="stream" onClick={() => setHeadStreamTicks((ticks) => ticks + 1)}>Stream Head</button>
         <button type="button" data-testid="stream-tail" onClick={() => setTailStreamTicks((ticks) => ticks + 1)}>Stream Tail</button>
+        <button type="button" data-testid="stream-live-reply" onClick={() => setLiveReplyTicks((ticks) => ticks + 1)}>Stream Live Reply</button>
         <button type="button" data-testid="stream-tail-scroll" onClick={() => streamTailAndScroll("auto", 180)}>Stream Tail and Scroll</button>
         <button type="button" data-testid="stream-tail-smooth-page" onClick={() => {
           const distance = scrollRef.current?.clientHeight ?? 0;
