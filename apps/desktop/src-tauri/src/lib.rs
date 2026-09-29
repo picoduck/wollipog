@@ -605,6 +605,11 @@ struct CloseGuard {
     /// window: nothing to close, nothing to warn into, and a second launch swallowed by the
     /// single-instance guard. One close gesture gets one decision.
     exit_authorized: AtomicBool,
+    /// Set when a held close asked the dashboard to confirm (#1965), and spent by Quit Anyway.
+    ///
+    /// Without it `quit_after_confirmation` could quit with no close ever held — something closing the
+    /// window twice cannot do, because the first close is always asked about.
+    confirmation_requested: AtomicBool,
 }
 
 /// Session statuses whose work dies with the process.
@@ -825,9 +830,11 @@ fn risk_for_runner(sessions: &[serde_json::Value], runner_id: &str) -> ExitRisk 
 ///
 /// Returns true when the caller should PREVENT the close.
 fn hold_close_for_work(app: &tauri::AppHandle) -> bool {
-    let Some(work) = exit_hold_for_work(app, &app.state::<CloseGuard>().warned_at) else {
+    let guard = app.state::<CloseGuard>();
+    let Some(work) = exit_hold_for_work(app, &guard.warned_at) else {
         return false;
     };
+    request_confirmation(&guard);
     // Best effort: if no webview can show this, the user presses close again and exits.
     for window in app.webview_windows().values() {
         let _ = window.emit(CLOSE_WOULD_STOP_WORK_EVENT, &work);
@@ -3551,17 +3558,27 @@ fn is_restart_request(code: Option<i32>) -> bool {
 /// The confirmation is the decision a held close asks for, so this quits the way a second close
 /// does: it leaves the same one-decision authorization, which `handle_run_event` consumes instead of
 /// asking `hold_close_for_work` again — however long the dialog was open, and so however stale the
-/// warning's grace period. It takes no arguments and does nothing a second window close cannot.
+/// warning's grace period. It takes no arguments and does nothing a second window close cannot: it
+/// quits only after a held close has asked, and spends that request.
 #[tauri::command]
-fn quit_after_confirmation(app: tauri::AppHandle) {
-    quit_after_confirmation_with(&app.state::<CloseGuard>(), || app.exit(0));
+fn quit_after_confirmation(app: tauri::AppHandle) -> Result<(), String> {
+    quit_after_confirmation_with(&app.state::<CloseGuard>(), || app.exit(0))
+}
+
+/// Record that a held close has asked the dashboard to confirm, for Quit Anyway to spend.
+fn request_confirmation(guard: &CloseGuard) {
+    guard.confirmation_requested.store(true, Ordering::Relaxed);
 }
 
 /// The command's body, apart from the `AppHandle` a unit test cannot build. The authorization is left
 /// BEFORE the exit is requested, so the `ExitRequested` it raises always finds it.
-fn quit_after_confirmation_with(guard: &CloseGuard, exit: impl FnOnce()) {
+fn quit_after_confirmation_with(guard: &CloseGuard, exit: impl FnOnce()) -> Result<(), String> {
+    if !guard.confirmation_requested.swap(false, Ordering::Relaxed) {
+        return Err("Wollipog isn't waiting to quit. Close the window to quit.".into());
+    }
     authorize_exit(guard);
     exit();
+    Ok(())
 }
 
 /// Whether an `ExitRequested` is held: only when no decided gesture authorized it, and only then is
@@ -5142,13 +5159,15 @@ mod tests {
         // again — not even after the warning's grace period, which a dialog left open outlasts.
         let guard = CloseGuard::default();
         let mut exits = 0;
+        request_confirmation(&guard);
         quit_after_confirmation_with(&guard, || {
             assert!(
                 guard.exit_authorized.load(Ordering::Relaxed),
                 "the exit is requested only once its authorization is in place"
             );
             exits += 1;
-        });
+        })
+        .unwrap();
         assert_eq!(exits, 1);
 
         let mut asked = false;
@@ -5170,6 +5189,27 @@ mod tests {
         authorize_exit(&second_close);
         assert!(!exit_is_held(&second_close, || true));
         assert!(exit_is_held(&second_close, || true));
+    }
+
+    #[test]
+    fn quit_anyway_quits_only_after_a_held_close_has_asked() {
+        // Closing twice always begins with a close that was asked about. Quit Anyway must not be a
+        // way to quit that skips that, so with no request outstanding it refuses and authorizes nothing.
+        let guard = CloseGuard::default();
+        let mut exits = 0;
+        assert!(quit_after_confirmation_with(&guard, || exits += 1).is_err());
+        assert_eq!(exits, 0);
+        assert!(
+            !guard.exit_authorized.load(Ordering::Relaxed),
+            "a refused quit leaves no authorization behind for a later exit"
+        );
+
+        // One held close, one quit: the request is spent by the quit that used it.
+        request_confirmation(&guard);
+        assert!(quit_after_confirmation_with(&guard, || exits += 1).is_ok());
+        assert!(!exit_is_held(&guard, || true));
+        assert!(quit_after_confirmation_with(&guard, || exits += 1).is_err());
+        assert_eq!(exits, 1);
     }
 
     #[test]
